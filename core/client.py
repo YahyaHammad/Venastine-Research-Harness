@@ -28,6 +28,9 @@ v1_provider_endpoints = {
 provider = config.provider
 provider_api_key = config.api_key
 
+selected_model = ""
+loaded_model = ""
+
 # Credential initialization
 def credential_initialization():
     if provider in v1_provider_endpoints:
@@ -39,10 +42,18 @@ def credential_initialization():
     elif provider == "Anthropic":
         client = Anthropic(api_key=provider_api_key)
     else:
-        raise ValueError("Model Selection Error")
+        raise ValueError("Provider Selection Error")
     return client
 
 def list_models():
     models = client.models.list()
     available_models = models.data
     return available_models
+
+def select_model():
+    # Get input for model selection
+    if selected_model in available_models:
+        loaded_model = selected_model
+    else:
+        raise ValueError("Model Selection Error")
+    return loaded_model

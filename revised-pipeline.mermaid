@@ -1,0 +1,52 @@
+flowchart TD
+    P1["Pass 1 · Initial generation<br/><small>query + context → raw response</small>"]
+    P2["Pass 2 · Claim extraction<br/><small>structured prompt → JSON list of falsifiable claims</small>"]
+    P3a["3a · Source grounding<br/><small>similarity + authority</small>"]
+    P3b["3b · Critic pass<br/><small>fallacy + contradiction, severity weighted by grounding</small>"]
+    P3c["3c · Completeness<br/><small>expected content gaps</small>"]
+    P5["Pass 5 · Assumption audit<br/><small>query framing · hidden premises · domain gaps</small>"]
+    P4["Pass 4 · Confidence tiers<br/><small>HIGH · MEDIUM · LOW · UNVERIFIED · UNVERIFIED_COVERAGE</small>"]
+    D1{"Per-claim:<br/>issues above threshold?"}
+    P6a["Pass 6a · Revise<br/><small>rewrite flagged claim only</small>"]
+    P6c{"Pass 6c · Re-validate<br/><small>re-run 3a→3b, 4 on revised claim</small>"}
+    D2{"Retry cap<br/>reached?"}
+    FB["Fallback<br/><small>mark UNVERIFIED + annotate</small>"]
+    P6b["Pass 6b · Annotate<br/><small>add confidence tags</small>"]
+    MRG["Merge claims"]
+    OUT["ReasonedResponse<br/><small>content · claims · assumptions · gaps · trace</small>"]
+
+    P1 --> P2
+    P2 --> P3a
+    P2 --> P3c
+    P3a --> P3b
+    P3a --> P5
+    P3b --> P5
+    P3c --> P5
+    P5 --> P4
+    P4 --> D1
+    D1 -- "flagged claim(s)" --> P6a
+    D1 -- "clean" --> P6b
+    P6a --> P6c
+    P6c -- "still flagged" --> D2
+    D2 -- "no, retry" --> P6a
+    D2 -- "yes, exhausted" --> FB
+    P6c -- "clean" --> MRG
+    FB --> MRG
+    P6b --> MRG
+    MRG --> OUT
+
+    classDef teal fill:#0d5c4e,stroke:#0d5c4e,color:#a7e8d4
+    classDef purple fill:#463a8f,stroke:#463a8f,color:#c9c0f0
+    classDef blue fill:#1f5f8b,stroke:#1f5f8b,color:#bcdcf0
+    classDef brown fill:#8a3f10,stroke:#8a3f10,color:#f2c396
+    classDef maroon fill:#7a1f4b,stroke:#7a1f4b,color:#f0b8d4
+    classDef olive fill:#4a6b1f,stroke:#4a6b1f,color:#d4e8b0
+    classDef gray fill:#4a4a4a,stroke:#4a4a4a,color:#e0e0e0
+
+    class P1,MRG,OUT teal
+    class P2,P5 purple
+    class P3a,P6c blue
+    class P3b,P6a brown
+    class P3c maroon
+    class P4 olive
+    class D1,D2,FB,P6b gray

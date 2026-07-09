@@ -19,9 +19,9 @@ class WebSearchParams(BaseModel):
 
     @field_validator("query")
     @classmethod
-    def strip_query(cls, v: str) -> str:
-        v = v.strip()
-        if not v:
+    def strip_query(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
             raise ValueError("query cannot be empty")
         return v  # pydantic uses this return value as the final field value
 
