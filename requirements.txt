@@ -1,9 +1,11 @@
 anthropic==0.116.0
-database==0.6.0
 ddgs==9.14.4
 httpx==0.28.1
 markitdown==0.1.6
 openai==2.45.0
 protobuf==7.35.1
+google-genai==1.0.0
 pydantic==2.13.4
+sympy==1.13.3
 sqlmodel==0.0.39
+python-dotenv==1.0.1

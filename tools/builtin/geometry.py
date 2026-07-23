@@ -1,0 +1,94 @@
+"""
+tools/builtin/geometry.py
+
+Classical 2D/3D geometry: distances, midpoints, lines, circles, polygons,
+and triangles. Matrix/vector/tensor work lives in linear_algebra.py --
+this tool is specifically for geometric objects and their properties.
+"""
+
+from __future__ import annotations
+
+from typing import Literal, Optional
+
+from sympy.geometry import Point, Line, Circle, Polygon, Triangle
+from pydantic import BaseModel, Field
+
+from tools.builtin._math_common import safe_parse, serialize, MathParseError
+
+_OPERATIONS = Literal[
+    "distance", "midpoint", "is_collinear", "line_intersection",
+    "circle_area", "circle_circumference",
+    "polygon_area", "polygon_perimeter", "triangle_properties",
+]
+
+
+class GeometryParams(BaseModel):
+    operation: _OPERATIONS = Field(..., description="Which operation to perform")
+    points: Optional[list[list[str]]] = Field(
+        None, description="List of points, each as [x, y] coordinate strings (numbers or symbolic expressions)"
+    )
+    radius: Optional[str] = Field(None, description="Radius, for circle operations")
+    center: Optional[list[str]] = Field(None, description="Center point [x, y], for circle operations")
+
+
+TOOL_SCHEMA = {
+    "name": "geometry",
+    "description": (
+        "Classical geometry operations: distance and midpoint between "
+        "points, collinearity check, line intersection, circle area and "
+        "circumference, polygon area and perimeter, and triangle "
+        "properties (area, perimeter, right/equilateral/isosceles checks)."
+    ),
+    "input_schema": GeometryParams.model_json_schema(),
+}
+
+
+def _to_point(coords: list[str]) -> Point:
+    return Point(*[safe_parse(c) for c in coords])
+
+
+def run(params: dict) -> dict:
+    parsed = GeometryParams(**params)
+
+    try:
+        op = parsed.operation
+        pts = [_to_point(p) for p in parsed.points] if parsed.points else []
+
+        if op == "distance":
+            result = pts[0].distance(pts[1])
+        elif op == "midpoint":
+            result = pts[0].midpoint(pts[1])
+        elif op == "is_collinear":
+            result = Point.is_collinear(*pts)
+        elif op == "line_intersection":
+            line_a = Line(pts[0], pts[1])
+            line_b = Line(pts[2], pts[3])
+            result = line_a.intersection(line_b)
+        elif op == "circle_area":
+            result = Circle(_to_point(parsed.center), safe_parse(parsed.radius)).area
+        elif op == "circle_circumference":
+            result = Circle(_to_point(parsed.center), safe_parse(parsed.radius)).circumference
+        elif op == "polygon_area":
+            result = Polygon(*pts).area
+        elif op == "polygon_perimeter":
+            result = Polygon(*pts).perimeter
+        elif op == "triangle_properties":
+            tri = Triangle(*pts)
+            result = {
+                "area": str(tri.area),
+                "perimeter": str(tri.perimeter),
+                "is_right": tri.is_right(),
+                "is_equilateral": tri.is_equilateral(),
+                "is_isosceles": tri.is_isosceles(),
+            }
+        else:
+            return {"error": f"Unknown operation: {op}"}
+
+    except MathParseError as e:
+        return {"error": str(e)}
+    except (IndexError, TypeError) as e:
+        return {"error": f"Missing or malformed points/parameters for '{op}': {e}"}
+    except Exception as e:
+        return {"error": f"Computation failed: {e}"}
+
+    return {"result": serialize(result), "operation": op}
