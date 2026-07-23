@@ -1,24 +1,31 @@
 import os
+from dataclasses import dataclass
 
 
-"""
-Model provider selection
-"""
-provider = "OpenAI" # Pick one of the following (ensure correct spelling & capitalization) {OpenAI, Anthropic, Google, OpenRouter, DeepSeek, Grok, Mistral, Groq, TogetherAI, Perplexity, Fireworks, Qwen, Z.AI, Cohere]
-api_key = os.environ.get("") # Add your api key to the system environment variables then insert the name of the variable you created between the double quotations 
+@dataclass
+class APICredentials:
+    provider_name: str # Pick one of the following (ensure correct spelling & capitalization) {OPENAI, ANTHROPIC, GOOGLE, OPENROUTER, DEEPSEEK, GROK, MISTRAL, GROQ, TOGETHERAI, PERPLEXITY, FIREWORKS, QWEN, Z.AI, COHERE]
+    api_key: str # Add your api key to the system environment variables then insert the name of the variable you created between the double quotations 
+    
+    # api_url: str
 
-context_window = 0 # leave at 0 for setting by provider
 
-"""
-Agent tool permission selection
-"""
-web_search = true
-get_time = true
-read = false
-write = false
-edit = false
-shell = false
+@dataclass
+class ToolPermissions:
+    web_search: bool = True
+    get_time: bool = True
+    calculator: bool = True
+    read: bool = False
+    write: bool = False
+    edit: bool = False
+    shell: bool = False
 
-"""
-Maximum number of steps for each reasoning pass
-"""
+@dataclass
+class ToolApprovals:
+    web_search: bool = False
+    get_time: bool = False
+    calculator: bool = False
+    read: bool = False
+    write: bool = False
+    edit: bool = False
+    shell: bool = True

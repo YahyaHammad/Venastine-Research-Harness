@@ -1,59 +1,46 @@
-# LLM API Wrapper Script
-import os
-from .. import config
-
 from openai import OpenAI
 from google import genai
 from anthropic import Anthropic
 
-# Anthropic and Google API endpoints managed natively by their respective SDKs
+from credentials import load_provider_data
 
-v1_provider_endpoints = {
-    # Direct drop-in OpenAI SDK compatibility
-    "OpenAI": "https://api.openai.com/v1",
-    "DeepSeek": "https://api.deepseek.com/v1",
-    "Grok": "https://api.x.ai/v1",
-    "Mistral": "https://api.mistral.ai/v1",
-    "Groq": "https://api.groq.com/openai/v1",
-    "TogetherAI": "https://api.together.ai/v1",
-    "Perplexity": "https://api.perplexity.ai",
-    "Fireworks": "https://api.fireworks.ai/inference/v1",
-    "Qwen": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-    "Z.AI": "https://open.bigmodel.cn/api/paas/v4",
-    "Cohere": "https://api.cohere.ai/compatibility/v1",
-    "OpenRouter": "https://openrouter.ai/api/v1"
-}
+# Caches initialized clients so repeated calls for the same provider don't
+# rebuild the client (and re-read the credentials file) every time.
+_client_cache: dict[str, object] = {}
 
 
-provider = config.provider
-provider_api_key = config.api_key
+def api_initialization(provider_name: str):
+    if provider_name in _client_cache:
+        return _client_cache[provider_name]
 
-selected_model = ""
-loaded_model = ""
+    provider_data = load_provider_data()
 
-# Credential initialization
-def credential_initialization():
-    if provider in v1_provider_endpoints:
-        client = OpenAI(
-            base_url=v1_provider_endpoints[provider],
-            api_key=provider_api_key) # capitalize provider name and concatenate the string for standardization
-    elif provider == "Google":
-        client = genai.Client(api_key=provider_api_key)
-    elif provider == "Anthropic":
-        client = Anthropic(api_key=provider_api_key)
+    if provider_name not in provider_data:
+        raise ValueError(f"Unknown provider: {provider_name}")
+
+    entry = provider_data[provider_name]
+
+    if entry.get("is_v1_compatible", False):
+        client = OpenAI(base_url=entry["API_URL"], api_key=entry["API_KEY"])
+    elif provider_name == "GOOGLE":
+        client = genai.Client(api_key=entry["API_KEY"])
+    elif provider_name == "ANTHROPIC":
+        client = Anthropic(api_key=entry["API_KEY"])
+        # Add further proprietary API formats here
     else:
-        raise ValueError("Provider Selection Error")
+        raise ValueError(f"Provider {provider_name} is not currently supported")
+
+    _client_cache[provider_name] = client
     return client
 
-def list_models():
-    models = client.models.list()
-    available_models = models.data
-    return available_models
 
-def select_model():
-    # Get input for model selection
+def list_models(client) -> list[str]:
+    models = client.models.list()
+    return [model.id for model in models.data]
+
+
+def select_model(selected_model: str, available_models: list[str]) -> str:
     if selected_model in available_models:
-        loaded_model = selected_model
-    else:
-        raise ValueError("Model Selection Error")
-    return loaded_model
+        return selected_model
+    raise ValueError(f"Model '{selected_model}' is not in the available models list")
+

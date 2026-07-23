@@ -1,5 +1,2 @@
 .ipynb_checkpoints/
-/.ipynb_checkpoints/
-.ipynb_checkpoints
-/tools/builtin/.ipynb_checkpoints
-/core/.ipynb_checkpoints
+.env

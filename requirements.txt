@@ -1,7 +1,9 @@
 anthropic==0.116.0
-duckduckgo_search==8.1.1
+database==0.6.0
+ddgs==9.14.4
 httpx==0.28.1
 markitdown==0.1.6
-openai==2.44.0
+openai==2.45.0
 protobuf==7.35.1
 pydantic==2.13.4
+sqlmodel==0.0.39
