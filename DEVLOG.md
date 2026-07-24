@@ -101,7 +101,7 @@ ROADMAP §2's acceptance criterion: *"running `main.py` and triggering a tool re
 
 ### 2.6 Discoveries during testing
 
-None beyond the deviations above.
+No additional issues surfaced during §2's implementation. The deviations from the original ROADMAP §2 spec — all user-decided via the Q&A in §2.2 — are the only divergence; see §2.4 for the full deviation table. Two minor defense-in-depth improvements to `logging_setup.py` were applied after a post-implementation review: the handler-cleanup `except` was narrowed from bare `Exception` to `(OSError, IOError)`, and `log_file` is now normalized via `os.path.abspath` before being passed to `os.makedirs` / `RotatingFileHandler`. Neither changes behavior in the normal path.
 
 ---
 

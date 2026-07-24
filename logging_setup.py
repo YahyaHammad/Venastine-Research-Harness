@@ -92,7 +92,7 @@ def configure_logging(
         root.removeHandler(handler)
         try:
             handler.close()
-        except Exception:
+        except (OSError, IOError):
             # Closing should not fail loudly, but if a handler is in a
             # weird state we still want to proceed with fresh handlers.
             pass
@@ -103,7 +103,13 @@ def configure_logging(
 
     if log_file is None:
         log_file = os.environ.get("AGENT_LOG_FILE", _DEFAULT_LOG_FILE)
-    log_dir = os.path.dirname(os.fspath(log_file))
+    # Normalize relative paths and embedded ../ so makedirs and
+    # RotatingFileHandler see a clean absolute path. Not a containment
+    # check -- the user can still point AGENT_LOG_FILE anywhere they
+    # want; this just prevents accidental path-traversal via relative
+    # segments in env-configured paths.
+    log_file = os.path.abspath(log_file)
+    log_dir = os.path.dirname(log_file)
     if log_dir and not os.path.isdir(log_dir):
         os.makedirs(log_dir, exist_ok=True)
 

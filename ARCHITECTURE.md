@@ -37,9 +37,10 @@ Venastine Research Harness/
 ├── database.py                    # the DB engine + table creation -- owns the CONNECTION only
 ├── storage.py                     # thread/message schema + CRUD -- owns PERSISTENCE only
 ├── logging_setup.py                # logging config -- see ROADMAP.md §2, DEVLOG.md §2
-├── providers.json                 # LLM provider credentials, written by credentials.py
+├── providers.json.example            # tracked template -- LLM provider credentials structure (empty keys)
+├── providers.json                   # gitignored runtime file -- written by credentials.py, NOT tracked
 ├── .env / .env.example            # misc tool API keys, written by env_secrets.py's convention
-├── .gitignore                     # protects .env, providers.json, *.db from being committed
+├── .gitignore                     # protects .env, providers.json, *.db, *.log, logs/ from being committed
 ├── requirements.txt
 ├── conftest.py                     # ROOT -- test bootstrap, import-time SDK stubs -- see ROADMAP.md §4, DEVLOG.md §4
 ├── pytest.ini                      # testpaths=tests, --strict-markers
@@ -231,7 +232,7 @@ This file exists but is empty, and its purpose relative to `security/permissions
 **Files in scope:**
 
 - **`pytest.ini`** (project root) — `[pytest] testpaths=tests` and `--strict-markers`. No `asyncio`, no `filterwarnings` overrides.
-- **`conftest.py`** (project root) — import-time SDK stub insertion. Before pytest collects any test module, this file inserts 6 fake modules (`openai`, `anthropic`, `google`, `google.genai`, `sqlmodel`, `ddgs`) into `sys.modules` so collection-time imports of `core/client.py`, `core/memory.py`, `storage.py`, `tools/registry.py`, etc. succeed without real SDK packages or network access. `pydantic` and `sympy` are deliberately NOT faked (pure-Python, no network, needed for real validation/math in `test_math_tools.py`).
+- **`conftest.py`** (project root) — import-time SDK stub insertion. Before pytest collects any test module, this file installs fake modules into `sys.modules` — 7 entries covering 6 SDK packages: `openai`, `anthropic`, `google` + `google.genai` (one two-level fake), `sqlmodel`, `httpx`, `ddgs` — so collection-time imports of `core/client.py`, `core/memory.py`, `storage.py`, `tools/registry.py`, etc. succeed without real SDK packages or network access. `pydantic` and `sympy` are deliberately NOT faked (pure-Python, no network, needed for real validation/math in `test_math_tools.py`).
 - **`tests/conftest.py`** — shared fixtures:
   - `make_model_response(text, tool_calls=None, usage=None)` — constructs a `ModelResponse` directly, bypassing real SDK mocking.
   - `fake_storage` — monkeypatches `storage.save_message` and `storage.get_session_history` for memory tests.

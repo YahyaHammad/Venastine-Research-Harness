@@ -1,3 +1,7 @@
 .ipynb_checkpoints/
 .env
 *.pyc
+logs/
+*.log
+*.db
+providers.json
