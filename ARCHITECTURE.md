@@ -36,11 +36,26 @@ Venastine Research Harness/
 ├── env_secrets.py                 # misc TOOL keys (.env) -- NOT LLM provider keys
 ├── database.py                    # the DB engine + table creation -- owns the CONNECTION only
 ├── storage.py                     # thread/message schema + CRUD -- owns PERSISTENCE only
-├── logging_setup.py                # (stub -- see ROADMAP.md)
+├── logging_setup.py                # logging config -- see ROADMAP.md §2, DEVLOG.md §2
 ├── providers.json                 # LLM provider credentials, written by credentials.py
 ├── .env / .env.example            # misc tool API keys, written by env_secrets.py's convention
 ├── .gitignore                     # protects .env, providers.json, *.db from being committed
 ├── requirements.txt
+├── conftest.py                     # ROOT -- test bootstrap, import-time SDK stubs -- see ROADMAP.md §4, DEVLOG.md §4
+├── pytest.ini                      # testpaths=tests, --strict-markers
+├── DEVLOG.md                       # implementation notes for built ROADMAP sections -- see §0
+│
+├── tests/                          # 60 tests, all offline, ~0.55s -- see ROADMAP.md §4, DEVLOG.md §4
+│   ├── conftest.py                 # fixtures: make_model_response, FakeStorage, ...
+│   ├── BREAKING_CHANGES.md         # what-breaks-it / symptom / fix per area
+│   ├── test_confidence_scoring.py  # 5 tests (3 ROADMAP verbatim regressions)
+│   ├── test_client_translation.py  # 14 tests -- both translation branches + batching
+│   ├── test_loop_stop_conditions.py# 3 tests (ROADMAP verbatim)
+│   ├── test_orchestrator.py        # 4 tests -- full pipeline mocked (most fragile mock)
+│   ├── test_registry_permissions.py# 8 tests -- allow/deny/approval
+│   ├── test_math_tools.py          # 14 tests -- symbolic equivalence + injection regression
+│   ├── test_memory_write_through.py# 7 tests -- write-through + storage-path-mismatch catch
+│   └── test_loop_tool_dispatch.py  # 5 tests -- _run tool-dispatch branches
 │
 ├── core/
 │   ├── client.py                  # ONE model call, normalized across providers; provider-specific wire formats live ONLY here
@@ -200,6 +215,36 @@ Covered in full in §7 below. The short version of the file boundary: `base.py` 
 ### 4.11 `safety/policy_enforcement.py`
 
 This file exists but is empty, and its purpose relative to `security/permissions.py` was never established. Do not assume it duplicates permission logic — see ROADMAP.md §8 for a concrete proposal (content-level output filtering, not access control) before writing anything here.
+
+### 4.12 `logging_setup.py` — logging infrastructure
+
+**Belongs here:** `configure_logging()` — one public function that sets up the root logger with a `StreamHandler(stream=sys.stderr)` and a `RotatingFileHandler` writing to `logs/app.log` (1 MB × 3 backups). Both handlers share a `%(asctime)s [%(levelname)s] %(name)s: %(message)s` format with `%Y-%m-%d %H:%M:%S` datefmt. Idempotent on repeated calls (clears and closes pre-existing root handlers before attaching). Reads `AGENT_LOG_LEVEL` (default `"INFO"`, accepts int/name/numeric-string) and `AGENT_LOG_FILE` (default `"logs/app.log"`, overridable via `log_file=` kwarg). Auto-creates the log-file parent directory if missing.
+
+**Does NOT belong here:** any import of `core/` modules, any call to `configure_logging()` at module level. This file is passive — it defines the config function; wiring it into production code is `main.py`'s job (currently deferred to ROADMAP §1 — see DEVLOG.md §2.5).
+
+**Why on the project root and not `core/`:** logging is cross-cutting infrastructure (like `config.py`), not conversation-loop-specific. A future CLI rewrite, a scheduled-job runner, or a web service wrapper would all use it without importing `core/` at all.
+
+**Known gotcha:** the file is named `logging_setup.py` (not `logging.py`) to avoid shadowing Python's stdlib `logging` module — the original gotcha documented in §11.
+
+### 4.13 `tests/` directory and supporting root files
+
+**Files in scope:**
+
+- **`pytest.ini`** (project root) — `[pytest] testpaths=tests` and `--strict-markers`. No `asyncio`, no `filterwarnings` overrides.
+- **`conftest.py`** (project root) — import-time SDK stub insertion. Before pytest collects any test module, this file inserts 6 fake modules (`openai`, `anthropic`, `google`, `google.genai`, `sqlmodel`, `ddgs`) into `sys.modules` so collection-time imports of `core/client.py`, `core/memory.py`, `storage.py`, `tools/registry.py`, etc. succeed without real SDK packages or network access. `pydantic` and `sympy` are deliberately NOT faked (pure-Python, no network, needed for real validation/math in `test_math_tools.py`).
+- **`tests/conftest.py`** — shared fixtures:
+  - `make_model_response(text, tool_calls=None, usage=None)` — constructs a `ModelResponse` directly, bypassing real SDK mocking.
+  - `fake_storage` — monkeypatches `storage.save_message` and `storage.get_session_history` for memory tests.
+  - `provider_factory` / `client_for_provider` — return a mock-`api_initialization`-compatible tuple for translation tests.
+  - `clear_client_cache` (autouse) — resets `api_initialization`'s cached clients before each test.
+- **`tests/BREAKING_CHANGES.md`** — per-file tables documenting what breaks each test when production code changes, the symptom, and the fix. Created because `test_orchestrator.py` was identified as the suite's most fragile mock — its mock dict is keyed by pass_id strings that ROADMAP §3 and §10 will modify.
+- **8 test files** (6 per ROADMAP §4 + 2 additions: `test_memory_write_through.py`, `test_loop_tool_dispatch.py`).
+
+**What belongs here:** tests that run offline (~0.55s), with zero network access and zero real API keys. Stubs in root `conftest.py` catch import-time module resolution; fixtures in `tests/conftest.py` provide `ModelResponse` construction and storage mocking; individual test files cover production code's behavior.
+
+**What does NOT belong here:** any test that requires a real API key, any test that makes an outbound HTTP call, any test that depends on a specific file on disk (unless the fixture creates and cleans it). If you need to test a provider's real wire format, write an integration test in a separate directory (`tests_integration/` or similar) that is excluded by `pytest.ini`'s `testpaths`.
+
+**Why stubs are in the root `conftest.py`, not a fixture:** pytest runs root `conftest.py` before collecting any test module. Fixtures run at test-time — too late, because `core/client.py`'s `import openai` fails during collection. Root-level `conftest.py` is the standard escape hatch for import-time SDK stubbing.
 
 ## 5. Request lifecycle — regular conversation, traced end to end
 

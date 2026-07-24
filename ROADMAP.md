@@ -149,6 +149,10 @@ def configure_logging(level: int = logging.INFO) -> None:
 
 **Acceptance criteria:** running `main.py` and triggering a tool retry (e.g. force a `web_search` failure) shows a timestamped WARNING line on stderr, not silence.
 
+### Built
+
+`configure_logging()` in `logging_setup.py` (project root). Stderr + rotating file handler (`logs/app.log`, 1 MB × 3 backups). Env-overridable level (`AGENT_LOG_LEVEL`, default `"INFO"`). Idempotent on repeated calls. **Not yet wired into `main.py`** — wiring deferred to §1. See `DEVLOG.md §2` for the full decision record (six pre-implementation questions, all deviations from the spec above, and acceptance-criteria status).
+
 ---
 
 ## 3. Malformed-JSON recovery in the pipeline
@@ -243,6 +247,10 @@ tests/
 - Token budget exceeded on the FIRST call → `stop_reason == "token_budget_exceeded"`, exactly 1 call made, and confirm the response's tool_calls were NOT dispatched (check the tool's mock wasn't invoked).
 
 **Acceptance criteria:** `pytest` runs the full suite with zero network access and zero real API keys required (everything mocked), and the three regression cases above are present verbatim, not paraphrased into something weaker.
+
+### Built
+
+10 new files (no production code changed): `pytest.ini`, root `conftest.py` (import-time SDK stubs for 6 modules), `tests/` directory with `conftest.py` (fixtures), `tests/BREAKING_CHANGES.md`, and 8 test files — 6 per the spec above, plus 2 additions (`test_memory_write_through.py`, `test_loop_tool_dispatch.py`). 60 tests total, ~0.55s, zero network/API keys. See `DEVLOG.md §4` for the full decision record (seven pre-implementation questions, all deviations and why, two discoveries including a real production bug in `core/memory.py`'s resume shape that affects §1's `--thread` acceptance criteria, and acceptance-criteria status).
 
 ---
 
