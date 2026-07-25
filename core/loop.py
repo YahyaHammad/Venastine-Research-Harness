@@ -9,6 +9,7 @@ reimplements the loop, so there's exactly one place the mechanics live.
 """
 
 from typing import Optional
+from uuid import UUID
 
 import config
 import prompts.system_prompts as system_prompts
@@ -44,6 +45,17 @@ class RunAgentLoop:
             )
             total_tokens_used += response.usage.get("input_tokens", 0) + response.usage.get("output_tokens", 0)
 
+            # Persist EVERY assistant turn to memory BEFORE any branching.
+            # Earlier versions only persisted on the tool-calling path,
+            # which silently dropped plain-text final answers and any
+            # response cut short by the token-budget exit -- a thread
+            # resumed later via ConversationMemory(thread_id=...) would
+            # be missing its last assistant turn. Moving this call up
+            # fixes that bug and unblocks ROADMAP §3's JSON-retry path,
+            # which relies on the failed assistant output being present
+            # in the resumed thread's history.
+            memory.add_assistant_message(response)
+
             if max_total_tokens is not None and total_tokens_used >= max_total_tokens:
                 # Cumulative budget exhausted -- stop here. Don't dispatch
                 # any tool calls this response requested and don't make
@@ -56,11 +68,6 @@ class RunAgentLoop:
             if not response.tool_calls:
                 response.stop_reason = "complete"
                 return response
-
-            # Passes the normalized ModelResponse directly -- provider-
-            # agnostic now, since every provider's call_model() already
-            # produces this same shape (.text, .tool_calls).
-            memory.add_assistant_message(response)
 
             for call in response.tool_calls:
                 if allowed_tools is not None and call.name not in allowed_tools:
@@ -90,9 +97,11 @@ class RunAgentLoop:
         one continuous thread."""
         memory = ConversationMemory()
         memory.add_user_message(user_goal)
-        return RunAgentLoop._run(
+        response = RunAgentLoop._run(
             memory, DEFAULT_SYSTEM_PROMPT, provider_name, model, None, max_steps, max_total_tokens
         )
+        response.thread_id = memory.thread_id
+        return response
 
     @staticmethod
     def run_deep_research_mode(
@@ -113,6 +122,38 @@ class RunAgentLoop:
         memory = ConversationMemory()
         memory.add_user_message(pass_input)
         system_prompt = system_prompts.passes_prompts[pass_id]
-        return RunAgentLoop._run(
+        response = RunAgentLoop._run(
             memory, system_prompt, provider_name, model, None, max_steps, max_total_tokens
         )
+        response.thread_id = memory.thread_id
+        return response
+
+    @staticmethod
+    def continue_conversation(
+        thread_id: UUID,
+        message: str,
+        system_prompt: str,
+        model: str,
+        provider_name: str = DEFAULT_PROVIDER,
+        max_steps: int = config.MAX_ITERATIONS,
+        max_total_tokens: int = config.MAX_TOKEN_BUDGET,
+    ) -> ModelResponse:
+        """
+        Sends a follow-up message into an EXISTING conversation thread and
+        runs the loop to completion on it. The resumed thread's full history
+        (every prior user/assistant/tool turn, persisted by _run()'s
+        always-persist behavior) is loaded by ConversationMemory and
+        visible to the next call_model invocation.
+
+        ROADMAP §3's JSON-retry path uses this to retry a pass that
+        returned malformed JSON: the corrective follow-up is sent into
+        the same thread the failed pass used, so the model sees its own
+        prior output in context and can correct it.
+        """
+        memory = ConversationMemory(thread_id=thread_id)
+        memory.add_user_message(message)
+        response = RunAgentLoop._run(
+            memory, system_prompt, provider_name, model, None, max_steps, max_total_tokens
+        )
+        response.thread_id = thread_id
+        return response

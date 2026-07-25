@@ -24,8 +24,6 @@ by any of ROADMAP's six named files. Every downstream roadmap item
 that touches core/loop.py or core/client.py benefits from this net.
 """
 
-import pytest
-
 from core.loop import RunAgentLoop
 from tests.conftest import make_model_response
 
@@ -104,9 +102,15 @@ def test_single_tool_call_dispatches_and_feeds_result_to_memory(mocker):
     assert response.stop_reason == "complete"
     # Exactly two model calls: one with tool, one without.
     assert call_model.call_count == 2
-    # One assistant message recorded (from the iteration that had tool_calls).
-    assert len(memory.assistant_messages) == 1
+    # Two assistant messages recorded: one for the tool-calling turn and
+    # one for the plain-text "Done." turn. The always-persist fix in
+    # core/loop.py (ROADMAP §3) moved add_assistant_message up before
+    # branching, so the plain-text final answer is now also in the
+    # thread's history -- a thread resumed later via --thread no longer
+    # silently drops the last assistant turn.
+    assert len(memory.assistant_messages) == 2
     assert memory.assistant_messages[0] is canned_with_tool
+    assert memory.assistant_messages[1] is canned_done
     # One tool result recorded.
     assert memory.tool_results == [("t1", {"echoed": {"query": "x"}})]
     dispatch_mock.assert_called_once_with("web_search", {"query": "x"})

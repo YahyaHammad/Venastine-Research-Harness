@@ -28,14 +28,25 @@ entry point orchestrator's `_run_pass` calls. Any change to:
       per ROADMAP §10), the Pass 2 mock payload can still contain extra
       fields (they'll be filtered out), but if a required field is added,
       the mock must include it.
-  (4) ROADMAP §3 (JSON-retry) will refactor `_run_pass` into
-      `_run_pass_with_json_retry`. This test patches `run_deep_research_mode`
-      (the function `_run_pass` calls), NOT `_run_pass` itself -- so that
-      refactor should not break this test. If the JSON-retry work changes
-      WHICH ENTRY POINT the orchestrator calls (e.g. it starts calling
-      `_run()` directly per ROADMAP §3's "alternative"), or if it adds a
-      new argument to `run_deep_research_mode`, this fixture breaks.
-      -> FIX: see tests/BREAKING_CHANGES.md for the expected mock update.
+  (4) ROADMAP §3 (JSON-retry) refactored `_run_pass` into
+      `_run_pass_with_json_retry`. THIS TEST STILL PATCHES
+      `RunAgentLoop.run_deep_research_mode` (the function the helper calls
+      for its INITIAL attempt), NOT `_run_pass` or `_run_pass_with_json_retry`.
+      -- The refactor's retry path calls `RunAgentLoop.continue_conversation`
+         when the initial response fails to parse as JSON. Existing tests
+         queue valid JSON, so the retry path never fires; this test still
+         asserts only on the happy-path call order.
+      -> IF a future change makes the orchestrator call `_run()` directly
+         (skipping `run_deep_research_mode`), this fixture's mock needs
+         to switch from `RunAgentLoop.run_deep_research_mode` to
+         `RunAgentLoop._run`. See tests/BREAKING_CHANGES.md for the
+         expected mock-update pattern.
+  (5) Roadmap §5 minimal pipeline persistence: run_deep_research_pipeline()
+      now calls create_pipeline_run() up front and update_pipeline_run()
+      on success/failure. These go through the (real) fake sqlmodel in
+      conftest.py — no monkeypatching required for the happy-path tests.
+      The failure-path test below (test_pipeline_failure_marks_run_failed)
+      patches `update_pipeline_run` to assert on the status transition.
 
 When this test fails, the error typically points at a real design change
 in orchestrator.py, not a flaky test. Read the failure (often a
@@ -46,13 +57,11 @@ itself actually changed (the latter is a real regression to investigate).
 """
 
 import json
-from unittest.mock import patch
 
 import pytest
 
 import config
 from core.loop import RunAgentLoop
-from core.reasoning.base import Claim, PipelineRun
 from core.reasoning.orchestrator import run_deep_research_pipeline
 from tests.conftest import make_model_response
 
@@ -371,3 +380,217 @@ def test_pipeline_trace_contains_expected_lines_in_order(mocker):
     assert actual_starts == expected_pass_starts, (
         f"Trace order or content mismatch.\n expected: {expected_pass_starts}\n got:      {actual_starts}\n"
     )
+
+
+# ===========================================================================
+# ---- ROADMAP §5: failure-path persistence ---------------------------------
+# ===========================================================================
+
+def test_pipeline_failure_marks_run_failed_and_persists_partial_snapshot(mocker):
+    """When a pass raises an unrecoverable error, the pipeline's
+    try/except wrapper must call update_pipeline_run(status='failed') with
+    a snapshot of the partial PipelineRun before re-raising. This is the
+    ROADMAP §5 minimal-core contract: a mid-pipeline crash still leaves
+    a durable record operators can inspect later.
+
+    Strategy: patch run_deep_research_mode to raise on Pass 3a (after
+    earlier passes have populated run.plan / run.raw_response / run.claims).
+    Patch update_pipeline_run so we can assert it's called with the right
+    status and that the snapshot reflects the partial state at failure
+    time. create_pipeline_run is left to run through the (upgraded) fake
+    sqlmodel so the run_id is a real UUID.
+    """
+    payloads = _clean_pipeline_payloads()
+    call_log = []
+
+    def side_effect(*, pass_input, model, pass_id, provider_name="ANTHROPIC", **kwargs):
+        call_log.append(pass_id)
+        if pass_id == "Pass 3a":
+            raise RuntimeError("simulated mid-pipeline failure")
+        entry = payloads.get(pass_id)
+        if entry is None:
+            raise AssertionError(
+                f"orchestrator called an unexpected pass_id '{pass_id}'. "
+                f"Known: {list(payloads.keys())}. Update the mock."
+            )
+        return _response_with_text(entry)
+
+    mocker.patch.object(
+        RunAgentLoop, "run_deep_research_mode",
+        side_effect=side_effect,
+    )
+
+    # Spy on update_pipeline_run -- capture (run_id, run, status) tuples.
+    captured_updates: list = []
+    real_update = None
+    from core.reasoning import pipeline_storage as ps
+    real_update = ps.update_pipeline_run
+
+    def spy_update(run_id, run, status=None):
+        captured_updates.append((run_id, run, status))
+        # Call through to the real implementation so the row actually
+        # transitions to 'failed' -- the fake sqlmodel supports this.
+        return real_update(run_id, run, status=status)
+
+    mocker.patch.object(ps, "update_pipeline_run", side_effect=spy_update)
+    # The orchestrator imports update_pipeline_run by name at module
+    # import time, so patching pipeline_storage.update_pipeline_run isn't
+    # enough -- we have to patch the name the orchestrator actually calls.
+    from core.reasoning import orchestrator as orch_mod
+    mocker.patch.object(orch_mod, "update_pipeline_run", side_effect=spy_update)
+
+    with pytest.raises(RuntimeError, match="simulated mid-pipeline failure"):
+        run_deep_research_pipeline(
+            user_query="test query",
+            model="claude-test",
+            provider_name="ANTHROPIC",
+        )
+
+    # The orchestrator should have called update_pipeline_run exactly
+    # once on the failure path (with status='failed'). It should NOT
+    # have been called with status='complete' first.
+    statuses_seen = [u[2] for u in captured_updates]
+    assert "failed" in statuses_seen, (
+        f"Expected at least one update with status='failed', got: {statuses_seen}"
+    )
+    assert "complete" not in statuses_seen, (
+        f"Pipeline that raised should NOT have marked status='complete', got: {statuses_seen}"
+    )
+
+    # The PipelineRun passed to update_pipeline_run carries the partial
+    # state at failure time: plan + raw_response + claims are populated
+    # (Pass 0/1/2 ran before Pass 3a raised), but the orchestrator never
+    # got to Pass 3b onward, so the run isn't complete.
+    failed_update = next(u for u in captured_updates if u[2] == "failed")
+    run_id, partial_run, status = failed_update
+    assert isinstance(run_id, type(captured_updates[0][0]))  # UUID type
+    assert status == "failed"
+    # partial_run is the live PipelineRun object (pre-serialization); the
+    # separate-column serialization happens inside update_pipeline_run.
+    assert partial_run.user_query == "test query"
+    assert partial_run.plan != {}, "Plan should be populated before Pass 3a raised"
+    assert partial_run.raw_response != "", "Pass 1 ran successfully before Pass 3a"
+    assert len(partial_run.claims) == 3, "Pass 2 extracted 3 claims before Pass 3a raised"
+    # The pipeline reached Pass 3a (the simulated failure point) --
+    # call_log confirms the order.
+    assert call_log[:4] == ["Pass 0", "Pass 1", "Pass 2", "Pass 3a"], (
+        f"Expected to reach Pass 3a (the failure point). call_log={call_log}"
+    )
+
+
+def test_pipeline_success_marks_run_complete(mocker):
+    """Symmetrical with the failure-path test: a clean pipeline run that
+    completes Final synthesis must call update_pipeline_run with
+    status='complete' (matching ModelResponse.stop_reason's 'complete'
+    for a normal, non-error finish). This is the ROADMAP §5 success-side
+    contract."""
+    payloads = _clean_pipeline_payloads()
+    call_log = []
+    mocker.patch.object(
+        RunAgentLoop, "run_deep_research_mode",
+        side_effect=_build_pass_mock(call_log, payloads),
+    )
+
+    # Spy on update_pipeline_run via the same path-exact-name the
+    # failure-path test uses.
+    from core.reasoning import orchestrator as orch_mod
+    captured_updates: list = []
+    real_update = orch_mod.update_pipeline_run
+
+    def spy_update(run_id, run, status=None):
+        captured_updates.append((run_id, run, status))
+        return real_update(run_id, run, status=status)
+
+    mocker.patch.object(orch_mod, "update_pipeline_run", side_effect=spy_update)
+
+    run = run_deep_research_pipeline(
+        user_query="Quantum computing risks to encryption?",
+        model="claude-test",
+        provider_name="ANTHROPIC",
+    )
+
+    statuses_seen = [u[2] for u in captured_updates]
+    assert statuses_seen == ["complete"], (
+        f"Successful run should call update_pipeline_run once with "
+        f"status='complete', got: {statuses_seen}"
+    )
+
+    # The pipeline still returns the full, completed PipelineRun on the
+    # success path (the persistence wrap must not swallow the return value).
+    assert run.final_report != "", "Successful run should carry a final report"
+    assert run.run_id is not None, "Successful run should have a durable record id"
+
+
+# ===========================================================================
+# ---- ROADMAP §3: JSON-retry mechanism -------------------------------------
+# ===========================================================================
+
+def test_json_retry_path_calls_continue_conversation_on_malformed_json(mocker):
+    """When a JSON-emitting pass returns malformed JSON on its first
+    attempt, _run_pass_with_json_retry must:
+
+      1. Call RunAgentLoop.continue_conversation with the same thread_id
+         the initial run_deep_research_mode call returned.
+      2. Include in the corrective message: a phrase explaining the
+         parse failure, and an instruction to respond with ONLY valid JSON.
+      3. Stop retrying after MAX_JSON_RETRIES corrective attempts and
+         raise ValueError (which the pipeline's try/except turns into a
+         status='failed' record before re-raising).
+
+    Strategy: patch run_deep_research_mode and continue_conversation to
+    both always return malformed JSON, so all retry attempts fail. The
+    test asserts the retry count and corrective message content. The
+    trace-line format belongs in the unit test of
+    _run_pass_with_json_retry (see tests/test_json_retry.py).
+    """
+    import config
+    from uuid import uuid4
+    fake_thread_id = uuid4()
+
+    def fake_run_dr_mode(*, pass_input, model, pass_id, provider_name="ANTHROPIC", **kwargs):
+        resp = make_model_response(text="not valid json {{{")
+        resp.thread_id = fake_thread_id
+        return resp
+
+    continue_calls: list = []
+
+    def fake_continue(*, thread_id, message, system_prompt, model, provider_name="ANTHROPIC", **kwargs):
+        continue_calls.append({
+            "thread_id": thread_id,
+            "message": message,
+        })
+        resp = make_model_response(text="still not json")
+        resp.thread_id = thread_id
+        return resp
+
+    mocker.patch.object(RunAgentLoop, "run_deep_research_mode", side_effect=fake_run_dr_mode)
+    mocker.patch.object(RunAgentLoop, "continue_conversation", side_effect=fake_continue)
+
+    with pytest.raises(ValueError, match="did not return valid JSON"):
+        run_deep_research_pipeline(
+            user_query="test",
+            model="claude-test",
+            provider_name="ANTHROPIC",
+        )
+
+    # Pass 0 should have made MAX_JSON_RETRIES corrective continue_conversation
+    # calls, all against the same thread_id.
+    expected_retries = config.MAX_JSON_RETRIES
+    assert len(continue_calls) == expected_retries, (
+        f"Expected exactly {expected_retries} continue_conversation calls "
+        f"(1 initial run_deep_research_mode + {expected_retries} retries), "
+        f"got {len(continue_calls)}."
+    )
+    for call in continue_calls:
+        assert call["thread_id"] == fake_thread_id, (
+            "Retry must reuse the SAME thread_id as the initial call "
+            f"(got {call['thread_id']}, expected {fake_thread_id})"
+        )
+        # Corrective message must include the parse-error phrase and
+        # the instruction to respond with ONLY valid JSON.
+        assert "did not parse as valid JSON" in call["message"], (
+            "Corrective message must explain the parse failure to the model"
+        )
+        assert "ONLY valid JSON" in call["message"], (
+            "Corrective message must instruct the model to emit ONLY valid JSON"
+        )

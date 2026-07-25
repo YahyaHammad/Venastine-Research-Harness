@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Optional
+from uuid import UUID
 import json
 
 from openai import OpenAI
@@ -68,6 +69,10 @@ class ModelResponse:
     raw: Any = None  # original SDK response, kept for logging/debugging only
     usage: dict = field(default_factory=lambda: {"input_tokens": 0, "output_tokens": 0})
     stop_reason: str = "complete"  # set by RunAgentLoop._run(), not here -- see core/loop.py
+    thread_id: Optional[UUID] = None  # set by the public entry points (run_deep_research_mode,
+                                      # continue_conversation) so callers can persist/retry
+                                      # against the same thread. call_model() itself NEVER
+                                      # sets this -- it has no thread concept.
 
 
 # ============================================================================

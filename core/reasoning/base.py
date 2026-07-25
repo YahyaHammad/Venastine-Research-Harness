@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Literal, Optional
+from uuid import UUID
 
 ClaimType = Literal["factual", "synthesis", "speculative"]
 ConfidenceTier = Literal["HIGH", "MEDIUM", "LOW", "UNVERIFIED", "UNVERIFIED_COVERAGE"]
@@ -25,7 +26,18 @@ GroundingStatus = Literal["grounded", "partial", "ungrounded"]
 class Claim:
     """One atomic, self-contained assertion extracted from Pass 1's raw
     response by Pass 2. Every later pass mutates fields on this same
-    object rather than creating parallel data structures keyed by id."""
+    object rather than creating parallel data structures keyed by id.
+
+    SERIALIZATION NOTE: every claim-serialization call site in this
+    codebase (orchestrator.py passes 3a/3b/5/6a/6c/final synthesis, and
+    pipeline_storage.update_pipeline_run) uses the shallow `vars(c)`.
+    That is correct only while every field below stays JSON-native
+    (str / list / dict / float / int / None). If a nested-dataclass field
+    is EVER added here, ALL of those `vars(c)` sites must migrate to
+    `dataclasses.asdict(c)` TOGETHER, not piecemeal -- hardening just one
+    site would leave the rest exposed and create two different
+    serialization mechanisms for the same object in the same codebase.
+    """
 
     id: str
     text: str
@@ -71,6 +83,11 @@ class PipelineRun:
     """
 
     user_query: str
+    # Set by run_deep_research_pipeline() once a PipelineRunRecord is
+    # created in storage; stays None in tests that bypass persistence.
+    # ROADMAP §5 (pipeline persistence minimal core): the record lets a
+    # run that fails mid-pipeline be inspected and (future) resumed.
+    run_id: Optional[UUID] = None
     plan: dict = field(default_factory=dict)                  # Pass 0
     raw_response: str = ""                                     # Pass 1
     claims: list[Claim] = field(default_factory=list)          # Pass 2, mutated by 3a/3b/5/4/6a/6c/6b

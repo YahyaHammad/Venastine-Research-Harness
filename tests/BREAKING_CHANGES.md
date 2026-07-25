@@ -148,6 +148,24 @@ is manually maintained in `confidence_scoring.py`.
 
 ---
 
+## 8. `test_pipeline_storage.py` & the §5 persistence schema/status
+
+These tests exercise `core/reasoning/pipeline_storage.py`
+(`create_pipeline_run` / `update_pipeline_run`) against the upgraded fake
+sqlmodel, plus the orchestrator's failure-path persistence wrap.
+
+### What breaks these
+
+| Change | Symptom | Fix |
+|---|---|---|
+| Rename a `PipelineRunRecord` column (`claims_json` / `trace_json` / `coverage_gaps_json` / `final_report`) or change its type | `test_update_pipeline_run_on_complete_marks_complete_and_stores_columns` fails with `AttributeError` on the record, or a `json.loads` mismatch | Update the column name/type in the assertion; keep the separate-columns convention (do NOT collapse back into one blob — see DEVLOG §3.4 for why) |
+| Change the `status` literals (`running` / `complete` / `failed`) | `test_..._marks_complete...` and the orchestrator failure/success-path tests fail on the status assertion | Update the literal in both `pipeline_storage.py` (terminal check) and the tests. `complete` is deliberately aligned with `ModelResponse.stop_reason`'s `"complete"` — don't drift it back to `succeeded` |
+| Change `update_pipeline_run`'s serialization (e.g. `vars(c)` → `asdict(c)`, or add a field to `Claim`) | The `claims_json` round-trip assertion may change shape | Per the migration note on `Claim` in `base.py`: if a nested-dataclass field is added, migrate EVERY `vars(c)` site (orchestrator passes + `pipeline_storage`) to `asdict(c)` together, then update the test's expected claim dict |
+| Change the inner-failure logging in `orchestrator.py`'s except block (the `logger.error(...)` call) | `test_inner_storage_failure_propagates_original_exception_and_logs_run_id` fails — either the original exception is masked (real regression) or the run_id no longer appears in the log message | The invariant: the ORIGINAL pipeline exception must propagate, and the persistence failure must be logged at ERROR naming the `run_id`. Restore both before touching the test |
+| Build `load_pipeline_run()` / per-pass checkpointing (ROADMAP §5 proper) | New behavior, existing tests still pass (they only cover create + terminal update) | ADD tests for the read API and the data-only (no-status) update path; verify a data-only update does NOT reset a terminal record's status (the reason `status` is `Optional`) |
+
+---
+
 ## General regeneration: when a production change breaks several tests at once
 
 If a planned refactor (e.g. ROADMAP §3's JSON-retry, §10's ensemble mode)

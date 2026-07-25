@@ -10,6 +10,8 @@ MAX_ITERATIONS = 20  # matches the max_steps default used elsewhere
 
 # --- Deep research pipeline ---
 MAX_PIPELINE_RETRIES = 2  # max revise/re-validate loop iterations per claim before fallback
+MAX_JSON_RETRIES = 2  # max corrective follow-up attempts when a pass returns malformed JSON
+                      # (total attempts per pass = MAX_JSON_RETRIES + 1). See ROADMAP §3.
 
 # --- Cumulative token budget ---
 # New, separate from MAX_TOKENS (which caps a single call's output).

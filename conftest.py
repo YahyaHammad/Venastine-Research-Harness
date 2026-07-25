@@ -198,32 +198,97 @@ def _build_fake_google_module():
 # ---------------------------------------------------------------------------
 
 def _build_fake_sqlmodel_module():
-    """Minimal fake that supports storage.py and database.py IMPORT-TIME
-    needs (which happen when core.client -> core.loop -> core.memory ->
-    storage -> database is imported). Per-test fixtures for real
-    persistence swap these out for real sqlmodel_before_ the test body
-    runs.
+    """Minimal fake that supports storage.py, database.py, and
+    core/reasoning/pipeline_storage.py IMPORT-TIME needs (which happen
+    when core.client -> core.loop -> core.memory -> storage -> database
+    or orchestrator -> pipeline_storage is imported).
+
+    Beyond import-time, supports enough of construction + basic CRUD
+    (add / commit / refresh / get) for orchestrator tests to exercise
+    create_pipeline_run / update_pipeline_run WITHOUT monkeypatching
+    them out. Per-test fixtures for real persistence (test_memory_write_through,
+    test_pipeline_storage) swap these out for real sqlmodel against a
+    tmp_path DB before the test body runs.
+
+    The fake Session maintains an in-memory store keyed by (model, pk)
+    so get() after add()+commit() returns the same object, and refresh()
+    populates any Field-default_factory attributes (UUIDs, datetimes)
+    that were left None at add() time.
     """
     mod = types.ModuleType("sqlmodel")
 
+    # Track declared classes so the Session fake can introspect defaults
+    # and store/retrieve them across commit/refresh. Keyed by identity.
+    _registered_models: dict = {}
+
     def _Field(default=None, default_factory=None, sa_type=None, **kwargs):
-        # Returns a sentinel that pydantic treats as a class-level default.
-        # Real SQLModel.Field returns a sqlalchemy Column; we don't query
-        # so we don't need that.
-        return default if default is not None else default_factory
+        # Returns a sentinel describing the field's default behavior.
+        # The _SQLModel.__init_subclass__ collects these so __init__ can
+        # apply defaults at construction time, simulating pydantic's
+        # behavior on real SQLModel classes.
+        return {"default": default, "default_factory": default_factory}
 
     class _SQLModel:
         @classmethod
         def __init_subclass__(cls, table=False, **kwargs):
-            # Swallow `table=True` kwarg without doing anything.
             super().__init_subclass__(**kwargs)
+            _registered_models[cls] = {
+                "table": table,
+                "fields": dict(cls.__dict__),  # snapshot Field(...) sentinels
+            }
+            # Build a per-class __init__ that accepts every Field in the
+            # class body as a kwarg, applying the Field's default /
+            # default_factory when the kwarg isn't passed.
+            field_defaults = {}
+            for name, attr in cls.__dict__.items():
+                if isinstance(attr, dict) and "default" in attr and "default_factory" in attr:
+                    if attr["default"] is not None:
+                        field_defaults[name] = attr["default"]
+                    elif attr["default_factory"] is not None:
+                        # Sentinel: __init__ will call the factory if missing.
+                        field_defaults[name] = ("__factory__", attr["default_factory"])
+                    else:
+                        field_defaults[name] = None  # explicit None default
+                elif name in ("id", "thread_id") and name not in field_defaults:
+                    # Plain annotation without Field(...) -- pydantic would
+                    # make it required; we leave it None to mirror real
+                    # SQLModel's default-factory behavior for primary keys.
+                    field_defaults[name] = None
+
+            def _make_init(defaults):
+                def __init__(self, **data):
+                    for name, default in defaults.items():
+                        if name in data:
+                            setattr(self, name, data[name])
+                        elif isinstance(default, tuple) and default[0] == "__factory__":
+                            setattr(self, name, default[1]())
+                        else:
+                            setattr(self, name, default)
+                    # Accept any extra kwargs the caller passed (don't raise)
+                    # to stay permissive vs pydantic's strict validation.
+                    for name, value in data.items():
+                        if name not in defaults:
+                            setattr(self, name, value)
+                return __init__
+
+            cls.__init__ = _make_init(field_defaults)
 
     def _create_engine(url, **kwargs):
         return types.SimpleNamespace(execute=lambda *a, **k: None)
 
+    # In-memory store shared across all Session instances opened against
+    # the same engine: table_name -> {pk: row}. Used by get() to return
+    # previously-committed rows; refresh() leaves attributes unchanged
+    # under the fake (which is enough for UUID/datetime default-factory
+    # values that were already set at __init__ time).
+    _store: dict = {}
+
+    def _table_name_for(model):
+        return getattr(model, "__name__", str(model))
+
     class _Session:
         def __init__(self, engine):
-            pass
+            self._pending = []  # rows added but not yet committed
 
         def __enter__(self):
             return self
@@ -232,19 +297,27 @@ def _build_fake_sqlmodel_module():
             return False
 
         def add(self, obj):
-            pass
+            self._pending.append(obj)
 
         def commit(self):
-            pass
+            for obj in self._pending:
+                table = _table_name_for(type(obj))
+                pk = getattr(obj, "id", None)
+                if pk is not None:
+                    _store.setdefault(table, {})[pk] = obj
+            self._pending = []
 
         def refresh(self, obj):
+            # Real SQLModel refresh() reloads attributes from the DB.
+            # Under the fake, default-factory values are already set at
+            # __init__ time, so nothing needs refreshing here.
             pass
 
         def get(self, model, pk):
-            return None
+            return _store.get(_table_name_for(model), {}).get(pk)
 
         def exec(self, statement):
-            return types.SimpleNamespace(all=lambda: [])
+            return types.SimpleNamespace(all=lambda: list(_store.get("", {}).values()))
 
     def _select(*args):
         def where(*pred):

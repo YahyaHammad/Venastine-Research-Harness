@@ -211,6 +211,10 @@ def _run_pass_with_json_retry(pass_id: str, pass_input: str, model: str, provide
 
 **Acceptance criteria:** feed a mocked response that returns malformed JSON on the first call and valid JSON on the second — confirm the pipeline completes using the corrected second response, and confirm the trace log records that a retry happened (add a `run.log(...)` line inside the except block for this).
 
+### Built
+
+`_run_pass_with_json_retry()` in `core/reasoning/orchestrator.py`, wrapping the 8 JSON-emitting passes (0, 2, 3a, 3b, 3c, 5, 6a, 6c); Pass 1 and Final synthesis stay on bare `_run_pass()`. Retry re-enters the SAME pass-thread via a new public `RunAgentLoop.continue_conversation(thread_id, message, ...)` (the clean alternative offered above — no private `_run()` reach-through from the orchestrator). `MAX_JSON_RETRIES = 2` added to `config.py` (3 total attempts). Corrective message quotes the parse error + first 200 chars of the failed output + "respond with ONLY valid JSON." Two prerequisite bug fixes were required and landed with this: the `_run()` always-persist fix (failed/plain-text assistant turns are now persisted, so the retry can see the model's prior output) and the `core/memory.py` resume-shape normalization (closes §4 Discovery 2). Acceptance criteria met — see `tests/test_json_retry.py` (7 tests, incl. a crux test proving the failed turn is visible after resume) and `tests/test_orchestrator.py::test_json_retry_path_calls_continue_conversation_on_malformed_json`. **Full decision record in `DEVLOG.md §3`** (five initial questions + four follow-ups + one correction, all deviations, and the §5-minimal-core scope pulled forward).
+
 ---
 
 ## 4. Test suite
@@ -353,6 +357,16 @@ def run_deep_research_pipeline(user_query, model, provider_name=DEFAULT_PROVIDER
 Place the `update_pipeline_run(...)` checkpoint call after every pass's log line (i.e., right after each `run.log(...)` call already in the function) — this gives fine-grained recoverability without a separate design decision about "which passes are worth checkpointing."
 
 **Acceptance criteria:** kill the process (or raise a forced exception) mid-pipeline after Pass 3b completes; confirm `load_pipeline_run(run_id)` returns a record with `status="failed"` (or `"running"` if you didn't hit the except branch) and `claims` populated with whatever was captured through Pass 3b, not empty.
+
+### Built (minimal core only — pulled forward with §3)
+
+The minimal core of this section was built alongside §3 (malformed-JSON recovery), because an unrecoverable JSON failure — the exact outcome §3 produces — would otherwise lose the whole run. What landed:
+
+- `core/reasoning/pipeline_storage.py` (NEW): `PipelineRunRecord` table + `create_pipeline_run(user_query) -> UUID` + `update_pipeline_run(run_id, run, status=None)`. **Schema matches the spec above:** separate `claims_json` / `trace_json` / `coverage_gaps_json` string columns + `final_report` plain text; `status` ∈ {`running`, `complete`, `failed`}. (An initial single-`snapshot_json`-blob cut was reverted to these separate columns on review — see `DEVLOG.md §3.4`.) The TWO deliberate keeps versus the spec: `started_at`/`finished_at` instead of `created_at`/`updated_at` (`finished_at = None` while `running` carries meaning a generic `updated_at` can't), and `update_pipeline_run`'s `status` is `Optional[str] = None` instead of `status="running"` (so §5 proper's future data-only per-pass checkpoint can't silently reset a terminal record's status — see `DEVLOG.md §3.4`).
+- `core/reasoning/base.py`: `PipelineRun.run_id: Optional[UUID] = None` added (as specified).
+- `core/reasoning/orchestrator.py`: `run_deep_research_pipeline()` creates the record up front and wraps the body in try/except — `status="complete"` on clean completion, `status="failed"` (best-effort, never masking the original exception) on any error. If the failure-path persistence write itself fails, that secondary error is logged at ERROR (module logger) and the original exception still propagates.
+
+**What is NOT built yet (remains for §5 proper):** per-pass checkpointing (the spec's `update_pipeline_run(..., status="running")` after every pass — currently the record only transitions running→complete/failed, so a crash mid-pass shows the partial state in the columns but not a per-pass "last completed pass" marker), and the `load_pipeline_run(run_id)` read API. The acceptance criterion above (which depends on `load_pipeline_run` + per-pass checkpoints) is therefore **not yet satisfiable**; the failure-path durability IS verified by `tests/test_orchestrator.py::test_pipeline_failure_marks_run_failed_and_persists_partial_snapshot` and `tests/test_pipeline_storage.py` (4 tests, incl. the inner-storage-failure caplog test). **Full decision record in `DEVLOG.md §3.4` (deviation table) and §3.7 (open items for §5 proper, incl. the shallow `vars(c)` claim-serialization migration note).**
 
 ---
 

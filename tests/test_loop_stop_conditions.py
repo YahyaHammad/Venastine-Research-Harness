@@ -18,10 +18,7 @@ ModelResponse objects into _run() by monkeypatching core.loop.call_model
 -- no SDK mocking, no real API calls.
 """
 
-import pytest
-
 from core.loop import RunAgentLoop
-from core.client import ModelResponse
 from tests.conftest import make_model_response
 
 
@@ -83,10 +80,12 @@ def test_stop_condition_1_task_complete_no_tool_calls(mocker):
     response = RunAgentLoop._run(**_build_run_inputs(memory))
 
     assert response.stop_reason == "complete"
-    # The assistant's final message did NOT get added -- only tool-calling
-    # turns add an assistant message. This is core/loop.py:56-58's
-    # short-circuit before add_assistant_message runs.
-    assert len(memory.assistant_messages) == 0
+    # The "complete" path now persists the assistant message too -- the
+    # always-persist fix in core/loop.py moved add_assistant_message up
+    # before any branching, so a plain-text final answer is no longer
+    # silently dropped from the thread's history (this matters for
+    # ROADMAP §1's --thread resume and §3's JSON-retry resumes).
+    assert len(memory.assistant_messages) == 1
     assert len(memory.tool_results) == 0
 
 

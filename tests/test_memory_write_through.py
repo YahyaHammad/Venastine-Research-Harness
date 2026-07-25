@@ -23,37 +23,25 @@ WHY THIS FILE ALSO CATCHES THE storage.py PATH-MISMATCH BUG:
   catch at collection time, before any test body runs. The bug doesn't
   need an explicit assertion; the import itself is the assertion.
 
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~ NOTE ON RESUME-SHAPE BEHAVIOR ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-This test suite documents what ConversationMemory ACTUALLY does on
-resume, not what an ideal design would do. Top-level `text` and
-`tool_calls` keys on assistant entries are LOST across resume in the
-current production code, because:
-
-  - add_assistant_message persists the rich neutral entry dict
-    ({"role","text","tool_calls"}) as storage.save_message's `content`.
-  - storage.get_session_history returns {"role","content","name",
-    "tool_call_id"} -- meaning the rich entry dict gets nested under
-    `content`, not preserved verbatim at top level.
-
-This means a resumed assistant turn has shape
-    {"role":"assistant", "content":{"role":"assistant","text":...,"tool_calls":[...]}, ...}
-not the original
-    {"role":"assistant", "text":..., "tool_calls":[...]}.
-
-The tests below assert this actual behavior, so any future change to
-either add_assistant_message or storage.get_session_history that
-realigns the write/read shapes will fail a test here with a clear
-"shape asymmetry" message -- and that failure is a signal to audit
-both ends, not necessarily a bug. If this asymmetry gets fixed, update
-the resume assertions to match the now-uniform shape.
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~ RESUME-SHAPE NOW UNIFORM ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Earlier drafts of this file documented a real asymmetry: assistant
+entries persisted as the full rich dict under storage's `content`
+column, and `get_session_history` returned them NESTED UNDER `content`
+rather than restored to their original top-level shape. core/memory.py
+now normalizes resumed history via _normalize_resumed_history(), so a
+loaded assistant turn has the same top-level `text` / `tool_calls` keys
+as one just written via add_assistant_message. The tests below assert
+this now-uniform shape; if a future change reintroduces the asymmetry
+(errors in _normalize_resumed_history, or an add_* method writing a
+different shape), one of these tests fails with a clear "shape
+asymmetry" message.
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 """
 
 import pytest
 from uuid import UUID
 
 from core.memory import ConversationMemory
-from core.client import ModelResponse, ToolCallRequest
 from tests.conftest import make_model_response
 
 
@@ -91,18 +79,13 @@ def test_resume_existing_thread_loads_messages_from_storage(fake_storage):
     """ConversationMemory(known_thread_id) calls get_thread to confirm
     existence and get_session_history to repopulate in-memory state.
 
-    NOTE: get_session_history returns storage_ROW_shape (role/content/
-    name/tool_call_id), NOT the neutral shape that add_* methods write
-    to .messages. This is a real asymmetry in the current code -- the
-    in-memory shape written by add_assistant_message has top-level
-    `text` / `tool_calls` keys; the resume-time shape nests the
-    assistant entry under a `content` key. Both shapes carry role/
-    tool_call_id; only the assistant's `text` field location differs.
-
-    We assert the BEHAVIOR-thats-guaranteed (right number of entries,
-    right role order, tool_call_id chain intact), without making
-    claims about assistant-text-key placement that don't survive
-    resume.
+    The in-memory shape after resume is now IDENTICAL to the shape
+    add_* methods write: assistant turns have top-level `text` and
+    `tool_calls` keys (not nested under `content`), thanks to
+    _normalize_resumed_history() in core/memory.py. This is the
+    ROADMAP §3 + §1 resume-shape fix -- it lets call_model's
+    _messages_for_provider see the same shape regardless of whether
+    the thread was just created or resumed.
     """
     first = ConversationMemory()
     thread_id = first.thread_id
@@ -124,13 +107,15 @@ def test_resume_existing_thread_loads_messages_from_storage(fake_storage):
     # Tool result chain: tool_call_id preserved on resume.
     assert second.messages[2]["role"] == "tool"
     assert second.messages[2]["tool_call_id"] == "t1"
-    # The assistant row's `content` is the full neutral entry dict
-    # that add_assistant_message persisted (NOT a string, NOT a
-    # lossless round-trip of the original top-level shape). Documenting
-    # the real behavior, not asserting an ideal.
+    # Assistant row's neutral shape is RESTORED -- text and tool_calls
+    # keys are at top level, NOT nested under a `content` key. This is
+    # what _normalize_resumed_history fixes (ROADMAP §3 + §1).
     assert second.messages[1]["role"] == "assistant"
-    assert isinstance(second.messages[1]["content"], dict)
-    assert second.messages[1]["content"]["text"] == "Hi there"
+    assert "text" in second.messages[1]
+    assert second.messages[1]["text"] == "Hi there"
+    assert second.messages[1]["tool_calls"] == []
+    # The lossy `content`-nesting shape should no longer be present.
+    assert "content" not in second.messages[1]
 
 
 def test_resume_nonexistent_thread_raises(fake_storage):
