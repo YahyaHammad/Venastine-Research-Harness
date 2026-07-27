@@ -26,7 +26,7 @@ ConversationThread / MessageLog.
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 from uuid import UUID, uuid4
 
@@ -50,7 +50,7 @@ class PipelineRunRecord(SQLModel, table=True):
     trace_json: str = "[]"
     coverage_gaps_json: str = "[]"
     final_report: str = ""
-    started_at: datetime = Field(default_factory=datetime.utcnow)
+    started_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     finished_at: Optional[datetime] = None
 
 
@@ -103,7 +103,7 @@ def update_pipeline_run(
         if status is not None:
             record.status = status
             if status in ("complete", "failed"):
-                record.finished_at = datetime.utcnow()
+                record.finished_at = datetime.now(timezone.utc)
         record.claims_json = json.dumps([vars(c) for c in run.claims])
         record.trace_json = json.dumps(run.trace)
         record.coverage_gaps_json = json.dumps(run.coverage_gaps)

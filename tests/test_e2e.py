@@ -15,6 +15,8 @@ trace log, and run id.
 
 from uuid import uuid4
 
+import pytest
+
 from core.client import ToolCallRequest
 from core.reasoning.base import PipelineRun
 from main import run_chat, run_research
@@ -149,14 +151,16 @@ def test_chat_mode_e2e_multi_turn_with_tool_use(mocker, capsys, fake_storage):
 def test_research_mode_e2e_prints_report_and_trace(mocker, capsys):
     """Full research-mode wiring: run_research -> run_deep_research_pipeline
     (mocked at the pipeline level -- the pipeline's internals are covered
-    by test_orchestrator.py) -> prints final report, trace lines, and
-    run id.
+    by test_orchestrator.py) -> write_run_artifacts (mocked -- the writer
+    is covered by test_output_writer.py) -> prints final report, trace
+    lines, run id, and artifacts path.
 
     Verifies:
     - The pipeline is called with the correct query/model/provider.
+    - write_run_artifacts is called with the pipeline's run.
     - The final report appears in stdout.
     - Trace lines appear in stdout.
-    - The run id is printed.
+    - The run id and artifacts path are printed.
     """
     known_run_id = uuid4()
 
@@ -172,6 +176,12 @@ def test_research_mode_e2e_prints_report_and_trace(mocker, capsys):
         return_value=canned_run,
     )
 
+    fake_output_dir = f"./output/{known_run_id}"
+    mock_writer = mocker.patch(
+        "core.reasoning.output_writer.write_run_artifacts",
+        return_value=fake_output_dir,
+    )
+
     run_research("What is quantum computing?", "ANTHROPIC", "test-model")
 
     # --- Verify the pipeline was called correctly ---
@@ -180,6 +190,9 @@ def test_research_mode_e2e_prints_report_and_trace(mocker, capsys):
         model="test-model",
         provider_name="ANTHROPIC",
     )
+
+    # --- Verify write_run_artifacts was called with the run ---
+    mock_writer.assert_called_once_with(canned_run)
 
     # --- Verify stdout ---
     out = capsys.readouterr().out
@@ -194,3 +207,98 @@ def test_research_mode_e2e_prints_report_and_trace(mocker, capsys):
 
     # Run id printed.
     assert str(known_run_id) in out
+
+    # Artifacts path printed.
+    assert "Full artifacts written to:" in out
+    assert fake_output_dir in out
+
+
+# ===========================================================================
+# ---- Audit fixes: error handling ------------------------------------------
+# ===========================================================================
+
+def test_chat_mode_survives_api_error(mocker, capsys, fake_storage):
+    """If run_agent_conversation raises (API key missing, network error,
+    bad thread id), the chat loop must print the error and continue --
+    NOT crash the interactive session. The user can retry or exit cleanly.
+    """
+    from core.loop import RunAgentLoop
+
+    mocker.patch("main.configure_logging")
+    mocker.patch(
+        "builtins.input",
+        side_effect=["hello", EOFError],
+    )
+
+    # First call raises; the loop should catch it and continue to the
+    # next input() call (EOFError -> exit).
+    mocker.patch.object(
+        RunAgentLoop, "run_agent_conversation",
+        side_effect=RuntimeError("API key missing"),
+    )
+
+    run_chat(thread_id=None, provider_name="ANTHROPIC", model="test-model")
+
+    out = capsys.readouterr().out
+    assert "[Error: API key missing]" in out, (
+        f"Error should be printed, not crash the session. Output:\n{out}"
+    )
+    assert "Exiting." in out, (
+        f"Session should exit cleanly after the error. Output:\n{out}"
+    )
+
+
+def test_research_mode_prints_report_when_artifacts_fail(mocker, capsys):
+    """If write_run_artifacts raises (disk full, permission denied), the
+    report and trace must STILL be printed -- the user waited for the
+    pipeline; they should see the result even if the files can't be
+    written. A warning about the artifact failure is printed instead.
+    """
+    known_run_id = uuid4()
+
+    canned_run = PipelineRun(user_query="test query")
+    canned_run.run_id = known_run_id
+    canned_run.final_report = "The answer is 42."
+    canned_run.log("Pass 0: plan produced.")
+
+    mocker.patch(
+        "core.reasoning.orchestrator.run_deep_research_pipeline",
+        return_value=canned_run,
+    )
+    mocker.patch(
+        "core.reasoning.output_writer.write_run_artifacts",
+        side_effect=OSError("disk full"),
+    )
+
+    run_research("test query", "ANTHROPIC", "test-model")
+
+    out = capsys.readouterr().out
+
+    # Report is printed despite artifact failure.
+    assert "The answer is 42." in out
+    # Trace is printed.
+    assert "Pass 0: plan produced." in out
+    # Warning about the artifact failure.
+    assert "[Warning: could not write artifacts:" in out
+    assert "disk full" in out
+    # "Full artifacts written to:" should NOT appear (no artifacts written).
+    assert "Full artifacts written to:" not in out
+
+
+def test_research_mode_survives_pipeline_failure(mocker, capsys):
+    """If run_deep_research_pipeline raises, run_research must print the
+    error, log the traceback, and exit non-zero -- not crash with an
+    unhandled traceback."""
+    mocker.patch(
+        "core.reasoning.orchestrator.run_deep_research_pipeline",
+        side_effect=RuntimeError("provider unreachable"),
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        run_research("test query", "ANTHROPIC", "test-model")
+
+    assert exc_info.value.code == 1
+
+    out = capsys.readouterr().out
+    assert "Pipeline failed: provider unreachable" in out
+    assert "If any partial results were persisted" in out

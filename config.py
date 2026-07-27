@@ -31,6 +31,9 @@ MAX_TOKEN_BUDGET = 100_000
 # --- Database ---
 DB_PATH = os.environ.get("APP_DB_PATH", "app.db")
 
+# --- Output artifacts ---
+OUTPUT_DIR = os.environ.get("AGENT_OUTPUT_DIR", "./output")
+
 
 @dataclass
 class APICredentials:

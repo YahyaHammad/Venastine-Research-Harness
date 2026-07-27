@@ -46,11 +46,13 @@ Venastine Research Harness/
 ├── pytest.ini                      # testpaths=tests, --strict-markers
 ├── DEVLOG.md                       # implementation notes for built ROADMAP sections -- see §0
 │
-├── tests/                          # 88 tests, all offline, ~0.50s -- see ROADMAP.md §4, DEVLOG.md §4
+├── tests/                          # 96 tests, all offline, ~1s (first run ~7s for matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
 │   ├── conftest.py                 # fixtures: make_model_response, FakeStorage, ...
 │   ├── BREAKING_CHANGES.md         # what-breaks-it / symptom / fix per area
 │   ├── test_cli.py                 # 7 tests -- ROADMAP §1 thread_id passthrough + UUID validation + parser defaults
-│   ├── test_e2e.py                 # 2 tests -- end-to-end chat (multi-turn + tool use) and research mode
+│   ├── test_e2e.py                 # 4 tests -- e2e chat (multi-turn + tool use), research mode, error handling ×2
+│   ├── test_logging_setup.py       # 1 test -- configure_logging fallback on bad log path
+│   ├── test_output_writer.py       # 5 tests -- ROADMAP §12 artifact file layout, contents, chart PNG, None guard
 │   ├── test_confidence_scoring.py  # 5 tests (3 ROADMAP verbatim regressions)
 │   ├── test_client_translation.py  # 14 tests -- both translation branches + batching
 │   ├── test_loop_stop_conditions.py# 3 tests (ROADMAP verbatim)
@@ -71,7 +73,8 @@ Venastine Research Harness/
 │       ├── base.py                # Claim / PipelineRun data model for the research pipeline (now carries run_id)
 │       ├── confidence_scoring.py  # Pass 4 -- deterministic scoring, ZERO LLM calls
 │       ├── orchestrator.py        # sequences all 10 passes + D0/D1/D2 + _run_pass_with_json_retry + §5 per-pass checkpoints
-│       └── pipeline_storage.py    # ROADMAP §5: PipelineRunRecord table + create/update/load_pipeline_run
+│       ├── pipeline_storage.py    # ROADMAP §5: PipelineRunRecord table + create/update/load_pipeline_run
+│       └── output_writer.py      # ROADMAP §12: write_run_artifacts -- human-browsable /output/<run_id>/ directory
 │
 ├── prompts/
 │   ├── system_prompts.py          # loads every pass's .md file into passes_prompts dict
@@ -252,7 +255,7 @@ This file exists but is empty, and its purpose relative to `security/permissions
   - `provider_factory` / `client_for_provider` — return a mock-`api_initialization`-compatible tuple for translation tests.
   - `clear_client_cache` (autouse) — resets `api_initialization`'s cached clients before each test.
 - **`tests/BREAKING_CHANGES.md`** — per-file tables documenting what breaks each test when production code changes, the symptom, and the fix. Created because `test_orchestrator.py` was identified as the suite's most fragile mock — its mock dict is keyed by pass_id strings that ROADMAP §3 and §10 will modify.
-- **12 test files** (6 per ROADMAP §4 + 2 from §4's own additions: `test_memory_write_through.py`, `test_loop_tool_dispatch.py`; + 2 from §3/§5: `test_json_retry.py`, `test_pipeline_storage.py`; + 2 from §1: `test_cli.py`, `test_e2e.py`).
+- **14 test files** (6 per ROADMAP §4 + 2 from §4's own additions: `test_memory_write_through.py`, `test_loop_tool_dispatch.py`; + 2 from §3/§5: `test_json_retry.py`, `test_pipeline_storage.py`; + 2 from §1: `test_cli.py`, `test_e2e.py`; + 1 from §12: `test_output_writer.py`; + 1 from audit: `test_logging_setup.py`).
 
 **What belongs here:** tests that run offline (~0.53s), with zero network access and zero real API keys. Stubs in root `conftest.py` catch import-time module resolution; fixtures in `tests/conftest.py` provide `ModelResponse` construction and storage mocking; individual test files cover production code's behavior.
 

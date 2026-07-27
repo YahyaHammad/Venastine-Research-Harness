@@ -11,6 +11,7 @@ Section numbers below match ROADMAP.md's section numbers exactly. When a section
 - 3. Malformed-JSON recovery (+ §5 minimal core pulled forward)
 - 4. Test suite
 - 5. Durable `PipelineRun` persistence (§5 proper)
+- 12. `/output/<run_id>/` file-writing system
 
 ---
 
@@ -452,3 +453,50 @@ ROADMAP §5's acceptance criterion: *"kill the process (or raise a forced except
 ### 5.7 Discoveries during implementation
 
 - **The hard-kill test initially failed** because patching `create_pipeline_run` to return a bare UUID (without calling through to the real implementation) skipped the actual record creation in the fake sqlmodel. The first per-pass checkpoint then raised `ValueError: No pipeline run found with id ...`. Fix: use the same spy-through-to-real pattern as the crash test (call `real_create(user_query)`, capture the returned `run_id`). This is a test-construction issue, not a production bug — the production code always calls the real `create_pipeline_run`.
+
+---
+
+## 12. `/output/<run_id>/` file-writing system
+
+### 12.1 What we built
+
+`core/reasoning/output_writer.py` (NEW): `write_run_artifacts(run) -> str` writes the full human-browsable artifact directory under `OUTPUT_DIR/<run_id>/`. File layout: `00_plan.md`, `01_raw_response.md`, `02_claims.json`, `03_grounding.json`, `03_critic.json`, `03_completeness.json`, `04_confidence.json`, `05_assumptions.json`, conditional `06_revisions.json`, `confidence_chart.png` (matplotlib bar chart), `trace.md`, `report.md`, graceful-skip `report.pdf`, plus `sources/` and `code/` placeholder subdirs.
+
+Supporting changes: `config.py` gains `OUTPUT_DIR` (env-overridable, default `./output`); `main.py`'s `run_research` calls `write_run_artifacts` and prints the path; `requirements.txt` gains `matplotlib==3.10.3`; `.gitignore` gains `output/`.
+
+### 12.2 Questions we asked & your answers
+
+One question:
+
+| # | Dimension | User's choice |
+|---|---|---|
+| 1 | matplotlib: hard dependency in requirements.txt, or optional (graceful skip)? | **Hard dependency** — the spec says to, and the acceptance criterion requires a real PNG chart. A fresh `pip install` should produce charts out of the box. |
+
+### 12.3 What we followed verbatim from ROADMAP §12
+
+- File layout: all numbered artifacts + trace.md + report.md + confidence_chart.png + conditional 06_revisions.json. ✓
+- `sources/` and `code/` placeholder subdirs created. ✓
+- `_write_confidence_chart`: matplotlib Agg backend, bar chart of tier distribution, UNVERIFIED_COVERAGE counted from `run.coverage_gaps`. ✓
+- `_try_write_pdf`: graceful degradation stub (markdown + weasyprint not installed → silent skip). ✓
+- `write_run_artifacts` NOT called from `run_deep_research_pipeline` — caller's decision. ✓
+- `vars(c)` claim serialization (matches every other site). ✓
+- `OUTPUT_DIR` env-overridable via `AGENT_OUTPUT_DIR`. ✓
+
+### 12.4 What we deviated from §12, and why
+
+| Spec language | Actual implementation | Why |
+|---|---|---|
+| (spec silent on `run_id is None`) | `write_run_artifacts` raises `ValueError` if `run.run_id is None` | Without the guard, tests that bypass persistence would silently create a directory named `"None"`. In production this can't happen (§5's `create_pipeline_run` sets `run_id` up front). |
+| Spec's `run_research` drops the trace/run_id printing | Kept the existing trace + run_id output, added the artifacts path line | The §1 CLI already prints these; dropping them would be a regression. The spec's version was written before §1 was built. |
+
+### 12.5 Acceptance criteria status
+
+ROADMAP §12's acceptance criterion: *"running the CLI in research mode produces a real directory under `./output/<uuid>/` containing every file listed above... and `confidence_chart.png` is a real, valid PNG showing the correct tier counts for that run."*
+
+**Implementation complete; end-to-end filesystem verification requires a real API key** (the pipeline needs live LLM calls). The artifact writer itself is verified by 5 tests in `tests/test_output_writer.py` against `tmp_path`: file layout (all 12 files + 2 subdirs), content round-trip (claims JSON, trace, report), conditional revisions file, None-run_id guard, and PNG validity (magic bytes check). The research-mode e2e test verifies the `run_research → write_run_artifacts` wiring.
+
+### 12.6 Test changes
+
+- `tests/test_output_writer.py` (NEW): 5 tests.
+- `tests/test_e2e.py`: research-mode test updated to mock `write_run_artifacts` and assert it's called + artifacts path printed.
+- Full suite: 96 tests. First run ~6.85s (matplotlib font caching on first import); subsequent runs faster.

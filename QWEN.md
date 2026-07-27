@@ -22,7 +22,7 @@ pip install -r requirements.txt
 # Run (interactive CLI — chat mode by default, --mode research for the pipeline)
 python main.py
 
-# Run tests (reported: 88 tests, all offline, ~0.50s, zero network/API keys needed --
+# Run tests (reported: 96 tests, all offline, ~1s (first run ~7s for matplotlib font cache), zero network/API keys needed --
 # but see "Known Bugs" below: requirements.txt does not currently list pytest or
 # pytest-mock, both of which the suite needs. If `pytest` fails to import, that's why.)
 pytest
@@ -104,7 +104,7 @@ Every model call goes through `RunAgentLoop._run()` in `core/loop.py` — both p
 - Pass 4 (confidence scoring) makes **zero LLM calls** — thresholds, retry counts, and dedup are pure Python. D0/D1/D2 and Pass 6b's annotation step are the same: if you find yourself adding a model call to any of these, you're rearchitecting a deliberate decision, not fixing a bug.
 - The scoring formula's cap-before-penalty ordering is a tested invariant — don't "simplify" it to cap-after (this exact simplification was a real bug once, caught by a test comparing a flagged vs. unflagged claim landing on the same tier).
 - Pass 6c does NOT re-run Pass 5 (assumption audit). Assumption-flagged claims currently exhaust retries and fall to UNVERIFIED. This is a known design gap, not a bug.
-- `vars(c)` is used for `Claim` serialization everywhere (orchestrator.py passes 3a/3b/5/6a/6c/final synthesis, plus `pipeline_storage.update_pipeline_run`). If a nested-dataclass field is ever added to `Claim`, ALL of these sites must migrate to `dataclasses.asdict(c)` together, in the same change — not one at a time.
+- `vars(c)` is used for `Claim` serialization everywhere (orchestrator.py passes 3a/3b/5/6a/6c/final synthesis, `pipeline_storage.update_pipeline_run`, and `output_writer.write_run_artifacts`). If a nested-dataclass field is ever added to `Claim`, ALL of these sites must migrate to `dataclasses.asdict(c)` together, in the same change — not one at a time.
 - `update_pipeline_run`'s `status` parameter defaults to `None`, not `"running"` — intentional, so a future data-only checkpoint call doesn't silently reset a `"complete"`/`"failed"` row.
 
 ### Testing Conventions
@@ -127,7 +127,7 @@ Every model call goes through `RunAgentLoop._run()` in `core/loop.py` — both p
 - `safety/policy_enforcement.py` exists but is empty; its purpose relative to `security/permissions.py` is undecided (see ROADMAP §8).
 - `tools/builtin/file_ops.py` is a stub (see ROADMAP §6).
 - `logging_setup.py` is built (and exceeds its own ROADMAP spec — rotating file handler, env-var overrides) and wired into `main.py` as the first call (ROADMAP §1).
-- `datetime.utcnow()` deprecation: `pipeline_storage.py` and `storage.py` both use naive UTC — migrate both together if/when moving to timezone-aware datetimes.
+- `datetime.utcnow()` deprecation: **fixed** — `pipeline_storage.py` and `storage.py` now use `datetime.now(timezone.utc)`. Values are created aware-UTC in memory, but SQLite round-trips them as naive UTC (SQLAlchemy's sqlite dialect drops tzinfo by default), so the stored format is unchanged from the `utcnow()` era — no migration or `app.db` deletion is needed.
 
 ## Before You Say a Change Is Done
 

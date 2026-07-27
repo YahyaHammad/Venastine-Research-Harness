@@ -1084,3 +1084,11 @@ def run_research(query, provider_name, model):
 ```
 
 **Acceptance criteria:** running the CLI in research mode produces a real directory under `./output/<uuid>/` containing every file listed above (PDF may legitimately be absent if no renderer is installed — that's correct degrade-gracefully behavior, not a bug), and `confidence_chart.png` is a real, valid PNG showing the correct tier counts for that run.
+
+### Built
+
+`core/reasoning/output_writer.py` (NEW): `write_run_artifacts(run) -> str` writes the full artifact directory under `OUTPUT_DIR/<run_id>/` — 12 files (00_plan.md through report.md, trace.md, confidence_chart.png, conditional 06_revisions.json) plus `sources/` and `code/` placeholder subdirs. `_write_confidence_chart` produces a matplotlib bar chart (hard dependency, `matplotlib==3.10.3` in requirements.txt). `_try_write_pdf` is a graceful-degradation stub (markdown + weasyprint not installed → silently skipped). `run.run_id is None` raises `ValueError` (can't happen in production — §5's `create_pipeline_run` sets it up front — but guards tests that bypass persistence).
+
+`config.py`: `OUTPUT_DIR = os.environ.get("AGENT_OUTPUT_DIR", "./output")` added. `main.py`'s `run_research` calls `write_run_artifacts(run)` after the pipeline completes and prints the artifacts path. `.gitignore`: `output/` added.
+
+5 tests in `tests/test_output_writer.py` (file layout, content round-trip, conditional revisions file, None-run_id guard, PNG validity) + research-mode e2e test updated to verify `write_run_artifacts` is called. **Full decision record in `DEVLOG.md §12`.**

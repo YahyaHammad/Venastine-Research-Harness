@@ -6,3 +6,4 @@ logs/
 *.db
 providers.json
 .qwen/
+output/

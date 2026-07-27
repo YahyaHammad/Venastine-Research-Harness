@@ -110,14 +110,25 @@ def configure_logging(
     # segments in env-configured paths.
     log_file = os.path.abspath(log_file)
     log_dir = os.path.dirname(log_file)
-    if log_dir and not os.path.isdir(log_dir):
-        os.makedirs(log_dir, exist_ok=True)
+    try:
+        if log_dir and not os.path.isdir(log_dir):
+            os.makedirs(log_dir, exist_ok=True)
 
-    file_handler = RotatingFileHandler(
-        log_file,
-        maxBytes=max_bytes,
-        backupCount=backup_count,
-        encoding="utf-8",
-    )
-    file_handler.setFormatter(formatter)
-    root.addHandler(file_handler)
+        file_handler = RotatingFileHandler(
+            log_file,
+            maxBytes=max_bytes,
+            backupCount=backup_count,
+            encoding="utf-8",
+        )
+        file_handler.setFormatter(formatter)
+        root.addHandler(file_handler)
+    except OSError as e:
+        # Logging to a file is non-essential. If the directory can't be
+        # created or the file can't be opened (read-only filesystem,
+        # permission denied, disk full), fall back to stderr-only rather
+        # than crashing the program at startup.
+        print(
+            f"Warning: could not create log file at {log_file} ({e}); "
+            f"logging to stderr only.",
+            file=sys.stderr,
+        )

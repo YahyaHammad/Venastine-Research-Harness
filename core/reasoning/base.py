@@ -29,8 +29,9 @@ class Claim:
     object rather than creating parallel data structures keyed by id.
 
     SERIALIZATION NOTE: every claim-serialization call site in this
-    codebase (orchestrator.py passes 3a/3b/5/6a/6c/final synthesis, and
-    pipeline_storage.update_pipeline_run) uses the shallow `vars(c)`.
+    codebase (orchestrator.py passes 3a/3b/5/6a/6c/final synthesis,
+    pipeline_storage.update_pipeline_run, and
+    output_writer.write_run_artifacts) uses the shallow `vars(c)`.
     That is correct only while every field below stays JSON-native
     (str / list / dict / float / int / None). If a nested-dataclass field
     is EVER added here, ALL of those `vars(c)` sites must migrate to

@@ -1,5 +1,5 @@
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 from uuid import UUID, uuid4
 
@@ -10,7 +10,7 @@ from database import engine  # your SQLAlchemy engine, assumed to exist here
 
 class ConversationThread(SQLModel, table=True):
     id: UUID = Field(default_factory=uuid4, primary_key=True)
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     extra_data: Dict[str, Any] = Field(default_factory=dict, sa_type=JSON)
 
 
@@ -21,7 +21,7 @@ class MessageLog(SQLModel, table=True):
     content: str  # always JSON-encoded, regardless of the original type
     name: Optional[str] = None
     tool_call_id: Optional[str] = None
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 def create_thread() -> UUID:

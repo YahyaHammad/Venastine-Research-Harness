@@ -9,3 +9,4 @@ pydantic==2.13.4
 sympy==1.13.3
 sqlmodel==0.0.39
 python-dotenv==1.0.1
+matplotlib==3.10.3

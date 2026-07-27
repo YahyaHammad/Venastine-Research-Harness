@@ -20,6 +20,7 @@ the permanent fallback entry point.
 """
 
 import argparse
+import logging
 import sys
 from uuid import UUID
 
@@ -27,6 +28,8 @@ import config
 from core.loop import RunAgentLoop, DEFAULT_PROVIDER
 from database import create_db_and_tables
 from logging_setup import configure_logging
+
+logger = logging.getLogger(__name__)
 
 
 def _uuid_type(value: str) -> UUID:
@@ -75,12 +78,18 @@ def run_chat(
         if not user_input:
             continue
 
-        response = RunAgentLoop.run_agent_conversation(
-            user_goal=user_input,
-            model=model,
-            provider_name=provider_name,
-            thread_id=current_thread_id,
-        )
+        try:
+            response = RunAgentLoop.run_agent_conversation(
+                user_goal=user_input,
+                model=model,
+                provider_name=provider_name,
+                thread_id=current_thread_id,
+            )
+        except Exception as e:
+            logger.exception("Chat turn failed")
+            print(f"\n[Error: {e}]")
+            continue
+
         current_thread_id = response.thread_id
 
         if not printed_thread_id and current_thread_id:
@@ -94,15 +103,31 @@ def run_chat(
 
 
 def run_research(query: str, provider_name: str, model: str) -> None:
-    """Run the full deep-research pipeline and print the results."""
+    """Run the full deep-research pipeline, write artifacts to disk,
+    and print the results."""
     from core.reasoning.orchestrator import run_deep_research_pipeline
+    from core.reasoning.output_writer import write_run_artifacts
 
     print(f"Running deep-research pipeline on: {query!r}")
     print(f"Provider: {provider_name} | Model: {model}\n")
 
-    run = run_deep_research_pipeline(
-        user_query=query, model=model, provider_name=provider_name,
-    )
+    try:
+        run = run_deep_research_pipeline(
+            user_query=query, model=model, provider_name=provider_name,
+        )
+    except Exception as e:
+        logger.exception("Research pipeline failed")
+        print(f"\nPipeline failed: {e}")
+        print("If any partial results were persisted, they can be "
+              "inspected via the database.")
+        raise SystemExit(1)
+
+    output_dir = None
+    try:
+        output_dir = write_run_artifacts(run)
+    except Exception as e:
+        logger.exception("Could not write artifacts")
+        print(f"\n[Warning: could not write artifacts: {e}]")
 
     print(run.final_report)
 
@@ -112,6 +137,8 @@ def run_research(query: str, provider_name: str, model: str) -> None:
 
     if run.run_id:
         print(f"\n[run id: {run.run_id}]")
+    if output_dir:
+        print(f"Full artifacts written to: {output_dir}")
 
 
 def build_parser() -> argparse.ArgumentParser:
