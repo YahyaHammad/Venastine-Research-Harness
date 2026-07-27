@@ -30,7 +30,7 @@ These recur throughout the codebase. When you're unsure which file something bel
 
 ```
 Venastine Research Harness/
-├── main.py                        # entry point (currently a hardcoded example -- see ROADMAP.md)
+├── main.py                        # interactive CLI entry point (ROADMAP §1) -- chat + research modes, argparse, logging wiring
 ├── config.py                      # ALL tunable settings + permission/approval dataclasses
 ├── credentials.py                 # LLM PROVIDER keys (providers.json) -- NOT misc tool keys
 ├── env_secrets.py                 # misc TOOL keys (.env) -- NOT LLM provider keys
@@ -46,9 +46,11 @@ Venastine Research Harness/
 ├── pytest.ini                      # testpaths=tests, --strict-markers
 ├── DEVLOG.md                       # implementation notes for built ROADMAP sections -- see §0
 │
-├── tests/                          # 79 tests, all offline, ~0.53s -- see ROADMAP.md §4, DEVLOG.md §4
+├── tests/                          # 88 tests, all offline, ~0.50s -- see ROADMAP.md §4, DEVLOG.md §4
 │   ├── conftest.py                 # fixtures: make_model_response, FakeStorage, ...
 │   ├── BREAKING_CHANGES.md         # what-breaks-it / symptom / fix per area
+│   ├── test_cli.py                 # 7 tests -- ROADMAP §1 thread_id passthrough + UUID validation + parser defaults
+│   ├── test_e2e.py                 # 2 tests -- end-to-end chat (multi-turn + tool use) and research mode
 │   ├── test_confidence_scoring.py  # 5 tests (3 ROADMAP verbatim regressions)
 │   ├── test_client_translation.py  # 14 tests -- both translation branches + batching
 │   ├── test_loop_stop_conditions.py# 3 tests (ROADMAP verbatim)
@@ -250,7 +252,7 @@ This file exists but is empty, and its purpose relative to `security/permissions
   - `provider_factory` / `client_for_provider` — return a mock-`api_initialization`-compatible tuple for translation tests.
   - `clear_client_cache` (autouse) — resets `api_initialization`'s cached clients before each test.
 - **`tests/BREAKING_CHANGES.md`** — per-file tables documenting what breaks each test when production code changes, the symptom, and the fix. Created because `test_orchestrator.py` was identified as the suite's most fragile mock — its mock dict is keyed by pass_id strings that ROADMAP §3 and §10 will modify.
-- **10 test files** (6 per ROADMAP §4 + 2 from §4's own additions: `test_memory_write_through.py`, `test_loop_tool_dispatch.py`; + 2 from §3/§5: `test_json_retry.py`, `test_pipeline_storage.py`).
+- **12 test files** (6 per ROADMAP §4 + 2 from §4's own additions: `test_memory_write_through.py`, `test_loop_tool_dispatch.py`; + 2 from §3/§5: `test_json_retry.py`, `test_pipeline_storage.py`; + 2 from §1: `test_cli.py`, `test_e2e.py`).
 
 **What belongs here:** tests that run offline (~0.53s), with zero network access and zero real API keys. Stubs in root `conftest.py` catch import-time module resolution; fixtures in `tests/conftest.py` provide `ModelResponse` construction and storage mocking; individual test files cover production code's behavior.
 

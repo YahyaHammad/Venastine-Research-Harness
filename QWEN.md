@@ -19,10 +19,10 @@ Both modes share the same call-and-tool-dispatch loop (`core/loop.py`), multi-pr
 # Install dependencies
 pip install -r requirements.txt
 
-# Run (currently a hardcoded example query — interactive CLI is ROADMAP §1, not yet built)
+# Run (interactive CLI — chat mode by default, --mode research for the pipeline)
 python main.py
 
-# Run tests (reported: 79 tests, all offline, ~0.53s, zero network/API keys needed --
+# Run tests (reported: 88 tests, all offline, ~0.50s, zero network/API keys needed --
 # but see "Known Bugs" below: requirements.txt does not currently list pytest or
 # pytest-mock, both of which the suite needs. If `pytest` fails to import, that's why.)
 pytest
@@ -126,7 +126,7 @@ Every model call goes through `RunAgentLoop._run()` in `core/loop.py` — both p
 - `security/sandbox.py` and `tools/builtin/shell.py` are empty stubs — shell execution must never be enabled without a real sandbox.
 - `safety/policy_enforcement.py` exists but is empty; its purpose relative to `security/permissions.py` is undecided (see ROADMAP §8).
 - `tools/builtin/file_ops.py` is a stub (see ROADMAP §6).
-- `logging_setup.py` is built (and exceeds its own ROADMAP spec — rotating file handler, env-var overrides) but not wired into `main.py` — deferred to ROADMAP §1's interactive CLI, which is also not yet built.
+- `logging_setup.py` is built (and exceeds its own ROADMAP spec — rotating file handler, env-var overrides) and wired into `main.py` as the first call (ROADMAP §1).
 - `datetime.utcnow()` deprecation: `pipeline_storage.py` and `storage.py` both use naive UTC — migrate both together if/when moving to timezone-aware datetimes.
 
 ## Before You Say a Change Is Done

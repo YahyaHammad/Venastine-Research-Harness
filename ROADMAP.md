@@ -112,6 +112,12 @@ def run_research(query, provider_name, model):
 
 **Acceptance criteria:** a person can run `python main.py`, have a multi-turn conversation with tool use working, exit, and resume the exact same thread later with `--thread <uuid>` and see prior context intact. `python main.py --mode research "some query"` (add a positional `query` arg for this) runs the full pipeline and prints the final report.
 
+### Built
+
+`main.py` rewritten as an argparse CLI with two modes (chat, research). `configure_logging()` wired as the first call (unblocks §2's acceptance criterion). Prerequisite fix landed: `run_agent_conversation` now accepts `thread_id: Optional[UUID] = None` and passes it through to `ConversationMemory(thread_id=thread_id)` — multi-turn chat and `--thread` resume both work. `ModelResponse.thread_id` was already present (§3 work).
+
+One convenience beyond the spec: the positional `query` arg (spec: research-mode only) also works in chat mode as the first user message, then the interactive loop continues. `build_parser()` is a separate function so tests can exercise argument parsing without side effects. 7 tests in `tests/test_cli.py` (thread_id passthrough ×2, UUID validation ×2, parser defaults ×3) + 2 end-to-end tests in `tests/test_e2e.py` (chat mode: multi-turn with tool use + thread resume + write-through persistence; research mode: report + trace + run id printed). A feature-rich Textual TUI is planned as a separate effort; this CLI is the permanent fallback entry point. **Full decision record in `DEVLOG.md §1`.**
+
 ---
 
 ## 2. `logging_setup.py`

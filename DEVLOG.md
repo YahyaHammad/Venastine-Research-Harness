@@ -6,6 +6,7 @@ Section numbers below match ROADMAP.md's section numbers exactly. When a section
 
 **Index:**
 - 0. Chat-trace context — how this document's decisions were made
+- 1. Interactive CLI entry point
 - 2. `logging_setup.py`
 - 3. Malformed-JSON recovery (+ §5 minimal core pulled forward)
 - 4. Test suite
@@ -29,6 +30,64 @@ The two implemented sections (§2, §4) below were each delivered through a stru
 - Every deviation from ROADMAP documented in this file was explicitly chosen by the user, not inferred. If you disagree with a deviation, you're disagreeing with a recorded decision, not a stray guess — the right move is to surface the conflict to the user and re-ask, not silently override.
 - Each section below records the question dimensions that were asked, so a future agent continuing partial work can see whether their question was already answered (and how) before re-asking.
 - The "ask before implementing" pattern is the user's stated preference. New roadmap sections should follow the same clarification cycle, not skip it. Treat the answers recorded here as prior decisions not to be re-litigated without cause — same weight as any other architectural commitment in ARCHITECTURE.md.
+
+---
+
+## 1. Interactive CLI entry point
+
+### 1.1 What we built
+
+`main.py` rewritten from a hardcoded example query to an argparse CLI with two modes:
+
+- **Chat mode** (default): `input()`/`print()` loop with tool use. Thread id printed after the first response for later `--thread` resume. Ctrl+C / Ctrl+D to exit.
+- **Research mode** (`--mode research "query"`): runs `run_deep_research_pipeline`, prints final report + trace + run id.
+
+Flags: `--thread UUID` (resume), `--mode {chat,research}`, `--provider` (default: `DEFAULT_PROVIDER` from `core/loop.py`), `--model` (default: `config.MODEL_NAME`). Positional `query` (optional in chat mode — used as the first message; required in research mode).
+
+`configure_logging()` wired as the very first call inside `if __name__ == "__main__":` — this unblocks §2's acceptance criterion (tool retry warnings now appear on stderr).
+
+Prerequisite fix: `run_agent_conversation` in `core/loop.py` now accepts `thread_id: Optional[UUID] = None` and passes it to `ConversationMemory(thread_id=thread_id)`. `ModelResponse.thread_id` was already present (§3 work) — no change needed there.
+
+### 1.2 Questions we asked & your answers
+
+Two questions before implementation:
+
+| # | Dimension | User's choice |
+|---|---|---|
+| 1 | Sequencing: basic CLI first (then Textual TUI later), TUI now, or both in one pass? | **Basic CLI first** — get the project usable now; the TUI replaces the I/O layer later. The argparse/dispatch/logging scaffolding carries forward. |
+| 2 | TUI vision: what does "feature rich" mean? | **Textual-based app** — full TUI framework with panels, scrollable history, sidebar, live streaming. Planned as a separate effort. |
+
+### 1.3 What we followed verbatim from ROADMAP §1
+
+- argparse with `--thread`, `--mode`, `--provider`, `--model` flags. ✓
+- UUID validation via `uuid.UUID(value)` with a clear CLI error for malformed input. ✓
+- `DEFAULT_PROVIDER` imported from `core/loop.py`, not duplicated. ✓
+- Chat mode: `input()`/`print()` loop, thread id printed after first response, `[stopped early: ...]` for non-complete stops. ✓
+- Research mode: `run_deep_research_pipeline` → print report + trace. ✓
+- `configure_logging()` as the first line, `create_db_and_tables()` immediately after. ✓
+- Prerequisite fix: `thread_id` parameter on `run_agent_conversation`, `ConversationMemory(thread_id=thread_id)`. ✓
+
+### 1.4 What we deviated from §1, and why
+
+| Spec language | Actual implementation | Why |
+|---|---|---|
+| Positional `query` arg for research mode only | Also works in chat mode as the first user message (then the loop continues) | Natural convenience — `python main.py "hello"` starts a chat with "hello" as the first turn. No spec language prohibits this; the spec just doesn't mention it. |
+| (spec silent on `build_parser()` separation) | `build_parser()` is a standalone function, argparse setup separated from `if __name__ == "__main__":` | Testability — `tests/test_cli.py` exercises parser defaults and UUID validation without triggering `configure_logging()` / `create_db_and_tables()` side effects. |
+| (spec silent on a Textual TUI) | CLI documented as the permanent fallback; Textual TUI planned separately | User's choice (Q1/Q2). The CLI's scaffolding (argparse, mode dispatch, logging wiring) carries forward to the TUI entry point. |
+
+### 1.5 Acceptance criteria status
+
+ROADMAP §1's acceptance criterion: *"a person can run `python main.py`, have a multi-turn conversation with tool use working, exit, and resume the exact same thread later with `--thread <uuid>` and see prior context intact."*
+
+**Implementation complete; end-to-end verification requires a real API key** (the test suite is offline). The wiring is verified by 7 tests in `tests/test_cli.py`: thread_id passthrough (×2), UUID validation (×2), parser defaults (×3). The resume-shape bugs that previously blocked `--thread` (§4 Discovery 2, §3.8 tool-result fix) are both fixed — a resumed thread now reconstructs the identical neutral shape for every role.
+
+§2's acceptance criterion is also unblocked: `configure_logging()` is now called in production code.
+
+### 1.6 Test changes
+
+- `tests/test_cli.py` (NEW): 7 tests — thread_id passthrough with/without the parameter, `_uuid_type` valid/invalid, parser defaults, research-mode parsing, `--thread` flag parsing.
+- `tests/test_e2e.py` (NEW): 2 end-to-end tests — chat mode (multi-turn with tool use, thread resume, write-through persistence verified via `fake_storage`) and research mode (report + trace + run id printed). Chat mode uses the `fake_storage` fixture because the fake sqlmodel's `select().where().order_by()` chain doesn't support the full query `get_session_history` needs; the storage layer itself is covered by `test_memory_write_through.py`.
+- Full suite: 88 tests, ~0.50s, zero network/API keys.
 
 ---
 

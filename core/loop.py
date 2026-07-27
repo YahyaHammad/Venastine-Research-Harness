@@ -92,10 +92,12 @@ class RunAgentLoop:
         provider_name: str = DEFAULT_PROVIDER,
         max_steps: int = config.MAX_ITERATIONS,
         max_total_tokens: int = config.MAX_TOKEN_BUDGET,
+        thread_id: Optional[UUID] = None,
     ) -> ModelResponse:
         """Regular conversation -- full tool set, default system prompt,
-        one continuous thread."""
-        memory = ConversationMemory()
+        one continuous thread. Pass thread_id to resume an existing
+        thread; omit (or None) to start a fresh one."""
+        memory = ConversationMemory(thread_id=thread_id)
         memory.add_user_message(user_goal)
         response = RunAgentLoop._run(
             memory, DEFAULT_SYSTEM_PROMPT, provider_name, model, None, max_steps, max_total_tokens
