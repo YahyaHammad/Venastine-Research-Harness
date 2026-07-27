@@ -1,13 +1,11 @@
 """
 test_pipeline_storage.py
 
-ROADMAP §5 (minimal core): unit tests for the create_pipeline_run /
-update_pipeline_run pair in core/reasoning/pipeline_storage.py.
+ROADMAP §5: unit tests for the create_pipeline_run / update_pipeline_run
+/ load_pipeline_run trio in core/reasoning/pipeline_storage.py.
 
 These tests run against the upgraded fake sqlmodel in conftest.py
-(construction + in-memory CRUD) -- no real sqlite needed. Per-pass
-checkpointing and a load_pipeline_run() read API remain for §5 proper
-and are NOT tested here (they don't exist yet).
+(construction + in-memory CRUD) -- no real sqlite needed.
 
 The tests:
 
@@ -25,6 +23,13 @@ The tests:
      except block, the ORIGINAL pipeline exception still propagates (not
      the persistence error), and the persistence failure is logged at
      ERROR with the offending run_id named in the message.
+  5. load_pipeline_run() round-trips all 9 fields (id, user_query,
+     status, started_at, finished_at, claims, trace, coverage_gaps,
+     final_report) through create -> update -> load.
+  6. load_pipeline_run() with a nonexistent run_id raises ValueError
+     (matching update_pipeline_run's convention).
+  7. load_pipeline_run() on a just-created 'running' record (no update
+     yet) returns the empty defaults and finished_at=None.
 """
 
 import json
@@ -38,6 +43,7 @@ from core.reasoning.base import Claim, PipelineRun
 from core.reasoning.pipeline_storage import (
     PipelineRunRecord,
     create_pipeline_run,
+    load_pipeline_run,
     update_pipeline_run,
 )
 
@@ -222,3 +228,81 @@ def test_inner_storage_failure_propagates_original_exception_and_logs_run_id(moc
         f"ERROR log message must name the failing run_id {known_run_id}; "
         f"got: {[r.getMessage() for r in error_records]}"
     )
+
+
+# ===========================================================================
+# ---- Tests 5-7: load_pipeline_run (ROADMAP §5 proper) ---------------------
+# ===========================================================================
+
+def test_load_pipeline_run_round_trips_all_fields():
+    """create -> update (with claims, trace, gaps, report) -> load must
+    return all 9 fields intact: id, user_query, status, started_at,
+    finished_at, claims (list of raw dicts), trace (list of strings),
+    coverage_gaps (list of dicts), final_report (plain text).
+
+    Claims come back as raw dicts (the shape vars(c) produced at write
+    time), NOT reconstructed Claim dataclass instances -- the read API
+    is for inspection, not pipeline re-entry."""
+    run_id = create_pipeline_run("round-trip query")
+    run = _make_sample_run("round-trip query")
+    run.coverage_gaps = [{"gap": "missing Y", "tier": "UNVERIFIED_COVERAGE"}]
+    run.final_report = "A round-tripped report."
+
+    update_pipeline_run(run_id, run, status="complete")
+    loaded = load_pipeline_run(run_id)
+
+    assert loaded["id"] == run_id
+    assert loaded["user_query"] == "round-trip query"
+    assert loaded["status"] == "complete"
+    assert isinstance(loaded["started_at"], datetime)
+    assert isinstance(loaded["finished_at"], datetime)
+
+    # claims: list of raw dicts, one per Claim, fields intact.
+    assert isinstance(loaded["claims"], list)
+    assert len(loaded["claims"]) == 1
+    claim_dict = loaded["claims"][0]
+    assert isinstance(claim_dict, dict)
+    assert claim_dict["id"] == "C1"
+    assert claim_dict["text"] == "A claim."
+    assert claim_dict["type"] == "factual"
+    assert claim_dict["entities"] == ["A"]
+
+    # trace: list of strings, order preserved.
+    assert loaded["trace"] == ["Trace line 1.", "Trace line 2."]
+
+    # coverage_gaps: list of dicts.
+    assert loaded["coverage_gaps"] == [{"gap": "missing Y", "tier": "UNVERIFIED_COVERAGE"}]
+
+    # final_report: plain text, not JSON-encoded.
+    assert loaded["final_report"] == "A round-tripped report."
+
+
+def test_load_pipeline_run_with_unknown_run_id_raises_value_error():
+    """load_pipeline_run(bogus_uuid) must raise ValueError with a clear
+    message -- matching update_pipeline_run's convention. A missing
+    record is a real bug (wrong id, deleted row), not an expected path."""
+    bogus = uuid4()
+
+    with pytest.raises(ValueError, match="No pipeline run found with id"):
+        load_pipeline_run(bogus)
+
+
+def test_load_pipeline_run_returns_empty_defaults_for_running_record():
+    """A just-created record (create_pipeline_run only, no
+    update_pipeline_run yet) must load with status='running',
+    finished_at=None, and the four data columns at their empty defaults
+    ([] / [] / [] / ""). This is the state a hard-killed run sits in
+    if the kill happens before the first per-pass checkpoint fires."""
+    run_id = create_pipeline_run("fresh query")
+
+    loaded = load_pipeline_run(run_id)
+
+    assert loaded["id"] == run_id
+    assert loaded["user_query"] == "fresh query"
+    assert loaded["status"] == "running"
+    assert isinstance(loaded["started_at"], datetime)
+    assert loaded["finished_at"] is None
+    assert loaded["claims"] == []
+    assert loaded["trace"] == []
+    assert loaded["coverage_gaps"] == []
+    assert loaded["final_report"] == ""

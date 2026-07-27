@@ -20,11 +20,14 @@ sees its own prior output in context. Up to config.MAX_JSON_RETRIES
 corrective attempts are made; a final ValueError surfaces unrecoverable
 failures.
 
-ROADMAP §5 (minimal pipeline persistence): each run is wrapped in a
+ROADMAP §5 (durable pipeline persistence): each run is wrapped in a
 try/except that records status='failed' (with a snapshot of the partial
 run) before re-raising, so a mid-pipeline crash still leaves a durable
-record. Per-pass checkpointing and a load_pipeline_run() read API remain
-for §5 proper.
+record. A data-only update_pipeline_run() checkpoint fires after every
+run.log() trace line, so even a hard kill (KeyboardInterrupt / SystemExit,
+which bypass the except Exception block) leaves the record populated
+through the last completed pass. load_pipeline_run() in
+pipeline_storage.py provides the read API.
 """
 
 from __future__ import annotations
@@ -200,17 +203,20 @@ def run_deep_research_pipeline(
         # --- Pass 0: preliminary plan ---
         run.plan = _parse_json_response(_run_pass_with_json_retry("Pass 0", user_query, model, provider_name, run.trace))
         run.log(f"Pass 0: plan produced ({len(run.plan.get('key_entities_or_subjects', []))} key entities anticipated).")
+        update_pipeline_run(run.run_id, run)
 
         # --- Pass 1: initial generation (no ensemble mode in this version) ---
         pass1_input = f"Original query:\n{user_query}\n\nPreliminary plan (loose context, may deviate freely):\n{json.dumps(run.plan)}"
         run.raw_response = _run_pass("Pass 1", pass1_input, model, provider_name)
         run.log("Pass 1: initial generation complete.")
+        update_pipeline_run(run.run_id, run)
 
         # --- Pass 2: claim extraction & classification ---
         pass2_input = f"Response to extract claims from:\n{run.raw_response}"
         claims_json = _parse_json_response(_run_pass_with_json_retry("Pass 2", pass2_input, model, provider_name, run.trace))
         run.claims = [_claim_from_json(c) for c in claims_json]
         run.log(f"Pass 2: extracted {len(run.claims)} claim(s).")
+        update_pipeline_run(run.run_id, run)
 
         # --- D0: route by claim type (pure code) ---
         factual_claims = [c for c in run.claims if c.type == "factual"]
@@ -219,6 +225,7 @@ def run_deep_research_pipeline(
             f"D0: {len(factual_claims)} factual claim(s) routed to 3a/3b, "
             f"{len(non_factual_claims)} synthesis/speculative claim(s) routed directly to Pass 5."
         )
+        update_pipeline_run(run.run_id, run)
 
         # --- Pass 3a + 3b: only for factual claims, batched by deduplicated entity ---
         if factual_claims:
@@ -231,6 +238,7 @@ def run_deep_research_pipeline(
             grounding_json = _parse_json_response(_run_pass_with_json_retry("Pass 3a", pass3a_input, model, provider_name, run.trace))
             _apply_grounding(run.claims, grounding_json)
             run.log(f"Pass 3a: grounded {len(unique_entities)} unique entities across {len(factual_claims)} factual claim(s).")
+            update_pipeline_run(run.run_id, run)
 
             pass3b_input = (
                 f"Raw response:\n{run.raw_response}\n\n"
@@ -239,8 +247,10 @@ def run_deep_research_pipeline(
             critic_json = _parse_json_response(_run_pass_with_json_retry("Pass 3b", pass3b_input, model, provider_name, run.trace))
             _apply_critic(run.claims, critic_json)
             run.log("Pass 3b: critique complete for factual claims.")
+            update_pipeline_run(run.run_id, run)
         else:
             run.log("Pass 3a/3b: skipped -- no factual claims to ground or critique.")
+            update_pipeline_run(run.run_id, run)
 
         # --- Pass 3c: completeness, independent of Pass 1's raw_response ---
         pass3c_input = f"Original query:\n{user_query}\n\nPreliminary plan:\n{json.dumps(run.plan)}"
@@ -249,6 +259,7 @@ def run_deep_research_pipeline(
             f"Pass 3c: coverage_score={run.completeness.get('coverage_score')}, "
             f"{len(run.completeness.get('gaps', []))} gap(s) identified."
         )
+        update_pipeline_run(run.run_id, run)
 
         # --- Pass 5: assumption audit -- ALL claims, plus completeness ---
         pass5_input = (
@@ -259,14 +270,17 @@ def run_deep_research_pipeline(
         run.assumptions = _parse_json_response(_run_pass_with_json_retry("Pass 5", pass5_input, model, provider_name, run.trace))
         _apply_assumption_flags(run.claims, run.assumptions)
         run.log(f"Pass 5: assumption audit complete, {len(run.assumptions.get('per_claim_flags', {}))} claim(s) flagged.")
+        update_pipeline_run(run.run_id, run)
 
         # --- Pass 4: confidence tiering (0 LLM calls) ---
         run_confidence_tiering(run)
         run.log("Pass 4: confidence tiers assigned (pure code, zero LLM calls).")
+        update_pipeline_run(run.run_id, run)
 
         # --- D1 + the 6a/6c/D2 retry loop ---
         flagged = [c for c in run.claims if c.confidence_tier in FLAGGED_TIERS]
         run.log(f"D1: {len(flagged)} claim(s) flagged for revision, {len(run.claims) - len(flagged)} already clean.")
+        update_pipeline_run(run.run_id, run)
 
         while flagged:
             # --- Pass 6a: ONE batched call across every currently-flagged claim ---
@@ -286,6 +300,7 @@ def run_deep_research_pipeline(
                     claim.revision_text = rev["revised_text"]
                     claim.retry_count += 1
             run.log(f"Pass 6a: revised {len(revisions)} claim(s) in this retry round.")
+            update_pipeline_run(run.run_id, run)
 
             # --- Pass 6c: re-validate the revised subset only (batched, reuses Pass 4's code) ---
             pass6c_input = json.dumps([vars(c) for c in flagged])
@@ -296,12 +311,14 @@ def run_deep_research_pipeline(
 
             still_flagged = [c for c in flagged if c.confidence_tier in FLAGGED_TIERS]
             run.log(f"Pass 6c: {len(flagged) - len(still_flagged)} claim(s) now clean, {len(still_flagged)} still flagged.")
+            update_pipeline_run(run.run_id, run)
 
             # --- D2: retry cap check (pure code) ---
             exhausted = [c for c in still_flagged if c.retry_count >= MAX_RETRIES]
             for c in exhausted:
                 _apply_fallback(c)
                 run.log(f"D2: claim {c.id} exhausted retries ({c.retry_count}) -> fallback UNVERIFIED.")
+                update_pipeline_run(run.run_id, run)
 
             flagged = [c for c in still_flagged if c.retry_count < MAX_RETRIES]
 
@@ -312,9 +329,11 @@ def run_deep_research_pipeline(
             if claim.annotation is None:
                 claim.annotation = f"[{claim.confidence_tier}]"
         run.log("Pass 6b: annotation complete (templated, zero LLM calls).")
+        update_pipeline_run(run.run_id, run)
 
         # --- Merge (pure code) ---
         run.log(f"Merge: final claim set assembled -- {len(run.claims)} claim(s), {len(run.coverage_gaps)} coverage gap(s).")
+        update_pipeline_run(run.run_id, run)
 
         # --- Final synthesis ---
         synthesis_input = (

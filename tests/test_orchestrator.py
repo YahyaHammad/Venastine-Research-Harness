@@ -41,12 +41,17 @@ entry point orchestrator's `_run_pass` calls. Any change to:
          to switch from `RunAgentLoop.run_deep_research_mode` to
          `RunAgentLoop._run`. See tests/BREAKING_CHANGES.md for the
          expected mock-update pattern.
-  (5) Roadmap §5 minimal pipeline persistence: run_deep_research_pipeline()
-      now calls create_pipeline_run() up front and update_pipeline_run()
-      on success/failure. These go through the (real) fake sqlmodel in
-      conftest.py — no monkeypatching required for the happy-path tests.
-      The failure-path test below (test_pipeline_failure_marks_run_failed)
-      patches `update_pipeline_run` to assert on the status transition.
+  (5) Roadmap §5 pipeline persistence: run_deep_research_pipeline()
+      calls create_pipeline_run() up front, a data-only
+      update_pipeline_run(run.run_id, run) checkpoint after EVERY
+      run.log() trace line, and a terminal update with
+      status='complete'/'failed' at the end. These go through the (real)
+      fake sqlmodel in conftest.py — no monkeypatching required for the
+      happy-path tests. The success-path test asserts the LAST call has
+      status='complete' and all preceding calls have status=None. The
+      two acceptance-criterion tests (crash after 3b, hard kill after
+      3b) verify load_pipeline_run() returns claims populated through
+      the last checkpoint.
 
 When this test fails, the error typically points at a real design change
 in orchestrator.py, not a flaky test. Read the failure (often a
@@ -63,6 +68,7 @@ import pytest
 import config
 from core.loop import RunAgentLoop
 from core.reasoning.orchestrator import run_deep_research_pipeline
+from core.reasoning.pipeline_storage import load_pipeline_run
 from tests.conftest import make_model_response
 
 
@@ -482,8 +488,9 @@ def test_pipeline_success_marks_run_complete(mocker):
     """Symmetrical with the failure-path test: a clean pipeline run that
     completes Final synthesis must call update_pipeline_run with
     status='complete' (matching ModelResponse.stop_reason's 'complete'
-    for a normal, non-error finish). This is the ROADMAP §5 success-side
-    contract."""
+    for a normal, non-error finish) as its FINAL call. All preceding
+    calls are data-only per-pass checkpoints (status=None). This is the
+    ROADMAP §5 success-side contract."""
     payloads = _clean_pipeline_payloads()
     call_log = []
     mocker.patch.object(
@@ -510,15 +517,186 @@ def test_pipeline_success_marks_run_complete(mocker):
     )
 
     statuses_seen = [u[2] for u in captured_updates]
-    assert statuses_seen == ["complete"], (
-        f"Successful run should call update_pipeline_run once with "
-        f"status='complete', got: {statuses_seen}"
+    # The LAST call must be the terminal status='complete'.
+    assert statuses_seen[-1] == "complete", (
+        f"Final update_pipeline_run call should have status='complete', "
+        f"got: {statuses_seen[-1]}"
+    )
+    # All preceding calls are data-only per-pass checkpoints (status=None).
+    assert all(s is None for s in statuses_seen[:-1]), (
+        f"All pre-terminal checkpoint calls should have status=None, "
+        f"got: {statuses_seen[:-1]}"
+    )
+    # At least one data-only checkpoint fired (proves per-pass
+    # checkpointing is wired in, not just the terminal update).
+    assert len(statuses_seen) > 1, (
+        f"Expected data-only per-pass checkpoints before the terminal "
+        f"update, got only: {statuses_seen}"
     )
 
     # The pipeline still returns the full, completed PipelineRun on the
     # success path (the persistence wrap must not swallow the return value).
     assert run.final_report != "", "Successful run should carry a final report"
     assert run.run_id is not None, "Successful run should have a durable record id"
+
+
+# ===========================================================================
+# ---- ROADMAP §5: acceptance criterion -- per-pass checkpoint durability ----
+# ===========================================================================
+
+def test_crash_after_pass_3b_leaves_claims_populated_via_load(mocker):
+    """ROADMAP §5 acceptance criterion: raise a forced exception
+    mid-pipeline after Pass 3b completes; confirm load_pipeline_run()
+    returns a record with status='failed' and claims populated with
+    whatever was captured through Pass 3b, not empty.
+
+    Strategy: let Pass 0/1/2/3a/3b run with valid canned payloads (so
+    claims are extracted, grounded, and critiqued), then raise
+    RuntimeError on Pass 3c. The orchestrator's except block fires,
+    setting status='failed'. load_pipeline_run() then reads the durable
+    record back.
+    """
+    payloads = _clean_pipeline_payloads()
+    call_log = []
+
+    def side_effect(*, pass_input, model, pass_id, provider_name="ANTHROPIC", **kwargs):
+        call_log.append(pass_id)
+        if pass_id == "Pass 3c":
+            raise RuntimeError("simulated crash after Pass 3b")
+        entry = payloads.get(pass_id)
+        if entry is None:
+            raise AssertionError(
+                f"orchestrator called an unexpected pass_id '{pass_id}'. "
+                f"Known: {list(payloads.keys())}. Update the mock."
+            )
+        return _response_with_text(entry)
+
+    mocker.patch.object(RunAgentLoop, "run_deep_research_mode", side_effect=side_effect)
+
+    # Capture the run_id so we can call load_pipeline_run after the crash.
+    from core.reasoning import orchestrator as orch_mod
+    captured_run_ids: list = []
+    real_create = orch_mod.create_pipeline_run
+
+    def spy_create(user_query):
+        run_id = real_create(user_query)
+        captured_run_ids.append(run_id)
+        return run_id
+
+    mocker.patch.object(orch_mod, "create_pipeline_run", side_effect=spy_create)
+
+    with pytest.raises(RuntimeError, match="simulated crash after Pass 3b"):
+        run_deep_research_pipeline(
+            user_query="acceptance criterion query",
+            model="claude-test",
+            provider_name="ANTHROPIC",
+        )
+
+    assert len(captured_run_ids) == 1
+    run_id = captured_run_ids[0]
+
+    loaded = load_pipeline_run(run_id)
+    assert loaded["status"] == "failed"
+    # Claims were extracted by Pass 2, grounded by 3a, critiqued by 3b.
+    assert len(loaded["claims"]) == 3, (
+        f"Expected 3 claims populated through Pass 3b, got {len(loaded['claims'])}"
+    )
+    claim_ids = {c["id"] for c in loaded["claims"]}
+    assert claim_ids == {"C1", "C2", "C3"}
+    # Grounding fields were applied by Pass 3a.
+    for c in loaded["claims"]:
+        assert c["grounding_status"] == "grounded", (
+            f"Claim {c['id']} should be grounded after Pass 3a"
+        )
+    # Trace includes lines through Pass 3b but NOT Pass 3c.
+    trace = loaded["trace"]
+    assert any(line.startswith("Pass 3b:") for line in trace), (
+        f"Trace should include Pass 3b's log line, got: {trace}"
+    )
+    assert not any(line.startswith("Pass 3c:") for line in trace), (
+        f"Trace should NOT include Pass 3c (it crashed), got: {trace}"
+    )
+    # Final report was never produced.
+    assert loaded["final_report"] == ""
+
+
+def test_hard_kill_bypasses_except_block_checkpoint_survives(mocker):
+    """A hard kill (KeyboardInterrupt) bypasses the orchestrator's
+    'except Exception' block entirely -- the status='failed' terminal
+    update never fires. The record must still hold the state from the
+    last per-pass checkpoint: status='running' (from creation), claims
+    populated through Pass 3b (from the checkpoint after Pass 3b's log
+    line). This is the 'or running if you didn't hit the except branch'
+    half of the ROADMAP §5 acceptance criterion.
+
+    Strategy: same canned payloads as the crash test, but raise
+    KeyboardInterrupt (inherits BaseException, NOT Exception) on
+    Pass 3c. Spy on create_pipeline_run (calling through to the real
+    implementation so the record actually exists in the fake sqlmodel)
+    and capture the run_id for the post-kill load_pipeline_run call.
+    """
+    payloads = _clean_pipeline_payloads()
+    call_log = []
+
+    def side_effect(*, pass_input, model, pass_id, provider_name="ANTHROPIC", **kwargs):
+        call_log.append(pass_id)
+        if pass_id == "Pass 3c":
+            raise KeyboardInterrupt("simulated hard kill")
+        entry = payloads.get(pass_id)
+        if entry is None:
+            raise AssertionError(
+                f"orchestrator called an unexpected pass_id '{pass_id}'. "
+                f"Known: {list(payloads.keys())}. Update the mock."
+            )
+        return _response_with_text(entry)
+
+    mocker.patch.object(RunAgentLoop, "run_deep_research_mode", side_effect=side_effect)
+
+    # Spy on create_pipeline_run -- call through to the real
+    # implementation so the record exists in the fake sqlmodel, and
+    # capture the run_id for the post-kill assertion.
+    from core.reasoning import orchestrator as orch_mod
+    captured_run_ids: list = []
+    real_create = orch_mod.create_pipeline_run
+
+    def spy_create(user_query):
+        run_id = real_create(user_query)
+        captured_run_ids.append(run_id)
+        return run_id
+
+    mocker.patch.object(orch_mod, "create_pipeline_run", side_effect=spy_create)
+
+    with pytest.raises(KeyboardInterrupt, match="simulated hard kill"):
+        run_deep_research_pipeline(
+            user_query="hard kill query",
+            model="claude-test",
+            provider_name="ANTHROPIC",
+        )
+
+    assert len(captured_run_ids) == 1
+    known_run_id = captured_run_ids[0]
+
+    loaded = load_pipeline_run(known_run_id)
+    # The except Exception block was bypassed -- status stays 'running'.
+    assert loaded["status"] == "running", (
+        f"Hard kill should leave status='running' (except block bypassed), "
+        f"got: {loaded['status']}"
+    )
+    assert loaded["finished_at"] is None, (
+        "Hard kill should leave finished_at=None (no terminal transition)"
+    )
+    # The per-pass checkpoint after Pass 3b's log line wrote the claims.
+    assert len(loaded["claims"]) == 3, (
+        f"Expected 3 claims from the Pass 3b checkpoint, got {len(loaded['claims'])}"
+    )
+    # Trace includes lines through Pass 3b.
+    trace = loaded["trace"]
+    assert any(line.startswith("Pass 3b:") for line in trace), (
+        f"Trace should include Pass 3b's log line, got: {trace}"
+    )
+    assert not any(line.startswith("Pass 3c:") for line in trace), (
+        f"Trace should NOT include Pass 3c (it was killed), got: {trace}"
+    )
 
 
 # ===========================================================================

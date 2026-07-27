@@ -60,6 +60,12 @@ def save_message(
 
 
 def get_session_history(thread_id: UUID) -> List[dict]:
+    """
+    Reconstructs the exact neutral shape core/memory.py's add_* methods
+    write, per msg.role -- this is the counterpart to memory.py only ever
+    persisting the role-specific payload (see that file's docstring for
+    why there's no separate normalization step on the read side either).
+    """
     with Session(engine) as session:
         statement = (
             select(MessageLog)
@@ -70,11 +76,29 @@ def get_session_history(thread_id: UUID) -> List[dict]:
 
         formatted_history = []
         for msg in db_messages:
-            payload = {"role": msg.role, "content": json.loads(msg.content)}
+            decoded = json.loads(msg.content)
+
+            if msg.role == "assistant":
+                # decoded is {"text": ..., "tool_calls": [...]} -- exactly
+                # what add_assistant_message persisted, nothing nested.
+                payload = {
+                    "role": "assistant",
+                    "text": decoded.get("text", ""),
+                    "tool_calls": decoded.get("tool_calls", []),
+                }
+            elif msg.role == "tool":
+                # decoded is the plain result string add_tool_result persisted.
+                payload = {"role": "tool", "tool_call_id": msg.tool_call_id, "content": decoded}
+            else:
+                # user (and any future plain-content role): decoded is
+                # already the right value for "content".
+                payload = {"role": msg.role, "content": decoded}
+                if msg.tool_call_id:
+                    payload["tool_call_id"] = msg.tool_call_id
+
             if msg.name:
                 payload["name"] = msg.name
-            if msg.tool_call_id:
-                payload["tool_call_id"] = msg.tool_call_id
+
             formatted_history.append(payload)
 
         return formatted_history

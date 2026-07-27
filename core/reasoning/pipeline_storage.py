@@ -1,12 +1,13 @@
 """
 core/reasoning/pipeline_storage.py
 
-Minimal persistence layer for deep-research pipeline runs. ROADMAP §5
-(pipeline persistence) is pulled forward only far enough to make a
-mid-pipeline failure durable: a PipelineRunRecord row is created at
-the start of run_deep_research_pipeline() and updated with final
-status (complete / failed) at the end. Per-pass checkpointing and
-the load_pipeline_run() read API remain for §5 proper.
+Persistence layer for deep-research pipeline runs (ROADMAP §5). A
+PipelineRunRecord row is created at the start of
+run_deep_research_pipeline(), checkpointed with a data-only
+update_pipeline_run() call after every pass's trace-log line, and
+flipped to a terminal status (complete / failed) at the end. The
+load_pipeline_run() read API returns the stored state as a plain dict
+for inspection and debugging.
 
 Schema deliberately mirrors the codebase convention established by
 storage.py's MessageLog: semantically distinct data lives in separate
@@ -109,3 +110,36 @@ def update_pipeline_run(
         record.final_report = run.final_report
         session.add(record)
         session.commit()
+
+
+# ---------------------------------------------------------------------------
+# ---- Public read API -------------------------------------------------------
+# ---------------------------------------------------------------------------
+
+def load_pipeline_run(run_id: UUID) -> dict:
+    """Loads a PipelineRunRecord by id and returns its state as a plain
+    dict. Raises ValueError if run_id doesn't exist (matching
+    update_pipeline_run's convention -- a missing record is a real bug,
+    not an expected path).
+
+    Claims are returned as raw dicts (the shape vars(c) produced at write
+    time), not reconstructed Claim dataclass instances. If/when
+    programmatic pipeline resume is built, that function reconstructs
+    Claim objects itself, using the same field-filtering pattern
+    _claim_from_json already established in orchestrator.py.
+    """
+    with Session(engine) as session:
+        record = session.get(PipelineRunRecord, run_id)
+        if record is None:
+            raise ValueError(f"No pipeline run found with id {run_id}")
+        return {
+            "id": record.id,
+            "user_query": record.user_query,
+            "status": record.status,
+            "started_at": record.started_at,
+            "finished_at": record.finished_at,
+            "claims": json.loads(record.claims_json),
+            "trace": json.loads(record.trace_json),
+            "coverage_gaps": json.loads(record.coverage_gaps_json),
+            "final_report": record.final_report,
+        }

@@ -169,11 +169,13 @@ class FakeStorage:
         return self._threads.get(thread_id, None)
 
     def save_message(self, thread_id, role, content, name=None, tool_call_id=None):
-        # Mirrors the symmetric behavior of real storage: production's
-        # save_message json.dumps'es `content` to disk and get_session_history
-        # json.loads'es it back. Round-trip = identity for any JSON-encodable
-        # Python value (a string, a dict, a list, etc.). So the fake can
-        # just store `content` as-is and return it as-is.
+        # Stores content exactly as given -- production's save_message
+        # json.dumps'es it and get_session_history json.loads'es it back,
+        # and round-trip is identity for any JSON-encodable value, so the
+        # fake doesn't need to actually serialize anything. The
+        # RECONSTRUCTION logic below, though, has to mirror storage.py's
+        # for real -- that part isn't just a serialization round trip,
+        # it's role-specific shape-building that has to match production.
         self.saved_messages.append((thread_id, role, content, name, tool_call_id))
         self._messages_by_thread.setdefault(thread_id, []).append({
             "role": role,
@@ -183,7 +185,38 @@ class FakeStorage:
         })
 
     def get_session_history(self, thread_id):
-        return [dict(m) for m in self._messages_by_thread.get(thread_id, [])]
+        """
+        Mirrors real storage.py's get_session_history() reconstruction,
+        per role -- this fake must stay in sync with that logic. If
+        storage.py's reconstruction changes, this needs the identical
+        change, or the fake silently stops representing what production
+        actually does (which is exactly how the tool-row resume-shape
+        bug went uncaught for a time: the fake and the fix diverged
+        without anything flagging it).
+        """
+        formatted = []
+        for row in self._messages_by_thread.get(thread_id, []):
+            role = row["role"]
+            content = row["content"]
+
+            if role == "assistant":
+                payload = {
+                    "role": "assistant",
+                    "text": content.get("text", ""),
+                    "tool_calls": content.get("tool_calls", []),
+                }
+            elif role == "tool":
+                payload = {"role": "tool", "tool_call_id": row["tool_call_id"], "content": content}
+            else:
+                payload = {"role": role, "content": content}
+                if row.get("tool_call_id"):
+                    payload["tool_call_id"] = row["tool_call_id"]
+
+            if row.get("name"):
+                payload["name"] = row["name"]
+
+            formatted.append(payload)
+        return formatted
 
 
 @pytest.fixture

@@ -9,6 +9,7 @@ Section numbers below match ROADMAP.md's section numbers exactly. When a section
 - 2. `logging_setup.py`
 - 3. Malformed-JSON recovery (+ §5 minimal core pulled forward)
 - 4. Test suite
+- 5. Durable `PipelineRun` persistence (§5 proper)
 
 ---
 
@@ -320,3 +321,75 @@ A post-implementation review (pyflakes + manual trace) surfaced the following. I
 - **OPEN (low) — `vars(c)` claim serialization is shallow.** Every claim-serialization site (orchestrator passes 3a/3b/5/6a/6c/final synthesis, and `pipeline_storage.update_pipeline_run`) uses `vars(c)`, which is correct only while every `Claim` field stays JSON-native. If a nested-dataclass field is ever added to `Claim`, ALL those sites must migrate to `asdict(c)` together, not piecemeal — hardening one site alone would just relocate the fragility and create two serialization mechanisms for the same object. A migration note now lives on `Claim` in `base.py`. (Supersedes the earlier `_to_jsonable` None-dropping concern, which is moot now that the blob is gone.)
 - **OPEN (info) — `datetime.utcnow()` deprecation warnings.** `pipeline_storage.py` uses `datetime.utcnow()` to match the existing `storage.py` convention (which already emits the same deprecation warning on Python 3.13). Deliberately consistent with the codebase rather than introducing a divergent timezone-aware style; migrate both files together if/when the project moves off naive UTC.
 - **OPEN (info) — columns store model-produced claim text verbatim.** Malicious/garbage content a model emits ends up in `claims_json` / `trace_json`. JSON encoding makes this storage-safe (no injection), but any future UI that renders these columns must HTML-escape them. Not a §3-introduced risk; flagged for the §5/§1 UI work.
+
+### 3.8 Follow-up fix: tool-result resume-shape bug (post-review, separate session)
+
+A subsequent extensive review (checking consistency of everything built against ARCHITECTURE.md/ROADMAP.md/this file, prompted by a project handoff) found that §4's `add_tool_result()` had the **identical root cause** as the assistant-row bug §3.4/§3.7 fixed, left unaddressed: both methods persisted the whole neutral entry dict (`{"role": ..., ...}`) to `storage.save_message`, and the read-side fix (`_normalize_resumed_history()`) only special-cased `role == "assistant"`. A resumed tool-result entry came back with `content` nested under itself — `{"role": "tool", "content": {"role": "tool", "tool_call_id": ..., "content": "..."}, "tool_call_id": ...}` — verified by direct reproduction against the real `storage.py`, not just traced on paper. This is reachable in production: Pass 3a is both JSON-retry-wrapped (§3) and tool-using (grounding), so a malformed-JSON response following a tool call in that pass would resume with a corrupted tool-result turn feeding into `_messages_for_provider()`.
+
+**Root cause of why it went uncaught:** `test_resume_existing_thread_loads_messages_from_storage` asserted the resumed tool entry's `role` and `tool_call_id`, but never its `content` — the identical assertion that *was* written for the assistant row (`assert "content" not in second.messages[1]`) was never applied to the tool row.
+
+**Fix — moved to the write side, removing `_normalize_resumed_history()` entirely** rather than adding a third special case: `add_assistant_message` now persists only `{"text": ..., "tool_calls": ...}`; `add_tool_result` now persists only `str(result)` — neither passes the redundant `"role"` key (already carried by `save_message`'s own `role=` argument) to storage at all. `storage.get_session_history()` now reconstructs the neutral shape directly, per `msg.role`, so no post-hoc normalization step exists in `core/memory.py` for any role, present or future. `tests/conftest.py`'s `FakeStorage.get_session_history()` was updated to mirror this reconstruction — it previously did a naive passthrough that relied on `core/memory.py`'s (now-removed) normalization step, and would have silently diverged from the real `storage.py` if left as-is.
+
+**Regression tests added:** `test_memory_write_through.py` now asserts the tool row's resumed `content` matches its fresh-session shape exactly (the specific assertion that was missing), plus a new assertion on the tool row's *saved* content in the non-resume write-through test. Verified via direct reproduction against real `storage.py` for both the tool-row fix and (as a non-regression check) the assistant-row path, before considering this closed.
+
+**The general lesson, worth keeping in mind for future fixes in this file:** when a bug's fix is a per-case branch added to a normalizer/translator/dispatcher, that's usually a sign the fix belongs one layer down, at the point where the divergent cases are produced — not one layer up, at the point where they're consumed. Fixing the write side once closes a bug for every current *and future* case; patching the read side closes it only for the case that happened to be noticed first.
+
+---
+
+## 5. Durable `PipelineRun` persistence (§5 proper)
+
+### 5.1 What we built
+
+The remainder of ROADMAP §5 on top of the minimal core that was pulled forward with §3 (see §3.4 above for Phase 1). Two pieces:
+
+1. **Per-pass checkpointing** — a data-only `update_pipeline_run(run.run_id, run)` call (no status argument) after every `run.log(...)` trace line in `orchestrator.py`. 16 sites total: Pass 0, 1, 2, D0, 3a, 3b, "3a/3b skipped" (else branch), 3c, 5, 4, D1, 6a (while loop), 6c (while loop), D2 per-claim (for loop inside while loop), 6b, Merge. The only `run.log(...)` NOT followed by a data-only checkpoint is "Final synthesis complete.", which is immediately followed by the terminal `update_pipeline_run(run.run_id, run, status="complete")` — adding a data-only checkpoint right before it would be a redundant write of identical data.
+
+2. **`load_pipeline_run(run_id) -> dict`** — the read API in `pipeline_storage.py`. Returns 9 fields: `id`, `user_query`, `status`, `started_at`, `finished_at`, `claims` (list of raw dicts), `trace` (list of strings), `coverage_gaps` (list of dicts), `final_report` (plain text). Raises `ValueError` for a nonexistent `run_id`, matching `update_pipeline_run`'s convention.
+
+Production files touched: `core/reasoning/pipeline_storage.py` (docstring update + `load_pipeline_run`), `core/reasoning/orchestrator.py` (docstring update + 16 checkpoint calls).
+
+Test files touched: `tests/test_pipeline_storage.py` (docstring update + import + 3 new tests), `tests/test_orchestrator.py` (docstring update + import + 2 new tests + 1 updated test).
+
+### 5.2 Questions we asked & your answers
+
+Three questions before implementation:
+
+| # | Dimension | User's choice |
+|---|---|---|
+| 1 | `load_pipeline_run` return shape: include `started_at`/`finished_at`, or follow the spec's original 7-field return dict? | **Include them** — the schema already has them (locked Phase 1 deviation), `finished_at=None` while running carries real meaning, and the spec's return shape predates the deviation. |
+| 2 | Checkpoint granularity: after EVERY `run.log(...)` literally (including D2's per-claim lines inside the while loop), or one per logical pass/step? | **Every `run.log(...)` literally** — the spec's stated intent is "fine-grained recoverability without a separate design decision." Every checkpoint does write new data (the trace grew by one line), and the SQLite writes are cheap. |
+| 3 | `load_pipeline_run` claims: raw dicts (spec) or reconstructed `Claim` dataclass instances? | **Raw dicts**, with an addition: the docstring carries "raw dicts now; if/when programmatic pipeline resume is built, that function reconstructs Claim objects itself, using the same field-filtering pattern `_claim_from_json` already established." |
+
+### 5.3 What we followed verbatim from ROADMAP §5
+
+- Checkpoint placement: "right after each `run.log(...)` call already in the function." ✓ (16 sites, every `run.log(...)` except the one immediately before the terminal update.)
+- `load_pipeline_run` return shape: dict with `id`, `user_query`, `status`, `claims` (json.loads), `trace` (json.loads), `coverage_gaps` (json.loads), `final_report` (plain text). ✓ (Plus `started_at`/`finished_at` per Q1.)
+- `load_pipeline_run` raises `ValueError` for a nonexistent `run_id`. ✓
+- Acceptance criterion: crash after Pass 3b → `load_pipeline_run` returns claims populated, not empty. ✓ (Both the `except Exception` path and the hard-kill `BaseException` path.)
+
+### 5.4 What we deviated from §5, and why
+
+| Spec language | Actual implementation | Why |
+|---|---|---|
+| `update_pipeline_run(run.run_id, run, status="running")` for per-pass checkpoints | `update_pipeline_run(run.run_id, run)` — no status argument | Phase 1's locked deviation: `status` defaults to `None`, not `"running"`. A data-only checkpoint must not touch status — passing `status="running"` would silently reset a `"complete"`/`"failed"` record if a checkpoint somehow fired after a terminal transition. `None` = "don't touch status unless told to." |
+| (spec silent on hard-kill behavior) | `except Exception` block does not catch `KeyboardInterrupt`/`SystemExit` — the per-pass checkpoint is what makes the hard-kill case recoverable | Not a deviation from the spec's letter (the spec says "kill the process" as an acceptance-criterion alternative), but worth documenting: the checkpoint's value is precisely that it survives a `BaseException` that bypasses the except block. The hard-kill test (`test_hard_kill_bypasses_except_block_checkpoint_survives`) proves this. |
+| (spec's return dict has 7 fields) | Return dict has 9 fields (adds `started_at`, `finished_at`) | User's choice (Q1). The spec's return shape was written before the `started_at`/`finished_at` deviation was locked in Phase 1. |
+| Checkpoint after "Final synthesis complete." | No data-only checkpoint here — the terminal `status="complete"` update immediately follows | The terminal update writes the same data plus the status transition. A data-only checkpoint right before it would be two writes of identical data columns with no intervening mutation. The spec's "after every pass" intent is satisfied by the terminal update itself. |
+
+### 5.5 Acceptance criteria status
+
+ROADMAP §5's acceptance criterion: *"kill the process (or raise a forced exception) mid-pipeline after Pass 3b completes; confirm `load_pipeline_run(run_id)` returns a record with `status="failed"` (or `"running"` if you didn't hit the except branch) and `claims` populated with whatever was captured through Pass 3b, not empty."*
+
+**Fully satisfied:**
+- `test_crash_after_pass_3b_leaves_claims_populated_via_load`: forced `RuntimeError` on Pass 3c → `status="failed"`, 3 claims with grounding/critic fields populated, trace through Pass 3b, empty final_report. ✓
+- `test_hard_kill_bypasses_except_block_checkpoint_survives`: `KeyboardInterrupt` on Pass 3c (bypasses `except Exception`) → `status="running"`, `finished_at=None`, 3 claims from the last checkpoint, trace through Pass 3b. ✓
+
+### 5.6 Test changes
+
+- `tests/test_pipeline_storage.py`: 4 → 7 tests. Three new: round-trip (create → update → load, all 9 fields), nonexistent `run_id` raises `ValueError`, just-created record returns empty defaults with `finished_at=None`.
+- `tests/test_orchestrator.py`: 7 → 9 tests. Two new (the acceptance-criterion pair above). One updated: `test_pipeline_success_marks_run_complete` now asserts the LAST call has `status="complete"` and all preceding calls have `status=None` (data-only checkpoints), plus at least one data-only call exists.
+- Full suite: 79 tests, ~0.53s, zero network/API keys.
+
+### 5.7 Discoveries during implementation
+
+- **The hard-kill test initially failed** because patching `create_pipeline_run` to return a bare UUID (without calling through to the real implementation) skipped the actual record creation in the fake sqlmodel. The first per-pass checkpoint then raised `ValueError: No pipeline run found with id ...`. Fix: use the same spy-through-to-real pattern as the crash test (call `real_create(user_query)`, capture the returned `run_id`). This is a test-construction issue, not a production bug — the production code always calls the real `create_pipeline_run`.

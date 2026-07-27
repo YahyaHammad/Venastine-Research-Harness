@@ -151,18 +151,21 @@ is manually maintained in `confidence_scoring.py`.
 ## 8. `test_pipeline_storage.py` & the §5 persistence schema/status
 
 These tests exercise `core/reasoning/pipeline_storage.py`
-(`create_pipeline_run` / `update_pipeline_run`) against the upgraded fake
-sqlmodel, plus the orchestrator's failure-path persistence wrap.
+(`create_pipeline_run` / `update_pipeline_run` / `load_pipeline_run`)
+against the upgraded fake sqlmodel, plus the orchestrator's failure-path
+persistence wrap and per-pass checkpointing.
 
 ### What breaks these
 
 | Change | Symptom | Fix |
 |---|---|---|
-| Rename a `PipelineRunRecord` column (`claims_json` / `trace_json` / `coverage_gaps_json` / `final_report`) or change its type | `test_update_pipeline_run_on_complete_marks_complete_and_stores_columns` fails with `AttributeError` on the record, or a `json.loads` mismatch | Update the column name/type in the assertion; keep the separate-columns convention (do NOT collapse back into one blob — see DEVLOG §3.4 for why) |
+| Rename a `PipelineRunRecord` column (`claims_json` / `trace_json` / `coverage_gaps_json` / `final_report`) or change its type | `test_update_pipeline_run_on_complete_marks_complete_and_stores_columns` and `test_load_pipeline_run_round_trips_all_fields` fail with `AttributeError` on the record, or a `json.loads` mismatch | Update the column name/type in both the write and read assertions; keep the separate-columns convention (do NOT collapse back into one blob — see DEVLOG §3.4 for why) |
 | Change the `status` literals (`running` / `complete` / `failed`) | `test_..._marks_complete...` and the orchestrator failure/success-path tests fail on the status assertion | Update the literal in both `pipeline_storage.py` (terminal check) and the tests. `complete` is deliberately aligned with `ModelResponse.stop_reason`'s `"complete"` — don't drift it back to `succeeded` |
 | Change `update_pipeline_run`'s serialization (e.g. `vars(c)` → `asdict(c)`, or add a field to `Claim`) | The `claims_json` round-trip assertion may change shape | Per the migration note on `Claim` in `base.py`: if a nested-dataclass field is added, migrate EVERY `vars(c)` site (orchestrator passes + `pipeline_storage`) to `asdict(c)` together, then update the test's expected claim dict |
 | Change the inner-failure logging in `orchestrator.py`'s except block (the `logger.error(...)` call) | `test_inner_storage_failure_propagates_original_exception_and_logs_run_id` fails — either the original exception is masked (real regression) or the run_id no longer appears in the log message | The invariant: the ORIGINAL pipeline exception must propagate, and the persistence failure must be logged at ERROR naming the `run_id`. Restore both before touching the test |
-| Build `load_pipeline_run()` / per-pass checkpointing (ROADMAP §5 proper) | New behavior, existing tests still pass (they only cover create + terminal update) | ADD tests for the read API and the data-only (no-status) update path; verify a data-only update does NOT reset a terminal record's status (the reason `status` is `Optional`) |
+| Add/remove a `load_pipeline_run` return field | `test_load_pipeline_run_round_trips_all_fields` fails on a missing/extra key | Update the assertion to match the new return shape. The 9-field contract (id, user_query, status, started_at, finished_at, claims, trace, coverage_gaps, final_report) is documented in `pipeline_storage.py`'s docstring |
+| Remove or relocate a per-pass `update_pipeline_run(run.run_id, run)` checkpoint in `orchestrator.py` | `test_crash_after_pass_3b_leaves_claims_populated_via_load` or `test_hard_kill_bypasses_except_block_checkpoint_survives` fails — claims or trace are empty/incomplete after a mid-pipeline crash | Restore the checkpoint after the affected `run.log(...)` call. The invariant: every `run.log(...)` (except "Final synthesis complete.", which is subsumed by the terminal update) is followed by a data-only checkpoint. See DEVLOG §5.1 for the full 16-site list |
+| Change `test_pipeline_success_marks_run_complete`'s status assertion back to `statuses_seen == ["complete"]` | The test fails because per-pass checkpoints add `None`-status calls before the terminal `"complete"` | The correct assertion: last call is `"complete"`, all preceding are `None`, and at least one `None` exists. See DEVLOG §5.6 |
 
 ---
 

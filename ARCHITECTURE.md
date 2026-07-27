@@ -46,19 +46,19 @@ Venastine Research Harness/
 ├── pytest.ini                      # testpaths=tests, --strict-markers
 ├── DEVLOG.md                       # implementation notes for built ROADMAP sections -- see §0
 │
-├── tests/                          # 74 tests, all offline, ~0.55s -- see ROADMAP.md §4, DEVLOG.md §4
+├── tests/                          # 79 tests, all offline, ~0.53s -- see ROADMAP.md §4, DEVLOG.md §4
 │   ├── conftest.py                 # fixtures: make_model_response, FakeStorage, ...
 │   ├── BREAKING_CHANGES.md         # what-breaks-it / symptom / fix per area
 │   ├── test_confidence_scoring.py  # 5 tests (3 ROADMAP verbatim regressions)
 │   ├── test_client_translation.py  # 14 tests -- both translation branches + batching
 │   ├── test_loop_stop_conditions.py# 3 tests (ROADMAP verbatim)
-│   ├── test_orchestrator.py        # 7 tests -- full pipeline mocked + JSON-retry + §5 failure-path
+│   ├── test_orchestrator.py        # 9 tests -- full pipeline mocked + JSON-retry + §5 failure/success/acceptance
 │   ├── test_registry_permissions.py# 8 tests -- allow/deny/approval
 │   ├── test_math_tools.py          # 14 tests -- symbolic equivalence + injection regression
 │   ├── test_memory_write_through.py# 7 tests -- write-through + storage-path-mismatch catch + resume-shape
 │   ├── test_loop_tool_dispatch.py  # 5 tests -- _run tool-dispatch branches
 │   ├── test_json_retry.py          # 7 tests -- ROADMAP §3 malformed-JSON recovery (incl. crux test)
-│   └── test_pipeline_storage.py    # 4 tests -- ROADMAP §5 minimal create/update_pipeline_run + inner-failure caplog
+│   └── test_pipeline_storage.py    # 7 tests -- ROADMAP §5 create/update/load_pipeline_run + inner-failure caplog
 │
 ├── core/
 │   ├── client.py                  # ONE model call, normalized across providers; provider-specific wire formats live ONLY here
@@ -68,8 +68,8 @@ Venastine Research Harness/
 │   └── reasoning/
 │       ├── base.py                # Claim / PipelineRun data model for the research pipeline (now carries run_id)
 │       ├── confidence_scoring.py  # Pass 4 -- deterministic scoring, ZERO LLM calls
-│       ├── orchestrator.py        # sequences all 10 passes + D0/D1/D2 + _run_pass_with_json_retry + §5 try/except wrap
-│       └── pipeline_storage.py    # ROADMAP §5 minimal core: PipelineRunRecord table + create/update_pipeline_run
+│       ├── orchestrator.py        # sequences all 10 passes + D0/D1/D2 + _run_pass_with_json_retry + §5 per-pass checkpoints
+│       └── pipeline_storage.py    # ROADMAP §5: PipelineRunRecord table + create/update/load_pipeline_run
 │
 ├── prompts/
 │   ├── system_prompts.py          # loads every pass's .md file into passes_prompts dict
@@ -180,7 +180,7 @@ This section exists specifically because earlier drafts of this project put pers
 
 **Relationship to `storage.py`:** `ConversationMemory.__init__` calls `storage.create_thread()`/`storage.get_thread()` to start or resume a thread, and every `add_*` method calls the matching `storage.save_message()` — write-through persistence, not a separate sync step. `core/memory.py` is the ONLY file that calls into `storage.py` for conversation data.
 
-**Resume-shape normalization (ROADMAP §3 + §1):** `storage.get_session_history` returns rows in the storage-ROW shape (`{"role": ..., "content": <json_decoded>, ...}`), which differs from the neutral in-memory shape for assistant turns — the rich entry dict gets nested under `content` rather than preserved at top level. `ConversationMemory.__init__` runs `_normalize_resumed_history()` on the rows loaded from storage so that a resumed assistant turn has the same top-level `text` / `tool_calls` keys as one just written via `add_assistant_message`. Without this normalization, `_messages_for_provider()` would see different shapes depending on whether the thread was just created or resumed — and ROADMAP §3's JSON-retry path (which re-enters a thread with `continue_conversation`) would break silently. The unit test for this lives in `test_memory_write_through.py::test_resume_existing_thread_loads_messages_from_storage`; the integration crux test in `test_json_retry.py::test_resumed_history_contains_failed_assistant_turn` proves the failed-malformed turn is visible to `_run` after resume.
+**Resume-shape fix (ROADMAP §3 + §1):** `core/memory.py`'s `add_assistant_message`/`add_tool_result` persist only the role-specific payload to `storage.save_message` (never the whole neutral entry dict, which would redundantly re-wrap `role` inside `content`), and `storage.get_session_history` reconstructs the exact neutral shape directly, per `msg.role`. A resumed turn is therefore identical to a freshly-written one for every role, with no separate normalization step in `core/memory.py` at all. (An earlier version fixed this with a read-side special case for `role == "assistant"` only — the identical bug in the tool row went uncaught for a time as a result; fixing what gets written, once, closes this for every role rather than one at a time.) Without this, `_messages_for_provider()` would see different shapes depending on whether the thread was just created or resumed — and ROADMAP §3's JSON-retry path (which re-enters a thread via `continue_conversation`) would break silently. Tests: `test_memory_write_through.py` asserts the uniform shape for both the assistant row and the tool row; `test_json_retry.py::test_resumed_history_contains_failed_assistant_turn` proves the failed-malformed turn is visible to `_run` after resume.
 
 ### 4.7 `core/client.py` — ONE model call, and the ONLY place provider formats exist
 
@@ -214,7 +214,7 @@ This section exists specifically because earlier drafts of this project put pers
 
 `ModelResponse.thread_id` is set by `run_deep_research_mode()`, `run_agent_conversation()`, and `continue_conversation()` before they return — never by `call_model()` (which doesn't know which thread it's running against). Callers use it to thread-followup calls (e.g. JSON retries).
 
-**`continue_conversation()` (ROADMAP §3):** the public entry point `RunAgentLoop.continue_conversation(thread_id, message, system_prompt, model, ...)` re-enters an existing thread, appends `message` as a user turn, and runs `_run()` to completion. The resumed thread's history (every prior user/assistant/tool turn, persisted by the always-persist behavior above and normalized by `_normalize_resumed_history` in `core/memory.py`) is loaded by `ConversationMemory` and visible to the next `call_model` invocation. The JSON-retry path uses this to retry a pass that returned malformed JSON — the corrective follow-up is sent into the same thread the failed pass used, so the model sees its own prior output in context and can correct it.
+**`continue_conversation()` (ROADMAP §3):** the public entry point `RunAgentLoop.continue_conversation(thread_id, message, system_prompt, model, ...)` re-enters an existing thread, appends `message` as a user turn, and runs `_run()` to completion. The resumed thread's history (every prior user/assistant/tool turn, persisted by the always-persist behavior above and reconstructed into the same neutral shape by `storage.get_session_history`) is loaded by `ConversationMemory` and visible to the next `call_model` invocation. The JSON-retry path uses this to retry a pass that returned malformed JSON — the corrective follow-up is sent into the same thread the failed pass used, so the model sees its own prior output in context and can correct it.
 
 ### 4.9 `core/reasoning/base.py`, `confidence_scoring.py`, `orchestrator.py` — the research pipeline
 
@@ -250,9 +250,9 @@ This file exists but is empty, and its purpose relative to `security/permissions
   - `provider_factory` / `client_for_provider` — return a mock-`api_initialization`-compatible tuple for translation tests.
   - `clear_client_cache` (autouse) — resets `api_initialization`'s cached clients before each test.
 - **`tests/BREAKING_CHANGES.md`** — per-file tables documenting what breaks each test when production code changes, the symptom, and the fix. Created because `test_orchestrator.py` was identified as the suite's most fragile mock — its mock dict is keyed by pass_id strings that ROADMAP §3 and §10 will modify.
-- **10 test files** (6 per ROADMAP §4 + 2 from §4's own additions: `test_memory_write_through.py`, `test_loop_tool_dispatch.py`; + 2 from §3/§5-minimal: `test_json_retry.py`, `test_pipeline_storage.py`).
+- **10 test files** (6 per ROADMAP §4 + 2 from §4's own additions: `test_memory_write_through.py`, `test_loop_tool_dispatch.py`; + 2 from §3/§5: `test_json_retry.py`, `test_pipeline_storage.py`).
 
-**What belongs here:** tests that run offline (~0.55s), with zero network access and zero real API keys. Stubs in root `conftest.py` catch import-time module resolution; fixtures in `tests/conftest.py` provide `ModelResponse` construction and storage mocking; individual test files cover production code's behavior.
+**What belongs here:** tests that run offline (~0.53s), with zero network access and zero real API keys. Stubs in root `conftest.py` catch import-time module resolution; fixtures in `tests/conftest.py` provide `ModelResponse` construction and storage mocking; individual test files cover production code's behavior.
 
 **What does NOT belong here:** any test that requires a real API key, any test that makes an outbound HTTP call, any test that depends on a specific file on disk (unless the fixture creates and cleans it). If you need to test a provider's real wire format, write an integration test in a separate directory (`tests_integration/` or similar) that is excluded by `pytest.ini`'s `testpaths`.
 
@@ -260,11 +260,11 @@ This file exists but is empty, and its purpose relative to `security/permissions
 
 **SQLModel fake upgrade (ROADMAP §5):** the fake `_SQLModel` @ `sys.modules["sqlmodel"]` now supports construction with Field-declared kwargs (defaults + default_factory), and `_Session` keeps an in-memory `dict[model_name, dict[pk, row]]` across commits so `add` / `commit` / `get` round-trip correctly. This lets `test_orchestrator.py` exercise `create_pipeline_run` / `update_pipeline_run` end-to-end WITHOUT monkeypatching them out — the earlier fake was import-time-only and would have required every §5 test to mock the storage layer. Tests that need REAL SQLite (`test_pipeline_storage.py`'s column-serialization assertions specifically) still swap fake → real via the `monkeypatch` fixture pattern documented in `test_memory_write_through.py`'s docstring.
 
-### 4.14 `core/reasoning/pipeline_storage.py` — ROADMAP §5 minimal core
+### 4.14 `core/reasoning/pipeline_storage.py` — ROADMAP §5 pipeline persistence
 
-**Belongs here:** `PipelineRunRecord` (one SQLModel table row per `run_deep_research_pipeline()` invocation), `create_pipeline_run(user_query) -> UUID` (inserts a `status='running'` row), and `update_pipeline_run(run_id, run, status=None)` (re-serializes the live `PipelineRun` into the four data columns, sets `status` and `finished_at` if a status is given). These are the ONLY functions the orchestrator should call for pipeline-level persistence.
+**Belongs here:** `PipelineRunRecord` (one SQLModel table row per `run_deep_research_pipeline()` invocation), `create_pipeline_run(user_query) -> UUID` (inserts a `status='running'` row), `update_pipeline_run(run_id, run, status=None)` (re-serializes the live `PipelineRun` into the four data columns, sets `status` and `finished_at` if a status is given), and `load_pipeline_run(run_id) -> dict` (reads a record back as a plain dict with 9 fields: `id`, `user_query`, `status`, `started_at`, `finished_at`, `claims`, `trace`, `coverage_gaps`, `final_report`). These are the ONLY functions the orchestrator should call for pipeline-level persistence.
 
-**Does NOT belong here:** any notion of "what pass we're on" or "what claim is currently being revised" — that's `core/reasoning/orchestrator.py`'s in-memory `PipelineRun` object. Per-pass checkpointing (ROADMAP §5 proper) would belong here as a `load_pipeline_run(run_id)` read API; that function is NOT built yet. Keep this file's surface area at exactly two public functions until the full §5 spec lands.
+**Does NOT belong here:** any notion of "what pass we're on" or "what claim is currently being revised" — that's `core/reasoning/orchestrator.py`'s in-memory `PipelineRun` object. The orchestrator owns the per-pass checkpoint *calls* (a data-only `update_pipeline_run(run.run_id, run)` after every `run.log(...)` trace line — 16 sites); this file owns the persistence mechanics those calls go through. `load_pipeline_run` returns claims as raw dicts (the shape `vars(c)` produced at write time), not reconstructed `Claim` instances — if/when programmatic pipeline resume is built, that function reconstructs `Claim` objects itself using `_claim_from_json`'s field-filtering pattern in `orchestrator.py`.
 
 **Separate columns, not one blob:** the record stores `claims_json` / `trace_json` / `coverage_gaps_json` (each a `json.dumps`'d string) and `final_report` (plain text) as four separate typed columns, mirroring `storage.py`'s `MessageLog` convention (separate columns for semantically distinct data; JSON-encode only the genuinely variable shapes). This is deliberate: a persistence layer built for crash-resilience shouldn't itself be a single point of failure — a serialization problem in one field must not corrupt the others. `status` ∈ {`running`, `complete`, `failed`} — `complete` matches `ModelResponse.stop_reason`'s literal for a normal non-error finish. `started_at` is set at creation; `finished_at` is `None` while `running` and set only on a terminal (`complete`/`failed`) transition, so a `NULL` `finished_at` meaningfully reads as "still running." Claims serialize via `vars(c)`, matching every other claim-serialization site in `orchestrator.py` (see the migration note on `Claim` in `base.py`).
 
@@ -388,7 +388,7 @@ Returns the full `PipelineRun` (not just the final report) — every intermediat
 
 `database.py` (connection) → `storage.py` (schema + CRUD, provider-neutral JSON-encoded content) → `core/memory.py` (active conversation state, write-through to storage). One SQLite database per local user; no `user_id` anywhere in the schema.
 
-**Pipeline run records ARE durable now (ROADMAP §5 minimal core):** `run_deep_research_pipeline()` creates a `PipelineRunRecord` row (`status='running'`) up front via `core/reasoning/pipeline_storage.py`, and the wrapping try/except flips it to `'complete'` (on clean completion) or `'failed'` (on any exception) before returning/re-raising, writing the run's structured output into separate columns (`claims_json` / `trace_json` / `coverage_gaps_json` / `final_report`) — including the partial state at failure time. The record's `id` is carried on `PipelineRun.run_id` so a future `load_pipeline_run(run_id)` read API can find it. What is NOT yet durable: per-pass checkpointing (a crash mid-pass loses that pass's in-flight output, though the record's `trace_json` still shows how far the run got) and the read API itself — both remain for §5 proper. The underlying per-pass conversation threads still persist independently (each pass is a real `ConversationMemory`).
+**Pipeline run records are fully durable (ROADMAP §5):** `run_deep_research_pipeline()` creates a `PipelineRunRecord` row (`status='running'`) up front via `core/reasoning/pipeline_storage.py`, checkpoints the run's structured output into separate columns (`claims_json` / `trace_json` / `coverage_gaps_json` / `final_report`) after **every** `run.log(...)` trace line (16 data-only `update_pipeline_run(run.run_id, run)` calls — no status argument), and flips the record to `'complete'` (on clean completion) or `'failed'` (on any `Exception`) at the end. A hard kill (`KeyboardInterrupt` / `SystemExit`) bypasses the `except Exception` block but still leaves the record populated through the last completed pass, because the per-pass checkpoint already wrote it. `load_pipeline_run(run_id)` provides the read API (returns a 9-field dict; claims as raw dicts). The record's `id` is carried on `PipelineRun.run_id`. The underlying per-pass conversation threads still persist independently (each pass is a real `ConversationMemory`).
 
 ## 10. Tools reference
 

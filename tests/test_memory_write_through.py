@@ -24,17 +24,23 @@ WHY THIS FILE ALSO CATCHES THE storage.py PATH-MISMATCH BUG:
   need an explicit assertion; the import itself is the assertion.
 
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~ RESUME-SHAPE NOW UNIFORM ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Earlier drafts of this file documented a real asymmetry: assistant
-entries persisted as the full rich dict under storage's `content`
-column, and `get_session_history` returned them NESTED UNDER `content`
-rather than restored to their original top-level shape. core/memory.py
-now normalizes resumed history via _normalize_resumed_history(), so a
-loaded assistant turn has the same top-level `text` / `tool_calls` keys
-as one just written via add_assistant_message. The tests below assert
-this now-uniform shape; if a future change reintroduces the asymmetry
-(errors in _normalize_resumed_history, or an add_* method writing a
-different shape), one of these tests fails with a clear "shape
-asymmetry" message.
+Earlier drafts of this file documented a real asymmetry: assistant (and,
+it turned out, tool) entries persisted as the full rich entry dict under
+storage's `content` column -- including a redundant "role" key duplicating
+what save_message's own `role=` argument already carries -- so
+`get_session_history` returned them NESTED UNDER `content` rather than
+restored to their original top-level shape.
+
+The FIX now lives on the WRITE side, in core/memory.py: each add_* method
+persists only the role-specific payload (no redundant "role" key), and
+storage.get_session_history() reconstructs the neutral shape directly per
+msg.role. There is no separate normalization step -- fixing what gets
+written, once, means resumed history is identical to freshly-written
+history for every role, without a matching special case at every read
+site. The tests below assert this uniform shape for BOTH the assistant
+row and the tool row -- an earlier version of this file only asserted it
+for the assistant row, which is exactly how the identical tool-row bug
+went uncaught for a time.
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 """
 
@@ -79,13 +85,12 @@ def test_resume_existing_thread_loads_messages_from_storage(fake_storage):
     """ConversationMemory(known_thread_id) calls get_thread to confirm
     existence and get_session_history to repopulate in-memory state.
 
-    The in-memory shape after resume is now IDENTICAL to the shape
-    add_* methods write: assistant turns have top-level `text` and
-    `tool_calls` keys (not nested under `content`), thanks to
-    _normalize_resumed_history() in core/memory.py. This is the
-    ROADMAP §3 + §1 resume-shape fix -- it lets call_model's
-    _messages_for_provider see the same shape regardless of whether
-    the thread was just created or resumed.
+    The in-memory shape after resume is IDENTICAL to the shape add_*
+    methods write for both the assistant row AND the tool row: neither
+    has content nested under a redundant wrapper. This test previously
+    only asserted this for the assistant row's `text`/`tool_calls` --
+    the tool row's `content` was never checked, which is exactly why an
+    identical bug in add_tool_result went uncaught. Both are asserted now.
     """
     first = ConversationMemory()
     thread_id = first.thread_id
@@ -104,12 +109,15 @@ def test_resume_existing_thread_loads_messages_from_storage(fake_storage):
     # User content (a plain string) round-trips as-is.
     assert second.messages[0]["role"] == "user"
     assert second.messages[0]["content"] == "Hello"
-    # Tool result chain: tool_call_id preserved on resume.
+    # Tool result chain: tool_call_id preserved on resume, AND content is
+    # the plain result string -- NOT nested under a second "content" key
+    # inside itself. This exact assertion was missing before; it's the
+    # one that would have caught the tool-row resume-shape bug.
     assert second.messages[2]["role"] == "tool"
     assert second.messages[2]["tool_call_id"] == "t1"
+    assert second.messages[2]["content"] == str({"result": "r"})
     # Assistant row's neutral shape is RESTORED -- text and tool_calls
-    # keys are at top level, NOT nested under a `content` key. This is
-    # what _normalize_resumed_history fixes (ROADMAP §3 + §1).
+    # keys are at top level, NOT nested under a `content` key.
     assert second.messages[1]["role"] == "assistant"
     assert "text" in second.messages[1]
     assert second.messages[1]["text"] == "Hi there"
@@ -178,13 +186,16 @@ def test_add_assistant_message_appends_and_save_uses_neutral_shape(fake_storage)
         "id": "t1", "name": "web_search", "input": {"query": "x"},
     }
 
-    # Storage was called with role='assistant' and content = the neutral
-    # entry dict (NOT the raw ModelResponse). This is the contract that
-    # eliminates the old `response.raw.content` reach-through.
+    # Storage was called with role='assistant' and content = ONLY the
+    # role-specific payload (text + tool_calls) -- NOT the raw
+    # ModelResponse, and NOT the whole neutral entry dict either. A
+    # redundant "role" key inside content (duplicating what save_message's
+    # own role= argument already carries) was the exact root cause of the
+    # resume-shape bug -- its absence here is the regression test for that.
     assert len(fake_storage.saved_messages) == 1
     thread_id, role, content, name, tool_call_id = fake_storage.saved_messages[0]
     assert role == "assistant"
-    assert content["role"] == "assistant"
+    assert "role" not in content
     assert content["text"] == "Searching now."
     assert len(content["tool_calls"]) == 1
     assert content["tool_calls"][0]["input"] == {"query": "x"}
@@ -205,8 +216,12 @@ def test_add_tool_result_appends_one_entry_per_result(fake_storage):
     assert mem.messages[0]["content"] == str({"result": "first"})
     assert mem.messages[1]["tool_call_id"] == "t2"
 
-    # Two save_message calls, one per result. Each has tool_call_id set.
+    # Two save_message calls, one per result. Each has tool_call_id set,
+    # and content is ONLY the result string -- not the whole entry dict
+    # (which would redundantly duplicate "role"/"tool_call_id" inside
+    # content, the exact pattern that caused the resume-shape bug).
     assert len(fake_storage.saved_messages) == 2
+    assert fake_storage.saved_messages[0][2] == str({"result": "first"})
     assert fake_storage.saved_messages[0][3] is None  # name=None (always)
     assert fake_storage.saved_messages[0][4] == "t1"
     assert fake_storage.saved_messages[1][4] == "t2"

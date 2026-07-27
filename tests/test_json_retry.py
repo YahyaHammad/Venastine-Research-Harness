@@ -30,7 +30,8 @@ The seven tests below:
      the initial run_deep_research_mode returned.
   5. Failed output appears in history -> continue_conversation's
      ConversationMemory loads the failed assistant turn from storage
-     (via _normalize_resumed_history) and shows it in messages[1].
+     (via storage.get_session_history's per-role reconstruction) and
+     shows it in messages[1].
   6. Trace format -> retry line is in the expected shape, and repeats
      once per failed attempt.
   7. Corrective message content -> contains the parse-error phrase,
@@ -249,8 +250,8 @@ def test_resumed_history_contains_failed_assistant_turn(mocker):
     real `run_deep_research_mode` -> `_run` sequence with mocked
     `call_model`, so the bug-fixed _run() runs against real
     ConversationMemory + FakeStorage -- proving the failed assistant
-    turn is persisted AND restored correctly by
-    _normalize_resumed_history on the next resume.
+    turn is persisted AND restored correctly (via storage's per-role
+    reconstruction) on the next resume.
 
     Implementation note: rather than set up real ConversationMemory + a
     full FakeStorage, we verify the SAME behavior by catching the
@@ -310,7 +311,7 @@ def test_resumed_history_contains_failed_assistant_turn(mocker):
     #      FakeStorage now has it stored.
     #   2. on parse failure, call real continue_conversation(thread_id, ...) ->
     #      ConversationMemory(thread_id=...) is created -> get_session_history
-    #      -> _normalize_resumed_history reconstructs the neutral shape.
+    #      reconstructs the neutral shape directly (per msg.role).
     #   3. _run with the resumed history -> call_model -> returns valid JSON.
     #   4. helper returns the valid JSON text.
     result = _run_pass_with_json_retry(
@@ -324,7 +325,7 @@ def test_resumed_history_contains_failed_assistant_turn(mocker):
     # turn with text == malformed_text. This proves:
     #   - _run()'s always-persist fix actually persisted the malformed response.
     #   - ConversationMemory reloaded it via get_session_history.
-    #   - _normalize_resumed_history restored the neutral shape
+    #   - storage.get_session_history restored the neutral shape
     #     (top-level `text` key, not nested under `content`).
     # Without any one of those three corrections, this assertion would fail.
     assert len(call_log) == 2, (
@@ -353,13 +354,13 @@ def test_resumed_history_contains_failed_assistant_turn(mocker):
         f"Resumed assistant turn must carry the original failed text. "
         f"Expected: {malformed_text!r}, got: {assistant_turns[0].get('text')!r}"
     )
-    # The neutral-shape restoration (core/memory.py's _normalize_resumed_history)
-    # is what puts `text` at top level -- if it'd been left in the lossy
-    # `content: {text: ...}` shape, this assertion would fail with KeyError
-    # on `assistant_turns[0]["text"]`.
+    # The neutral-shape restoration (storage.get_session_history's
+    # per-role reconstruction) is what puts `text` at top level -- if
+    # it'd been left in the lossy `content: {text: ...}` shape, this
+    # assertion would fail with KeyError on `assistant_turns[0]["text"]`.
     assert "tool_calls" in assistant_turns[0], (
         "Resumed assistant turn must have tool_calls key at top level too "
-        "(per _normalize_resumed_history's contract)."
+        "(per storage.get_session_history's reconstruction)."
     )
 
     # And the corrective user turn must be the LAST user message:
