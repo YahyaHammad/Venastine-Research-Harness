@@ -40,6 +40,36 @@ MAX_FILE_SIZE_BYTES = 10_000_000   # 10 MB — hard reject before opening
 MAX_READ_LINES = 500               # max lines per read call
 MAX_READ_CHARS = 50_000            # max chars per read call
 
+# --- Shell / sandbox (ROADMAP §7) ---
+SHELL_BINARY = os.environ.get("AGENT_SHELL", "")  # auto-detect if empty
+ALLOW_INSECURE_SANDBOX_FALLBACK = False  # explicitly enable subprocess fallback
+AUTO_APPROVE_SANDBOX_FALLBACK = False    # auto-approve fallback runs (no per-run prompt)
+SANDBOX_DOCKER_IMAGE = os.environ.get("AGENT_SANDBOX_IMAGE", "python:3.13-slim")
+SANDBOX_TIMEOUT_SECONDS = 60
+SANDBOX_MEMORY_MB = 1024
+SANDBOX_CPU_SECONDS = 30
+SANDBOX_MAX_PIDS = 200
+
+# WARNING: commands matching these words get network access inside the
+# sandbox. A compromised package or script can exfiltrate data or
+# download payloads. Only add commands you trust.
+NETWORK_ALLOWED_COMMANDS = [
+    "pip", "pip3", "curl", "wget", "git",
+    "npm", "yarn", "pnpm", "apt", "apt-get",
+    "yum", "dnf", "brew", "cargo",
+]
+
+# WARNING: inert commands run WITHOUT filesystem isolation — they can
+# read files outside the workspace (e.g. cat /etc/passwd). They are
+# read-only inspection commands; the risk is information disclosure,
+# not modification.
+INERT_COMMANDS = [
+    "ls", "cat", "pwd", "echo", "grep", "wc",
+    "head", "tail", "date", "whoami", "uname", "which",
+    "where", "type", "file", "stat", "du", "df", "tree",
+    "uniq", "diff", "md5sum", "sha256sum",
+]
+
 
 @dataclass
 class APICredentials:

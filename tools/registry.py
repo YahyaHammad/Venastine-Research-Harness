@@ -4,7 +4,7 @@ from tools.base import ToolSpec
 from tools.builtin import (
     web_search, fetch_url, get_time, arxiv,
     symbolic_math, linear_algebra, probability_stats, discrete_math, logic, geometry,
-    file_ops,
+    file_ops, shell,
 )
 from security.permissions import is_tool_allowed, requires_approval
 
@@ -70,8 +70,4 @@ registry.register(ToolSpec("geometry", geometry.TOOL_SCHEMA, geometry.run))
 registry.register(ToolSpec("read", file_ops.READ_TOOL_SCHEMA, file_ops.read_run, approval_check=file_ops._file_approval_check))
 registry.register(ToolSpec("write", file_ops.WRITE_TOOL_SCHEMA, file_ops.write_run, approval_check=file_ops._file_approval_check))
 registry.register(ToolSpec("edit", file_ops.EDIT_TOOL_SCHEMA, file_ops.edit_run, approval_check=file_ops._file_approval_check))
-
-# shell isn't registered yet -- shell.py is empty. Registering it as-is
-# would crash this module at import time (AttributeError). Finish
-# shell.py + security/sandbox.py (ROADMAP §7), then add its registration
-# line here the same way as the others above.
+registry.register(ToolSpec("shell", shell.TOOL_SCHEMA, shell.run, approval_check=shell._shell_approval_check))
