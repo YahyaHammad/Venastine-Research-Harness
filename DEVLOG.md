@@ -11,6 +11,9 @@ Section numbers below match ROADMAP.md's section numbers exactly. When a section
 - 3. Malformed-JSON recovery (+ §5 minimal core pulled forward)
 - 4. Test suite
 - 5. Durable `PipelineRun` persistence (§5 proper)
+- 6. `tools/builtin/file_ops.py`
+- 7. `tools/builtin/shell.py` + `security/sandbox.py`
+- 8. `safety/policy_enforcement.py`
 - 12. `/output/<run_id>/` file-writing system
 
 ---
@@ -500,3 +503,178 @@ ROADMAP §12's acceptance criterion: *"running the CLI in research mode produces
 - `tests/test_output_writer.py` (NEW): 5 tests.
 - `tests/test_e2e.py`: research-mode test updated to mock `write_run_artifacts` and assert it's called + artifacts path printed.
 - Full suite: 96 tests. First run ~6.85s (matplotlib font caching on first import); subsequent runs faster.
+
+---
+
+## 6. `tools/builtin/file_ops.py`
+
+### 6.1 What we built
+
+Three file-operation tools — `read`, `write`, `edit` — in `tools/builtin/file_ops.py`, registered as three separate `ToolSpec`s to match `config.ToolPermissions`'s three separate boolean fields (`read` / `write` / `edit`). This allows review/audit agents to be given read access without write or edit.
+
+Supporting changes: `config.py` gains `WORKSPACE_DIR`, `MAX_FILE_SIZE_BYTES` (10 MB), `MAX_READ_LINES` (500), `MAX_READ_CHARS` (50 000). `tools/base.py` gains `approval_check: Optional[Callable[[str, dict], bool]]` on `ToolSpec`. `tools/registry.py` dispatch uses `approval_check` when present, falling back to `requires_approval()`.
+
+### 6.2 Questions we asked & your answers
+
+Four questions before implementation:
+
+| # | Dimension | User's choice |
+|---|---|---|
+| 1 | markitdown: plain text only, or use for rich formats (PDF, DOCX, etc.)? | **Use markitdown for rich formats** — the dependency is already in requirements.txt; leverage it. |
+| 2 | Within-workspace approval: config boolean can override, or always auto-approved? | **Config can override** — `ToolApprovals.write = True` forces approval even within workspace. |
+| 3 | Read line-count behavior: hard error if count > max, or clamp + inform? | **Clamp + inform** — silently clamp to MAX_READ_LINES but include a note in the response. |
+| 4 | File size guard: keep a hard reject for enormous files, or rely on truncation only? | **Yes, keep a size guard** — 10 MB hard reject before opening prevents memory exhaustion on the markitdown path. |
+
+### 6.3 What we followed verbatim from ROADMAP §6
+
+- Three separate tools matching `config.ToolPermissions`'s three boolean fields. ✓
+- `write` creates or overwrites; parent directories created automatically. ✓
+- `edit` uses unique-match str_replace semantics (0 matches → error, >1 → error). ✓
+- Pydantic params models with `TOOL_SCHEMA` dicts in Anthropic native shape. ✓
+
+### 6.4 What we deviated from §6, and why
+
+| Spec language | Actual implementation | Why |
+|---|---|---|
+| `_resolve_safe_path` hard-rejects paths outside WORKSPACE_DIR | `_resolve_path` resolves symlinks/`..` but never rejects; approval layer decides | User's requirement: outside-workspace paths should ask the user, not be hard-rejected. The approval model (within workspace = auto-approved unless config override; outside = always ask) replaces the hard reject. |
+| Read tool reads entire file (up to MAX_FILE_SIZE_BYTES) | Read tool accepts `offset`/`count` params with MAX_READ_LINES/MAX_READ_CHARS truncation | User's requirement: pagination to avoid API context limits. Count clamped to max with a note (not hard error). Char truncation also noted. |
+| Read tool is plain-text only (`open(path, "r")`) | Rich extensions (.pdf, .docx, .pptx, etc.) use markitdown; text extensions use `open()` | User's choice (Q1). markitdown was already a dependency. |
+| (spec silent on approval model) | `ToolSpec.approval_check` field added to `tools/base.py`; file_ops provides `_file_approval_check` | Needed for path-dependent approval without violating the permissions/tools layering boundary. `security/permissions.py` stays generic; the tool defines its own approval policy. |
+| `MAX_FILE_SIZE_BYTES = 1_000_000` (1 MB) | `MAX_FILE_SIZE_BYTES = 10_000_000` (10 MB) | Context protection is now handled by MAX_READ_LINES/MAX_READ_CHARS; the size guard is purely for memory protection (especially markitdown which loads the whole file). |
+
+### 6.5 Acceptance criteria status
+
+ROADMAP §6's acceptance criterion: *"attempting to read/write/edit a path like `../../etc/passwd` or an absolute path like `/etc/passwd` is rejected with a clear error, verified by an actual test."*
+
+**Deviated per user decision:** outside-workspace paths are NOT rejected — they require user approval. The tests verify the approval model (within workspace + config False → no approval; outside workspace → approval required). A round-trip (write → read → edit → read) inside the workspace succeeds. 31 tests in `tests/test_file_ops.py`.
+
+### 6.6 Test changes
+
+- `tests/test_file_ops.py` (NEW): 31 tests — path resolution (5), approval check (4), read tool (9), write tool (4), edit tool (4), registry integration (5).
+- Full suite: 131 tests.
+
+---
+
+## 7. `tools/builtin/shell.py` + `security/sandbox.py`
+
+### 7.1 What we built
+
+Cross-platform shell execution tool with a hybrid sandbox: Docker (default, strong isolation) or subprocess + hardening (fallback, weak isolation, requires explicit opt-in). Inert commands (read-only inspection from `config.INERT_COMMANDS` with no shell metacharacters and no path-qualified binary) bypass both backends via a lightweight subprocess.
+
+`security/sandbox.py` (NEW): `detect_shell()`, `is_docker_available()`, `_is_inert()`, `_needs_network()`, `_scrubbed_env()`, `_run_inert()`, `_run_docker()` (with `Popen` + `docker kill` on timeout), `_run_subprocess_fallback()`, `run_sandboxed()` with `docker_available` parameter for TOCTOU safety.
+
+`tools/builtin/shell.py` (NEW): `ShellParams`, `TOOL_SCHEMA`, `_shell_approval_check()` (layered: base config → inert → Docker → fallback gate), `run()` with TOCTOU safety net.
+
+Supporting changes: `config.py` gains 10 sandbox constants (`SHELL_BINARY`, `ALLOW_INSECURE_SANDBOX_FALLBACK`, `AUTO_APPROVE_SANDBOX_FALLBACK`, `SANDBOX_DOCKER_IMAGE`, timeout/memory/CPU/PID limits, `NETWORK_ALLOWED_COMMANDS`, `INERT_COMMANDS`). `tools/registry.py` registers shell with `approval_check`.
+
+### 7.2 Questions we asked & your answers
+
+Seven questions across two rounds:
+
+| # | Dimension | User's choice |
+|---|---|---|
+| 1 | Sandbox technology: Docker, subprocess+hardening, or hybrid? | **Hybrid** — Docker by default; subprocess fallback only if `ALLOW_INSECURE_SANDBOX_FALLBACK=True` with explicit safety gate. |
+| 2 | Network access: no network by default, or allowed? | **No network by default** with configurable allowlist of commands that get network (pip, curl, git, etc.). |
+| 3 | Command allowlist: no allowlist, blocklist only, or allowlist for inert + sandbox for rest? | **Allowlist for inert + sandbox for rest** — read-only inspection commands bypass the full sandbox. |
+| 4 | Shell binary: auto-detect + config override, bash only, or agent chooses per call? | **Auto-detect + config override** — bash on Linux/macOS, pwsh on Windows. |
+| 5 | Windows + Docker: Docker=bash with fallback=pwsh, Windows always fallback, or Windows Docker containers? | **Docker=bash, fallback=pwsh** — Docker runs Linux containers; pwsh requires the fallback. |
+| 6 | Fallback approval: per-run by default with auto-approve config, or always auto-approved? | **Per-run by default** — `AUTO_APPROVE_SANDBOX_FALLBACK=True` to auto-approve. |
+| 7 | Resource defaults: moderate, generous, or restrictive? | **Generous** — 60s timeout, 1GB memory, 30s CPU, 200 PIDs. |
+
+### 7.3 What we followed verbatim from ROADMAP §7
+
+- `security/sandbox.py` kept separate from `tools/builtin/shell.py` for modularity. ✓
+- Scrubbed environment (no API keys, minimal PATH). ✓
+- Wall-clock timeout on all paths. ✓
+- `config.ToolPermissions.shell = False` and `config.ToolApprovals.shell = True` defaults unchanged. ✓
+
+### 7.4 What we deviated from §7, and why
+
+| Spec language | Actual implementation | Why |
+|---|---|---|
+| Strict command allowlist as the security boundary; `shell=False`, pre-split args | Allowlist classifies inert vs non-inert; non-inert uses `shell=True` with bash/pwsh; sandbox is the security boundary | User's requirement: real shell execution (scripts, pipelines), not just read-only inspection commands. |
+| Process-level sandboxing only; Docker explicitly deferred | Docker is the default backend; subprocess is the fallback | User's requirement: strong isolation by default. The ROADMAP's "usable, not production-grade" scope was overridden by the user's security priority. |
+| Unix-only (`preexec_fn` + `rlimit`) | Cross-platform: Docker works everywhere; fallback uses rlimit on Unix, timeout-only on Windows | User's requirement: Windows support (PowerShell). |
+| No network concept | `NETWORK_ALLOWED_COMMANDS` allowlist; `--network none` in Docker for non-matching commands | User's requirement: some commands need network (pip install, git clone). |
+| `CPU_TIME_LIMIT_SECONDS = 5`, `MEMORY_LIMIT_BYTES = 256 MB`, `WALL_CLOCK_TIMEOUT_SECONDS = 10` | 60s timeout, 1GB memory, 30s CPU, 200 PIDs | User's choice (Q7) — generous defaults for real scripts. |
+| (spec silent on fallback approval) | `AUTO_APPROVE_SANDBOX_FALLBACK` config; per-run approval by default | User's requirement: explicit safety gate for the insecure path. |
+| (spec silent on TOCTOU) | `run_sandboxed` accepts `docker_available` param; `shell.run()` probes once and threads it through; safety net returns error if Docker died after approval | Security review finding: independent Docker probes in approval check vs execution allow silent downgrade to insecure fallback. |
+
+### 7.5 Security review findings (post-implementation `/review --effort high`)
+
+Five Critical and eight Suggestion findings from a high-effort security review. All fixed:
+
+| # | Severity | Finding | Fix |
+|---|---|---|---|
+| 1 | Critical | `find -delete` / `sort -o` in INERT_COMMANDS bypass sandbox | Removed `find`/`sort` from allowlist; added `_DANGEROUS_FLAGS` denylist in `_is_inert()` |
+| 2 | Critical | Docker timeout kills CLI client but not container | Rewrote `_run_docker` with `Popen` + `--name sandbox-{uuid}` + `docker kill` on timeout |
+| 3 | Critical | TOCTOU: approval check and execution probe Docker independently | `run_sandboxed` accepts `docker_available` param; `shell.run()` probes once |
+| 4 | Critical | `_needs_network` matches keywords anywhere in command string | Now matches only the first word (command name) |
+| 5 | Critical | `os.path.basename` allows attacker-planted `./ls` binary | Removed basename stripping; reject path-qualified tokens (`/`, `\`, `.` prefix) |
+| 6 | Suggestion | `detect_shell()` at import time blocks on Windows | Computed once at module level with try/except fallback |
+| 7 | Suggestion | `Optional[callable]` type error | Changed to `Optional[Callable[[], None]]` |
+| 8 | Suggestion | `shell_binary` unused in `_run_inert` | Prefixed with underscore |
+| 9-13 | Suggestion | Test gaps (or→and, convoluted assertion, detect_shell not patched, network=False untested, backend internals untested) | Fixed all; added 13 new tests |
+
+### 7.6 Acceptance criteria status
+
+ROADMAP §7's acceptance criterion: *"a command not on the allowlist is rejected before `subprocess.run` is ever called."*
+
+**Deviated per user decision:** the allowlist is not the security boundary — the sandbox is. Non-allowlisted commands run inside Docker (or the fallback). The acceptance criterion is reinterpreted as: inert commands run without sandbox; non-inert commands run inside Docker with volume mount and network isolation. Verified by 44 tests in `tests/test_shell.py`.
+
+### 7.7 Test changes
+
+- `tests/test_shell.py` (NEW): 44 tests — detect_shell (3), docker available (3), _is_inert (7), _needs_network (6), scrubbed env (2), backend internals (8), routing (7), approval check (5), registry integration (3).
+- Full suite: 175 tests.
+
+---
+
+## 8. `safety/policy_enforcement.py`
+
+### 8.1 What we built
+
+Content-level output policy applied after every tool call via `registry.dispatch()`. Two responsibilities:
+
+1. **Centralized blocked-domain list** — `BLOCKED_DOMAINS` set with 3 default entries (well-known harmful domains). `is_domain_blocked(url)` helper used by both `web_search.py` and `fetch_url.py`.
+2. **Secret redaction** — 7 regex patterns (OpenAI, Anthropic, GitHub, AWS, Google, Slack, PEM private keys). `redact_secrets(text)` replaces matches with `[REDACTED]`. `check_output_policy(tool_name, result)` scans `content`, `result`, `stdout`, `stderr` keys.
+
+Supporting changes: `tools/registry.py` imports and calls `check_output_policy` in `dispatch()`. `tools/builtin/web_search.py` removes its local `BLOCKED_DOMAINS` and imports `is_domain_blocked`. `tools/builtin/fetch_url.py` adds `is_domain_blocked` check before fetching. `safety/__init__.py` created (was missing, caused import failures).
+
+### 8.2 Questions we asked & your answers
+
+Three questions:
+
+| # | Dimension | User's choice |
+|---|---|---|
+| 1 | fetch_url enforcement: also check blocked domains, or ROADMAP spec only (web_search)? | **Yes, enforce in fetch_url too** — closes the gap where fetch_url could bypass the blocklist. |
+| 2 | Default blocked domains: empty set, or small default list? | **Small default list** of well-known harmful domains; user maintains based on threat model. |
+| 3 | Secret scan extensions: add stderr, extra patterns, recursive scanning? | **stderr + extra patterns** (AWS, Google, Slack, PEM keys). No recursive scanning. |
+
+### 8.3 What we followed verbatim from ROADMAP §8
+
+- `check_output_policy` called by `registry.dispatch()` after every tool handler. ✓
+- `web_search.py` removes its own `BLOCKED_DOMAINS` and imports from centralized module. ✓
+- Secret redaction as defense-in-depth on tool output. ✓
+- `BLOCKED_DOMAINS` as a set, not per-tool. ✓
+
+### 8.4 What we deviated from §8, and why
+
+| Spec language | Actual implementation | Why |
+|---|---|---|
+| 3 secret patterns (OpenAI, Anthropic, GitHub) | 7 patterns (+ AWS `AKIA...`, Google `AIza...`, Slack `xox[baprs]-...`, PEM private key headers) | Defense-in-depth; these are common key formats that the ROADMAP's 3 patterns miss. |
+| Scans `content`, `result`, `stdout` | Also scans `stderr` | Shell tool's stderr can contain leaked secrets via error messages. |
+| `web_search.py` imports `BLOCKED_DOMAINS` and checks in `_normalize()` | `web_search.py` imports `is_domain_blocked(url)` helper | Cleaner API; handles URL parsing centrally. Also used by `fetch_url.py`. |
+| (spec silent on fetch_url) | `fetch_url.py` also enforces blocked domains | User's requirement: all web-facing tools respect the blocklist. |
+| `BLOCKED_DOMAINS: set[str] = set()` (empty) | 3 default entries with maintenance comment | User's choice (Q2) — non-empty list demonstrates the mechanism. |
+| (spec silent on `safety/__init__.py`) | Created empty `__init__.py` | Was missing; `from safety.policy_enforcement import ...` failed without it. |
+
+### 8.5 Acceptance criteria status
+
+ROADMAP §8's acceptance criterion: *"a tool result containing a string matching one of the secret patterns comes back from `registry.dispatch()` with `[REDACTED]` in place of the match."*
+
+**Fully satisfied:** `test_dispatch_redacts_secret_from_tool_output` registers a fake tool returning a planted OpenAI key, dispatches it, and asserts the key is replaced with `[REDACTED]`. 22 tests in `tests/test_policy_enforcement.py`.
+
+### 8.6 Test changes
+
+- `tests/test_policy_enforcement.py` (NEW): 22 tests — redact_secrets (9), is_domain_blocked (6), check_output_policy (6), registry integration (1).
+- Full suite: 197 tests.

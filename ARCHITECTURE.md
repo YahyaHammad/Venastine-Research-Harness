@@ -46,23 +46,26 @@ Venastine Research Harness/
 ├── pytest.ini                      # testpaths=tests, --strict-markers
 ├── DEVLOG.md                       # implementation notes for built ROADMAP sections -- see §0
 │
-├── tests/                          # 96 tests, all offline, ~1s (first run ~7s for matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
+├── tests/                          # 197 tests, all offline, ~1.7s (first run ~7s for matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
 │   ├── conftest.py                 # fixtures: make_model_response, FakeStorage, ...
 │   ├── BREAKING_CHANGES.md         # what-breaks-it / symptom / fix per area
 │   ├── test_cli.py                 # 7 tests -- ROADMAP §1 thread_id passthrough + UUID validation + parser defaults
-│   ├── test_e2e.py                 # 4 tests -- e2e chat (multi-turn + tool use), research mode, error handling ×2
+│   ├── test_e2e.py                 # 5 tests -- e2e chat (multi-turn + tool use), research mode, error handling ×3
 │   ├── test_logging_setup.py       # 1 test -- configure_logging fallback on bad log path
-│   ├── test_output_writer.py       # 5 tests -- ROADMAP §12 artifact file layout, contents, chart PNG, None guard
+│   ├── test_output_writer.py       # 6 tests -- ROADMAP §12 artifact file layout, contents, chart PNG, None guard, tier counts
 │   ├── test_confidence_scoring.py  # 5 tests (3 ROADMAP verbatim regressions)
 │   ├── test_client_translation.py  # 14 tests -- both translation branches + batching
 │   ├── test_loop_stop_conditions.py# 3 tests (ROADMAP verbatim)
 │   ├── test_orchestrator.py        # 9 tests -- full pipeline mocked + JSON-retry + §5 failure/success/acceptance
 │   ├── test_registry_permissions.py# 8 tests -- allow/deny/approval
 │   ├── test_math_tools.py          # 14 tests -- symbolic equivalence + injection regression
-│   ├── test_memory_write_through.py# 7 tests -- write-through + storage-path-mismatch catch + resume-shape
+│   ├── test_memory_write_through.py# 9 tests -- write-through + storage-path-mismatch catch + resume-shape + list_threads
 │   ├── test_loop_tool_dispatch.py  # 5 tests -- _run tool-dispatch branches
 │   ├── test_json_retry.py          # 7 tests -- ROADMAP §3 malformed-JSON recovery (incl. crux test)
-│   └── test_pipeline_storage.py    # 7 tests -- ROADMAP §5 create/update/load_pipeline_run + inner-failure caplog
+│   ├── test_pipeline_storage.py    # 7 tests -- ROADMAP §5 create/update/load_pipeline_run + inner-failure caplog
+│   ├── test_file_ops.py            # 31 tests -- ROADMAP §6 path resolution, approval, read/write/edit, registry
+│   ├── test_shell.py               # 44 tests -- ROADMAP §7 sandbox routing, inert/network classification, approval, backend internals
+│   └── test_policy_enforcement.py  # 22 tests -- ROADMAP §8 secret redaction, domain blocking, output policy, registry integration
 │
 ├── core/
 │   ├── client.py                  # ONE model call, normalized across providers; provider-specific wire formats live ONLY here
@@ -94,10 +97,11 @@ Venastine Research Harness/
 │
 ├── security/
 │   ├── permissions.py             # is_tool_allowed() / requires_approval() -- reads config's dataclasses
-│   └── sandbox.py                 # (stub -- see ROADMAP.md)
+│   └── sandbox.py                 # ROADMAP §7: hybrid Docker/subprocess sandbox, inert fast-path, network allowlist
 │
 ├── safety/
-│   └── policy_enforcement.py      # (stub, purpose undecided -- see ROADMAP.md §8)
+│   ├── __init__.py                # package init
+│   └── policy_enforcement.py      # ROADMAP §8: content-level output policy -- blocked domains + secret redaction
 │
 └── tools/
     ├── base.py                    # ToolSpec -- the bundle every tool gets registered as
@@ -114,8 +118,8 @@ Venastine Research Harness/
         ├── discrete_math.py       # number theory, combinatorics
         ├── logic.py                # propositional logic (NOT full proof-writing -- see its docstring)
         ├── geometry.py             # points, lines, circles, polygons, triangles
-        ├── file_ops.py             # (stub -- see ROADMAP.md)
-        └── shell.py                # (stub, unsafe to enable without sandbox.py -- see ROADMAP.md)
+        ├── file_ops.py             # ROADMAP §6: read/write/edit with path-dependent approval + markitdown
+        └── shell.py                # ROADMAP §7: shell execution via sandbox module
 ```
 
 ## 4. File-by-file contracts — what belongs where, and what does NOT
@@ -124,7 +128,7 @@ This section exists specifically because earlier drafts of this project put pers
 
 ### 4.1 `config.py` — settings ONLY, never logic
 
-**Belongs here:** plain values. `MODEL_NAME`, `MAX_TOKENS`, `MAX_ITERATIONS`, `MAX_PIPELINE_RETRIES`, `MAX_TOKEN_BUDGET`, `DB_PATH`, and the `APICredentials` / `ToolPermissions` / `ToolApprovals` dataclasses (which are still just typed bags of values — booleans per tool name, nothing more).
+**Belongs here:** plain values. `MODEL_NAME`, `MAX_TOKENS`, `MAX_ITERATIONS`, `MAX_PIPELINE_RETRIES`, `MAX_TOKEN_BUDGET`, `DB_PATH`, `OUTPUT_DIR`, `WORKSPACE_DIR`, `MAX_FILE_SIZE_BYTES`, `MAX_READ_LINES`, `MAX_READ_CHARS`, `SHELL_BINARY`, `ALLOW_INSECURE_SANDBOX_FALLBACK`, `AUTO_APPROVE_SANDBOX_FALLBACK`, `SANDBOX_DOCKER_IMAGE`, `SANDBOX_TIMEOUT_SECONDS`, `SANDBOX_MEMORY_MB`, `SANDBOX_CPU_SECONDS`, `SANDBOX_MAX_PIDS`, `NETWORK_ALLOWED_COMMANDS`, `INERT_COMMANDS`, and the `APICredentials` / `ToolPermissions` / `ToolApprovals` dataclasses (which are still just typed bags of values — booleans per tool name, nothing more).
 
 **Does NOT belong here:** any function that reads these values and makes a decision. `config.py` never imports `security/permissions.py`, never contains an `if`/`else` that changes behavior, never touches the filesystem or network. If you're about to write a function in this file, stop — it belongs in whichever file consumes the setting.
 
@@ -156,7 +160,7 @@ This section exists specifically because earlier drafts of this project put pers
 
 ### 4.5 `storage.py` — the SCHEMA and CRUD only
 
-**Belongs here:** `ConversationThread` / `MessageLog` (SQLModel table classes), `create_thread()`, `get_thread()`, `save_message()`, `get_session_history()`. This file owns the JSON encode/decode needed to fit structured message content into a text column — callers pass and receive plain Python objects and never need to know JSON is involved.
+**Belongs here:** `ConversationThread` / `MessageLog` (SQLModel table classes), `create_thread()`, `get_thread()`, `save_message()`, `get_session_history()`, `list_threads()`. This file owns the JSON encode/decode needed to fit structured message content into a text column — callers pass and receive plain Python objects and never need to know JSON is involved. `list_threads()` returns all threads ordered by `created_at` descending for CLI/TUI thread browsing; `core/memory.py` does NOT call it.
 
 **Does NOT belong here:** any notion of "the current conversation" or "what the agent loop is doing this turn" — that's `core/memory.py`'s job. `storage.py` has no concept of an active run; it only knows how to durably read and write rows given a `thread_id`.
 
@@ -229,9 +233,15 @@ Covered in full in §7 below. The short version of the file boundary: `base.py` 
 
 `security/permissions.py` is **policy**: `is_tool_allowed(name)` and `requires_approval(name, params)`, both reading `config.ToolPermissions()` / `config.ToolApprovals()`. `tools/registry.py` is **mechanism**: it's the single choke point every tool call passes through, and it's the only file that imports both `security.permissions` and the individual tool modules. Tool files themselves (`tools/builtin/*.py`) never import `security.permissions` at all — permission checks happen once, centrally, in `registry.dispatch()`, before a tool function is ever called.
 
-### 4.11 `safety/policy_enforcement.py`
+**`ToolSpec.approval_check` (ROADMAP §6/§7):** `tools/base.py`'s `ToolSpec` dataclass has an optional `approval_check: Callable[[str, dict], bool]` field. When present, `registry.dispatch()` calls it instead of the generic `requires_approval()`. This lets tools define path-dependent or context-dependent approval policies (e.g. file_ops auto-approves within WORKSPACE_DIR, shell auto-approves when Docker is available) without `security/permissions.py` needing to know about tool internals.
 
-This file exists but is empty, and its purpose relative to `security/permissions.py` was never established. Do not assume it duplicates permission logic — see ROADMAP.md §8 for a concrete proposal (content-level output filtering, not access control) before writing anything here.
+**`safety/policy_enforcement.check_output_policy` (ROADMAP §8):** `registry.dispatch()` also calls `check_output_policy(tool_name, result)` after every tool handler returns, applying content-level policy (secret redaction) to the result before it reaches the caller. This is a post-call filter, not a pre-call gate — distinct from `security/permissions.py`'s access control.
+
+### 4.11 `safety/policy_enforcement.py` — content-level output policy (ROADMAP §8)
+
+**Belongs here:** `BLOCKED_DOMAINS` (centralized set of harmful domains), `is_domain_blocked(url)` (used by `web_search.py` and `fetch_url.py` to reject URLs before fetching), `_SECRET_PATTERNS` (7 regex patterns for OpenAI/Anthropic/GitHub/AWS/Google/Slack/PEM keys), `redact_secrets(text)` (replaces matches with `[REDACTED]`), and `check_output_policy(tool_name, result)` (scans `content`/`result`/`stdout`/`stderr` keys in tool output dicts). Called by `registry.dispatch()` after every tool handler — a post-call filter, not a pre-call gate.
+
+**Does NOT belong here:** access control (that's `security/permissions.py`'s job, applied before a tool runs). Do not add `is_tool_allowed` or `requires_approval` logic here — the two files answer different questions at different points in the dispatch lifecycle.
 
 ### 4.12 `logging_setup.py` — logging infrastructure
 
@@ -255,7 +265,7 @@ This file exists but is empty, and its purpose relative to `security/permissions
   - `provider_factory` / `client_for_provider` — return a mock-`api_initialization`-compatible tuple for translation tests.
   - `clear_client_cache` (autouse) — resets `api_initialization`'s cached clients before each test.
 - **`tests/BREAKING_CHANGES.md`** — per-file tables documenting what breaks each test when production code changes, the symptom, and the fix. Created because `test_orchestrator.py` was identified as the suite's most fragile mock — its mock dict is keyed by pass_id strings that ROADMAP §3 and §10 will modify.
-- **14 test files** (6 per ROADMAP §4 + 2 from §4's own additions: `test_memory_write_through.py`, `test_loop_tool_dispatch.py`; + 2 from §3/§5: `test_json_retry.py`, `test_pipeline_storage.py`; + 2 from §1: `test_cli.py`, `test_e2e.py`; + 1 from §12: `test_output_writer.py`; + 1 from audit: `test_logging_setup.py`).
+- **17 test files** (6 per ROADMAP §4 + 2 from §4's own additions: `test_memory_write_through.py`, `test_loop_tool_dispatch.py`; + 2 from §3/§5: `test_json_retry.py`, `test_pipeline_storage.py`; + 2 from §1: `test_cli.py`, `test_e2e.py`; + 1 from §12: `test_output_writer.py`; + 1 from audit: `test_logging_setup.py`; + 1 from §6: `test_file_ops.py`; + 1 from §7: `test_shell.py`; + 1 from §8: `test_policy_enforcement.py`).
 
 **What belongs here:** tests that run offline (~0.53s), with zero network access and zero real API keys. Stubs in root `conftest.py` catch import-time module resolution; fixtures in `tests/conftest.py` provide `ModelResponse` construction and storage mocking; individual test files cover production code's behavior.
 
@@ -385,9 +395,13 @@ Returns the full `PipelineRun` (not just the final report) — every intermediat
 
 ## 8. Security/permissions model — current state
 
-`config.ToolPermissions` / `config.ToolApprovals` are dataclasses with one boolean field per registered tool name. `security/permissions.py`'s `is_tool_allowed(name)` / `requires_approval(name, params)` read these. `tools/registry.py.dispatch()` checks both, in that order, before calling any tool's `run()`.
+`config.ToolPermissions` / `config.ToolApprovals` are dataclasses with one boolean field per registered tool name. `security/permissions.py`'s `is_tool_allowed(name)` / `requires_approval(name, params)` read these. `tools/registry.py.dispatch()` checks both, in that order, before calling any tool's `run()`. After the handler returns, `dispatch()` calls `safety/policy_enforcement.check_output_policy()` to redact secrets from the result.
 
-**What's NOT built:** `security/sandbox.py` is empty. This matters most for `shell.py` (also currently an empty stub) — a shell-execution tool should never be enabled without a real sandbox behind it. See ROADMAP.md §6/§7 for both specs together, since they're linked.
+**Path-dependent approval (ROADMAP §6/§7):** `ToolSpec.approval_check` lets tools override the generic boolean lookup. `file_ops` uses it for workspace-boundary approval; `shell` uses it for Docker-availability-aware approval with a TOCTOU safety net.
+
+**Sandbox (ROADMAP §7):** `security/sandbox.py` provides hybrid Docker/subprocess isolation. Inert commands bypass the sandbox via a lightweight subprocess. Non-inert commands run in Docker (default) or the explicit subprocess fallback. Network is disabled by default with a configurable allowlist.
+
+**Content-level policy (ROADMAP §8):** `safety/policy_enforcement.py` provides centralized blocked-domain enforcement (used by `web_search` and `fetch_url`) and secret redaction on all tool output.
 
 ## 9. Persistence model — recap
 
@@ -409,8 +423,8 @@ Returns the full `PipelineRun` (not just the final report) — every intermediat
 | `discrete_math` | `discrete_math.py` | Working | Number theory + combinatorics via SymPy |
 | `logic` | `logic.py` | Working | Propositional logic ONLY — see its docstring for scope limits |
 | `geometry` | `geometry.py` | Working | Points/lines/circles/polygons/triangles via SymPy |
-| `file_ops` | `file_ops.py` | **Stub** | Imports only, no schema/run() — see ROADMAP.md §6 |
-| `shell` | `shell.py` | **Stub, empty** | Do not enable without sandbox.py — see ROADMAP.md §7 |
+| `file_ops` | `file_ops.py` | Working | read/write/edit with path-dependent approval, markitdown for rich formats, line/char pagination |
+| `shell` | `shell.py` | Working | Shell execution via sandbox module; inert fast-path; Docker default, subprocess fallback |
 
 All math tools share `_math_common.py`'s `safe_parse()` — a SymPy expression parser with `__builtins__` explicitly blanked, verified via test to actually block a real injection payload, not just assumed safe. Any new math-adjacent tool should use this, not its own `eval`/`sympify` call.
 

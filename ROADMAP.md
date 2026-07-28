@@ -512,6 +512,10 @@ registry.register(ToolSpec("edit", file_ops.EDIT_TOOL_SCHEMA, file_ops.edit_run)
 
 **Acceptance criteria:** attempting to read/write/edit a path like `../../etc/passwd` or an absolute path like `/etc/passwd` is rejected with a clear error, verified by an actual test, not just code inspection. A round trip (write, then read, then edit, then read again) inside the workspace succeeds.
 
+### Built
+
+`tools/builtin/file_ops.py` (NEW): three tools — `read`, `write`, `edit` — registered as separate `ToolSpec`s matching `config.ToolPermissions`'s three boolean fields. `read` supports `offset`/`count` pagination with `MAX_READ_LINES`/`MAX_READ_CHARS` truncation (clamp + inform, not hard error), markitdown for rich formats (.pdf, .docx, etc.), and a 10 MB file-size guard. `write` creates/overwrites with auto parent-dir creation. `edit` uses unique-match str_replace. Path-dependent approval via `ToolSpec.approval_check` on `tools/base.py`: within WORKSPACE_DIR = auto-approved (unless config override), outside = always ask. `_resolve_path` resolves symlinks/`..` but never hard-rejects (deviated from ROADMAP's `_resolve_safe_path`). `config.py` gains `WORKSPACE_DIR`, `MAX_FILE_SIZE_BYTES`, `MAX_READ_LINES`, `MAX_READ_CHARS`. 31 tests in `tests/test_file_ops.py`. **Full decision record in `DEVLOG.md §6`.**
+
 ---
 
 ## 7. `tools/builtin/shell.py` + `security/sandbox.py`
@@ -657,6 +661,10 @@ def run(params: dict) -> dict:
 
 **Acceptance criteria:** a command not on the allowlist (e.g. `["rm", "-rf", "/"]`) is rejected before `subprocess.run` is ever called (verify via a test that patches `subprocess.run` and asserts it was never invoked for a denied command). An allowed command that runs past `WALL_CLOCK_TIMEOUT_SECONDS` returns a timeout error rather than hanging. Confirm `minimal_env` does not leak `os.environ` — e.g. set a fake `OPENAI_API_KEY` in the test's environment and confirm an `echo $OPENAI_API_KEY`-equivalent inside the sandbox doesn't see it (note: `echo` alone can't expand `$VAR` without shell interpretation, which is intentionally absent here — this is a feature, not a gap to fix).
 
+### Built
+
+`security/sandbox.py` (NEW): hybrid Docker/subprocess sandbox. `run_sandboxed()` routes: inert commands → lightweight subprocess (no Docker/fallback needed); non-inert → Docker (default, strong isolation) or subprocess fallback (requires `ALLOW_INSECURE_SANDBOX_FALLBACK=True`). Docker path uses `Popen` + `--name sandbox-{uuid}` + `docker kill` on timeout (fixes orphaned-container bug from security review). `_is_inert()` rejects path-qualified binaries and dangerous flags (`-delete`, `-exec`, `-o`). `_needs_network()` matches only the command name (first word), not arguments. `_scrubbed_env()` whitelists safe keys only. `tools/builtin/shell.py` (NEW): `ShellParams`, `TOOL_SCHEMA`, `_shell_approval_check()` (layered: base config → inert → Docker → fallback gate with TOCTOU safety net), `run()` probes Docker once and threads result to `run_sandboxed()`. `config.py` gains 10 sandbox constants. `tools/base.py` gains `approval_check` field on `ToolSpec`. **Deviated from ROADMAP:** shell interpretation (`shell=True`) for non-inert commands; Docker as default (ROADMAP deferred it); cross-platform (ROADMAP was Unix-only); network allowlist; generous resource defaults (60s/1GB/30s/200 PIDs vs ROADMAP's 10s/256MB/5s); fallback approval gate. Post-implementation `/review --effort high` found 5 Critical + 8 Suggestion security issues — all fixed. 44 tests in `tests/test_shell.py`. **Full decision record in `DEVLOG.md §7`.**
+
 ---
 
 ## 8. `safety/policy_enforcement.py`
@@ -725,6 +733,10 @@ def dispatch(self, tool_name, params, approval_callback=None) -> dict:
 **`tools/builtin/web_search.py` change:** remove its own `BLOCKED_DOMAINS: set[str] = set()` and `from safety.policy_enforcement import BLOCKED_DOMAINS` instead, so there's exactly one list, not one-per-tool.
 
 **Acceptance criteria:** a tool result containing a string matching one of the secret patterns comes back from `registry.dispatch()` with `[REDACTED]` in place of the match, verified by a test that constructs a fake tool returning a planted fake key and asserts it never appears in the dispatched result.
+
+### Built
+
+`safety/policy_enforcement.py` (NEW): `BLOCKED_DOMAINS` set (3 default entries), `is_domain_blocked(url)` helper (used by both `web_search.py` and `fetch_url.py`), 7 `_SECRET_PATTERNS` (OpenAI, Anthropic, GitHub, AWS, Google, Slack, PEM private keys — 4 added beyond ROADMAP's 3), `redact_secrets(text)`, `check_output_policy(tool_name, result)` scanning `content`/`result`/`stdout`/`stderr` (stderr added beyond ROADMAP). `tools/registry.py` calls `check_output_policy` in `dispatch()` after every tool handler. `web_search.py` removes local `BLOCKED_DOMAINS`, imports `is_domain_blocked`. `fetch_url.py` adds domain check before fetching (ROADMAP didn't mention fetch_url). `safety/__init__.py` created (was missing). 22 tests in `tests/test_policy_enforcement.py`. **Full decision record in `DEVLOG.md §8`.**
 
 ---
 
