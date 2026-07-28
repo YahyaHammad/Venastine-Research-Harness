@@ -7,6 +7,7 @@ from tools.builtin import (
     file_ops, shell,
 )
 from security.permissions import is_tool_allowed, requires_approval
+from safety.policy_enforcement import check_output_policy
 
 
 class ToolCallDenied(Exception):
@@ -53,7 +54,9 @@ class ToolRegistry:
             if not approved:
                 raise ToolCallDenied(f"{tool_name} requires approval and was not given")
 
-        return spec.handler(params)
+        result = spec.handler(params)
+        result = check_output_policy(tool_name, result)
+        return result
 
 
 registry = ToolRegistry()

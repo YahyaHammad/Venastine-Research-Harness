@@ -12,6 +12,8 @@ from typing import Optional
 from pydantic import BaseModel, Field, field_validator
 from ddgs import DDGS
 
+from safety.policy_enforcement import is_domain_blocked
+
 logger = logging.getLogger(__name__)
 
 
@@ -57,7 +59,6 @@ class WebSearchError(Exception):
 
 # ---- Policy / tuning knobs -------------------------------------------------
 
-BLOCKED_DOMAINS: set[str] = set()
 MAX_SNIPPET_CHARS = 300
 REQUEST_TIMEOUT_S = 8.0
 MAX_RETRIES = 2
@@ -99,8 +100,7 @@ def _normalize(raw: list[dict]) -> list[SearchResult]:
     out: list[SearchResult] = []
     for r in raw:
         url = r.get("href", "")
-        domain = url.split("/")[2] if "://" in url else url
-        if domain in BLOCKED_DOMAINS:
+        if is_domain_blocked(url):
             continue
 
         snippet = (r.get("body") or "")[:MAX_SNIPPET_CHARS]

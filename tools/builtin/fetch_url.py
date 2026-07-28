@@ -5,6 +5,8 @@ import logging
 import httpx
 from pydantic import BaseModel, Field
 
+from safety.policy_enforcement import is_domain_blocked
+
 logger = logging.getLogger(__name__)
 
 _TOOL_DESCRIPTION = "Retrieve the contents of a web page using a URL."
@@ -28,6 +30,9 @@ def run(params: dict) -> dict:
 
     if not (parsed.url.startswith("http://") or parsed.url.startswith("https://")):
         return {"error": "URL must start with http:// or https://"}
+
+    if is_domain_blocked(parsed.url):
+        return {"error": f"Domain is blocked by policy: {parsed.url}"}
 
     try:
         response = httpx.get(parsed.url, timeout=REQUEST_TIMEOUT_S, follow_redirects=True)
