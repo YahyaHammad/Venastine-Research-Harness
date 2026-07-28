@@ -34,6 +34,12 @@ DB_PATH = os.environ.get("APP_DB_PATH", "app.db")
 # --- Output artifacts ---
 OUTPUT_DIR = os.environ.get("AGENT_OUTPUT_DIR", "./output")
 
+# --- File-ops workspace (ROADMAP §6) ---
+WORKSPACE_DIR = os.environ.get("AGENT_WORKSPACE", "./workspace")
+MAX_FILE_SIZE_BYTES = 10_000_000   # 10 MB — hard reject before opening
+MAX_READ_LINES = 500               # max lines per read call
+MAX_READ_CHARS = 50_000            # max chars per read call
+
 
 @dataclass
 class APICredentials:

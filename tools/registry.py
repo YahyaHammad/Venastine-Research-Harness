@@ -4,6 +4,7 @@ from tools.base import ToolSpec
 from tools.builtin import (
     web_search, fetch_url, get_time, arxiv,
     symbolic_math, linear_algebra, probability_stats, discrete_math, logic, geometry,
+    file_ops,
 )
 from security.permissions import is_tool_allowed, requires_approval
 
@@ -38,12 +39,21 @@ class ToolRegistry:
         if not is_tool_allowed(tool_name):
             raise ToolCallDenied(f"{tool_name} is disabled by policy")
 
-        if requires_approval(tool_name, params):
+        spec = self._tools[tool_name]
+
+        # Path-dependent approval (e.g. file_ops) overrides the generic
+        # boolean lookup when the tool provides its own approval_check.
+        if spec.approval_check is not None:
+            needs_approval = spec.approval_check(tool_name, params)
+        else:
+            needs_approval = requires_approval(tool_name, params)
+
+        if needs_approval:
             approved = approval_callback(tool_name, params) if approval_callback else False
             if not approved:
                 raise ToolCallDenied(f"{tool_name} requires approval and was not given")
 
-        return self._tools[tool_name].handler(params)
+        return spec.handler(params)
 
 
 registry = ToolRegistry()
@@ -57,9 +67,11 @@ registry.register(ToolSpec("probability_stats", probability_stats.TOOL_SCHEMA, p
 registry.register(ToolSpec("discrete_math", discrete_math.TOOL_SCHEMA, discrete_math.run))
 registry.register(ToolSpec("logic", logic.TOOL_SCHEMA, logic.run))
 registry.register(ToolSpec("geometry", geometry.TOOL_SCHEMA, geometry.run))
+registry.register(ToolSpec("read", file_ops.READ_TOOL_SCHEMA, file_ops.read_run, approval_check=file_ops._file_approval_check))
+registry.register(ToolSpec("write", file_ops.WRITE_TOOL_SCHEMA, file_ops.write_run, approval_check=file_ops._file_approval_check))
+registry.register(ToolSpec("edit", file_ops.EDIT_TOOL_SCHEMA, file_ops.edit_run, approval_check=file_ops._file_approval_check))
 
-# file_ops and shell aren't registered yet -- file_ops.py has no
-# TOOL_SCHEMA or run() defined, and shell.py is empty. Registering either
-# as-is would crash this module at import time (AttributeError) the
-# moment anything imports the registry. Finish those two tool files, then
-# add their registration lines here the same way as the three above.
+# shell isn't registered yet -- shell.py is empty. Registering it as-is
+# would crash this module at import time (AttributeError). Finish
+# shell.py + security/sandbox.py (ROADMAP §7), then add its registration
+# line here the same way as the others above.
