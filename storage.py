@@ -59,6 +59,22 @@ def save_message(
         session.commit()
 
 
+def list_threads() -> List[dict]:
+    """Returns all conversation threads, most recent first.
+
+    Each entry: ``{"id": UUID, "created_at": datetime}``.
+    Used by the CLI / TUI layer for thread browsing — core/memory.py
+    does NOT call this.
+    """
+    with Session(engine) as session:
+        statement = (
+            select(ConversationThread)
+            .order_by(ConversationThread.created_at.desc())
+        )
+        threads = session.exec(statement).all()
+        return [{"id": t.id, "created_at": t.created_at} for t in threads]
+
+
 def get_session_history(thread_id: UUID) -> List[dict]:
     """
     Reconstructs the exact neutral shape core/memory.py's add_* methods

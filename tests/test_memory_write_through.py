@@ -225,3 +225,42 @@ def test_add_tool_result_appends_one_entry_per_result(fake_storage):
     assert fake_storage.saved_messages[0][3] is None  # name=None (always)
     assert fake_storage.saved_messages[0][4] == "t1"
     assert fake_storage.saved_messages[1][4] == "t2"
+
+
+# ---------------------------------------------------------------------------
+# ---- storage.list_threads() -----------------------------------------------
+# ---------------------------------------------------------------------------
+
+def test_list_threads_returns_all_threads_most_recent_first(fake_storage):
+    """list_threads() must return every created thread as
+    {"id": UUID, "created_at": datetime}, ordered most-recent-first.
+    This is the backend function the CLI / TUI thread picker will call;
+    core/memory.py does NOT use it."""
+    import time
+    from uuid import UUID
+    from datetime import datetime
+
+    id1 = fake_storage.create_thread()
+    time.sleep(0.01)  # ensure distinct created_at
+    id2 = fake_storage.create_thread()
+    time.sleep(0.01)
+    id3 = fake_storage.create_thread()
+
+    result = fake_storage.list_threads()
+
+    assert len(result) == 3
+    # Most recent first.
+    assert result[0]["id"] == id3
+    assert result[1]["id"] == id2
+    assert result[2]["id"] == id1
+    # Each entry has the right shape.
+    for entry in result:
+        assert isinstance(entry["id"], UUID)
+        assert isinstance(entry["created_at"], datetime)
+        assert set(entry.keys()) == {"id", "created_at"}
+
+
+def test_list_threads_empty_when_no_threads(fake_storage):
+    """list_threads() on a fresh storage with zero threads returns an
+    empty list, not None or an error."""
+    assert fake_storage.list_threads() == []

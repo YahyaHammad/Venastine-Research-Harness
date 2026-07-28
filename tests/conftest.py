@@ -155,18 +155,30 @@ class FakeStorage:
         self.created_threads = []
         self.saved_messages = []  # list of (thread_id, role, content, name, tool_call_id)
         self._threads = {}        # thread_id -> True (existence tracker)
+        self._thread_created_at = {}  # thread_id -> datetime
         self._messages_by_thread = {}  # thread_id -> list of neutral-shape dicts
 
     def create_thread(self):
+        from datetime import datetime, timezone
         from uuid import uuid4
         thread_id = uuid4()
         self.created_threads.append(thread_id)
         self._threads[thread_id] = True
+        self._thread_created_at[thread_id] = datetime.now(timezone.utc)
         self._messages_by_thread[thread_id] = []
         return thread_id
 
     def get_thread(self, thread_id):
         return self._threads.get(thread_id, None)
+
+    def list_threads(self):
+        """Mirrors storage.list_threads(): most recent first."""
+        return sorted(
+            [{"id": tid, "created_at": ts}
+             for tid, ts in self._thread_created_at.items()],
+            key=lambda t: t["created_at"],
+            reverse=True,
+        )
 
     def save_message(self, thread_id, role, content, name=None, tool_call_id=None):
         # Stores content exactly as given -- production's save_message
