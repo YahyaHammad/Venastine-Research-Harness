@@ -4,7 +4,7 @@ from dataclasses import dataclass
 # --- Model / loop settings -- these were missing; call_model, RunAgentLoop,
 # and database.py all depend on them ---
 MODEL_NAME = os.environ.get("AGENT_MODEL", "claude-sonnet-5")
-MAX_TOKENS = 1024
+MAX_TOKENS = 4096
 # --- Loop control ---
 MAX_ITERATIONS = 20  # matches the max_steps default used elsewhere
 

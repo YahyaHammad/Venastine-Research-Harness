@@ -811,6 +811,10 @@ if provider_name == "GOOGLE":
 
 **Acceptance criteria:** a real (not mocked) call to Google with one tool available successfully round-trips: model requests the tool, the tool dispatches, the result gets translated back into a `FunctionResponse`-shaped turn, and a second call produces a final answer. Verified with a real API key, not just mocked shapes, since the exact object construction above was explicitly NOT verified against current SDK behavior in this directive.
 
+### Built
+
+Implemented against `google-genai==1.0.0` with all SDK shapes verified by inspecting the installed package's Pydantic model fields (not guessed). Key findings during verification: `FunctionDeclaration.parameters` accepts a raw dict (auto-converts to `types.Schema`); `response.text` raises `ValueError` when function_call parts are present (must parse parts manually); `FunctionCall.id` is optional (UUID generated when missing). The `FunctionResponse.name` field (required by Google but absent from the neutral tool-result shape) is resolved via a `{tool_call_id: name}` lookup built from assistant messages during translation. The root conftest.py Google fake was expanded from a no-op `Client` to include a `types` submodule and `models.generate_content()`. 2 NotImplementedError tests replaced with 8 positive tests (tool schema, 4 message translation, 3 call_model). The spec's acceptance criterion requires a real API key for end-to-end verification — the offline test suite verifies translation shapes and response parsing via mocks. Full decision record: DEVLOG.md §9.
+
 ---
 
 ## 10. Ensemble mode

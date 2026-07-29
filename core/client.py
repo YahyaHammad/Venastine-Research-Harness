@@ -1,10 +1,11 @@
 from dataclasses import dataclass, field
 from typing import Any, Optional
-from uuid import UUID
+from uuid import UUID, uuid4
 import json
 
 from openai import OpenAI
 from google import genai
+from google.genai import types as genai_types
 from anthropic import Anthropic
 
 from credentials import load_provider_data
@@ -92,10 +93,16 @@ def _tools_for_provider(provider_name: str, tool_schemas: list[dict]):
         return tool_schemas
 
     if provider_name == "GOOGLE":
-        raise NotImplementedError(
-            "Google tool-calling translation isn't wired in yet -- "
-            "call without tools, or finish this translation first."
-        )
+        return [genai_types.Tool(
+            function_declarations=[
+                genai_types.FunctionDeclaration(
+                    name=s["name"],
+                    description=s["description"],
+                    parameters=s["input_schema"],
+                )
+                for s in tool_schemas
+            ]
+        )]
 
     # OpenAI-compatible providers
     return [
@@ -125,9 +132,68 @@ def _is_tool_result_message(msg: dict) -> bool:
     )
 
 
-def _messages_for_provider(provider_name: str, neutral_messages: list[dict]) -> list[dict]:
+def _messages_for_provider(provider_name: str, neutral_messages: list[dict]) -> list:
     if provider_name == "GOOGLE":
-        raise NotImplementedError("Google message translation isn't wired in yet")
+        # Build a {tool_call_id: function_name} lookup from assistant
+        # messages so we can populate FunctionResponse.name (required by
+        # Google but absent from the neutral tool-result shape).
+        call_id_to_name: dict[str, str] = {}
+        for msg in neutral_messages:
+            if msg["role"] == "assistant":
+                for tc in msg.get("tool_calls", []):
+                    call_id_to_name[tc["id"]] = tc["name"]
+
+        translated = []
+        for msg in neutral_messages:
+            role = msg["role"]
+
+            if role == "user":
+                translated.append(genai_types.Content(
+                    role="user",
+                    parts=[genai_types.Part(text=msg["content"])],
+                ))
+
+            elif role == "assistant":
+                parts = []
+                if msg.get("text"):
+                    parts.append(genai_types.Part(text=msg["text"]))
+                for tc in msg.get("tool_calls", []):
+                    parts.append(genai_types.Part(
+                        function_call=genai_types.FunctionCall(
+                            name=tc["name"],
+                            args=tc["input"],
+                            id=tc["id"],
+                        )
+                    ))
+                # Google rejects Content with empty parts; skip empty
+                # assistant turns (e.g. safety-filtered responses that
+                # produced no text and no tool calls).
+                if parts:
+                    translated.append(genai_types.Content(role="model", parts=parts))
+
+            elif role == "tool":
+                name = call_id_to_name.get(msg["tool_call_id"])
+                if name is None:
+                    raise ValueError(
+                        f"Tool result references tool_call_id={msg['tool_call_id']!r} "
+                        f"but no assistant message in the history made that call"
+                    )
+                part = genai_types.Part(
+                    function_response=genai_types.FunctionResponse(
+                        name=name,
+                        response={"result": msg["content"]},
+                    )
+                )
+                # Batch consecutive tool results into a single user
+                # Content — Google requires strict user/model alternation.
+                if (translated
+                        and translated[-1].role == "user"
+                        and all(p.function_response is not None for p in translated[-1].parts)):
+                    translated[-1].parts.append(part)
+                else:
+                    translated.append(genai_types.Content(role="user", parts=[part]))
+
+        return translated
 
     if provider_name == "ANTHROPIC":
         translated: list[dict] = []
@@ -236,7 +302,38 @@ def call_model(
         return ModelResponse(text=text, tool_calls=calls, raw=response, usage=usage)
 
     if provider_name == "GOOGLE":
-        raise NotImplementedError("Google call path needs message + tool translation finished first")
+        response = client.models.generate_content(
+            model=model,
+            contents=translated_messages,
+            config=genai_types.GenerateContentConfig(
+                system_instruction=system_prompt,
+                tools=_tools_for_provider(provider_name, tool_schemas),
+                max_output_tokens=config.MAX_TOKENS,
+            ),
+        )
+        # response.text raises ValueError when function_call parts are
+        # present, so we must iterate parts manually. Guard against
+        # empty candidates (safety filter) and null content (blocked
+        # candidate) — both are documented, non-exceptional API outcomes.
+        candidate = response.candidates[0] if response.candidates else None
+        content = candidate.content if candidate else None
+        parts = content.parts if content else []
+        text = "".join(p.text for p in parts if p.text is not None)
+        calls = []
+        for p in parts:
+            if p.function_call is not None:
+                fc = p.function_call
+                calls.append(ToolCallRequest(
+                    id=fc.id or str(uuid4()),
+                    name=fc.name,
+                    input=fc.args or {},
+                ))
+        usage_meta = getattr(response, "usage_metadata", None)
+        usage = {
+            "input_tokens": getattr(usage_meta, "prompt_token_count", 0) if usage_meta else 0,
+            "output_tokens": getattr(usage_meta, "candidates_token_count", 0) if usage_meta else 0,
+        }
+        return ModelResponse(text=text, tool_calls=calls, raw=response, usage=usage)
 
     # OpenAI-compatible path
     full_messages = [{"role": "system", "content": system_prompt}] + translated_messages

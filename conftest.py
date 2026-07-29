@@ -173,19 +173,106 @@ def _build_fake_anthropic_module():
 # ---------------------------------------------------------------------------
 
 def _build_fake_google_module():
-    """Two-level fake: `google` and `google.genai`. core/client.py only
-    needs `genai.Client(api_key=...)` to exist at import time. The GOOGLE
-    branch in call_model raises NotImplementedError before reaching any
-    real method, so we don't fake anything on the returned client."""
+    """Two-level fake: `google` and `google.genai`. Includes a `types`
+    submodule with the classes core/client.py's GOOGLE branch constructs
+    (Tool, FunctionDeclaration, FunctionCall, FunctionResponse, Part,
+    Content, GenerateContentConfig) and a fake `models.generate_content`
+    on the client so call_model's GOOGLE branch can be tested offline."""
 
     google_mod = types.ModuleType("google")
     genai_mod = types.ModuleType("google.genai")
 
+    # ---- Fake types submodule -------------------------------------------
+    types_mod = types.ModuleType("google.genai.types")
+
+    class _FakeFunctionDeclaration:
+        def __init__(self, name=None, description=None, parameters=None, **kw):
+            self.name = name
+            self.description = description
+            self.parameters = parameters
+
+    class _FakeTool:
+        def __init__(self, function_declarations=None, **kw):
+            self.function_declarations = function_declarations or []
+
+    class _FakeFunctionCall:
+        def __init__(self, name=None, args=None, id=None, **kw):
+            self.name = name
+            self.args = args
+            self.id = id
+
+    class _FakeFunctionResponse:
+        def __init__(self, name=None, response=None, id=None, **kw):
+            self.name = name
+            self.response = response
+            self.id = id
+
+    class _FakePart:
+        def __init__(self, text=None, function_call=None, function_response=None, **kw):
+            self.text = text
+            self.function_call = function_call
+            self.function_response = function_response
+
+    class _FakeContent:
+        def __init__(self, role=None, parts=None, **kw):
+            self.role = role
+            self.parts = parts or []
+
+    class _FakeGenerateContentConfig:
+        def __init__(self, system_instruction=None, tools=None, max_output_tokens=None, **kw):
+            self.system_instruction = system_instruction
+            self.tools = tools
+            self.max_output_tokens = max_output_tokens
+
+    types_mod.FunctionDeclaration = _FakeFunctionDeclaration
+    types_mod.Tool = _FakeTool
+    types_mod.FunctionCall = _FakeFunctionCall
+    types_mod.FunctionResponse = _FakeFunctionResponse
+    types_mod.Part = _FakePart
+    types_mod.Content = _FakeContent
+    types_mod.GenerateContentConfig = _FakeGenerateContentConfig
+
+    # ---- Fake client with models.generate_content -----------------------
+    class _FakeGoogleCandidate:
+        def __init__(self, content=None):
+            self.content = content
+
+    class _FakeGoogleResponse:
+        """Mimics GenerateContentResponse. Tests set _responses on the
+        fake models object to queue canned responses."""
+        def __init__(self, text="", function_calls=None, usage=None):
+            parts = []
+            if text:
+                parts.append(_FakePart(text=text))
+            for fc in (function_calls or []):
+                parts.append(_FakePart(function_call=fc))
+            self.candidates = [_FakeGoogleCandidate(
+                content=_FakeContent(role="model", parts=parts)
+            )]
+            u = usage or {}
+            self.usage_metadata = types.SimpleNamespace(
+                prompt_token_count=u.get("input_tokens", 0),
+                candidates_token_count=u.get("output_tokens", 0),
+            )
+
+    class _FakeGoogleModels:
+        def __init__(self):
+            self._responses = []
+
+        def set_responses(self, responses):
+            self._responses = list(responses)
+
+        def generate_content(self, *, model, contents, config=None):
+            if self._responses:
+                return self._responses.pop(0)
+            return _FakeGoogleResponse(text="")
+
     class _Client:
         def __init__(self, **kwargs):
-            pass
+            self.models = _FakeGoogleModels()
 
     genai_mod.Client = _Client
+    genai_mod.types = types_mod
     # core/client.py does `from google import genai`, so `google.genai`
     # must be an attribute on the `google` module as well as a key in
     # sys.modules.
@@ -407,6 +494,7 @@ def _install_fake_sdks():
     google_mod, genai_mod = _build_fake_google_module()
     sys.modules["google"] = google_mod
     sys.modules["google.genai"] = genai_mod
+    sys.modules["google.genai.types"] = genai_mod.types
     sys.modules["sqlmodel"] = _build_fake_sqlmodel_module()
     sys.modules["httpx"] = _build_fake_httpx_module()
     sys.modules["ddgs"] = _build_fake_ddgs_module()

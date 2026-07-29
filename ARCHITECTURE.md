@@ -46,7 +46,7 @@ Venastine Research Harness/
 ├── pytest.ini                      # testpaths=tests, --strict-markers
 ├── DEVLOG.md                       # implementation notes for built ROADMAP sections -- see §0
 │
-├── tests/                          # 199 tests, all offline, ~1.7s (first run ~7s for matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
+├── tests/                          # 205 tests, all offline, ~1.7s (first run ~7s for matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
 │   ├── conftest.py                 # fixtures: make_model_response, FakeStorage, ...
 │   ├── BREAKING_CHANGES.md         # what-breaks-it / symptom / fix per area
 │   ├── test_cli.py                 # 7 tests -- ROADMAP §1 thread_id passthrough + UUID validation + parser defaults
@@ -54,7 +54,7 @@ Venastine Research Harness/
 │   ├── test_logging_setup.py       # 1 test -- configure_logging fallback on bad log path
 │   ├── test_output_writer.py       # 6 tests -- ROADMAP §12 artifact file layout, contents, chart PNG, None guard, tier counts
 │   ├── test_confidence_scoring.py  # 5 tests (3 ROADMAP verbatim regressions)
-│   ├── test_client_translation.py  # 14 tests -- both translation branches + batching
+│   ├── test_client_translation.py  # 20 tests -- all three provider translation branches + batching + Google call_model
 │   ├── test_loop_stop_conditions.py# 3 tests (ROADMAP verbatim)
 │   ├── test_orchestrator.py        # 9 tests -- full pipeline mocked + JSON-retry + §5 failure/success/acceptance
 │   ├── test_registry_permissions.py# 8 tests -- allow/deny/approval
@@ -200,12 +200,15 @@ This section exists specifically because earlier drafts of this project put pers
 
 **The two translation functions are the crux of multi-provider support.** `_tools_for_provider()` converts tool schemas (always authored in Anthropic's native shape by every tool's `TOOL_SCHEMA`) into whatever the target provider expects. `_messages_for_provider()` does the same for conversation history. If you add a new provider, these two functions are what you extend — nowhere else.
 
-**Anthropic vs. OpenAI, the two load-bearing differences to remember:**
-- System prompt: Anthropic takes it as a dedicated `system=` parameter, never a message. OpenAI wants it prepended as a `{"role": "system", ...}` message.
-- Tool results: Anthropic batches every tool result from one turn into a SINGLE user message with multiple `tool_result` content blocks. OpenAI wants one separate `{"role": "tool", ...}` message per result. Get this batching wrong and the API will reject the request.
-- Token limit parameter: OpenAI's Chat Completions API uses `max_completion_tokens`, not the deprecated `max_tokens` (which reasoning/o-series models reject outright).
+**Anthropic vs. OpenAI vs. Google, the load-bearing differences to remember:**
+- System prompt: Anthropic takes it as a dedicated `system=` parameter, never a message. OpenAI wants it prepended as a `{"role": "system", ...}` message. Google uses `system_instruction` inside `GenerateContentConfig` — a third distinct pattern.
+- Tool results: Anthropic batches every tool result from one turn into a SINGLE user message with multiple `tool_result` content blocks. OpenAI wants one separate `{"role": "tool", ...}` message per result. Google wraps each result in `Content(role="user", parts=[Part(function_response=FunctionResponse(name=..., response=...))])` — the function name must be looked up from the assistant message that made the call (the neutral shape doesn't carry it).
+- Assistant role name: Anthropic and OpenAI use `"assistant"`. Google uses `"model"` — NOT `"assistant"`.
+- Token limit parameter: OpenAI's Chat Completions API uses `max_completion_tokens`, not the deprecated `max_tokens` (which reasoning/o-series models reject outright). Google uses `max_output_tokens` inside `GenerateContentConfig`.
+- Response parsing: Anthropic iterates `response.content` blocks by `.type`. OpenAI reads `response.choices[0].message`. Google iterates `response.candidates[0].content.parts` — `response.text` raises `ValueError` when function_call parts are present, so parts must be parsed manually.
+- Tool call IDs: Anthropic and OpenAI always provide an `id` on tool calls. Google's `FunctionCall.id` is optional (defaults to `None`) — `call_model` generates a UUID when missing.
 
-**Google is stubbed, not implemented** — `_tools_for_provider`, `_messages_for_provider`, and the `GOOGLE` branch of `call_model()` all raise `NotImplementedError` with a clear message. See ROADMAP.md for the spec.
+**Google Gemini (ROADMAP §9):** fully implemented. `_tools_for_provider` wraps schemas in `Tool(function_declarations=[FunctionDeclaration(...)])` (raw `input_schema` dict auto-converts to `types.Schema`). `_messages_for_provider` builds a `{tool_call_id: name}` lookup from assistant messages for `FunctionResponse.name`. `call_model` calls `client.models.generate_content(...)` with `GenerateContentConfig(system_instruction=..., tools=...)` and parses parts manually.
 
 ### 4.8 `core/loop.py` — the shared call-dispatch-repeat control flow
 

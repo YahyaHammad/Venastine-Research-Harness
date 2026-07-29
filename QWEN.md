@@ -9,7 +9,7 @@
 
 Both modes share the same call-and-tool-dispatch loop (`core/loop.py`), multi-provider client (`core/client.py`), and tool registry (`tools/registry.py`).
 
-**Supported providers:** Anthropic (fully implemented), OpenAI-compatible (fully implemented — OpenAI, DeepSeek, Groq, Mistral, etc.), Google Gemini (stubbed — raises `NotImplementedError`).
+**Supported providers:** Anthropic (fully implemented), OpenAI-compatible (fully implemented — OpenAI, DeepSeek, Groq, Mistral, etc.), Google Gemini (fully implemented — ROADMAP §9).
 
 **Tech stack:** Python, SQLModel/SQLAlchemy (SQLite), SymPy (math tools), Pydantic, Anthropic SDK, OpenAI SDK, python-dotenv. No async code anywhere.
 

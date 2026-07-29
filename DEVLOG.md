@@ -14,6 +14,7 @@ Section numbers below match ROADMAP.md's section numbers exactly. When a section
 - 6. `tools/builtin/file_ops.py`
 - 7. `tools/builtin/shell.py` + `security/sandbox.py`
 - 8. `safety/policy_enforcement.py`
+- 9. Google Gemini support
 - 11. Critic-model routing
 - 12. `/output/<run_id>/` file-writing system
 
@@ -457,6 +458,58 @@ ROADMAP §5's acceptance criterion: *"kill the process (or raise a forced except
 ### 5.7 Discoveries during implementation
 
 - **The hard-kill test initially failed** because patching `create_pipeline_run` to return a bare UUID (without calling through to the real implementation) skipped the actual record creation in the fake sqlmodel. The first per-pass checkpoint then raised `ValueError: No pipeline run found with id ...`. Fix: use the same spy-through-to-real pattern as the crash test (call `real_create(user_query)`, capture the returned `run_id`). This is a test-construction issue, not a production bug — the production code always calls the real `create_pipeline_run`.
+
+---
+
+## 9. Google Gemini support
+
+### 9.1 What we built
+
+Full Google Gemini provider support in `core/client.py` — tool schema translation, message history translation, and the `call_model` GOOGLE branch — replacing the three `NotImplementedError` stubs. Verified against the installed `google-genai==1.0.0` SDK by inspecting Pydantic model fields at runtime (not guessed from docs).
+
+**`_tools_for_provider` GOOGLE branch:** wraps all tool schemas in a single `types.Tool(function_declarations=[...])` containing one `types.FunctionDeclaration` per schema. The `input_schema` dict is passed directly as `parameters` — the SDK's Pydantic validation auto-converts it to `types.Schema` (including string-to-enum conversion for the `type` field, e.g. `"object"` → `Type.OBJECT`).
+
+**`_messages_for_provider` GOOGLE branch:** builds a `{tool_call_id: function_name}` lookup by scanning all assistant messages in the neutral history (needed because Google's `FunctionResponse` requires `name` but the neutral tool-result shape only has `tool_call_id`). Translates: user → `Content(role="user", parts=[Part(text=...)])`, assistant → `Content(role="model", parts=[...])` with text and `function_call` parts, tool result → `Content(role="user", parts=[Part(function_response=FunctionResponse(name=looked_up, response={"result": ...}))])`.
+
+**`call_model` GOOGLE branch:** calls `client.models.generate_content(model=..., contents=..., config=types.GenerateContentConfig(system_instruction=..., tools=...))`. Parses `response.candidates[0].content.parts` manually — `response.text` raises `ValueError` when function_call parts are present (confirmed by reading the SDK source). Generates a UUID via `uuid4()` when `FunctionCall.id` is `None` (the SDK field is optional). Usage from `response.usage_metadata.prompt_token_count` / `candidates_token_count`.
+
+**Root `conftest.py` fake expansion:** the Google fake was expanded from a no-op `Client` to include a `types` submodule with all 7 classes the production code constructs (`Tool`, `FunctionDeclaration`, `FunctionCall`, `FunctionResponse`, `Part`, `Content`, `GenerateContentConfig`), plus `models.generate_content()` on the client with a `set_responses()` queue for canned responses. `google.genai.types` registered in `sys.modules`.
+
+### 9.2 Questions we asked & your answers
+
+No clarifying questions were needed — the ROADMAP §9 spec explicitly flagged which shapes needed SDK verification vs. which were confirmed safe. The verification was done by inspecting the installed `google-genai==1.0.0` package's Pydantic model fields at runtime, confirming every field name and type before writing code.
+
+### 9.3 What we followed verbatim from ROADMAP §9
+
+- `client.models.generate_content(model=..., contents=..., config=GenerateContentConfig(system_instruction=..., tools=...))` call pattern. ✓
+- System prompt via `system_instruction` in `GenerateContentConfig` (third distinct pattern). ✓
+- Roles: `"user"` and `"model"` (NOT `"assistant"`). ✓
+- Tool schema: `Tool(function_declarations=[FunctionDeclaration(name=, description=, parameters=)])`. ✓
+- Message translation: user→text Part, assistant→model role with text + function_call Parts, tool result→user role with function_response Part. ✓
+- Response parsing: iterate parts manually (spec warned `response.text` may not work with tools — confirmed it raises `ValueError`). ✓
+
+### 9.4 What we deviated from §9, and why
+
+| Spec language | Actual implementation | Why |
+|---|---|---|
+| `parameters=schema["input_schema"]  # may need conversion to types.Schema, verify` | Passed raw dict directly — SDK auto-converts | Verified at runtime: `FunctionDeclaration(parameters={"type": "object", ...})` produces a valid `types.Schema` with `Type.OBJECT`. No manual conversion needed. |
+| (spec silent on `FunctionCall.id`) | Generate `uuid4()` when `fc.id` is `None` | SDK field is `Optional[str]` with default `None`. Our neutral shape requires `id` for tool-call/result matching. |
+| (spec silent on `FunctionResponse.name` lookup) | Build `{tool_call_id: name}` dict from assistant messages | Neutral tool-result shape has `tool_call_id` + `content` but no `name`. Google's `FunctionResponse` requires `name`. Lookup avoids changing the neutral shape or `core/memory.py`. |
+| (spec silent on conftest fake expansion) | Expanded Google fake with `types` submodule + `models.generate_content()` | The old fake was a no-op `Client` because the GOOGLE branch raised `NotImplementedError`. Now that the branch is implemented, the fake needs the types the production code constructs and a `generate_content` method for `call_model` tests. |
+| `from google import genai` (existing import) | Added `from google.genai import types as genai_types` | The production code needs `genai_types.Tool(...)`, `genai_types.Part(...)`, etc. Explicit import is clearer than `genai.types.Tool(...)`. |
+| (spec silent on `response.text` behavior) | Parse parts manually, never call `response.text` | Reading the SDK source confirmed: `response.text` raises `ValueError` if any part has a non-text, non-thought field (like `function_call`). |
+
+### 9.5 Acceptance criteria status
+
+ROADMAP §9's acceptance criterion: *"a real (not mocked) call to Google with one tool available successfully round-trips: model requests the tool, the tool dispatches, the result gets translated back into a `FunctionResponse`-shaped turn, and a second call produces a final answer. Verified with a real API key."*
+
+**Partially satisfied offline.** The translation shapes and response parsing are verified by 8 offline tests (tool schema, 4 message translation, 3 call_model). The end-to-end round-trip with a real API key requires credentials and network access — not testable in the offline suite. The SDK shapes were verified against the installed `google-genai==1.0.0` package at implementation time, which addresses the spec's concern about "the exact object construction above was explicitly NOT verified against current SDK behavior."
+
+### 9.6 Test changes
+
+- `tests/test_client_translation.py`: replaced `test_tools_google_not_implemented` with `test_tools_google_wraps_in_function_declarations`; replaced `test_messages_google_not_implemented` with 4 positive tests (user, assistant role, assistant tool call, tool result name lookup); added 3 `call_model` tests (text-only, tool call with UUID generation, preserved id); updated round-trip test to include Google. Net: +6 tests (14 → 20).
+- `conftest.py`: expanded Google fake (not a test file, but required for the new tests).
+- Full suite: 205 tests.
 
 ---
 
