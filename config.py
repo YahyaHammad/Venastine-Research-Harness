@@ -24,9 +24,13 @@ MAX_TOKEN_BUDGET = 100_000
 # Deferred for now (core sequential pipeline only, per current scope):
 #   ensemble_mode / ensemble_n -- N-candidate Pass 1 generation + cross-candidate
 #     consistency check feeding Pass 4's scoring. Not built yet.
-#   critic_model -- routing the critic/grounding passes to a different model
-#     than the generator. Not built yet; every pass currently uses the same
-#     provider_name/model passed into run_deep_research_pipeline().
+
+# --- Critic-model routing (ROADMAP §11) ---
+# Route the critic/grounding passes (3a, 3b, 6c) to a different model than
+# the generator, so a model isn't checking its own output for errors.
+# None means every pass uses the same provider/model — no special routing.
+# Example to enable: {"provider_name": "OPENAI", "model": "gpt-5.1"}
+CRITIC_MODEL: dict | None = None
 
 # --- Database ---
 DB_PATH = os.environ.get("APP_DB_PATH", "app.db")

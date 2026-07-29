@@ -959,6 +959,10 @@ No changes needed to `_run_pass`, `RunAgentLoop`, or `core/client.py` — this i
 
 **Acceptance criteria:** run the pipeline (mocked) with `config.CRITIC_MODEL = {"provider_name": "OPENAI", "model": "gpt-5.1"}` and an Anthropic `provider_name`/`model` for everything else — confirm (via the mock's call log) that Pass 3a/3b/6c calls were made with `provider_name="OPENAI"` while Pass 0/1/2/3c/5/6a/final synthesis were made with the Anthropic values.
 
+### Built
+
+Implemented per spec with no deviations. `config.CRITIC_MODEL: dict | None = None` added (using modern `dict | None` syntax instead of `Optional[dict]` for consistency with the project's existing type-hint style). The orchestrator resolves `critic_provider`/`critic_model` once after `run.run_id` and swaps `model, provider_name` → `critic_model, critic_provider` on exactly 3 call sites: Pass 3a, 3b, and 6c. All other passes unchanged. 2 new tests in `tests/test_critic_routing.py` verify the routing via mock call logs. Full decision record: DEVLOG.md §11.
+
 ---
 
 ## 12. `/output/<run_id>/` file-writing system

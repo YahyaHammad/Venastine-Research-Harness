@@ -14,6 +14,7 @@ Section numbers below match ROADMAP.md's section numbers exactly. When a section
 - 6. `tools/builtin/file_ops.py`
 - 7. `tools/builtin/shell.py` + `security/sandbox.py`
 - 8. `safety/policy_enforcement.py`
+- 11. Critic-model routing
 - 12. `/output/<run_id>/` file-writing system
 
 ---
@@ -456,6 +457,57 @@ ROADMAP §5's acceptance criterion: *"kill the process (or raise a forced except
 ### 5.7 Discoveries during implementation
 
 - **The hard-kill test initially failed** because patching `create_pipeline_run` to return a bare UUID (without calling through to the real implementation) skipped the actual record creation in the fake sqlmodel. The first per-pass checkpoint then raised `ValueError: No pipeline run found with id ...`. Fix: use the same spy-through-to-real pattern as the crash test (call `real_create(user_query)`, capture the returned `run_id`). This is a test-construction issue, not a production bug — the production code always calls the real `create_pipeline_run`.
+
+---
+
+## 11. Critic-model routing
+
+### 11.1 What we built
+
+A config-driven routing layer in the orchestrator that sends the critic/grounding passes (3a, 3b, 6c) to a different model than the generator, preventing a model from checking its own output with the same blind spots.
+
+**`config.py`:** added `CRITIC_MODEL: dict | None = None`. When set, it must be a dict with `"provider_name"` and `"model"` keys (e.g. `{"provider_name": "OPENAI", "model": "gpt-5.1"}`). `None` (the default) means no special routing — every pass uses the same provider/model.
+
+**`core/reasoning/orchestrator.py`:** after `run.run_id = create_pipeline_run(user_query)`, the function resolves:
+
+```python
+critic_provider = config.CRITIC_MODEL["provider_name"] if config.CRITIC_MODEL else provider_name
+critic_model = config.CRITIC_MODEL["model"] if config.CRITIC_MODEL else model
+```
+
+Then Pass 3a, 3b, and 6c calls use `critic_model, critic_provider` instead of `model, provider_name`. All other passes (0, 1, 2, 3c, 5, 6a, Final synthesis) are unchanged. No changes to `_run_pass`, `_run_pass_with_json_retry`, `RunAgentLoop`, or `core/client.py`.
+
+### 11.2 Questions we asked & your answers
+
+No clarifying questions were needed — the ROADMAP §11 spec is a complete, no-decisions-left brief with exact code shown. The only style note: the spec uses `Optional[dict]` but the project's existing convention (e.g. `list[str] | None` in orchestrator.py) uses the modern `|` syntax, so `dict | None` was used instead.
+
+### 11.3 What we followed verbatim from ROADMAP §11
+
+- `CRITIC_MODEL` config constant with `None` default and example dict shape. ✓
+- Resolve `critic_provider`/`critic_model` once near the top of `run_deep_research_pipeline()`. ✓
+- Pass 3a, 3b, 6c use critic model; all other passes use main model. ✓
+- Pass 6a stays on the generator model (revision reflects the generator's voice/style). ✓
+- No changes to `_run_pass`, `RunAgentLoop`, or `core/client.py`. ✓
+- Acceptance criterion verified via mock call log: 3a/3b/6c with `OPENAI`/`gpt-5.1`, all others with `ANTHROPIC`/`claude-test`. ✓
+
+### 11.4 What we deviated from §11, and why
+
+| Spec language | Actual implementation | Why |
+|---|---|---|
+| `CRITIC_MODEL: Optional[dict] = None` | `CRITIC_MODEL: dict \| None = None` | Project convention uses modern `|` syntax (see `list[str] \| None` in orchestrator.py). Avoids importing `Optional` from `typing`. |
+| (spec silent on docstring update) | Updated orchestrator module docstring to document §11 routing | The old docstring said "no critic-model-routing" which was now stale. |
+| (spec silent on config deferred comment) | Removed `critic_model` line from the "Deferred" comment block in config.py | It's no longer deferred. |
+
+### 11.5 Acceptance criteria status
+
+ROADMAP §11's acceptance criterion: *"run the pipeline (mocked) with `config.CRITIC_MODEL = {"provider_name": "OPENAI", "model": "gpt-5.1"}` and an Anthropic `provider_name`/`model` for everything else — confirm (via the mock's call log) that Pass 3a/3b/6c calls were made with `provider_name="OPENAI"` while Pass 0/1/2/3c/5/6a/final synthesis were made with the Anthropic values."*
+
+**Fully satisfied:** `test_critic_routing_sends_3a_3b_6c_to_critic_model` asserts exactly this. A second test (`test_no_critic_model_means_uniform_routing`) confirms the no-op path when `CRITIC_MODEL` is `None`.
+
+### 11.6 Test changes
+
+- `tests/test_critic_routing.py` (NEW): 2 tests — routing with CRITIC_MODEL set (asserts 3a/3b/6c use critic provider/model, all others use main), and no-op routing with CRITIC_MODEL=None (asserts uniform provider/model across all passes).
+- Full suite: 199 tests.
 
 ---
 

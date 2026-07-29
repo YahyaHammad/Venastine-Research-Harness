@@ -123,7 +123,6 @@ Every model call goes through `RunAgentLoop._run()` in `core/loop.py` — both p
 
 ## Known Open Items
 
-- `safety/policy_enforcement.py` exists but is empty; ROADMAP §8 defines its purpose as content-level output policy (centralized blocked-domain list + secret redaction), distinct from `security/permissions.py`'s access control. Not yet built.
 - `logging_setup.py` is built (and exceeds its own ROADMAP spec — rotating file handler, env-var overrides) and wired into `main.py` as the first call (ROADMAP §1).
 - `datetime.utcnow()` deprecation: **fixed** — `pipeline_storage.py` and `storage.py` now use `datetime.now(timezone.utc)`. Values are created aware-UTC in memory, but SQLite round-trips them as naive UTC (SQLAlchemy's sqlite dialect drops tzinfo by default), so the stored format is unchanged from the `utcnow()` era — no migration or `app.db` deletion is needed.
 

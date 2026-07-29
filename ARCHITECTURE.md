@@ -46,7 +46,7 @@ Venastine Research Harness/
 ├── pytest.ini                      # testpaths=tests, --strict-markers
 ├── DEVLOG.md                       # implementation notes for built ROADMAP sections -- see §0
 │
-├── tests/                          # 197 tests, all offline, ~1.7s (first run ~7s for matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
+├── tests/                          # 199 tests, all offline, ~1.7s (first run ~7s for matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
 │   ├── conftest.py                 # fixtures: make_model_response, FakeStorage, ...
 │   ├── BREAKING_CHANGES.md         # what-breaks-it / symptom / fix per area
 │   ├── test_cli.py                 # 7 tests -- ROADMAP §1 thread_id passthrough + UUID validation + parser defaults
@@ -65,7 +65,8 @@ Venastine Research Harness/
 │   ├── test_pipeline_storage.py    # 7 tests -- ROADMAP §5 create/update/load_pipeline_run + inner-failure caplog
 │   ├── test_file_ops.py            # 31 tests -- ROADMAP §6 path resolution, approval, read/write/edit, registry
 │   ├── test_shell.py               # 44 tests -- ROADMAP §7 sandbox routing, inert/network classification, approval, backend internals
-│   └── test_policy_enforcement.py  # 22 tests -- ROADMAP §8 secret redaction, domain blocking, output policy, registry integration
+│   ├── test_policy_enforcement.py  # 22 tests -- ROADMAP §8 secret redaction, domain blocking, output policy, registry integration
+│   └── test_critic_routing.py      # 2 tests -- ROADMAP §11 critic-model routing (3a/3b/6c to critic, rest to main)
 │
 ├── core/
 │   ├── client.py                  # ONE model call, normalized across providers; provider-specific wire formats live ONLY here
@@ -75,7 +76,7 @@ Venastine Research Harness/
 │   └── reasoning/
 │       ├── base.py                # Claim / PipelineRun data model for the research pipeline (now carries run_id)
 │       ├── confidence_scoring.py  # Pass 4 -- deterministic scoring, ZERO LLM calls
-│       ├── orchestrator.py        # sequences all 10 passes + D0/D1/D2 + _run_pass_with_json_retry + §5 per-pass checkpoints
+│       ├── orchestrator.py        # sequences all 10 passes + D0/D1/D2 + _run_pass_with_json_retry + §5 per-pass checkpoints + §11 critic-model routing
 │       ├── pipeline_storage.py    # ROADMAP §5: PipelineRunRecord table + create/update/load_pipeline_run
 │       └── output_writer.py      # ROADMAP §12: write_run_artifacts -- human-browsable /output/<run_id>/ directory
 │
@@ -128,7 +129,7 @@ This section exists specifically because earlier drafts of this project put pers
 
 ### 4.1 `config.py` — settings ONLY, never logic
 
-**Belongs here:** plain values. `MODEL_NAME`, `MAX_TOKENS`, `MAX_ITERATIONS`, `MAX_PIPELINE_RETRIES`, `MAX_TOKEN_BUDGET`, `DB_PATH`, `OUTPUT_DIR`, `WORKSPACE_DIR`, `MAX_FILE_SIZE_BYTES`, `MAX_READ_LINES`, `MAX_READ_CHARS`, `SHELL_BINARY`, `ALLOW_INSECURE_SANDBOX_FALLBACK`, `AUTO_APPROVE_SANDBOX_FALLBACK`, `SANDBOX_DOCKER_IMAGE`, `SANDBOX_TIMEOUT_SECONDS`, `SANDBOX_MEMORY_MB`, `SANDBOX_CPU_SECONDS`, `SANDBOX_MAX_PIDS`, `NETWORK_ALLOWED_COMMANDS`, `INERT_COMMANDS`, and the `APICredentials` / `ToolPermissions` / `ToolApprovals` dataclasses (which are still just typed bags of values — booleans per tool name, nothing more).
+**Belongs here:** plain values. `MODEL_NAME`, `MAX_TOKENS`, `MAX_ITERATIONS`, `MAX_PIPELINE_RETRIES`, `MAX_TOKEN_BUDGET`, `DB_PATH`, `OUTPUT_DIR`, `WORKSPACE_DIR`, `MAX_FILE_SIZE_BYTES`, `MAX_READ_LINES`, `MAX_READ_CHARS`, `SHELL_BINARY`, `ALLOW_INSECURE_SANDBOX_FALLBACK`, `AUTO_APPROVE_SANDBOX_FALLBACK`, `SANDBOX_DOCKER_IMAGE`, `SANDBOX_TIMEOUT_SECONDS`, `SANDBOX_MEMORY_MB`, `SANDBOX_CPU_SECONDS`, `SANDBOX_MAX_PIDS`, `NETWORK_ALLOWED_COMMANDS`, `INERT_COMMANDS`, `CRITIC_MODEL` (optional dict for §11 critic-model routing — `None` means no special routing), and the `APICredentials` / `ToolPermissions` / `ToolApprovals` dataclasses (which are still just typed bags of values — booleans per tool name, nothing more).
 
 **Does NOT belong here:** any function that reads these values and makes a decision. `config.py` never imports `security/permissions.py`, never contains an `if`/`else` that changes behavior, never touches the filesystem or network. If you're about to write a function in this file, stop — it belongs in whichever file consumes the setting.
 
@@ -392,6 +393,8 @@ Returns the full `PipelineRun` (not just the final report) — every intermediat
 **Malformed-JSON recovery (ROADMAP §3):** the eight JSON-emitting passes (0, 2, 3a, 3b, 3c, 5, 6a, 6c) go through `_run_pass_with_json_retry()` instead of bare `_run_pass()`. On a parse failure it re-enters the SAME pass-thread via `RunAgentLoop.continue_conversation()` with a corrective follow-up (parse error + first 200 chars of the failed output + "respond with ONLY valid JSON"); the model sees its own failed turn because `_run()`'s always-persist behavior already wrote it to the thread. Up to `config.MAX_JSON_RETRIES` corrective attempts; an unrecoverable failure raises `ValueError`. The two plain-text passes (1, Final synthesis) stay on bare `_run_pass()` — they have nothing to parse.
 
 **Pipeline persistence wrap (ROADMAP §5 minimal core):** the whole pass sequence runs inside a try/except. On entry, `create_pipeline_run()` inserts a `PipelineRunRecord` (`status='running'`) and its id is stored on `run.run_id`. On clean completion, `update_pipeline_run(run.run_id, run, status='complete')` persists the final state into the record's separate columns (`claims_json` / `trace_json` / `coverage_gaps_json` / `final_report`). On any exception, the except block calls `update_pipeline_run(..., status='failed')` with the partial state before re-raising; if that storage write itself fails, the failure is logged at ERROR via the module logger (not `run.trace`, which would be inert once persistence has failed) and the original exception still propagates — the status update is best-effort and never masks the real error.
+
+**Critic-model routing (ROADMAP §11):** when `config.CRITIC_MODEL` is set (a `dict` with `"provider_name"` and `"model"` keys), the orchestrator resolves `critic_provider`/`critic_model` once at the top of `run_deep_research_pipeline()` and routes Pass 3a, 3b, and 6c (which re-runs 3a/3b logic) to the critic provider/model instead of the generator's. Every other pass (0, 1, 2, 3c, 5, 6a, Final synthesis) keeps using the main `provider_name`/`model`. When `CRITIC_MODEL` is `None` (the default), all passes use the same provider/model — routing is a no-op. No changes to `_run_pass`, `_run_pass_with_json_retry`, `RunAgentLoop`, or `core/client.py` — this is purely an orchestrator-level routing decision, since every underlying function already accepts `model`/`provider_name` as parameters. Pass 6a intentionally stays on the generator model (revision should reflect the generator's voice/style).
 
 ## 8. Security/permissions model — current state
 

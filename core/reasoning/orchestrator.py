@@ -7,9 +7,14 @@ for factual claims) -> 3c -> 5 (all claims) -> Pass 4 (code) -> D1 -> the
 
 SCOPE OF THIS VERSION: core sequential pipeline only. No ensemble mode
 (single Pass 1 generation, no cross-candidate consistency check), no
-critic-model-routing (every pass uses the same provider/model), no
 filesystem output yet (returns a PipelineRun object; the /output/<run_id>/
 file-writing system is a separate, later piece of work).
+
+ROADMAP §11 (critic-model routing): when config.CRITIC_MODEL is set,
+Pass 3a, 3b, and 6c (which re-runs 3a/3b logic) use the critic
+provider/model instead of the generator's. Every other pass keeps using
+the main provider_name/model. This prevents a model from checking its
+own output for errors with the same blind spots.
 
 ROADMAP §3 (malformed-JSON recovery): JSON-emitting passes are wrapped in
 _run_pass_with_json_retry, which on a parse failure re-enters the SAME
@@ -199,6 +204,11 @@ def run_deep_research_pipeline(
     # and persists a snapshot of the partial run before re-raising.
     run.run_id = create_pipeline_run(user_query)
 
+    # ROADMAP §11: resolve critic provider/model once. When CRITIC_MODEL
+    # is None these fall back to the main provider/model — no-op routing.
+    critic_provider = config.CRITIC_MODEL["provider_name"] if config.CRITIC_MODEL else provider_name
+    critic_model = config.CRITIC_MODEL["model"] if config.CRITIC_MODEL else model
+
     try:
         # --- Pass 0: preliminary plan ---
         run.plan = _parse_json_response(_run_pass_with_json_retry("Pass 0", user_query, model, provider_name, run.trace))
@@ -235,7 +245,7 @@ def run_deep_research_pipeline(
                 f"Deduplicated entities to research (search each ONCE, map results back "
                 f"to every claim referencing it):\n{json.dumps(unique_entities)}"
             )
-            grounding_json = _parse_json_response(_run_pass_with_json_retry("Pass 3a", pass3a_input, model, provider_name, run.trace))
+            grounding_json = _parse_json_response(_run_pass_with_json_retry("Pass 3a", pass3a_input, critic_model, critic_provider, run.trace))
             _apply_grounding(run.claims, grounding_json)
             run.log(f"Pass 3a: grounded {len(unique_entities)} unique entities across {len(factual_claims)} factual claim(s).")
             update_pipeline_run(run.run_id, run)
@@ -244,7 +254,7 @@ def run_deep_research_pipeline(
                 f"Raw response:\n{run.raw_response}\n\n"
                 f"Factual claims with grounding:\n{json.dumps([vars(c) for c in factual_claims])}"
             )
-            critic_json = _parse_json_response(_run_pass_with_json_retry("Pass 3b", pass3b_input, model, provider_name, run.trace))
+            critic_json = _parse_json_response(_run_pass_with_json_retry("Pass 3b", pass3b_input, critic_model, critic_provider, run.trace))
             _apply_critic(run.claims, critic_json)
             run.log("Pass 3b: critique complete for factual claims.")
             update_pipeline_run(run.run_id, run)
@@ -304,7 +314,7 @@ def run_deep_research_pipeline(
 
             # --- Pass 6c: re-validate the revised subset only (batched, reuses Pass 4's code) ---
             pass6c_input = json.dumps([vars(c) for c in flagged])
-            revalidation = _parse_json_response(_run_pass_with_json_retry("Pass 6c", pass6c_input, model, provider_name, run.trace))
+            revalidation = _parse_json_response(_run_pass_with_json_retry("Pass 6c", pass6c_input, critic_model, critic_provider, run.trace))
             _apply_grounding(run.claims, revalidation.get("grounding", []))
             _apply_critic(run.claims, revalidation.get("critic", []))
             run_confidence_tiering(run)  # Pass 4's function again -- code, not a call
