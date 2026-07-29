@@ -5,10 +5,11 @@ Sequences the deep-research pipeline: Pass 0 -> 1 -> 2 -> D0 -> (3a -> 3b
 for factual claims) -> 3c -> 5 (all claims) -> Pass 4 (code) -> D1 -> the
 6a/6c/D2 retry loop -> 6b (template) -> merge -> final synthesis.
 
-SCOPE OF THIS VERSION: core sequential pipeline only. No ensemble mode
-(single Pass 1 generation, no cross-candidate consistency check), no
-filesystem output yet (returns a PipelineRun object; the /output/<run_id>/
-file-writing system is a separate, later piece of work).
+SCOPE OF THIS VERSION: core sequential pipeline with optional ensemble
+mode (ROADMAP §10: N-candidate Pass 1 generation + cross-candidate
+consistency check feeding Pass 4's scoring). No filesystem output yet
+(returns a PipelineRun object; the /output/<run_id>/ file-writing system
+is a separate, later piece of work).
 
 ROADMAP §11 (critic-model routing): when config.CRITIC_MODEL is set,
 Pass 3a, 3b, and 6c (which re-runs 3a/3b logic) use the critic
@@ -55,18 +56,20 @@ FLAGGED_TIERS = {"LOW", "UNVERIFIED"}
 MAX_RETRIES = getattr(config, "MAX_PIPELINE_RETRIES", 2)
 MAX_JSON_RETRIES = getattr(config, "MAX_JSON_RETRIES", 2)
 
-_CLAIM_INPUT_FIELDS = {"id", "text", "type", "entities", "source_span"}
+_CLAIM_INPUT_FIELDS = {"id", "text", "type", "entities", "source_span", "asserted_by_candidates"}
 
 
 # ============================================================================
 # ---- Small helpers ----------------------------------------------------------
 # ============================================================================
 
-def _run_pass(pass_id: str, pass_input: str, model: str, provider_name: str) -> str:
+def _run_pass(pass_id: str, pass_input: str, model: str, provider_name: str,
+              temperature: float | None = None) -> str:
     """One LLM-backed pass. Every actual model call in this file goes
     through this single function."""
     response = RunAgentLoop.run_deep_research_mode(
         pass_input=pass_input, model=model, pass_id=pass_id, provider_name=provider_name,
+        temperature=temperature,
     )
     return response.text
 
@@ -92,6 +95,7 @@ def _run_pass_with_json_retry(
     model: str,
     provider_name: str,
     trace: list[str] | None = None,
+    temperature: float | None = None,
 ) -> str:
     """Runs one JSON-emitting pass and recovers from malformed JSON by
     sending a corrective follow-up into the SAME thread the pass used.
@@ -109,6 +113,7 @@ def _run_pass_with_json_retry(
     """
     response = RunAgentLoop.run_deep_research_mode(
         pass_input=pass_input, model=model, pass_id=pass_id, provider_name=provider_name,
+        temperature=temperature,
     )
     raw_text = response.text
 
@@ -136,6 +141,7 @@ def _run_pass_with_json_retry(
                 system_prompt=system_prompts.passes_prompts[pass_id],
                 model=model,
                 provider_name=provider_name,
+                temperature=temperature,
             )
             raw_text = retry_response.text
 
@@ -196,7 +202,11 @@ def run_deep_research_pipeline(
     user_query: str,
     model: str,
     provider_name: str = DEFAULT_PROVIDER,
+    ensemble_mode: bool | None = None,
+    ensemble_n: int | None = None,
 ) -> PipelineRun:
+    ensemble_mode = config.ENSEMBLE_MODE if ensemble_mode is None else ensemble_mode
+    ensemble_n = config.ENSEMBLE_N if ensemble_n is None else ensemble_n
     run = PipelineRun(user_query=user_query)
 
     # ROADMAP §5 minimal core: create the durable record up front. On a
@@ -215,14 +225,26 @@ def run_deep_research_pipeline(
         run.log(f"Pass 0: plan produced ({len(run.plan.get('key_entities_or_subjects', []))} key entities anticipated).")
         update_pipeline_run(run.run_id, run)
 
-        # --- Pass 1: initial generation (no ensemble mode in this version) ---
+        # --- Pass 1: initial generation (ensemble mode: N candidates) ---
         pass1_input = f"Original query:\n{user_query}\n\nPreliminary plan (loose context, may deviate freely):\n{json.dumps(run.plan)}"
-        run.raw_response = _run_pass("Pass 1", pass1_input, model, provider_name)
-        run.log("Pass 1: initial generation complete.")
+        if ensemble_mode:
+            candidates = [
+                _run_pass("Pass 1", pass1_input, model, provider_name,
+                          temperature=config.ENSEMBLE_TEMPERATURE)
+                for _ in range(ensemble_n)
+            ]
+            run.raw_response = candidates[0]
+            pass2_input = "\n\n".join(
+                f"Candidate {i + 1}:\n{c}" for i, c in enumerate(candidates)
+            )
+            run.log(f"Pass 1: ensemble mode — {ensemble_n} candidates generated.")
+        else:
+            run.raw_response = _run_pass("Pass 1", pass1_input, model, provider_name)
+            pass2_input = f"Response to extract claims from:\n{run.raw_response}"
+            run.log("Pass 1: initial generation complete.")
         update_pipeline_run(run.run_id, run)
 
         # --- Pass 2: claim extraction & classification ---
-        pass2_input = f"Response to extract claims from:\n{run.raw_response}"
         claims_json = _parse_json_response(_run_pass_with_json_retry("Pass 2", pass2_input, model, provider_name, run.trace))
         run.claims = [_claim_from_json(c) for c in claims_json]
         run.log(f"Pass 2: extracted {len(run.claims)} claim(s).")
@@ -283,7 +305,7 @@ def run_deep_research_pipeline(
         update_pipeline_run(run.run_id, run)
 
         # --- Pass 4: confidence tiering (0 LLM calls) ---
-        run_confidence_tiering(run)
+        run_confidence_tiering(run, ensemble_n=ensemble_n if ensemble_mode else 0)
         run.log("Pass 4: confidence tiers assigned (pure code, zero LLM calls).")
         update_pipeline_run(run.run_id, run)
 
@@ -317,7 +339,7 @@ def run_deep_research_pipeline(
             revalidation = _parse_json_response(_run_pass_with_json_retry("Pass 6c", pass6c_input, critic_model, critic_provider, run.trace))
             _apply_grounding(run.claims, revalidation.get("grounding", []))
             _apply_critic(run.claims, revalidation.get("critic", []))
-            run_confidence_tiering(run)  # Pass 4's function again -- code, not a call
+            run_confidence_tiering(run, ensemble_n=ensemble_n if ensemble_mode else 0)  # Pass 4's function again -- code, not a call
 
             still_flagged = [c for c in flagged if c.confidence_tier in FLAGGED_TIERS]
             run.log(f"Pass 6c: {len(flagged) - len(still_flagged)} claim(s) now clean, {len(still_flagged)} still flagged.")

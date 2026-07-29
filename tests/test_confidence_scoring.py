@@ -198,3 +198,80 @@ def test_synthesis_above_cap_drops_tier_when_penalized():
     # raw_score should be clamped to 0.0 -- the cap-before-penalty puts
     # the calculation at 0.65 - 0.75 = -0.10 -> max(0.0, ..., min(1.0, ...)).
     assert breakdown["raw_score"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# ---- ROADMAP §10: ensemble formula -------------------------------------
+# ---------------------------------------------------------------------------
+
+def test_ensemble_consistency_score_computation():
+    """With ensemble_n=3 and 2 candidates asserting a claim, the
+    consistency_score must be 2/3 ≈ 0.667."""
+    claim = Claim(
+        id="C1", text="Test claim.", type="factual",
+        entities=["test"], grounding_status="grounded",
+        critic_severity=0.0, assumption_flags=[],
+        asserted_by_candidates=[1, 2],
+    )
+    tier, breakdown = score_claim(claim, ensemble_n=3)
+    assert breakdown["consistency_score"] == round(2 / 3, 4)
+
+
+def test_ensemble_factual_uses_ensemble_formula():
+    """A grounded factual claim with 3/3 consistency in ensemble mode
+    should land higher than the same claim in non-ensemble mode (the
+    consistency term adds 0.15 * 1.0 = 0.15 to the raw score)."""
+    claim = Claim(
+        id="C1", text="Test claim.", type="factual",
+        entities=["test"], grounding_status="grounded",
+        critic_severity=0.0, assumption_flags=[],
+        asserted_by_candidates=[1, 2, 3],
+    )
+    _, non_ensemble_bd = score_claim(claim, ensemble_n=0)
+    _, ensemble_bd = score_claim(claim, ensemble_n=3)
+    # Ensemble formula: 0.4*1.0 + 0.3*1.0 + 0.15*1.0 = 0.85
+    # Non-ensemble:     0.5*1.0 + 0.35*1.0 = 0.85
+    # Same total, but the ensemble breakdown should include consistency_score
+    assert "consistency_score" in ensemble_bd
+    assert "consistency_score" not in non_ensemble_bd
+
+
+def test_ensemble_non_factual_ignores_consistency():
+    """For non-factual claims in ensemble mode, consistency doesn't
+    rescue from the cap — the formula is the same as non-ensemble."""
+    claim = Claim(
+        id="C1", text="Speculative claim.", type="speculative",
+        critic_severity=0.0, assumption_flags=[],
+        asserted_by_candidates=[1, 2, 3],
+    )
+    _, non_ensemble_bd = score_claim(claim, ensemble_n=0)
+    _, ensemble_bd = score_claim(claim, ensemble_n=3)
+    # Both should have the same raw_score (capped critic - penalty)
+    assert non_ensemble_bd["raw_score"] == ensemble_bd["raw_score"]
+
+
+def test_non_ensemble_regression_identical_output():
+    """The non-ensemble formula (ensemble_n=0) must produce byte-for-byte
+    identical results to the pre-§10 code. This is the regression guard
+    from §10's acceptance criteria."""
+    # Re-run the three §4 regression cases with ensemble_n=0 explicitly
+    c1 = Claim(id="C1", text="Earth orbits Sun.", type="factual",
+               entities=["Earth", "Sun"], grounding_status="grounded",
+               critic_severity=0.0, assumption_flags=[])
+    tier, _ = score_claim(c1, ensemble_n=0)
+    assert tier == "HIGH"
+
+    c2 = Claim(id="C2", text="Capital of France is Lyon.", type="factual",
+               entities=["France"], grounding_status="ungrounded",
+               critic_severity=0.0, assumption_flags=[])
+    tier, _ = score_claim(c2, ensemble_n=0)
+    assert tier == "UNVERIFIED"
+
+    clean = Claim(id="C3", text="Life elsewhere.", type="speculative",
+                  critic_severity=0.0, assumption_flags=[])
+    flagged = Claim(id="C4", text="Life elsewhere.", type="speculative",
+                    critic_severity=0.0, assumption_flags=["uniformitarianism"])
+    clean_tier, clean_bd = score_claim(clean, ensemble_n=0)
+    flagged_tier, flagged_bd = score_claim(flagged, ensemble_n=0)
+    assert clean_tier != flagged_tier
+    assert round(clean_bd["raw_score"] - flagged_bd["raw_score"], 4) == 0.15

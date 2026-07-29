@@ -526,3 +526,81 @@ def test_call_model_google_null_content():
     )
     assert result.text == ""
     assert result.tool_calls == []
+
+
+# ---------------------------------------------------------------------------
+# ---- call_model: temperature threading (ROADMAP §10) ---------------------
+# ---------------------------------------------------------------------------
+
+def test_call_model_passes_temperature_when_provided():
+    """When temperature is explicitly given, it must appear in the API
+    call kwargs for all three providers."""
+    # Anthropic
+    resp = SimpleNamespace(
+        content=[SimpleNamespace(type="text", text="ok")],
+        usage=SimpleNamespace(input_tokens=10, output_tokens=5),
+    )
+    captured = {}
+    def fake_create(**kw):
+        captured.update(kw)
+        return resp
+    client = SimpleNamespace(messages=SimpleNamespace(create=fake_create))
+    call_model(client, "ANTHROPIC", "m", [], "sys", [], temperature=0.7)
+    assert captured["temperature"] == 0.7
+
+    # OpenAI
+    resp2 = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content="ok", tool_calls=None))],
+        usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5),
+    )
+    captured2 = {}
+    def fake_create2(**kw):
+        captured2.update(kw)
+        return resp2
+    client2 = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=fake_create2)))
+    call_model(client2, "OPENAI", "m", [], "sys", [], temperature=0.7)
+    assert captured2["temperature"] == 0.7
+
+    # Google
+    resp3 = _make_google_response(text="ok", usage={"input_tokens": 10, "output_tokens": 5})
+    models3 = _CapturingGoogleModels(resp3)
+    client3 = SimpleNamespace(models=models3)
+    call_model(client3, "GOOGLE", "m", [], "sys", [], temperature=0.7)
+    assert models3.last_call["config"].temperature == 0.7
+
+
+def test_call_model_omits_temperature_when_none():
+    """When temperature is None (default), it must NOT appear in the
+    API call kwargs — each provider uses its own default."""
+    # Anthropic
+    resp = SimpleNamespace(
+        content=[SimpleNamespace(type="text", text="ok")],
+        usage=SimpleNamespace(input_tokens=10, output_tokens=5),
+    )
+    captured = {}
+    def fake_create(**kw):
+        captured.update(kw)
+        return resp
+    client = SimpleNamespace(messages=SimpleNamespace(create=fake_create))
+    call_model(client, "ANTHROPIC", "m", [], "sys", [])
+    assert "temperature" not in captured
+
+    # OpenAI
+    resp2 = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content="ok", tool_calls=None))],
+        usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5),
+    )
+    captured2 = {}
+    def fake_create2(**kw):
+        captured2.update(kw)
+        return resp2
+    client2 = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=fake_create2)))
+    call_model(client2, "OPENAI", "m", [], "sys", [])
+    assert "temperature" not in captured2
+
+    # Google
+    resp3 = _make_google_response(text="ok", usage={"input_tokens": 10, "output_tokens": 5})
+    models3 = _CapturingGoogleModels(resp3)
+    client3 = SimpleNamespace(models=models3)
+    call_model(client3, "GOOGLE", "m", [], "sys", [])
+    assert models3.last_call["config"].temperature is None

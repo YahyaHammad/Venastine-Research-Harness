@@ -219,10 +219,11 @@ def _build_fake_google_module():
             self.parts = parts or []
 
     class _FakeGenerateContentConfig:
-        def __init__(self, system_instruction=None, tools=None, max_output_tokens=None, **kw):
+        def __init__(self, system_instruction=None, tools=None, max_output_tokens=None, temperature=None, **kw):
             self.system_instruction = system_instruction
             self.tools = tools
             self.max_output_tokens = max_output_tokens
+            self.temperature = temperature
 
     types_mod.FunctionDeclaration = _FakeFunctionDeclaration
     types_mod.Tool = _FakeTool

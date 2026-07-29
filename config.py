@@ -22,8 +22,16 @@ MAX_JSON_RETRIES = 2  # max corrective follow-up attempts when a pass returns ma
 MAX_TOKEN_BUDGET = 100_000
 
 # Deferred for now (core sequential pipeline only, per current scope):
-#   ensemble_mode / ensemble_n -- N-candidate Pass 1 generation + cross-candidate
-#     consistency check feeding Pass 4's scoring. Not built yet.
+#   (none remaining -- ensemble_mode/ensemble_n built in ROADMAP §10,
+#    critic_model built in ROADMAP §11)
+
+# --- Ensemble mode (ROADMAP §10) ---
+# Run Pass 1 N times at higher temperature for diversity, then extract
+# the union of claims across candidates with a cross-candidate consistency
+# score feeding Pass 4's formula. Off by default.
+ENSEMBLE_MODE = False
+ENSEMBLE_N = 3
+ENSEMBLE_TEMPERATURE = 1.0
 
 # --- Critic-model routing (ROADMAP §11) ---
 # Route the critic/grounding passes (3a, 3b, 6c) to a different model than

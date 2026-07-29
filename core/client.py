@@ -271,6 +271,7 @@ def call_model(
     messages: list[dict],
     system_prompt: str,
     tool_schemas: list[dict],
+    temperature: Optional[float] = None,
 ) -> ModelResponse:
     """
     One call to the model, regardless of provider. `messages` is the
@@ -282,13 +283,16 @@ def call_model(
     translated_messages = _messages_for_provider(provider_name, messages)
 
     if provider_name == "ANTHROPIC":
-        response = client.messages.create(
+        kwargs = dict(
             model=model,
             max_tokens=config.MAX_TOKENS,
             system=system_prompt,
             messages=translated_messages,
             tools=_tools_for_provider(provider_name, tool_schemas),
         )
+        if temperature is not None:
+            kwargs["temperature"] = temperature
+        response = client.messages.create(**kwargs)
         text = "\n".join(b.text for b in response.content if b.type == "text")
         calls = [
             ToolCallRequest(id=b.id, name=b.name, input=b.input)
@@ -302,14 +306,17 @@ def call_model(
         return ModelResponse(text=text, tool_calls=calls, raw=response, usage=usage)
 
     if provider_name == "GOOGLE":
+        genai_config_kwargs = dict(
+            system_instruction=system_prompt,
+            tools=_tools_for_provider(provider_name, tool_schemas),
+            max_output_tokens=config.MAX_TOKENS,
+        )
+        if temperature is not None:
+            genai_config_kwargs["temperature"] = temperature
         response = client.models.generate_content(
             model=model,
             contents=translated_messages,
-            config=genai_types.GenerateContentConfig(
-                system_instruction=system_prompt,
-                tools=_tools_for_provider(provider_name, tool_schemas),
-                max_output_tokens=config.MAX_TOKENS,
-            ),
+            config=genai_types.GenerateContentConfig(**genai_config_kwargs),
         )
         # response.text raises ValueError when function_call parts are
         # present, so we must iterate parts manually. Guard against
@@ -337,7 +344,7 @@ def call_model(
 
     # OpenAI-compatible path
     full_messages = [{"role": "system", "content": system_prompt}] + translated_messages
-    response = client.chat.completions.create(
+    openai_kwargs = dict(
         model=model,
         messages=full_messages,
         # max_completion_tokens, NOT max_tokens -- max_tokens is deprecated
@@ -347,6 +354,9 @@ def call_model(
         max_completion_tokens=config.MAX_TOKENS,
         tools=_tools_for_provider(provider_name, tool_schemas),
     )
+    if temperature is not None:
+        openai_kwargs["temperature"] = temperature
+    response = client.chat.completions.create(**openai_kwargs)
     choice = response.choices[0].message
     text = choice.content or ""
     calls = [

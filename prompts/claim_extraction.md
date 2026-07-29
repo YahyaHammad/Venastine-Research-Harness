@@ -26,3 +26,7 @@ Respond with ONLY this JSON structure — a flat list, one entry per claim:
 ```
 
 Use sequential zero-padded ids (c001, c002, ...). Extract every distinct claim — don't merge unrelated assertions to save space, and don't split one claim into fragments that aren't independently meaningful.
+
+## When given multiple labeled candidates (ensemble mode)
+
+If the input contains multiple responses labeled "Candidate 1", "Candidate 2", etc. rather than a single response, extract the UNION of distinct claims across all of them. When the same underlying assertion appears in more than one candidate (even if worded differently), merge it into ONE claim entry and add an `"asserted_by_candidates"` field listing every candidate number (1-indexed) that made this assertion. If candidates genuinely disagree on a point, extract them as separate claims, each with its own `asserted_by_candidates` list reflecting only the candidates that actually support that specific version.

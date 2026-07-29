@@ -772,3 +772,91 @@ def test_json_retry_path_calls_continue_conversation_on_malformed_json(mocker):
         assert "ONLY valid JSON" in call["message"], (
             "Corrective message must instruct the model to emit ONLY valid JSON"
         )
+
+
+# ---------------------------------------------------------------------------
+# ---- ROADMAP §10: ensemble mode -----------------------------------------
+# ---------------------------------------------------------------------------
+
+def test_pipeline_ensemble_mode_passes_1_runs_n_times(mocker):
+    """With ensemble_mode=True, ensemble_n=3, Pass 1 must be called
+    exactly 3 times (once per candidate), and Pass 2 must receive
+    the concatenated candidates."""
+    payloads = {
+        "Pass 0": json.dumps({"key_entities_or_subjects": ["x"], "outline": ["p"]}),
+        # 3 candidates for Pass 1
+        "Pass 1": [
+            "Candidate 1 text: claim A and claim B.",
+            "Candidate 2 text: claim A only.",
+            "Candidate 3 text: claim A and claim B.",
+        ],
+        # Pass 2 extracts claims with asserted_by_candidates
+        "Pass 2": json.dumps([
+            {"id": "C1", "text": "Claim A.", "type": "factual",
+             "entities": ["A"], "source_span": "", "asserted_by_candidates": [1, 2, 3]},
+            {"id": "C2", "text": "Claim B.", "type": "factual",
+             "entities": ["B"], "source_span": "", "asserted_by_candidates": [1, 3]},
+        ]),
+        "Pass 3a": json.dumps([
+            {"claim_id": "C1", "sources": [], "status": "grounded"},
+            {"claim_id": "C2", "sources": [], "status": "grounded"},
+        ]),
+        "Pass 3b": json.dumps([
+            {"claim_id": "C1", "fallacies": [], "contradictions": [], "severity": 0.0},
+            {"claim_id": "C2", "fallacies": [], "contradictions": [], "severity": 0.0},
+        ]),
+        "Pass 3c": json.dumps({"coverage_score": 0.9, "gaps": []}),
+        "Pass 5": json.dumps({"per_claim_flags": {}}),
+        "Final synthesis": "Ensemble report.",
+    }
+    call_log: list[str] = []
+    mocker.patch.object(
+        RunAgentLoop, "run_deep_research_mode",
+        side_effect=_build_pass_mock(call_log, payloads),
+    )
+
+    run = run_deep_research_pipeline(
+        user_query="test", model="m", provider_name="ANTHROPIC",
+        ensemble_mode=True, ensemble_n=3,
+    )
+
+    # Pass 1 called exactly 3 times
+    pass1_calls = [p for p in call_log if p == "Pass 1"]
+    assert len(pass1_calls) == 3, f"Expected 3 Pass 1 calls, got {len(pass1_calls)}"
+
+    # C2 asserted by candidates 1 and 3 → length 2
+    c2 = run.claim_by_id("C2")
+    assert c2 is not None
+    assert c2.asserted_by_candidates == [1, 3]
+
+    # Consistency score for C2 = 2/3 ≈ 0.667
+    assert c2.score_breakdown["consistency_score"] == round(2 / 3, 4)
+
+    # C1 asserted by all 3 → consistency_score = 1.0
+    c1 = run.claim_by_id("C1")
+    assert c1.asserted_by_candidates == [1, 2, 3]
+    assert c1.score_breakdown["consistency_score"] == 1.0
+
+
+def test_pipeline_non_ensemble_mode_single_pass_1(mocker):
+    """With ensemble_mode=False (default), Pass 1 runs exactly once
+    and claims have empty asserted_by_candidates."""
+    payloads = _clean_pipeline_payloads()
+    call_log: list[str] = []
+    mocker.patch.object(
+        RunAgentLoop, "run_deep_research_mode",
+        side_effect=_build_pass_mock(call_log, payloads),
+    )
+
+    run = run_deep_research_pipeline(
+        user_query="test", model="m", provider_name="ANTHROPIC",
+        ensemble_mode=False,
+    )
+
+    pass1_calls = [p for p in call_log if p == "Pass 1"]
+    assert len(pass1_calls) == 1
+
+    # No consistency_score in breakdown (non-ensemble)
+    for claim in run.claims:
+        assert "consistency_score" not in claim.score_breakdown
+        assert claim.asserted_by_candidates == []

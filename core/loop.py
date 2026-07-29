@@ -32,6 +32,7 @@ class RunAgentLoop:
         allowed_tools: Optional[list[str]],
         max_steps: int,
         max_total_tokens: Optional[int] = None,
+        temperature: Optional[float] = None,
     ) -> ModelResponse:
         client = api_initialization(provider_name)
         tool_schemas = registry.schemas(allowed_tools)
@@ -41,7 +42,8 @@ class RunAgentLoop:
 
         for _ in range(max_steps):
             response = call_model(
-                client, provider_name, model, memory.messages, system_prompt, tool_schemas
+                client, provider_name, model, memory.messages, system_prompt, tool_schemas,
+                temperature=temperature,
             )
             total_tokens_used += response.usage.get("input_tokens", 0) + response.usage.get("output_tokens", 0)
 
@@ -93,6 +95,7 @@ class RunAgentLoop:
         max_steps: int = config.MAX_ITERATIONS,
         max_total_tokens: int = config.MAX_TOKEN_BUDGET,
         thread_id: Optional[UUID] = None,
+        temperature: Optional[float] = None,
     ) -> ModelResponse:
         """Regular conversation -- full tool set, default system prompt,
         one continuous thread. Pass thread_id to resume an existing
@@ -100,7 +103,8 @@ class RunAgentLoop:
         memory = ConversationMemory(thread_id=thread_id)
         memory.add_user_message(user_goal)
         response = RunAgentLoop._run(
-            memory, DEFAULT_SYSTEM_PROMPT, provider_name, model, None, max_steps, max_total_tokens
+            memory, DEFAULT_SYSTEM_PROMPT, provider_name, model, None, max_steps, max_total_tokens,
+            temperature=temperature,
         )
         response.thread_id = memory.thread_id
         return response
@@ -113,6 +117,7 @@ class RunAgentLoop:
         provider_name: str = DEFAULT_PROVIDER,
         max_steps: int = config.MAX_ITERATIONS,
         max_total_tokens: int = config.MAX_TOKEN_BUDGET,
+        temperature: Optional[float] = None,
     ) -> ModelResponse:
         """
         Runs ONE research pass. `pass_input` is whatever the orchestrator
@@ -125,7 +130,8 @@ class RunAgentLoop:
         memory.add_user_message(pass_input)
         system_prompt = system_prompts.passes_prompts[pass_id]
         response = RunAgentLoop._run(
-            memory, system_prompt, provider_name, model, None, max_steps, max_total_tokens
+            memory, system_prompt, provider_name, model, None, max_steps, max_total_tokens,
+            temperature=temperature,
         )
         response.thread_id = memory.thread_id
         return response
@@ -139,6 +145,7 @@ class RunAgentLoop:
         provider_name: str = DEFAULT_PROVIDER,
         max_steps: int = config.MAX_ITERATIONS,
         max_total_tokens: int = config.MAX_TOKEN_BUDGET,
+        temperature: Optional[float] = None,
     ) -> ModelResponse:
         """
         Sends a follow-up message into an EXISTING conversation thread and
@@ -155,7 +162,8 @@ class RunAgentLoop:
         memory = ConversationMemory(thread_id=thread_id)
         memory.add_user_message(message)
         response = RunAgentLoop._run(
-            memory, system_prompt, provider_name, model, None, max_steps, max_total_tokens
+            memory, system_prompt, provider_name, model, None, max_steps, max_total_tokens,
+            temperature=temperature,
         )
         response.thread_id = thread_id
         return response

@@ -60,6 +60,11 @@ class Claim:
     # Populated by Pass 5 (ALL claims, factual or not).
     assumption_flags: list[str] = field(default_factory=list)
 
+    # Populated by Pass 2 in ensemble mode (ROADMAP §10). Lists the
+    # 1-indexed candidate numbers that independently asserted this claim.
+    # Empty/unused when ensemble mode is off.
+    asserted_by_candidates: list[int] = field(default_factory=list)
+
     # Populated by Pass 4 (pure code, no LLM call) -- see confidence_scoring.py.
     confidence_tier: Optional[ConfidenceTier] = None
     score_breakdown: dict = field(default_factory=dict)
