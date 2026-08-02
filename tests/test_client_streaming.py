@@ -1,0 +1,247 @@
+"""
+test_client_streaming.py
+
+Direct unit tests for core/client.py's call_model_stream() — the three
+provider streaming implementations and the D21 usage-or-raise rule. These
+run the REAL function bodies (unlike the loop tests, which mock
+call_model_stream wholesale), using hand-rolled fake clients passed in as
+the `client` argument. No root-conftest SDK stub changes are needed because
+call_model_stream takes `client` as a parameter.
+
+`supports_stream_usage` is read via core.client.load_provider_data, which we
+monkeypatch per test to control the D21 flag.
+
+Most tests drain the stream via collect_response() — the §13 helper for
+callers that only need the final result — which keeps that helper covered
+(its no-final raise contract has its own test at the bottom).
+"""
+
+from types import SimpleNamespace
+
+import pytest
+
+from core.client import StreamToken, call_model_stream, collect_response
+
+
+# ---------------------------------------------------------------------------
+# ---- Anthropic ------------------------------------------------------------
+# ---------------------------------------------------------------------------
+
+class _FakeAnthropicStream:
+    def __init__(self, texts, final_message):
+        self.text_stream = list(texts)
+        self._final = final_message
+
+    def get_final_message(self):
+        return self._final
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class _FakeAnthropicClient:
+    def __init__(self, texts, final_message):
+        self.messages = SimpleNamespace(
+            stream=lambda **kwargs: _FakeAnthropicStream(texts, final_message)
+        )
+
+
+def test_stream_anthropic_text_and_tool_use(monkeypatch):
+    monkeypatch.setattr("core.client.load_provider_data", lambda: {})
+
+    final_message = SimpleNamespace(
+        content=[
+            SimpleNamespace(type="text", text="Searching now."),
+            SimpleNamespace(type="tool_use", id="t1", name="web_search", input={"query": "x"}),
+        ],
+        usage=SimpleNamespace(input_tokens=11, output_tokens=7),
+    )
+    client = _FakeAnthropicClient(["Searching ", "now."], final_message)
+
+    tokens = list(call_model_stream(
+        client, "ANTHROPIC", "m", [], "sys", [],
+    ))
+
+    # text deltas yielded, then a terminal final_response
+    deltas = [t.text_delta for t in tokens if t.text_delta is not None]
+    assert deltas == ["Searching ", "now."]
+
+    resp = tokens[-1].final_response
+    assert resp.text == "Searching now."
+    assert len(resp.tool_calls) == 1
+    assert resp.tool_calls[0].name == "web_search"
+    assert resp.tool_calls[0].input == {"query": "x"}
+    assert resp.usage == {"input_tokens": 11, "output_tokens": 7}
+
+
+# ---------------------------------------------------------------------------
+# ---- Google ---------------------------------------------------------------
+# ---------------------------------------------------------------------------
+
+class _FakeGoogleModels:
+    def __init__(self, chunks):
+        self._chunks = chunks
+
+    def generate_content_stream(self, *, model, contents, config=None):
+        return iter(self._chunks)
+
+
+class _FakeGoogleClient:
+    def __init__(self, chunks):
+        self.models = _FakeGoogleModels(chunks)
+
+
+def _google_chunk(parts, usage=None):
+    cand = SimpleNamespace(content=SimpleNamespace(parts=parts))
+    return SimpleNamespace(candidates=[cand], usage_metadata=usage)
+
+
+def test_stream_google_text_and_function_call(monkeypatch):
+    monkeypatch.setattr("core.client.load_provider_data", lambda: {})
+
+    fc = SimpleNamespace(id="g1", name="get_time", args={})
+    chunks = [
+        _google_chunk([SimpleNamespace(text="The ", function_call=None)]),
+        _google_chunk([SimpleNamespace(text="time.", function_call=None),
+                       SimpleNamespace(text=None, function_call=fc)]),
+        _google_chunk([], usage=SimpleNamespace(
+            prompt_token_count=21, candidates_token_count=9)),
+    ]
+    client = _FakeGoogleClient(chunks)
+
+    resp = collect_response(call_model_stream(
+        client, "GOOGLE", "m", [], "sys", [],
+    ))
+    assert resp.text == "The time."
+    assert len(resp.tool_calls) == 1
+    assert resp.tool_calls[0].name == "get_time"
+    assert resp.usage == {"input_tokens": 21, "output_tokens": 9}
+
+
+def test_stream_google_missing_id_gets_uuid(monkeypatch):
+    monkeypatch.setattr("core.client.load_provider_data", lambda: {})
+
+    fc = SimpleNamespace(id=None, name="get_time", args={})
+    chunks = [_google_chunk([SimpleNamespace(text=None, function_call=fc)])]
+    client = _FakeGoogleClient(chunks)
+
+    resp = collect_response(call_model_stream(client, "GOOGLE", "m", [], "sys", []))
+    assert resp.tool_calls[0].id  # a UUID was generated, not None
+
+
+def test_stream_google_d21_raises_on_zero_usage_when_flag_true(monkeypatch):
+    monkeypatch.setattr(
+        "core.client.load_provider_data",
+        lambda: {"GOOGLE": {"supports_stream_usage": True}},
+    )
+    # No usage_metadata on any chunk -> usage stays zero -> D21 raise.
+    chunks = [_google_chunk([SimpleNamespace(text="hi", function_call=None)])]
+    client = _FakeGoogleClient(chunks)
+
+    with pytest.raises(RuntimeError, match="without usage"):
+        collect_response(call_model_stream(client, "GOOGLE", "m", [], "sys", []))
+
+
+# ---------------------------------------------------------------------------
+# ---- OpenAI-compatible ----------------------------------------------------
+# ---------------------------------------------------------------------------
+
+class _FakeOpenAICompletions:
+    def __init__(self, chunks):
+        self._chunks = chunks
+        self.last_kwargs = None
+
+    def create(self, **kwargs):
+        self.last_kwargs = kwargs
+        return iter(self._chunks)
+
+
+class _FakeOpenAIClient:
+    def __init__(self, chunks):
+        self.chat = SimpleNamespace(completions=_FakeOpenAICompletions(chunks))
+
+
+def _oai_delta(content=None, tool_calls=None):
+    return SimpleNamespace(content=content, tool_calls=tool_calls)
+
+
+def _oai_chunk(delta=None, usage=None):
+    choices = [SimpleNamespace(delta=delta)] if delta is not None else []
+    return SimpleNamespace(choices=choices, usage=usage)
+
+
+def test_stream_openai_tool_fragment_accumulation(monkeypatch):
+    """name AND arguments are split across deltas with the same index and
+    must be reassembled (regression for the last-write-wins name bug)."""
+    monkeypatch.setattr("core.client.load_provider_data", lambda: {})
+
+    chunks = [
+        _oai_chunk(_oai_delta(tool_calls=[SimpleNamespace(
+            index=0, id="o1",
+            function=SimpleNamespace(name="web_", arguments='{"qu'))])),
+        _oai_chunk(_oai_delta(tool_calls=[SimpleNamespace(
+            index=0, id=None,
+            function=SimpleNamespace(name="search", arguments='ery": "x"}'))])),
+        _oai_chunk(None, usage=SimpleNamespace(prompt_tokens=5, completion_tokens=3)),
+    ]
+    client = _FakeOpenAIClient(chunks)
+
+    resp = collect_response(call_model_stream(client, "OPENAI", "m", [], "sys", []))
+
+    assert len(resp.tool_calls) == 1
+    tc = resp.tool_calls[0]
+    assert tc.id == "o1"
+    assert tc.name == "web_search"          # accumulated, not last-write-wins
+    assert tc.input == {"query": "x"}       # arguments joined
+    assert resp.usage == {"input_tokens": 5, "output_tokens": 3}
+
+
+def test_stream_openai_sends_stream_options_only_when_flag_true(monkeypatch):
+    monkeypatch.setattr(
+        "core.client.load_provider_data",
+        lambda: {"OPENAI": {"supports_stream_usage": True}},
+    )
+    chunks = [_oai_chunk(None, usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1))]
+    client = _FakeOpenAIClient(chunks)
+    collect_response(call_model_stream(client, "OPENAI", "m", [], "sys", []))
+    assert client.chat.completions.last_kwargs.get("stream_options") == {"include_usage": True}
+
+    # Flag absent -> no stream_options (so providers that reject it still work).
+    monkeypatch.setattr("core.client.load_provider_data", lambda: {})
+    client2 = _FakeOpenAIClient([_oai_chunk(_oai_delta(content="x"))])
+    collect_response(call_model_stream(client2, "OPENAI", "m", [], "sys", []))
+    assert "stream_options" not in client2.chat.completions.last_kwargs
+
+
+def test_stream_openai_d21_raises_on_zero_usage_when_flag_true(monkeypatch):
+    monkeypatch.setattr(
+        "core.client.load_provider_data",
+        lambda: {"OPENAI": {"supports_stream_usage": True}},
+    )
+    chunks = [_oai_chunk(_oai_delta(content="hi"))]  # no usage chunk
+    client = _FakeOpenAIClient(chunks)
+
+    with pytest.raises(RuntimeError, match="without usage"):
+        collect_response(call_model_stream(client, "OPENAI", "m", [], "sys", []))
+
+
+def test_stream_openai_no_raise_when_flag_false_and_zero_usage(monkeypatch):
+    monkeypatch.setattr("core.client.load_provider_data", lambda: {})
+    chunks = [_oai_chunk(_oai_delta(content="hi"))]  # no usage chunk
+    client = _FakeOpenAIClient(chunks)
+
+    resp = collect_response(call_model_stream(client, "OPENAI", "m", [], "sys", []))
+    assert resp.usage == {"input_tokens": 0, "output_tokens": 0}
+
+
+def test_collect_response_raises_when_stream_has_no_final():
+    """collect_response() must raise — not return None or a partial
+    result — when the stream completes without a terminal token."""
+    def gen():
+        yield StreamToken(text_delta="partial")
+
+    with pytest.raises(RuntimeError, match="without yielding a final response"):
+        collect_response(gen())

@@ -15,8 +15,17 @@ from uuid import UUID, uuid4
 import pytest
 
 from core.loop import RunAgentLoop
+from core.events import LoopEvent
 from main import _uuid_type, build_parser
 from tests.conftest import make_model_response
+
+
+def _fake_run_generator(response):
+    """Returns a side_effect function that makes a mocked _run() yield
+    a single terminal LoopEvent, matching the generator contract."""
+    def gen(*args, **kwargs):
+        yield LoopEvent(final_response=response, stop_reason=response.stop_reason)
+    return gen
 
 
 # ===========================================================================
@@ -47,7 +56,7 @@ def test_run_agent_conversation_passes_thread_id_to_memory(mocker):
     mocker.patch("core.loop.ConversationMemory", SpyMemory)
 
     canned = make_model_response(text="Hello!", usage={"input_tokens": 10, "output_tokens": 5})
-    mocker.patch.object(RunAgentLoop, "_run", return_value=canned)
+    mocker.patch.object(RunAgentLoop, "_run", side_effect=_fake_run_generator(canned))
 
     response = RunAgentLoop.run_agent_conversation(
         user_goal="Hi",
@@ -81,7 +90,7 @@ def test_run_agent_conversation_without_thread_id_starts_fresh(mocker):
     mocker.patch("core.loop.ConversationMemory", SpyMemory)
 
     canned = make_model_response(text="Hi!", usage={"input_tokens": 10, "output_tokens": 5})
-    mocker.patch.object(RunAgentLoop, "_run", return_value=canned)
+    mocker.patch.object(RunAgentLoop, "_run", side_effect=_fake_run_generator(canned))
 
     RunAgentLoop.run_agent_conversation(user_goal="Hey", model="test-model")
 

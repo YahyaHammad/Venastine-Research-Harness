@@ -2,71 +2,85 @@
   "OPENAI": {
     "API_URL": "https://api.openai.com/v1",
     "API_KEY": "",
-    "is_v1_compatible": true
+    "is_v1_compatible": true,
+    "supports_stream_usage": true
   },
   "DEEPSEEK": {
     "API_URL": "https://api.deepseek.com/v1",
     "API_KEY": "",
-    "is_v1_compatible": true
+    "is_v1_compatible": true,
+    "supports_stream_usage": false
   },
   "GROK": {
     "API_URL": "https://api.x.ai/v1",
     "API_KEY": "",
-    "is_v1_compatible": true
+    "is_v1_compatible": true,
+    "supports_stream_usage": false
   },
   "MISTRAL": {
     "API_URL": "https://api.mistral.ai/v1",
     "API_KEY": "",
-    "is_v1_compatible": true
+    "is_v1_compatible": true,
+    "supports_stream_usage": false
   },
   "GROQ": {
     "API_URL": "https://api.groq.com/openai/v1",
     "API_KEY": "",
-    "is_v1_compatible": true
+    "is_v1_compatible": true,
+    "supports_stream_usage": false
   },
   "TOGETHERAI": {
     "API_URL": "https://api.together.ai/v1",
     "API_KEY": "",
-    "is_v1_compatible": true
+    "is_v1_compatible": true,
+    "supports_stream_usage": false
   },
   "PERPLEXITY": {
     "API_URL": "https://api.perplexity.ai/v1",
     "API_KEY": "",
-    "is_v1_compatible": true
+    "is_v1_compatible": true,
+    "supports_stream_usage": false
   },
   "FIREWORKS": {
     "API_URL": "https://api.fireworks.ai/inference/v1",
     "API_KEY": "",
-    "is_v1_compatible": true
+    "is_v1_compatible": true,
+    "supports_stream_usage": false
   },
   "QWEN": {
     "API_URL": "https://dashscope.aliyuncs.com/compatible-mode/v1",
     "API_KEY": "",
-    "is_v1_compatible": true
+    "is_v1_compatible": true,
+    "supports_stream_usage": false
   },
   "Z.AI": {
     "API_URL": "https://open.bigmodel.cn/api/paas/v4",
     "API_KEY": "",
-    "is_v1_compatible": true
+    "is_v1_compatible": true,
+    "supports_stream_usage": false
   },
   "COHERE": {
     "API_URL": "https://api.cohere.ai/compatibility/v1",
     "API_KEY": "",
-    "is_v1_compatible": true
+    "is_v1_compatible": true,
+    "supports_stream_usage": false
   },
   "OPENROUTER": {
     "API_URL": "https://openrouter.ai/api/v1",
     "API_KEY": "",
-    "is_v1_compatible": true
+    "is_v1_compatible": true,
+    "supports_stream_usage": false
   },
   "ANTHROPIC": {
     "API_URL": "",
     "API_KEY": "",
-    "is_v1_compatible": false
+    "is_v1_compatible": false,
+    "supports_stream_usage": true
   },
   "GOOGLE": {
     "API_URL": "",
     "API_KEY": "",
-    "is_v1_compatible": false
+    "is_v1_compatible": false,
+    "supports_stream_usage": false
   }
 }

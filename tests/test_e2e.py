@@ -20,7 +20,7 @@ import pytest
 from core.client import ToolCallRequest
 from core.reasoning.base import PipelineRun
 from main import run_chat, run_research
-from tests.conftest import make_model_response
+from tests.conftest import make_model_response, make_stream_from_response
 
 
 # ===========================================================================
@@ -68,9 +68,15 @@ def test_chat_mode_e2e_multi_turn_with_tool_use(mocker, capsys, fake_storage):
         text="You're welcome!",
         usage={"input_tokens": 40, "output_tokens": 10},
     )
-    mock_call_model = mocker.patch(
-        "core.loop.call_model",
-        side_effect=[tool_call_response, turn1_answer, turn2_answer],
+    _responses = [tool_call_response, turn1_answer, turn2_answer]
+    _call_idx = {"n": 0}
+    def _fake_stream(*args, **kwargs):
+        resp = _responses[_call_idx["n"]]
+        _call_idx["n"] += 1
+        yield from make_stream_from_response(resp)()
+    mock_call_model_stream = mocker.patch(
+        "core.loop.call_model_stream",
+        side_effect=_fake_stream,
     )
 
     # --- Mock the tool dispatch ---
@@ -106,10 +112,10 @@ def test_chat_mode_e2e_multi_turn_with_tool_use(mocker, capsys, fake_storage):
     assert "Exiting." in out
 
     # --- Verify call counts ---
-    # 3 call_model calls: tool-call response, turn-1 answer, turn-2 answer.
-    assert mock_call_model.call_count == 3, (
-        f"Expected 3 call_model calls (tool + turn1 + turn2), "
-        f"got {mock_call_model.call_count}"
+    # 3 call_model_stream calls: tool-call response, turn-1 answer, turn-2 answer.
+    assert mock_call_model_stream.call_count == 3, (
+        f"Expected 3 call_model_stream calls (tool + turn1 + turn2), "
+        f"got {mock_call_model_stream.call_count}"
     )
 
     # Tool dispatched exactly once (the get_time call in turn 1).
@@ -117,12 +123,12 @@ def test_chat_mode_e2e_multi_turn_with_tool_use(mocker, capsys, fake_storage):
     mock_dispatch.assert_called_once_with("get_time", {})
 
     # --- Verify multi-turn thread resume ---
-    # call_model is called with memory.messages as the 4th positional
+    # call_model_stream is called with memory.messages as the 4th positional
     # arg. Turn 2's call should have MORE messages than turn 1's (the
     # conversation grew: user + assistant(tool_call) + tool_result +
     # assistant(answer) + user("Thanks!")).
-    turn1_messages = mock_call_model.call_args_list[0][0][3]
-    turn2_first_call_messages = mock_call_model.call_args_list[2][0][3]
+    turn1_messages = mock_call_model_stream.call_args_list[0][0][3]
+    turn2_first_call_messages = mock_call_model_stream.call_args_list[2][0][3]
     assert len(turn2_first_call_messages) > len(turn1_messages), (
         f"Turn 2 should have more messages than turn 1 "
         f"(multi-turn resume). Turn 1: {len(turn1_messages)}, "

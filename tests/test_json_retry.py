@@ -45,7 +45,7 @@ import pytest
 
 import config
 from core.loop import RunAgentLoop
-from tests.conftest import make_model_response
+from tests.conftest import make_model_response, make_stream_from_response
 
 from uuid import uuid4
 
@@ -286,7 +286,7 @@ def test_resumed_history_contains_failed_assistant_turn(mocker):
 
     call_log = []
 
-    def fake_call_model(*args, **kwargs):
+    def fake_call_model_stream(*args, **kwargs):
         # Snapshot the messages list -- core/loop._run() passes the SAME
         # memory.messages list by reference every iteration, so if we
         # don't copy we'd see later-mutated state when we inspect the
@@ -294,11 +294,12 @@ def test_resumed_history_contains_failed_assistant_turn(mocker):
         call_log.append(list(args[3]))  # messages arg is 4th positional
         if len(call_log) == 1:
             # First call from run_deep_research_mode: return malformed JSON.
-            return make_model_response(text=malformed_text)
-        # Second call from continue_conversation -> _run: return valid JSON.
-        return make_model_response(text=valid_text)
+            yield from make_stream_from_response(make_model_response(text=malformed_text))()
+        else:
+            # Second call from continue_conversation -> _run: return valid JSON.
+            yield from make_stream_from_response(make_model_response(text=valid_text))()
 
-    mocker.patch("core.loop.call_model", side_effect=fake_call_model)
+    mocker.patch("core.loop.call_model_stream", side_effect=fake_call_model_stream)
 
     # Patch registry.schemas to return [] (no tools needed).
     from tools.registry import registry

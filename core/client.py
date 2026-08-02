@@ -76,6 +76,16 @@ class ModelResponse:
                                       # sets this -- it has no thread concept.
 
 
+@dataclass
+class StreamToken:
+    """One token-level event yielded by call_model_stream(). Exactly one
+    field is populated per yield: text_delta for incremental text, or
+    final_response for the terminal ModelResponse (with accumulated tool
+    calls and usage)."""
+    text_delta: Optional[str] = None
+    final_response: Optional[ModelResponse] = None
+
+
 # ============================================================================
 # ---- Tool schema translation ------------------------------------------------
 # ============================================================================
@@ -369,3 +379,212 @@ def call_model(
         "output_tokens": getattr(usage_obj, "completion_tokens", 0) if usage_obj else 0,
     }
     return ModelResponse(text=text, tool_calls=calls, raw=response, usage=usage)
+
+
+# ============================================================================
+# ---- Streaming call + helpers -----------------------------------------------
+# ============================================================================
+
+def collect_response(gen) -> ModelResponse:
+    """Drain a call_model_stream() generator into a single ModelResponse.
+    For callers that need the streaming path internally but only care
+    about the final result (analogous to run_to_completion for _run())."""
+    final = None
+    for token in gen:
+        if token.final_response is not None:
+            final = token.final_response
+    if final is None:
+        raise RuntimeError(
+            "call_model_stream completed without yielding a final response"
+        )
+    return final
+
+
+def call_model_stream(
+    client,
+    provider_name: str,
+    model: str,
+    messages: list[dict],
+    system_prompt: str,
+    tool_schemas: list[dict],
+    temperature: Optional[float] = None,
+):
+    """Generator sibling to call_model(). Yields StreamToken events:
+    text_delta for incremental text, final_response for the terminal
+    ModelResponse with accumulated tool calls and usage.
+
+    Three provider implementations — Anthropic typed events, Google
+    chunked candidates, OpenAI-compatible index-accumulated tool-call
+    fragments. Each must produce a ModelResponse identical to what
+    call_model() produces for the same inputs.
+
+    D21 (usage-or-raise): if the provider is marked as supporting stream
+    usage but the stream completes with zero usage, raise rather than
+    silently reporting zero (which disables budget enforcement and §21's
+    compaction trigger).
+    """
+    translated_messages = _messages_for_provider(provider_name, messages)
+
+    # Read once so every branch applies the same D21 usage-or-raise rule.
+    # Anthropic always reports usage on its final message, so the flag only
+    # gates the Google and OpenAI-compatible branches below.
+    provider_data = load_provider_data()
+    supports_stream_usage = provider_data.get(provider_name, {}).get(
+        "supports_stream_usage", False
+    )
+
+    if provider_name == "ANTHROPIC":
+        stream_kwargs = dict(
+            model=model,
+            max_tokens=config.MAX_TOKENS,
+            system=system_prompt,
+            messages=translated_messages,
+            tools=_tools_for_provider(provider_name, tool_schemas),
+        )
+        if temperature is not None:
+            stream_kwargs["temperature"] = temperature
+
+        with client.messages.stream(**stream_kwargs) as stream:
+            for text in stream.text_stream:
+                yield StreamToken(text_delta=text)
+            final_msg = stream.get_final_message()
+            text = "\n".join(
+                b.text for b in final_msg.content if b.type == "text"
+            )
+            calls = [
+                ToolCallRequest(id=b.id, name=b.name, input=b.input)
+                for b in final_msg.content if b.type == "tool_use"
+            ]
+            usage_obj = getattr(final_msg, "usage", None)
+            usage = {
+                "input_tokens": getattr(usage_obj, "input_tokens", 0) if usage_obj else 0,
+                "output_tokens": getattr(usage_obj, "output_tokens", 0) if usage_obj else 0,
+            }
+        yield StreamToken(final_response=ModelResponse(
+            text=text, tool_calls=calls, usage=usage,
+        ))
+        return
+
+    if provider_name == "GOOGLE":
+        genai_config_kwargs = dict(
+            system_instruction=system_prompt,
+            tools=_tools_for_provider(provider_name, tool_schemas),
+            max_output_tokens=config.MAX_TOKENS,
+        )
+        if temperature is not None:
+            genai_config_kwargs["temperature"] = temperature
+
+        text_parts = []
+        calls = []
+        usage = {"input_tokens": 0, "output_tokens": 0}
+
+        for chunk in client.models.generate_content_stream(
+            model=model,
+            contents=translated_messages,
+            config=genai_types.GenerateContentConfig(**genai_config_kwargs),
+        ):
+            candidate = chunk.candidates[0] if chunk.candidates else None
+            content = candidate.content if candidate else None
+            parts = content.parts if content else []
+            for p in parts:
+                if p.text is not None:
+                    text_parts.append(p.text)
+                    yield StreamToken(text_delta=p.text)
+                if p.function_call is not None:
+                    fc = p.function_call
+                    calls.append(ToolCallRequest(
+                        id=fc.id or str(uuid4()),
+                        name=fc.name,
+                        input=fc.args or {},
+                    ))
+            usage_meta = getattr(chunk, "usage_metadata", None)
+            if usage_meta:
+                usage["input_tokens"] = getattr(usage_meta, "prompt_token_count", 0)
+                usage["output_tokens"] = getattr(usage_meta, "candidates_token_count", 0)
+
+        # D21 parity with the OpenAI branch: raise if marked as supporting
+        # stream usage but the stream completed with zero usage.
+        if supports_stream_usage and usage["input_tokens"] == 0 and usage["output_tokens"] == 0:
+            raise RuntimeError(
+                f"Streaming call to {provider_name} completed without usage "
+                f"data despite supports_stream_usage=True. The stream may "
+                f"have been interrupted before the final usage chunk."
+            )
+
+        yield StreamToken(final_response=ModelResponse(
+            text="".join(text_parts), tool_calls=calls, usage=usage,
+        ))
+        return
+
+    # OpenAI-compatible path (supports_stream_usage already read above)
+    full_messages = [{"role": "system", "content": system_prompt}] + translated_messages
+    openai_kwargs = dict(
+        model=model,
+        messages=full_messages,
+        max_completion_tokens=config.MAX_TOKENS,
+        tools=_tools_for_provider(provider_name, tool_schemas),
+        stream=True,
+    )
+    if temperature is not None:
+        openai_kwargs["temperature"] = temperature
+    if supports_stream_usage:
+        openai_kwargs["stream_options"] = {"include_usage": True}
+
+    text_parts = []
+    tool_fragments: dict[int, dict] = {}
+    usage = {"input_tokens": 0, "output_tokens": 0}
+
+    for chunk in client.chat.completions.create(**openai_kwargs):
+        if chunk.choices:
+            delta = chunk.choices[0].delta
+            if delta.content:
+                text_parts.append(delta.content)
+                yield StreamToken(text_delta=delta.content)
+            if delta.tool_calls:
+                for tc_delta in delta.tool_calls:
+                    idx = tc_delta.index
+                    if idx not in tool_fragments:
+                        tool_fragments[idx] = {
+                            "id": "", "name_parts": [], "arguments_parts": [],
+                        }
+                    if tc_delta.id:
+                        tool_fragments[idx]["id"] = tc_delta.id
+                    # Accumulate name like arguments: some v1-compatible
+                    # providers split function.name across deltas, so a
+                    # last-write-wins assignment would corrupt the name.
+                    if tc_delta.function and tc_delta.function.name:
+                        tool_fragments[idx]["name_parts"].append(
+                            tc_delta.function.name
+                        )
+                    if tc_delta.function and tc_delta.function.arguments:
+                        tool_fragments[idx]["arguments_parts"].append(
+                            tc_delta.function.arguments
+                        )
+        usage_obj = getattr(chunk, "usage", None)
+        if usage_obj:
+            usage["input_tokens"] = getattr(usage_obj, "prompt_tokens", 0)
+            usage["output_tokens"] = getattr(usage_obj, "completion_tokens", 0)
+
+    # D21: if the provider is marked as supporting stream usage but we
+    # got zero usage, the stream was likely interrupted before the final
+    # usage chunk arrived. Raise rather than silently reporting zero.
+    if supports_stream_usage and usage["input_tokens"] == 0 and usage["output_tokens"] == 0:
+        raise RuntimeError(
+            f"Streaming call to {provider_name} completed without usage "
+            f"data despite supports_stream_usage=True. The stream may "
+            f"have been interrupted before the final usage chunk."
+        )
+
+    calls = []
+    for idx in sorted(tool_fragments):
+        frag = tool_fragments[idx]
+        raw_args = "".join(frag["arguments_parts"])
+        calls.append(ToolCallRequest(
+            id=frag["id"],
+            name="".join(frag["name_parts"]),
+            input=json.loads(raw_args) if raw_args else {},
+        ))
+
+    yield StreamToken(final_response=ModelResponse(
+        text="".join(text_parts), tool_calls=calls, usage=usage,
+    ))

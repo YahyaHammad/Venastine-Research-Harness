@@ -21,6 +21,7 @@ def save_credentials(
     api_key: str,
     api_url: str = "",
     is_v1_compatible: bool = True,
+    supports_stream_usage: bool = False,
 ) -> None:
     provider_data = load_provider_data()
 
@@ -29,11 +30,13 @@ def save_credentials(
         if api_url:
             provider_data[provider_name]["API_URL"] = api_url
         provider_data[provider_name]["is_v1_compatible"] = is_v1_compatible
+        provider_data[provider_name]["supports_stream_usage"] = supports_stream_usage
     else:
         provider_data[provider_name] = {
             "API_KEY": api_key,
             "API_URL": api_url,
             "is_v1_compatible": is_v1_compatible,
+            "supports_stream_usage": supports_stream_usage,
         }
 
     _write_provider_data(provider_data)

@@ -15,7 +15,7 @@ import types
 
 import pytest
 
-from core.client import ModelResponse, ToolCallRequest
+from core.client import ModelResponse, ToolCallRequest, StreamToken
 
 
 # ---------------------------------------------------------------------------
@@ -47,6 +47,38 @@ def make_model_response(
 def make_response():
     """Fixture form so tests can use it without importing the helper."""
     return make_model_response
+
+
+def make_stream_from_response(response: ModelResponse):
+    """Returns a side_effect function for mocking core.loop.call_model_stream.
+
+    Each call to the mock produces a fresh generator that yields
+    StreamToken events equivalent to what call_model_stream would yield
+    for this ModelResponse: one text_delta (if text is non-empty), then
+    one final_response.
+    """
+    def _side_effect(*args, **kwargs):
+        if response.text:
+            yield StreamToken(text_delta=response.text)
+        yield StreamToken(final_response=response)
+    return _side_effect
+
+
+def make_stream_sequence(*responses: ModelResponse):
+    """Return a side_effect function for mocking core.loop.call_model_stream
+    across multiple turns.
+
+    Successive calls to the mock yield streams built from each response in
+    order; calls beyond the last response repeat the final one (matching
+    the inline two-turn fakes this helper replaces). The call count is
+    exposed as ``fake.calls`` for assertions on how many model turns ran.
+    """
+    def _side_effect(*args, **kwargs):
+        idx = min(_side_effect.calls, len(responses) - 1)
+        _side_effect.calls += 1
+        yield from make_stream_from_response(responses[idx])()
+    _side_effect.calls = 0
+    return _side_effect
 
 
 # ---------------------------------------------------------------------------

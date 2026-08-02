@@ -57,17 +57,27 @@ responses by the new retry factor.
 
 ## 2. `test_loop_stop_conditions.py` & `test_loop_tool_dispatch.py`
 
-These mock `core.loop.call_model` and `core.loop.registry.dispatch`
+These mock `core.loop.call_model_stream` and `core.loop.registry.dispatch`
 directly, both as top-level references inside `core/loop.py`.
+
+**§13 generator conversion:** `_run()` is now a generator yielding
+`LoopEvent` objects. Tests wrap it in `run_to_completion()` and mock
+`core.loop.call_model_stream` (via `make_stream_from_response` from
+`tests/conftest.py`) instead of `core.loop.call_model`. The mock target
+changed from `core.loop.call_model` to `core.loop.call_model_stream`.
+Any test that still patches `core.loop.call_model` will fail with
+`AttributeError: module 'core.loop' has no attribute 'call_model'`.
 
 ### What breaks these
 
 | Change | Symptom | Fix |
 |---|---|---|
-| Rename or move `call_model` (e.g. refactor into `core/client.call_model` directly, pluralize the import in `core/loop.py`) | The mock target `core.loop.call_model` no longer exists; tests pass through to real `call_model` and fail (no fake client) | Update the mock target path in both files (`mocker.patch("core.loop.call_model", ...)` → `mocker.patch("core.loop.call_model", ...)` with the new import path) |
-| Add a new parameter to `_run()` (e.g. `temperature` per ROADMAP §10) | `TypeError: _run() got an unexpected keyword argument 'temperature'` only if tests pass it; tests today use `_build_run_kwargs` so they only pass what's listed | If `_run` grows a required positional parameter (unlikely), update `_build_run_kwargs` and `_FakeMemory` signature |
+| Rename or move `call_model_stream` (e.g. refactor into a different module) | The mock target `core.loop.call_model_stream` no longer exists; tests pass through to real `call_model_stream` and fail (no fake client) | Update the mock target path in both files |
+| Add a new parameter to `_run()` (e.g. `tool_context` per ROADMAP §15) | `TypeError: _run() got an unexpected keyword argument` only if tests pass it; tests today use `_build_run_kwargs` / `_make_run_kwargs` so they only pass what's listed | If `_run` grows a required positional parameter (unlikely), update the kwargs builders |
 | Change the `stop_reason` strings (e.g. "max_steps_reached" → "MAX_STEPS") | Direct `assert response.stop_reason == "complete"` fails | Update the string literals in the assert statements; these strings are deliberately stable per ARCHITECTURE.md §4.8 so changes here are intentional and warrant a ROADMAP update too |
 | Change `_run`'s tool_gate behavior to skip the `error: not available in this context` early branch | `test_disallowed_tool_name_skips_dispatch_and_feeds_error_result` still passes IF the new behavior also avoids dispatching, fails if it dispatches | Audit the new behavior; either update the assertion expectations OR flag the change as a regression of the "tools not allowed in this context" guarantee |
+| Remove `run_to_completion()` or change its import path | Tests that call `run_to_completion(RunAgentLoop._run(...))` fail with ImportError | Update the import; `run_to_completion` lives in `core/loop.py` per §13's decision |
+| Change `LoopEvent` field names | Tests that inspect events directly (test_streaming_loop.py) fail on attribute access | Update field names in both production and test code |
 
 ---
 

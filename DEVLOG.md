@@ -783,3 +783,52 @@ ROADMAP §8's acceptance criterion: *"a tool result containing a string matching
 
 - `tests/test_policy_enforcement.py` (NEW): 22 tests — redact_secrets (9), is_domain_blocked (6), check_output_policy (6), registry integration (1).
 - Full suite: 197 tests.
+
+## 13. Streaming refactor — generator `_run()` + `call_model_stream()`
+
+### 13.1 What we built
+
+Converted `RunAgentLoop._run()` from a synchronous function returning one `ModelResponse` into a **generator** yielding `LoopEvent` objects (new `core/events.py`), so the TUI (§16), subagents (§18), and MCP (§17) can observe token deltas, tool calls, and permission prompts in real time. Added `call_model_stream()` to `core/client.py` (three provider streaming implementations), `collect_response()` (drain a stream to one `ModelResponse`), `StreamToken`, and `run_to_completion()` in `core/loop.py` so the three public wrappers stay synchronous and every existing caller still gets a `ModelResponse`.
+
+### 13.2 Questions we asked & your answers
+
+The §13 plan was validated by a high-effort self-review (9 finder agents + probe-based verifier + 2 reverse-audit rounds) before implementation was finalized. The review surfaced real defects that were fixed in the same pass rather than deferred — see §13.5. No open design questions remained; the two judgment calls (conservative `supports_stream_usage` defaults, and `approval_needed` as the single approval source) are recorded below.
+
+### 13.3 What we followed verbatim from ROADMAP_v2 §13
+
+- `LoopEvent` dataclass with the six fields and no `error` variant (exceptions propagate naturally; `orchestrator.py`'s failure-path persistence depends on a real exception). ✓
+- `_run()` yields terminal `LoopEvent(final_response=..., stop_reason=...)` only on an actual stop condition; the loop does NOT terminate after each iteration. ✓
+- D20 persist-before-branch preserved in the generator and regression-tested against the persisted `MessageLog` (AC6). ✓
+- All three public wrappers (`run_agent_conversation`, `run_deep_research_mode`, `continue_conversation`) drain via `run_to_completion()`. ✓
+- `permission_channel: queue.Queue | None` parameter; headless (None) denies approval-requiring tools by default. ✓
+- D21 usage-or-raise for providers marked `supports_stream_usage`. ✓
+
+### 13.4 What we deviated from §13, and why
+
+- **`run_to_completion()` lives in `core/loop.py`, not a separate module** — it is tightly coupled to `_run()`'s generator shape; a separate module risked a circular import for no benefit.
+- **Approval is decided by `ToolRegistry.approval_needed()`, not by `requires_approval()` alone in the loop.** The review found the loop pre-checking `requires_approval()` (config boolean) while `dispatch()` uses `spec.approval_check()` (path/command-dependent) — they diverge for `read/write/edit/shell`, silently denying an out-of-workspace path without ever yielding `permission_request`. `approval_needed()` is now the single source both call. When the user approves via the channel, `_run()` passes `approval_callback=lambda n, p: True` so `dispatch()`'s internal re-check doesn't deny an already-approved tool.
+
+### 13.5 Review-driven fixes (found by the §13 self-review, fixed in this pass)
+
+| Finding | Fix |
+|---|---|
+| Approval divergence (`requires_approval` vs `approval_check`) silently denied path-dependent tools | `ToolRegistry.approval_needed()` single source; loop + dispatch both use it |
+| `test_streaming_loop.py` hit the real credential loader → failed in CI / fresh clone (providers.json gitignored) | autouse `api_initialization` patch in the test module |
+| GOOGLE branch lacked D21 usage-or-raise and streaming-usage opt-in | `supports_stream_usage` read once at top; D21 raise added to the Google branch |
+| Tool-call fragment reassembly overwrote `function.name` (last-write-wins) | accumulate `name_parts` like `arguments` |
+| `providers.json.example` marked 8 providers `supports_stream_usage: true` unverified (a wrong `true` hard-breaks a provider) | conservative defaults: only OPENAI/ANTHROPIC `true` |
+| `save_credentials()` dropped the flag on write | now persists `supports_stream_usage` |
+| `_run()` had no `response is None` guard after the stream loop | raise a clear `RuntimeError` (parity with `collect_response`) |
+| `test_..._ToolCallDenied_caught...` was vacuous (shell denied before dispatch) | now exercises the catch as a side-effect of the `approval_needed` fix (inert `ls` reaches dispatch) |
+| No dedicated `permission_channel` test | added 2 tests (approve → dispatch with callback; headless → denial) |
+
+The two remaining Suggestion-level findings were also addressed afterwards: the copy-pasted two-turn mock factories in `test_loop_tool_dispatch.py` (and the similar ones in `test_streaming_loop.py`) were consolidated into `tests/conftest.py::make_stream_sequence()`, and `collect_response()` — kept, since it is a ROADMAP deliverable for future streaming consumers — now has real callers: `test_client_streaming.py` drains most streams through it and tests its no-final raise contract. See §13.6.
+
+### 13.6 Test changes
+
+- `tests/test_streaming_loop.py` (NEW): 7 tests — AC2 event ordering, AC5 exception propagation, AC6 persistence ×3, permission_channel approve/deny ×2.
+- `tests/test_client_streaming.py` (NEW): 9 tests — direct `call_model_stream()` coverage for all three provider streaming paths, D21 usage-or-raise (Google + OpenAI), OpenAI tool-call name/arguments fragment accumulation, `stream_options` gating, and `collect_response()`'s no-final raise contract. Most tests drain via `collect_response()`, giving the §13 helper real callers. Uses hand-rolled fake clients passed as the `client` argument (no root-conftest stub changes).
+- `tests/test_loop_stop_conditions.py`, `test_loop_tool_dispatch.py`, `test_cli.py`, `test_e2e.py`, `test_json_retry.py`: migrated `core.loop.call_model` mocks to `core.loop.call_model_stream` and wrapped `_run()` in `run_to_completion()`.
+- `tests/conftest.py`: added `make_stream_from_response()` and `make_stream_sequence()` helpers.
+- `tests/BREAKING_CHANGES.md` §2 updated for the generator conversion.
+- Full suite: 234 tests.

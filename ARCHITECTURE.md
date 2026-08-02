@@ -46,8 +46,8 @@ Venastine Research Harness/
 ├── pytest.ini                      # testpaths=tests, --strict-markers
 ├── DEVLOG.md                       # implementation notes for built ROADMAP sections -- see §0
 │
-├── tests/                          # 205 tests, all offline, ~1.7s (first run ~7s for matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
-│   ├── conftest.py                 # fixtures: make_model_response, FakeStorage, ...
+├── tests/                          # 234 tests, all offline, ~1.7s (first run ~7s for matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
+│   ├── conftest.py                 # fixtures: make_model_response, make_stream_from_response, make_stream_sequence, FakeStorage, ...
 │   ├── BREAKING_CHANGES.md         # what-breaks-it / symptom / fix per area
 │   ├── test_cli.py                 # 7 tests -- ROADMAP §1 thread_id passthrough + UUID validation + parser defaults
 │   ├── test_e2e.py                 # 5 tests -- e2e chat (multi-turn + tool use), research mode, error handling ×3
@@ -55,7 +55,9 @@ Venastine Research Harness/
 │   ├── test_output_writer.py       # 6 tests -- ROADMAP §12 artifact file layout, contents, chart PNG, None guard, tier counts
 │   ├── test_confidence_scoring.py  # 5 tests (3 ROADMAP verbatim regressions)
 │   ├── test_client_translation.py  # 20 tests -- all three provider translation branches + batching + Google call_model
+│   ├── test_client_streaming.py    # 8 tests -- ROADMAP §13 direct call_model_stream coverage (3 providers + D21 + fragment accumulation)
 │   ├── test_loop_stop_conditions.py# 3 tests (ROADMAP verbatim)
+│   ├── test_streaming_loop.py      # 7 tests -- ROADMAP §13 generator event ordering, exception propagation, D20 persistence, permission_channel
 │   ├── test_orchestrator.py        # 9 tests -- full pipeline mocked + JSON-retry + §5 failure/success/acceptance
 │   ├── test_registry_permissions.py# 8 tests -- allow/deny/approval
 │   ├── test_math_tools.py          # 14 tests -- symbolic equivalence + injection regression
@@ -69,8 +71,9 @@ Venastine Research Harness/
 │   └── test_critic_routing.py      # 2 tests -- ROADMAP §11 critic-model routing (3a/3b/6c to critic, rest to main)
 │
 ├── core/
-│   ├── client.py                  # ONE model call, normalized across providers; provider-specific wire formats live ONLY here
-│   ├── loop.py                    # RunAgentLoop -- the shared call-dispatch-repeat control flow + continue_conversation
+│   ├── client.py                  # ONE model call, normalized across providers; provider-specific wire formats live ONLY here. §13 adds call_model_stream() (3 streaming impls) + collect_response() + StreamToken
+│   ├── loop.py                    # RunAgentLoop -- §13: _run() is a GENERATOR yielding LoopEvent; run_to_completion() drains it for the 3 public wrappers; permission_channel approval bridge
+│   ├── events.py                  # §13: LoopEvent dataclass -- the single event type _run() yields (token_delta / tool_call_start / tool_result / permission_request / final_response / stop_reason)
 │   ├── memory.py                  # ConversationMemory -- in-run message list, provider-NEUTRAL shape, backed by storage.py + resume-shape fix
 │   │
 │   └── reasoning/
@@ -194,7 +197,7 @@ This section exists specifically because earlier drafts of this project put pers
 
 ### 4.7 `core/client.py` — ONE model call, and the ONLY place provider formats exist
 
-**Belongs here:** `api_initialization()`, `list_models()`, `select_model()`, `call_model()`, `ModelResponse`/`ToolCallRequest` (the normalized shapes), and the two translation functions `_tools_for_provider()` / `_messages_for_provider()`.
+**Belongs here:** `api_initialization()`, `list_models()`, `select_model()`, `call_model()`, `ModelResponse`/`ToolCallRequest` (the normalized shapes), and the two translation functions `_tools_for_provider()` / `_messages_for_provider()`. ROADMAP §13 adds `call_model_stream()` (a generator sibling to `call_model()` with three provider streaming implementations), `collect_response()` (drains a stream into one `ModelResponse`), and the `StreamToken` type (`text_delta` / `final_response`).
 
 **Does NOT belong here:** any looping/retry logic, any tool dispatch, any conversation-level bookkeeping. This file answers exactly one question — "given neutral messages, a system prompt, and tool schemas, make one call and hand back a normalized response" — and nothing else.
 
@@ -210,9 +213,11 @@ This section exists specifically because earlier drafts of this project put pers
 
 **Google Gemini (ROADMAP §9):** fully implemented. `_tools_for_provider` wraps schemas in `Tool(function_declarations=[FunctionDeclaration(...)])` (raw `input_schema` dict auto-converts to `types.Schema`). `_messages_for_provider` builds a `{tool_call_id: name}` lookup from assistant messages for `FunctionResponse.name`. `call_model` calls `client.models.generate_content(...)` with `GenerateContentConfig(system_instruction=..., tools=...)` and parses parts manually.
 
+**Streaming (ROADMAP §13):** `call_model_stream()` is a generator yielding `StreamToken(text_delta=...)` for incremental text and a terminal `StreamToken(final_response=ModelResponse)`. Three implementations mirror `call_model()`'s branches and must produce a `ModelResponse` identical to the non-streaming path for the same inputs: Anthropic iterates `client.messages.stream(...).text_stream` then `get_final_message()`; Google iterates `generate_content_stream(...)` chunks (accumulating text + function_call parts, usage from the last chunk's `usage_metadata`); OpenAI-compatible iterates `chat.completions.create(..., stream=True)` chunks, accumulating tool-call `arguments` AND `name` fragments by `index` (both are split across deltas on some providers — a last-write-wins `name` corrupts the tool name). **D21 usage-or-raise:** `supports_stream_usage` is read once from `providers.json` at the top; the Google and OpenAI branches raise if the flag is true but the stream completes with zero usage (a silently-zero budget would disable `max_total_tokens` and §21's compaction trigger). Anthropic always reports usage on its final message, so the flag doesn't gate it. `collect_response()` drains a stream for callers that only need the final result.
+
 ### 4.8 `core/loop.py` — the shared call-dispatch-repeat control flow
 
-**Belongs here:** `RunAgentLoop` with one internal `_run()` method that THREE public entry points call — `run_agent_conversation()` (regular chat), `run_deep_research_mode()` (one research pass, fresh thread), and `continue_conversation()` (ROADMAP §3 — re-enter an existing thread with a follow-up user message). None of the entry points reimplement the loop; each configures `_run()` differently (system prompt, thread lifetime) and lets it do the actual work.
+**Belongs here:** `RunAgentLoop` with one internal `_run()` method that THREE public entry points call — `run_agent_conversation()` (regular chat), `run_deep_research_mode()` (one research pass, fresh thread), and `continue_conversation()` (ROADMAP §3 — re-enter an existing thread with a follow-up user message). None of the entry points reimplement the loop; each configures `_run()` differently (system prompt, thread lifetime) and lets it do the actual work. ROADMAP §13 makes `_run()` a **generator** yielding `LoopEvent` objects (from `core/events.py`); the three public wrappers stay synchronous by draining it through `run_to_completion()`, so every existing caller still gets a `ModelResponse`. `_run()` also accepts an optional `permission_channel` (a `queue.Queue`) for the TUI approval flow.
 
 **Does NOT belong here:** anything provider-specific (that's `core/client.py`), anything about which tools exist or are allowed (that's `tools/registry.py` + `security/permissions.py`), anything about claim-level pipeline state (that's `core/reasoning/`).
 
@@ -223,7 +228,9 @@ This section exists specifically because earlier drafts of this project put pers
 
 `ModelResponse.stop_reason` is set by `_run()`, never by `call_model()` — `call_model()` doesn't know about steps or budgets, only about making one call.
 
-**Always-persist behavior (ROADMAP §3 fix):** `memory.add_assistant_message(response)` is called immediately after `call_model()` returns and the token count is updated, BEFORE any branching on stop conditions. Earlier drafts called `add_assistant_message` only on the tool-calling path, which silently dropped plain-text final answers (and any response cut short by the budget-exceeded exit) from the persisted thread — a thread resumed via `ConversationMemory(thread_id=...)` would be missing its last assistant turn. The fix closes that bug AND unblocks ROADMAP §3's JSON-retry path, which relies on the failed assistant output being present in the resumed thread's history so `continue_conversation` can show the model its own prior malformed output.
+**Always-persist behavior (ROADMAP §3 fix):** `memory.add_assistant_message(response)` is called immediately after `call_model()` returns and the token count is updated, BEFORE any branching on stop conditions. Earlier drafts called `add_assistant_message` only on the tool-calling path, which silently dropped plain-text final answers (and any response cut short by the budget-exceeded exit) from the persisted thread — a thread resumed via `ConversationMemory(thread_id=...)` would be missing its last assistant turn. The fix closes that bug AND unblocks ROADMAP §3's JSON-retry path, which relies on the failed assistant output being present in the resumed thread's history so `continue_conversation` can show the model its own prior malformed output. ROADMAP §13 preserved this ordering in the generator (`_run()` calls `add_assistant_message` right after the stream completes, before any stop-condition `yield`/`return`) and promoted it to decision D20 with a regression test (`test_streaming_loop.py` AC6) that inspects the persisted `MessageLog`, not the return value.
+
+**Approval single source of truth (ROADMAP §13/§15 bridge):** the loop's permission bridge and `registry.dispatch()` must agree on whether a call needs approval. `ToolRegistry.approval_needed(tool_name, params)` is that single source: the tool's own path/command-dependent `approval_check` when present (file_ops outside the workspace, shell non-inert), else the generic `requires_approval()` config boolean. Both `dispatch()` and `_run()` call it, so a path-dependent tool yields a `permission_request` `LoopEvent` (letting the TUI prompt the user) instead of being silently denied by one check while the other says no approval. When the user approves via `permission_channel`, `_run()` passes `approval_callback=lambda n, p: True` to `dispatch()` so the internal re-check doesn't deny an already-approved tool.
 
 `ModelResponse.thread_id` is set by `run_deep_research_mode()`, `run_agent_conversation()`, and `continue_conversation()` before they return — never by `call_model()` (which doesn't know which thread it's running against). Callers use it to thread-followup calls (e.g. JSON retries).
 

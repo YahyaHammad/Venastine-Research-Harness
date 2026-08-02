@@ -33,6 +33,21 @@ class ToolRegistry:
             return [spec.schema for spec in self._tools.values()]
         return [self._tools[name].schema for name in tool_names if name in self._tools]
 
+    def approval_needed(self, tool_name: str, params: dict) -> bool:
+        """Single source of truth for whether a call needs human approval:
+        the tool's own path/command-dependent approval_check when present
+        (e.g. file_ops outside the workspace, shell non-inert commands),
+        else the generic config boolean. Both dispatch() and the streaming
+        loop's permission bridge use this so they can never diverge -- a
+        path-dependent tool must surface a permission prompt, not be
+        silently denied by one check while the other says no approval."""
+        spec = self._tools.get(tool_name)
+        if spec is None:
+            return requires_approval(tool_name, params)
+        if spec.approval_check is not None:
+            return spec.approval_check(tool_name, params)
+        return requires_approval(tool_name, params)
+
     def dispatch(self, tool_name: str, params: dict, approval_callback=None) -> dict:
         if tool_name not in self._tools:
             raise ValueError(f"Unknown tool: {tool_name}")
@@ -42,12 +57,7 @@ class ToolRegistry:
 
         spec = self._tools[tool_name]
 
-        # Path-dependent approval (e.g. file_ops) overrides the generic
-        # boolean lookup when the tool provides its own approval_check.
-        if spec.approval_check is not None:
-            needs_approval = spec.approval_check(tool_name, params)
-        else:
-            needs_approval = requires_approval(tool_name, params)
+        needs_approval = self.approval_needed(tool_name, params)
 
         if needs_approval:
             approved = approval_callback(tool_name, params) if approval_callback else False
