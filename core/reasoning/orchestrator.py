@@ -138,7 +138,7 @@ def _run_pass_with_json_retry(
             retry_response = RunAgentLoop.continue_conversation(
                 thread_id=response.thread_id,
                 message=corrective,
-                system_prompt=system_prompts.passes_prompts[pass_id],
+                system_prompt=system_prompts.pass_prompt(pass_id),
                 model=model,
                 provider_name=provider_name,
                 temperature=temperature,

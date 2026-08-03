@@ -21,10 +21,12 @@ the permanent fallback entry point.
 
 import argparse
 import logging
+import os
 import sys
 from uuid import UUID
 
 import config
+from core import config_loader, workspace_trust
 from core.loop import RunAgentLoop, DEFAULT_PROVIDER
 from database import create_db_and_tables
 from logging_setup import configure_logging
@@ -102,9 +104,17 @@ def run_chat(
         print()
 
 
-def run_research(query: str, provider_name: str, model: str) -> None:
+def run_research(
+    query: str,
+    provider_name: str,
+    model: str,
+    ensemble_mode: bool | None = None,
+    ensemble_n: int | None = None,
+) -> None:
     """Run the full deep-research pipeline, write artifacts to disk,
-    and print the results."""
+    and print the results. ensemble_mode/ensemble_n come from
+    settings.json (§14); None means the pipeline falls back to the
+    config.py defaults."""
     from core.reasoning.orchestrator import run_deep_research_pipeline
     from core.reasoning.output_writer import write_run_artifacts
 
@@ -114,6 +124,7 @@ def run_research(query: str, provider_name: str, model: str) -> None:
     try:
         run = run_deep_research_pipeline(
             user_query=query, model=model, provider_name=provider_name,
+            ensemble_mode=ensemble_mode, ensemble_n=ensemble_n,
         )
     except Exception as e:
         logger.exception("Research pipeline failed")
@@ -167,17 +178,67 @@ def build_parser() -> argparse.ArgumentParser:
         default="chat",
         help="chat (default) or research (deep-research pipeline).",
     )
+    # Defaults are None so that after parsing we can tell an explicit
+    # CLI choice from argparse fill-in; resolution happens in main via
+    # resolve_runtime_defaults (CLI > settings.json > config.py).
     parser.add_argument(
         "--provider",
-        default=DEFAULT_PROVIDER,
-        help=f"LLM provider name (default: {DEFAULT_PROVIDER}).",
+        default=None,
+        help=f"LLM provider name (default: settings.json, else "
+             f"{DEFAULT_PROVIDER}).",
     )
     parser.add_argument(
         "--model",
-        default=config.MODEL_NAME,
-        help=f"Model name (default: {config.MODEL_NAME}).",
+        default=None,
+        help=f"Model name (default: settings.json, else "
+             f"{config.MODEL_NAME}).",
+    )
+    parser.add_argument(
+        "--trust-project",
+        action="store_true",
+        help="Grant workspace trust (D17) for the current directory's "
+             ".venastine/ content -- intended for scripts/CI where the "
+             "interactive prompt is unavailable.",
     )
     return parser
+
+
+def resolve_runtime_defaults(args, settings: dict) -> tuple[str, str]:
+    """Provider/model precedence: explicit CLI flag > settings.json
+    (trusted project tier already beat user tier inside the loader) >
+    config.py constants."""
+    provider = args.provider or settings.get("default_provider") or DEFAULT_PROVIDER
+    model = args.model or settings.get("default_model") or config.MODEL_NAME
+    return provider, model
+
+
+def _ensure_workspace_trust(project_path: str, trust_flag: bool) -> None:
+    """D17 one-time confirmation. Shows what would load (file list plus
+    settings.json verbatim -- a project's settings can pick the provider
+    and multiply pipeline cost via ensemble_n, so approval must be
+    informed). Interactive y/N on a TTY; --trust-project grants for
+    scripts/CI; non-TTY without the flag skips project content with a
+    notice instead of hanging on input()."""
+    if workspace_trust.is_trusted(project_path):
+        return
+    summary = config_loader.describe_project_content(project_path)
+    if trust_flag:
+        print(summary)
+        workspace_trust.grant_trust(project_path)
+        print("Trust granted for this project.\n")
+        return
+    if sys.stdin.isatty():
+        print(summary)
+        answer = input("Trust this project's .venastine/ content? [y/N]: ")
+        if answer.strip().lower() in ("y", "yes"):
+            workspace_trust.grant_trust(project_path)
+            print("Trust granted for this project.\n")
+        else:
+            print("Proceeding without project-level content.\n")
+    else:
+        print("[notice] .venastine/ present but not trusted; skipping "
+              "project-level content. Run once with --trust-project to "
+              "grant trust.\n")
 
 
 if __name__ == "__main__":
@@ -187,9 +248,19 @@ if __name__ == "__main__":
     parser = build_parser()
     args = parser.parse_args()
 
+    project_path = os.getcwd()
+    _ensure_workspace_trust(project_path, args.trust_project)
+    config_loader.initialize(project_path)
+    settings = config_loader.get_settings()
+    provider, model = resolve_runtime_defaults(args, settings)
+
     if args.mode == "research":
         if not args.query:
             parser.error("--mode research requires a positional query argument.")
-        run_research(args.query, args.provider, args.model)
+        run_research(
+            args.query, provider, model,
+            ensemble_mode=settings.get("ensemble_mode"),
+            ensemble_n=settings.get("ensemble_n"),
+        )
     else:
-        run_chat(args.thread, args.provider, args.model, first_message=args.query)
+        run_chat(args.thread, provider, model, first_message=args.query)

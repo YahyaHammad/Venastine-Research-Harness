@@ -46,10 +46,10 @@ Venastine Research Harness/
 ├── pytest.ini                      # testpaths=tests, --strict-markers
 ├── DEVLOG.md                       # implementation notes for built ROADMAP sections -- see §0
 │
-├── tests/                          # 234 tests, all offline, ~1.7s (first run ~7s for matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
+├── tests/                          # 272 tests, all offline, ~1.9s (first run ~7s for matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
 │   ├── conftest.py                 # fixtures: make_model_response, make_stream_from_response, make_stream_sequence, FakeStorage, ...
 │   ├── BREAKING_CHANGES.md         # what-breaks-it / symptom / fix per area
-│   ├── test_cli.py                 # 7 tests -- ROADMAP §1 thread_id passthrough + UUID validation + parser defaults
+│   ├── test_cli.py                 # 13 tests -- ROADMAP §1 thread_id passthrough + UUID validation + §14 parser defaults/resolution/trust flow
 │   ├── test_e2e.py                 # 5 tests -- e2e chat (multi-turn + tool use), research mode, error handling ×3
 │   ├── test_logging_setup.py       # 1 test -- configure_logging fallback on bad log path
 │   ├── test_output_writer.py       # 6 tests -- ROADMAP §12 artifact file layout, contents, chart PNG, None guard, tier counts
@@ -58,6 +58,9 @@ Venastine Research Harness/
 │   ├── test_client_streaming.py    # 8 tests -- ROADMAP §13 direct call_model_stream coverage (3 providers + D21 + fragment accumulation)
 │   ├── test_loop_stop_conditions.py# 3 tests (ROADMAP verbatim)
 │   ├── test_streaming_loop.py      # 7 tests -- ROADMAP §13 generator event ordering, exception propagation, D20 persistence, permission_channel
+│   ├── test_workspace_trust.py     # 8 tests -- ROADMAP_v2 §14 AC1/AC2 + hash-control properties (path-in-hash, determinism)
+│   ├── test_config_loader.py       # 18 tests -- ROADMAP_v2 §14 frontmatter AC4, tier precedence D8/D18, settings merge, CONTEXT opt-in AC5, catalog
+│   ├── test_load_skill.py          # 6 tests -- load_skill view-only retrieval, D24 permission declaration, catalog prompt injection
 │   ├── test_orchestrator.py        # 9 tests -- full pipeline mocked + JSON-retry + §5 failure/success/acceptance
 │   ├── test_registry_permissions.py# 8 tests -- allow/deny/approval
 │   ├── test_math_tools.py          # 14 tests -- symbolic equivalence + injection regression
@@ -74,6 +77,8 @@ Venastine Research Harness/
 │   ├── client.py                  # ONE model call, normalized across providers; provider-specific wire formats live ONLY here. §13 adds call_model_stream() (3 streaming impls) + collect_response() + StreamToken
 │   ├── loop.py                    # RunAgentLoop -- §13: _run() is a GENERATOR yielding LoopEvent; run_to_completion() drains it for the 3 public wrappers; permission_channel approval bridge
 │   ├── events.py                  # §13: LoopEvent dataclass -- the single event type _run() yields (token_delta / tool_call_start / tool_result / permission_request / final_response / stop_reason)
+│   ├── workspace_trust.py         # ROADMAP_v2 §14 (D17): trust store keyed by resolved path + content hash; is_trusted/grant_trust; sorted-walk deterministic hash with path-in-hash
+│   ├── config_loader.py           # ROADMAP_v2 §14: three-tier .md discovery (harness/project/user), line-anchored frontmatter parse, settings.json merge with loud unknown-key rejection, CONTEXT.md opt-in, frontmatter-only skill catalog
 │   ├── memory.py                  # ConversationMemory -- in-run message list, provider-NEUTRAL shape, backed by storage.py + resume-shape fix
 │   │
 │   └── reasoning/
@@ -84,7 +89,7 @@ Venastine Research Harness/
 │       └── output_writer.py      # ROADMAP §12: write_run_artifacts -- human-browsable /output/<run_id>/ directory
 │
 ├── prompts/
-│   ├── system_prompts.py          # loads every pass's .md file into passes_prompts dict
+│   ├── system_prompts.py          # loads every pass's .md file into passes_prompts dict; §14: with_skill_catalog()/pass_prompt() append the frontmatter-only skill catalog to chat + research prompts
 │   ├── universal_system_prompt    # preamble prepended to EVERY pass's prompt
 │   ├── preliminary_plan.md        # Pass 0
 │   ├── initial_generation.md      # Pass 1
@@ -113,8 +118,9 @@ Venastine Research Harness/
     └── builtin/
         ├── _math_common.py        # shared safe-expression-parsing foundation for the 6 math tools
         ├── web_search.py          # DuckDuckGo search
-        ├── fetch_url.py           # fetch a specific URL's content
+        ├── fetch_url.py           # fetch a specific URL's content (registered but denied: no ToolPermissions field -- §15/D24 fixes structurally)
         ├── get_time.py            # current UTC time
+        ├── load_skill.py          # ROADMAP_v2 §14: view a skill's full body on request (progressive disclosure; view-only, activation is §19)
         ├── arxiv.py               # arXiv paper search
         ├── symbolic_math.py       # algebra, calculus, trig, arithmetic (SymPy)
         ├── linear_algebra.py      # matrices, vectors, low-order tensors (SymPy)
@@ -297,6 +303,16 @@ Covered in full in §7 below. The short version of the file boundary: `base.py` 
 **`update_pipeline_run`'s `status` is `Optional[str] = None` on purpose:** the minimal core only ever passes a terminal status, but §5 proper's deferred per-pass checkpointing will call this for plain data snapshots WITHOUT a status. A defaulted status value would silently reset a `complete`/`failed` record back to that default on a data-only update; `None` means "don't touch status unless told to," making that future extension safe by construction.
 
 **Failure-mode handling:** `update_pipeline_run` raises `ValueError` for an unknown `run_id`. The orchestrator's try/except wrapper calls `update_pipeline_run(run_id, run, status='failed')` to persist the partial state before re-raising the original exception; if storage itself is the failure point, the inner update's error is logged at ERROR via the module logger (it reaches stderr through Python's lastResort handler even before `logging_setup` is wired in) — NOT `run.log()`, which would be inert here since the propagated exception carries no reference back to the local `run` and persistence already failed. The original exception always propagates (`tests/test_pipeline_storage.py::test_inner_storage_failure_propagates_original_exception_and_logs_run_id` documents this contract).
+
+### 4.15 `core/workspace_trust.py` + `core/config_loader.py` — file syntax, config loading, workspace trust (ROADMAP_v2 §14)
+
+**Belongs here:** `workspace_trust.py` owns the D17 gate ONLY — `is_trusted()`/`grant_trust()` keyed by resolved project path + a sha256 content hash of everything under `.venastine/` (sorted `os.walk` descent, relative paths fed into the hash with `\0` separators so renames/swaps change the digest; posix-normalized separators so the digest is platform-independent). `config_loader.py` owns discovery and parsing: line-anchored `---` frontmatter regex (a bare horizontal rule inside a body must not terminate the block — AC4), three-tier `.md` discovery (harness `<root>/{agents,skills}/builtin/` → project `.venastine/` (trust-gated) → user `~/.config/venastine/`), D18 harness-collision rejection with a warning, `settings.json` merge (trusted project > user; unknown keys RAISE; compaction keys validate but warn as unimplemented until §21), `CONTEXT.md` caching with per-agent opt-in (`context_for_agent`), and the frontmatter-only `skill_catalog_text()`. Startup cache via `initialize(project_path)` / `reset()`.
+
+**Does NOT belong here:** skill activation semantics (`additional_tools`, slash commands — §19), agent execution (§18), `mcp.json` loading (§17), compaction consumption (§21), and the trust-prompt UX — `main.py` owns prompting (interactive y/N on a TTY showing `describe_project_content()` output, `--trust-project` for scripts/CI, notice-and-skip on non-TTY); `workspace_trust.py` owns only the store.
+
+**Progressive disclosure (user decision, §14 build):** system prompts list skills as name + one-line description ONLY; full bodies enter context exclusively as a `load_skill` tool result (view-only — activation stays in §19). Assembly lives in ONE place, `prompts/system_prompts.py`'s `with_skill_catalog()` / `pass_prompt()`, used by the chat loop, every research pass, and the §3 JSON-retry path, so the catalog cannot diverge between an attempt and its retry. `load_skill` is a normal registered tool with declared `ToolPermissions`/`ToolApprovals` fields (D24).
+
+**Load-bearing invariants:** untrusted project content is ABSENT, not loaded-but-disabled (no partial trust); the trust store path and user config dir resolve at call time, not import time (tests redirect them via env/monkeypatch); provider/model resolution is CLI > settings.json > `config.py` in `main.resolve_runtime_defaults()`, which is only possible because the argparse defaults are `None` — an argparse-filled default would be indistinguishable from an explicit choice and would silently always beat settings.json.
 
 ## 5. Request lifecycle — regular conversation, traced end to end
 

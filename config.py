@@ -106,6 +106,7 @@ class ToolPermissions:
     write: bool = False
     edit: bool = False
     shell: bool = False
+    load_skill: bool = True
 
 @dataclass
 class ToolApprovals:
@@ -122,3 +123,4 @@ class ToolApprovals:
     write: bool = False
     edit: bool = False
     shell: bool = True
+    load_skill: bool = False

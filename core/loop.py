@@ -189,7 +189,8 @@ class RunAgentLoop:
         memory = ConversationMemory(thread_id=thread_id)
         memory.add_user_message(user_goal)
         response = run_to_completion(RunAgentLoop._run(
-            memory, DEFAULT_SYSTEM_PROMPT, provider_name, model, None,
+            memory, system_prompts.with_skill_catalog(DEFAULT_SYSTEM_PROMPT),
+            provider_name, model, None,
             max_steps, max_total_tokens, temperature=temperature,
         ))
         response.thread_id = memory.thread_id
@@ -214,7 +215,7 @@ class RunAgentLoop:
         """
         memory = ConversationMemory()
         memory.add_user_message(pass_input)
-        system_prompt = system_prompts.passes_prompts[pass_id]
+        system_prompt = system_prompts.pass_prompt(pass_id)
         response = run_to_completion(RunAgentLoop._run(
             memory, system_prompt, provider_name, model, None,
             max_steps, max_total_tokens, temperature=temperature,

@@ -832,3 +832,41 @@ The two remaining Suggestion-level findings were also addressed afterwards: the 
 - `tests/conftest.py`: added `make_stream_from_response()` and `make_stream_sequence()` helpers.
 - `tests/BREAKING_CHANGES.md` §2 updated for the generator conversion.
 - Full suite: 234 tests.
+
+## 14. File syntax + config loader + workspace trust (ROADMAP_v2 §14)
+
+### 14.1 What was built
+
+- `core/workspace_trust.py` — D17 gate per the ROADMAP sketch, including both Rev. 3 hash corrections (sorted `dirs` in-place for deterministic descent; relative paths fed into the digest with `\0` separators). One deliberate deviation: the trust store path resolves at CALL time (`_trust_store_path()`), not as an import-time module constant as sketched — an import-time `expanduser` made the store unredirectable in tests. Relative paths are posix-normalized so the digest is identical on Windows and POSIX.
+- `core/config_loader.py` — three-tier discovery (harness `<root>/{agents,skills}/builtin/`, trust-gated project `.venastine/`, user `~/.config/venastine/`), line-anchored frontmatter parse, D18 harness-collision rejection with warning, project-wins-over-user, `settings.json` merge, `CONTEXT.md` cache + per-agent opt-in, frontmatter-only skill catalog, startup cache (`initialize`/`reset`).
+- `tools/builtin/load_skill.py` — view-only body retrieval; registered with declared `ToolPermissions.load_skill = True` / `ToolApprovals.load_skill = False` (D24).
+- `prompts/system_prompts.py` — `with_skill_catalog()` / `pass_prompt()`; chat loop, every research pass, and the §3 JSON-retry path all assemble through them.
+- `main.py` — startup trust flow, `--trust-project` flag, parser `--provider`/`--model` defaults moved to `None` with post-parse `resolve_runtime_defaults()` (CLI > settings > config.py), ensemble knobs forwarded to the pipeline (it already accepted them as kwargs — settings.json became the first way to enable ensemble mode without editing source).
+- `requirements.txt` — `pyyaml==6.0.3` (was already a transitive dependency; pinned explicitly per the ROADMAP).
+
+### 14.2 Decisions made in the clarification cycle (user-decided)
+
+| Question | Decision |
+|---|---|
+| Semantics of the model requesting a full skill | View-only: body returned as a tool result. Activation (`additional_tools`, `/skill`) deferred to §19's SkillManager. |
+| Where the catalog is injected | Chat AND research passes (user chose the wider scope; pipeline prompts gain the catalog via `pass_prompt()`). |
+| settings.json runtime wiring | Wire existing knobs now (provider/model/ensemble); compaction keys parse but are consumed by §21. |
+| Trust prompt UX | Interactive y/N on a TTY, `--trust-project` for scripts/CI, notice-and-skip on non-TTY (no CI hang). |
+
+### 14.3 User amendments applied during planning
+
+1. **Announce inertness rather than allow it.** Unknown settings keys raise `ValueError` at load (a typo must not masquerade as a setting); known-but-unimplemented `compaction.*` keys validate and warn once at startup ("not implemented yet (ROADMAP_v2 §21); ignored"). No silent no-ops at any point.
+2. **Project-tier settings are a different grant.** Trusting a repo also lets it choose the provider and multiply pipeline cost via `ensemble_n`. Kept project-tier settings (per D19) but made the grant informed:
+3. **The trust prompt shows settings.json verbatim** (plus the file list) before asking — `describe_project_content()`. Consistent with the project's "never silently do consequential things" posture (compaction visibility, `remember()` approval).
+4. **The parser-defaults gap (found by the user):** with `default=DEFAULT_PROVIDER` on the argparse arguments, "user passed --provider X" is indistinguishable from argparse fill-in, so settings.json could never win — provider/model would look wired while inert (the `fetch_url` shape, but emitting nothing). Fixed by `default=None` + post-parse resolution; `tests/test_cli.py::test_build_parser_defaults` now asserts the None defaults.
+
+### 14.4 Test changes
+
+- `tests/test_workspace_trust.py` (NEW, 8): AC1 (untrusted until granted), AC2 (content change revokes), added-file revocation, path-in-hash (name-swap produces a different digest), hash determinism, store written under redirected home, `content_files` sorted/relative.
+- `tests/test_config_loader.py` (NEW, 18): AC4 horizontal-rule regression, malformed-file skip-with-warning, untrusted project content absent, trusted loads, project-wins-over-user, D18 harness collision warning, catalog frontmatter-only (body text absent), settings precedence (trusted/untrusted), unknown key raises, unknown compaction key raises, wrong type raises, compaction warns unimplemented, pre-init `get_settings()` empty, AC5 CONTEXT opt-in (true/false/None agent, untrusted), agent field parsing.
+- `tests/test_load_skill.py` (NEW, 6): body retrieval, unknown-skill error, D24 permission declaration regression, catalog appended to chat + every pass prompt, prompt unchanged without skills / before initialize.
+- `tests/test_cli.py`: parser-defaults test updated for `None`; +6 tests (resolution precedence, trust flag grants, non-TTY skip without hanging, prompt shows settings verbatim, interactive y/n).
+- `tests/test_e2e.py`: research-mode pipeline assertion extended with the new `ensemble_mode=None, ensemble_n=None` kwargs.
+- `tests/conftest.py`: autouse `clear_config_loader_state` fixture so one test's `initialize()` can't leak into another test's prompt assembly.
+- `tests/BREAKING_CHANGES.md` §9 added for the §14 break surface.
+- Full suite: 272 tests.

@@ -10,13 +10,15 @@ parser defaults) is exercised.
 """
 
 import argparse
+import sys
+from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
 
 from core.loop import RunAgentLoop
 from core.events import LoopEvent
-from main import _uuid_type, build_parser
+from main import _uuid_type, build_parser, resolve_runtime_defaults, _ensure_workspace_trust
 from tests.conftest import make_model_response
 
 
@@ -123,19 +125,97 @@ def test_uuid_type_rejects_garbage():
 # ===========================================================================
 
 def test_build_parser_defaults():
-    """No-arg invocation defaults to chat mode, no thread, default
-    provider and model."""
+    """No-arg invocation defaults to chat mode, no thread, and
+    provider/model None -- they resolve after parse (CLI > settings.json
+    > config.py), so argparse fill-in must be distinguishable from an
+    explicit choice. Trust flag off."""
     parser = build_parser()
     args = parser.parse_args([])
 
     assert args.mode == "chat"
     assert args.thread is None
     assert args.query is None
+    assert args.provider is None
+    assert args.model is None
+    assert args.trust_project is False
 
+
+def test_resolve_runtime_defaults_precedence():
+    settings = {"default_provider": "OPENAI", "default_model": "gpt-5.1"}
+
+    provider, model = resolve_runtime_defaults(
+        SimpleNamespace(provider=None, model=None), settings)
+    assert (provider, model) == ("OPENAI", "gpt-5.1")
+
+    # explicit CLI choice beats settings.json
+    provider, model = resolve_runtime_defaults(
+        SimpleNamespace(provider="ANTHROPIC", model=None), settings)
+    assert (provider, model) == ("ANTHROPIC", "gpt-5.1")
+
+    # no settings -> config.py constants
     from core.loop import DEFAULT_PROVIDER
     import config
-    assert args.provider == DEFAULT_PROVIDER
-    assert args.model == config.MODEL_NAME
+    provider, model = resolve_runtime_defaults(
+        SimpleNamespace(provider=None, model=None), {})
+    assert (provider, model) == (DEFAULT_PROVIDER, config.MODEL_NAME)
+
+
+# ===========================================================================
+# ---- Workspace trust flow (D17) --------------------------------------------
+# ===========================================================================
+
+@pytest.fixture
+def _untrusted_project(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("HOME", str(home))
+    proj = tmp_path / "proj"
+    (proj / ".venastine").mkdir(parents=True)
+    (proj / ".venastine" / "settings.json").write_text(
+        '{"default_model": "m"}', encoding="utf-8")
+    return proj
+
+
+def test_trust_flag_grants_without_prompt(_untrusted_project):
+    from core import workspace_trust
+    _ensure_workspace_trust(str(_untrusted_project), True)
+    assert workspace_trust.is_trusted(str(_untrusted_project)) is True
+
+
+def test_trust_non_tty_skips_without_hanging(_untrusted_project, monkeypatch, capsys):
+    from core import workspace_trust
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    _ensure_workspace_trust(str(_untrusted_project), False)
+    assert workspace_trust.is_trusted(str(_untrusted_project)) is False
+    assert "--trust-project" in capsys.readouterr().out
+
+
+def test_trust_prompt_shows_settings_contents(_untrusted_project, monkeypatch, capsys):
+    """Approval must be informed: the prompt shows settings.json verbatim
+    (a project's settings can pick the provider / multiply pipeline cost)."""
+    from core import workspace_trust
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda _prompt="": "n")
+    _ensure_workspace_trust(str(_untrusted_project), False)
+    out = capsys.readouterr().out
+    assert '"default_model": "m"' in out
+    assert workspace_trust.is_trusted(str(_untrusted_project)) is False
+
+
+def test_trust_interactive_yes_grants(_untrusted_project, monkeypatch):
+    from core import workspace_trust
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda _prompt="": "y")
+    _ensure_workspace_trust(str(_untrusted_project), False)
+    assert workspace_trust.is_trusted(str(_untrusted_project)) is True
+
+
+def test_trust_interactive_no_skips(_untrusted_project, monkeypatch):
+    from core import workspace_trust
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda _prompt="": "n")
+    _ensure_workspace_trust(str(_untrusted_project), False)
+    assert workspace_trust.is_trusted(str(_untrusted_project)) is False
 
 
 def test_build_parser_research_mode_with_query():

@@ -4,7 +4,7 @@ from tools.base import ToolSpec
 from tools.builtin import (
     web_search, fetch_url, get_time, arxiv,
     symbolic_math, linear_algebra, probability_stats, discrete_math, logic, geometry,
-    file_ops, shell,
+    file_ops, shell, load_skill,
 )
 from security.permissions import is_tool_allowed, requires_approval
 from safety.policy_enforcement import check_output_policy
@@ -84,3 +84,4 @@ registry.register(ToolSpec("read", file_ops.READ_TOOL_SCHEMA, file_ops.read_run,
 registry.register(ToolSpec("write", file_ops.WRITE_TOOL_SCHEMA, file_ops.write_run, approval_check=file_ops._file_approval_check))
 registry.register(ToolSpec("edit", file_ops.EDIT_TOOL_SCHEMA, file_ops.edit_run, approval_check=file_ops._file_approval_check))
 registry.register(ToolSpec("shell", shell.TOOL_SCHEMA, shell.run, approval_check=shell._shell_approval_check))
+registry.register(ToolSpec("load_skill", load_skill.TOOL_SCHEMA, load_skill.run))

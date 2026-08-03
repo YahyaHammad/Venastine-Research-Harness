@@ -179,6 +179,28 @@ persistence wrap and per-pass checkpointing.
 
 ---
 
+## 9. `test_cli.py` — parser defaults, trust flow, and prompt assembly (§14)
+
+§14 changed `main.py`: `--provider`/`--model` now default to `None` and
+resolve AFTER parsing via `resolve_runtime_defaults()` (CLI >
+settings.json > config.py), a `--trust-project` flag was added, and
+startup runs `_ensure_workspace_trust()` + `config_loader.initialize()`.
+System prompts now assemble through
+`prompts.system_prompts.with_skill_catalog()` / `pass_prompt()`.
+
+### What breaks these
+
+| Change | Symptom | Fix |
+|---|---|---|
+| Move parser defaults back to argparse-level constants (`default=DEFAULT_PROVIDER`) | `test_build_parser_defaults` fails (asserts `None`) | The `None` defaults are load-bearing: argparse fill-in must be distinguishable from an explicit CLI choice or settings.json can never win. Resolution lives in `resolve_runtime_defaults()` |
+| Rename a known settings.json key | `test_resolve_runtime_defaults_precedence` fails | Update the dict keys; the known-key schema lives in `core/config_loader.py::_KNOWN_SETTINGS` and must change in the same commit |
+| Change the non-TTY notice wording | `test_trust_non_tty_skips_without_hanging` asserts the notice mentions `--trust-project` | Keep the flag name in the notice (it is the remediation the user needs); the flag itself is user-facing CLI surface and should not be renamed casually |
+| Change `describe_project_content()` so settings.json is no longer shown verbatim | `test_trust_prompt_shows_settings_contents` fails | The verbatim display is the informed-consent amendment (DEVLOG §14): a project's settings can pick the provider and multiply pipeline cost, so approval must show them. Restore verbatim display |
+| Assert exact system-prompt text passed to `_run()` in any test | Prompt gains an appended `## Available skills` catalog whenever `config_loader` was initialized with skills present | The autouse `clear_config_loader_state` fixture (tests/conftest.py) resets the cache between tests; only `initialize()` with skills inside a test that wants the catalog |
+| Move `pass_prompt()`/`with_skill_catalog()` out of `prompts/system_prompts.py` | `test_load_skill.py` prompt-assembly tests fail on import | Keep both there; the §3 JSON-retry path and `run_deep_research_mode` must share one assembly point so the catalog cannot diverge between an attempt and its retry |
+
+---
+
 ## General regeneration: when a production change breaks several tests at once
 
 If a planned refactor (e.g. ROADMAP §3's JSON-retry, §10's ensemble mode)

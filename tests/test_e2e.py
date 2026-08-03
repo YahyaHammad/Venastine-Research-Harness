@@ -191,10 +191,14 @@ def test_research_mode_e2e_prints_report_and_trace(mocker, capsys):
     run_research("What is quantum computing?", "ANTHROPIC", "test-model")
 
     # --- Verify the pipeline was called correctly ---
+    # §14: run_research forwards the settings.json ensemble knobs
+    # (None here = fall back to config.py defaults inside the pipeline)
     mock_pipeline.assert_called_once_with(
         user_query="What is quantum computing?",
         model="test-model",
         provider_name="ANTHROPIC",
+        ensemble_mode=None,
+        ensemble_n=None,
     )
 
     # --- Verify write_run_artifacts was called with the run ---

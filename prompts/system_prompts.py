@@ -40,3 +40,24 @@ def get_system_prompts() -> dict:
 
 
 passes_prompts = get_system_prompts()
+
+
+def with_skill_catalog(base_prompt: str) -> str:
+    """Appends the frontmatter-only skill catalog (ROADMAP_v2 §14) when
+    skills were discovered at startup; a no-op append otherwise. Skill
+    bodies never enter the prompt -- the model requests them via the
+    load_skill tool."""
+    from core import config_loader
+
+    catalog = config_loader.skill_catalog_text()
+    if not catalog:
+        return base_prompt
+    return f"{base_prompt}\n\n{catalog}"
+
+
+def pass_prompt(pass_id: str) -> str:
+    """A research pass's system prompt with the skill catalog appended.
+    BOTH the pass entry point (loop.run_deep_research_mode) and the §3
+    JSON-retry path (orchestrator) must go through here so the catalog
+    cannot diverge between an original attempt and its retry."""
+    return with_skill_catalog(passes_prompts[pass_id])

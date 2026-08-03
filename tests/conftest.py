@@ -96,6 +96,18 @@ def clear_client_cache():
     core.client._client_cache.clear()
 
 
+@pytest.fixture(autouse=True)
+def clear_config_loader_state():
+    """core.config_loader caches the startup discovery (agents, skills,
+    settings, trust state). Reset between tests so one test's
+    initialize() against a tmp dir can't leak into another test's prompt
+    assembly or tool lookups."""
+    from core import config_loader
+    config_loader.reset()
+    yield
+    config_loader.reset()
+
+
 # ---------------------------------------------------------------------------
 # ---- Fake provider client builders (for tests that drive call_model) ---
 # ---------------------------------------------------------------------------
