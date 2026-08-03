@@ -31,6 +31,20 @@ from core.loop import RunAgentLoop, DEFAULT_PROVIDER
 from database import create_db_and_tables
 from logging_setup import configure_logging
 
+# Importing these for their SIDE EFFECT, and the side effect is load-bearing:
+# a SQLModel table class registers on SQLModel.metadata when its module is
+# imported, and create_db_and_tables() creates only what is registered by the
+# time it runs. database.py deliberately knows nothing about what tables exist
+# (ARCHITECTURE §4.4), so declaring them is the entry point's job.
+#
+# storage was already reaching metadata by luck -- core.loop -> core.memory ->
+# storage, above. pipeline_storage was NOT: main.py imports the orchestrator
+# lazily inside run_research(), which is after create_db_and_tables() has
+# already run, so a FRESH database never got a pipelinerunrecord table and the
+# first research run died on "no such table". Do not "tidy" these away.
+import storage  # noqa: F401 -- registers ConversationThread, MessageLog
+import core.reasoning.pipeline_storage  # noqa: F401 -- registers PipelineRunRecord
+
 logger = logging.getLogger(__name__)
 
 
@@ -194,6 +208,13 @@ def build_parser() -> argparse.ArgumentParser:
              f"{config.MODEL_NAME}).",
     )
     parser.add_argument(
+        "--tui",
+        action="store_true",
+        help="Launch the Textual TUI (ROADMAP_v2 §16) instead of the "
+             "line-based CLI. The CLI remains the default and is a "
+             "permanent fallback (D12) -- it is never removed.",
+    )
+    parser.add_argument(
         "--trust-project",
         action="store_true",
         help="Grant workspace trust (D17) for the current directory's "
@@ -280,7 +301,14 @@ if __name__ == "__main__":
     settings = load_project_config(project_path, args.trust_project)
     provider, model = resolve_runtime_defaults(args, settings)
 
-    if args.mode == "research":
+    if args.tui:
+        if args.mode == "research":
+            # §16 ships the chat shell; research mode's coarse progress view
+            # is driven from inside the TUI, not from a launch flag.
+            parser.error("--tui does not take --mode research; use /research inside the TUI.")
+        from tui.app import run as run_tui
+        run_tui(provider, model, settings)
+    elif args.mode == "research":
         if not args.query:
             parser.error("--mode research requires a positional query argument.")
         run_research(

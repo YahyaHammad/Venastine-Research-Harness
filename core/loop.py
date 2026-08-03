@@ -71,6 +71,7 @@ class RunAgentLoop:
         max_steps: int,
         max_total_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
+        effort: Optional[str] = None,
         permission_channel: Optional[queue.Queue] = None,
     ):
         """Generator yielding LoopEvent objects as the loop progresses.
@@ -99,7 +100,7 @@ class RunAgentLoop:
             response = None
             for token in call_model_stream(
                 client, provider_name, model, memory.messages,
-                system_prompt, tool_schemas, temperature,
+                system_prompt, tool_schemas, temperature, effort,
             ):
                 if token.text_delta:
                     yield LoopEvent(token_delta=token.text_delta)
@@ -201,6 +202,7 @@ class RunAgentLoop:
         max_total_tokens: int = config.MAX_TOKEN_BUDGET,
         thread_id: Optional[UUID] = None,
         temperature: Optional[float] = None,
+        effort: Optional[str] = None,
         context: Optional[ToolContext] = None,
     ) -> ModelResponse:
         """Regular conversation — full tool set, default system prompt,
@@ -213,7 +215,7 @@ class RunAgentLoop:
         response = run_to_completion(RunAgentLoop._run(
             memory, system_prompts.with_skill_catalog(DEFAULT_SYSTEM_PROMPT),
             provider_name, model, context,
-            max_steps, max_total_tokens, temperature=temperature,
+            max_steps, max_total_tokens, temperature=temperature, effort=effort,
         ))
         response.thread_id = memory.thread_id
         return response
@@ -227,6 +229,7 @@ class RunAgentLoop:
         max_steps: int = config.MAX_ITERATIONS,
         max_total_tokens: int = config.MAX_TOKEN_BUDGET,
         temperature: Optional[float] = None,
+        effort: Optional[str] = None,
         context: Optional[ToolContext] = None,
     ) -> ModelResponse:
         """
@@ -241,7 +244,7 @@ class RunAgentLoop:
         system_prompt = system_prompts.pass_prompt(pass_id)
         response = run_to_completion(RunAgentLoop._run(
             memory, system_prompt, provider_name, model, context,
-            max_steps, max_total_tokens, temperature=temperature,
+            max_steps, max_total_tokens, temperature=temperature, effort=effort,
         ))
         response.thread_id = memory.thread_id
         return response
@@ -256,6 +259,7 @@ class RunAgentLoop:
         max_steps: int = config.MAX_ITERATIONS,
         max_total_tokens: int = config.MAX_TOKEN_BUDGET,
         temperature: Optional[float] = None,
+        effort: Optional[str] = None,
         context: Optional[ToolContext] = None,
     ) -> ModelResponse:
         """
@@ -274,7 +278,7 @@ class RunAgentLoop:
         memory.add_user_message(message)
         response = run_to_completion(RunAgentLoop._run(
             memory, system_prompt, provider_name, model, context,
-            max_steps, max_total_tokens, temperature=temperature,
+            max_steps, max_total_tokens, temperature=temperature, effort=effort,
         ))
         response.thread_id = thread_id
         return response

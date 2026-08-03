@@ -306,3 +306,67 @@ def test_load_pipeline_run_returns_empty_defaults_for_running_record():
     assert loaded["trace"] == []
     assert loaded["coverage_gaps"] == []
     assert loaded["final_report"] == ""
+
+
+# ---------------------------------------------------------------------------
+# ---- Fresh-database table creation (found during §16) ---------------------
+# ---------------------------------------------------------------------------
+
+def test_main_registers_every_table_before_creating_the_database():
+    """A fresh database must get pipelinerunrecord, not just the two
+    conversation tables.
+
+    The defect this guards: SQLModel table classes register on
+    SQLModel.metadata at MODULE IMPORT time, and create_db_and_tables()
+    creates only what is registered when it runs. storage reached metadata
+    by luck (main -> core.loop -> core.memory -> storage); pipeline_storage
+    did not, because main.py imports the orchestrator lazily inside
+    run_research() — after create_db_and_tables() has already run. So a
+    fresh app.db had no pipelinerunrecord table and the first research run
+    died on "no such table". It looked fine here only because an existing
+    app.db already had it, and *.db is gitignored — a clone got nothing.
+
+    Asserted against main.py's own import statements, parsed from source.
+    Two weaker forms were tried first and both were wrong:
+
+      - checking SQLModel.metadata fails, because the suite runs against
+        the fake sqlmodel from the root conftest, whose metadata is not the
+        real registry;
+      - checking `"core.reasoning.pipeline_storage" in sys.modules` is
+        VACUOUS — this very test file imports that module, so the
+        assertion passes with main.py's import deleted. It was verified to
+        pass against the broken code before being replaced.
+
+    The AST check is the one that fails when the import is removed, which
+    is the only property that makes this test worth having.
+    """
+    import ast
+    import pathlib
+
+    tree = ast.parse(pathlib.Path("main.py").read_text(encoding="utf-8"))
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported.add(node.module)
+
+    assert "storage" in imported, (
+        "main.py must import storage for its table-registration side effect"
+    )
+    assert "core.reasoning.pipeline_storage" in imported, (
+        "main.py must import core.reasoning.pipeline_storage for its table "
+        "registration side effect; without it a fresh database has no "
+        "pipelinerunrecord table and the first research run fails on "
+        "'no such table'"
+    )
+
+
+def test_create_db_and_tables_refuses_to_create_an_empty_database(mocker):
+    """The total-failure case fails loudly instead of silently creating
+    nothing and surfacing as 'no such table' at the first write."""
+    import database
+
+    mocker.patch.object(database.SQLModel, "metadata", mocker.Mock(tables={}))
+    with pytest.raises(RuntimeError, match="no table classes registered"):
+        database.create_db_and_tables()

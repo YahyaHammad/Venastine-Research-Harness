@@ -219,12 +219,29 @@ def _build_fake_google_module():
             self.parts = parts or []
 
     class _FakeGenerateContentConfig:
-        def __init__(self, system_instruction=None, tools=None, max_output_tokens=None, temperature=None, **kw):
+        def __init__(self, system_instruction=None, tools=None, max_output_tokens=None,
+                     temperature=None, thinking_config=None, **kw):
             self.system_instruction = system_instruction
             self.tools = tools
             self.max_output_tokens = max_output_tokens
             self.temperature = temperature
+            self.thinking_config = thinking_config
 
+    class _FakeThinkingConfig:
+        """Mirrors the REAL google-genai's ThinkingConfig, which exists on the
+        pinned 1.0.0 -- but note the real one there carries only
+        `include_thoughts`; `thinking_budget` arrived in a later release.
+        The fake accepts both so tests can exercise either side of
+        core.client._google_supports_thinking_budget(), which is the gate
+        that keeps §16 from sending a field the pinned SDK cannot carry."""
+
+        model_fields = {"include_thoughts": None, "thinking_budget": None}
+
+        def __init__(self, include_thoughts=None, thinking_budget=None, **kw):
+            self.include_thoughts = include_thoughts
+            self.thinking_budget = thinking_budget
+
+    types_mod.ThinkingConfig = _FakeThinkingConfig
     types_mod.FunctionDeclaration = _FakeFunctionDeclaration
     types_mod.Tool = _FakeTool
     types_mod.FunctionCall = _FakeFunctionCall

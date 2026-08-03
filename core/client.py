@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 from uuid import UUID, uuid4
 import json
+import logging
 
 from openai import OpenAI
 from google import genai
@@ -10,6 +11,8 @@ from anthropic import Anthropic
 
 from credentials import load_provider_data
 import config
+
+logger = logging.getLogger(__name__)
 
 # Caches initialized clients so repeated calls for the same provider don't
 # rebuild the client (and re-read the credentials file) every time.
@@ -274,6 +277,166 @@ def _messages_for_provider(provider_name: str, neutral_messages: list[dict]) -> 
 # ---- The actual call --------------------------------------------------------
 # ============================================================================
 
+# ============================================================================
+# ---- Sampling + reasoning-effort translation (ROADMAP_v2 §16) ---------------
+# ============================================================================
+#
+# Both helpers below are the same "translate at the boundary, once" case that
+# _tools_for_provider / _messages_for_provider exist for: the three providers
+# express these concepts differently enough that no caller should have to know.
+
+# (provider_name, model) -> supported effort levels. Populated lazily; the
+# Anthropic branch queries the API once per process rather than per call.
+_effort_levels_cache: dict[tuple[str, str], list[str]] = {}
+
+
+def _sampling_kwargs(provider_name: str, model: str, temperature) -> dict:
+    """Sampling parameters for this call, or {} when the model rejects them.
+
+    Current Anthropic models removed temperature/top_p/top_k outright (any
+    value returns a 400) and Sonnet 5 rejects non-default values. Sending
+    one anyway is not a degraded request, it is a failed one -- which is how
+    ROADMAP §10's ensemble mode came to be built, documented as working, and
+    incapable of running against this harness's own default model.
+
+    Dropping the parameter is logged at WARNING rather than done silently.
+    The one caller that actually depends on temperature (ensemble mode) is
+    blocked upstream by an explicit guard in orchestrator.py, so this warning
+    should never fire in normal operation -- if it does, something new is
+    relying on sampling variation without knowing it cannot have it.
+    """
+    if temperature is None:
+        return {}
+    if model in config.MODELS_REJECTING_SAMPLING_PARAMS:
+        logger.warning(
+            "Dropping temperature=%s: model %r rejects sampling parameters. "
+            "Steer via prompting or reasoning effort instead.",
+            temperature, model,
+        )
+        return {}
+    return {"temperature": temperature}
+
+
+def effort_levels_for_model(client, provider_name: str, model: str) -> list[str]:
+    """Reasoning-effort levels this model accepts, most-to-least capable last.
+
+    Anthropic is queried, not tabulated: its Models API reports per-model
+    effort support (`capabilities.effort.<level>.supported`), so a newly
+    released Anthropic model needs no manual entry here. Every other provider
+    is tabulated because there is nothing to ask -- no OpenAI-compatible
+    provider in providers.json exposes a capability endpoint, and Google
+    expresses depth as an integer budget rather than a level set at all.
+
+    Falling back logs at WARNING, matching §21's MODEL_CONTEXT_WINDOWS
+    posture: a static table is honest about being incomplete, but it should
+    say so out loud when it is the thing answering.
+
+    Returns [] when the model supports no effort control, which callers must
+    treat as "offer no picker and send no effort parameter".
+    """
+    key = (provider_name, model)
+    if key in _effort_levels_cache:
+        return _effort_levels_cache[key]
+
+    levels: Optional[list[str]] = None
+    if provider_name == "GOOGLE" and not _google_supports_thinking_budget():
+        # Reporting no levels is the honest answer, not a silent [] : on the
+        # pinned SDK there is no field to put a budget in, so a picker
+        # offering levels would be offering something unsendable.
+        _effort_levels_cache[key] = []
+        return []
+    if provider_name == "ANTHROPIC":
+        try:
+            capabilities = client.models.retrieve(model).capabilities
+            effort = capabilities["effort"]
+            levels = [
+                name for name in ("low", "medium", "high", "xhigh", "max")
+                if isinstance(effort.get(name), dict)
+                and effort[name].get("supported")
+            ]
+        except Exception as e:
+            # Network failure, an SDK too old to expose capabilities, or a
+            # model the endpoint doesn't know. Fall through to the table.
+            logger.warning(
+                "Could not read effort capabilities for %r from the Anthropic "
+                "Models API (%s); falling back to the static table.", model, e,
+            )
+
+    if levels is None:
+        levels = config.MODEL_EFFORT_LEVELS.get(model)
+        if levels is None:
+            logger.warning(
+                "No effort levels known for %r on %s; assuming %s. Add an entry "
+                "to config.MODEL_EFFORT_LEVELS if this is wrong.",
+                model, provider_name, config.DEFAULT_EFFORT_LEVELS,
+            )
+            levels = list(config.DEFAULT_EFFORT_LEVELS)
+
+    _effort_levels_cache[key] = levels
+    return levels
+
+
+_google_budget_support: Optional[bool] = None
+
+
+def _google_supports_thinking_budget() -> bool:
+    """Whether the INSTALLED google-genai can express a thinking budget.
+
+    Checked rather than assumed, and the check earns its keep: the pinned
+    google-genai (1.0.0) ships a ThinkingConfig whose only field is
+    `include_thoughts` -- `thinking_budget` arrived in a later release. So
+    the obvious implementation, ThinkingConfig(thinking_budget=N), raises a
+    TypeError against the version this repo actually pins.
+
+    Rather than bump the pin (which would put §9's verified Google
+    implementation back in play for a feature Google users can do without),
+    reasoning effort is simply unavailable on Google until the pin moves.
+    D22's rule, applied: check the dependency's real shape, don't assume it.
+    """
+    global _google_budget_support
+    if _google_budget_support is None:
+        fields = getattr(genai_types.ThinkingConfig, "model_fields", {})
+        _google_budget_support = "thinking_budget" in fields
+        if not _google_budget_support:
+            logger.info(
+                "Installed google-genai has no ThinkingConfig.thinking_budget; "
+                "reasoning effort is unavailable on GOOGLE until the pin moves."
+            )
+    return _google_budget_support
+
+
+def _thinking_for_provider(provider_name: str, effort: Optional[str]) -> dict:
+    """Reasoning-effort kwargs for this provider, or {} when no effort is set.
+
+    Effort is opt-in: `effort=None` sends nothing at all and every provider
+    behaves exactly as it did before §16. That matters because the parameter
+    is not universally safe -- `reasoning_effort` is rejected by
+    OpenAI-compatible NON-reasoning models, and `thinking: {"type": "adaptive"}`
+    is rejected by pre-4.6 Anthropic models. Callers are expected to offer
+    only the levels effort_levels_for_model() reported, and to offer nothing
+    when it reported none.
+
+    Returned keys are merged into the provider's own kwargs by the caller;
+    the Google entry is nested inside GenerateContentConfig rather than sent
+    top-level, matching how that provider takes every other setting.
+    """
+    if not effort:
+        return {}
+    if provider_name == "ANTHROPIC":
+        # Adaptive thinking + an effort level is the current-model pairing;
+        # budget_tokens was removed and returns a 400.
+        return {
+            "thinking": {"type": "adaptive"},
+            "output_config": {"effort": effort},
+        }
+    if provider_name == "GOOGLE":
+        budget = config.GOOGLE_THINKING_BUDGETS.get(effort)
+        if budget is None or not _google_supports_thinking_budget():
+            return {}
+        return {"thinking_config": genai_types.ThinkingConfig(thinking_budget=budget)}
+    return {"reasoning_effort": effort}
+
+
 def call_model(
     client,
     provider_name: str,
@@ -282,6 +445,7 @@ def call_model(
     system_prompt: str,
     tool_schemas: list[dict],
     temperature: Optional[float] = None,
+    effort: Optional[str] = None,
 ) -> ModelResponse:
     """
     One call to the model, regardless of provider. `messages` is the
@@ -289,8 +453,12 @@ def call_model(
     just before the actual API call, into whatever shape the target
     provider expects. The system prompt is passed separately since
     Anthropic and OpenAI disagree about where it belongs.
+
+    `effort` is the reasoning-effort level (§16); None sends nothing.
     """
     translated_messages = _messages_for_provider(provider_name, messages)
+    sampling = _sampling_kwargs(provider_name, model, temperature)
+    thinking = _thinking_for_provider(provider_name, effort)
 
     if provider_name == "ANTHROPIC":
         kwargs = dict(
@@ -300,8 +468,8 @@ def call_model(
             messages=translated_messages,
             tools=_tools_for_provider(provider_name, tool_schemas),
         )
-        if temperature is not None:
-            kwargs["temperature"] = temperature
+        kwargs.update(sampling)
+        kwargs.update(thinking)
         response = client.messages.create(**kwargs)
         text = "\n".join(b.text for b in response.content if b.type == "text")
         calls = [
@@ -321,8 +489,8 @@ def call_model(
             tools=_tools_for_provider(provider_name, tool_schemas),
             max_output_tokens=config.MAX_TOKENS,
         )
-        if temperature is not None:
-            genai_config_kwargs["temperature"] = temperature
+        genai_config_kwargs.update(sampling)
+        genai_config_kwargs.update(thinking)
         response = client.models.generate_content(
             model=model,
             contents=translated_messages,
@@ -364,8 +532,8 @@ def call_model(
         max_completion_tokens=config.MAX_TOKENS,
         tools=_tools_for_provider(provider_name, tool_schemas),
     )
-    if temperature is not None:
-        openai_kwargs["temperature"] = temperature
+    openai_kwargs.update(sampling)
+    openai_kwargs.update(thinking)
     response = client.chat.completions.create(**openai_kwargs)
     choice = response.choices[0].message
     text = choice.content or ""
@@ -408,6 +576,7 @@ def call_model_stream(
     system_prompt: str,
     tool_schemas: list[dict],
     temperature: Optional[float] = None,
+    effort: Optional[str] = None,
 ):
     """Generator sibling to call_model(). Yields StreamToken events:
     text_delta for incremental text, final_response for the terminal
@@ -424,6 +593,8 @@ def call_model_stream(
     compaction trigger).
     """
     translated_messages = _messages_for_provider(provider_name, messages)
+    sampling = _sampling_kwargs(provider_name, model, temperature)
+    thinking = _thinking_for_provider(provider_name, effort)
 
     # Read once so every branch applies the same D21 usage-or-raise rule.
     # Anthropic always reports usage on its final message, so the flag only
@@ -441,8 +612,8 @@ def call_model_stream(
             messages=translated_messages,
             tools=_tools_for_provider(provider_name, tool_schemas),
         )
-        if temperature is not None:
-            stream_kwargs["temperature"] = temperature
+        stream_kwargs.update(sampling)
+        stream_kwargs.update(thinking)
 
         with client.messages.stream(**stream_kwargs) as stream:
             for text in stream.text_stream:
@@ -471,8 +642,8 @@ def call_model_stream(
             tools=_tools_for_provider(provider_name, tool_schemas),
             max_output_tokens=config.MAX_TOKENS,
         )
-        if temperature is not None:
-            genai_config_kwargs["temperature"] = temperature
+        genai_config_kwargs.update(sampling)
+        genai_config_kwargs.update(thinking)
 
         text_parts = []
         calls = []
@@ -525,8 +696,8 @@ def call_model_stream(
         tools=_tools_for_provider(provider_name, tool_schemas),
         stream=True,
     )
-    if temperature is not None:
-        openai_kwargs["temperature"] = temperature
+    openai_kwargs.update(sampling)
+    openai_kwargs.update(thinking)
     if supports_stream_usage:
         openai_kwargs["stream_options"] = {"include_usage": True}
 

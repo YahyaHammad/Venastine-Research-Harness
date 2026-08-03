@@ -942,3 +942,83 @@ Every other `getattr(<dataclass>, name, <default>)` site sharing the `fetch_url`
 - `fetch_url` is callable and advertised — `is_tool_allowed` True, `requires_approval` False, present in `registry.schemas()`. All three were false before.
 - Advertised tools under default config: 10 of 15 registered. `read`/`write`/`edit` (permission False), `shell` (permission False), and `load_skill` (empty catalog) are correctly absent.
 - `python main.py` with a typo'd user `settings.json` exits 1 with one line on stderr and no traceback.
+
+## 16. Textual TUI shell + reasoning effort + the ensemble fix (ROADMAP_v2 §16)
+
+### 16.1 What was built
+
+- `tui/` (NEW) — `app.py` (App, worker, event routing, slash dispatch), `widgets.py` (transcript with Rich `Syntax` highlighting, raven panels, research progress), `commands.py` (registry), `screens.py` (permission + thread-picker modals), `themes.py` (8 themes), `ravens.py` (art + activity-state table), `app.tcss`.
+- `core/client.py` — `_sampling_kwargs()`, `_thinking_for_provider()`, `effort_levels_for_model()`, `_google_supports_thinking_budget()`; `effort` parameter on `call_model` and `call_model_stream`.
+- `core/loop.py` — `effort` threaded through `_run()` and all three public wrappers.
+- `config.py` — `MODELS_REJECTING_SAMPLING_PARAMS`, `MODEL_EFFORT_LEVELS`, `DEFAULT_EFFORT_LEVELS`, `GOOGLE_THINKING_BUDGETS`, `DEFAULT_EFFORT`; `MAX_TOKENS` 4096 → 16000.
+- `core/config_loader.py` — `_KNOWN_TUI`, and `_NESTED_SETTINGS` driving both validation and the cross-tier deep merge.
+- `core/reasoning/orchestrator.py` — the ensemble guard.
+- `main.py` — `--tui`.
+- `requirements.txt` — `textual>=1.0,<2.0`, plus `pytest` / `pytest-mock` / `pytest-asyncio`, which the suite has always needed and which had been a documented open item since §14.
+
+### 16.2 Decisions made in the clarification cycle (user-decided)
+
+| Question | Decision |
+|---|---|
+| §16's scope, given most of the wishlist isn't TUI code | **Shell only.** Capabilities land in their owning sections and register into the shell. |
+| What "goal mode" means | A **persistent per-thread objective** injected each turn — not a rubric-graded loop, not a mode switch. → §18 |
+| Question tool with no response channel | **Deny**, mirroring D26/`remember()`. |
+| Cross-thread referencing | **User-initiated** (`/ref` + picker); defers to §21, which has the summariser. |
+| Ensemble/temperature defect | Gate the parameter **and refuse to run degraded**. |
+| Source of valid effort levels | **Query Anthropic's Models API** so new Anthropic models need no manual entry; static table only where no equivalent exists. |
+| Research view | Coarse now; full observability gets its own roadmap section so it isn't lost. → §22 |
+| Shell contents | Themes, syntax highlighting, raven + animations — purely cosmetic items, which leave core logic untouched and are therefore low-risk. |
+
+The last one is worth recording as a judgement, not just a selection: the user explicitly excluded `/ref` from the shell on the grounds that it touches core logic while the cosmetic items do not. That is the same instinct §16's whole scope rests on.
+
+### 16.3 §16's spec had to be rewritten before it could be built
+
+§16 said "Unchanged from Rev. 1 in overall shape" and made AC1 "All Rev. 1 acceptance criteria" — but Rev. 1's text does not exist; Revision 3 overwrote it. The baseline TUI was unspecified.
+
+**This is a different failure from Rev. 3's "abbreviated restatement" rule, and worth naming separately:** a cross-reference to a *document revision* dangles the moment that revision is replaced, whereas a cross-reference to a *section number* survives (which is why this document declares section numbers stable). §16's body was rewritten in place, and the lesson recorded there.
+
+### 16.4 The ensemble defect (the §15 pattern, third instance)
+
+`orchestrator.py` passed `temperature=1.0` into `call_model`; current Anthropic models reject sampling parameters; `config.MODEL_NAME` defaults to `claude-sonnet-5`. ROADMAP §10 was built, documented as working, and could not run against the harness's own default model — invisible because `ENSEMBLE_MODE = False`, and newly reachable because §14 made it settable from `settings.json`.
+
+**Refusing beats dropping the parameter, and the reason is specific.** Dropping it makes ensemble mode *appear* to work: N candidates get generated, they are identical, and §10's cross-candidate consistency score then reports maximal agreement for every claim — feeding a falsely confident number into Pass 4's formula. The failure would be an expensive wrong answer rather than an error. So `call_model` drops the parameter (with a WARNING) and the orchestrator refuses outright, naming the model and saying what to do.
+
+This is the third instance of one shape: `fetch_url` (registered, never callable), the argparse-defaults gap (§14.3, wired but inert), and now ensemble mode (built, documented, unrunnable). All three were features that looked complete and had never been executed end to end on the shipped configuration.
+
+### 16.5 The pinned google-genai cannot express a thinking budget
+
+Implementing Google effort as `ThinkingConfig(thinking_budget=N)` — the obvious form — raises `TypeError` against `google-genai==1.0.0`, whose `ThinkingConfig` carries only `include_thoughts`. `thinking_budget` arrived later.
+
+Checked rather than assumed, which is D22's rule applied to a second dependency. The resolution is `_google_supports_thinking_budget()`: the installed SDK is inspected once, and when it cannot carry a budget, `effort_levels_for_model()` reports **no levels** for Google so the picker never offers something unsendable. Moving the pin would enable Google effort — and would also put §9's verified Google implementation back in scope for retest, to gain a feature Google users can do without. Recorded in `requirements.txt` next to the pin.
+
+### 16.6 Why effort is opt-in
+
+`effort=None` sends nothing on every provider, so every pre-§16 caller behaves exactly as before. This is not tidiness: `reasoning_effort` is rejected by OpenAI-compatible *non-reasoning* models, and `thinking: {type: "adaptive"}` is rejected by pre-4.6 Anthropic models. Silence is the only universally safe value. The TUI offers only levels `effort_levels_for_model()` reported, and offers nothing when it reported none.
+
+`MAX_TOKENS` moved 4096 → 16000 in the same change, because on current Anthropic models `max_tokens` caps thinking **plus** response text together — shipping the picker without this would ship a feature that truncates the answers it is attached to. It interacts with `MAX_TOKEN_BUDGET` (100k cumulative per `_run()`), so at 16k per call roughly six calls fit; both want raising together for `xhigh`/`max` work.
+
+### 16.7 Observations recorded, deliberately not changed
+
+- **`create_db_and_tables()` and the missing `pipelinerunrecord` table — investigated after §16 and FIXED.** The trap surfaced during §16 smoke testing as an import-order nuisance; checking it properly showed a live defect. Table classes register on `SQLModel.metadata` at module-import time; `storage` reached it by luck via `main.py` → `core.loop` → `core.memory`, but `pipeline_storage` did not, because the orchestrator is imported lazily inside `run_research()` — after `create_db_and_tables()` runs. **A fresh `app.db` therefore had no `pipelinerunrecord` table, and §5's durable pipeline persistence failed on the first research run of a clean install.** Masked locally by a long-lived `app.db`; invisible in CI because `*.db` is gitignored.
+
+  Fixed by making the entry point declare its tables (`main.py` imports `storage` and `core.reasoning.pipeline_storage` for the side effect) and by making `create_db_and_tables()` raise when nothing is registered. `database.py` stays ignorant of what tables exist, per §4.4 — importing them there would both violate that boundary and create a cycle, since `storage` imports `engine` from it.
+
+  **The regression test took three attempts, and the first two were worse than nothing.** Checking `SQLModel.metadata` fails because the suite runs against the root conftest's fake sqlmodel. Checking `"core.reasoning.pipeline_storage" in sys.modules` is *vacuous* — `test_pipeline_storage.py` imports that module itself, so the assertion passed with `main.py`'s import deleted; that was verified against the broken code rather than assumed. The surviving test parses `main.py`'s AST, and was confirmed to fail when the import is removed. This is the fourth instance of the project's recurring shape, and the first where the test guarding the fix nearly shipped unable to fail.
+- `tui/` is a namespace package (no `__init__.py`), matching `tools/`.
+
+### 16.8 Test changes
+
+- `tests/test_tui.py` (NEW, 10) — driven through Textual's own `run_test()` pilot rather than by calling handlers directly. AC2 approve/deny/escape, asserted **against the dispatched tool** rather than the modal rendering; AC3 a raising tool leaves the app alive and the raven idle; unknown slash command not sent to the model; theme apply/switch/reject/fallback; effort offered-levels and the level reaching the provider payload.
+- `tests/test_client_effort.py` (NEW, 15) — sampling gate (dropped + logged, passed through, `None` sends no key, default model is in the reject set), effort translation per provider, and capability discovery (queried for Anthropic, cached, falls back loudly, never queried for others, Google gated on the installed SDK).
+- `tests/test_ensemble_guard.py` (NEW, 3) — refusal before any LLM call or `PipelineRunRecord` row; ensemble-off unaffected on the same model; ensemble allowed on a sampling-capable model.
+- `tests/test_config_loader.py` — +4 for the `tui` block, including that it deep-merges like `compaction`.
+- `tests/test_client_translation.py` — the Google test asserted `max_output_tokens == 4096`; now asserts against `config.MAX_TOKENS`, since that value is explicitly a tunable.
+- `conftest.py` — the Google fake gained `ThinkingConfig`. The real SDK has it, so the fake lacking it was the double drifting from production, not the code being wrong.
+- `pytest.ini` unchanged: TUI tests use explicit `@pytest.mark.asyncio` markers rather than `asyncio_mode = auto`, keeping ARCHITECTURE §4.13's "no asyncio in pytest.ini" true.
+- Full suite: **335 tests** (was 307).
+
+### 16.9 Verified beyond the suite
+
+- **Both acceptance-criteria tests were confirmed able to fail**, not assumed to be meaningful: flipping `exit_on_error` back to Textual's `True` default tears the app down and AC3 fails; dropping the permission answer instead of putting it on the channel makes AC2 hang exactly as the docstring predicts (the worker blocks forever on `queue.get()`). Both restored afterwards.
+- Themes build against real textual 1.0.0 (all 8 register, `resolve()` falls back on an unknown name).
+- Headless pilot: layout mounts, ravens render, `/theme` switches live, an unknown command does not become a chat turn.

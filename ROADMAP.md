@@ -819,6 +819,26 @@ Implemented against `google-genai==1.0.0` with all SDK shapes verified by inspec
 
 ## 10. Ensemble mode
 
+> **⚠ Revisit required (found during ROADMAP_v2 §16).** The diversity mechanism below —
+> running Pass 1 N times at a raised `temperature` — does not work on current Anthropic
+> models, which reject sampling parameters outright (`temperature`/`top_p`/`top_k` were
+> removed on Opus 5 / 4.8 / 4.7 and Fable 5; Sonnet 5 rejects non-default values). Since
+> `config.MODEL_NAME` defaults to `claude-sonnet-5`, this section was built, documented as
+> working, and **could not execute against the harness's own default model**. It went
+> unnoticed because `ENSEMBLE_MODE = False` by default, so the failing request was never
+> made; ROADMAP_v2 §14 then shipped the first convenient way to enable it.
+>
+> §16 stopped the crash: `core/client.py` omits sampling parameters where the model rejects
+> them, and `orchestrator.py` **refuses** to run ensemble mode on such a model rather than
+> silently producing N identical candidates and reporting maximal cross-candidate
+> consistency for all of them (which would feed a falsely confident score into Pass 4).
+>
+> What remains is the redesign: replace sampling-level variation with **prompt-level**
+> variation — each candidate gets a distinct framing instruction — and re-evaluate whether
+> prompt-varied candidates are diverse enough for the cross-candidate consistency score to
+> mean what §4's formula assumes. Until then, ensemble mode works only on
+> OpenAI-compatible and Google models.
+
 **Problem:** `config.py` has no ensemble settings; `core/reasoning/orchestrator.py` always runs Pass 1 exactly once. The original spec described this as optional/off-by-default, folding a cross-candidate consistency signal into Pass 4's scoring — but left the exact mechanics (does Pass 2 run once on combined candidates, or once per candidate?) underspecified. Decision made below, not left open.
 
 **Decision:** Pass 1 runs `ensemble_n` times independently (each its own `ConversationMemory`/thread, at a higher temperature for diversity). Pass 2 runs **once**, given all candidates labeled and concatenated, and is asked to extract the union of distinct claims, tagging each with which candidate(s) asserted it. A new pure-code consistency score (fraction of candidates that independently asserted a given claim) becomes an additional term in Pass 4's formula, used only when ensemble mode was on for that run.

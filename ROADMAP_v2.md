@@ -70,6 +70,9 @@ Every decision below was made through a structured clarification cycle with the 
 - 19. Skill system — skill `.md` format + manager + activation + default skills
 - 20. Subagent reviewing — opt-in post-pipeline review
 - 21. Memory system — compaction, archive, thread-scoped pinning, user/project memory
+- 22. Pipeline observability — orchestrator events + the live research view **(added during §16)**
+- 23. Interactive tools — question tool, todo list, and the response channel they share **(added during §16)**
+- 24. `/init` — generate `CONTEXT.md` from the project **(added during §16)**
 - **Open Questions — None Remaining** (Rev. 3 — all decisions locked; verification items only)
 - **Why these calls, not just what they are** (Rev. 3 — the reasoning patterns behind several decisions above)
 
@@ -581,48 +584,105 @@ Implemented as specified, with four deliberate deviations and one correction to 
 
 ## 16. TUI — Textual app + widgets + slash commands + streaming integration
 
-**Unchanged from Rev. 1 in overall shape** (Textual app, `ModalScreen` for thread picker/permission prompts, slash command registry, `run_worker(thread=True)` running `_run()`'s generator off the UI thread). Two concrete fixes from review:
+**This section was rewritten during implementation, because it could not be built from what it said.** Rev. 3 described §16 as "Unchanged from Rev. 1 in overall shape" and made acceptance criterion 1 "All Rev. 1 acceptance criteria" — but Rev. 1's text no longer exists anywhere in this repository; Revision 3 overwrote it. What survived was a one-line gloss (Textual app, `ModalScreen` for thread picker / permission prompts, slash command registry, `run_worker(thread=True)`) plus two Rev. 3 corrections. The baseline TUI — layout, widget set, slash-command surface, mode toggle — was unspecified.
 
-### Permission prompt wiring (fixes C1)
+**The general lesson, and it is a different one from Rev. 3's "abbreviated restatement" rule:** a section that defers to another *document revision* rather than to another *section* has a dangling reference the moment that revision is replaced. Cross-references by section number survive revisions (that is why this document says section numbers are stable); cross-references to "Rev. 1" do not. Where a section is genuinely unchanged, restate its acceptance criteria rather than pointing at a revision that will be overwritten.
 
-The `permission_channel` parameter now exists on `_run()` (§13), closing the gap where the original draft referenced `self._permission_queue` and `event.permission_response_needed` without either being connected to an actual signature:
+### Scope: the shell, not the capabilities
+
+§16 ships a complete, polished TUI **shell**. Capabilities land in the section that owns them and register into the shell.
+
+This is forced by D12, which makes the CLI a permanent fallback that is never removed. A capability implemented inside `tui/` is invisible to the CLI *and* to the research pipeline — so a question tool, a todo list, or a goal mode written here would be a feature only one of three entry points can use. The shell hosts; it does not own.
+
+### Components
+
+- `tui/app.py` — the `App`. Event routing, the worker, slash-command dispatch, both ravens.
+- `tui/widgets.py` — transcript (with Rich `Syntax` highlighting for fenced code), raven panels, research progress.
+- `tui/commands.py` — the slash-command registry. Mechanism only; §18/§19/§21 register into it, exactly as `tools/registry.py` holds dispatch mechanics while `security/permissions.py` holds policy.
+- `tui/screens.py` — `ModalScreen`s for the permission prompt and the thread picker.
+- `tui/themes.py` — eight themes (dark/light × plain/red/green/blue).
+- `tui/ravens.py` — mascot art and the activity-state table.
+
+### Streaming and the permission bridge (fixes C1)
+
+`_run()` is already a generator yielding `LoopEvent` (§13), and `permission_channel` already exists, so the app needs no new loop machinery:
 
 ```python
 def run_agent_turn(self, user_input: str):
     channel = queue.Queue()
-    gen = RunAgentLoop._run(..., permission_channel=channel)
-    self._active_permission_channel = channel  # so the modal's callback can reach it
-    self.run_worker(lambda: self._consume(gen), thread=True, exit_on_error=False)
+    generator = RunAgentLoop._run(..., permission_channel=channel)
+    self.run_worker(lambda: self._consume(generator),
+                    thread=True, exit_on_error=False)
 
-def _consume(self, gen):
-    for event in gen:
-        self.post_message(LoopEventMessage(event))
-        if event.permission_request is not None:
-            # blocks THIS worker thread until the modal (on the UI thread)
-            # calls channel.put(...) after the user responds
-            pass  # the blocking .get() happens inside _run() itself, not here
-
-def on_permission_response(self, approved: bool):
-    self._active_permission_channel.put(approved)
+def _consume(self, generator):
+    for event in generator:
+        self.post_message(LoopEventMessage(event))   # thread-safe hand-off
 ```
 
-### Worker error handling (verified against Textual's actual behavior, not assumed)
+The worker thread blocks inside `_run()` on `permission_channel.get()`; the UI thread shows the modal and puts the decision on the queue. **Nothing re-enters or restarts the generator** — that is what AC2 asserts, and it asserts it against the dispatched tool rather than against the modal appearing, because a modal that renders and then drops the answer leaves the worker blocked forever. That failure presents as a hang, not as an error.
 
-An exception raised inside a `thread=True` worker does **not** propagate to the caller of `run_worker()` — Textual catches it, transitions the worker to `WorkerState.ERROR`, and the exception is available on `event.worker.error` via a `Worker.StateChanged` message. **`exit_on_error` defaults to `True`**, meaning an unhandled exception (e.g. a transient network error) would silently terminate the entire TUI app unless explicitly overridden:
+**Every dismissal path must produce a boolean.** Escape, and any dismissal carrying `None`, resolve to a denial. A `None` reaching `channel.put()` would unblock the worker with a non-answer; a dismissal that puts nothing at all never unblocks it.
 
-```python
-def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
-    if event.worker.state == WorkerState.ERROR:
-        self.notify(f"Error: {event.worker.error}", severity="error")
-```
+### Worker error handling (verified, not assumed)
 
-`run_worker(..., exit_on_error=False)` must be passed explicitly (shown above), and `on_worker_state_changed` must be implemented — this is now a hard acceptance criterion, not an assumed default.
+An exception inside a `thread=True` worker does not propagate to the caller of `run_worker()`. Textual catches it, moves the worker to `WorkerState.ERROR`, and exposes it on `event.worker.error`. **`exit_on_error` defaults to `True`**, so an unhandled transient network error would terminate the whole app. `exit_on_error=False` plus an `on_worker_state_changed` handler are both required.
+
+Confirmed against textual 1.0.0's real signature during implementation rather than assumed: `run_worker` takes `exit_on_error` and `thread`, and `Worker.StateChanged` / `WorkerState.ERROR` exist as described.
+
+### The two ravens
+
+**Corner raven — activity.** Driven entirely by the `LoopEvent` stream already flowing to the UI: `token_delta` → thinking, `tool_call_start` → a per-tool state (searching / reading / editing / running), `permission_request` → waiting, `final_response` → idle. **Unknown tool names map to a generic working state**, so §17's runtime-registered MCP tools and §18's subagents animate without the table being edited.
+
+**Small raven — reasoning effort.** Renders the current level so the setting is visible rather than remembered.
+
+**Animation must not compete with token streaming.** A redraw loop running against incoming deltas is the one place the mascot costs responsiveness rather than merely effort; animation pauses while a stream is active, and `tui.animations` disables it outright.
+
+### Reasoning-effort switching
+
+`core/client.py` gains `_thinking_for_provider()` alongside `_tools_for_provider()` / `_messages_for_provider()` — the same translate-at-the-boundary case. The three providers do not share a concept:
+
+| Provider | Shape | Valid values |
+|---|---|---|
+| Anthropic | `output_config.effort` + `thinking: {type: "adaptive"}` | Enum, **queryable** per model via `capabilities.effort` on the Models API |
+| OpenAI-compatible | `reasoning_effort` | Enum, reasoning models only; no capability endpoint on any provider in `providers.json` |
+| Google | `thinking_config.thinking_budget` | An **integer budget**, not an enum at all |
+
+So `effort_levels_for_model()` queries Anthropic and tabulates the rest — a newly released Anthropic model needs no entry anywhere in this repo, which is the whole reason to query rather than tabulate uniformly. Falling back logs at WARNING, matching §21's `MODEL_CONTEXT_WINDOWS` posture.
+
+**Effort is opt-in (`None` sends nothing).** This is load-bearing, not a default chosen for tidiness: `reasoning_effort` is rejected by OpenAI-compatible *non-reasoning* models, and `thinking: {type: "adaptive"}` is rejected by pre-4.6 Anthropic models. Silence is the only universally safe value, so every pre-§16 caller behaves exactly as before.
+
+**`config.MAX_TOKENS` was raised from 4096.** On current Anthropic models `max_tokens` caps thinking **plus** response text together, so the old value truncated answers mid-sentence the moment effort was enabled. Shipping the picker without this would have shipped a feature that breaks the thing it attaches to.
+
+### Prerequisite fixed here: ensemble mode could not run
+
+`orchestrator.py` passed `temperature=config.ENSEMBLE_TEMPERATURE` into `call_model`, and current Anthropic models reject sampling parameters — removed outright on Opus 5 / 4.8 / 4.7 and Fable 5, non-default values rejected on Sonnet 5, which is `config.MODEL_NAME`'s default. ROADMAP §10 was built, documented as working, and **could not execute against this harness's own default model**. It never surfaced because `ENSEMBLE_MODE = False`, and §14 shipped the first convenient way to turn it on.
+
+Two changes: `call_model`/`call_model_stream` omit sampling parameters where the model rejects them, and the orchestrator **refuses** to run ensemble mode on such a model. Refusing rather than silently dropping the parameter is the point — dropping it would generate `ensemble_n` identical candidates, spend N× the tokens, and then report maximal cross-candidate consistency for every claim, feeding a falsely confident score into Pass 4. Redesigning §10's diversity mechanism (prompt-level rather than sampling-level variation) is a deferred **§10 revisit**.
+
+### Research mode
+
+Coarse by construction. `run_deep_research_pipeline()` is synchronous and reports nothing while running: each pass is drained through `run_to_completion()` inside the orchestrator, so no `LoopEvent` escapes, and the per-pass checkpoints it does write go to the database rather than to a caller. §16 therefore runs the pipeline on a worker (the app stays responsive, the raven animates) and renders the trace and report on completion. Live pass-by-pass progress, per-claim tier updates, and token streaming inside a pass require the pipeline to emit events — that is **§22**.
 
 ### Acceptance criteria
 
-1. All Rev. 1 acceptance criteria (slash commands, thread switching via `storage.list_threads()` — already exists, confirmed against current code, no `storage.py` changes needed for this specifically — provider/model switching, chat/research mode toggle).
-2. A permission prompt shown mid-loop correctly resumes the SAME generator with the user's response, verified end to end (not just that the modal displays).
-3. A tool call that raises an exception results in a visible, graceful error notification, not an app crash — verified with `exit_on_error=False` explicitly set and a forced exception in a mocked tool call.
+1. Slash commands dispatch through a registry other sections can register into; an unknown command reports itself rather than becoming a chat turn. Thread switching via `storage.list_threads()` (already exists — no `storage.py` change). Provider/model shown; theme and effort switchable at runtime.
+2. A permission prompt shown mid-loop resumes the SAME generator with the user's response, verified end to end **against the dispatched tool**, not against the modal rendering. Denial and Escape both block the tool and both let the turn finish.
+3. A tool call that raises results in a visible, graceful error notification, not an app crash — verified with `exit_on_error=False` explicitly set and a forced exception in a mocked tool call, and with the raven returning to idle rather than sticking mid-activity.
+4. **(§16)** Effort switching offers only levels the current model reports, and the chosen level reaches the provider payload — asserted on the translated call arguments, not on the UI.
+5. **(§16)** Ensemble mode on a sampling-rejecting model raises a clear error naming the model, before any LLM call or `PipelineRunRecord` row.
+
+### Built
+
+Implemented as specified above. **335 tests pass** (307 → 335). Full decision record in DEVLOG.md §16.
+
+- `tui/` package (app, widgets, commands, screens, themes, ravens, `app.tcss`), `main.py --tui`.
+- `core/client.py`: `_sampling_kwargs()`, `_thinking_for_provider()`, `effort_levels_for_model()`, `_google_supports_thinking_budget()`.
+- `core/loop.py`: `effort` threaded through `_run()` and all three public wrappers.
+- `config.py`: `MODELS_REJECTING_SAMPLING_PARAMS`, `MODEL_EFFORT_LEVELS`, `GOOGLE_THINKING_BUDGETS`, `DEFAULT_EFFORT`, `MAX_TOKENS` 4096 → 16000.
+- `core/config_loader.py`: `_KNOWN_TUI`, and `_NESTED_SETTINGS` so the deep-merge stops naming sections inline.
+- `core/reasoning/orchestrator.py`: the ensemble guard.
+
+**One deviation, found by checking rather than assuming:** the pinned `google-genai==1.0.0` has a `ThinkingConfig` whose only field is `include_thoughts` — `thinking_budget` arrived in a later release, so the obvious implementation raises a `TypeError` against the version this repo actually pins. Rather than move the pin (which would put §9's verified Google implementation back in scope for retest to gain a feature Google users can do without), `_google_supports_thinking_budget()` checks the installed SDK and reports **no effort levels** on Google until the pin moves. D22's rule, applied to a second dependency.
 
 ---
 
@@ -781,6 +841,13 @@ def run(params: dict, parent_context: ToolContext, max_depth: int = 2) -> dict:
 
 `registry.dispatch()` needs to pass the CURRENT context through to any handler that declares a `parent_context` parameter — this is a signature-inspection concern for `dispatch()` to resolve when this is implemented (mirrors how tool handlers already vary in whether they take just `params` or more).
 
+### Built-in agents requested during §16
+
+Two wishlist items are agents, not TUI features, and land here:
+
+- **`/grill-me`** — an agent that reads the current thread and surfaces what still needs a decision: ambiguities, unstated design choices, assumptions the work is resting on. Shaped like §20's reviewer (read distilled state, return a structured list), and like every other agent it runs through `RunAgentLoop` rather than getting its own LLM-calling path.
+- **Goal mode** — a persistent objective, set once and folded into every subsequent turn's context so the agent stays oriented across a long session. **Decided: a persistent objective, not a rubric-graded iterate loop and not a loop-behaviour switch.** Needs thread-scoped state; `ConversationThread.extra_data` already exists and is unused (see §23's note about the same field). The TUI renders it as a banner.
+
 ### Acceptance criteria
 
 1. A subagent spawned by an agent restricted to `{read, web_search}` cannot access `shell` even if its own `.md` declares `allowed_tools: [shell]` — verified directly, not just asserted.
@@ -922,6 +989,13 @@ Two consequences worth stating rather than discovering:
 1. **`remember()` cannot fire on headless paths, by construction.** §13 specifies that with no `permission_channel` (CLI, and every deep-research pipeline pass), anything requiring approval is denied by default. So research passes can't write durable memories. That is the right outcome — a ten-pass pipeline running unattended is exactly the context where an injected "remember this" from fetched web content would be most dangerous and least noticed — but it means the pipeline must not be designed to depend on `remember()` for carrying anything forward. It already has `PipelineContext` for that.
 2. **If the prompt proves too frequent in practice, don't relax it — move it.** An approval prompt that fires often enough to be dismissed reflexively is worse than no prompt, because it launders consent. The fallback, if that happens, is the pattern §21 already uses for compaction: make it *visible and undoable* instead of gated — a `— remembered: "..." —` marker inline plus a `/forget` command — rather than dropping the gate and leaving the write silent. Same principle ("never silently do consequential things"), different mechanism.
 
+### Also served by this machinery (requested during §16)
+
+Both of these were asked for as TUI features and are really this section's:
+
+- **Session summaries** — the same operation as compaction: an agent distilling a thread segment. `CompactionCheckpoint` and `agents/builtin/compactor.md` already are this; a user-facing summary is that machinery invoked deliberately rather than by a token threshold. Building it separately in §16 would have meant either duplicating the compactor or pre-empting it.
+- **`/ref` cross-thread referencing** — user-initiated: a thread picker (§16 already has one, over `storage.list_threads()`), then the chosen thread's **distilled summary** injected into the current thread. **Decided: user-initiated rather than a model-callable search tool** — the user chooses what crosses, so nothing fetched in one thread can steer another without their say-so. It defers to here rather than to §16 because it needs something to inject, and the compactor is the summariser. Matches the project's "distill, don't share raw history" principle; a model-initiated `search_threads` remains possible later on top of the same retrieval, with an approval gate on D26's reasoning.
+
 ### Acceptance criteria
 
 1. Compaction never modifies or deletes rows in `MessageLog` — only adds `CompactionCheckpoint` rows. A full-history query against `MessageLog` alone always returns everything ever said, regardless of how many times compaction has run.
@@ -932,6 +1006,86 @@ Two consequences worth stating rather than discovering:
 6. **(D25) `remember()` with no explicit `scope` writes a `"project"`-scoped row**, keyed to the same resolved project path the trust store uses — and that memory does not surface in a thread opened from a different project directory.
 7. **(D26) `remember()` is denied on a path with no approval channel** (CLI, pipeline passes) rather than writing silently; `pin()` succeeds on those same paths. Both tools have declared fields in `ToolPermissions` and `ToolApprovals`, per D24's consistency check.
 8. **(D27) A `compaction` block in a trusted project's `settings.json` overrides the `config.py` defaults**, a user-level `settings.json` overrides `config.py` but loses to the project, and an out-of-range value (`strength: 9`, or `warning_margin >= buffer`) is rejected with a clear message at load time rather than producing incoherent trigger math later.
+
+---
+
+## 22. Pipeline observability — orchestrator events + the live research view
+
+**Added during §16.** The deep-research pipeline currently reports nothing while it runs. `run_deep_research_pipeline()` is synchronous; each pass is drained through `run_to_completion()` inside `orchestrator.py`, so no `LoopEvent` escapes, and the 16 per-pass `update_pipeline_run()` checkpoints write to the database rather than to a caller. §16's research view is coarse for exactly this reason — it can show that the pipeline is running and render the trace and report when it returns, and nothing in between.
+
+This is the second §13-scale refactor: make the orchestrator a generator.
+
+### Shape
+
+`run_deep_research_pipeline()` becomes a generator yielding a `PipelineEvent`, with a `run_pipeline_to_completion()` drainer keeping every existing caller (the CLI, `main.run_research`, the §16 TUI worker) synchronous — exactly the shape §13 used for `_run()` / `run_to_completion()`, for the same reason.
+
+Event kinds, at minimum: `pass_start` / `pass_complete` (with the pass id), `trace_line`, `claim_extracted`, `claim_tiered` (claim id + tier), `retry` (which claim, which attempt), and `run_complete`.
+
+### Decide the event shape BEFORE adding to it
+
+`LoopEvent` is a flat dataclass with an "exactly one field is populated" convention (see `core/events.py`). That was right for six kinds. §22 adds roughly seven more of a different family, and §23 adds two more — at which point a flat bag of ~15 optional fields, where the valid combinations are documented in a docstring rather than in the type, stops paying for itself.
+
+**Decide this first**: either `PipelineEvent` is a separate type from `LoopEvent` (likely — they have different consumers and different lifetimes), or both become a tagged union. Do not simply add fields to `LoopEvent` and discover the problem at §23.
+
+### Interaction with §5's checkpoints
+
+The orchestrator already calls `update_pipeline_run()` after every `run.log()`. Those calls and the new events carry overlapping information, and **two independent writers of related data is the exact bug shape this project already found and fixed once** (ARCHITECTURE/DEVLOG §3.8, cited by §21's own design principle). Derive one from the other — emit the event at the checkpoint site rather than adding a parallel emission path.
+
+### Acceptance criteria
+
+1. Every existing caller of `run_deep_research_pipeline()` still receives a finished `PipelineRun`, unchanged, via the drainer.
+2. A TUI consumer renders pass boundaries and claim tiers as they happen, without polling the database.
+3. §5's per-pass persistence still fires on every trace line, and there is exactly one place a trace line is recorded.
+4. The event-type decision above is made explicitly and recorded, before any event is added to `LoopEvent`.
+
+---
+
+## 23. Interactive tools — question tool, todo list, and the response channel they share
+
+**Added during §16.** Two requested capabilities need the same missing piece: a way for a *tool* to ask the user something and block until answered. §13 built exactly one of these — `permission_channel`, a `queue.Queue` carrying a boolean — and both of these need a richer version of it.
+
+### The shared piece first
+
+Generalise the approval bridge into a response channel that carries a typed request and a typed response, with `permission_channel` becoming one case of it rather than a parallel mechanism. Doing the tools first and the generalisation afterwards produces two bespoke channels and a third when §18 wants one.
+
+### Question tool
+
+Up to 4 options, multi-select, a write-your-own answer, and a "chat about this" escape that returns control to the conversation instead of forcing a choice.
+
+**Headless behaviour is decided (matches D26/`remember()`): with no response channel the call is DENIED**, and the model receives an error result it can work around. The CLI and every research pass are headless. This is deliberate for the same reason `remember()` is: a ten-pass pipeline running unattended is exactly where a blocking prompt nobody will answer turns into a hang, and where an injected question from fetched web content would be least noticed.
+
+Per D24 the tool needs declared fields in both `ToolPermissions` and `ToolApprovals`, or the import-time check fails.
+
+### Todo list tool
+
+A model-maintained checklist, persisted per thread, rendered in a TUI panel whose placement (top / bottom / side) is a `tui.todo_position` preference. Needs an event so the panel re-renders on change — see §22's note about deciding the event shape first.
+
+Open question to settle at build time: whether the list is thread-scoped state in `ConversationThread.extra_data` (which already exists and is unused) or its own table. `extra_data` is the cheaper answer and the field was put there for this kind of thing.
+
+### Acceptance criteria
+
+1. `permission_channel` is one case of the general channel, not a second mechanism alongside it.
+2. Both tools deny cleanly with no channel present, on the CLI and in every pipeline pass, and say why.
+3. Both tools have declared permission/approval fields (D24).
+4. The todo panel re-renders from an event, not from polling.
+
+---
+
+## 24. `/init` — generate `CONTEXT.md` from the project
+
+**Added during §16.** A command that reads the project and writes `.venastine/CONTEXT.md`, the free-text project context §14 already loads and injects into opted-in agents' prompts.
+
+### Two interactions to design around, not discover
+
+**Writing `CONTEXT.md` changes the workspace-trust hash.** D17 keys trust to a sha256 of everything under `.venastine/`, so generating this file invalidates the grant and the next run re-prompts. That is the trust system working exactly as designed — content changed, so consent is re-asked — but a `/init` that silently costs the user their trust grant is a bad experience. Either re-grant explicitly as part of the command (the user just authored the content, so consent is unambiguous) or tell them it will happen. Do not special-case `CONTEXT.md` out of the hash; that would put a hole in D17 for the convenience of one command.
+
+**`write` is permission `False` by default.** §24 either runs through the existing `write` tool (and so needs approval, which is right for a command that writes into the project) or writes directly from the command handler. Prefer the former: a command that bypasses the tool permission layer to write files is a precedent worth not setting.
+
+### Acceptance criteria
+
+1. Running `/init` on a trusted project leaves it trusted, without weakening the content hash.
+2. The generated file is the user's to edit — regeneration must not silently overwrite hand-edits without saying so.
+3. The write goes through the permission layer.
 
 ---
 

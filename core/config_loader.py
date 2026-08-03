@@ -46,12 +46,33 @@ _KNOWN_SETTINGS = {
     "ensemble_mode": bool,
     "ensemble_n": int,
     "compaction": dict,
+    "tui": dict,
 }
 _KNOWN_COMPACTION = {
     "strength": int,
     "keep_recent_tokens": int,
     "buffer_tokens": int,
     "warning_margin_tokens": int,
+}
+# ROADMAP_v2 §16. TUI preferences live here rather than in a dotfile of
+# their own because unknown settings keys RAISE (§14 amendment 1) -- a
+# preference the loader doesn't know about is a startup error, not a
+# silently ignored line. That is the tradeoff the loud-rejection rule
+# buys: adding a preference is a schema change, on purpose.
+_KNOWN_TUI = {
+    "theme": str,        # one of tui/themes.py's registered names
+    "animations": bool,  # master switch for the raven + transitions
+    "effort": str,       # persisted reasoning-effort level (§16)
+}
+
+# Settings whose value is a nested object. Both the validator and the
+# cross-tier merge below iterate this rather than naming keys twice --
+# `compaction` was the only member until §16 added `tui`, and hardcoding
+# it in two places is what made the shallow-merge defect (review finding
+# F2) possible in the first place.
+_NESTED_SETTINGS = {
+    "compaction": _KNOWN_COMPACTION,
+    "tui": _KNOWN_TUI,
 }
 
 
@@ -239,17 +260,22 @@ def _validate_settings(data, source: str) -> None:
             raise ValueError(
                 f"settings.json at {source}: key {key!r} must be {expected.__name__}, "
                 f"got {type(value).__name__}")
-    compaction = data.get("compaction")
-    if compaction is not None:
-        if not isinstance(compaction, dict):
-            raise ValueError(f"settings.json at {source}: 'compaction' must be an object")
-        for key, value in compaction.items():
-            if key not in _KNOWN_COMPACTION:
+    for section, known_keys in _NESTED_SETTINGS.items():
+        block = data.get(section)
+        if block is None:
+            continue
+        if not isinstance(block, dict):
+            raise ValueError(
+                f"settings.json at {source}: {section!r} must be an object")
+        for key, value in block.items():
+            if key not in known_keys:
                 raise ValueError(
-                    f"settings.json at {source}: unknown compaction key {key!r}")
-            if not _type_ok(value, int):
+                    f"settings.json at {source}: unknown {section} key {key!r}")
+            expected = known_keys[key]
+            if not _type_ok(value, expected):
                 raise ValueError(
-                    f"settings.json at {source}: compaction key {key!r} must be int")
+                    f"settings.json at {source}: {section} key {key!r} must be "
+                    f"{expected.__name__}, got {type(value).__name__}")
 
 
 def _read_settings_file(path: str) -> dict:
@@ -265,22 +291,29 @@ def _load_merged_settings(project_path: str, trusted: bool) -> dict:
     """Resolution order: project (trusted) > user. Anything absent falls
     through to config.py defaults at the consumer.
 
-    `compaction` merges one level deeper than the rest. Every other
-    setting is a scalar, so whole-value replacement IS per-key override
-    for them; for the one nested key, a plain dict.update() would let a
-    project setting `buffer_tokens` silently discard the user's
-    `strength` -- a per-key override everywhere else that becomes a
-    wholesale reset here, purely because of the value's type. §21 is the
-    consumer, so this is settled before anything depends on it.
+    Nested sections (`_NESTED_SETTINGS`) merge one level deeper than the
+    rest. Every other setting is a scalar, so whole-value replacement IS
+    per-key override for them; for a nested key, a plain dict.update()
+    would let a project setting `buffer_tokens` silently discard the
+    user's `strength` -- a per-key override everywhere else that becomes a
+    wholesale reset here, purely because of the value's type.
+
+    Driven off _NESTED_SETTINGS rather than naming sections inline: §16
+    added `tui` alongside `compaction`, and a second hardcoded section name
+    here is exactly how the first one came to be missed.
     """
     merged = _read_settings_file(os.path.join(_user_config_dir(), "settings.json"))
     if trusted:
         project = _read_settings_file(os.path.join(
             workspace_trust.venastine_dir(project_path), "settings.json"))
-        nested = {**merged.get("compaction", {}), **project.get("compaction", {})}
+        deep = {
+            section: {**merged.get(section, {}), **project.get(section, {})}
+            for section in _NESTED_SETTINGS
+        }
         merged.update(project)
-        if nested:
-            merged["compaction"] = nested
+        for section, value in deep.items():
+            if value:
+                merged[section] = value
     return merged
 
 

@@ -4,7 +4,14 @@ from dataclasses import dataclass
 # --- Model / loop settings -- these were missing; call_model, RunAgentLoop,
 # and database.py all depend on them ---
 MODEL_NAME = os.environ.get("AGENT_MODEL", "claude-sonnet-5")
-MAX_TOKENS = 4096
+# Per-call output ceiling. Raised from 4096 in ROADMAP_v2 §16: on current
+# Anthropic models max_tokens caps THINKING PLUS RESPONSE TEXT together, so
+# 4096 truncated answers mid-sentence as soon as reasoning effort was
+# enabled. Interacts with MAX_TOKEN_BUDGET below, which is the cumulative
+# governor across a whole _run() -- at 16k per call roughly six calls fit in
+# the default budget. Raise both together if you run at xhigh/max effort,
+# where the provider guidance is 64k+ per call.
+MAX_TOKENS = 16_000
 # --- Loop control ---
 MAX_ITERATIONS = 20  # matches the max_steps default used elsewhere
 
@@ -29,9 +36,36 @@ MAX_TOKEN_BUDGET = 100_000
 # Run Pass 1 N times at higher temperature for diversity, then extract
 # the union of claims across candidates with a cross-candidate consistency
 # score feeding Pass 4's formula. Off by default.
+#
+# WARNING: the temperature-based diversity mechanism below does not work on
+# current Anthropic models (see MODELS_REJECTING_SAMPLING_PARAMS). The
+# orchestrator refuses to run ensemble mode on such a model rather than
+# spending ensemble_n x the tokens on N identical candidates. Redesigning
+# the diversity mechanism is a deferred §10 revisit.
 ENSEMBLE_MODE = False
 ENSEMBLE_N = 3
 ENSEMBLE_TEMPERATURE = 1.0
+
+# --- Sampling-parameter support (ROADMAP_v2 §16 prerequisite) ---
+# Models that reject temperature/top_p/top_k. Current Anthropic models
+# removed these parameters outright (any value returns HTTP 400); Sonnet 5
+# rejects non-default values. Steering is expected to happen through
+# prompting and MODEL_EFFORT_LEVELS instead.
+#
+# A static table rather than a capability query: the Models API capability
+# tree does not report sampling support, so unlike effort levels (which ARE
+# queryable, see MODEL_EFFORT_LEVELS) there is nothing to ask. Same posture
+# as §21's MODEL_CONTEXT_WINDOWS -- honest about being incomplete, and
+# incompleteness is safe here because the failure is a loud 400, not a
+# silent wrong answer.
+MODELS_REJECTING_SAMPLING_PARAMS = frozenset({
+    "claude-fable-5",
+    "claude-mythos-5",
+    "claude-opus-5",
+    "claude-opus-4-8",
+    "claude-opus-4-7",
+    "claude-sonnet-5",
+})
 
 # --- Critic-model routing (ROADMAP §11) ---
 # Route the critic/grounding passes (3a, 3b, 6c) to a different model than
@@ -39,6 +73,31 @@ ENSEMBLE_TEMPERATURE = 1.0
 # None means every pass uses the same provider/model — no special routing.
 # Example to enable: {"provider_name": "OPENAI", "model": "gpt-5.1"}
 CRITIC_MODEL: dict | None = None
+
+# --- Reasoning effort (ROADMAP_v2 §16) ---
+# The default effort level requested when the user has not chosen one.
+# None means "send nothing" -- the provider's own default applies.
+DEFAULT_EFFORT: str | None = None
+
+# Fallback effort levels for providers whose APIs expose no capability
+# endpoint (every OpenAI-compatible provider, and Google). ANTHROPIC is NOT
+# listed here on purpose: its Models API reports per-model effort support,
+# so client.py queries it and new Anthropic models need no entry. Consulted
+# only on the fallback path, which logs at WARNING -- same posture as §21's
+# MODEL_CONTEXT_WINDOWS.
+MODEL_EFFORT_LEVELS: dict[str, list[str]] = {}
+DEFAULT_EFFORT_LEVELS = ["low", "medium", "high"]
+
+# Google expresses reasoning depth as an integer token budget rather than an
+# enum, so a level has to be mapped to a number at the boundary. -1 is the
+# SDK's "decide dynamically" sentinel.
+GOOGLE_THINKING_BUDGETS = {
+    "low": 2_048,
+    "medium": 8_192,
+    "high": 16_384,
+    "xhigh": 24_576,
+    "max": -1,
+}
 
 # --- Database ---
 DB_PATH = os.environ.get("APP_DB_PATH", "app.db")

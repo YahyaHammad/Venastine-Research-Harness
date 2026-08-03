@@ -424,9 +424,13 @@ def test_call_model_google_text_only():
     # Verify request construction
     assert models.last_call is not None
     assert models.last_call["model"] == "gemini-test"
-    config = models.last_call["config"]
-    assert config.system_instruction == "You are helpful."
-    assert config.max_output_tokens == 4096
+    sent_config = models.last_call["config"]
+    assert sent_config.system_instruction == "You are helpful."
+    # Assert against the setting, not a literal: MAX_TOKENS is explicitly a
+    # tunable (§16 raised it from 4096 because thinking and response text
+    # share the cap). What matters here is that call_model forwards it.
+    import config as harness_config
+    assert sent_config.max_output_tokens == harness_config.MAX_TOKENS
 
 
 def test_call_model_google_with_tool_call():

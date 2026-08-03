@@ -11,15 +11,16 @@ python main.py                                    # chat mode, new thread
 python main.py --thread <uuid>                    # resume a thread
 python main.py --mode research "some query"       # ten-pass deep-research pipeline
 python main.py --provider OPENAI --model gpt-5.1  # override provider/model
+python main.py --tui                              # Textual TUI (§16); the CLI stays the default (D12)
 python main.py --trust-project                    # grant D17 workspace trust non-interactively
 
-pytest                                            # 307 tests, offline, ~2s (first run ~7s: matplotlib font cache)
+pytest                                            # 339 tests, offline, ~4s (first run ~7s: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
 ```
 
-**`requirements.txt` does not list `pytest` or `pytest-mock`**, but 11 test files depend on the `mocker` fixture. If the suite runs, they're installed some other way; if `pytest` fails to import, that's why.
+Test dependencies (`pytest`, `pytest-mock`, `pytest-asyncio`) are now listed in `requirements.txt` — they had been missing since §14, which is why older docs warn about it.
 
 **Credentials are two separate mechanisms, deliberately.** LLM provider keys → `providers.json` (managed by `credentials.py`, gitignored, template at `providers.json.example`). Misc tool API keys (GitHub, NVD) → `.env` (managed by `env_secrets.py`, template at `.env.example`). Never mix them.
 
@@ -28,10 +29,10 @@ pytest -k "grounding" -x                          # by keyword, stop on first fa
 Read these before changing anything non-trivial — they carry design decisions that are locked, not defaults to re-derive.
 
 - **ARCHITECTURE.md** — what's built, file-by-file contracts ("what belongs here / what does NOT"), known gotchas (§11).
-- **ROADMAP.md** (§1–§12, all built) and **ROADMAP_v2.md** (§13–§21; §13–§15 built) — full implementation specs with a locked Design Decisions Record (D1–D27). Section and D-numbers are stable and cross-referenced everywhere.
+- **ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **ROADMAP_v2.md** (§13–§24; §13–§16 built) — full implementation specs with a locked Design Decisions Record (D1–D27). Section and D-numbers are stable and cross-referenced everywhere.
 - **DEVLOG.md** — per-section implementation notes: what was followed verbatim, what was deviated from (every deviation was an explicit user decision — do not silently override).
 - **tests/BREAKING_CHANGES.md** — what breaks each test when production code changes, the symptom, and the fix.
-- **QWEN.md** — a sibling agent-context file. Stale (it predates §13/§14/§15 and disagrees with itself on test counts); prefer ARCHITECTURE.md and the code.
+- **QWEN.md** — a sibling agent-context file. Stale (it predates §13–§16 and disagrees with itself on test counts); prefer ARCHITECTURE.md and the code.
 
 ## Architecture
 
@@ -67,6 +68,24 @@ Three stop conditions, all in `_run()`: no tool calls (`complete`), `max_steps` 
 **Approval single source of truth:** `ToolRegistry.approval_needed(name, params, context)` — the tool's own `approval_check` **OR'd with** the config/context lookup (§15; it used to *replace* it, which made agent overrides inert for `read`/`write`/`edit`/`shell`). Both `dispatch()` and `_run()`'s permission bridge call it, so they cannot diverge. §15's spec sketch inlines this into `dispatch()` because it predates §13 — don't follow it there.
 
 **Permissions are "stricter wins" (§15/D14).** Allow/deny ANDs across global config and every active `ToolContext` (`tools/context.py`); the global check runs first and unconditionally, so no agent or skill can re-enable a globally disabled tool. Approval ORs across all layers, making `approval_overrides` a one-way ratchet — a `False` entry is indistinguishable from an absent one, and that asymmetry is the design, not a gap. `_run()` takes a `context`, not an `allowed_tools` list, and performs no membership check of its own. `registry.schemas(context)` advertises only what is actually callable.
+
+### The TUI (`tui/`, §16)
+
+A **shell**, not a feature home. D12 makes the CLI a permanent fallback, so anything implemented in `tui/` is invisible to the CLI *and* the research pipeline — which is why the question tool, todo list, goal mode, `/init`, session summaries and cross-thread referencing are all specified in §18/§21/§23/§24 instead. `tui/commands.py` is a registry other sections register into.
+
+Two things in `tui/app.py` are load-bearing and easy to break silently:
+- **`run_worker(..., exit_on_error=False)` + `on_worker_state_changed`.** Textual's default tears the whole app down on a transient worker exception.
+- **Every permission dismissal path must put a boolean on the channel.** The worker blocks inside `_run()` on `permission_channel.get()`; a dismissal carrying `None`, or one that puts nothing, hangs it forever. That is why the AC2 tests assert on the *dispatched tool*, not on the modal rendering.
+
+### Reasoning effort
+
+`effort=None` sends nothing, on every provider — deliberately. `reasoning_effort` is rejected by OpenAI-compatible non-reasoning models and adaptive thinking by pre-4.6 Anthropic models, so silence is the only universally safe value. Anthropic's valid levels are **queried** (`capabilities.effort` on the Models API) so new Anthropic models need no table entry; everything else falls back to `config.MODEL_EFFORT_LEVELS` with a WARNING. Google reports no levels at all on the pinned `google-genai==1.0.0`, which has no `thinking_budget` field.
+
+`config.MAX_TOKENS` caps thinking **plus** response on current Anthropic models — that is why §16 raised it from 4096.
+
+### Sampling parameters
+
+Current Anthropic models reject `temperature`/`top_p`/`top_k` (`config.MODELS_REJECTING_SAMPLING_PARAMS`). `_sampling_kwargs()` drops them with a WARNING, and the orchestrator **refuses** to run ensemble mode on such a model rather than generating N identical candidates and reporting maximal cross-candidate consistency for all of them. ROADMAP §10's diversity mechanism needs a redesign — see its revisit note.
 
 ### Provider translation (`core/client.py`)
 

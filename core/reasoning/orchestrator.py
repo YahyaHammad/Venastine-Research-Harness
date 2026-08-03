@@ -207,6 +207,25 @@ def run_deep_research_pipeline(
 ) -> PipelineRun:
     ensemble_mode = config.ENSEMBLE_MODE if ensemble_mode is None else ensemble_mode
     ensemble_n = config.ENSEMBLE_N if ensemble_n is None else ensemble_n
+
+    # ROADMAP_v2 §16 prerequisite. Ensemble mode's entire diversity mechanism
+    # is a raised temperature on Pass 1 -- and current Anthropic models reject
+    # sampling parameters outright (HTTP 400). Before this guard the request
+    # simply failed; the tempting "fix" is to drop the parameter and carry on,
+    # which is worse: it spends ensemble_n x the tokens to generate N
+    # identical candidates and then reports high cross-candidate consistency
+    # for all of them, feeding a falsely confident score into Pass 4.
+    #
+    # Refuse instead, and say what to do about it. Redesigning the diversity
+    # mechanism (prompt-level variation rather than sampling-level) is a
+    # deferred §10 revisit -- see DEVLOG §16.
+    if ensemble_mode and model in config.MODELS_REJECTING_SAMPLING_PARAMS:
+        raise ValueError(
+            f"Ensemble mode needs sampling variation, which {model!r} does not "
+            f"support (it rejects temperature/top_p/top_k). Run ensemble mode "
+            f"on an OpenAI-compatible or Google model, or disable ensemble_mode."
+        )
+
     run = PipelineRun(user_query=user_query)
 
     # ROADMAP §5 minimal core: create the durable record up front. On a

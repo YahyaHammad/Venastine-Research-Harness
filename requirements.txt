@@ -4,6 +4,11 @@ httpx==0.28.1
 markitdown==0.1.6
 openai==2.45.0
 protobuf==7.35.1
+# NOTE (ROADMAP_v2 §16): this pin has no ThinkingConfig.thinking_budget --
+# that field arrived in a later release. core/client.py checks for it at
+# runtime and reports no effort levels on GOOGLE rather than sending a
+# field the SDK cannot carry. Moving this pin enables Google effort; it
+# also puts §9's verified Google implementation back in scope for retest.
 google-genai==1.0.0
 pydantic==2.13.4
 sympy==1.13.3
@@ -11,3 +16,15 @@ sqlmodel==0.0.39
 python-dotenv==1.0.1
 matplotlib==3.10.3
 pyyaml==6.0.3
+# ROADMAP_v2 §16 TUI. Upper-bounded per D22 -- the mcp lesson was that an
+# unpinned dependency mid-major-version-transition migrates you by accident.
+textual>=1.0,<2.0
+
+# --- Test dependencies -------------------------------------------------
+# Previously absent, which the docs recorded as a known open item since
+# §14: the suite has always needed pytest and pytest-mock, and §16's TUI
+# pilot tests add pytest-asyncio. Listed now so `pip install -r` produces
+# a working suite instead of one that fails at import.
+pytest>=8.0
+pytest-mock>=3.14
+pytest-asyncio>=1.0

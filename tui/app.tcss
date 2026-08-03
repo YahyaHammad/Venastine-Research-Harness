@@ -1,0 +1,87 @@
+/* ROADMAP_v2 §16. Colours come from the active theme's variables rather
+   than literals, so all eight themes restyle this without edits. */
+
+#main {
+    width: 1fr;
+}
+
+#sidebar {
+    width: 22;
+    border-left: solid $panel;
+    padding: 1;
+}
+
+#transcript {
+    height: 1fr;
+    border: solid $panel;
+    padding: 0 1;
+}
+
+#prompt {
+    dock: bottom;
+    border: solid $primary;
+}
+
+#raven {
+    height: 5;
+    color: $accent;
+    content-align: center middle;
+}
+
+#effort-raven {
+    height: 2;
+    color: $secondary;
+    content-align: center middle;
+}
+
+PermissionScreen {
+    align: center middle;
+}
+
+#permission-dialog {
+    grid-size: 2 3;
+    grid-gutter: 1 2;
+    grid-rows: auto 1fr auto;
+    padding: 1 2;
+    width: 60;
+    height: auto;
+    max-height: 20;
+    border: thick $warning;
+    background: $surface;
+}
+
+#permission-title {
+    column-span: 2;
+    text-style: bold;
+}
+
+#permission-params {
+    column-span: 2;
+    height: auto;
+    max-height: 10;
+    overflow-y: auto;
+    color: $text-muted;
+}
+
+ThreadPickerScreen {
+    align: center middle;
+}
+
+#thread-dialog {
+    width: 70;
+    height: auto;
+    max-height: 24;
+    padding: 1 2;
+    border: thick $primary;
+    background: $surface;
+}
+
+#thread-title {
+    text-style: bold;
+    padding-bottom: 1;
+}
+
+#thread-list {
+    height: auto;
+    max-height: 18;
+}

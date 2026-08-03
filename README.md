@@ -33,6 +33,7 @@ python main.py                                    # chat mode, new thread
 python main.py --thread <uuid>                    # resume a thread
 python main.py --mode research "some query"       # deep-research pipeline
 python main.py --provider OPENAI --model gpt-5.1  # override defaults
+python main.py --tui                              # Textual TUI (chat + /research)
 ```
 
 Ctrl+C or Ctrl+D exits chat mode; the thread id is printed after the first response so you can resume it later. Research mode prints the final report plus the trace log, and writes full artifacts to `output/<run_id>/`.
@@ -41,6 +42,6 @@ Project-level configuration (`.venastine/` — agents, skills, `settings.json`, 
 
 ## Status
 
-ROADMAP.md §1–§12 are fully built, as are ROADMAP_v2.md §13 (streaming loop), §14 (config loader + workspace trust), and §15 (permission system). That covers the interactive CLI, the inference loop with streaming, persistence, a 15-tool registry, the full deep-research pipeline, and three-tier agent/skill discovery. Remaining work is ROADMAP_v2.md §16–§21: the TUI, MCP client, agent and skill systems, subagent review, and the memory/compaction system.
+ROADMAP.md §1–§12 are fully built (§10's ensemble mode carries a revisit note), as are ROADMAP_v2.md §13 (streaming loop), §14 (config loader + workspace trust), §15 (permission system), and §16 (Textual TUI shell, reasoning-effort switching). Remaining work is ROADMAP_v2.md §17–§24: MCP client, agent and skill systems, subagent review, memory/compaction, pipeline observability, interactive tools, and `/init`.
 
-Run the test suite with `pytest` — 307 tests, fully offline, no API keys needed.
+Run the test suite with `pytest` — 339 tests, fully offline, no API keys needed.

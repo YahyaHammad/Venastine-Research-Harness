@@ -375,3 +375,54 @@ def test_f6_get_agents_and_get_skills_empty_before_initialize():
     assert config_loader.get_settings() == {}
     assert config_loader.get_skill("anything") is None
     assert config_loader.skill_catalog_text() == ""
+
+
+# ---------------------------------------------------------------------------
+# ---- TUI settings block (ROADMAP_v2 §16) ----------------------------------
+# ---------------------------------------------------------------------------
+
+def test_tui_settings_load(_redirect_roots):
+    _write_settings(_redirect_roots["user"],
+                    {"tui": {"theme": "dark-green", "animations": False}})
+
+    config_loader.initialize(str(_redirect_roots["project"]))
+    tui = config_loader.get_settings()["tui"]
+
+    assert tui["theme"] == "dark-green"
+    assert tui["animations"] is False
+
+
+def test_tui_unknown_key_raises(_redirect_roots):
+    """The same loud rejection every other settings key gets. A TUI
+    preference the loader doesn't know about is a startup error, not a
+    silently ignored line -- which is exactly why TUI prefs live in the
+    settings schema rather than a dotfile of their own."""
+    _write_settings(_redirect_roots["user"], {"tui": {"colour_scheme": "dark"}})
+
+    with pytest.raises(ValueError, match="unknown tui key"):
+        config_loader.initialize(str(_redirect_roots["project"]))
+
+
+def test_tui_wrong_type_raises(_redirect_roots):
+    _write_settings(_redirect_roots["user"], {"tui": {"animations": "yes"}})
+
+    with pytest.raises(ValueError, match="must be bool"):
+        config_loader.initialize(str(_redirect_roots["project"]))
+
+
+def test_tui_deep_merges_like_compaction(_redirect_roots):
+    """§16 added a SECOND nested section, so the deep-merge had to stop
+    naming 'compaction' inline. A project overriding one TUI key must not
+    discard the user's others -- the same defect class review finding F2
+    caught for compaction."""
+    _write_settings(_redirect_roots["user"],
+                    {"tui": {"theme": "dark-red", "animations": False}})
+    _write_settings(_redirect_roots["project"] / ".venastine",
+                    {"tui": {"theme": "light-blue"}})
+    workspace_trust.grant_trust(str(_redirect_roots["project"]))
+
+    config_loader.initialize(str(_redirect_roots["project"]))
+    tui = config_loader.get_settings()["tui"]
+
+    assert tui["theme"] == "light-blue"      # project wins on its own key
+    assert tui["animations"] is False        # user's sibling key survives
