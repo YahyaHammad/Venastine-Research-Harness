@@ -413,6 +413,14 @@ def get_skill(name: str) -> Optional[SkillDef]:
     return _state["skills"].get(name)
 
 
+def get_agent(name: str) -> Optional[AgentDef]:
+    """None before initialize() or for an unknown name -- see
+    get_agents(). AgentManager (§18) is the consumer."""
+    if _state is None:
+        return None
+    return _state["agents"].get(name)
+
+
 def context_for_agent(agent: Optional[AgentDef]) -> Optional[str]:
     """CONTEXT.md is opt-in per agent (use_project_context), so no agent
     (or an agent without the flag) never pays its token cost. Untrusted

@@ -295,6 +295,30 @@ MCP tools approval-gated by default. Two new test files: `test_mcp_client.py`,
 
 ---
 
+## 13. Agent system: dispatch injection, headless callability, goal mode (§18)
+
+§18 added `parent_run` to `dispatch()`, signature-inspection injection of
+`parent_context`/`parent_run` into handlers that declare them, the
+headless callability filter (`schemas(callable_only=...)` +
+`headless_hidden()`), `ConversationMemory.extra`/`set_extra`, and the
+`system_prompt=` kwarg on `run_agent_conversation`.
+
+### What breaks these
+
+| Change | Symptom | Fix |
+|---|---|---|
+| Define a `fake_dispatch(name, params, context=None, approval_callback=None)` test double | `TypeError: got an unexpected keyword argument 'parent_run'` — the loop always passes it now | Add `parent_run=None` to the stub signature |
+| Assert `dispatch.assert_called_once_with(name, params, context=X)` | Fails: actual call also carries `parent_run=RunInfo(...)` | Add `parent_run=ANY` (or the exact RunInfo) to the expectation |
+| Assert `approval_needed` was called exactly once per tool call | Fails: §18's headless filter consults it at schema time too | Assert every call received the same context (`call_args_list`), not a count — see `test_context_is_forwarded_to_dispatch_and_approval_needed` |
+| Spy/fake `ConversationMemory` lacking `.extra` | `AttributeError: ... no attribute 'extra'` from `with_goal()` | Add `self.extra = {}` to the double (and `set_extra` if it is exercised) |
+| `FakeStorage.get_thread` returning a bare truthy sentinel | `AttributeError` on `.extra_data` in `ConversationMemory.__init__` | Return an object carrying `extra_data` (the fake now mirrors the real row); keep `None` for unknown ids |
+| Rename the `## Persistent objective` marker or move goal assembly out of `core.loop.with_goal` | `test_goal_persists_and_injects_into_prompt` fails | The marker lives in `with_goal()` so the CLI wrapper and TUI worker cannot drift; keep both calling it |
+| Make `child_context` a union instead of an intersection | `test_ac1_*` fail | C6: intersection, never union — a restricted parent must not escape via a permissive child |
+| Remove the `callable_only` drop from `schemas()` | `test_headless_filter_hides_approval_gated_mcp_tool` fails | The headless rule is the §15-17 finalization: uncallable-without-a-channel tools are not advertised, and `headless_hidden()` feeds the once-per-process WARNING |
+| Register a dynamically-named probe tool without the `mcp__` prefix in dispatch tests | `ToolCallDenied: ... disabled by policy` | Unknown non-`mcp__` names are denied by design; use `mcp__*` names for probes (allowed by default, approval-gated, so pass an `approval_callback`) |
+
+---
+
 ## General regeneration: when a production change breaks several tests at once
 
 If a planned refactor (e.g. ROADMAP §3's JSON-retry, §10's ensemble mode)

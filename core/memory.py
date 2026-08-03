@@ -44,7 +44,10 @@ PERSISTENCE, AND WHY THERE'S NO NORMALIZATION STEP HERE:
 from typing import Optional
 from uuid import UUID
 
-from storage import create_thread, get_thread, save_message, get_session_history
+from storage import (
+    create_thread, get_thread, save_message, get_session_history,
+    update_thread_extra,
+)
 
 
 class ConversationMemory:
@@ -52,11 +55,31 @@ class ConversationMemory:
         if thread_id is None:
             self.thread_id = create_thread()
             self._messages: list[dict] = []
+            self._extra: dict = {}
         else:
-            if get_thread(thread_id) is None:
+            thread = get_thread(thread_id)
+            if thread is None:
                 raise ValueError(f"No conversation thread found with id {thread_id}")
             self.thread_id = thread_id
             self._messages = get_session_history(thread_id)
+            self._extra = dict(getattr(thread, "extra_data", None) or {})
+
+    @property
+    def extra(self) -> dict:
+        """Snapshot of the thread's extra_data (goal mode §18). A copy --
+        mutate via set_extra(), which persists write-through like the
+        message methods."""
+        return dict(self._extra)
+
+    def set_extra(self, key: str, value) -> None:
+        """Write one extra_data key (value=None deletes), persisting
+        immediately so a goal set from the TUI is visible to the next
+        run in any shell."""
+        update_thread_extra(self.thread_id, key, value)
+        if value is None:
+            self._extra.pop(key, None)
+        else:
+            self._extra[key] = value
 
     def add_user_message(self, text: str) -> None:
         entry = {"role": "user", "content": text}

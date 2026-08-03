@@ -898,6 +898,16 @@ Two wishlist items are agents, not TUI features, and land here:
 2. Nesting beyond `max_depth` returns a clear error rather than continuing to spawn.
 3. `AgentManager`'s actual method surface is checked against every call site in §20 before §20 is considered complete.
 
+### Built
+
+Implemented; full decision record in DEVLOG §18, file contract in ARCHITECTURE.md §4.18. Deviations from the sketch above, all locked with the project owner before implementation:
+
+- `spawn_subagent` receives its parent scope through `dispatch()` signature inspection — handlers declaring `parent_context` / `parent_run` receive them; the Rev. 1 `depth:` parameter and `allowed_tools=` kwarg never existed in code (§15 replaced the latter with `context=`). Generalised so §23's response-channel tools add a third injectable name without reopening `dispatch()`.
+- `/agent <name>` is **session-scoped** (switch until `/agent default`); `/grill-me` runs one `continue_conversation` turn in the CURRENT thread; both register into §16's slash registry from `agents/tui_commands.py`. CLI unchanged (TUI-only commands, D12).
+- Goal mode: persistent per-thread objective in `ConversationThread.extra_data`, written only by `/goal`, injected into every shell's prompt by `core.loop.with_goal()`, mirrored by a TUI `GoalBanner`.
+- The §15–17 headless finalization landed here, widened from approval-only to callability per the owner: `schemas(callable_only=True)` drops approval-gated tools when no `permission_channel` exists, paired with a once-per-process WARNING naming them (no quiet invisibility).
+- AC1/AC2 verified by `tests/test_agents.py` with revert-checks (union and disabled-filter both fail their tests). AC3: the current consumer surface is `get()/names()/all()`; §20 must re-verify against its own call sites when built, per the criterion's own wording.
+
 ---
 
 ## 19. Skill system — skill `.md` format + manager + activation + default skills

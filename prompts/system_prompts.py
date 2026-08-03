@@ -55,9 +55,40 @@ def with_skill_catalog(base_prompt: str) -> str:
     return f"{base_prompt}\n\n{catalog}"
 
 
+def agent_catalog_text() -> str:
+    """Frontmatter-only catalog of discovered agents (ROADMAP_v2 §18),
+    mirroring skill_catalog_text(): the model learns which agents exist
+    (for spawn_subagent / the TUI's /agent) without any agent body
+    entering the prompt. Empty string when none are discovered."""
+    from core import config_loader
+
+    agents = config_loader.get_agents()
+    if not agents:
+        return ""
+    lines = [
+        "## Available agents",
+        "The agents below can be spawned with the spawn_subagent tool. "
+        "Only their summaries are listed here; each agent's full "
+        "methodology is applied to its own run when spawned.",
+    ]
+    for name in sorted(agents):
+        lines.append(f"- {name}: {agents[name].description}")
+    return "\n".join(lines)
+
+
+def with_catalogs(base_prompt: str) -> str:
+    """Both frontmatter-only catalogs (skills §14, agents §18) appended;
+    the single assembly point every default system prompt goes through."""
+    prompt = with_skill_catalog(base_prompt)
+    catalog = agent_catalog_text()
+    if catalog:
+        prompt = f"{prompt}\n\n{catalog}"
+    return prompt
+
+
 def pass_prompt(pass_id: str) -> str:
-    """A research pass's system prompt with the skill catalog appended.
+    """A research pass's system prompt with both catalogs appended.
     BOTH the pass entry point (loop.run_deep_research_mode) and the §3
-    JSON-retry path (orchestrator) must go through here so the catalog
+    JSON-retry path (orchestrator) must go through here so the catalogs
     cannot diverge between an original attempt and its retry."""
-    return with_skill_catalog(passes_prompts[pass_id])
+    return with_catalogs(passes_prompts[pass_id])

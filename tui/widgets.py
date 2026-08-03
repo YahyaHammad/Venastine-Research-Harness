@@ -67,6 +67,22 @@ class EffortRaven(Static):
         self.update(ravens.effort_raven(self.effort))
 
 
+class GoalBanner(Static):
+    """Persistent-objective banner (§18 goal mode). Hidden when the
+    thread has no goal; a one-line reminder of what the session is
+    oriented toward, fed by app.py from ConversationThread.extra_data."""
+
+    goal = reactive(None, always_update=True)
+
+    def watch_goal(self) -> None:
+        if self.goal:
+            self.display = True
+            self.update(Text(f"goal  {self.goal}", style="bold yellow"))
+        else:
+            self.display = False
+            self.update("")
+
+
 class Transcript(RichLog):
     """The conversation. Code fences render highlighted via Rich's Syntax.
 

@@ -26,6 +26,7 @@ on the tool-calling path silently drops plain-text final answers and
 budget-truncated responses.
 """
 
+import logging
 import queue
 from typing import Optional
 from uuid import UUID
@@ -35,11 +36,29 @@ import prompts.system_prompts as system_prompts
 from core.client import api_initialization, call_model_stream, ModelResponse
 from core.events import LoopEvent
 from core.memory import ConversationMemory
-from tools.context import ToolContext
+from tools.context import ToolContext, RunInfo
 from tools.registry import registry, ToolCallDenied
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant."
 DEFAULT_PROVIDER = "ANTHROPIC"
+
+# The headless callability notice (§18) names tools hidden by
+# schemas(callable_only=True). Once per process: research runs make ten
+# _run() calls per pipeline, and the list only changes with config.
+_headless_notice_shown = False
+
+
+def with_goal(system_prompt: str, memory: ConversationMemory) -> str:
+    """Append a thread's persistent objective (§18 goal mode) to a system
+    prompt. Single source for the '## Persistent objective' marker so the
+    CLI wrapper and the TUI worker cannot drift apart. No-op when the
+    thread has no goal."""
+    goal = memory.extra.get("goal")
+    if not goal:
+        return system_prompt
+    return f"{system_prompt}\n\n## Persistent objective\n{goal}"
 
 
 def run_to_completion(gen) -> ModelResponse:
@@ -92,7 +111,25 @@ class RunAgentLoop:
         dispatch() with no approval_callback.
         """
         client = api_initialization(provider_name)
-        tool_schemas = registry.schemas(context)
+        # §18 headless callability rule (user-widened from approval-only):
+        # with no permission_channel, a tool that needs approval is
+        # uncallable in this configuration, so it is not advertised --
+        # but named once in a WARNING so the hiding is never silent.
+        headless = permission_channel is None
+        tool_schemas = registry.schemas(context, callable_only=headless)
+        if headless:
+            global _headless_notice_shown
+            hidden = registry.headless_hidden(context)
+            if hidden and not _headless_notice_shown:
+                _headless_notice_shown = True
+                logger.warning(
+                    "Headless run (no permission channel): not advertising "
+                    "%s -- they require approval and nothing here can "
+                    "grant it. Run the TUI to use them.",
+                    ", ".join(sorted(hidden)),
+                )
+        run_info = RunInfo(
+            model=model, provider_name=provider_name, effort=effort)
         total_tokens_used = 0
 
         response = None
@@ -174,13 +211,15 @@ class RunAgentLoop:
                             result = registry.dispatch(
                                 call.name, call.input, context=context,
                                 approval_callback=lambda n, p: True,
+                                parent_run=run_info,
                             )
                         except ToolCallDenied as e:
                             result = {"error": str(e)}
                 else:
                     try:
                         result = registry.dispatch(
-                            call.name, call.input, context=context)
+                            call.name, call.input, context=context,
+                            parent_run=run_info)
                     except ToolCallDenied as e:
                         result = {"error": str(e)}
 
@@ -204,16 +243,29 @@ class RunAgentLoop:
         temperature: Optional[float] = None,
         effort: Optional[str] = None,
         context: Optional[ToolContext] = None,
+        system_prompt: Optional[str] = None,
     ) -> ModelResponse:
         """Regular conversation — full tool set, default system prompt,
         one continuous thread. Pass thread_id to resume an existing
         thread; omit (or None) to start a fresh one. Pass context (§15) to
         run under an agent's tool restrictions; None means global policy
-        only, which is every caller until §18."""
+        only. Pass system_prompt (§18) when running AS an agent -- the
+        TUI worker builds it via agents.manager.build_system_prompt();
+        None keeps the default base + skill/agent catalogs.
+
+        A thread's persistent goal (§18 goal mode) is appended to WHICHEVER
+        prompt is used, so it applies in every shell without the callers
+        knowing about it."""
         memory = ConversationMemory(thread_id=thread_id)
         memory.add_user_message(user_goal)
+        prompt = with_goal(
+            system_prompt
+            if system_prompt is not None
+            else system_prompts.with_catalogs(DEFAULT_SYSTEM_PROMPT),
+            memory,
+        )
         response = run_to_completion(RunAgentLoop._run(
-            memory, system_prompts.with_skill_catalog(DEFAULT_SYSTEM_PROMPT),
+            memory, prompt,
             provider_name, model, context,
             max_steps, max_total_tokens, temperature=temperature, effort=effort,
         ))

@@ -1150,3 +1150,40 @@ The vacuous ones share a shape — **the assertion was correct, but the environm
 manifest the failure**. The false positive is its mirror: the environment manifested a failure the
 code never had. Both are invisible to a green suite, and both are only found by deliberately
 breaking the thing the test claims to guard.
+
+## §18 — Agent system (manager + subagent tool + per-agent scoping + intersection)
+
+### 18.1 Decisions locked in the clarification cycle (user-decided)
+
+| Question | Decision |
+|---|---|
+| §15–17 finalization: headless research passes advertise approval-gated MCP tools they can never call | **Headless callability filter, widened by the user from approval-only to callability**: `schemas(callable_only=True)` drops any tool whose `approval_needed(name, {}, context)` is True when no `permission_channel` exists. Paired with a once-per-process WARNING naming `headless_hidden()` output — the user's caveat: filtering on permissions alone would have made `fetch_url`-style invisibility *quieter*, so the hiding must be named. Orchestrator-level ToolContext stays available later as a complement, not now. |
+| `/agent <name>` semantics (D6 named it; §18 never defined it) | **Session-scoped active agent** in the TUI until `/agent default` or another switch. `spawn_subagent` already covers one-shot runs, so `/agent` one-shot would duplicate it. |
+| CLI surface for §18 commands | **TUI-only for now** (CLI unchanged; D12). `spawn_subagent` works in every shell. |
+| `/grill-me` shape (a fresh subagent thread can't see the current thread) | **One turn in the CURRENT thread** via `continue_conversation` with the grill-me system prompt — live history, no digest loss. The live memory is reloaded when the result lands so the next streaming turn sees the exchange. |
+
+### 18.2 What was built
+
+- `agents/manager.py` — `AgentManager` thin over `core.config_loader.get_agents()` (D29 order already applied there): `get`/`names`/`all`, `active_context()` (depth 0), `child_context()` (C6 intersection + C3 depth increment), `system_prompt_for()` (base + catalogs + body + opt-in CONTEXT.md). AC3 verified: §20's consumer surface is exactly `get()/names()/all()`.
+- `agents/subagent_tool.py` — `spawn_subagent` (params `agent_name`, `task`). Depth check vs `config.SUBAGENT_MAX_DEPTH`; child context via `manager.child_context`; model/provider/effort inherited from `parent_run` only where the agent definition is silent; returns `{"result", "subagent_thread_id"}` (distilled, per the pipeline's own principle). `core.loop` imported INSIDE `run()` — `tools/registry.py` imports this module to register it, and `core.loop` imports `tools.registry`; a top-level import closes that cycle.
+- `agents/builtin/grill-me.md` — first built-in agent.
+- `agents/tui_commands.py` — `/agent`, `/goal`, `/grill-me` into §16's slash registry; does not import `tui.app` (handlers receive it), so `app.py` imports it cycle-free.
+- `tools/registry.py` — `dispatch(..., parent_run=None)`; signature inspection cached at `register()` (`_declared_injections`); handlers declaring `parent_context`/`parent_run` receive them, the twelve pre-§18 tools untouched. `schemas(callable_only=...)` + `headless_hidden()`.
+- `core/loop.py` — headless wiring + once-per-process WARNING; `run_agent_conversation(system_prompt=...)`; `with_goal()` single source for the `## Persistent objective` marker.
+- `core/memory.py` + `storage.py` — `extra` / `set_extra` / `update_thread_extra` / `get_thread_extra` (goal mode in `extra_data`, §23's todo list can share the field).
+- `tui/app.py` — `active_agent` state, agent-aware `run_agent_turn`, `GoalBanner`, `run_one_shot`/`on_one_shot_finished` for `/grill-me`.
+- `config.py` — `SUBAGENT_MAX_DEPTH = 2`; `spawn_subagent` D24 fields (permission True, approval False).
+
+### 18.3 Deviations from the §18 sketch, and why
+
+1. **The sketch's `depth: int` parameter and `allowed_tools=` kwarg never existed in code.** §15 replaced `allowed_tools` with `context=` everywhere, and depth lives on `ToolContext.subagent_depth`. `spawn_subagent` gets both via dispatch injection, which is the sketch's own stated mechanism ("thread ToolContext itself through the spawn call") implemented as signature inspection so §23 generalizes it.
+2. **`run_agent_conversation` gained `system_prompt=`** rather than a new wrapper: the TUI worker and the subagent tool share one entry point, and the goal is appended by `with_goal()` regardless of which prompt is used.
+3. **FakeStorage's `get_thread` had to grow `extra_data`.** It returned a bare truthy sentinel; `ConversationMemory.__init__` now reads `.extra_data`, so the fake mirrors the real row (the repo's own fake-must-track-production rule).
+
+### 18.4 Test changes
+
+- `tests/test_agents.py` (NEW, 16) — AC1 intersection verified through the REAL `is_tool_allowed` (not the arithmetic); AC2 depth error + child-context/RunInfo inheritance; AC3 manager surface; dispatch injection (both probes use `mcp__*` names — unknown non-mcp names are policy-denied by design); headless filter + once-per-process WARNING; goal persistence + prompt injection; agent catalog frontmatter-only; `spawn_subagent` D24; `/agent`//`/goal`//`/grill-me` against stub apps.
+- Contract updates across `test_cli.py`, `test_e2e.py`, `test_loop_tool_dispatch.py`, `test_loop_stop_conditions.py`, `test_streaming_loop.py` — fake `dispatch` signatures gained `parent_run=None`, dispatch assertions gained `parent_run=ANY`, SpyMemory gained `.extra`, and the approval_needed assertion became "every call received the same context" because the headless filter consults it at schema time.
+- Revert-checks: `child_context` unioned → both AC1 tests fail; `callable_only` drop disabled → the hide test fails. Both restored.
+- `tests/BREAKING_CHANGES.md` §13 added.
+- Full suite: **395 tests** (was 379).

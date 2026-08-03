@@ -15,6 +15,11 @@ MAX_TOKENS = 16_000
 # --- Loop control ---
 MAX_ITERATIONS = 20  # matches the max_steps default used elsewhere
 
+# --- Subagents (ROADMAP_v2 §18) ---
+# Maximum spawn_subagent nesting. The counter lives on
+# ToolContext.subagent_depth; this is the value it is checked against (C3).
+SUBAGENT_MAX_DEPTH = 2
+
 # --- Deep research pipeline ---
 MAX_PIPELINE_RETRIES = 2  # max revise/re-validate loop iterations per claim before fallback
 MAX_JSON_RETRIES = 2  # max corrective follow-up attempts when a pass returns malformed JSON
@@ -172,6 +177,10 @@ class ToolPermissions:
     edit: bool = False
     shell: bool = False
     load_skill: bool = True
+    # §18: spawning is allowed by default (model autonomy, D6) and needs no
+    # approval -- the spawned run's own tools are each gated by policy,
+    # intersection-capped by the parent's context (C6).
+    spawn_subagent: bool = True
 
 @dataclass
 class ToolApprovals:
@@ -195,3 +204,4 @@ class ToolApprovals:
     edit: bool = False
     shell: bool = True
     load_skill: bool = False
+    spawn_subagent: bool = False

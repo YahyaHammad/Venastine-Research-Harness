@@ -19,6 +19,7 @@ ROADMAP_v2 §15:
     registration (D24).
 """
 
+import inspect
 from typing import Optional, TYPE_CHECKING
 
 from tools.base import ToolSpec
@@ -31,9 +32,17 @@ from security.permissions import (
     assert_permissions_declared, is_tool_allowed, requires_approval,
 )
 from safety.policy_enforcement import check_output_policy
+from agents import subagent_tool
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from tools.context import ToolContext
+    from tools.context import ToolContext, RunInfo
+
+# Handler parameter names dispatch() will inject, by signature inspection
+# (ROADMAP_v2 §18). A tool handler that declares one of these receives the
+# live value; handlers that don't are called with params only. Generalised
+# so §23's response-channel tools can add a third name later without
+# touching dispatch() again.
+_INJECTABLE_PARAMS = ("parent_context", "parent_run")
 
 
 class ToolCallDenied(Exception):
@@ -44,9 +53,25 @@ class ToolCallDenied(Exception):
 class ToolRegistry:
     def __init__(self) -> None:
         self._tools: dict[str, ToolSpec] = {}
+        # name -> the subset of _INJECTABLE_PARAMS the handler declares.
+        # Cached at register() so dispatch() never re-inspects per call.
+        self._injectable: dict[str, tuple] = {}
 
     def register(self, spec: ToolSpec) -> None:
         self._tools[spec.name] = spec
+        self._injectable[spec.name] = self._declared_injections(spec.handler)
+
+    @staticmethod
+    def _declared_injections(handler) -> tuple:
+        """Which injectable run-scoped values this handler wants. A
+        handler opts in simply by naming a parameter (e.g.
+        `def run(params, parent_context)`); everything else stays a
+        params-only call so the existing twelve tools are untouched."""
+        try:
+            names = set(inspect.signature(handler).parameters)
+        except (TypeError, ValueError):  # builtins / un-introspectable
+            return ()
+        return tuple(p for p in _INJECTABLE_PARAMS if p in names)
 
     def unregister(self, tool_name: str) -> None:
         """Runtime removal (D15). An MCP server disconnecting drops its
@@ -58,8 +83,22 @@ class ToolRegistry:
         disconnect handling can run more than once for the same server.
         """
         self._tools.pop(tool_name, None)
+        self._injectable.pop(tool_name, None)
 
-    def schemas(self, context: Optional["ToolContext"] = None) -> list[dict]:
+    def _advertised(self, name: str, spec, context) -> bool:
+        """The two §15 filters, shared by schemas() and
+        headless_hidden(): policy allowability plus the tool's own
+        "nothing to act on" signal."""
+        if not is_tool_allowed(name, context):
+            return False
+        if spec.available_check is not None and not spec.available_check():
+            return False
+        return True
+
+    def schemas(
+        self, context: Optional["ToolContext"] = None,
+        callable_only: bool = False,
+    ) -> list[dict]:
         """What gets sent to the LLM's `tools` parameter each call.
 
         Only tools that are actually callable are advertised. Advertising
@@ -69,20 +108,41 @@ class ToolRegistry:
         defect did for its whole life (D24), so §15 fixes the shape as
         well as the instance.
 
-        Two filters, deliberately distinct:
+        Filters, deliberately distinct:
           * is_tool_allowed(name, context) -- policy. Global config AND
             every active layer's restriction.
           * spec.available_check() -- the tool's own "I have nothing to
             act on yet" signal (load_skill with an empty skill catalog).
+          * callable_only (§18, user-widened headless callability rule) --
+            when the run has no permission_channel, a tool whose
+            approval_needed() is True for empty params is UNCALLABLE in
+            this configuration (nothing can grant the approval), so it is
+            not advertised. autoApproved MCP servers and approval-free
+            tools pass; approval-gated ones drop. The loop pairs this with
+            a once-per-process WARNING naming what was hidden -- no quiet
+            invisibility (the fetch_url lesson).
         """
         out = []
         for name, spec in self._tools.items():
-            if not is_tool_allowed(name, context):
+            if not self._advertised(name, spec, context):
                 continue
-            if spec.available_check is not None and not spec.available_check():
+            if callable_only and self.approval_needed(name, {}, context):
                 continue
             out.append(spec.schema)
         return out
+
+    def headless_hidden(self, context: Optional["ToolContext"] = None) -> list[str]:
+        """Names that would be advertised with a permission_channel but
+        are dropped by schemas(callable_only=True) -- i.e. advertised yet
+        uncallable headless. The loop logs exactly this list once, so a
+        tool hidden by the headless filter is named and explained rather
+        than silently absent (the trade this project keeps deciding
+        against)."""
+        return [
+            name for name, spec in self._tools.items()
+            if self._advertised(name, spec, context)
+            and self.approval_needed(name, {}, context)
+        ]
 
     def approval_needed(
         self, tool_name: str, params: dict,
@@ -119,6 +179,7 @@ class ToolRegistry:
         self, tool_name: str, params: dict,
         context: Optional["ToolContext"] = None,
         approval_callback=None,
+        parent_run: Optional["RunInfo"] = None,
     ) -> dict:
         # Unknown-tool guard: ValueError, deliberately NOT ToolCallDenied.
         # The two exception types separate "you misnamed it" from "policy
@@ -143,7 +204,14 @@ class ToolRegistry:
             if not approved:
                 raise ToolCallDenied(f"{tool_name} requires approval and was not given")
 
-        result = spec.handler(params)
+        # §18: hand the live run-scoped values to handlers that declared
+        # them (spawn_subagent wants both). Handlers that didn't are
+        # called with params only -- the twelve pre-§18 tools are
+        # byte-for-byte untouched by this.
+        injected = {}
+        for param in self._injectable.get(tool_name, ()):
+            injected[param] = context if param == "parent_context" else parent_run
+        result = spec.handler(params, **injected)
         # ROADMAP §8 secret redaction -- a post-call filter, not a pre-call
         # gate. Load-bearing: §15's own Rev. 2 sketch dropped this line,
         # which would have deleted the redaction layer outright in the
@@ -168,6 +236,7 @@ registry.register(ToolSpec("write", file_ops.WRITE_TOOL_SCHEMA, file_ops.write_r
 registry.register(ToolSpec("edit", file_ops.EDIT_TOOL_SCHEMA, file_ops.edit_run, approval_check=file_ops._file_approval_check))
 registry.register(ToolSpec("shell", shell.TOOL_SCHEMA, shell.run, approval_check=shell._shell_approval_check))
 registry.register(ToolSpec("load_skill", load_skill.TOOL_SCHEMA, load_skill.run, available_check=load_skill.has_skills))
+registry.register(ToolSpec("spawn_subagent", subagent_tool.TOOL_SCHEMA, subagent_tool.run))
 
 # D24: fail loudly at import if any statically registered tool has no
 # declared permission/approval field. Runs here rather than in

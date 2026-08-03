@@ -35,15 +35,19 @@ from textual.worker import Worker, WorkerState
 
 import config
 import storage
+from agents.manager import manager
+from agents.tui_commands import register_agent_commands
 from core import config_loader
 from core.client import api_initialization, effort_levels_for_model
-from core.loop import DEFAULT_PROVIDER, DEFAULT_SYSTEM_PROMPT, RunAgentLoop
+from core.loop import (
+    DEFAULT_PROVIDER, DEFAULT_SYSTEM_PROMPT, RunAgentLoop, with_goal,
+)
 from core.memory import ConversationMemory
 from prompts import system_prompts
 from tui import ravens, themes
 from tui.commands import SlashCommand, registry as commands
 from tui.screens import PermissionScreen, ThreadPickerScreen
-from tui.widgets import EffortRaven, RavenPanel, Transcript
+from tui.widgets import EffortRaven, GoalBanner, RavenPanel, Transcript
 
 
 class LoopEventMessage(Message):
@@ -77,6 +81,17 @@ class TurnFinished(Message):
         super().__init__()
 
 
+class OneShotFinished(Message):
+    """A one-shot turn (/grill-me) ran to completion in the CURRENT
+    thread via continue_conversation. Carries the final text, or the
+    exception if it raised."""
+
+    def __init__(self, text: str | None, error: BaseException | None = None):
+        self.text = text
+        self.error = error
+        super().__init__()
+
+
 class VenastineApp(App):
     """Chat + research shell."""
 
@@ -102,6 +117,9 @@ class VenastineApp(App):
         self.memory: ConversationMemory | None = None
         self._permission_channel: queue.Queue | None = None
         self._busy = False
+        # §18 session-scoped active agent (/agent switch). None = default
+        # harness. Applies to subsequent turns until switched or cleared.
+        self.active_agent = None
 
     # -- layout --------------------------------------------------------------
 
@@ -109,6 +127,7 @@ class VenastineApp(App):
         yield Header()
         with Horizontal():
             with Vertical(id="main"):
+                yield GoalBanner(id="goal-banner")
                 yield Transcript(id="transcript")
                 yield Input(placeholder="Message, or /help", id="prompt")
             with Vertical(id="sidebar"):
@@ -121,11 +140,16 @@ class VenastineApp(App):
         self.theme = self._theme_name
         self.query_one("#effort-raven", EffortRaven).effort = self.effort
         self.memory = ConversationMemory()
+        self.refresh_goal_banner()
         self._transcript.write_system(
             f"{self.provider_name} | {self.model} | theme {self._theme_name}"
         )
         self._transcript.write_system("Type /help for commands.")
         self.query_one("#prompt", Input).focus()
+
+    def refresh_goal_banner(self) -> None:
+        goal = self.memory.extra.get("goal") if self.memory else None
+        self.query_one("#goal-banner", GoalBanner).goal = goal
 
     @property
     def _transcript(self) -> Transcript:
@@ -161,15 +185,34 @@ class VenastineApp(App):
         self._transcript.write_user(user_input)
         self.memory.add_user_message(user_input)
 
+        # §18: a session-scoped active agent supplies the system prompt,
+        # the ToolContext, and model/provider/max_steps overrides. With
+        # none active this is the default harness run (base + catalogs).
+        if self.active_agent is not None:
+            agent = self.active_agent
+            context = manager.active_context(agent)
+            base_prompt = manager.system_prompt_for(
+                agent, DEFAULT_SYSTEM_PROMPT)
+            model = agent.model or self.model
+            provider = agent.provider or self.provider_name
+            max_steps = agent.max_steps or config.MAX_ITERATIONS
+        else:
+            context = None
+            base_prompt = system_prompts.with_catalogs(DEFAULT_SYSTEM_PROMPT)
+            model = self.model
+            provider = self.provider_name
+            max_steps = config.MAX_ITERATIONS
+        prompt = with_goal(base_prompt, self.memory)
+
         channel: queue.Queue = queue.Queue()
         self._permission_channel = channel
         generator = RunAgentLoop._run(
             self.memory,
-            system_prompts.with_skill_catalog(DEFAULT_SYSTEM_PROMPT),
-            self.provider_name,
-            self.model,
-            None,                      # ToolContext (§15) — agents set this in §18
-            config.MAX_ITERATIONS,
+            prompt,
+            provider,
+            model,
+            context,
+            max_steps,
             config.MAX_TOKEN_BUDGET,
             effort=self.effort,
             permission_channel=channel,
@@ -199,6 +242,53 @@ class VenastineApp(App):
             self.post_message(TurnFinished(error))
         if error is not None:
             raise error
+
+    def run_one_shot(self, system_prompt: str, message: str) -> None:
+        """Run ONE turn in the CURRENT thread under a different system
+        prompt (§18 /grill-me: the agent sees the live history directly,
+        no digest loss). Uses continue_conversation so the exchange
+        persists into the thread; the live memory is reloaded when the
+        result lands so the next streaming turn sees it too."""
+        self._busy = True
+        self._raven.state = ravens.THINKING
+        thread_id = self.memory.thread_id
+        model, provider = self.model, self.provider_name
+
+        def work() -> None:
+            error = None
+            text = None
+            try:
+                response = RunAgentLoop.continue_conversation(
+                    thread_id=thread_id,
+                    message=message,
+                    system_prompt=system_prompt,
+                    model=model,
+                    provider_name=provider,
+                    effort=self.effort,
+                )
+                text = response.text
+            except BaseException as e:  # noqa: BLE001 — reported, re-raised
+                error = e
+            self.post_message(OneShotFinished(text, error))
+            if error is not None:
+                raise error
+
+        self.run_worker(
+            work, thread=True, exit_on_error=False, name="one-shot",
+        )
+
+    def on_one_shot_finished(self, message: OneShotFinished) -> None:
+        self._busy = False
+        self._raven.resume_animation()
+        self._raven.state = ravens.IDLE
+        if message.error is not None:
+            self._transcript.write_error(f"[error: {message.error}]")
+            return
+        # Reload so the grill exchange is in the live history for the
+        # next streaming turn.
+        self.memory = ConversationMemory(thread_id=self.memory.thread_id)
+        self._transcript.flush_stream()
+        self._transcript.write(message.text)
 
     def on_loop_event_message(self, message: LoopEventMessage) -> None:
         event = message.event
@@ -427,6 +517,7 @@ def register_builtin_commands() -> None:
 
 
 register_builtin_commands()
+register_agent_commands()  # §18: /agent, /goal, /grill-me
 
 
 def run(provider_name: str, model: str, settings: dict | None = None) -> None:

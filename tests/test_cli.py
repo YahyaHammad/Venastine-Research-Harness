@@ -51,6 +51,7 @@ def test_run_agent_conversation_passes_thread_id_to_memory(mocker):
             captured_kwargs["thread_id"] = thread_id
             self.thread_id = thread_id or uuid4()
             self.messages = []
+            self.extra = {}  # §18: run_agent_conversation reads the goal
 
         def add_user_message(self, text):
             self.messages.append({"role": "user", "content": text})
@@ -85,6 +86,7 @@ def test_run_agent_conversation_without_thread_id_starts_fresh(mocker):
             captured_kwargs["thread_id"] = thread_id
             self.thread_id = uuid4()
             self.messages = []
+            self.extra = {}  # §18: run_agent_conversation reads the goal
 
         def add_user_message(self, text):
             self.messages.append({"role": "user", "content": text})

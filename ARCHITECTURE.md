@@ -46,7 +46,7 @@ Venastine Research Harness/
 ├── pytest.ini                      # testpaths=tests, --strict-markers
 ├── DEVLOG.md                       # implementation notes for built ROADMAP sections -- see §0
 │
-├── tests/                          # 379 tests, all offline, ~12s (first run ~7s for matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
+├── tests/                          # 395 tests, all offline, ~14s (first run ~7s for matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
 │   ├── conftest.py                 # fixtures: make_model_response, make_stream_from_response, make_stream_sequence, FakeStorage, ...
 │   ├── BREAKING_CHANGES.md         # what-breaks-it / symptom / fix per area
 │   ├── test_cli.py                 # 13 tests -- ROADMAP §1 thread_id passthrough + UUID validation + §14 parser defaults/resolution/trust flow
@@ -72,7 +72,8 @@ Venastine Research Harness/
 │   ├── test_shell.py               # 44 tests -- ROADMAP §7 sandbox routing, inert/network classification, approval, backend internals
 │   ├── test_policy_enforcement.py  # 22 tests -- ROADMAP §8 secret redaction, domain blocking, output policy, registry integration
 │   ├── test_critic_routing.py      # 2 tests -- ROADMAP §11 critic-model routing (3a/3b/6c to critic, rest to main)
-│   └── test_permission_context.py  # 21 tests -- ROADMAP_v2 §15 AC1-AC7 (stricter wins, mcp default, redaction survives, D24, unregister) + schemas filtering
+│   ├── test_permission_context.py  # 21 tests -- ROADMAP_v2 §15 AC1-AC7 (stricter wins, mcp default, redaction survives, D24, unregister) + schemas filtering
+│   └── test_agents.py              # 16 tests -- ROADMAP_v2 §18 AC1-AC3 (intersection, depth, manager surface), dispatch injection, headless filter + warning, goal mode, catalog, D24, TUI commands
 │
 ├── core/
 │   ├── client.py                  # ONE model call, normalized across providers; provider-specific wire formats live ONLY here. §13 adds call_model_stream() (3 streaming impls) + collect_response() + StreamToken
@@ -118,9 +119,16 @@ Venastine Research Harness/
 │   ├── config.py                  # mcp.json discovery/merge (user beats project, D29) + the first-run acknowledgement store (D31)
 │   └── registration.py            # MCP Tool -> ToolSpec, mcp__<server>__<tool>, runtime register/unregister (D15)
 │
+├── agents/                        # ROADMAP_v2 §18: agent system. Namespace package (no __init__.py), like tools/ and tui/
+│   ├── manager.py                 # AgentManager -- thin lookup over config_loader + C6 intersection / C3 depth composition + prompt assembly
+│   ├── subagent_tool.py           # spawn_subagent tool (D6 model-initiated); declares parent_context/parent_run for dispatch injection
+│   ├── tui_commands.py            # /agent, /goal, /grill-me registered into §16's slash registry (TUI-only commands)
+│   └── builtin/
+│       └── grill-me.md            # built-in agent: surfaces what still needs a decision in the current thread
+│
 ├── tui/                           # ROADMAP_v2 §16: the Textual shell. Hosts capabilities; owns none (D12 keeps the CLI first-class)
-│   ├── app.py                     # the App -- worker, LoopEvent routing, slash dispatch, permission bridge, both ravens
-│   ├── widgets.py                 # transcript (Rich Syntax highlighting), raven panels, research progress
+│   ├── app.py                     # the App -- worker, LoopEvent routing, slash dispatch, permission bridge, both ravens; §18 active-agent state + goal banner
+│   ├── widgets.py                 # transcript (Rich Syntax highlighting), raven panels, research progress, GoalBanner
 │   ├── commands.py                # slash-command registry -- MECHANISM only; §18/§19/§21 register into it
 │   ├── screens.py                 # ModalScreens: permission prompt (AC2), thread picker
 │   ├── themes.py                  # 8 themes (dark/light x plain/red/green/blue)
@@ -324,7 +332,7 @@ Covered in full in §7 below. The short version of the file boundary: `base.py` 
   - `provider_factory` / `client_for_provider` — return a mock-`api_initialization`-compatible tuple for translation tests.
   - `clear_client_cache` (autouse) — resets `api_initialization`'s cached clients before each test.
 - **`tests/BREAKING_CHANGES.md`** — per-file tables documenting what breaks each test when production code changes, the symptom, and the fix. Created because `test_orchestrator.py` was identified as the suite's most fragile mock — its mock dict is keyed by pass_id strings that ROADMAP §3 and §10 will modify.
-- **24 test files** (6 per ROADMAP §4 + 2 from §4's own additions: `test_memory_write_through.py`, `test_loop_tool_dispatch.py`; + 2 from §3/§5: `test_json_retry.py`, `test_pipeline_storage.py`; + 2 from §1: `test_cli.py`, `test_e2e.py`; + 1 from §12: `test_output_writer.py`; + 1 from audit: `test_logging_setup.py`; + 1 from §6: `test_file_ops.py`; + 1 from §7: `test_shell.py`; + 1 from §8: `test_policy_enforcement.py`; + 2 from §13: `test_client_streaming.py`, `test_streaming_loop.py`; + 3 from ROADMAP_v2 §14: `test_workspace_trust.py`, `test_config_loader.py`, `test_load_skill.py`; + 1 from §15: `test_permission_context.py`; + 1 from §11: `test_critic_routing.py`).
+- **25 test files** (6 per ROADMAP §4 + 2 from §4's own additions: `test_memory_write_through.py`, `test_loop_tool_dispatch.py`; + 2 from §3/§5: `test_json_retry.py`, `test_pipeline_storage.py`; + 2 from §1: `test_cli.py`, `test_e2e.py`; + 1 from §12: `test_output_writer.py`; + 1 from audit: `test_logging_setup.py`; + 1 from §6: `test_file_ops.py`; + 1 from §7: `test_shell.py`; + 1 from §8: `test_policy_enforcement.py`; + 2 from §13: `test_client_streaming.py`, `test_streaming_loop.py`; + 3 from ROADMAP_v2 §14: `test_workspace_trust.py`, `test_config_loader.py`, `test_load_skill.py`; + 1 from §15: `test_permission_context.py`; + 1 from §11: `test_critic_routing.py`; + 1 from §18: `test_agents.py`).
 
 **What belongs here:** tests that run offline (~1.9s; first run ~7s for the matplotlib font cache), with zero network access and zero real API keys. Stubs in root `conftest.py` catch import-time module resolution; fixtures in `tests/conftest.py` provide `ModelResponse` construction and storage mocking; individual test files cover production code's behavior.
 
@@ -388,6 +396,18 @@ Covered in full in §7 below. The short version of the file boundary: `base.py` 
 **Approval is a base default, not an `approval_check`.** MCP tools are allowed by default (`_default_for_unknown_tool`) but require approval by default (`_default_for_unknown_approval`), with a per-server `autoApprove` opt-out registered via `permissions.set_dynamic_approval_default()`. The opt-out cannot be a `ToolSpec.approval_check`, because `approval_needed()` ORs those in and OR can only tighten — expressed there it would be silently inert (D28).
 
 **Does NOT belong here:** secret redaction (`safety/policy_enforcement.py` owns it, and §17 made it recurse so `structured_content` is covered), approval *policy* (`security/permissions.py`), dispatch mechanics (`tools/registry.py`), or the trust prompt UX (`main.py` — `workspace_trust.py` owns only the store).
+
+### 4.18 `agents/` — the agent system (ROADMAP_v2 §18)
+
+**Belongs here:** `manager.py` owns lookup (`get`/`names`/`all` over `core.config_loader.get_agents()`, which already applies D29 tier order) and the §18 composition rules: `active_context()` (session-scoped `/agent` switch, depth 0), `child_context()` (C6 intersection-with-parent + C3 depth increment), `system_prompt_for()` (base + skill/agent catalogs + agent body + opt-in `CONTEXT.md`, one assembly point). `subagent_tool.py` owns `spawn_subagent` (D6 model-initiated half). `tui_commands.py` owns `/agent`, `/goal`, `/grill-me` registered into §16's slash registry — the shell hosts, this section owns. `builtin/grill-me.md` is the first built-in agent.
+
+**Dispatch injection is the §18 mechanism.** `tools/registry.dispatch()` inspects handler signatures at `register()` time and hands `parent_context` / `parent_run` (a `tools.context.RunInfo`: model / provider / effort) to handlers that declare them. `spawn_subagent` declares both; the twelve pre-§18 tools declare neither and are byte-for-byte untouched. Generalised on purpose so §23's response-channel tools add a third injectable name without reopening `dispatch()`.
+
+**The headless callability rule (§15–17 finalization, user-widened).** `schemas(callable_only=True)` drops any tool whose `approval_needed(name, {}, context)` is True when the run has no `permission_channel` — it is uncallable in that configuration, and advertising uncallable tools is the `fetch_url` damage class. `core/loop._run()` passes `callable_only=(permission_channel is None)` and logs a once-per-process WARNING naming `headless_hidden()` output, so the hiding is never silent (the trade this project keeps deciding against). autoApproved MCP servers stay advertised because they need no approval.
+
+**Goal mode lives in `ConversationThread.extra_data`.** `storage.update_thread_extra()` / `ConversationMemory.extra` + `set_extra()` persist it; `core/loop.with_goal()` appends the `## Persistent objective` section in EVERY shell (CLI wrapper and TUI worker both call it); `tui/widgets.GoalBanner` mirrors it. `/goal` is the only writer.
+
+**Does NOT belong here:** discovery / frontmatter parsing / tier precedence (`core/config_loader.py`), skill activation (§19), the slash registry mechanism (`tui/commands.py`), thread persistence (`storage.py`), or any LLM call — `spawn_subagent` and `/grill-me` both route through `RunAgentLoop`, never a bespoke client path.
 
 ## 5. Request lifecycle — regular conversation, traced end to end
 

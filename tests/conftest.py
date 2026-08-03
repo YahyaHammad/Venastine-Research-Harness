@@ -201,6 +201,7 @@ class FakeStorage:
         self._threads = {}        # thread_id -> True (existence tracker)
         self._thread_created_at = {}  # thread_id -> datetime
         self._messages_by_thread = {}  # thread_id -> list of neutral-shape dicts
+        self._thread_extra = {}   # thread_id -> dict (extra_data mirror)
 
     def create_thread(self):
         from datetime import datetime, timezone
@@ -210,10 +211,33 @@ class FakeStorage:
         self._threads[thread_id] = True
         self._thread_created_at[thread_id] = datetime.now(timezone.utc)
         self._messages_by_thread[thread_id] = []
+        self._thread_extra[thread_id] = {}
         return thread_id
 
     def get_thread(self, thread_id):
-        return self._threads.get(thread_id, None)
+        # Mirrors production: a row object (truthy, carries extra_data) or
+        # None. core/memory.py reads .extra_data off it, so a bare True
+        # sentinel would no longer represent what production returns.
+        if thread_id not in self._threads:
+            return None
+        return types.SimpleNamespace(
+            id=thread_id,
+            extra_data=dict(self._thread_extra.get(thread_id, {})),
+        )
+
+    def get_thread_extra(self, thread_id):
+        if thread_id not in self._threads:
+            raise ValueError(f"No conversation thread found with id {thread_id}")
+        return dict(self._thread_extra.get(thread_id, {}))
+
+    def update_thread_extra(self, thread_id, key, value):
+        if thread_id not in self._threads:
+            raise ValueError(f"No conversation thread found with id {thread_id}")
+        extra = self._thread_extra.setdefault(thread_id, {})
+        if value is None:
+            extra.pop(key, None)
+        else:
+            extra[key] = value
 
     def list_threads(self):
         """Mirrors storage.list_threads(): most recent first."""
@@ -287,4 +311,5 @@ def fake_storage(monkeypatch):
     monkeypatch.setattr(memory_mod, "get_thread", storage.get_thread)
     monkeypatch.setattr(memory_mod, "save_message", storage.save_message)
     monkeypatch.setattr(memory_mod, "get_session_history", storage.get_session_history)
+    monkeypatch.setattr(memory_mod, "update_thread_extra", storage.update_thread_extra)
     return storage

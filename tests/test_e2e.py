@@ -13,6 +13,7 @@ Research mode test: run_research prints the pipeline's final report,
 trace log, and run id.
 """
 
+from unittest.mock import ANY
 from uuid import uuid4
 
 import pytest
@@ -120,9 +121,10 @@ def test_chat_mode_e2e_multi_turn_with_tool_use(mocker, capsys, fake_storage):
 
     # Tool dispatched exactly once (the get_time call in turn 1).
     assert mock_dispatch.call_count == 1
-    # §15: the loop forwards its ToolContext (None here -- no agent
-    # active) to every dispatch call.
-    mock_dispatch.assert_called_once_with("get_time", {}, context=None)
+    # §15/§18: the loop forwards its ToolContext (None here -- no agent
+    # active) and its RunInfo (parent_run) to every dispatch call.
+    mock_dispatch.assert_called_once_with(
+        "get_time", {}, context=None, parent_run=ANY)
 
     # --- Verify multi-turn thread resume ---
     # call_model_stream is called with memory.messages as the 4th positional

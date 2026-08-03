@@ -40,6 +40,35 @@ def get_thread(thread_id: UUID) -> Optional[ConversationThread]:
         return session.get(ConversationThread, thread_id)
 
 
+def get_thread_extra(thread_id: UUID) -> Dict[str, Any]:
+    """Copy of the thread's extra_data JSON column (goal mode §18, todo
+    list §23). Raises ValueError for an unknown thread, same contract as
+    the other accessors."""
+    with Session(engine) as session:
+        thread = session.get(ConversationThread, thread_id)
+        if thread is None:
+            raise ValueError(f"No conversation thread found with id {thread_id}")
+        return dict(thread.extra_data or {})
+
+
+def update_thread_extra(thread_id: UUID, key: str, value: Any) -> None:
+    """Set one key of the thread's extra_data; value=None deletes it.
+    Reassigns a fresh dict rather than mutating in place so SQLModel sees
+    the JSON column change."""
+    with Session(engine) as session:
+        thread = session.get(ConversationThread, thread_id)
+        if thread is None:
+            raise ValueError(f"No conversation thread found with id {thread_id}")
+        extra = dict(thread.extra_data or {})
+        if value is None:
+            extra.pop(key, None)
+        else:
+            extra[key] = value
+        thread.extra_data = extra
+        session.add(thread)
+        session.commit()
+
+
 def save_message(
     thread_id: UUID,
     role: str,

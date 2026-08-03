@@ -37,3 +37,18 @@ class ToolContext:
     allowed_tools: Optional[set[str]] = None
     approval_overrides: dict[str, bool] = field(default_factory=dict)
     subagent_depth: int = 0
+
+
+@dataclass
+class RunInfo:
+    """Identity of the enclosing run, for context-aware tool handlers that
+    spawn further runs (§18's spawn_subagent inherits model / provider /
+    effort when the agent definition names none of its own).
+
+    Carries no policy -- deliberately separate from ToolContext so a
+    handler's signature cannot confuse inheritance with restriction.
+    """
+
+    model: str
+    provider_name: str
+    effort: Optional[str] = None

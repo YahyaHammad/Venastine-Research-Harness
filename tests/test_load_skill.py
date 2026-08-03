@@ -64,7 +64,11 @@ def test_catalog_appended_to_prompts_when_skills_exist(_user_skill):
         assert "- crypto:" in system_prompts.pass_prompt(pass_id)
 
 
-def test_prompt_unchanged_without_skills(tmp_path):
+def test_prompt_unchanged_without_skills(tmp_path, monkeypatch):
+    # The harness tier ships grill-me.md, so point HARNESS_ROOT at an
+    # empty dir: this test's contract is "no skills AND no agents ->
+    # the prompt is byte-identical".
+    monkeypatch.setattr(config_loader, "HARNESS_ROOT", str(tmp_path / "harness"))
     project = tmp_path / "empty"
     project.mkdir()
     config_loader.initialize(str(project))
