@@ -46,7 +46,7 @@ Venastine Research Harness/
 ├── pytest.ini                      # testpaths=tests, --strict-markers
 ├── DEVLOG.md                       # implementation notes for built ROADMAP sections -- see §0
 │
-├── tests/                          # 272 tests, all offline, ~1.9s (first run ~7s for matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
+├── tests/                          # 307 tests, all offline, ~1.9s (first run ~7s for matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
 │   ├── conftest.py                 # fixtures: make_model_response, make_stream_from_response, make_stream_sequence, FakeStorage, ...
 │   ├── BREAKING_CHANGES.md         # what-breaks-it / symptom / fix per area
 │   ├── test_cli.py                 # 13 tests -- ROADMAP §1 thread_id passthrough + UUID validation + §14 parser defaults/resolution/trust flow
@@ -71,7 +71,8 @@ Venastine Research Harness/
 │   ├── test_file_ops.py            # 31 tests -- ROADMAP §6 path resolution, approval, read/write/edit, registry
 │   ├── test_shell.py               # 44 tests -- ROADMAP §7 sandbox routing, inert/network classification, approval, backend internals
 │   ├── test_policy_enforcement.py  # 22 tests -- ROADMAP §8 secret redaction, domain blocking, output policy, registry integration
-│   └── test_critic_routing.py      # 2 tests -- ROADMAP §11 critic-model routing (3a/3b/6c to critic, rest to main)
+│   ├── test_critic_routing.py      # 2 tests -- ROADMAP §11 critic-model routing (3a/3b/6c to critic, rest to main)
+│   └── test_permission_context.py  # 21 tests -- ROADMAP_v2 §15 AC1-AC7 (stricter wins, mcp default, redaction survives, D24, unregister) + schemas filtering
 │
 ├── core/
 │   ├── client.py                  # ONE model call, normalized across providers; provider-specific wire formats live ONLY here. §13 adds call_model_stream() (3 streaming impls) + collect_response() + StreamToken
@@ -113,12 +114,13 @@ Venastine Research Harness/
 │   └── policy_enforcement.py      # ROADMAP §8: content-level output policy -- blocked domains + secret redaction
 │
 └── tools/
-    ├── base.py                    # ToolSpec -- the bundle every tool gets registered as
-    ├── registry.py                # the ONLY file that imports both security.permissions AND every tool module
+    ├── base.py                    # ToolSpec -- the bundle every tool gets registered as (+ §15 available_check)
+    ├── context.py                 # §15: ToolContext -- per-run tool restrictions (allowed_tools / approval_overrides / subagent_depth). Data only; leaf module, no project imports
+    ├── registry.py                # the ONLY file that imports both security.permissions AND every tool module. §15: context-aware schemas/approval_needed/dispatch, runtime unregister, D24 import-time check
     └── builtin/
         ├── _math_common.py        # shared safe-expression-parsing foundation for the 6 math tools
         ├── web_search.py          # DuckDuckGo search
-        ├── fetch_url.py           # fetch a specific URL's content (registered but denied: no ToolPermissions field -- §15/D24 fixes structurally)
+        ├── fetch_url.py           # fetch a specific URL's content (§15/D24: ToolPermissions/ToolApprovals fields added -- it was registered but denied on every call before that)
         ├── get_time.py            # current UTC time
         ├── load_skill.py          # ROADMAP_v2 §14: view a skill's full body on request (progressive disclosure; view-only, activation is §19)
         ├── arxiv.py               # arXiv paper search
@@ -236,7 +238,9 @@ This section exists specifically because earlier drafts of this project put pers
 
 **Always-persist behavior (ROADMAP §3 fix):** `memory.add_assistant_message(response)` is called immediately after `call_model()` returns and the token count is updated, BEFORE any branching on stop conditions. Earlier drafts called `add_assistant_message` only on the tool-calling path, which silently dropped plain-text final answers (and any response cut short by the budget-exceeded exit) from the persisted thread — a thread resumed via `ConversationMemory(thread_id=...)` would be missing its last assistant turn. The fix closes that bug AND unblocks ROADMAP §3's JSON-retry path, which relies on the failed assistant output being present in the resumed thread's history so `continue_conversation` can show the model its own prior malformed output. ROADMAP §13 preserved this ordering in the generator (`_run()` calls `add_assistant_message` right after the stream completes, before any stop-condition `yield`/`return`) and promoted it to decision D20 with a regression test (`test_streaming_loop.py` AC6) that inspects the persisted `MessageLog`, not the return value.
 
-**Approval single source of truth (ROADMAP §13/§15 bridge):** the loop's permission bridge and `registry.dispatch()` must agree on whether a call needs approval. `ToolRegistry.approval_needed(tool_name, params)` is that single source: the tool's own path/command-dependent `approval_check` when present (file_ops outside the workspace, shell non-inert), else the generic `requires_approval()` config boolean. Both `dispatch()` and `_run()` call it, so a path-dependent tool yields a `permission_request` `LoopEvent` (letting the TUI prompt the user) instead of being silently denied by one check while the other says no approval. When the user approves via `permission_channel`, `_run()` passes `approval_callback=lambda n, p: True` to `dispatch()` so the internal re-check doesn't deny an already-approved tool.
+**Approval single source of truth (ROADMAP §13, extended by §15):** the loop's permission bridge and `registry.dispatch()` must agree on whether a call needs approval. `ToolRegistry.approval_needed(tool_name, params, context)` is that single source: the tool's own path/command-dependent `approval_check` when present (file_ops outside the workspace, shell non-inert) **OR'd with** the context-aware `requires_approval()` lookup (§15 — it was an either/or before, see §4.10). Both `dispatch()` and `_run()` call it, so a path-dependent tool yields a `permission_request` `LoopEvent` (letting the TUI prompt the user) instead of being silently denied by one check while the other says no approval. When the user approves via `permission_channel`, `_run()` passes `approval_callback=lambda n, p: True` to `dispatch()` so the internal re-check doesn't deny an already-approved tool.
+
+**Tool scoping via `ToolContext` (ROADMAP_v2 §15):** `_run()` takes an optional `context: Optional[ToolContext]` — which **replaced** an `allowed_tools: list[str]` parameter that expressed the same restriction one layer up. The loop no longer performs a tool-membership check of its own: it computes `registry.schemas(context)`, passes the context to `approval_needed()` and `dispatch()`, and lets `security/permissions.py` compose the layers. A restricted tool is denied inside `dispatch()` and surfaces as an error result, with the message distinguishing a context restriction ("not available in this context" — the model can route around it by choosing another tool) from a global policy denial ("disabled by policy" — it cannot). All three public wrappers accept `context=` and default it to `None`; nothing in production constructs a non-`None` context until §18.
 
 `ModelResponse.thread_id` is set by `run_deep_research_mode()`, `run_agent_conversation()`, and `continue_conversation()` before they return — never by `call_model()` (which doesn't know which thread it's running against). Callers use it to thread-followup calls (e.g. JSON retries).
 
@@ -248,9 +252,24 @@ Covered in full in §7 below. The short version of the file boundary: `base.py` 
 
 ### 4.10 `security/permissions.py` vs. `tools/registry.py`
 
-`security/permissions.py` is **policy**: `is_tool_allowed(name)` and `requires_approval(name, params)`, both reading `config.ToolPermissions()` / `config.ToolApprovals()`. `tools/registry.py` is **mechanism**: it's the single choke point every tool call passes through, and it's the only file that imports both `security.permissions` and the individual tool modules. Tool files themselves (`tools/builtin/*.py`) never import `security.permissions` at all — permission checks happen once, centrally, in `registry.dispatch()`, before a tool function is ever called.
+`security/permissions.py` is **policy**: `is_tool_allowed(name, context=None)` and `requires_approval(name, params, context=None)`, both reading `config.ToolPermissions()` / `config.ToolApprovals()`. `tools/registry.py` is **mechanism**: it's the single choke point every tool call passes through, and it's the only file that imports both `security.permissions` and the individual tool modules. Tool files themselves (`tools/builtin/*.py`) never import `security.permissions` at all — permission checks happen once, centrally, in `registry.dispatch()`, before a tool function is ever called.
 
-**`ToolSpec.approval_check` (ROADMAP §6/§7):** `tools/base.py`'s `ToolSpec` dataclass has an optional `approval_check: Callable[[str, dict], bool]` field. When present, `registry.dispatch()` calls it instead of the generic `requires_approval()`. This lets tools define path-dependent or context-dependent approval policies (e.g. file_ops auto-approves within WORKSPACE_DIR, shell auto-approves when Docker is available) without `security/permissions.py` needing to know about tool internals.
+**"Stricter wins" (ROADMAP_v2 §15, D14).** Every currently active layer is consulted — global config, plus an optional `ToolContext` (`tools/context.py`) contributed by the active agent (§18) and the skills it has activated (§19):
+
+- **Allow/deny is a logical AND.** A tool is available only if global policy allows it AND every layer expressing an opinion allows it. The global check runs **first and unconditionally**: a globally disabled tool can never be re-enabled by any context. This is what makes workspace trust survivable — agent definitions can come from a merely-trusted project directory, and none of them may grant themselves a capability the user turned off.
+- **Approval is a logical OR.** Required if the tool's own `approval_check` says so, OR the global config says so, OR the context says so. `approval_overrides` is therefore a one-way ratchet: an entry can ADD an approval requirement, but a `False` entry is indistinguishable from the key being absent. Do not "fix" this into a three-state override.
+- **`_default_for_unknown_tool(name)`** gives dynamically-named tools an explicit, named default instead of letting `getattr`'s fallback decide by omission: `mcp__*` tools are allowed (their control point is §17's server-level trust gate), anything else unknown is denied.
+- **`assert_permissions_declared()` (D24)** runs at import from the bottom of `tools/registry.py` and raises if any statically registered tool lacks a field in both dataclasses. The helper lives in `permissions.py` (which owns knowledge of the dataclasses) and is *called* from `registry.py` (because `permissions.py` must not import the registry — the dependency runs one way, `tools -> security`). `mcp__*` names are exempt.
+
+**`ToolSpec.approval_check` (ROADMAP §6/§7, semantics changed by §15):** an optional `Callable[[str, dict], bool]` letting tools define path- or command-dependent approval policies (file_ops auto-approves within WORKSPACE_DIR; shell auto-approves when Docker is available) without `security/permissions.py` knowing about tool internals. **§15 changed this from a REPLACEMENT for `requires_approval()` to one term of an OR.** Before, defining an `approval_check` made a tool invisible to config- and context-level approval settings entirely, which would have made agent `approval_overrides` silently inert for `read`/`write`/`edit`/`shell` — the four tools where per-agent tightening matters most.
+
+**`ToolRegistry.approval_needed()` is the single source of truth** for "does this call need approval", and it is where that OR is computed. Both `dispatch()` and `core/loop.py`'s permission bridge call it, so they cannot disagree. Do not inline the composition into `dispatch()` — §15's own spec sketch does, because it predates §13's introduction of `approval_needed()`, and following it literally re-opens the divergence §13 closed (DEVLOG §15.3.1).
+
+**`ToolSpec.available_check` (§15):** an optional `Callable[[], bool]` meaning "do I have anything to act on right now?", consulted by `schemas()` only. Distinct from permissions — the tool is allowed, it just has nothing to do yet (`load_skill` with an empty skill catalog). `dispatch()` deliberately ignores it: a tool declaring itself unavailable is expected to return a clean error if called anyway.
+
+**`registry.schemas(context)` advertises only what is actually callable** (§15) — filtered by `is_tool_allowed(name, context)` and by `available_check`. Advertising an uncallable tool is not harmless: the model keeps choosing it and burning a turn per attempt, with the only signal a denial string buried in a tool result. That is exactly what the `fetch_url` defect did for its entire life. Under default config this is 10 of 15 registered tools (`read`/`write`/`edit`/`shell` are permission `False`; `load_skill` has no catalog until skills are discovered).
+
+**`register()` / `unregister()` (D15):** registration works at runtime, not just import time, for MCP (§17). `unregister()` is idempotent because disconnect handling can run more than once for the same server. This is why `dispatch()`'s unknown-tool `ValueError` guard matters more since §15, not less — a stale tool name is now a reachable state rather than a programmer error.
 
 **`safety/policy_enforcement.check_output_policy` (ROADMAP §8):** `registry.dispatch()` also calls `check_output_policy(tool_name, result)` after every tool handler returns, applying content-level policy (secret redaction) to the result before it reaches the caller. This is a post-call filter, not a pre-call gate — distinct from `security/permissions.py`'s access control.
 
@@ -282,9 +301,9 @@ Covered in full in §7 below. The short version of the file boundary: `base.py` 
   - `provider_factory` / `client_for_provider` — return a mock-`api_initialization`-compatible tuple for translation tests.
   - `clear_client_cache` (autouse) — resets `api_initialization`'s cached clients before each test.
 - **`tests/BREAKING_CHANGES.md`** — per-file tables documenting what breaks each test when production code changes, the symptom, and the fix. Created because `test_orchestrator.py` was identified as the suite's most fragile mock — its mock dict is keyed by pass_id strings that ROADMAP §3 and §10 will modify.
-- **17 test files** (6 per ROADMAP §4 + 2 from §4's own additions: `test_memory_write_through.py`, `test_loop_tool_dispatch.py`; + 2 from §3/§5: `test_json_retry.py`, `test_pipeline_storage.py`; + 2 from §1: `test_cli.py`, `test_e2e.py`; + 1 from §12: `test_output_writer.py`; + 1 from audit: `test_logging_setup.py`; + 1 from §6: `test_file_ops.py`; + 1 from §7: `test_shell.py`; + 1 from §8: `test_policy_enforcement.py`).
+- **24 test files** (6 per ROADMAP §4 + 2 from §4's own additions: `test_memory_write_through.py`, `test_loop_tool_dispatch.py`; + 2 from §3/§5: `test_json_retry.py`, `test_pipeline_storage.py`; + 2 from §1: `test_cli.py`, `test_e2e.py`; + 1 from §12: `test_output_writer.py`; + 1 from audit: `test_logging_setup.py`; + 1 from §6: `test_file_ops.py`; + 1 from §7: `test_shell.py`; + 1 from §8: `test_policy_enforcement.py`; + 2 from §13: `test_client_streaming.py`, `test_streaming_loop.py`; + 3 from ROADMAP_v2 §14: `test_workspace_trust.py`, `test_config_loader.py`, `test_load_skill.py`; + 1 from §15: `test_permission_context.py`; + 1 from §11: `test_critic_routing.py`).
 
-**What belongs here:** tests that run offline (~0.53s), with zero network access and zero real API keys. Stubs in root `conftest.py` catch import-time module resolution; fixtures in `tests/conftest.py` provide `ModelResponse` construction and storage mocking; individual test files cover production code's behavior.
+**What belongs here:** tests that run offline (~1.9s; first run ~7s for the matplotlib font cache), with zero network access and zero real API keys. Stubs in root `conftest.py` catch import-time module resolution; fixtures in `tests/conftest.py` provide `ModelResponse` construction and storage mocking; individual test files cover production code's behavior.
 
 **What does NOT belong here:** any test that requires a real API key, any test that makes an outbound HTTP call, any test that depends on a specific file on disk (unless the fixture creates and cleans it). If you need to test a provider's real wire format, write an integration test in a separate directory (`tests_integration/` or similar) that is excluded by `pytest.ini`'s `testpaths`.
 
@@ -335,7 +354,7 @@ Covered in full in §7 below. The short version of the file boundary: `base.py` 
 
 **OpenAI-compatible** (OpenAI, and any provider in `providers.json` with `is_v1_compatible: true` — DeepSeek, Groq, Mistral, etc., since they all speak the OpenAI wire format): fully implemented and verified end-to-end the same way.
 
-**Google:** stubbed. `_tools_for_provider`, `_messages_for_provider`, and `call_model`'s `GOOGLE` branch all raise `NotImplementedError`. Full spec for finishing this is in ROADMAP.md.
+**Google:** fully implemented (ROADMAP §9) and covered by `test_client_translation.py` / `test_client_streaming.py`. See §4.7 for the three load-bearing shape differences (`system_instruction`, `role="model"`, `max_output_tokens`) and the streaming/usage details.
 
 **Provider selection is currently per-call, not persisted per-thread.** Every call to `run_agent_conversation`/`run_deep_research_mode` takes `provider_name`/`model` fresh; nothing stops you from resuming a thread that was built with Anthropic's message shape and continuing it with OpenAI (this would likely break, since the neutral shape stored is provider-agnostic but was populated based on whichever provider actually ran — this hasn't been an issue in practice since every observed usage keeps one provider per thread, but it's not enforced).
 
@@ -424,9 +443,11 @@ Returns the full `PipelineRun` (not just the final report) — every intermediat
 
 ## 8. Security/permissions model — current state
 
-`config.ToolPermissions` / `config.ToolApprovals` are dataclasses with one boolean field per registered tool name. `security/permissions.py`'s `is_tool_allowed(name)` / `requires_approval(name, params)` read these. `tools/registry.py.dispatch()` checks both, in that order, before calling any tool's `run()`. After the handler returns, `dispatch()` calls `safety/policy_enforcement.check_output_policy()` to redact secrets from the result.
+`config.ToolPermissions` / `config.ToolApprovals` are dataclasses with one boolean field per registered tool name — and **every statically registered tool must have a field in both**, enforced at import by `assert_permissions_declared()` (D24). `security/permissions.py`'s `is_tool_allowed(name, context)` / `requires_approval(name, params, context)` read these. `tools/registry.py.dispatch()` checks both, in that order, before calling any tool's `run()`. After the handler returns, `dispatch()` calls `safety/policy_enforcement.check_output_policy()` to redact secrets from the result.
 
-**Path-dependent approval (ROADMAP §6/§7):** `ToolSpec.approval_check` lets tools override the generic boolean lookup. `file_ops` uses it for workspace-boundary approval; `shell` uses it for Docker-availability-aware approval with a TOCTOU safety net.
+**"Stricter wins" (ROADMAP_v2 §15, D14):** allow/deny ANDs across global config and every active `ToolContext`; approval ORs across all of them plus the tool's own `approval_check`. A context can narrow what is available and tighten what needs approval; it can never widen or loosen. Full contract in §4.10.
+
+**Path-dependent approval (ROADMAP §6/§7):** `ToolSpec.approval_check` lets tools contribute a dynamic approval term, OR'd with the config/context lookup (§15 — it used to replace it outright). `file_ops` uses it for workspace-boundary approval; `shell` uses it for Docker-availability-aware approval with a TOCTOU safety net.
 
 **Sandbox (ROADMAP §7):** `security/sandbox.py` provides hybrid Docker/subprocess isolation. Inert commands bypass the sandbox via a lightweight subprocess. Non-inert commands run in Docker (default) or the explicit subprocess fallback. Network is disabled by default with a configurable allowlist.
 
@@ -443,7 +464,7 @@ Returns the full `PipelineRun` (not just the final report) — every intermediat
 | Tool name | File | Status | Notes |
 |---|---|---|---|
 | `web_search` | `web_search.py` | Working | DuckDuckGo via `ddgs` package, cached, retried |
-| `fetch_url` | `fetch_url.py` | Working | Raw HTML text, truncated |
+| `fetch_url` | `fetch_url.py` | Working | Raw HTML text, truncated. Denied on every call until §15/D24 added its `ToolPermissions`/`ToolApprovals` fields — see §11 |
 | `get_time` | `get_time.py` | Working | No args, UTC only |
 | `arxiv_search` | `arxiv.py` | Working | Keyword + optional category, Atom XML parsed |
 | `symbolic_math` | `symbolic_math.py` | Working | Algebra/calculus/trig/arithmetic via SymPy, exact by default |
@@ -462,4 +483,5 @@ All math tools share `_math_common.py`'s `safe_parse()` — a SymPy expression p
 - **A root-level `logging.py` once shadowed Python's own `logging` stdlib module**, because the project root is on `sys.path` and any file doing `import logging` got the empty local file instead. Renamed to `logging_setup.py`. If a new top-level file is ever named after a stdlib or installed package, this exact failure mode recurs silently (no error at the shadowing point, just broken behavior wherever the real module was expected).
 - **`core/memory.py` once imported `from core.storage import ...` when the real file was `storage.py` at the project root.** Always verify actual file location before assuming a package-relative path.
 - **`tools/registry.py` at one point only registered 1 of 5 imported tools**, and separately had a dead/wrong import line (`import builtin.fetch_url as fetch_url`) alongside a correct one a few lines below. When adding a tool: import it, register it with `registry.register(ToolSpec(...))`, and confirm the registration line actually exists — importing a tool module is not the same as making it callable.
+- **`fetch_url` was registered, documented as Working, and denied on every call for its entire life**, because it had no field in `config.ToolPermissions` and `getattr(permissions, name, False)` therefore returned `False`. Nothing logged and nothing raised: the schema was still advertised to the model, so the model kept choosing the tool, and the only trace was a denial string inside a tool result it then worked around. This is the same shape as the gotcha above — a tool that is *nearly* wired — one layer further down, which is why §15/D24 replaced the defensive `getattr` default with an import-time check (`assert_permissions_declared`) rather than just adding the missing field. **Adding a tool is now four steps: import it, register it, add a boolean to BOTH `config.ToolPermissions` and `config.ToolApprovals`, and the import-time check enforces the third.** The general lesson, recorded in ROADMAP_v2's *Why these calls*: a defensive default is only safe where absence is impossible.
 - **`prompts/system_prompts.py`'s loader once built a local `passes_prompts` dict and returned it without ever assigning it back to the module-level variable of the same name** — the module-level dict stayed permanently empty. If you see a function that constructs a local variable shadowing a module-level one, check that the return value is actually being used, not just implicitly expected to "just work" via the shared name.

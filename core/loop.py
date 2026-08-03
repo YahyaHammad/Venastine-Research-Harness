@@ -13,6 +13,12 @@ final ModelResponse (the three public wrappers). The generator shape
 lets the TUI observe token deltas, tool calls, and permission prompts
 in real time without callbacks.
 
+§15 permission refactor: _run()'s old `allowed_tools` list is replaced by
+an optional ToolContext, which carries the same restriction plus approval
+overrides and subagent depth. One representation, threaded to the one
+place that enforces it (registry -> security.permissions), instead of the
+loop keeping a parallel membership check of its own.
+
 D20 invariant: memory.add_assistant_message(response) executes
 immediately after every call_model_stream return and BEFORE any
 stop-condition branch. This ordering is load-bearing — persisting only
@@ -29,6 +35,7 @@ import prompts.system_prompts as system_prompts
 from core.client import api_initialization, call_model_stream, ModelResponse
 from core.events import LoopEvent
 from core.memory import ConversationMemory
+from tools.context import ToolContext
 from tools.registry import registry, ToolCallDenied
 
 DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant."
@@ -60,13 +67,21 @@ class RunAgentLoop:
         system_prompt: str,
         provider_name: str,
         model: str,
-        allowed_tools: Optional[list[str]],
+        context: Optional[ToolContext],
         max_steps: int,
         max_total_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
         permission_channel: Optional[queue.Queue] = None,
     ):
         """Generator yielding LoopEvent objects as the loop progresses.
+
+        context: an optional ToolContext (§15) restricting which tools are
+        available and which need approval this run. None means only global
+        config policy applies, which is every production caller until §18
+        introduces agents. This replaced an `allowed_tools` list that did
+        the same job one layer up: the loop no longer decides tool
+        membership itself, it just hands the context to the registry and
+        lets security/permissions.py compose the layers.
 
         permission_channel: an optional queue.Queue (plain stdlib, NOT
         asyncio — this is a thread-to-thread handoff between the TUI's
@@ -76,7 +91,7 @@ class RunAgentLoop:
         dispatch() with no approval_callback.
         """
         client = api_initialization(provider_name)
-        tool_schemas = registry.schemas(allowed_tools)
+        tool_schemas = registry.schemas(context)
         total_tokens_used = 0
 
         response = None
@@ -123,46 +138,50 @@ class RunAgentLoop:
                     "id": call.id, "name": call.name, "input": call.input,
                 })
 
-                if allowed_tools is not None and call.name not in allowed_tools:
-                    result = {"error": f"{call.name} is not available in this context"}
-                else:
-                    # Single source of truth with dispatch(): consult the
-                    # tool's path/command-dependent approval_check when it
-                    # has one, else the generic config boolean. This keeps
-                    # the permission bridge and dispatch() from diverging
-                    # (a path-dependent tool must yield permission_request
-                    # so the TUI user can approve, not be silently denied).
-                    needs_approval = registry.approval_needed(call.name, call.input)
-                    if needs_approval:
-                        yield LoopEvent(permission_request={
-                            "tool_name": call.name, "params": call.input,
-                        })
-                        approved = (
-                            permission_channel.get()
-                            if permission_channel is not None
-                            else False
-                        )
-                        if not approved:
-                            result = {
-                                "error": f"{call.name} requires approval and was not given",
-                            }
-                        else:
-                            # Approval already obtained — pass a callback
-                            # that returns True so dispatch()'s internal
-                            # re-check doesn't deny it. Temporary bridge
-                            # until §15 refactors dispatch().
-                            try:
-                                result = registry.dispatch(
-                                    call.name, call.input,
-                                    approval_callback=lambda n, p: True,
-                                )
-                            except ToolCallDenied as e:
-                                result = {"error": str(e)}
+                # Single source of truth with dispatch(): approval_needed()
+                # ORs the tool's own path/command-dependent approval_check
+                # with the config/context requirement (§15). Both callers
+                # go through it so they cannot diverge — a path-dependent
+                # tool must yield permission_request so the TUI user can
+                # approve, not be silently denied by one check while the
+                # other reports no approval needed.
+                #
+                # There is no separate allowed_tools membership test here
+                # any more: dispatch() calls is_tool_allowed(name, context),
+                # which raises ToolCallDenied with a message distinguishing
+                # a context restriction from a global policy denial.
+                needs_approval = registry.approval_needed(
+                    call.name, call.input, context)
+                if needs_approval:
+                    yield LoopEvent(permission_request={
+                        "tool_name": call.name, "params": call.input,
+                    })
+                    approved = (
+                        permission_channel.get()
+                        if permission_channel is not None
+                        else False
+                    )
+                    if not approved:
+                        result = {
+                            "error": f"{call.name} requires approval and was not given",
+                        }
                     else:
+                        # Approval already obtained — pass a callback that
+                        # returns True so dispatch()'s internal re-check
+                        # doesn't deny an already-approved call.
                         try:
-                            result = registry.dispatch(call.name, call.input)
+                            result = registry.dispatch(
+                                call.name, call.input, context=context,
+                                approval_callback=lambda n, p: True,
+                            )
                         except ToolCallDenied as e:
                             result = {"error": str(e)}
+                else:
+                    try:
+                        result = registry.dispatch(
+                            call.name, call.input, context=context)
+                    except ToolCallDenied as e:
+                        result = {"error": str(e)}
 
                 yield LoopEvent(tool_result={"id": call.id, "result": result})
                 memory.add_tool_result(call.id, result)
@@ -182,15 +201,18 @@ class RunAgentLoop:
         max_total_tokens: int = config.MAX_TOKEN_BUDGET,
         thread_id: Optional[UUID] = None,
         temperature: Optional[float] = None,
+        context: Optional[ToolContext] = None,
     ) -> ModelResponse:
         """Regular conversation — full tool set, default system prompt,
         one continuous thread. Pass thread_id to resume an existing
-        thread; omit (or None) to start a fresh one."""
+        thread; omit (or None) to start a fresh one. Pass context (§15) to
+        run under an agent's tool restrictions; None means global policy
+        only, which is every caller until §18."""
         memory = ConversationMemory(thread_id=thread_id)
         memory.add_user_message(user_goal)
         response = run_to_completion(RunAgentLoop._run(
             memory, system_prompts.with_skill_catalog(DEFAULT_SYSTEM_PROMPT),
-            provider_name, model, None,
+            provider_name, model, context,
             max_steps, max_total_tokens, temperature=temperature,
         ))
         response.thread_id = memory.thread_id
@@ -205,6 +227,7 @@ class RunAgentLoop:
         max_steps: int = config.MAX_ITERATIONS,
         max_total_tokens: int = config.MAX_TOKEN_BUDGET,
         temperature: Optional[float] = None,
+        context: Optional[ToolContext] = None,
     ) -> ModelResponse:
         """
         Runs ONE research pass. `pass_input` is whatever the orchestrator
@@ -217,7 +240,7 @@ class RunAgentLoop:
         memory.add_user_message(pass_input)
         system_prompt = system_prompts.pass_prompt(pass_id)
         response = run_to_completion(RunAgentLoop._run(
-            memory, system_prompt, provider_name, model, None,
+            memory, system_prompt, provider_name, model, context,
             max_steps, max_total_tokens, temperature=temperature,
         ))
         response.thread_id = memory.thread_id
@@ -233,6 +256,7 @@ class RunAgentLoop:
         max_steps: int = config.MAX_ITERATIONS,
         max_total_tokens: int = config.MAX_TOKEN_BUDGET,
         temperature: Optional[float] = None,
+        context: Optional[ToolContext] = None,
     ) -> ModelResponse:
         """
         Sends a follow-up message into an EXISTING conversation thread and
@@ -249,7 +273,7 @@ class RunAgentLoop:
         memory = ConversationMemory(thread_id=thread_id)
         memory.add_user_message(message)
         response = run_to_completion(RunAgentLoop._run(
-            memory, system_prompt, provider_name, model, None,
+            memory, system_prompt, provider_name, model, context,
             max_steps, max_total_tokens, temperature=temperature,
         ))
         response.thread_id = thread_id

@@ -241,6 +241,34 @@ def _ensure_workspace_trust(project_path: str, trust_flag: bool) -> None:
               "grant trust.\n")
 
 
+def load_project_config(project_path: str, trust_flag: bool) -> dict:
+    """Runs the trust gate then config discovery, and reports a bad
+    configuration file as one line rather than a traceback.
+
+    The loud failure itself is deliberate and stays -- an unknown
+    settings.json key must never masquerade as a setting (ROADMAP_v2 §14
+    amendment 1). But the thing being reported is a typo in a file the
+    user wrote, not an internal error: a stack trace ending in ValueError
+    buries the one line that says which key in which file. Covers
+    ValueError (unknown key, wrong type, and json.JSONDecodeError, which
+    subclasses it -- so a corrupt settings.json or trusted_projects.json
+    lands here too) and OSError (an unreadable CONTEXT.md or config dir).
+    """
+    try:
+        _ensure_workspace_trust(project_path, trust_flag)
+        config_loader.initialize(project_path)
+    except (ValueError, OSError) as e:
+        # DEBUG, not exception(): the root logger's StreamHandler writes to
+        # stderr, so logger.exception() here would print the very traceback
+        # this function exists to replace -- the clean message would just
+        # appear underneath it. At DEBUG the trace is still one
+        # AGENT_LOG_LEVEL=DEBUG away when someone actually wants it.
+        logger.debug("Configuration load failed", exc_info=True)
+        print(f"\nConfiguration error: {e}\n", file=sys.stderr)
+        raise SystemExit(1)
+    return config_loader.get_settings()
+
+
 if __name__ == "__main__":
     configure_logging()
     create_db_and_tables()
@@ -249,9 +277,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     project_path = os.getcwd()
-    _ensure_workspace_trust(project_path, args.trust_project)
-    config_loader.initialize(project_path)
-    settings = config_loader.get_settings()
+    settings = load_project_config(project_path, args.trust_project)
     provider, model = resolve_runtime_defaults(args, settings)
 
     if args.mode == "research":

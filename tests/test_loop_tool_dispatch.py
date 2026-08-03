@@ -11,9 +11,17 @@ memory.add_tool_result.
 §13 update: _run() is now a generator. Tests wrap it in
 run_to_completion() and mock core.loop.call_model_stream (via
 make_stream_sequence) instead of core.loop.call_model.
+
+§15 update: _run()'s `allowed_tools` list is replaced by a ToolContext,
+and the loop no longer holds its own membership check -- a restricted
+tool is now denied inside registry.dispatch() by
+is_tool_allowed(name, context). The restriction test below therefore
+exercises the REAL registry rather than a mocked dispatch: mocking the
+thing that now performs the check would assert nothing about it.
 """
 
 from core.loop import RunAgentLoop, run_to_completion
+from tools.context import ToolContext
 from tests.conftest import make_model_response, make_stream_sequence
 
 
@@ -42,13 +50,13 @@ class _FakeMemory:
         return self._next_messages
 
 
-def _make_run_kwargs(memory, max_steps=10, allowed=None):
+def _make_run_kwargs(memory, max_steps=10, context=None):
     return dict(
         memory=memory,
         system_prompt="ignored",
         provider_name="ANTHROPIC",
         model="ignored",
-        allowed_tools=allowed,
+        context=context,
         max_steps=max_steps,
         max_total_tokens=None,
     )
@@ -80,7 +88,7 @@ def test_single_tool_call_dispatches_and_feeds_result_to_memory(mocker):
     mocker.patch("core.loop.call_model_stream", side_effect=fake_call_model_stream)
 
     dispatch_calls = []
-    def fake_dispatch(name, params, approval_callback=None):
+    def fake_dispatch(name, params, context=None, approval_callback=None):
         dispatch_calls.append((name, params))
         return {"echoed": params}
     dispatch_mock = mocker.patch("core.loop.registry.dispatch", side_effect=fake_dispatch)
@@ -93,7 +101,7 @@ def test_single_tool_call_dispatches_and_feeds_result_to_memory(mocker):
     assert memory.assistant_messages[0] is canned_with_tool
     assert memory.assistant_messages[1] is canned_done
     assert memory.tool_results == [("t1", {"echoed": {"query": "x"}})]
-    dispatch_mock.assert_called_once_with("web_search", {"query": "x"})
+    dispatch_mock.assert_called_once_with("web_search", {"query": "x"}, context=None)
 
 
 # ---------------------------------------------------------------------------
@@ -118,7 +126,7 @@ def test_two_tool_calls_in_one_response_dispatch_each_in_order(mocker):
     mocker.patch("core.loop.call_model_stream", side_effect=fake_call_model_stream)
 
     dispatched = []
-    def fake_dispatch(name, params, approval_callback=None):
+    def fake_dispatch(name, params, context=None, approval_callback=None):
         dispatched.append((name, params))
         return {"result_for": name}
     mocker.patch("core.loop.registry.dispatch", side_effect=fake_dispatch)
@@ -136,13 +144,24 @@ def test_two_tool_calls_in_one_response_dispatch_each_in_order(mocker):
 
 
 # ---------------------------------------------------------------------------
-# ---- Tool name not in allowed_tools -------------------------------------
+# ---- Tool name outside the context's allowed_tools -----------------------
 # ---------------------------------------------------------------------------
 
-def test_disallowed_tool_name_skips_dispatch_and_feeds_error_result(mocker):
-    """If allowed_tools is a list and the model requested a tool NOT in
-    that list, _run() must record an {"error": "...not available in this
-    context"} result and NOT call registry.dispatch for that tool."""
+def test_tool_outside_context_allowed_tools_is_denied_with_context_message(mocker):
+    """A tool the model requested that the active ToolContext excludes
+    must come back as {"error": "...not available in this context"}.
+
+    §15 moved this check out of _run() and into
+    registry.dispatch() -> is_tool_allowed(name, context), so this test
+    deliberately does NOT mock dispatch: it runs the real registry, real
+    permissions, and asserts the denial reaches memory as an error result
+    rather than escaping as an exception. Mocking dispatch here would
+    stub out the only code that now performs the check.
+
+    The message must say "not available in this context", not "disabled
+    by policy" -- web_search IS globally allowed, and the distinction
+    tells the model whether trying a different tool could help.
+    """
     memory = _FakeMemory()
 
     canned = make_model_response(
@@ -154,16 +173,38 @@ def test_disallowed_tool_name_skips_dispatch_and_feeds_error_result(mocker):
     fake_call_model_stream = make_stream_sequence(canned, done)
     mocker.patch("core.loop.call_model_stream", side_effect=fake_call_model_stream)
 
-    dispatch_mock = mocker.patch("core.loop.registry.dispatch")
+    context = ToolContext(allowed_tools={"get_time"})
+    run_to_completion(RunAgentLoop._run(
+        **_make_run_kwargs(memory, max_steps=5, context=context)))
 
-    run_to_completion(RunAgentLoop._run(**_make_run_kwargs(memory, max_steps=5, allowed=["get_time"])))
-
-    dispatch_mock.assert_not_called()
     assert len(memory.tool_results) == 1
     tool_call_id, result = memory.tool_results[0]
     assert tool_call_id == "t1"
     assert "error" in result
-    assert "not available" in result["error"]
+    assert "not available in this context" in result["error"]
+
+
+def test_globally_disabled_tool_says_disabled_by_policy_not_context(mocker):
+    """The companion to the test above: when the denial comes from global
+    config rather than the context, the message says so. Two causes, two
+    messages -- collapsing them into one string was the pre-§15 behavior
+    and loses the only actionable half of the information."""
+    memory = _FakeMemory()
+
+    # `write` is permission False in config.ToolPermissions by default.
+    canned = make_model_response(
+        text="",
+        tool_calls=[{"id": "t1", "name": "write", "input": {"path": "a", "content": "b"}}],
+    )
+    done = make_model_response(text="Done.")
+
+    fake_call_model_stream = make_stream_sequence(canned, done)
+    mocker.patch("core.loop.call_model_stream", side_effect=fake_call_model_stream)
+
+    run_to_completion(RunAgentLoop._run(**_make_run_kwargs(memory, max_steps=5)))
+
+    _, result = memory.tool_results[0]
+    assert "disabled by policy" in result["error"]
 
 
 # ---------------------------------------------------------------------------
@@ -186,11 +227,12 @@ def test_registry_dispatch_raises_ToolCallDenied_caught_and_recorded_as_error(mo
     fake_call_model_stream = make_stream_sequence(canned, done)
     mocker.patch("core.loop.call_model_stream", side_effect=fake_call_model_stream)
 
-    def fake_dispatch(name, params, approval_callback=None):
+    def fake_dispatch(name, params, context=None, approval_callback=None):
         raise ToolCallDenied(f"{name} requires approval and was not given")
     mocker.patch("core.loop.registry.dispatch", side_effect=fake_dispatch)
 
-    response = run_to_completion(RunAgentLoop._run(**_make_run_kwargs(memory, max_steps=5, allowed=["shell"])))
+    response = run_to_completion(RunAgentLoop._run(**_make_run_kwargs(
+        memory, max_steps=5, context=ToolContext(allowed_tools={"shell"}))))
 
     assert response.stop_reason == "complete"
     assert len(memory.tool_results) == 1
@@ -201,12 +243,15 @@ def test_registry_dispatch_raises_ToolCallDenied_caught_and_recorded_as_error(mo
 
 
 # ---------------------------------------------------------------------------
-# ---- allowed_tools=None means every tool is permitted -------------------
+# ---- context=None means the loop imposes no restriction of its own ------
 # ---------------------------------------------------------------------------
 
-def test_allowed_tools_none_permits_every_tool(mocker):
-    """When allowed_tools is None (the unrestricted case), every tool
-    the model requests must reach registry.dispatch."""
+def test_context_none_passes_every_tool_through_to_dispatch(mocker):
+    """With no ToolContext (the unrestricted case, and every production
+    caller until §18), _run() forwards each requested tool straight to
+    registry.dispatch with context=None -- it applies no membership
+    filter of its own. Whether the call is then ALLOWED is the registry's
+    decision, which is the point of the refactor."""
     memory = _FakeMemory()
     canned = make_model_response(
         text="",
@@ -219,6 +264,36 @@ def test_allowed_tools_none_permits_every_tool(mocker):
 
     dispatch_mock = mocker.patch("core.loop.registry.dispatch", return_value={"ok": True})
 
-    run_to_completion(RunAgentLoop._run(**_make_run_kwargs(memory, max_steps=5, allowed=None)))
+    run_to_completion(RunAgentLoop._run(**_make_run_kwargs(memory, max_steps=5, context=None)))
 
-    dispatch_mock.assert_called_once_with("arbitrary_tool_name", {"x": 1})
+    dispatch_mock.assert_called_once_with(
+        "arbitrary_tool_name", {"x": 1}, context=None)
+
+
+def test_context_is_forwarded_to_dispatch_and_approval_needed(mocker):
+    """The context object _run() was given must reach BOTH registry
+    calls. If it reached only one, the permission bridge and dispatch
+    would answer the approval question from different inputs -- the exact
+    divergence §13's approval_needed() and §15's OR-composition exist to
+    prevent."""
+    memory = _FakeMemory()
+    canned = make_model_response(
+        text="",
+        tool_calls=[{"id": "t1", "name": "get_time", "input": {}}],
+    )
+    done = make_model_response(text="Done.")
+
+    mocker.patch("core.loop.call_model_stream",
+                 side_effect=make_stream_sequence(canned, done))
+
+    context = ToolContext(allowed_tools={"get_time"})
+    approval_mock = mocker.patch(
+        "core.loop.registry.approval_needed", return_value=False)
+    dispatch_mock = mocker.patch(
+        "core.loop.registry.dispatch", return_value={"ok": True})
+
+    run_to_completion(RunAgentLoop._run(
+        **_make_run_kwargs(memory, max_steps=5, context=context)))
+
+    approval_mock.assert_called_once_with("get_time", {}, context)
+    dispatch_mock.assert_called_once_with("get_time", {}, context=context)

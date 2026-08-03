@@ -553,6 +553,32 @@ The check must run *after* MCP registration is understood to be exempt: dynamica
 
 ---
 
+### Built
+
+Implemented as specified, with four deliberate deviations and one correction to this section's own sketch. Full decision record in DEVLOG.md §15.
+
+**All seven acceptance criteria pass** (`tests/test_permission_context.py`, 21 tests). Suite: 272 → 307.
+
+**Deviations from the sketch above, each user-approved before implementation:**
+
+1. **The approval OR-composition lives in `ToolRegistry.approval_needed()`, not inlined in `dispatch()`.** The `dispatch()` sketch above was written against pre-§13 code and does not mention `approval_needed()` — which §13 introduced precisely as the single source of truth shared by `dispatch()` AND `_run()`'s permission bridge (ARCHITECTURE §4.8). Implemented literally, `dispatch()` would have gained stricter-wins while the loop's bridge kept the old `approval_check`-as-full-bypass behaviour, so an agent's `approval_overrides` would be honoured on one code path and silently ignored on the other. **This is this document's own "an abbreviated restatement of existing code is a proposal to delete whatever it abbreviates" rule (see *Why these calls*) applying to §15 one revision after it was written down** — the sketch is correct about the composition and stale about where it belongs.
+
+2. **`_run()`'s `allowed_tools` parameter is replaced by `context`, not kept alongside it.** The two expressed the same restriction at different layers, and §18's own sketch passes the same set through both channels (`ToolContext(allowed_tools=child_allowed)` *and* `run_agent_conversation(..., allowed_tools=child_allowed)`). `_run()` no longer performs a membership check of its own; `is_tool_allowed(name, context)` inside `dispatch()` covers it. The three public wrappers gained a `context=None` kwarg so §18 does not have to reopen their signatures.
+
+3. **`registry.schemas()` filters by policy** — not specified here at all. The `fetch_url` defect's entire damage was that the schema stayed advertised while the call was denied, so the model kept choosing it and burning a turn per attempt. Fixing the instance without the shape would leave `read`/`write`/`edit` (all permission `False` by default) doing exactly the same thing. Advertised tools under default config: 10 of 15 registered. **Note for §19:** this makes the staleness item in *Lower-priority items* live sooner — schemas are still computed once at the top of `_run()`, so a skill activated mid-session will not appear until the next turn.
+
+4. **`dispatch()` distinguishes two denial causes** — "not available in this context" vs "disabled by policy". A context restriction is something the model can route around by choosing another tool; a global denial is not. The pre-§15 loop produced the first message from its own membership check, so collapsing both into one string would have been a regression disguised as consolidation.
+
+**`fetch_url` defaults (the confirmation this section asks for):** permission `True`, approval `False`. Approval `True` would leave it unusable wherever there is no `permission_channel` to answer the prompt — the CLI chat loop and every research pass — which is the same outcome as the D24 bug with a different error string. It remains constrained by `policy_enforcement`'s blocked-domain list, and its output goes through secret redaction like every other tool's.
+
+**D24 check placement:** the helper is `security.permissions.assert_permissions_declared()`, called from the bottom of `tools/registry.py` after the static registrations. It lives in `permissions.py` because that file owns knowledge of the dataclasses, and is *called* from `registry.py` because `permissions.py` must not import the registry — the dependency runs `tools -> security`, one way. Verified live, not just unit-tested: deleting `ToolPermissions.fetch_url` makes `import tools.registry` raise.
+
+**`unregister()`** ships here (D15 assigns it to this section and AC7's stated trigger cannot be exercised without it). Idempotent — disconnect handling can run more than once for the same server. §17 only has to call it.
+
+**Also fixed in this cycle** — five findings from the §14 review, which had been tested but never reviewed: unhandled config errors reaching the user as a traceback; `compaction` settings replacing rather than deep-merging across tiers; silent same-tier name collisions; the frontmatter block not being anchored to the start of file; and `load_skill` being advertised with an empty catalog (solved via a new `ToolSpec.available_check`, keeping skill knowledge out of the registry). See DEVLOG §15.4.
+
+---
+
 ## 16. TUI — Textual app + widgets + slash commands + streaming integration
 
 **Unchanged from Rev. 1 in overall shape** (Textual app, `ModalScreen` for thread picker/permission prompts, slash command registry, `run_worker(thread=True)` running `_run()`'s generator off the UI thread). Two concrete fixes from review:

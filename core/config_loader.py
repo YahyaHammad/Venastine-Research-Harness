@@ -97,6 +97,15 @@ def _parse_frontmatter(text: str) -> tuple[dict, str]:
     matches = list(_FRONTMATTER_DELIM.finditer(text))
     if len(matches) < 2:
         raise ValueError("No valid YAML frontmatter block found (need two '---' lines)")
+    # The opening delimiter must be the FIRST thing in the file. Without
+    # this, a file with no frontmatter at all but two horizontal rules in
+    # its body has the prose between them handed to yaml.safe_load --
+    # which usually fails the "is it a mapping / does it have a name"
+    # checks downstream, but reports the wrong reason when it does.
+    if matches[0].start() != 0:
+        raise ValueError(
+            "File does not begin with a YAML frontmatter block "
+            "(the opening '---' must be the first line)")
     frontmatter_text = text[matches[0].end():matches[1].start()]
     body = text[matches[1].end():].strip()
     return yaml.safe_load(frontmatter_text), body
@@ -182,14 +191,25 @@ def _discover(kind: str, project_path: str, trusted: bool) -> dict:
             if defn is None:
                 continue
             if defn.name in found:
-                if found[defn.name].tier == "harness":
+                winner = found[defn.name]
+                if winner.tier == "harness":
                     logger.warning(
                         "%s-tier %s %r collides with a harness builtin; "
                         "the builtin wins and the %s file is ignored (D18).",
                         tier, kind, defn.name, tier,
                     )
-                # project vs user: project wins silently (D8) -- the user
-                # tier was simply overridden, which is the documented order.
+                else:
+                    # Cross-tier (project over user) is the documented D8
+                    # order, and same-tier is alphabetical-first-wins --
+                    # but neither is guessable from the outside, so say so.
+                    # Silently shadowing a definition is how someone spends
+                    # an afternoon editing a file that is never loaded.
+                    logger.warning(
+                        "%s-tier %s %r at %s is shadowed by the %s-tier "
+                        "definition at %s, which wins.",
+                        tier, kind, defn.name, defn.path, winner.tier,
+                        winner.path,
+                    )
                 continue
             found[defn.name] = defn
     return found
@@ -243,12 +263,24 @@ def _read_settings_file(path: str) -> dict:
 
 def _load_merged_settings(project_path: str, trusted: bool) -> dict:
     """Resolution order: project (trusted) > user. Anything absent falls
-    through to config.py defaults at the consumer."""
+    through to config.py defaults at the consumer.
+
+    `compaction` merges one level deeper than the rest. Every other
+    setting is a scalar, so whole-value replacement IS per-key override
+    for them; for the one nested key, a plain dict.update() would let a
+    project setting `buffer_tokens` silently discard the user's
+    `strength` -- a per-key override everywhere else that becomes a
+    wholesale reset here, purely because of the value's type. §21 is the
+    consumer, so this is settled before anything depends on it.
+    """
     merged = _read_settings_file(os.path.join(_user_config_dir(), "settings.json"))
     if trusted:
         project = _read_settings_file(os.path.join(
             workspace_trust.venastine_dir(project_path), "settings.json"))
+        nested = {**merged.get("compaction", {}), **project.get("compaction", {})}
         merged.update(project)
+        if nested:
+            merged["compaction"] = nested
     return merged
 
 
@@ -295,19 +327,28 @@ def reset() -> None:
     _state = None
 
 
-def _require_state() -> dict:
-    if _state is None:
-        raise RuntimeError(
-            "config_loader.initialize() has not been called for this run")
-    return _state
-
-
 def get_agents() -> dict:
-    return dict(_require_state()["agents"])
+    """Empty before initialize(), matching every other getter here.
+
+    Uninitialized means "no discovery has run", which is materially the
+    same state as "discovery ran and found nothing" for every consumer --
+    both mean there are no agents to offer. get_agents/get_skills used to
+    raise while get_settings/get_skill/skill_catalog_text/context_for_agent
+    returned empty, so the answer to "is calling this before startup an
+    error?" depended on which getter you happened to pick. Only main.py's
+    __main__ calls initialize(); §16's TUI, §18 and §19 add more entry
+    points, so one convention now beats six discoveries later.
+    """
+    if _state is None:
+        return {}
+    return dict(_state["agents"])
 
 
 def get_skills() -> dict:
-    return dict(_require_state()["skills"])
+    """Empty before initialize() -- see get_agents()."""
+    if _state is None:
+        return {}
+    return dict(_state["skills"])
 
 
 def get_settings() -> dict:

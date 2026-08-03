@@ -62,7 +62,7 @@ def _build_run_inputs(memory):
         system_prompt="ignored-by-stub",
         provider_name="ANTHROPIC",
         model="ignored-by-stub",
-        allowed_tools=None,
+        context=None,
         max_steps=10,
         max_total_tokens=None,
     )
@@ -110,7 +110,7 @@ def test_stop_condition_2_max_steps_call_count_equals_max_steps(mocker):
 
     dispatch_calls = {"n": 0}
 
-    def fake_dispatch(name, params, approval_callback=None):
+    def fake_dispatch(name, params, context=None, approval_callback=None):
         dispatch_calls["n"] += 1
         return {"result": "ok"}
 
@@ -122,7 +122,7 @@ def test_stop_condition_2_max_steps_call_count_equals_max_steps(mocker):
         system_prompt="ignored",
         provider_name="ANTHROPIC",
         model="ignored",
-        allowed_tools=None,
+        context=None,
         max_steps=max_steps,
         max_total_tokens=None,
     ))
@@ -178,7 +178,7 @@ def test_stop_condition_3_token_budget_exceeded_first_call(mocker):
         system_prompt="ignored",
         provider_name="ANTHROPIC",
         model="ignored",
-        allowed_tools=None,
+        context=None,
         max_steps=10,
         max_total_tokens=budget,
     ))

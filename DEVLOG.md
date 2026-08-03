@@ -870,3 +870,75 @@ The two remaining Suggestion-level findings were also addressed afterwards: the 
 - `tests/conftest.py`: autouse `clear_config_loader_state` fixture so one test's `initialize()` can't leak into another test's prompt assembly.
 - `tests/BREAKING_CHANGES.md` §9 added for the §14 break surface.
 - Full suite: 272 tests.
+
+## 15. Permission system refactor — "stricter wins" + dynamic registration (ROADMAP_v2 §15)
+
+### 15.1 What was built
+
+- `tools/context.py` (NEW) — `ToolContext` (`allowed_tools` / `approval_overrides` / `subagent_depth`), data only, no project imports. `subagent_depth` is carried now and consumed by §18.
+- `security/permissions.py` — `is_tool_allowed(name, context=None)` (AND across layers, global check unconditional and first), `requires_approval(name, params, context=None)` (OR across layers), `_default_for_unknown_tool()` (named default: `mcp__*` allowed, everything else unknown denied), `assert_permissions_declared()` (D24). `ToolContext` is imported under `TYPE_CHECKING` only — the real dependency direction is `tools -> security`, and a runtime import would create a cycle the moment `tools/context.py` grows an import of its own.
+- `tools/registry.py` — `schemas(context)`, `approval_needed(name, params, context)`, `dispatch(name, params, context, approval_callback)`, `unregister()` (D15, idempotent), and the D24 check at import after the static registrations. The unknown-tool `ValueError` guard and the `check_output_policy()` call are both preserved.
+- `tools/base.py` — `ToolSpec.available_check: Callable[[], bool]`, an optional "do I have anything to act on right now?" predicate consulted by `schemas()` only.
+- `core/loop.py` — `_run()`'s `allowed_tools` parameter replaced by `context: Optional[ToolContext]`; the three public wrappers gained a `context=None` kwarg so §18 does not have to reopen their signatures.
+- `config.py` — `fetch_url` added to `ToolPermissions` (True) and `ToolApprovals` (False).
+
+### 15.2 Decisions made in the clarification cycle (user-decided)
+
+| Question | Decision |
+|---|---|
+| `fetch_url` defaults (D24 asked for explicit confirmation) | Permission `True`, approval `False`. Approval `True` would have left it unusable wherever there is no `permission_channel` to answer the prompt — the CLI chat loop and every research pass — reproducing the D24 bug with a different error string. |
+| Where the approval OR-composition lives | Inside `ToolRegistry.approval_needed()`, not inlined in `dispatch()` as the §15 sketch shows. |
+| `_run()`'s `allowed_tools` vs `ToolContext.allowed_tools` | Replace the parameter — one representation. |
+| Should `schemas()` become policy-aware | Yes, filter on `is_tool_allowed(name, context)` now. |
+| `unregister()` — §15 or §17 | §15, per D15 and AC7. |
+| D24 check severity and placement | Import-time `RuntimeError`, helper in `security/permissions.py`, called from `tools/registry.py`. |
+| `compaction` settings merge semantics (review finding F2) | Deep-merge across tiers. |
+| §14 review findings to fix alongside | F1, F3, F4, F5 (plus F6/F7 as cleanup). |
+
+### 15.3 Deviations from the ROADMAP sketch, and why
+
+1. **The approval OR lives in `approval_needed()`, not inlined in `dispatch()`.** §15's `dispatch()` sketch was written against pre-§13 code and never mentions `approval_needed()` — which §13 introduced specifically as the single source of truth shared by `dispatch()` *and* `_run()`'s permission bridge (ARCHITECTURE §4.8). Implemented literally, `dispatch()` would have gained stricter-wins while the loop's bridge kept the old `approval_check`-as-full-bypass behaviour, so an agent's `approval_overrides` would be honoured on one path and silently ignored on the other. This is ROADMAP_v2's own "an abbreviated restatement of existing code is a proposal to delete whatever it abbreviates" rule applying to §15 one revision after it was written down.
+
+2. **`schemas()` filters by policy** (not in the spec at all). The `fetch_url` defect's entire damage was that the schema stayed advertised while the call was denied, so the model kept choosing it. Fixing only the instance and not the shape would leave `read`/`write`/`edit` — all permission `False` by default — doing the same thing today. Advertised tool count under default config went 15 → 10.
+
+3. **`dispatch()` distinguishes two denial causes.** A context restriction ("not available in this context") is something the model can route around by choosing a different tool; a global denial ("disabled by policy") is not. The pre-§15 loop produced the first message from its own membership check; folding that check into `is_tool_allowed` without splitting the message would have collapsed both into one string.
+
+4. **F5 is solved with `ToolSpec.available_check`, not a special case inside `schemas()`.** The registry owns mechanism; teaching it what a skill catalog is would put policy in it. `load_skill` supplies the predicate itself, reading the same `skill_catalog_text()` the prompt assembly reads, so "advertised" and "catalogued" cannot drift apart.
+
+### 15.4 §14 review findings fixed in this cycle
+
+§14 was tested but never reviewed. The implementation matched its spec closely — both Rev. 3 hash corrections present, the call-time path-resolution deviation correctly recorded in §14.1, D18's collision rule correct. No security holes or data-loss bugs. Fixed here:
+
+- **F1** — `config_loader.initialize()` raised out of `main.py` unhandled, so a typo in `settings.json` aborted the CLI with a stack trace. New `main.load_project_config()` catches `ValueError`/`OSError` (`json.JSONDecodeError` subclasses `ValueError`, so a corrupt `settings.json` or `trusted_projects.json` lands here too) and prints one line. The raising itself stays — an unknown key must never masquerade as a setting (§14 amendment 1); only the presentation changed. **The logging level is load-bearing:** the first version used `logger.exception()`, which writes the traceback through the root logger's stderr `StreamHandler` — reintroducing the exact output the fix exists to remove, with the clean message printed underneath it. Now `logger.debug(..., exc_info=True)`, so the trace is one `AGENT_LOG_LEVEL=DEBUG` away when someone wants it.
+- **F2** — `_load_merged_settings` shallow-updated, so a project `compaction` block discarded the user's sibling keys. Now deep-merged. `compaction` is the only nested key in the schema, which is exactly why this was invisible: for every scalar setting, whole-value replacement *is* per-key override.
+- **F3** — `_discover` warned only on harness collisions; same-tier duplicates resolved alphabetically-first-wins in silence. Every collision now warns, with the stronger D18 wording kept for the harness case.
+- **F4** — the frontmatter block is anchored to offset 0, so a file with no frontmatter but two body horizontal rules reports the right reason for being skipped instead of failing an unrelated check downstream.
+- **F5** — `load_skill` was advertised with an empty catalog (see 15.3.4).
+- **F6** — `get_agents()`/`get_skills()` raised `RuntimeError` pre-`initialize()` while four sibling getters returned empty, so whether calling before startup was an error depended on which getter you picked. All six return empty now; §16/§18/§19 add entry points that will not call `initialize()`.
+- **F7** (doc-only) — `ARCHITECTURE.md` §6 and `README.md` still described Google as stubbed (contradicting §4.7 of the same document), and `README.md` still said `main.py` runs one hardcoded query. Both predate §9 and §1 respectively.
+
+### 15.5 Root-cause sweep (observed, deliberately not changed)
+
+Every other `getattr(<dataclass>, name, <default>)` site sharing the `fetch_url` root cause, checked before calling this done:
+
+- `tools/builtin/file_ops.py:84` and `shell.py:109,145` read `config.ToolApprovals` with the same silent-default pattern inside their own `approval_check`s. These are safe **by construction now** rather than by luck: D24 guarantees every statically registered tool has both fields. They are also correct to ignore the context — `approval_needed()` ORs their answer with the context-aware lookup, so a tool's own check only has to answer "does MY policy require approval", not compose layers.
+- `core/reasoning/orchestrator.py:56-57` uses `getattr(config, "MAX_PIPELINE_RETRIES", 2)` for constants that definitely exist. Same shape, benign, outside §15's scope — recorded so it is not rediscovered as a finding later.
+- `core/client.py`'s `getattr(usage_obj, ..., 0)` reads are D21's named failure mode and are already gated by `supports_stream_usage` on the streaming paths (§13).
+
+### 15.6 Test changes
+
+- `tests/test_permission_context.py` (NEW, 21): AC1 (global deny beats a permissive context, at both the permissions and dispatch layers) plus the two-message denial distinction; AC2 (a context tightens a lenient default, direct and through `approval_needed`); AC3 (`approval_overrides: {shell: false}` does NOT suppress shell's own check, using the real `_shell_approval_check`, plus synthetic OR tests in both directions); AC4 (`mcp__*` allowed by default, non-mcp unknown still denied, mcp still subject to a context restriction); AC5 (`check_output_policy` still redacts a real secret pattern through `dispatch`); AC6 (every registered tool declared in both dataclasses, `fetch_url` callable AND advertised, the check raises, mcp exempt); AC7 (unknown name and post-`unregister` both `ValueError`); plus `schemas()` filtering and the F5 catalog case.
+- `tests/test_registry_permissions.py`: monkeypatch lambdas gained `context=None`; the two `schemas(list)` tests rewritten for `ToolContext`; +3 (globally-denied omitted, `available_check` omitted, `unregister` idempotent).
+- `tests/test_loop_tool_dispatch.py`: `allowed_tools` → `context`; the disallowed-tool test rewritten to run the REAL registry, because mocking `dispatch` now stubs out the very code that performs the check; +3 (global-denial message, context forwarded to both registry calls, `context=None` passthrough).
+- `tests/test_streaming_loop.py`, `tests/test_loop_stop_conditions.py`, `tests/test_e2e.py`: `context` kwarg renames and `dispatch(..., context=None)` assertions.
+- `tests/test_config_loader.py`: +6 (F2 deep-merge and its untrusted counterpart, F3 same-tier and cross-tier warnings, F4 anchor, F6 pre-init getters).
+- `tests/test_cli.py`: +3 for F1. **The first version of the F1 test could not fail** — pytest never runs `configure_logging()`, so the root logger has no console handler, and `"Traceback" not in err` passed while the bug was live. It now attaches a real stderr `StreamHandler` for the duration of the call; reverting the fix was confirmed to make it fail rather than assumed to. This is the repo's own "verify against production code paths, not the test double" lesson landing on a test asserting the right thing against the wrong environment.
+- `tests/BREAKING_CHANGES.md` §10 added for the §15 break surface.
+- Full suite: 307 tests (was 272).
+
+### 15.7 Verified beyond the suite
+
+- D24's check is live at import, not merely unit-tested: temporarily deleting `ToolPermissions.fetch_url` makes `import tools.registry` raise `RuntimeError: ... ['fetch_url']`.
+- `fetch_url` is callable and advertised — `is_tool_allowed` True, `requires_approval` False, present in `registry.schemas()`. All three were false before.
+- Advertised tools under default config: 10 of 15 registered. `read`/`write`/`edit` (permission False), `shell` (permission False), and `load_skill` (empty catalog) are correctly absent.
+- `python main.py` with a typo'd user `settings.json` exits 1 with one line on stderr and no traceback.

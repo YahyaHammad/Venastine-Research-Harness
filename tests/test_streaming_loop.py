@@ -63,7 +63,7 @@ def _run_kwargs(memory, **overrides):
         system_prompt="ignored",
         provider_name="ANTHROPIC",
         model="ignored",
-        allowed_tools=None,
+        context=None,
         max_steps=10,
         max_total_tokens=None,
     )
@@ -184,7 +184,7 @@ def test_ac6_plain_text_answer_persisted_before_return(fake_storage, mocker):
         system_prompt="test",
         provider_name="ANTHROPIC",
         model="test",
-        allowed_tools=None,
+        context=None,
         max_steps=10,
     ))
 
@@ -221,7 +221,7 @@ def test_ac6_budget_exceeded_persisted_before_return(fake_storage, mocker):
         system_prompt="test",
         provider_name="ANTHROPIC",
         model="test",
-        allowed_tools=None,
+        context=None,
         max_steps=10,
         max_total_tokens=1000,  # 500+600=1100 > 1000
     ))
@@ -263,7 +263,7 @@ def test_ac6_resumed_thread_sees_persisted_assistant_turn(fake_storage, mocker):
         system_prompt="test",
         provider_name="ANTHROPIC",
         model="test",
-        allowed_tools=None,
+        context=None,
         max_steps=10,
     ))
 
@@ -304,7 +304,7 @@ def test_permission_channel_yields_request_and_dispatches_on_approval(mocker):
     mocker.patch.object(registry, "approval_needed", return_value=True)
 
     dispatched = []
-    def fake_dispatch(name, params, approval_callback=None):
+    def fake_dispatch(name, params, context=None, approval_callback=None):
         dispatched.append((name, approval_callback))
         return {"ok": True}
     mocker.patch.object(registry, "dispatch", side_effect=fake_dispatch)
@@ -317,7 +317,7 @@ def test_permission_channel_yields_request_and_dispatches_on_approval(mocker):
         system_prompt="test",
         provider_name="ANTHROPIC",
         model="test",
-        allowed_tools=None,
+        context=None,
         max_steps=5,
         permission_channel=channel,
     ))
@@ -364,7 +364,7 @@ def test_permission_channel_denial_when_not_approved(mocker):
         system_prompt="test",
         provider_name="ANTHROPIC",
         model="test",
-        allowed_tools=None,
+        context=None,
         max_steps=5,
         permission_channel=None,  # headless → denied by default
     ))

@@ -2,7 +2,7 @@
 
 A custom agentic harness with two modes: a regular tool-using chat loop, and a ten-pass, self-critiquing deep-research pipeline that generates an answer, independently fact-checks and critiques its own claims, audits hidden assumptions, deterministically tiers confidence, and selectively revises only what's flagged.
 
-Supports Anthropic and OpenAI-compatible providers (Google Gemini is stubbed — see ROADMAP.md §9).
+Supports Anthropic, OpenAI-compatible (OpenAI, DeepSeek, Groq, Mistral, …), and Google Gemini providers.
 
 ## Documentation
 
@@ -28,8 +28,19 @@ These are two intentionally separate mechanisms — see `credentials.py` and `en
 
 ## Running it
 
-`main.py` currently runs one hardcoded example query — an interactive CLI (regular chat + research mode, with thread resumption) is specified in full in ROADMAP.md §1 but not yet built.
+```bash
+python main.py                                    # chat mode, new thread
+python main.py --thread <uuid>                    # resume a thread
+python main.py --mode research "some query"       # deep-research pipeline
+python main.py --provider OPENAI --model gpt-5.1  # override defaults
+```
+
+Ctrl+C or Ctrl+D exits chat mode; the thread id is printed after the first response so you can resume it later. Research mode prints the final report plus the trace log, and writes full artifacts to `output/<run_id>/`.
+
+Project-level configuration (`.venastine/` — agents, skills, `settings.json`, `CONTEXT.md`) requires a one-time trust confirmation on first run. Pass `--trust-project` to grant it non-interactively for scripts and CI.
 
 ## Status
 
-Core inference loop, persistence, tool registry with 10 working tools, and the full deep-research pipeline are built and verified (see ARCHITECTURE.md). Not yet usable end-to-end as a day-to-day tool — see ROADMAP.md §1–4 for what's blocking that specifically, versus the rest of the roadmap, which is genuine missing functionality that doesn't block getting a session going.
+ROADMAP.md §1–§12 are fully built, as are ROADMAP_v2.md §13 (streaming loop), §14 (config loader + workspace trust), and §15 (permission system). That covers the interactive CLI, the inference loop with streaming, persistence, a 15-tool registry, the full deep-research pipeline, and three-tier agent/skill discovery. Remaining work is ROADMAP_v2.md §16–§21: the TUI, MCP client, agent and skill systems, subagent review, and the memory/compaction system.
+
+Run the test suite with `pytest` — 307 tests, fully offline, no API keys needed.

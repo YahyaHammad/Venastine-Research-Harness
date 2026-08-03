@@ -272,3 +272,106 @@ def test_agent_fields_parsed(_redirect_roots):
     assert agent.max_steps == 7
     assert agent.use_memory is True  # default on, opt-out per field
     assert agent.use_project_context is False
+
+
+# ---------------------------------------------------------------------------
+# ---- §15-cycle review fixes (F2/F3/F4/F6) ---------------------------------
+# ---------------------------------------------------------------------------
+
+def test_f2_compaction_deep_merges_across_tiers(_redirect_roots):
+    """A project's compaction block overrides the user's PER KEY, it does
+    not replace the whole block.
+
+    Every other setting is a scalar, so whole-value replacement IS per-key
+    override for them. `compaction` is the one nested key, and a plain
+    dict.update() would let a project setting `buffer_tokens` silently
+    discard the user's `strength` -- the same operation behaving as a
+    per-key override everywhere else and a wholesale reset here, purely
+    because of the value's type. §21 consumes these, so it is pinned now.
+    """
+    _write_settings(_redirect_roots["user"],
+                    {"compaction": {"strength": 3, "buffer_tokens": 500}})
+    _write_settings(_redirect_roots["project"] / ".venastine",
+                    {"compaction": {"buffer_tokens": 100}})
+    workspace_trust.grant_trust(str(_redirect_roots["project"]))
+
+    config_loader.initialize(str(_redirect_roots["project"]))
+    compaction = config_loader.get_settings()["compaction"]
+
+    assert compaction["buffer_tokens"] == 100   # project wins on its own key
+    assert compaction["strength"] == 3          # user's sibling key survives
+
+
+def test_f2_untrusted_project_compaction_does_not_merge(_redirect_roots):
+    """Untrusted project content is ABSENT, not merged -- the deep-merge
+    must not become a back door into that rule."""
+    _write_settings(_redirect_roots["user"], {"compaction": {"strength": 3}})
+    _write_settings(_redirect_roots["project"] / ".venastine",
+                    {"compaction": {"strength": 9}})
+
+    config_loader.initialize(str(_redirect_roots["project"]))
+    assert config_loader.get_settings()["compaction"] == {"strength": 3}
+
+
+def test_f3_same_tier_name_collision_warns(_redirect_roots, caplog):
+    """Two files in the SAME directory declaring the same frontmatter
+    name resolve alphabetically-first-wins. That is fine; doing it
+    silently is not -- silently shadowing a definition is how someone
+    spends an afternoon editing a file that never loads."""
+    _write_md(_redirect_roots["user"], "skills", "aaa",
+              ["name: dup", "description: first"], "First body.")
+    _write_md(_redirect_roots["user"], "skills", "zzz",
+              ["name: dup", "description: second"], "Second body.")
+
+    with caplog.at_level("WARNING", logger="core.config_loader"):
+        config_loader.initialize(str(_redirect_roots["project"]))
+
+    assert config_loader.get_skill("dup").description == "first"  # aaa.md won
+    assert any("shadowed" in r.message for r in caplog.records)
+
+
+def test_f3_project_over_user_collision_warns(_redirect_roots, caplog):
+    """Cross-tier shadowing (D8's documented project-wins order) is also
+    announced -- the order is documented, but which file actually loaded
+    is not guessable from the outside."""
+    _write_skill(_redirect_roots["user"], "shared", description="user version")
+    _write_skill(_redirect_roots["project"] / ".venastine", "shared",
+                 description="project version")
+    workspace_trust.grant_trust(str(_redirect_roots["project"]))
+
+    with caplog.at_level("WARNING", logger="core.config_loader"):
+        config_loader.initialize(str(_redirect_roots["project"]))
+
+    assert config_loader.get_skill("shared").description == "project version"
+    assert any("shadowed" in r.message for r in caplog.records)
+
+
+def test_f4_file_not_starting_with_frontmatter_is_rejected(_redirect_roots, caplog):
+    """The opening '---' must be the first line. Without the anchor, a
+    file with NO frontmatter but two horizontal rules in its body has the
+    prose between them handed to yaml.safe_load -- which still gets
+    skipped downstream, but reports the wrong reason for it."""
+    skills = _redirect_roots["user"] / "skills"
+    skills.mkdir(parents=True)
+    (skills / "unanchored.md").write_text(
+        "Some prose first.\n\n---\n\nname: sneaky\ndescription: d\n\n---\n\nBody.\n",
+        encoding="utf-8")
+
+    with caplog.at_level("WARNING", logger="core.config_loader"):
+        config_loader.initialize(str(_redirect_roots["project"]))
+
+    assert config_loader.get_skill("sneaky") is None
+    assert any("does not begin with" in r.message for r in caplog.records)
+
+
+def test_f6_get_agents_and_get_skills_empty_before_initialize():
+    """Uninitialized and 'initialized, found nothing' are the same state
+    for every consumer. These two getters used to raise while four others
+    returned empty, so whether calling before startup was an error
+    depended on which getter you happened to pick."""
+    config_loader.reset()
+    assert config_loader.get_agents() == {}
+    assert config_loader.get_skills() == {}
+    assert config_loader.get_settings() == {}
+    assert config_loader.get_skill("anything") is None
+    assert config_loader.skill_catalog_text() == ""

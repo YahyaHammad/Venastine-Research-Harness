@@ -120,7 +120,9 @@ def test_chat_mode_e2e_multi_turn_with_tool_use(mocker, capsys, fake_storage):
 
     # Tool dispatched exactly once (the get_time call in turn 1).
     assert mock_dispatch.call_count == 1
-    mock_dispatch.assert_called_once_with("get_time", {})
+    # §15: the loop forwards its ToolContext (None here -- no agent
+    # active) to every dispatch call.
+    mock_dispatch.assert_called_once_with("get_time", {}, context=None)
 
     # --- Verify multi-turn thread resume ---
     # call_model_stream is called with memory.messages as the 4th positional

@@ -94,6 +94,12 @@ class APICredentials:
 @dataclass
 class ToolPermissions:
     web_search: bool = True
+    # ROADMAP_v2 §15/D24: fetch_url was registered and documented as working
+    # but had no field here, so getattr(..., False) denied every call since
+    # the tool was added. Allowed by default, matching web_search -- it is
+    # already constrained by policy_enforcement's blocked-domain list and
+    # its output goes through secret redaction like every other tool's.
+    fetch_url: bool = True
     get_time: bool = True
     arxiv_search: bool = True
     symbolic_math: bool = True
@@ -111,6 +117,12 @@ class ToolPermissions:
 @dataclass
 class ToolApprovals:
     web_search: bool = False
+    # No approval: a tool with approval=True is unusable wherever there is
+    # no permission_channel to answer the prompt (the CLI chat loop and
+    # every research pass), so gating fetch_url would leave it denied in
+    # exactly the places the grounding passes need it -- the same outcome
+    # as the D24 bug, with a different error string. See DEVLOG §15.
+    fetch_url: bool = False
     get_time: bool = False
     arxiv_search: bool = False
     symbolic_math: bool = False

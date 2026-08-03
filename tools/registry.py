@@ -1,4 +1,25 @@
-from typing import Optional
+"""
+tools/registry.py
+
+MECHANISM, not policy: the single choke point every tool call passes
+through. This is the only file that imports both security.permissions and
+the individual tool modules; tool modules never import permissions
+themselves.
+
+ROADMAP_v2 §15:
+  * every entry point takes an optional ToolContext, threaded from
+    core/loop.py, and hands it to the policy functions ("stricter wins",
+    D14 -- see security/permissions.py for the composition rule);
+  * approval_needed() is where the tool's own dynamic approval_check is
+    OR'd with the config/context lookup, so dispatch() and the loop's
+    permission bridge cannot diverge (see its docstring);
+  * schemas() advertises only what is actually callable;
+  * register()/unregister() work at runtime (D15) for MCP (§17);
+  * assert_permissions_declared() runs at import, after static
+    registration (D24).
+"""
+
+from typing import Optional, TYPE_CHECKING
 
 from tools.base import ToolSpec
 from tools.builtin import (
@@ -6,8 +27,13 @@ from tools.builtin import (
     symbolic_math, linear_algebra, probability_stats, discrete_math, logic, geometry,
     file_ops, shell, load_skill,
 )
-from security.permissions import is_tool_allowed, requires_approval
+from security.permissions import (
+    assert_permissions_declared, is_tool_allowed, requires_approval,
+)
 from safety.policy_enforcement import check_output_policy
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from tools.context import ToolContext
 
 
 class ToolCallDenied(Exception):
@@ -22,49 +48,106 @@ class ToolRegistry:
     def register(self, spec: ToolSpec) -> None:
         self._tools[spec.name] = spec
 
-    def schemas(self, tool_names: Optional[list[str]] = None) -> list[dict]:
-        """
-        What gets sent to the LLM's `tools` parameter each call. Pass a
-        list of names to restrict to a subset -- useful for giving
-        individual research passes different tool access later. Omit, or
-        pass None, for the full registered set.
-        """
-        if tool_names is None:
-            return [spec.schema for spec in self._tools.values()]
-        return [self._tools[name].schema for name in tool_names if name in self._tools]
+    def unregister(self, tool_name: str) -> None:
+        """Runtime removal (D15). An MCP server disconnecting drops its
+        tools mid-session, so a name that was valid a moment ago becomes
+        a reachable state rather than a programmer error -- which is why
+        dispatch() keeps its unknown-tool guard.
 
-    def approval_needed(self, tool_name: str, params: dict) -> bool:
-        """Single source of truth for whether a call needs human approval:
-        the tool's own path/command-dependent approval_check when present
-        (e.g. file_ops outside the workspace, shell non-inert commands),
-        else the generic config boolean. Both dispatch() and the streaming
-        loop's permission bridge use this so they can never diverge -- a
-        path-dependent tool must surface a permission prompt, not be
-        silently denied by one check while the other says no approval."""
+        Idempotent: removing an absent name is not an error, because
+        disconnect handling can run more than once for the same server.
+        """
+        self._tools.pop(tool_name, None)
+
+    def schemas(self, context: Optional["ToolContext"] = None) -> list[dict]:
+        """What gets sent to the LLM's `tools` parameter each call.
+
+        Only tools that are actually callable are advertised. Advertising
+        an uncallable tool is not harmless: the model keeps choosing it,
+        burns a turn per attempt, and the only signal is a denial string
+        inside a tool result. That is precisely the damage the `fetch_url`
+        defect did for its whole life (D24), so §15 fixes the shape as
+        well as the instance.
+
+        Two filters, deliberately distinct:
+          * is_tool_allowed(name, context) -- policy. Global config AND
+            every active layer's restriction.
+          * spec.available_check() -- the tool's own "I have nothing to
+            act on yet" signal (load_skill with an empty skill catalog).
+        """
+        out = []
+        for name, spec in self._tools.items():
+            if not is_tool_allowed(name, context):
+                continue
+            if spec.available_check is not None and not spec.available_check():
+                continue
+            out.append(spec.schema)
+        return out
+
+    def approval_needed(
+        self, tool_name: str, params: dict,
+        context: Optional["ToolContext"] = None,
+    ) -> bool:
+        """SINGLE SOURCE OF TRUTH for whether a call needs human approval.
+
+        Both dispatch() and core/loop.py's permission bridge call this, so
+        they can never disagree -- a path-dependent tool must surface a
+        permission_request event the user can approve, not be silently
+        denied by one check while the other reports no approval needed.
+
+        §15 makes this an OR rather than an either/or. Previously a tool
+        with an approval_check bypassed requires_approval() entirely,
+        which would have made agent-level approval_overrides do nothing
+        for read/write/edit/shell. Now:
+
+            tool's own approval_check  OR  config/context requirement
+
+        so a context can tighten a lenient default (an agent may demand
+        approval for symbolic_math) but can never suppress a check the
+        tool itself imposes (an agent declaring `shell: false` does NOT
+        skip shell's non-inert-command gate).
+        """
         spec = self._tools.get(tool_name)
-        if spec is None:
-            return requires_approval(tool_name, params)
-        if spec.approval_check is not None:
-            return spec.approval_check(tool_name, params)
-        return requires_approval(tool_name, params)
+        tool_level = (
+            spec.approval_check(tool_name, params)
+            if spec is not None and spec.approval_check is not None
+            else False
+        )
+        return tool_level or requires_approval(tool_name, params, context)
 
-    def dispatch(self, tool_name: str, params: dict, approval_callback=None) -> dict:
+    def dispatch(
+        self, tool_name: str, params: dict,
+        context: Optional["ToolContext"] = None,
+        approval_callback=None,
+    ) -> dict:
+        # Unknown-tool guard: ValueError, deliberately NOT ToolCallDenied.
+        # The two exception types separate "you misnamed it" from "policy
+        # blocks you". This matters MORE since §15, not less -- runtime
+        # unregister() makes a stale tool name a reachable state.
         if tool_name not in self._tools:
             raise ValueError(f"Unknown tool: {tool_name}")
 
-        if not is_tool_allowed(tool_name):
+        if not is_tool_allowed(tool_name, context):
+            # Distinguish the two causes: the model can do something about
+            # "not available in this context" (pick another tool for this
+            # task) that it cannot about a global policy denial.
+            if is_tool_allowed(tool_name, None):
+                raise ToolCallDenied(
+                    f"{tool_name} is not available in this context")
             raise ToolCallDenied(f"{tool_name} is disabled by policy")
 
         spec = self._tools[tool_name]
 
-        needs_approval = self.approval_needed(tool_name, params)
-
-        if needs_approval:
+        if self.approval_needed(tool_name, params, context):
             approved = approval_callback(tool_name, params) if approval_callback else False
             if not approved:
                 raise ToolCallDenied(f"{tool_name} requires approval and was not given")
 
         result = spec.handler(params)
+        # ROADMAP §8 secret redaction -- a post-call filter, not a pre-call
+        # gate. Load-bearing: §15's own Rev. 2 sketch dropped this line,
+        # which would have deleted the redaction layer outright in the
+        # section whose subject is tightening permissions.
         result = check_output_policy(tool_name, result)
         return result
 
@@ -84,4 +167,12 @@ registry.register(ToolSpec("read", file_ops.READ_TOOL_SCHEMA, file_ops.read_run,
 registry.register(ToolSpec("write", file_ops.WRITE_TOOL_SCHEMA, file_ops.write_run, approval_check=file_ops._file_approval_check))
 registry.register(ToolSpec("edit", file_ops.EDIT_TOOL_SCHEMA, file_ops.edit_run, approval_check=file_ops._file_approval_check))
 registry.register(ToolSpec("shell", shell.TOOL_SCHEMA, shell.run, approval_check=shell._shell_approval_check))
-registry.register(ToolSpec("load_skill", load_skill.TOOL_SCHEMA, load_skill.run))
+registry.register(ToolSpec("load_skill", load_skill.TOOL_SCHEMA, load_skill.run, available_check=load_skill.has_skills))
+
+# D24: fail loudly at import if any statically registered tool has no
+# declared permission/approval field. Runs here rather than in
+# security/permissions.py because that file must not import the registry
+# (the dependency runs tools -> security, not both ways). Runs AFTER the
+# registrations above and before any dynamic mcp__* registration, which
+# is exactly the set the check is meant to cover.
+assert_permissions_declared(registry._tools)

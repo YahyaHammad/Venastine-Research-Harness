@@ -235,3 +235,103 @@ def test_build_parser_thread_flag():
 
     assert isinstance(args.thread, UUID)
     assert str(args.thread) == uid
+
+
+# ===========================================================================
+# ---- Configuration errors are reported, not traced (review finding F1) ----
+# ===========================================================================
+#
+# The loud failure itself is deliberate and stays (ROADMAP_v2 §14
+# amendment 1: an unknown settings key must never masquerade as a
+# setting). What changed is that the thing being reported is a typo in a
+# file the user wrote, not an internal error -- a stack trace ending in
+# ValueError buries the one line saying which key in which file.
+
+def test_f1_bad_settings_key_exits_cleanly_with_the_reason(tmp_path, monkeypatch, capsys):
+    """Attaches a real stderr StreamHandler to the root logger, because
+    without one this assertion cannot fail.
+
+    pytest does not run configure_logging(), so the root logger has no
+    console handler during tests -- meaning a logger.exception() call in
+    load_project_config would print its traceback in production and
+    nothing here, and `"Traceback" not in err` would pass while the bug
+    was live. It did, once. The handler below is what makes the
+    stderr-shape assertion mean anything. Root level stays at its default
+    WARNING so a DEBUG-level trace stays silent while an ERROR-level one
+    (logger.exception) would show up and fail the test.
+    """
+    import logging
+
+    from main import load_project_config
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("HOME", str(home))
+    user_dir = home / ".config" / "venastine"
+    user_dir.mkdir(parents=True)
+    (user_dir / "settings.json").write_text(
+        '{"ensembel_n": 3}', encoding="utf-8")  # typo
+
+    proj = tmp_path / "proj"
+    proj.mkdir()
+
+    # Built after capsys is active so the handler binds the captured
+    # stream, and removed unconditionally so it cannot leak into another
+    # test's logging.
+    root = logging.getLogger()
+    root_handler = logging.StreamHandler(stream=sys.stderr)
+    root.addHandler(root_handler)
+    try:
+        with pytest.raises(SystemExit) as exc_info:
+            load_project_config(str(proj), False)
+    finally:
+        root.removeHandler(root_handler)
+
+    assert exc_info.value.code == 1
+    err = capsys.readouterr().err
+    assert "Configuration error" in err
+    assert "ensembel_n" in err        # names the offending key
+    assert "settings.json" in err     # and the file it is in
+    assert "Traceback" not in err
+
+
+def test_f1_corrupt_trust_store_exits_cleanly(tmp_path, monkeypatch, capsys):
+    """json.JSONDecodeError subclasses ValueError, so a corrupt
+    trusted_projects.json lands in the same handler rather than raising
+    out of is_trusted() during startup."""
+    from main import load_project_config
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("HOME", str(home))
+    user_dir = home / ".config" / "venastine"
+    user_dir.mkdir(parents=True)
+    (user_dir / "trusted_projects.json").write_text("{not json", encoding="utf-8")
+
+    proj = tmp_path / "proj"
+    (proj / ".venastine").mkdir(parents=True)
+
+    with pytest.raises(SystemExit) as exc_info:
+        load_project_config(str(proj), False)
+
+    assert exc_info.value.code == 1
+    assert "Configuration error" in capsys.readouterr().err
+
+
+def test_f1_clean_config_returns_settings(tmp_path, monkeypatch):
+    """The happy path still returns the merged settings dict -- the error
+    handling must not swallow a valid configuration."""
+    from main import load_project_config
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("HOME", str(home))
+    user_dir = home / ".config" / "venastine"
+    user_dir.mkdir(parents=True)
+    (user_dir / "settings.json").write_text(
+        '{"default_model": "cfg-model"}', encoding="utf-8")
+
+    proj = tmp_path / "proj"
+    proj.mkdir()
+
+    assert load_project_config(str(proj), False)["default_model"] == "cfg-model"
