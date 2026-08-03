@@ -1022,3 +1022,131 @@ Checked rather than assumed, which is D22's rule applied to a second dependency.
 - **Both acceptance-criteria tests were confirmed able to fail**, not assumed to be meaningful: flipping `exit_on_error` back to Textual's `True` default tears the app down and AC3 fails; dropping the permission answer instead of putting it on the channel makes AC2 hang exactly as the docstring predicts (the worker blocks forever on `queue.get()`). Both restored afterwards.
 - Themes build against real textual 1.0.0 (all 8 register, `resolve()` falls back on an unknown name).
 - Headless pilot: layout mounts, ravens render, `/theme` switches live, an unknown command does not become a chat turn.
+
+---
+
+## §17 — MCP client (stdio + HTTP + `mcp.json` + async bridge + trust)
+
+Followed the roadmap's *architecture* (D2a's bridge, D23's normalize-at-the-boundary, D17's trust
+gate). Deviated from its *code*, because D22's standing instruction — re-verify the SDK at
+implementation time rather than trusting the document — turned out to be load-bearing.
+
+### 17.1 The SDK moved, so the section did
+
+`mcp` 2.0.0 shipped **2026-07-28**, days before implementation. §17 was written against v1.x.
+Verified in hand against the installed package (not from the docs, which 404 on several paths their
+own README advertises): `Client(server)` replaces `ClientSession` + a separate transport CM; result
+fields are snake_case (`.content` / `.structured_content` / `.is_error`); `Tool.input_schema` plus a
+new `.title`; timeouts are `float` not `timedelta`; the exception is `MCPError`, not `McpError`; and
+`httpx`/`httpx-sse` became `httpx2`. Pinned `mcp>=2.0,<3`.
+
+`mode="auto"` was initially flagged as an interop risk and that was **wrong** — reading `_probe.py`
+showed `negotiate_auto()` falls back silently to the legacy handshake on any RPC error, making it
+the maximum-compatibility setting. Left at its default.
+
+### 17.2 Two bugs in the spec, both found by running it
+
+**The package cannot be called `mcp/`.** The project root is on `sys.path`, so a top-level `mcp/`
+shadows the installed SDK. Ships as `mcp_client/`. Same shape as the `logging.py` incident.
+
+**The `AsyncExitStack` shutdown design does not work.** Rev. 3 says the stack must live on the MCP
+loop, which is true but insufficient: anyio binds cancel scopes to the **task**, and
+`run_coroutine_threadsafe()` makes a new task per call, so `connect_all()` entering and
+`disconnect_all()` closing raises `RuntimeError: Attempted to exit cancel scope in a different
+task`. Reproduced against the real SDK *before* writing production code. Replaced with one
+long-lived manager task that enters every context, signals ready, and parks until shutdown.
+
+### 17.3 D23's redaction claim was false — found by an end-to-end test
+
+§17 asserts MCP output "gets secret-redacted by the existing layer with no change to it" because
+`content` and `result` are already in `_SCANNED_KEYS`. True only for **top-level strings**.
+`structured_content` is arbitrary JSON from a third-party server and lands under `result` as a
+dict, which `check_output_policy()` never descended into — so the output most likely to carry a
+leaked credential took the one unscanned path.
+
+Fixed in `safety/policy_enforcement.py` with a recursive, depth-bounded `_redact_value()`, **not**
+at the MCP boundary: the producer of the unscanned shape isn't MCP, it's any tool returning nested
+data under a scanned key, which `discrete_math` and `probability_stats` already can. A special case
+at the MCP boundary would have left those. This is "fix at the producer, not the consumer" applied
+to a case where the consumer fix was the tempting one.
+
+### 17.4 Decisions locked with the user before implementing
+
+- **D28** — MCP tools are allowed by default but **require approval** by default, per-server
+  `autoApprove` opt-out. Implemented as a *base default* rather than a `ToolSpec.approval_check`,
+  because `approval_needed()` ORs those and OR can only tighten — an opt-out expressed there would
+  have been silently inert. The D14 ratchet still holds: a context override can force approval back
+  on for an auto-approved server.
+- **D29** — tier precedence becomes harness > **user** > project, for MCP servers, agents and
+  skills alike. This **changed shipped §14 behavior** (it was project-over-user) and is the one
+  change here that reaches outside §17. Rationale: "project" doesn't mean *more specific*, it means
+  *it arrived with a directory you cloned*. Non-colliding definitions from all tiers still load —
+  precedence only ever breaks same-name ties.
+  **`settings.json` deliberately keeps project-over-user**: its values are shown verbatim in the
+  trust prompt and consented to directly, whereas an agent/skill/server is a named identity whose
+  danger is impersonation. An asymmetry on purpose, not an oversight.
+- **D30** — `mcp.json` accepts unrecognized keys (configs are shared with Claude Desktop/Cursor);
+  validation is by *connecting* and calling `list_tools()`; per-server failures are named and
+  skipped. §17's `_connect_all_async()` sketch had no try/except at all, so one stale entry would
+  have taken every server down with it.
+- **D31** — user-level servers are acknowledged once, keyed by name + hash of the config entry.
+- **D11 amended** — project config is `.venastine/mcp.json`, not the project root. At the root it
+  sat *outside* the trust hash, and `is_trusted()` returns `True` outright when `.venastine/` is
+  absent, so a root `mcp.json` in a repo without one would have spawned its `command` with no
+  prompt at all — the exact risk D17 exists for.
+
+### 17.5 Test changes
+
+- `tests/test_mcp_client.py` (NEW, 22) — the one place in this suite that uses a **real** SDK
+  against a **real** in-process `MCPServer`. Deliberate: v2's in-memory transport needs no
+  subprocess, socket or network, so the honest version is also the offline one, and what §17 owns
+  is almost entirely bridge behavior that a fake would model rather than test. The cancel-scope bug
+  is invisible to any fake — it lives in anyio's real cancel scopes.
+- `tests/test_mcp_config.py` (NEW, 12) — `mcp.json` parsing, tier precedence, trust gating, and
+  the acknowledgement store. No SDK involved.
+- `tests/test_policy_enforcement.py` — +3 for nested redaction, including bounded recursion depth.
+- `tests/test_config_loader.py` — `test_project_wins_over_user` became `test_user_wins_over_project`
+  (D29), the collision-warning test's direction flipped, and a new test asserts non-colliding
+  definitions from both tiers all load. That last one exists because "user tier wins" is easy to
+  implement as "only the user tier loads", which would silently drop every project skill.
+- `tests/test_permission_context.py` — the AC7 unregister test now passes an `approval_callback`;
+  under D28 an MCP dispatch without one is correctly denied before reaching the handler.
+- Full suite: **379 tests** (was 341), plus 1 opt-in `integration` test excluded by default.
+
+### 17.6 Verified beyond the suite
+
+Every new invariant was confirmed to **fail when reverted**, and two tests did not survive that
+check on the first attempt:
+
+- **The cancel-scope test was vacuous.** It called `disconnect_all()` and asserted it didn't raise —
+  and passed against the broken implementation, because `disconnect_all()` deliberately swallows
+  exceptions so a messy shutdown can't stop the process exiting. Rewritten to assert on the absence
+  of the "did not complete cleanly" warning; it now fails naming the exact `RuntimeError`.
+- **The AC4 timeout test was vacuous.** It asserted "no leaked task on the MCP loop" and passed with
+  `read_timeout_seconds` deleted. Measuring showed the loop always has background tasks, so the
+  filter matched nothing either way — and that the claimed coroutine leak could not be demonstrated
+  at all. Rewritten to assert on *which timeout fired* (elapsed < caller deadline, and the SDK's
+  `MCPError` rather than the local fallback), which is the real difference. The overclaiming comment
+  in `client.py` was corrected to match what was actually observed.
+
+- **AC8 needed a real subprocess, and it found a false positive rather than a bug.**
+  `tests/test_mcp_integration.py` spawns an actual stdio MCP server (`tests/stdio_server_fixture.py`),
+  connects through the real bridge, dispatches through the real registry, and asserts the child is
+  reaped. It initially FAILED, reporting an orphan — but the leak was in the *test*: the PowerShell
+  process-list query matched itself, because the needle appears in the query's own command line.
+  Isolating it against a plain `async with Client(stdio_client(...))` showed the SDK's teardown
+  (close stdin → grace → Windows Job Object kill) works correctly. Fixed by filtering on
+  `$_.Name -eq 'python.exe'`. Then verified in the other direction: with `disconnect_all()` stubbed
+  to a no-op, the test fails naming the orphaned PID.
+  (`wmic` is also gone from current Windows 11 — calling it raises `FileNotFoundError` from
+  `CreateProcess`, which looks exactly like the MCP server failing to spawn.)
+- **Marked `integration` and excluded from the default run** via `pytest.ini`'s
+  `-m "not integration"`. The default suite stays strictly offline — no process, no socket. Run it
+  deliberately with `pytest -m integration`. It exists because AC8 cannot be shown any other way:
+  the in-memory transport has no child process, so it cannot prove the one thing AC8 is about.
+
+That is three vacuous tests and one false-positive caught by this discipline across §16 and §17.
+The vacuous ones share a shape — **the assertion was correct, but the environment could not
+manifest the failure**. The false positive is its mirror: the environment manifested a failure the
+code never had. Both are invisible to a green suite, and both are only found by deliberately
+breaking the thing the test claims to guard.

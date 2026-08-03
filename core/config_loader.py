@@ -192,11 +192,28 @@ def _parse_md_file(path: str, kind: str, tier: str):
 
 
 def _tier_dirs(kind: str, project_path: str, trusted: bool) -> list:
+    """Search order, and _discover() is first-wins, so this list IS the
+    precedence rule: harness > user > project.
+
+    ORDER CHANGED IN §17 (D29). It was harness > project > user, i.e. the
+    conventional "more specific config wins". That is the wrong default
+    here, because "project" does not mean "more specific" -- it means "it
+    arrived with a directory you cloned", which is the entire premise of
+    D17. The user tier is the one you actually authored, so it should
+    never be silently displaced by the tier you merely trusted once.
+
+    Harness stays first and un-overridable (D18, unchanged): a project can
+    still never impersonate a builtin.
+
+    Note this only ever breaks SAME-NAME ties. Non-colliding definitions
+    from every tier all load -- _discover() accumulates a union and
+    consults precedence only when a name repeats.
+    """
     dirs = [("harness", os.path.join(HARNESS_ROOT, kind, "builtin"))]
+    dirs.append(("user", os.path.join(_user_config_dir(), kind)))
     if trusted:
         dirs.append(("project", os.path.join(
             workspace_trust.venastine_dir(project_path), kind)))
-    dirs.append(("user", os.path.join(_user_config_dir(), kind)))
     return dirs
 
 
@@ -434,9 +451,25 @@ def describe_project_content(project_path: str) -> str:
     files = workspace_trust.content_files(project_path)
     lines = [f"Project .venastine/ content ({root}):"]
     lines += [f"  - {rel}" for rel in files]
-    settings_path = os.path.join(root, "settings.json")
-    if os.path.exists(settings_path):
-        with open(settings_path, "r", encoding="utf-8") as f:
-            lines.append("settings.json contents:")
-            lines += ["  | " + line for line in f.read().splitlines()]
+
+    # settings.json and mcp.json are shown VERBATIM, the rest by name.
+    # These two are the ones whose contents change what runs: settings can
+    # pick the provider and multiply pipeline cost via ensemble_n, and
+    # mcp.json names a local command to execute. Approving trust without
+    # seeing that command is not an informed decision, which is the whole
+    # reason §17 moved project MCP config under .venastine/ instead of
+    # leaving it at the project root outside the trust boundary.
+    for fname, label in (("settings.json", "settings.json contents:"),
+                         ("mcp.json", "mcp.json contents (these commands would run):")):
+        path = os.path.join(root, fname)
+        if not os.path.exists(path):
+            continue
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                body = f.read()
+        except OSError as e:
+            lines.append(f"{fname}: could not be read ({e})")
+            continue
+        lines.append(label)
+        lines += ["  | " + line for line in body.splitlines()]
     return "\n".join(lines)

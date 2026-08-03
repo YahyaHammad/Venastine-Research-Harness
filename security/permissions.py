@@ -50,6 +50,49 @@ def _default_for_unknown_tool(tool_name: str) -> bool:
     return tool_name.startswith("mcp__")
 
 
+def _default_for_unknown_approval(tool_name: str) -> bool:
+    """Approval counterpart to _default_for_unknown_tool.
+
+    MCP tools default to REQUIRING approval (§17 decision D). They are
+    allowed by default but not trusted by default, and those are different
+    questions: an MCP server is third-party code that the model can reach
+    without the user ever naming it. The project tier is trust-gated
+    (D17), but a user-level mcp.json auto-connects, and config files grow
+    entries that installers appended.
+
+    Everything else unknown defaults to not requiring approval, matching
+    the previous getattr fallback.
+    """
+    return tool_name.startswith("mcp__")
+
+
+# Base approval defaults for tools that cannot have a declared field --
+# populated at connection time from each MCP server's `autoApprove`.
+#
+# This exists because the per-server opt-out CANNOT be expressed as a
+# ToolSpec.approval_check: registry.approval_needed() ORs those in, and OR
+# can only ever tighten. Varying the BASE DEFAULT instead keeps D14's
+# one-way ratchet exactly intact -- a context override can still force
+# approval back on for an auto-approved server, but nothing can wave a
+# call past a gate a stricter layer set.
+_dynamic_approval_defaults: dict = {}
+
+
+def set_dynamic_approval_default(tool_name: str, required: bool) -> None:
+    """Declare the base approval default for a dynamically-named tool."""
+    _dynamic_approval_defaults[tool_name] = bool(required)
+
+
+def clear_dynamic_approval_defaults(prefix: Optional[str] = None) -> None:
+    """Drop defaults for tools that no longer exist. Idempotent, because
+    disconnect handling can run more than once for the same server."""
+    if prefix is None:
+        _dynamic_approval_defaults.clear()
+        return
+    for name in [n for n in _dynamic_approval_defaults if n.startswith(prefix)]:
+        del _dynamic_approval_defaults[name]
+
+
 def is_tool_allowed(
     tool_name: str, context: Optional["ToolContext"] = None
 ) -> bool:
@@ -86,7 +129,15 @@ def requires_approval(
     both dispatch() and the loop's permission bridge call.
     """
     approvals = config.ToolApprovals()
-    tool_level = getattr(approvals, tool_name, False)
+    if hasattr(approvals, tool_name):
+        tool_level = getattr(approvals, tool_name)
+    else:
+        # No declared field: a dynamically-named tool (§17). Its base
+        # default is whatever was registered for it, falling back to the
+        # named default rather than to bare False.
+        tool_level = _dynamic_approval_defaults.get(
+            tool_name, _default_for_unknown_approval(tool_name)
+        )
     context_level = (
         context.approval_overrides.get(tool_name, False)
         if context is not None

@@ -312,12 +312,18 @@ def test_ac7_dispatch_after_unregister_raises_ValueError(reg, monkeypatch):
     is exactly why the guard has to stay."""
     _patch_dataclass(monkeypatch, "ToolPermissions")
     reg.register(ToolSpec("mcp__server__tool", {"name": "mcp__server__tool"}, _handler))
-    assert reg.dispatch("mcp__server__tool", {}) == {"result": "ran"}
+    # The approval_callback is required as of §17/D28: MCP tools are
+    # allowed by default but now require approval by default, which are
+    # different questions. Without it this dispatch raises ToolCallDenied
+    # before ever reaching the handler.
+    assert reg.dispatch("mcp__server__tool", {},
+                        approval_callback=lambda n, p: True) == {"result": "ran"}
 
     reg.unregister("mcp__server__tool")
 
     with pytest.raises(ValueError, match="Unknown tool"):
-        reg.dispatch("mcp__server__tool", {})
+        reg.dispatch("mcp__server__tool", {},
+                     approval_callback=lambda n, p: True)
 
 
 # ---------------------------------------------------------------------------

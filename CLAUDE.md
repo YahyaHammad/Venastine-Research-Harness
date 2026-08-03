@@ -14,13 +14,16 @@ python main.py --provider OPENAI --model gpt-5.1  # override provider/model
 python main.py --tui                              # Textual TUI (§16); the CLI stays the default (D12)
 python main.py --trust-project                    # grant D17 workspace trust non-interactively
 
-pytest                                            # 339 tests, offline, ~4s (first run ~7s: matplotlib font cache)
+pytest                                            # 379 tests, offline, ~12s (first run ~15s: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
+pytest -m integration                             # opt-in; spawns a real stdio MCP server (§17 AC8)
 ```
 
 Test dependencies (`pytest`, `pytest-mock`, `pytest-asyncio`) are now listed in `requirements.txt` — they had been missing since §14, which is why older docs warn about it.
+
+MCP servers are a *third* config file again — `mcp.json`, user-level or `.venastine/`-level. Not `.env`, not `providers.json`, not `settings.json`.
 
 **Credentials are two separate mechanisms, deliberately.** LLM provider keys → `providers.json` (managed by `credentials.py`, gitignored, template at `providers.json.example`). Misc tool API keys (GitHub, NVD) → `.env` (managed by `env_secrets.py`, template at `.env.example`). Never mix them.
 
@@ -76,6 +79,24 @@ A **shell**, not a feature home. D12 makes the CLI a permanent fallback, so anyt
 Two things in `tui/app.py` are load-bearing and easy to break silently:
 - **`run_worker(..., exit_on_error=False)` + `on_worker_state_changed`.** Textual's default tears the whole app down on a transient worker exception.
 - **Every permission dismissal path must put a boolean on the channel.** The worker blocks inside `_run()` on `permission_channel.get()`; a dismissal carrying `None`, or one that puts nothing, hangs it forever. That is why the AC2 tests assert on the *dispatched tool*, not on the modal rendering.
+
+### MCP (`mcp_client/`, §17)
+
+**The package is `mcp_client/`, never `mcp/`.** The project root is on `sys.path`, so a top-level `mcp/` shadows the installed SDK — the `logging.py` incident again. §17's spec sketches `mcp/client.py`; don't follow it there. Every SDK symbol lives inside this package so a version migration touches one directory.
+
+**Pinned to `mcp>=2.0,<3`.** v2 is not v1: fields are snake_case (`.content` / `.structured_content` / `.is_error`), `Tool.input_schema`, timeouts are `float`, the exception is `MCPError`, and `Client(server)` replaces `ClientSession` + a separate transport CM. Reading the v1 spellings against v2 doesn't crash — `getattr` returns `None` and every failed call silently looks successful.
+
+**The manager task is required.** `AsyncExitStack` cannot be entered in `connect_all()` and closed in `disconnect_all()`: anyio binds cancel scopes to the **task**, and `run_coroutine_threadsafe()` makes a new task per call, so the right *loop* is necessary but not sufficient. One long-lived `_manager()` task enters every context, signals ready, and parks until shutdown. If `RuntimeError: Attempted to exit cancel scope in a different task` appears, something moved an enter/exit across a task boundary.
+
+**Two timeouts, both needed.** `read_timeout_seconds` cancels the request protocol-side; `future.result(timeout=)` only stops waiting. The margin makes the protocol one fire first.
+
+**MCP tools are allowed by default but require approval by default** (D28). The per-server `autoApprove` opt-out is a *base default* (`permissions.set_dynamic_approval_default`), never a `ToolSpec.approval_check` — `approval_needed()` ORs those and OR can only tighten, so an opt-out there is inert.
+
+**Tier precedence is harness > user > project** (D29) for MCP servers, agents and skills — inverted from the usual "more specific wins", because "project" means "arrived with a repo you cloned". `settings.json` deliberately keeps project-over-user, since the trust prompt shows its values verbatim. Non-colliding definitions from all tiers still load; precedence only breaks same-name ties.
+
+**`mcp.json` accepts unknown keys** (unlike `settings.json`, which raises) so configs shared with Claude Desktop/Cursor work. Validation is by *connecting*; per-server failures are named and skipped, never fatal.
+
+**Redaction recurses now.** `check_output_policy()` used to scan top-level strings only; `structured_content` arrives under `result` as a dict, so third-party MCP output was the one unscanned path. Fixed in `safety/policy_enforcement.py`, not at the MCP boundary — any tool returning nested data had the same hole.
 
 ### Reasoning effort
 

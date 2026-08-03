@@ -109,13 +109,31 @@ def test_trusted_project_skills_load(_redirect_roots):
     assert config_loader.get_skill("proj-skill") is not None
 
 
-def test_project_wins_over_user(_redirect_roots):
+def test_user_wins_over_project(_redirect_roots):
+    """§17/D29 REVERSED this. It used to be project-wins ("more specific
+    config wins"), which is the wrong default here: "project" doesn't mean
+    more specific, it means it arrived with a directory you cloned -- the
+    entire premise of D17. Trusting a project once should not silently
+    hand it the power to redefine a skill you wrote and rely on."""
     _write_skill(_redirect_roots["project"] / ".venastine", "dup", body="PROJECT BODY")
     _write_skill(_redirect_roots["user"], "dup", body="USER BODY")
     workspace_trust.grant_trust(str(_redirect_roots["project"]))
 
     config_loader.initialize(str(_redirect_roots["project"]))
-    assert config_loader.get_skill("dup").body == "PROJECT BODY"
+    assert config_loader.get_skill("dup").body == "USER BODY"
+
+
+def test_non_colliding_definitions_from_both_tiers_all_load(_redirect_roots):
+    """Precedence only ever breaks SAME-NAME ties -- _discover accumulates
+    a union. Worth asserting explicitly: reading D29 as "user tier wins"
+    could easily be implemented as "user tier is the only one that loads",
+    which would silently drop every project skill that has no counterpart."""
+    _write_skill(_redirect_roots["user"], "only_user")
+    _write_skill(_redirect_roots["project"] / ".venastine", "only_project")
+    workspace_trust.grant_trust(str(_redirect_roots["project"]))
+
+    config_loader.initialize(str(_redirect_roots["project"]))
+    assert set(config_loader.get_skills()) >= {"only_user", "only_project"}
 
 
 def test_harness_collision_rejected_with_warning(_redirect_roots, caplog):
@@ -330,10 +348,11 @@ def test_f3_same_tier_name_collision_warns(_redirect_roots, caplog):
     assert any("shadowed" in r.message for r in caplog.records)
 
 
-def test_f3_project_over_user_collision_warns(_redirect_roots, caplog):
-    """Cross-tier shadowing (D8's documented project-wins order) is also
-    announced -- the order is documented, but which file actually loaded
-    is not guessable from the outside."""
+def test_f3_user_over_project_collision_warns(_redirect_roots, caplog):
+    """Cross-tier shadowing is announced -- the order is documented, but
+    which file actually loaded is not guessable from the outside. The
+    direction flipped in §17/D29; the warning must name the LOSER as the
+    project file, or it would tell someone to go edit the wrong one."""
     _write_skill(_redirect_roots["user"], "shared", description="user version")
     _write_skill(_redirect_roots["project"] / ".venastine", "shared",
                  description="project version")
@@ -342,8 +361,10 @@ def test_f3_project_over_user_collision_warns(_redirect_roots, caplog):
     with caplog.at_level("WARNING", logger="core.config_loader"):
         config_loader.initialize(str(_redirect_roots["project"]))
 
-    assert config_loader.get_skill("shared").description == "project version"
-    assert any("shadowed" in r.message for r in caplog.records)
+    assert config_loader.get_skill("shared").description == "user version"
+    shadow = [r.message for r in caplog.records if "shadowed" in r.message]
+    assert shadow, "cross-tier shadowing must be announced"
+    assert "project-tier" in shadow[0] and "user-tier" in shadow[0]
 
 
 def test_f4_file_not_starting_with_frontmatter_is_rejected(_redirect_roots, caplog):

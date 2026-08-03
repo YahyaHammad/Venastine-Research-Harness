@@ -38,10 +38,18 @@ python main.py --tui                              # Textual TUI (chat + /researc
 
 Ctrl+C or Ctrl+D exits chat mode; the thread id is printed after the first response so you can resume it later. Research mode prints the final report plus the trace log, and writes full artifacts to `output/<run_id>/`.
 
-Project-level configuration (`.venastine/` — agents, skills, `settings.json`, `CONTEXT.md`) requires a one-time trust confirmation on first run. Pass `--trust-project` to grant it non-interactively for scripts and CI.
+Project-level configuration (`.venastine/` — agents, skills, `settings.json`, `mcp.json`, `CONTEXT.md`) requires a one-time trust confirmation on first run. Pass `--trust-project` to grant it non-interactively for scripts and CI.
+
+**MCP servers** are configured in `mcp.json`, either at `~/.config/venastine/mcp.json` (yours) or `.venastine/mcp.json` (the project's, trust-gated). The format is Claude Code compatible, and keys this harness doesn't recognize are ignored, so a config shared with another MCP client works as-is:
+
+```json
+{"mcpServers": {"files": {"command": "npx", "args": ["-y", "@example/server"]}}}
+```
+
+MCP tools are namespaced `mcp__<server>__<tool>` and **require approval before each call** by default; add `"autoApprove": true` to a server entry to opt out. On a name collision your user-level entry wins over the project's.
 
 ## Status
 
-ROADMAP.md §1–§12 are fully built (§10's ensemble mode carries a revisit note), as are ROADMAP_v2.md §13 (streaming loop), §14 (config loader + workspace trust), §15 (permission system), and §16 (Textual TUI shell, reasoning-effort switching). Remaining work is ROADMAP_v2.md §17–§24: MCP client, agent and skill systems, subagent review, memory/compaction, pipeline observability, interactive tools, and `/init`.
+ROADMAP.md §1–§12 are fully built (§10's ensemble mode carries a revisit note), as are ROADMAP_v2.md §13 (streaming loop), §14 (config loader + workspace trust), §15 (permission system), §16 (Textual TUI shell, reasoning-effort switching), and §17 (MCP client). Remaining work is ROADMAP_v2.md §18–§24: agent and skill systems, subagent review, memory/compaction, pipeline observability, interactive tools, and `/init`.
 
-Run the test suite with `pytest` — 339 tests, fully offline, no API keys needed.
+Run the test suite with `pytest` — 379 tests, fully offline, no API keys needed.

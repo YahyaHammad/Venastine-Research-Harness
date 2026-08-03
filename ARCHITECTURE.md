@@ -46,7 +46,7 @@ Venastine Research Harness/
 ├── pytest.ini                      # testpaths=tests, --strict-markers
 ├── DEVLOG.md                       # implementation notes for built ROADMAP sections -- see §0
 │
-├── tests/                          # 339 tests, all offline, ~4.3s (first run ~7s for matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
+├── tests/                          # 379 tests, all offline, ~12s (first run ~7s for matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
 │   ├── conftest.py                 # fixtures: make_model_response, make_stream_from_response, make_stream_sequence, FakeStorage, ...
 │   ├── BREAKING_CHANGES.md         # what-breaks-it / symptom / fix per area
 │   ├── test_cli.py                 # 13 tests -- ROADMAP §1 thread_id passthrough + UUID validation + §14 parser defaults/resolution/trust flow
@@ -112,6 +112,11 @@ Venastine Research Harness/
 ├── safety/
 │   ├── __init__.py                # package init
 │   └── policy_enforcement.py      # ROADMAP §8: content-level output policy -- blocked domains + secret redaction
+│
+├── mcp_client/                    # ROADMAP_v2 §17: MCP client. NAMED mcp_client, NOT mcp -- a root mcp/ shadows the installed SDK
+│   ├── client.py                  # the background thread + one event loop + the manager task; MCPClient; _normalize (D23)
+│   ├── config.py                  # mcp.json discovery/merge (user beats project, D29) + the first-run acknowledgement store (D31)
+│   └── registration.py            # MCP Tool -> ToolSpec, mcp__<server>__<tool>, runtime register/unregister (D15)
 │
 ├── tui/                           # ROADMAP_v2 §16: the Textual shell. Hosts capabilities; owns none (D12 keeps the CLI first-class)
 │   ├── app.py                     # the App -- worker, LoopEvent routing, slash dispatch, permission bridge, both ravens
@@ -365,6 +370,24 @@ Covered in full in §7 below. The short version of the file boundary: `base.py` 
 **Raven activity states are table-driven** (`ravens.TOOL_STATES`), and unknown tool names map to a generic working state — so §17's runtime-registered MCP tools and §18's subagents animate without the table being edited.
 
 **Research mode is coarse by construction, not by omission.** `run_deep_research_pipeline()` is synchronous and reports nothing while running: every pass is drained through `run_to_completion()` inside the orchestrator, so no `LoopEvent` escapes, and §5's per-pass checkpoints write to the database rather than to a caller. §16 runs the pipeline on a worker and renders the trace and report on completion; live progress is §22.
+
+### 4.17 `mcp_client/` — the MCP client and its async bridge (ROADMAP_v2 §17)
+
+**Belongs here:** every symbol imported from the `mcp` SDK, without exception. `client.py` owns the bridge and `_normalize()`; `config.py` owns `mcp.json`; `registration.py` owns the registry translation. A future major-version migration should touch this directory and nothing else.
+
+**The package name is load-bearing.** The project root is on `sys.path`, so a top-level `mcp/` package — which is what §17's spec sketches — shadows the installed SDK, and `import mcp` inside it resolves to itself. Same failure as the root `logging.py` incident, with a wider blast radius.
+
+**The bridge exists so nothing else has to be async.** One dedicated thread owns one event loop; every call crosses via `run_coroutine_threadsafe(...).result(timeout=...)`. `_run()`, `dispatch()` and every handler stay plain synchronous functions (D2a).
+
+**The manager task is required, not stylistic.** `AsyncExitStack` cannot be entered by `connect_all()` and closed by `disconnect_all()`, because anyio binds cancel scopes to the **task** and `run_coroutine_threadsafe()` creates a new task per call — being on the correct loop is necessary but not sufficient. The failure is `RuntimeError: Attempted to exit cancel scope in a different task than it was entered in`, reproduced against the real SDK before this code was written. One long-lived `_manager()` task enters every context, signals ready, and parks on an event until shutdown, so the stack unwinds where it was entered.
+
+**Shutdown is not tidiness.** stdio servers are child processes this harness spawned, and the MCP thread is a daemon that dies at interpreter exit without unwinding. `main.py` calls `teardown_mcp()` in a `finally` around all three modes; skipping it orphans subprocesses that accumulate across sessions.
+
+**Two timeouts, deliberately.** `read_timeout_seconds` cancels the request at the protocol level; `future.result(timeout=)` only unblocks the calling thread. The margin makes the protocol one win, so a hung server is told to stop rather than merely stopped being waited on. The caller-side one remains as the backstop for a wedged loop.
+
+**Approval is a base default, not an `approval_check`.** MCP tools are allowed by default (`_default_for_unknown_tool`) but require approval by default (`_default_for_unknown_approval`), with a per-server `autoApprove` opt-out registered via `permissions.set_dynamic_approval_default()`. The opt-out cannot be a `ToolSpec.approval_check`, because `approval_needed()` ORs those in and OR can only tighten — expressed there it would be silently inert (D28).
+
+**Does NOT belong here:** secret redaction (`safety/policy_enforcement.py` owns it, and §17 made it recurse so `structured_content` is covered), approval *policy* (`security/permissions.py`), dispatch mechanics (`tools/registry.py`), or the trust prompt UX (`main.py` — `workspace_trust.py` owns only the store).
 
 ## 5. Request lifecycle — regular conversation, traced end to end
 

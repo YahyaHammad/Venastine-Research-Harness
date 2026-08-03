@@ -149,6 +149,38 @@ class TestCheckOutputPolicy:
         out = check_output_policy("test_tool", result)
         assert out is result  # mutated in place
 
+    def test_redacts_secrets_nested_inside_a_scanned_key(self):
+        """§17. Redaction used to scan TOP-LEVEL strings only, which held
+        while every tool returned {"result": "<string>"}. MCP breaks it:
+        structured_content is arbitrary JSON from a third-party server and
+        arrives under `result` as a dict -- so the output most likely to
+        carry a leaked credential took the one unscanned path.
+
+        Found by an end-to-end MCP test, not by reading the code."""
+        result = {"result": {"creds": {"api_key":
+                  "sk-ant-abc123def456ghi789jkl012mno345pqr678stu901"}}}
+        out = check_output_policy("test_tool", result)
+        assert "sk-ant-" not in str(out)
+        assert "REDACTED" in str(out)
+
+    def test_redacts_secrets_inside_a_list_under_a_scanned_key(self):
+        result = {"content": ["ok",
+                  "sk-ant-abc123def456ghi789jkl012mno345pqr678stu901"]}
+        out = check_output_policy("test_tool", result)
+        assert "sk-ant-" not in str(out)
+        assert out["content"][0] == "ok"
+
+    def test_deeply_nested_structures_do_not_recurse_without_bound(self):
+        """Bounded descent: this scans output from code the user didn't
+        write, so a pathological structure must degrade rather than blow
+        the stack."""
+        nested = inner = {}
+        for _ in range(200):
+            inner["next"] = {}
+            inner = inner["next"]
+        inner["v"] = "sk-ant-abc123def456ghi789jkl012mno345pqr678stu901"
+        check_output_policy("test_tool", {"result": nested})  # must not raise
+
 
 # ===========================================================================
 # ---- Registry integration -------------------------------------------------

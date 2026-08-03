@@ -20,6 +20,19 @@ pyyaml==6.0.3
 # unpinned dependency mid-major-version-transition migrates you by accident.
 textual>=1.0,<2.0
 
+# ROADMAP_v2 §17 MCP client. Upper-bounded per D22 -- and D22 exists
+# BECAUSE of this package: it was mid-major-version transition when §17
+# was written, and 2.0.0 landed 2026-07-28 before implementation started.
+#
+# v2 is a real break for consumers, verified in hand rather than from the
+# docs: result fields are snake_case (.content/.structured_content/
+# .is_error, was camelCase), timeouts are float seconds (was timedelta),
+# the exception is MCPError (was McpError), streamablehttp_client is
+# removed, and httpx/httpx-sse are replaced by httpx2 -- which is why
+# there are now two HTTP stacks installed. httpx stays; anthropic, openai
+# and ddgs all still need it.
+mcp>=2.0,<3
+
 # --- Test dependencies -------------------------------------------------
 # Previously absent, which the docs recorded as a known open item since
 # §14: the suite has always needed pytest and pytest-mock, and §16's TUI

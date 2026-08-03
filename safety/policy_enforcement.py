@@ -97,6 +97,40 @@ def redact_secrets(text: str) -> str:
 _SCANNED_KEYS = ("content", "result", "stdout", "stderr")
 
 
+# How deep to descend into nested values. Bounded so a pathological or
+# hostile structure can't turn redaction into a stack overflow -- this
+# scans output from code the user didn't write.
+_MAX_REDACT_DEPTH = 12
+
+
+def _redact_value(value, depth: int = 0):
+    """Redact secrets anywhere inside a JSON-shaped value.
+
+    ADDED IN §17, and it closes a real hole rather than generalising for
+    its own sake. The original scanned only TOP-LEVEL strings, which was
+    sufficient while every tool returned `{"result": "<some string>"}`.
+    MCP breaks that assumption: `structured_content` is arbitrary JSON
+    from a third-party server, and it arrives under `result` as a dict --
+    so the output most likely to contain a leaked credential was the one
+    output that was never scanned. Caught by an end-to-end test, not by
+    reading the code.
+
+    Fixed here rather than in mcp_client/, because the producer of the
+    unscanned shape isn't MCP -- it's any tool returning nested data under
+    a scanned key, which `discrete_math` and `probability_stats` already
+    can. A special case at the MCP boundary would have left those.
+    """
+    if isinstance(value, str):
+        return redact_secrets(value)
+    if depth >= _MAX_REDACT_DEPTH:
+        return value
+    if isinstance(value, dict):
+        return {k: _redact_value(v, depth + 1) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return type(value)(_redact_value(v, depth + 1) for v in value)
+    return value
+
+
 def check_output_policy(tool_name: str, result: dict) -> dict:
     """Apply content-level policy to a tool's output.
 
@@ -105,7 +139,6 @@ def check_output_policy(tool_name: str, result: dict) -> dict:
     Mutates *result* in place and returns it.
     """
     for key in _SCANNED_KEYS:
-        value = result.get(key)
-        if isinstance(value, str):
-            result[key] = redact_secrets(value)
+        if key in result:
+            result[key] = _redact_value(result[key])
     return result
