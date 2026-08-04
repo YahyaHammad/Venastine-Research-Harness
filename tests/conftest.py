@@ -12,6 +12,7 @@ behavior.
 import importlib
 import sys
 import types
+from uuid import uuid4
 
 import pytest
 
@@ -202,6 +203,7 @@ class FakeStorage:
         self._thread_created_at = {}  # thread_id -> datetime
         self._messages_by_thread = {}  # thread_id -> list of neutral-shape dicts
         self._thread_extra = {}   # thread_id -> dict (extra_data mirror)
+        self._checkpoints = {}    # thread_id -> the latest CompactionCheckpoint (§21)
 
     def create_thread(self):
         from datetime import datetime, timezone
@@ -258,13 +260,34 @@ class FakeStorage:
         # it's role-specific shape-building that has to match production.
         self.saved_messages.append((thread_id, role, content, name, tool_call_id))
         self._messages_by_thread.setdefault(thread_id, []).append({
+            "id": uuid4(),
             "role": role,
             "content": content,
             "name": name,
             "tool_call_id": tool_call_id,
+            "pinned": False,
         })
 
-    def get_session_history(self, thread_id):
+    # -- ROADMAP_v2 §21 reads ---------------------------------------------
+    #
+    # The watermark and pinned reads storage.py grew for compaction. They
+    # are here for the same reason the reconstruction below is: core/memory
+    # calls them, so a fake that lacks them makes memory untestable rather
+    # than making the tests pass on a simplification.
+
+    def _split_at(self, rows, message_id):
+        """Mirrors storage._split_at: index just past message_id, or 0
+        when it isn't in this thread. The 0 matters -- it is what makes an
+        unrecognised watermark show the whole thread rather than hide a
+        prefix."""
+        if message_id is None:
+            return 0
+        for index, row in enumerate(rows):
+            if row["id"] == message_id:
+                return index + 1
+        return 0
+
+    def get_session_history(self, thread_id, after_message_id=None):
         """
         Mirrors real storage.py's get_session_history() reconstruction,
         per role -- this fake must stay in sync with that logic. If
@@ -274,8 +297,61 @@ class FakeStorage:
         bug went uncaught for a time: the fake and the fix diverged
         without anything flagging it).
         """
+        rows = self._messages_by_thread.get(thread_id, [])
+        return self._reconstruct(rows[self._split_at(rows, after_message_id):])
+
+    def archive_history(self, thread_id):
+        """AC1's unreduced read: no watermark parameter, ever."""
+        return self._reconstruct(self._messages_by_thread.get(thread_id, []))
+
+    def pinned_through(self, thread_id, message_id):
+        rows = self._messages_by_thread.get(thread_id, [])
+        return self._reconstruct(
+            [r for r in rows[:self._split_at(rows, message_id)] if r["pinned"]])
+
+    def history_through(self, thread_id, message_id, after_message_id=None):
+        rows = self._messages_by_thread.get(thread_id, [])
+        start = self._split_at(rows, after_message_id)
+        end = self._split_at(rows, message_id)
+        return self._reconstruct(
+            [r for r in rows[start:end] if not r["pinned"]])
+
+    def turn_start_ids(self, thread_id):
+        return [r["id"] for r in self._messages_by_thread.get(thread_id, [])
+                if r["role"] == "user"]
+
+    def message_ids_from(self, thread_id, message_id):
+        rows = self._messages_by_thread.get(thread_id, [])
+        start = self._split_at(rows, message_id)
+        if not start:
+            return []
+        return [message_id] + [r["id"] for r in rows[start:]]
+
+    def set_pinned(self, message_ids, pinned=True):
+        wanted = set(message_ids)
+        changed = 0
+        for rows in self._messages_by_thread.values():
+            for row in rows:
+                if row["id"] in wanted and row["pinned"] != pinned:
+                    row["pinned"] = pinned
+                    changed += 1
+        return changed
+
+    def latest_checkpoint(self, thread_id):
+        return self._checkpoints.get(thread_id)
+
+    def save_checkpoint(self, thread_id, summary_text,
+                        covers_up_to_message_id, strategy="rederive"):
+        checkpoint = types.SimpleNamespace(
+            id=uuid4(), thread_id=thread_id, summary_text=summary_text,
+            covers_up_to_message_id=covers_up_to_message_id,
+            strategy=strategy)
+        self._checkpoints[thread_id] = checkpoint
+        return checkpoint.id
+
+    def _reconstruct(self, rows):
         formatted = []
-        for row in self._messages_by_thread.get(thread_id, []):
+        for row in rows:
             role = row["role"]
             content = row["content"]
 
@@ -299,6 +375,41 @@ class FakeStorage:
         return formatted
 
 
+# Every storage symbol core/memory.py imports, in ONE list.
+#
+# It was two: the fixture below had a copy and test_json_retry.py had a
+# hand-rolled one. §21 added five symbols to core/memory.py and the
+# hand-rolled copy silently kept redirecting four -- so the unpatched call
+# reached a real Session against the root conftest's FAKE sqlmodel, whose
+# Field() returns a dict, and the failure surfaced as
+# "'dict' object has no attribute 'desc'" from a test about JSON retries.
+#
+# A second list of the same fact is the shape this project's canonical bug
+# has. Adding a storage import to core/memory.py now means adding one name
+# here, and every installer follows.
+MEMORY_STORAGE_SYMBOLS = (
+    "create_thread", "get_thread", "save_message", "get_session_history",
+    "update_thread_extra",
+    # ROADMAP_v2 §21
+    "latest_checkpoint", "pinned_through", "turn_start_ids",
+    "message_ids_from", "set_pinned",
+)
+
+
+def install_fake_storage(set_attr, storage) -> None:
+    """Redirect core/memory.py's storage imports at `storage`.
+
+    `set_attr` is whatever the caller has for patching -- `monkeypatch.setattr`
+    or `mocker.patch.object`, which take the same (target, name, value)
+    positionally. Passing the patcher in rather than choosing one keeps this
+    usable from both fixture and test bodies.
+    """
+    import core.memory as memory_mod
+
+    for name in MEMORY_STORAGE_SYMBOLS:
+        set_attr(memory_mod, name, getattr(storage, name))
+
+
 @pytest.fixture
 def fake_storage(monkeypatch):
     """Injects a FakeStorage in place of every storage function imported
@@ -306,10 +417,5 @@ def fake_storage(monkeypatch):
     behavior without a real DB should depend on this fixture.
     """
     storage = FakeStorage()
-    import core.memory as memory_mod
-    monkeypatch.setattr(memory_mod, "create_thread", storage.create_thread)
-    monkeypatch.setattr(memory_mod, "get_thread", storage.get_thread)
-    monkeypatch.setattr(memory_mod, "save_message", storage.save_message)
-    monkeypatch.setattr(memory_mod, "get_session_history", storage.get_session_history)
-    monkeypatch.setattr(memory_mod, "update_thread_extra", storage.update_thread_extra)
+    install_fake_storage(monkeypatch.setattr, storage)
     return storage

@@ -46,7 +46,27 @@ from uuid import UUID
 
 from storage import (
     create_thread, get_thread, save_message, get_session_history,
-    update_thread_extra,
+    update_thread_extra, latest_checkpoint, pinned_through,
+    message_ids_from, set_pinned, turn_start_ids,
+)
+
+# ROADMAP_v2 §21 (M8). How a compaction summary is introduced to the model.
+#
+# The neutral shape has three roles -- user, assistant, tool -- and no
+# "system" among them, because the system prompt travels separately. A
+# leading USER message is therefore the only form all three providers
+# accept in the message list, and it is where a conversation naturally
+# starts anyway.
+#
+# It is NEVER persisted as a MessageLog row. Doing so would put derived
+# content in an append-only archive whose whole value is being original,
+# and the next compaction would then summarize the previous summary as if
+# it were something the user said -- chaining by accident, on a code path
+# that means to re-derive.
+SUMMARY_PREFIX = (
+    "[Summary of the earlier part of this conversation, compacted to save "
+    "context. The full history is preserved and unedited; this is what is "
+    "being shown to you now.]\n\n"
 )
 
 
@@ -61,8 +81,111 @@ class ConversationMemory:
             if thread is None:
                 raise ValueError(f"No conversation thread found with id {thread_id}")
             self.thread_id = thread_id
-            self._messages = get_session_history(thread_id)
             self._extra = dict(getattr(thread, "extra_data", None) or {})
+            self._messages = self._derived_view()
+
+    # -- the derived view (§21) --------------------------------------------
+
+    def _derived_view(self) -> list[dict]:
+        """What the agent sees this turn: a view computed over the archive,
+        not a second copy of it.
+
+        Three parts, in order:
+          1. the latest checkpoint's summary, as a leading user message
+          2. pinned rows from inside the span that summary covers (M9),
+             verbatim -- the summary skipped them, and one watermark
+             cannot say "everything through K except these"
+          3. every archive row after the watermark, verbatim
+
+        A thread that has never been compacted has no checkpoint, so this
+        returns exactly what get_session_history() always returned. That
+        equivalence is what keeps every pre-§21 caller untouched until the
+        trigger first fires on a thread, and it is asserted directly.
+        """
+        checkpoint = latest_checkpoint(self.thread_id)
+        if checkpoint is None:
+            return get_session_history(self.thread_id)
+
+        watermark = checkpoint.covers_up_to_message_id
+        summary = {
+            "role": "user",
+            "content": f"{SUMMARY_PREFIX}{checkpoint.summary_text}",
+        }
+        return (
+            [summary]
+            + pinned_through(self.thread_id, watermark)
+            + get_session_history(self.thread_id, after_message_id=watermark)
+        )
+
+    def apply_checkpoint(self) -> None:
+        """Rebuild the in-memory view after a compaction was recorded.
+
+        Deliberately re-reads rather than splicing the summary into the
+        list it already holds. The assembly rules (a leading summary,
+        pinned re-inclusion, the tail) then live in exactly one place, so
+        a mid-run compaction and a resumed thread cannot produce different
+        views of the same checkpoint -- which is the divergence a second
+        assembly path would eventually introduce.
+        """
+        self._messages = self._derived_view()
+
+    # -- measured context size (§21) ----------------------------------------
+
+    @property
+    def last_input_tokens(self) -> int:
+        """The provider's own count of everything it was last sent on this
+        thread, or 0 if it has never been measured.
+
+        This is what §21's compaction trigger reads. It is exact and it
+        comes from the provider rather than from a local tokenizer that
+        would have to be right per model -- but it is retrospective, which
+        is why the trigger is evaluated after a response and acts before
+        the next call.
+
+        PERSISTED, via the same extra_data write-through goal mode uses.
+        §21 says a resumed thread needs a rough character estimate before
+        its first call because nothing has been measured yet; carrying the
+        last real measurement across the process boundary means the
+        estimate is only ever needed for a thread written before this
+        section existed.
+        """
+        return int(self._extra.get("last_input_tokens") or 0)
+
+    def record_input_tokens(self, tokens: int) -> None:
+        """Store the measurement from the call that just returned. Ignores
+        a zero, which is what D21's raise exists to prevent reaching here
+        and what a provider reporting no usage would otherwise write over
+        a real earlier number."""
+        if tokens:
+            self.set_extra("last_input_tokens", int(tokens))
+
+    # -- pinning (§21) ------------------------------------------------------
+
+    def pin_last(self, turns: int = 1) -> int:
+        """Mark the last `turns` turns compaction-exempt. Returns how many
+        rows were newly pinned.
+
+        ORDINAL, not an id. §21 keeps MessageLog.id out of the neutral
+        shape -- the model never sees one and so cannot name one -- and
+        adding it would put a persistence concept into the provider-neutral
+        contract the whole memory design rests on, with three translation
+        branches then needing to strip it before the wire. "Pin the last N
+        turns" needs no id and is how the tool would actually be used.
+
+        A turn starts at a user message and runs to just before the next
+        one, so pinning a turn keeps the question together with its answer
+        and any tool results between them. Asking for more turns than the
+        thread has pins the whole thread rather than erroring: the intent
+        ("keep this conversation") is unambiguous and there is nothing to
+        clarify.
+        """
+        if turns < 1:
+            return 0
+        starts = turn_start_ids(self.thread_id)
+        if not starts:
+            return 0
+        first = starts[max(0, len(starts) - turns)]
+        return set_pinned(message_ids_from(self.thread_id, first))
 
     @property
     def extra(self) -> dict:

@@ -265,11 +265,13 @@ def test_resumed_history_contains_failed_assistant_turn(mocker):
 
     # Install a FakeStorage over core.memory's storage imports.
     fake_storage = FakeStorage()
-    import core.memory as memory_mod
-    mocker.patch.object(memory_mod, "create_thread", fake_storage.create_thread)
-    mocker.patch.object(memory_mod, "get_thread", fake_storage.get_thread)
-    mocker.patch.object(memory_mod, "save_message", fake_storage.save_message)
-    mocker.patch.object(memory_mod, "get_session_history", fake_storage.get_session_history)
+    # The shared installer, NOT a hand-rolled list. This test used to name
+    # the four symbols it needed; §21 added five more to core/memory.py and
+    # the unpatched ones reached a real Session against the fake sqlmodel,
+    # failing here with an error about `.desc()` that has nothing to do
+    # with JSON retries. See conftest.MEMORY_STORAGE_SYMBOLS.
+    from tests.conftest import install_fake_storage
+    install_fake_storage(mocker.patch.object, fake_storage)
 
     # Patch api_initialization so _run doesn't reach the real SDK client.
     mocker.patch("core.loop.api_initialization", return_value=object())
