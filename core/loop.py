@@ -385,6 +385,7 @@ class RunAgentLoop:
         system_prompt: Optional[str] = None,
         permission_channel: Optional[queue.Queue] = None,
         granted_tools: Optional[set] = None,
+        authorization=None,
     ) -> ModelResponse:
         """Regular conversation — full tool set, default system prompt,
         one continuous thread. Pass thread_id to resume an existing
@@ -404,7 +405,25 @@ class RunAgentLoop:
         parent could prompt, so it silently lost every approval-gated tool
         -- including all MCP tools -- and the same agent behaved
         differently depending on whether it was activated with /agent or
-        spawned."""
+        spawned.
+
+        authorization (§20): a RunAuthorization, for an agent-shaped run
+        that is part of a research run -- §20's reviewer is the first.
+        §25 added the bundle to run_deep_research_mode and
+        continue_conversation and stopped here, because nothing
+        agent-shaped needed it yet; a reviewer inheriting its run's grants
+        and BUDGET does.
+
+        Mutually exclusive with granted_tools, and checked rather than
+        silently resolved. The two spell the same underlying argument, so
+        one would quietly win -- and if the bundle lost, a reviewer would
+        run with no budget and no provider while looking authorised."""
+        if authorization is not None and granted_tools is not None:
+            raise ValueError(
+                "run_agent_conversation: pass authorization= or "
+                "granted_tools=, not both -- they set the same underlying "
+                "argument, so one would silently win."
+            )
         memory = ConversationMemory(thread_id=thread_id)
         memory.add_user_message(user_goal)
         prompt = with_goal(
@@ -413,11 +432,15 @@ class RunAgentLoop:
             else system_prompts.with_catalogs(DEFAULT_SYSTEM_PROMPT),
             memory,
         )
+        auth_kwargs = (
+            _authorization_kwargs(authorization) if authorization is not None
+            else {"granted_tools": granted_tools}
+        )
         response = run_to_completion(RunAgentLoop._run(
             memory, prompt,
             provider_name, model, context,
             max_steps, max_total_tokens, temperature=temperature, effort=effort,
-            permission_channel=permission_channel, granted_tools=granted_tools,
+            permission_channel=permission_channel, **auth_kwargs,
         ))
         response.thread_id = memory.thread_id
         return response

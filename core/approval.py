@@ -16,6 +16,13 @@ whether a tool is allowed at all and whether a call needs approval (D14,
 question that policy raised. That is why a grant lives on RunInfo and not
 in ToolContext.approval_overrides -- those OR, so they can only tighten.
 
+§20 adds a THIRD thing that is not either of those: ReviewConsent, the
+human's answer to "may this edit be applied?". It lives here because it
+has the same shape and the same reason for existing -- a decision the
+shell knows how to obtain and the pipeline must not hard-code -- not
+because it is a way for a tool call to proceed. See its docstring for why
+it is not folded into RunAuthorization.
+
 Deliberately a leaf module with no project imports. core/loop.py,
 main.py, tui/app.py and core/reasoning/ all depend on it; it depends on
 none of them.
@@ -86,6 +93,37 @@ class ApprovalProvider:
 
     ask: Callable[[str, dict, Optional[str]], bool]
     honour_run_scope: bool = True
+
+
+@dataclass
+class ReviewConsent:
+    """A caller-supplied way to ask the user about one proposed correction
+    and block. ROADMAP_v2 §20 (V3/V4).
+
+    decide(finding, round) -> (decision, notes), where decision is one of
+    "accept", "reject", "refine" or "reject_all", and notes carries the
+    free-text steer that only "refine" reads.
+
+    NOT a field on RunAuthorization, deliberately. That bundle answers "may
+    this gated call proceed?"; this answers "may this edit be applied?" --
+    a different question, at a different stage, with a different set of
+    answers. §25 warned against multiplying KINDS of authorization inside
+    the bundle, and folding an edit decision in there would be exactly
+    that. Both belong in §23's response channel eventually; until then they
+    stay two named things rather than one overloaded one.
+
+    Absent means nobody can be asked, and V6 makes that decisive: the
+    review still runs and still records what it found, but nothing is
+    applied. Same posture as a headless run's gated tools -- the inability
+    to ask is not permission to proceed.
+
+    "reject_all" ends the walk and declines everything remaining. It is
+    safe by construction because it only ever DECLINES: the escape hatch a
+    long review needs cannot be the one that turns fatigue into a
+    reflexive accept.
+    """
+
+    decide: Callable[[dict, int], tuple]
 
 
 @dataclass

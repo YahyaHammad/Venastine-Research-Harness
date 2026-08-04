@@ -169,6 +169,27 @@ MAX_GRANTED_TOOL_CALLS = 150
 ATTENDED_APPROVAL_TIMEOUT_S = 600
 
 
+# ROADMAP_v2 §20 (D9). Whether a finished research run gets a reviewer pass
+# over its own output. Off by default: it is one more model call plus a
+# re-synthesis whenever a correction is accepted, and it needs someone
+# present to consent to anything it changes.
+SUBAGENT_REVIEW = False
+
+# §20 (V4). Ceiling on how many findings one review may put to the user.
+# Consent fatigue is the failure mode a mutating review stage has and a
+# read-only one does not: the fiftieth prompt gets answered differently
+# from the first, and an injected "correction" only needs one reflexive
+# yes. Findings past the cap are dropped and the drop is TRACED -- a
+# silent truncation would read as "the reviewer found twelve things".
+MAX_REVIEW_FINDINGS = 25
+
+# §20 (V5). How many times one finding may be sent back for refinement.
+# A human asks for each round, so this is not a runaway guard -- it bounds
+# the case where the reviewer keeps producing a proposal that misses the
+# same point, which is when the honest answer is to reject it.
+MAX_REVIEW_REFINEMENTS = 3
+
+
 @dataclass
 class APICredentials:
     provider_name: str # Pick one of the following (ensure correct spelling & capitalization) {OPENAI, ANTHROPIC, GOOGLE, OPENROUTER, DEEPSEEK, GROK, MISTRAL, GROQ, TOGETHERAI, PERPLEXITY, FIREWORKS, QWEN, Z.AI, COHERE]
