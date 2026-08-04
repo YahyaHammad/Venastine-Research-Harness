@@ -65,6 +65,11 @@ _KNOWN_SETTINGS = {
 # fixed by adding support for it. See _validate_settings.
 _KNOWN_RESEARCH = {
     "approval_mode": str,   # "none" (default) or "attended"
+    # §20/D9. A MODE, so R12's rule permits persisting it: the worst a
+    # hostile settings.json can do here is make a run stop and ask you
+    # about corrections it wants to make, which is more friction and never
+    # more authority. --no-review escapes it for one run.
+    "subagent_review": bool,
 }
 RESEARCH_APPROVAL_MODES = ("none", "attended")
 _KNOWN_COMPACTION = {

@@ -60,6 +60,7 @@ def write_run_artifacts(run: PipelineRun) -> str:
       04_confidence.json      Pass 4 tier + score breakdown per claim
       05_assumptions.json     Pass 5 assumption audit
       06_revisions.json       6a/6c revisions (only if any claim was revised)
+      07_review.json          §20 review findings + decisions (only if reviewed)
       granted_calls.json      §25 audit trail (only if a grant was spent)
       confidence_chart.png    Tier distribution bar chart (matplotlib)
       trace.md                Full trace log
@@ -121,6 +122,13 @@ def write_run_artifacts(run: PipelineRun) -> str:
     # skimmed past, which is the opposite of an audit trail's job.
     if run.granted_calls:
         write("granted_calls.json", json.dumps(run.granted_calls, indent=2))
+
+    # §20: same rule, same reason. Its presence in an output directory is
+    # itself the signal that this run was reviewed -- and on a run with no
+    # consent route it is the ONLY durable record of what the reviewer
+    # found, since nothing was applied for the claims file to show.
+    if run.subagent_reviews:
+        write("07_review.json", json.dumps(run.subagent_reviews, indent=2))
 
     # Essential human-readable artifacts first -- a supplementary-file
     # failure (chart, PDF) must not prevent these from being written.

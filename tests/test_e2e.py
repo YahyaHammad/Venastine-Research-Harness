@@ -208,6 +208,13 @@ def test_research_mode_e2e_prints_report_and_trace(mocker, capsys):
         # positionally here rather than left out, so a future default of
         # "grant something" cannot slip through this test unnoticed.
         authorization=None,
+        # §20: same reasoning. review=None means nothing can be applied
+        # (V6) and subagent_review=None defers to config.SUBAGENT_REVIEW,
+        # which is False -- so a default research run is unchanged. Both
+        # asserted so a future default of "review and apply" cannot slip
+        # through unnoticed.
+        review=None,
+        subagent_review=None,
     )
 
     # --- Verify write_run_artifacts was called with the run ---

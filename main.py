@@ -313,13 +313,20 @@ def run_research(
     ensemble_mode: bool | None = None,
     ensemble_n: int | None = None,
     authorization=None,
+    review=None,
+    subagent_review=None,
 ) -> None:
     """Run the full deep-research pipeline, write artifacts to disk,
     and print the results. ensemble_mode/ensemble_n come from
     settings.json (§14); None means the pipeline falls back to the
     config.py defaults. authorization (§25) comes from
     build_research_authorization(); None means no gated tool is reachable,
-    which is the behaviour every research run had before §25."""
+    which is the behaviour every research run had before §25.
+
+    review (§20) comes from build_review_consent(); None means the review
+    may still run but applies nothing (V6). subagent_review is whether it
+    runs at all -- separate, because --review on a piped run has no
+    consent object and must still report."""
     from core.reasoning.orchestrator import run_deep_research_pipeline
     from core.reasoning.output_writer import write_run_artifacts
 
@@ -330,7 +337,8 @@ def run_research(
         run = run_deep_research_pipeline(
             user_query=query, model=model, provider_name=provider_name,
             ensemble_mode=ensemble_mode, ensemble_n=ensemble_n,
-            authorization=authorization,
+            authorization=authorization, review=review,
+            subagent_review=subagent_review,
         )
     except Exception as e:
         logger.exception("Research pipeline failed")
@@ -451,6 +459,30 @@ def build_parser() -> argparse.ArgumentParser:
              "happens, instead of hiding those tools. Combines with "
              "--grant, which covers the tools you do not want asked about.",
     )
+    # §20 (D9). Same None-default precedence as --attended, and for the
+    # same reason: the MODE is persistable, so settings.json can turn the
+    # review on and an explicit flag still wins either way. --no-review
+    # exists because a persisted `true` otherwise has no per-run escape.
+    review_group = parser.add_mutually_exclusive_group()
+    review_group.add_argument(
+        "--review",
+        dest="review",
+        action="store_const",
+        const=True,
+        default=None,
+        help="Research mode: after the pipeline finishes, have a reviewer "
+             "agent check its claims and report, and offer each proposed "
+             "correction for you to accept, reject or refine. Nothing is "
+             "changed without your say-so.",
+    )
+    review_group.add_argument(
+        "--no-review",
+        dest="review",
+        action="store_const",
+        const=False,
+        help="Research mode: skip the post-pipeline review even if "
+             "settings.json or config.py turns it on.",
+    )
     parser.add_argument(
         "--tui",
         action="store_true",
@@ -486,6 +518,73 @@ def resolve_attended(args, settings: dict) -> bool:
     if args.attended is not None:
         return bool(args.attended)
     return settings.get("research", {}).get("approval_mode") == "attended"
+
+
+def resolve_review(args, settings: dict) -> bool:
+    """§20 (D9). --review/--no-review > settings.json
+    research.subagent_review > config.SUBAGENT_REVIEW.
+
+    Same mechanism as resolve_attended: it only works because the argparse
+    default is None, so "flag absent" stays distinguishable from "flag
+    given as false" -- and --no-review has to be able to beat a persisted
+    true, or a project setting could not be escaped for one run."""
+    if args.review is not None:
+        return bool(args.review)
+    persisted = settings.get("research", {}).get("subagent_review")
+    if persisted is not None:
+        return bool(persisted)
+    return bool(config.SUBAGENT_REVIEW)
+
+
+def build_review_consent():
+    """A ReviewConsent that asks at the terminal (§20 V4).
+
+    Returns None when stdin is not a terminal, and that is load-bearing
+    rather than defensive: V6 says nothing is applied without a consent
+    route, so a piped or cron-driven run is advisory BY CONSTRUCTION
+    instead of by a check somewhere downstream that could be forgotten.
+    Reading a decision off a pipe would also be answering on the user's
+    behalf with whatever bytes happened to be there.
+    """
+    from core.approval import ReviewConsent
+
+    if not sys.stdin.isatty():
+        return None
+
+    reader = _StdinReader()
+
+    def decide(finding, round_index):
+        kind = finding.get("kind")
+        target = finding.get("claim_id") or "the report"
+        print(f"\n[review] {kind} correction to {target} "
+              f"(severity: {finding.get('severity', 'unknown')})")
+        print(f"  why: {finding.get('reason', '(no reason given)')}")
+        print(f"  proposed: {finding.get('proposed')}")
+        if round_index:
+            print(f"  (refinement {round_index} of "
+                  f"{config.MAX_REVIEW_REFINEMENTS})")
+        answer = reader.ask(
+            "  [a]ccept / [r]eject / [f] refine <note> / [!] reject the "
+            f"rest ({config.ATTENDED_APPROVAL_TIMEOUT_S}s): ",
+            config.ATTENDED_APPROVAL_TIMEOUT_S)
+        if answer is None:
+            # Same direction as an unanswered approval prompt: declining
+            # is safe and continuing is useful, so walking away from a
+            # review degrades it rather than wedging the run.
+            print("  [no answer — rejected; the review continues]")
+            return ("reject", "")
+        answer = answer.strip()
+        head, _, note = answer.partition(" ")
+        head = head.lower()
+        if head in ("a", "accept"):
+            return ("accept", "")
+        if head in ("f", "refine"):
+            return ("refine", note.strip())
+        if head in ("!", "reject-all"):
+            return ("reject_all", "")
+        return ("reject", "")
+
+    return ReviewConsent(decide=decide)
 
 
 def _ask(prompt: str) -> str:
@@ -707,12 +806,19 @@ if __name__ == "__main__":
             # AFTER setup_mcp: the tools a grant can cover are named at
             # connection time, so asking any earlier would offer a list
             # that is empty for exactly the servers this exists to reach.
+            review_on = resolve_review(args, settings)
             run_research(
                 args.query, provider, model,
                 ensemble_mode=settings.get("ensemble_mode"),
                 ensemble_n=settings.get("ensemble_n"),
                 authorization=build_research_authorization(
                     args.grant_tools, resolve_attended(args, settings)),
+                # Two facts, deliberately: whether the review runs, and
+                # whether anyone can be asked about it. build_review_consent
+                # returns None on a non-tty stdin, so a piped run still
+                # gets the findings and still changes nothing (V6).
+                subagent_review=review_on,
+                review=build_review_consent() if review_on else None,
             )
         else:
             run_chat(args.thread, provider, model, first_message=args.query)

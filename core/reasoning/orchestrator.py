@@ -197,7 +197,7 @@ def _synthesis_input(run: PipelineRun, directives: list | None = None) -> str:
 
 
 def _review_stage(run: PipelineRun, model: str, provider_name: str,
-                  authorization, review) -> None:
+                  authorization, review, enabled: bool = False) -> None:
     """ROADMAP_v2 §20. Opt-in review of the finished run, with every
     correction consented to individually.
 
@@ -209,12 +209,17 @@ def _review_stage(run: PipelineRun, model: str, provider_name: str,
     directory at all. The consent OBJECT still comes from the shell,
     because only a shell knows how to reach a human.
 
-    `review is not None` also enables the stage, so a shell that offered
-    the user a consent route does not additionally need the config flag
-    set. The flag alone (D9) runs it with nobody to ask, which V6 makes
-    advisory.
+    `enabled` and `review` are SEPARATE on purpose. "The user asked for a
+    review" and "someone can be asked about its findings" are different
+    facts, and collapsing them loses the case that matters: --review on a
+    piped run must still produce findings and still change nothing (V6).
+    If the consent object alone enabled the stage, that run would skip the
+    review entirely and report nothing at all.
+
+    A consent object with `enabled` false still runs it, because a caller
+    that went to the trouble of building one wants the review.
     """
-    if not config.SUBAGENT_REVIEW and review is None:
+    if not enabled and review is None:
         return
 
     from core.reasoning import review as review_module
@@ -266,6 +271,7 @@ def run_deep_research_pipeline(
     ensemble_n: int | None = None,
     authorization=None,
     review=None,
+    subagent_review: bool | None = None,
 ) -> PipelineRun:
     """authorization (§25): a core.approval.RunAuthorization built by the
     shell that launched this run, or None for the pre-§25 behaviour (no
@@ -279,9 +285,16 @@ def run_deep_research_pipeline(
     human. A SECOND parameter rather than a field on the authorization
     bundle: that bundle answers "may this gated call proceed?" and this
     answers "may this edit be applied?". None means nothing is applied,
-    even when the review itself runs (V6)."""
+    even when the review itself runs (V6).
+
+    subagent_review (§20/D9): whether the review stage runs at all. None
+    falls back to config.SUBAGENT_REVIEW, matching ensemble_mode's
+    pattern. Separate from `review` because --review on a piped run must
+    still produce findings while applying nothing."""
     ensemble_mode = config.ENSEMBLE_MODE if ensemble_mode is None else ensemble_mode
     ensemble_n = config.ENSEMBLE_N if ensemble_n is None else ensemble_n
+    subagent_review = (config.SUBAGENT_REVIEW if subagent_review is None
+                       else subagent_review)
 
     # ROADMAP_v2 §16 prerequisite. Ensemble mode's entire diversity mechanism
     # is a raised temperature on Pass 1 -- and current Anthropic models reject
@@ -478,7 +491,8 @@ def run_deep_research_pipeline(
         update_pipeline_run(run.run_id, run)
 
         # --- §20: review, consent, correct ---
-        _review_stage(run, model, provider_name, authorization, review)
+        _review_stage(run, model, provider_name, authorization, review,
+                      enabled=subagent_review)
 
         update_pipeline_run(run.run_id, run, status="complete")
         return run

@@ -24,6 +24,7 @@ Two hard acceptance criteria live in this file:
        against textual 1.0.0's actual signature, not assumed.
 """
 
+import logging
 import queue
 from uuid import UUID
 
@@ -53,9 +54,11 @@ from prompts import system_prompts
 from tui import ravens, themes
 from tui.commands import SlashCommand, registry as commands
 from tui.screens import (
-    GrantPickerScreen, PermissionScreen, ThreadPickerScreen,
+    GrantPickerScreen, PermissionScreen, ReviewScreen, ThreadPickerScreen,
 )
 from tui.widgets import EffortRaven, GoalBanner, RavenPanel, Transcript
+
+logger = logging.getLogger(__name__)
 
 
 class LoopEventMessage(Message):
@@ -533,6 +536,43 @@ class VenastineApp(App):
         finally:
             self._permission_channel = None
 
+    def ask_review_blocking(self, finding: dict, round_index: int):
+        """Show the review modal and BLOCK until answered. §20 V4.
+
+        Called from the /research worker thread, and structured exactly
+        like ask_permission_blocking for the same reason: the pipeline
+        drains its passes through run_to_completion(), so no LoopEvent
+        carries this question to the UI.
+
+        The SAME `_permission_channel` field, so `_release_permission_channel`
+        already covers it -- quitting with a review modal open must not
+        leave a non-daemon worker parked on a Queue nobody will ever
+        answer. That release puts a bare False, which is why the decode
+        below treats anything that is not a (decision, notes) pair as a
+        rejection: a new dismissal path added later fails safe instead of
+        silently applying an edit.
+        """
+        channel: queue.Queue = queue.Queue()
+        self._permission_channel = channel
+        screen = ReviewScreen(finding, round_index,
+                              config.MAX_REVIEW_REFINEMENTS)
+        self.call_from_thread(
+            self.push_screen, screen, lambda answer: channel.put(answer))
+        try:
+            return _decode_review_answer(
+                channel.get(timeout=config.ATTENDED_APPROVAL_TIMEOUT_S))
+        except queue.Empty:
+            self.call_from_thread(self._timed_out_review, screen)
+            return ("reject", "")
+        finally:
+            self._permission_channel = None
+
+    def _timed_out_review(self, screen) -> None:
+        if screen in self.screen_stack:
+            screen.dismiss(("reject", ""))
+        self._transcript.write_system(
+            "[no answer — correction rejected; the review continues]")
+
     def _timed_out_permission(self, screen, tool_name: str) -> None:
         if screen in self.screen_stack:
             screen.dismiss(False)
@@ -575,6 +615,12 @@ class VenastineApp(App):
             self._transcript.write_system(f"  {line}")
         self._transcript.flush_stream()
         self._transcript.write(run.final_report)
+        if run.subagent_reviews:
+            accepted = sum(1 for d in run.subagent_reviews
+                           if d.get("decision") == "accept")
+            self._transcript.write_system(
+                f"[review: {len(run.subagent_reviews)} finding(s), "
+                f"{accepted} applied — full record in 07_review.json]")
         if run.run_id:
             self._transcript.write_system(f"[run id: {run.run_id}]")
 
@@ -654,6 +700,24 @@ def _cmd_effort(app: VenastineApp, args: str) -> None:
     app.start_effort_lookup(args)
 
 
+def _decode_review_answer(answer):
+    """Anything that is not a well-formed (decision, notes) pair is a
+    REJECT.
+
+    Module-level and shared so the timeout path, the modal path and
+    `_release_permission_channel`'s bare False all funnel through one
+    rule. This is the fifth place the "every dismissal must carry a
+    value" invariant applies, and the first where the unsafe failure is
+    silently applying an edit rather than merely hanging.
+    """
+    if not isinstance(answer, (tuple, list)) or len(answer) != 2:
+        return ("reject", "")
+    decision, notes = answer
+    if decision not in ("accept", "reject", "refine", "reject_all"):
+        return ("reject", "")
+    return (decision, notes or "")
+
+
 def _cmd_research(app: VenastineApp, args: str) -> None:
     """Run the deep-research pipeline on a query, off the UI thread.
 
@@ -672,14 +736,19 @@ def _cmd_research(app: VenastineApp, args: str) -> None:
         candidates, parse_grant_spec, GrantSpecError,
     )
 
-    attended, grant_spec, query = _split_research_flags(args)
+    attended, review, grant_spec, query = _split_research_flags(args)
     if not attended:
         attended = app._settings.get("research", {}).get(
             "approval_mode") == "attended"
+    if review is None:
+        persisted = app._settings.get("research", {}).get("subagent_review")
+        review = bool(persisted) if persisted is not None \
+            else bool(config.SUBAGENT_REVIEW)
     app._research_attended = attended
+    app._research_review = review
     if not query:
         app._transcript.write_error(
-            "Usage: /research [--attended] [--grant[=a,b]] <query>")
+            "Usage: /research [--attended] [--review] [--grant[=a,b]] <query>")
         return
     if app._busy:
         app._transcript.write_error("Still working — wait for this turn to finish.")
@@ -749,8 +818,9 @@ def _authorization_for(app: VenastineApp, granted: set):
 def _split_research_flags(args: str):
     """Strip leading /research flags off the query.
 
-    Returns (attended, grant_spec, query), where grant_spec is None
-    (absent), GRANT_PICKER (bare flag), or the raw comma-separated string.
+    Returns (attended, review, grant_spec, query), where grant_spec is
+    None (absent), GRANT_PICKER (bare flag), or the raw comma-separated
+    string, and review is None (defer to settings) / True / False.
 
     A LOOP over leading tokens, so --grant and --attended compose in
     either written order -- R10 makes the combination the useful case, and
@@ -767,11 +837,16 @@ def _split_research_flags(args: str):
     """
     text = (args or "").strip()
     attended = False
+    review = None
     grant_spec = None
     while text:
         head, _sep, rest = text.partition(" ")
         if head == "--attended":
             attended = True
+        elif head == "--review":
+            review = True
+        elif head == "--no-review":
+            review = False
         elif head in ("--grant", "--grant-tools"):
             grant_spec = GRANT_PICKER
         elif head.startswith("--grant=") or head.startswith("--grant-tools="):
@@ -779,7 +854,24 @@ def _split_research_flags(args: str):
         else:
             break
         text = rest.strip()
-    return attended, grant_spec, text
+    return attended, review, grant_spec, text
+
+
+def _review_consent_for(app: VenastineApp):
+    """A ReviewConsent backed by the modal, or None when the review is
+    off. §20 V4/V6."""
+    from core.approval import ReviewConsent
+
+    if not getattr(app, "_research_review", False):
+        return None
+    app._transcript.write_system(
+        "Review: after the pipeline finishes, a reviewer checks its claims "
+        "and report. Each proposed correction is yours to accept, reject or "
+        f"refine; {config.ATTENDED_APPROVAL_TIMEOUT_S}s with no answer "
+        "rejects that one and the review continues.")
+    return ReviewConsent(
+        decide=lambda finding, round_index:
+            app.ask_review_blocking(finding, round_index))
 
 
 def _start_research(app: VenastineApp, query: str, authorization) -> None:
@@ -789,9 +881,12 @@ def _start_research(app: VenastineApp, query: str, authorization) -> None:
     app._transcript.write_user(f"/research {query}")
     app._transcript.write_system("Running the ten-pass pipeline. This takes a while.")
     app._raven.state = ravens.THINKING
+    review_on = bool(getattr(app, "_research_review", False))
+    consent = _review_consent_for(app)
 
     def work() -> None:
         from core.reasoning.orchestrator import run_deep_research_pipeline
+        from core.reasoning.output_writer import write_run_artifacts
         error = None
         try:
             run = run_deep_research_pipeline(
@@ -801,7 +896,18 @@ def _start_research(app: VenastineApp, query: str, authorization) -> None:
                 ensemble_mode=app._settings.get("ensemble_mode"),
                 ensemble_n=app._settings.get("ensemble_n"),
                 authorization=authorization,
+                review=consent,
+                subagent_review=review_on,
             )
+            # §20 V9. write_run_artifacts had ONE production call site
+            # (main.py), so a TUI research run produced no /output/<run_id>/
+            # at all -- the shipped consequence of leaving a post-pipeline
+            # stage to whichever shell remembers it. Best-effort, matching
+            # the CLI: a disk failure must not discard a completed run.
+            try:
+                write_run_artifacts(run)
+            except Exception:
+                logger.exception("Could not write artifacts")
             app.post_message(ResearchFinished(run, None))
         except BaseException as e:  # noqa: BLE001 — reported, then re-raised
             error = e
@@ -840,7 +946,8 @@ def register_builtin_commands() -> None:
         SlashCommand("theme", "switch colour theme", _cmd_theme, "[name]"),
         SlashCommand("effort", "switch reasoning effort", _cmd_effort, "[level|auto]"),
         SlashCommand("research", "run the deep-research pipeline",
-                     _cmd_research, "[--grant[=a,b]] <query>"),
+                     _cmd_research,
+                     "[--attended] [--review] [--grant[=a,b]] <query>"),
         SlashCommand("threads", "resume a saved thread", _cmd_threads),
         SlashCommand("new", "start a new thread", _cmd_new),
         SlashCommand("quit", "exit", _cmd_quit),

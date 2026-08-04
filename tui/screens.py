@@ -17,7 +17,7 @@ from textual.app import ComposeResult
 from textual.containers import Grid, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import (
-    Button, Label, ListItem, ListView, SelectionList, Static,
+    Button, Input, Label, ListItem, ListView, SelectionList, Static,
 )
 from textual.widgets.selection_list import Selection
 
@@ -109,6 +109,72 @@ class GrantPickerScreen(ModalScreen[object]):
 
     def action_cancel(self) -> None:
         self.dismiss(None)
+
+
+class ReviewScreen(ModalScreen[object]):
+    """Decide one proposed correction to a finished research run (§20 V4).
+
+    Dismisses with a (decision, notes) tuple. Every dismissal path carries
+    one -- escape, the buttons, and the app's shutdown release -- because
+    the /research worker is blocked on a queue and a dismissal carrying
+    None would park it forever. That invariant now applies in a fifth
+    place; the decoder in tui/app.py treats anything malformed as a
+    rejection so a new path added later fails safe rather than silently.
+
+    Four outcomes, not two. Reject and refine are different answers: "this
+    is wrong" ends the finding, while "you missed something" sends it back
+    with a note. And "reject the rest" is the escape a long review needs,
+    safe by construction because it only ever declines -- the affordance
+    that must NOT exist is the one that accepts in bulk.
+    """
+
+    BINDINGS = [("escape", "reject", "Reject")]
+
+    def __init__(self, finding: dict, round_index: int = 0,
+                 max_rounds: int = 0):
+        super().__init__()
+        self._finding = finding
+        self._round = round_index
+        self._max_rounds = max_rounds
+
+    def compose(self) -> ComposeResult:
+        kind = self._finding.get("kind", "?")
+        target = self._finding.get("claim_id") or "the report"
+        severity = self._finding.get("severity", "unknown")
+        body = (
+            f"Why: {self._finding.get('reason', '(no reason given)')}\n\n"
+            f"Proposed: {self._finding.get('proposed')}"
+        )
+        if self._round:
+            body = (f"(refinement {self._round} of {self._max_rounds})\n\n"
+                    f"{body}")
+        yield Vertical(
+            Label(f"{kind} correction to {target}  [{severity}]",
+                  id="review-title"),
+            Static(body, id="review-body"),
+            Input(placeholder="Note for the reviewer (used by Refine)",
+                  id="review-note"),
+            Button("Accept", variant="success", id="review-accept"),
+            Button("Refine", variant="primary", id="review-refine"),
+            Button("Reject", variant="error", id="review-reject"),
+            Button("Reject the rest", variant="error", id="review-reject-all"),
+            id="review-dialog",
+        )
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        decisions = {
+            "review-accept": "accept",
+            "review-refine": "refine",
+            "review-reject": "reject",
+            "review-reject-all": "reject_all",
+        }
+        note = self.query_one("#review-note", Input).value.strip()
+        self.dismiss((decisions[event.button.id], note))
+
+    def action_reject(self) -> None:
+        # Escape declines rather than dismissing with no value, for the
+        # same reason PermissionScreen's escape denies.
+        self.dismiss(("reject", ""))
 
 
 class ThreadPickerScreen(ModalScreen[object]):

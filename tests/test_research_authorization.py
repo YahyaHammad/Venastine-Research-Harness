@@ -190,18 +190,18 @@ class TestTheTuiFlagSplitter:
         return _split_research_flags(text)
 
     def test_no_flag(self):
-        assert self._split("what is entropy") == (False, None, "what is entropy")
+        assert self._split("what is entropy") == (False, None, None, "what is entropy")
 
     def test_bare_grant(self):
         assert self._split("--grant what is entropy") == \
-            (False, GRANT_PICKER, "what is entropy")
+            (False, None, GRANT_PICKER, "what is entropy")
 
     def test_grant_with_value(self):
         assert self._split("--grant=a,b what is entropy") == \
-            (False, "a,b", "what is entropy")
+            (False, None, "a,b", "what is entropy")
 
     def test_attended_alone(self):
-        assert self._split("--attended q") == (True, None, "q")
+        assert self._split("--attended q") == (True, None, None, "q")
 
     @pytest.mark.parametrize("text", [
         "--attended --grant=a q",
@@ -213,25 +213,25 @@ class TestTheTuiFlagSplitter:
         Handling one flag and then the other in a fixed sequence left
         '--grant --attended q' with '--attended q' as the research
         question."""
-        assert self._split(text) == (True, "a", "q")
+        assert self._split(text) == (True, None, "a", "q")
 
     def test_a_query_merely_mentioning_a_flag_is_still_a_query(self):
         """Leading tokens only, not a search. '/research what does --grant
         do' is a research question about the flag, and treating it as an
         invocation would silently swallow the query."""
         assert self._split("what does --grant do") == \
-            (False, None, "what does --grant do")
+            (False, None, None, "what does --grant do")
 
     def test_bare_flag_with_no_query_yields_no_query(self):
-        assert self._split("--grant") == (False, GRANT_PICKER, "")
+        assert self._split("--grant") == (False, None, GRANT_PICKER, "")
 
     def test_the_cli_spelling_is_accepted_here_too(self):
         """The CLI needs two flag names because argparse would eat the
         query as an optional value; here the value is attached with =, so
         both names can mean one thing and muscle memory from either shell
         works."""
-        assert self._split("--grant-tools=a,b q") == (False, "a,b", "q")
-        assert self._split("--grant-tools q") == (False, GRANT_PICKER, "q")
+        assert self._split("--grant-tools=a,b q") == (False, None, "a,b", "q")
+        assert self._split("--grant-tools q") == (False, None, GRANT_PICKER, "q")
 
 
 # ===========================================================================

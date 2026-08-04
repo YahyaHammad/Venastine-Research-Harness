@@ -275,7 +275,7 @@ def _consent(*answers):
     return consent
 
 
-def _stage(run, mocker, consent=None, authorization=None):
+def _stage(run, mocker, consent=None, authorization=None, enabled=False):
     from core import config_loader
     from core.reasoning import orchestrator
 
@@ -286,7 +286,8 @@ def _stage(run, mocker, consent=None, authorization=None):
     # actually loads, which is half of what these tests are for.
     config_loader.initialize(".")
     mocker.patch.object(orchestrator, "update_pipeline_run")
-    orchestrator._review_stage(run, "m", "ANTHROPIC", authorization, consent)
+    orchestrator._review_stage(run, "m", "ANTHROPIC", authorization, consent,
+                               enabled=enabled)
 
 
 TEXT_FINDING = {"kind": "text", "claim_id": "c1",
@@ -331,8 +332,7 @@ class TestNobodyToAskAppliesNothing:
         _stub_reviewer(mocker, [TEXT_FINDING])
         resynth = _stub_resynthesis(mocker)
 
-        mocker.patch.object(config, "SUBAGENT_REVIEW", True)
-        _stage(run, mocker, consent=None)
+        _stage(run, mocker, consent=None, enabled=True)
 
         assert run.claims[0].final_text == "original text"
         assert run.final_report == before
@@ -667,13 +667,13 @@ class TestTheStageIsWiredIntoThePipeline:
         from core.reasoning import orchestrator
 
         run = _reviewed_run()
-        mocker.patch.object(config, "SUBAGENT_REVIEW", True)
         mocker.patch.object(orchestrator, "update_pipeline_run")
         mocker.patch.object(review_module, "run_review",
                             side_effect=RuntimeError("reviewer exploded"))
 
         with pytest.raises(RuntimeError, match="reviewer exploded"):
-            orchestrator._review_stage(run, "m", "ANTHROPIC", None, None)
+            orchestrator._review_stage(run, "m", "ANTHROPIC", None, None,
+                                       enabled=True)
 
     def test_the_pipeline_calls_the_stage_after_final_synthesis(self, mocker):
         """Without this, every test above passes against a _review_stage
@@ -732,3 +732,354 @@ def test_a_missing_reviewer_agent_skips_rather_than_failing(mocker):
     called.assert_not_called()
     assert run.final_report == "REPORT v1"
     assert any("not found" in line for line in run.trace)
+
+
+# ===========================================================================
+# ---- The shells: how a human is actually asked ----------------------------
+# ===========================================================================
+
+
+class TestRequestedIsSeparateFromCanBeAsked:
+    """The two facts collapse dangerously if merged. --review on a piped
+    run has no consent object, so a design where the consent object alone
+    enables the stage would skip the review entirely -- reporting nothing
+    on exactly the run the user asked to have checked."""
+
+    def test_enabled_with_no_consent_still_runs_and_reports(self, mocker):
+        run = _reviewed_run()
+        _stub_reviewer(mocker, [TEXT_FINDING])
+        _stub_resynthesis(mocker)
+        _stage(run, mocker, consent=None, enabled=True)
+
+        assert len(run.subagent_reviews) == 1
+        assert run.claims[0].final_text == "original text"
+
+    def test_the_pipeline_resolves_the_flag_from_config_when_unset(self, mocker):
+        """subagent_review=None must fall back to config.SUBAGENT_REVIEW,
+        matching ensemble_mode's pattern -- otherwise setting the config
+        flag would do nothing through the shells, which pass None."""
+        from core.reasoning import orchestrator
+
+        captured = {}
+        mocker.patch.object(orchestrator, "update_pipeline_run")
+        mocker.patch.object(orchestrator, "create_pipeline_run",
+                            return_value=uuid4())
+        mocker.patch.object(orchestrator, "run_confidence_tiering")
+        mocker.patch.object(orchestrator, "_run_pass", return_value="REPORT")
+        mocker.patch.object(
+            orchestrator, "_run_pass_with_json_retry",
+            side_effect=lambda pass_id, *a, **k: _canned_for(pass_id))
+        mocker.patch.object(
+            orchestrator, "_review_stage",
+            side_effect=lambda *a, **k: captured.update(k))
+        mocker.patch.object(config, "SUBAGENT_REVIEW", True)
+
+        orchestrator.run_deep_research_pipeline(
+            user_query="q", model="m", provider_name="ANTHROPIC")
+
+        assert captured["enabled"] is True
+
+
+class TestTheCliShell:
+
+    def _args(self, argv):
+        import main
+        return main.build_parser().parse_args(argv)
+
+    def test_review_and_no_review_are_mutually_exclusive(self):
+        with pytest.raises(SystemExit):
+            self._args(["--mode", "research", "--review", "--no-review", "q"])
+
+    def test_the_flag_defaults_to_none_so_settings_can_supply_it(self):
+        """The whole precedence chain rests on this: argparse defaulting
+        to False would make 'flag absent' indistinguishable from 'flag
+        given as false', and settings.json could never be honoured."""
+        assert self._args(["--mode", "research", "q"]).review is None
+
+    def test_precedence_is_flag_then_settings_then_config(self, mocker):
+        import main
+
+        mocker.patch.object(config, "SUBAGENT_REVIEW", False)
+        settings_on = {"research": {"subagent_review": True}}
+
+        assert main.resolve_review(self._args(["q"]), {}) is False
+        assert main.resolve_review(self._args(["q"]), settings_on) is True
+        # --no-review must beat a persisted true, or a project setting
+        # could not be escaped for a single run.
+        assert main.resolve_review(
+            self._args(["--no-review", "q"]), settings_on) is False
+        assert main.resolve_review(self._args(["--review", "q"]), {}) is True
+
+    def test_config_supplies_the_default_when_settings_is_silent(self, mocker):
+        import main
+
+        mocker.patch.object(config, "SUBAGENT_REVIEW", True)
+        assert main.resolve_review(self._args(["q"]), {}) is True
+
+    def test_a_non_tty_stdin_gets_no_consent_object(self, mocker):
+        """V6 by construction rather than by a downstream check. Reading a
+        decision off a pipe would answer on the user's behalf with
+        whatever bytes happened to be there."""
+        import main
+
+        mocker.patch("sys.stdin.isatty", return_value=False)
+        assert main.build_review_consent() is None
+
+    def test_a_tty_gets_one(self, mocker):
+        import main
+
+        mocker.patch("sys.stdin.isatty", return_value=True)
+        assert main.build_review_consent() is not None
+
+    def test_the_terminal_prompt_parses_every_answer(self, mocker):
+        import main
+
+        mocker.patch("sys.stdin.isatty", return_value=True)
+        consent = main.build_review_consent()
+        answers = iter([
+            "a\n", "accept\n", "r\n", "f the source is dated 2019\n",
+            "!\n", "\n", "gibberish\n",
+        ])
+        mocker.patch.object(main._StdinReader, "ask",
+                            side_effect=lambda *a, **k: next(answers))
+
+        assert consent.decide(TEXT_FINDING, 0) == ("accept", "")
+        assert consent.decide(TEXT_FINDING, 0) == ("accept", "")
+        assert consent.decide(TEXT_FINDING, 0) == ("reject", "")
+        assert consent.decide(TEXT_FINDING, 0) == (
+            "refine", "the source is dated 2019")
+        assert consent.decide(TEXT_FINDING, 0) == ("reject_all", "")
+        # Anything unrecognised, including a bare newline, declines.
+        assert consent.decide(TEXT_FINDING, 0) == ("reject", "")
+        assert consent.decide(TEXT_FINDING, 0) == ("reject", "")
+
+    def test_an_unanswered_prompt_rejects_rather_than_hanging(self, mocker):
+        import main
+
+        mocker.patch("sys.stdin.isatty", return_value=True)
+        consent = main.build_review_consent()
+        mocker.patch.object(main._StdinReader, "ask", return_value=None)
+
+        assert consent.decide(TEXT_FINDING, 0) == ("reject", "")
+
+    def test_run_research_forwards_both_review_arguments(self, mocker):
+        import main
+
+        pipeline = mocker.patch(
+            "core.reasoning.orchestrator.run_deep_research_pipeline",
+            return_value=_reviewed_run())
+        mocker.patch("core.reasoning.output_writer.write_run_artifacts",
+                     return_value="/out")
+        sentinel = ReviewConsent(decide=lambda f, r: ("reject", ""))
+
+        main.run_research("q", "ANTHROPIC", "m", review=sentinel,
+                          subagent_review=True)
+
+        assert pipeline.call_args.kwargs["review"] is sentinel
+        assert pipeline.call_args.kwargs["subagent_review"] is True
+
+
+class TestTheTuiShell:
+
+    def test_the_flag_splitter_handles_review(self):
+        from tui.app import _split_research_flags
+
+        assert _split_research_flags("--review q") == (False, True, None, "q")
+        assert _split_research_flags("--no-review q") == (
+            False, False, None, "q")
+
+    def test_review_composes_with_the_other_flags_in_any_order(self):
+        from tui.app import _split_research_flags
+
+        for text in ("--attended --review --grant=a q",
+                     "--grant=a --review --attended q",
+                     "--review --attended --grant=a q"):
+            assert _split_research_flags(text) == (True, True, "a", "q"), text
+
+    def test_a_query_mentioning_the_flag_is_still_a_query(self):
+        from tui.app import _split_research_flags
+
+        assert _split_research_flags("what does --review do") == (
+            False, None, None, "what does --review do")
+
+    def test_the_modal_answer_decoder_fails_safe(self):
+        """Every dismissal path must carry a value, and the release path
+        puts a bare False. Anything that is not a well-formed pair is a
+        REJECT -- this is the first place where the unsafe failure is
+        silently applying an edit rather than merely hanging."""
+        from tui.app import _decode_review_answer
+
+        assert _decode_review_answer(("accept", "")) == ("accept", "")
+        assert _decode_review_answer(("refine", "note")) == ("refine", "note")
+        assert _decode_review_answer(False) == ("reject", "")
+        assert _decode_review_answer(None) == ("reject", "")
+        assert _decode_review_answer(("accept",)) == ("reject", "")
+        assert _decode_review_answer(("yes", "")) == ("reject", "")
+        assert _decode_review_answer(("accept", None)) == ("accept", "")
+
+    def test_every_review_screen_dismissal_carries_a_decision(self):
+        """The worker parks on a Queue inside the consent callback. A
+        dismissal carrying None hangs it forever -- the invariant that
+        already applies to PermissionScreen, now in a fifth place."""
+        import inspect
+
+        from tui.screens import ReviewScreen
+
+        source = inspect.getsource(ReviewScreen)
+        dismissals = [line.strip() for line in source.splitlines()
+                      if "self.dismiss(" in line]
+        assert dismissals, "ReviewScreen must dismiss with a value"
+        assert all("self.dismiss()" not in d for d in dismissals), dismissals
+        assert any("reject" in d for d in dismissals), (
+            "escape must decline explicitly, not dismiss with no value")
+
+
+class TestBothShellsWriteArtifacts:
+    """V9. write_run_artifacts had ONE production call site, so a TUI
+    research run produced no /output/<run_id>/ at all."""
+
+    def test_the_cli_writes_them(self, mocker):
+        import main
+
+        mocker.patch("core.reasoning.orchestrator.run_deep_research_pipeline",
+                     return_value=_reviewed_run())
+        writer = mocker.patch(
+            "core.reasoning.output_writer.write_run_artifacts",
+            return_value="/out")
+
+        main.run_research("q", "ANTHROPIC", "m")
+
+        assert writer.call_count == 1
+
+    def test_the_tui_worker_writes_them_too(self, mocker):
+        from tui import app as tui_app
+
+        run = _reviewed_run()
+        mocker.patch("core.reasoning.orchestrator.run_deep_research_pipeline",
+                     return_value=run)
+        writer = mocker.patch(
+            "core.reasoning.output_writer.write_run_artifacts",
+            return_value="/out")
+
+        app = _FakeTuiApp()
+        tui_app._start_research(app, "q", None)
+        app.run_the_worker()
+
+        assert writer.call_count == 1
+
+    def test_a_writer_failure_does_not_lose_the_tui_run(self, mocker):
+        """Best-effort, matching the CLI. A full disk must not discard ten
+        passes of completed work."""
+        from tui import app as tui_app
+
+        run = _reviewed_run()
+        mocker.patch("core.reasoning.orchestrator.run_deep_research_pipeline",
+                     return_value=run)
+        mocker.patch("core.reasoning.output_writer.write_run_artifacts",
+                     side_effect=OSError("disk full"))
+
+        app = _FakeTuiApp()
+        tui_app._start_research(app, "q", None)
+        app.run_the_worker()
+
+        assert app.messages and app.messages[-1].run is run
+        assert app.messages[-1].error is None
+
+
+class _FakeTuiApp:
+    """Minimal stand-in for VenastineApp: _start_research only touches the
+    transcript, the raven, _busy, the settings and run_worker."""
+
+    def __init__(self, review=False):
+        self.model = "m"
+        self.provider_name = "ANTHROPIC"
+        self._settings = {}
+        self._busy = False
+        self._research_review = review
+        self._transcript = _NullTranscript()
+        self._raven = _NullRaven()
+        self.messages = []
+        self._work = None
+
+    def run_worker(self, work, **kwargs):
+        self._work = work
+
+    def run_the_worker(self):
+        self._work()
+
+    def post_message(self, message):
+        self.messages.append(message)
+
+
+class _NullTranscript:
+    def write(self, *a, **k): pass
+    def write_user(self, *a, **k): pass
+    def write_system(self, *a, **k): pass
+    def write_error(self, *a, **k): pass
+    def flush_stream(self, *a, **k): pass
+
+
+class _NullRaven:
+    state = None
+
+
+class TestTheReviewArtifact:
+    """Same rule as granted_calls.json: written only when there is
+    something to write, so its presence in an output directory is itself
+    the signal that this run was reviewed."""
+
+    def _write(self, tmp_path, mocker, reviews):
+        from core.reasoning.output_writer import write_run_artifacts
+
+        mocker.patch.object(config, "OUTPUT_DIR", str(tmp_path))
+        run = _reviewed_run()
+        run.run_id = uuid4()
+        run.subagent_reviews = reviews
+        return write_run_artifacts(run)
+
+    def test_written_when_the_run_was_reviewed(self, tmp_path, mocker):
+        import os
+
+        out = self._write(tmp_path, mocker,
+                          [dict(TEXT_FINDING, decision="accept")])
+        path = os.path.join(out, "07_review.json")
+        assert os.path.exists(path)
+        with open(path, encoding="utf-8") as f:
+            assert json.load(f)[0]["decision"] == "accept"
+
+    def test_absent_when_it_was_not(self, tmp_path, mocker):
+        import os
+
+        out = self._write(tmp_path, mocker, [])
+        assert not os.path.exists(os.path.join(out, "07_review.json"))
+
+    def test_a_rejected_finding_is_still_written(self, tmp_path, mocker):
+        """On a run with no consent route this file is the ONLY durable
+        record of what the reviewer found -- nothing was applied, so the
+        claims file shows nothing."""
+        import os
+
+        out = self._write(tmp_path, mocker,
+                          [dict(TEXT_FINDING, decision="reject")])
+        assert os.path.exists(os.path.join(out, "07_review.json"))
+
+
+class TestTheSettingsKey:
+
+    def _validate(self, block):
+        from core.config_loader import _validate_settings
+
+        _validate_settings({"research": block}, "test-settings.json")
+
+    def test_subagent_review_is_accepted(self):
+        self._validate({"subagent_review": True})
+
+    def test_a_non_boolean_is_rejected(self):
+        with pytest.raises(ValueError):
+            self._validate({"subagent_review": "yes"})
+
+    def test_granted_tools_is_still_rejected_by_name(self):
+        """R12 stands. A persisted MODE can only ever add prompts; a
+        persisted grant list could only ever remove them."""
+        with pytest.raises(ValueError, match="granted_tools"):
+            self._validate({"granted_tools": ["read"]})
