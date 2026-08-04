@@ -262,7 +262,7 @@ agents/builtin/*.md, skills/builtin/*.md   # shipped WITH the harness; never ove
 ~/.config/venastine/agents/*.md, skills/*.md, settings.json, mcp.json   # user-level; always trusted (you authored it)
 ```
 
-**Discovery precedence:** harness → project (only if trusted) → user. A name collision AT THE HARNESS TIER is rejected outright with a warning — not silently shadowed — per D18. A name collision between project and user tiers still resolves project-wins, per the original D8 (this is a much lower-stakes case since neither can impersonate a built-in).
+**Discovery precedence:** harness → project (only if trusted) → user. A name collision AT THE HARNESS TIER is rejected outright with a warning — not silently shadowed — per D18. A name collision between project and user tiers still resolves project-wins, per the original D8 (this is a much lower-stakes case since neither can impersonate a built-in). **AMENDED BY D29 (§17): user beats project**, for agents, skills and MCP servers alike -- "project" does not mean "more specific", it means "it arrived with a directory you cloned", so the tier you merely trusted once must not silently displace the one you authored. `settings.json` deliberately keeps project-over-user, because its values are shown verbatim in the trust prompt and consented to directly.
 
 ### Workspace trust (new, D17)
 
@@ -890,7 +890,7 @@ def run(params: dict, parent_context: ToolContext, max_depth: int = 2) -> dict:
 Two wishlist items are agents, not TUI features, and land here:
 
 - **`/grill-me`** — an agent that reads the current thread and surfaces what still needs a decision: ambiguities, unstated design choices, assumptions the work is resting on. Shaped like §20's reviewer (read distilled state, return a structured list), and like every other agent it runs through `RunAgentLoop` rather than getting its own LLM-calling path.
-- **Goal mode** — a persistent objective, set once and folded into every subsequent turn's context so the agent stays oriented across a long session. **Decided: a persistent objective, not a rubric-graded iterate loop and not a loop-behaviour switch.** Needs thread-scoped state; `ConversationThread.extra_data` already exists and is unused (see §23's note about the same field). The TUI renders it as a banner.
+- **Goal mode** — a persistent objective, set once and folded into every subsequent turn's context so the agent stays oriented across a long session. **Decided: a persistent objective, not a rubric-graded iterate loop and not a loop-behaviour switch.** Needs thread-scoped state; `ConversationThread.extra_data` already exists. (It is no longer unused: §18 shipped goal mode into it via key-scoped `set_extra()`, so §23's todo list would coexist under its own key rather than owning the column.) The TUI renders it as a banner.
 
 ### Acceptance criteria
 
@@ -1047,7 +1047,7 @@ Two consequences worth stating rather than discovering:
 
 Both of these were asked for as TUI features and are really this section's:
 
-- **Session summaries** — the same operation as compaction: an agent distilling a thread segment. `CompactionCheckpoint` and `agents/builtin/compactor.md` already are this; a user-facing summary is that machinery invoked deliberately rather than by a token threshold. Building it separately in §16 would have meant either duplicating the compactor or pre-empting it.
+- **Session summaries** — the same operation as compaction: an agent distilling a thread segment. `CompactionCheckpoint` and `agents/builtin/compactor.md` (this section) will be this -- neither exists yet, and `config_loader` warns that compaction settings are present but unimplemented; a user-facing summary is that machinery invoked deliberately rather than by a token threshold. Building it separately in §16 would have meant either duplicating the compactor or pre-empting it.
 - **`/ref` cross-thread referencing** — user-initiated: a thread picker (§16 already has one, over `storage.list_threads()`), then the chosen thread's **distilled summary** injected into the current thread. **Decided: user-initiated rather than a model-callable search tool** — the user chooses what crosses, so nothing fetched in one thread can steer another without their say-so. It defers to here rather than to §16 because it needs something to inject, and the compactor is the summariser. Matches the project's "distill, don't share raw history" principle; a model-initiated `search_threads` remains possible later on top of the same retrieval, with an approval gate on D26's reasoning.
 
 ### Acceptance criteria
@@ -1114,11 +1114,12 @@ Per D24 the tool needs declared fields in both `ToolPermissions` and `ToolApprov
 
 A model-maintained checklist, persisted per thread, rendered in a TUI panel whose placement (top / bottom / side) is a `tui.todo_position` preference. Needs an event so the panel re-renders on change — see §22's note about deciding the event shape first.
 
-Open question to settle at build time: whether the list is thread-scoped state in `ConversationThread.extra_data` (which already exists and is unused) or its own table. `extra_data` is the cheaper answer and the field was put there for this kind of thing.
+Open question to settle at build time: whether the list is thread-scoped state in `ConversationThread.extra_data` or its own table. `extra_data` is the cheaper answer and the field was put there for this kind of thing -- note it is NO LONGER unused, since §18 shipped goal mode into it via key-scoped `set_extra()`, so a todo list would share the column under its own key.
 
 ### Acceptance criteria
 
 1. `permission_channel` is one case of the general channel, not a second mechanism alongside it.
+1b. **Per-tool subagent sign-off is a named consumer of this channel.** The §14-§18 review shipped §18's sign-off as all-or-nothing (decision S1) precisely because the boolean channel cannot carry a list-out/subset-back exchange: approving a spawn authorises the child's entire approval-gated set. The per-tool version -- request carries the candidate tools, response carries the approved subset, and rejected names are removed from the child's `allowed_tools` -- is deliberately deferred here rather than built on a bespoke second channel. `ToolSpec.approval_notice` and `ToolSpec.grant_scope` already exist and generalise to it.
 2. Both tools deny cleanly with no channel present, on the CLI and in every pipeline pass, and say why.
 3. Both tools have declared permission/approval fields (D24).
 4. The todo panel re-renders from an event, not from polling.

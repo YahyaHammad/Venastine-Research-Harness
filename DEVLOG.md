@@ -940,7 +940,7 @@ Every other `getattr(<dataclass>, name, <default>)` site sharing the `fetch_url`
 
 - D24's check is live at import, not merely unit-tested: temporarily deleting `ToolPermissions.fetch_url` makes `import tools.registry` raise `RuntimeError: ... ['fetch_url']`.
 - `fetch_url` is callable and advertised — `is_tool_allowed` True, `requires_approval` False, present in `registry.schemas()`. All three were false before.
-- Advertised tools under default config: 10 of 15 registered. `read`/`write`/`edit` (permission False), `shell` (permission False), and `load_skill` (empty catalog) are correctly absent.
+- Advertised tools under default config: 10 of 15 registered at the time of §15. `read`/`write`/`edit` (permission False), `shell` (permission False), and `load_skill` (empty catalog) are correctly absent.
 - `python main.py` with a typo'd user `settings.json` exits 1 with one line on stderr and no traceback.
 
 ## 16. Textual TUI shell + reasoning effort + the ensemble fix (ROADMAP_v2 §16)
@@ -1015,7 +1015,7 @@ Checked rather than assumed, which is D22's rule applied to a second dependency.
 - `tests/test_client_translation.py` — the Google test asserted `max_output_tokens == 4096`; now asserts against `config.MAX_TOKENS`, since that value is explicitly a tunable.
 - `conftest.py` — the Google fake gained `ThinkingConfig`. The real SDK has it, so the fake lacking it was the double drifting from production, not the code being wrong.
 - `pytest.ini` unchanged: TUI tests use explicit `@pytest.mark.asyncio` markers rather than `asyncio_mode = auto`, keeping ARCHITECTURE §4.13's "no asyncio in pytest.ini" true.
-- Full suite: **335 tests** (was 307).
+- Full suite: **339 tests** (was 307). (Recorded as 335 originally, which contradicted this section's own enumerated deltas of +32 and disagreed with §17.5's "was 341" baseline -- corrected in the §14-§18 review, finding f17.)
 
 ### 16.9 Verified beyond the suite
 
@@ -1187,3 +1187,79 @@ breaking the thing the test claims to guard.
 - Revert-checks: `child_context` unioned → both AC1 tests fail; `callable_only` drop disabled → the hide test fails. Both restored.
 - `tests/BREAKING_CHANGES.md` §13 added.
 - Full suite: **395 tests** (was 379).
+
+---
+
+## §14–§18 review pass (65 findings)
+
+A multi-agent review of `d190998..HEAD` — §14 config loader/trust, §15
+permissions, §16 TUI, §17 MCP client, §18 agents — produced 16 Critical,
+48 Suggestion and 1 Nice-to-have finding. Report:
+`.qwen/reviews/2026-08-04-local.md`; per-finding detail in
+`.qwen/tmp/qwen-review-local-findings-in.json`.
+
+Fixed across seven commits. **Every fix was shown to fail when reverted**
+before being kept — the discipline that had already caught three vacuous
+tests and one false positive in §16–§17, and that this pass extended to
+every change rather than a sample.
+
+### The four shapes the Criticals fell into
+
+1. **A builtin used as a parser.** `isinstance(True, int)` is `True` and
+   `bool("false")` is `True`, so `max_steps: yes` became a one-step
+   agent, `use_memory: "false"` inverted an opt-out, and
+   `"autoApprove": "false"` turned the D28 approval gate off. All three
+   now validate and warn instead of coercing (f1, f2, r1-1).
+2. **Error types that escape their handler.** `UnicodeDecodeError` is a
+   `ValueError`, not an `OSError` — so an undecodable `settings.json` in
+   an *untrusted* project killed startup before the trust prompt could
+   render, making trust ungrantable by any path. And `MCPError` is not
+   the only thing mcp 2.0 raises (f3, r2-2, f6).
+3. **Child processes outliving the harness.** Every failure path in
+   `setup_mcp` dropped a connected client without unwinding it, and a
+   timed-out `connect_all` left the manager task uncancellable — so one
+   hung server orphaned every *other* server's subprocess (f5, f7).
+4. **Capability varying by invocation path.** The same agent kept its
+   approval-gated tools under `/agent` and silently lost them when
+   spawned, while also losing the parent's approval *tightenings* — the
+   two halves of the same missing plumbing (f12, r3-1).
+
+### Decisions taken during the fix pass (S1–S4)
+
+| # | Decision |
+|---|---|
+| **S1** | **Subagent sign-off, all-or-nothing, per turn.** Approving a spawn authorises the child's whole approval-gated set for the rest of the turn. Per-tool selection is deferred to §23's response channel and recorded there as a named consumer. |
+| **S2** | **The parent's approval tightenings union into the child.** Only `True` entries carry, since a `False` is indistinguishable from absent under D14's OR — so unioning can only tighten. **This amends §18's locked sketch**, which shows `approval_overrides=agent_def.approval_overrides` verbatim; C6 reasoned about `allowed_tools` and never considered the approval axis. |
+| **S3** | **MCP teardown by exact name, not by prefix.** `mcp__<server>__<tool>` cannot be taken apart again — neither `__` in a server name nor in a tool name is illegal. Registration records what it registered. No `mcp.json` content is rejected up front, so decision G stands. |
+| **S4** | **One central effort validator, cached.** A network call at startup is acceptable; on lookup failure the requested level passes through unverified with a WARNING rather than being dropped, and the failure is not cached. |
+
+### Named consequences
+
+- **`spawn_subagent` is now approval-gated**, so the headless callability
+  filter drops it from CLI chat and every research pass: delegation is
+  TUI-only. This follows the rule already in force for MCP tools, and the
+  notice names it, but it is a real capability change to two shipped
+  modes.
+- **The AC2 permission tests used `shell`**, which is globally
+  permission-disabled — so with reachability now checked before approval
+  (f55) it never reaches a modal at all. They were demonstrating the
+  permission round-trip on a tool the model can never call, and now use
+  `web_search`.
+- **A damaged trust store no longer exits.** It means "nothing is
+  trusted", which re-triggers the prompt; previously a partial write
+  exited 1 on every invocation in every project until the file was
+  deleted by hand.
+
+### Tests that could not fail
+
+Nine existing tests passed against the very defect they were written to
+catch, and were rewritten (f31, f32, f33, f37, f50, f51, f53, f62, f64).
+The recurring shape is an assertion that cannot see its own regression:
+a 200-deep chain against a 1000-frame recursion limit; a substring check
+where the *order* was the contract; two tests that monkeypatched the
+cached answer instead of the computation that produces it; and one that
+arranged the state it was supposed to observe.
+
+Three more covered nothing at all and got real tests (f29, f52, f53).
+
+- Full suite: **489 tests** (was 395), plus the opt-in `integration` test.

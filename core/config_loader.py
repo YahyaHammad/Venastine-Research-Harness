@@ -14,7 +14,9 @@ tool to view a body. Bodies never enter context unrequested.
 
 Tier precedence: a harness-tier name can never be shadowed -- a
 project/user file colliding with a builtin is rejected with a warning
-(D18). Project vs user collisions resolve project-wins.
+(D18). Project vs user collisions resolve USER-wins (D29): the user tier is
+what you authored; the project tier is what arrived with a directory
+you cloned.
 
 `initialize(project_path)` is called once at startup (main.py) and caches
 everything; getters return the cached state. Tests call initialize() with

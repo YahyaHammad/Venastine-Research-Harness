@@ -297,7 +297,8 @@ class RunAgentLoop:
         thread; omit (or None) to start a fresh one. Pass context (§15) to
         run under an agent's tool restrictions; None means global policy
         only. Pass system_prompt (§18) when running AS an agent -- the
-        TUI worker builds it via agents.manager.build_system_prompt();
+        TUI worker and spawn_subagent both build it via
+        agents.manager.AgentManager.system_prompt_for();
         None keeps the default base + skill/agent catalogs.
 
         A thread's persistent goal (§18 goal mode) is appended to WHICHEVER

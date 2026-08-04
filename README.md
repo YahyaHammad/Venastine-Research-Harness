@@ -50,6 +50,6 @@ MCP tools are namespaced `mcp__<server>__<tool>` and **require approval before e
 
 ## Status
 
-ROADMAP.md §1–§12 are fully built (§10's ensemble mode carries a revisit note), as are ROADMAP_v2.md §13 (streaming loop), §14 (config loader + workspace trust), §15 (permission system), §16 (Textual TUI shell, reasoning-effort switching), and §17 (MCP client). Remaining work is ROADMAP_v2.md §18–§24: agent and skill systems, subagent review, memory/compaction, pipeline observability, interactive tools, and `/init`.
+ROADMAP.md §1–§12 are fully built (§10's ensemble mode carries a revisit note), as are ROADMAP_v2.md §13 (streaming loop), §14 (config loader + workspace trust), §15 (permission system), §16 (Textual TUI shell, reasoning-effort switching), §17 (MCP client), and §18 (agent system: `/agent`, `spawn_subagent`, goal mode, `/grill-me`). Remaining work is ROADMAP_v2.md §19–§24: the skill system, subagent review, memory/compaction, pipeline observability, interactive tools, and `/init`.
 
-Run the test suite with `pytest` — 379 tests, fully offline, no API keys needed.
+Run the test suite with `pytest` — 489 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
