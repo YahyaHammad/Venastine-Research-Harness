@@ -76,7 +76,8 @@ def _stub_continue_returning_sequence(mocker, responses):
     def side_effect(*, thread_id, message, system_prompt, model, provider_name="ANTHROPIC", **kwargs):
         rsp = queue.pop(0) if queue else make_model_response(text="")
         rsp.thread_id = thread_id
-        call_log.append({"thread_id": thread_id, "message": message})
+        call_log.append({"thread_id": thread_id, "message": message,
+                         "system_prompt": system_prompt})
         return rsp
 
     mocker.patch.object(RunAgentLoop, "continue_conversation", side_effect=side_effect)
@@ -483,4 +484,63 @@ def test_corrective_message_contains_parse_error_excerpt_and_instruction(mocker)
     assert "ONLY valid JSON" in corrective_msg, (
         f"Corrective message must instruct the model to respond with ONLY "
         f"valid JSON; got: {corrective_msg!r}"
+    )
+
+
+# ===========================================================================
+# ---- §20: the loop is shared, so it must not assume it serves a pass -----
+# ===========================================================================
+#
+# Extracted into core/reasoning/json_retry.py so §20's reviewer -- which is
+# agent-shaped, not pass-shaped -- gets the same recovery rather than a
+# second copy of it. The two tests below pin the parts of that extraction
+# a re-inlining would silently undo. Everything above still drives the
+# orchestrator's wrapper, so the pass path stays covered end to end.
+
+def test_the_retry_continues_under_the_callers_system_prompt(mocker):
+    """The retry re-enters the caller's OWN thread, so it has to continue
+    under the caller's own prompt. The extracted loop hardcoding
+    pass_prompt(label) would look right for all ten passes and hand the
+    reviewer a research-pass prompt mid-review -- a model asked to correct
+    its JSON while being told it is now doing source grounding."""
+    from core.reasoning.json_retry import retry_until_json
+
+    bad = make_model_response(text="not json {{{")
+    bad.thread_id = uuid4()
+    good = make_model_response(text=json.dumps({"ok": 1}))
+    continue_calls = _stub_continue_returning_sequence(mocker, [good])
+
+    retry_until_json(
+        bad, label="Review", system_prompt="REVIEWER PROMPT",
+        model="m", provider_name="ANTHROPIC",
+    )
+
+    assert len(continue_calls) == 1
+    assert continue_calls[0]["system_prompt"] == "REVIEWER PROMPT"
+
+
+def test_every_retry_response_reaches_the_on_response_hook(mocker):
+    """§25's granted-call audit trail hangs off this. A retry is the same
+    work continuing, so a tool call it makes on a pre-flight grant belongs
+    on the same record -- and a grant spent invisibly on the attempt where
+    the model was already struggling is precisely the call an unattended
+    run's audit trail exists to show."""
+    from core.reasoning.json_retry import retry_until_json
+
+    bad = make_model_response(text="nope {{{")
+    bad.thread_id = uuid4()
+    still_bad = make_model_response(text="also nope {")
+    good = make_model_response(text=json.dumps({"ok": 1}))
+    _stub_continue_returning_sequence(mocker, [still_bad, good])
+
+    seen = []
+    result = retry_until_json(
+        bad, label="Review", system_prompt="p", model="m",
+        provider_name="ANTHROPIC", on_response=seen.append, max_retries=3,
+    )
+
+    assert json.loads(result) == {"ok": 1}
+    assert seen == [still_bad, good], (
+        "Both retry responses must reach the hook -- not just the last one, "
+        "and not just the successful one."
     )

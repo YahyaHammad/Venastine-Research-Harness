@@ -40,13 +40,14 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any
 
 import config
 import prompts.system_prompts as system_prompts
 from core.loop import RunAgentLoop
 from core.reasoning.base import Claim, PipelineRun
 from core.reasoning.confidence_scoring import run_confidence_tiering
+from core.reasoning.json_retry import parse_json_response as _parse_json_response
+from core.reasoning.json_retry import retry_until_json
 from core.reasoning.pipeline_storage import create_pipeline_run, update_pipeline_run
 
 logger = logging.getLogger(__name__)
@@ -94,21 +95,6 @@ def _record_granted_calls(pass_id: str, response, authorization) -> None:
         authorization.granted_calls.append({"pass": pass_id, **call})
 
 
-def _parse_json_response(text: str) -> Any:
-    """Passes are instructed (via the universal preamble) to emit clean
-    JSON, optionally in a code fence. Strip the fence if present."""
-    cleaned = text.strip()
-    if cleaned.startswith("```"):
-        cleaned = cleaned.split("```")[1]
-        if cleaned.lower().startswith("json"):
-            cleaned = cleaned[4:]
-        cleaned = cleaned.strip()
-    try:
-        return json.loads(cleaned)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"Pass did not return valid JSON: {e}\n\nRaw text:\n{text[:500]}") from e
-
-
 def _run_pass_with_json_retry(
     pass_id: str,
     pass_input: str,
@@ -118,14 +104,13 @@ def _run_pass_with_json_retry(
     temperature: float | None = None,
     authorization=None,
 ) -> str:
-    """Runs one JSON-emitting pass and recovers from malformed JSON by
-    sending a corrective follow-up into the SAME thread the pass used.
+    """Runs one JSON-emitting pass and recovers from malformed JSON.
 
-    The failed assistant turn is already in the thread's history (see
-    _run()'s always-persist fix in core/loop.py), so the model sees its
-    own prior output when continue_conversation() re-enters the thread.
-    The corrective message also includes the parse error and the first
-    200 chars of the failed output as a salience cue.
+    The recovery itself lives in core/reasoning/json_retry.py, shared with
+    §20's reviewer. All this function adds is the pass's own first attempt
+    and the two pass-specific facts the shared loop cannot know: which
+    system prompt to continue under, and that a retry's tool calls belong
+    on the same §25 audit trail as the original attempt's.
 
     ROADMAP §3: attempts = MAX_JSON_RETRIES + 1 (1 initial +
     MAX_JSON_RETRIES corrective). Unrecoverable failure raises ValueError
@@ -137,45 +122,21 @@ def _run_pass_with_json_retry(
         temperature=temperature, authorization=authorization,
     )
     _record_granted_calls(pass_id, response, authorization)
-    raw_text = response.text
 
-    for attempt in range(MAX_JSON_RETRIES):
-        try:
-            _parse_json_response(raw_text)
-            return raw_text
-        except ValueError as e:
-            if trace is not None:
-                trace.append(
-                    f"{pass_id}: JSON parse failed on attempt {attempt + 1}/"
-                    f"{MAX_JSON_RETRIES + 1} ({str(e).splitlines()[0]}), "
-                    f"retrying with corrective message."
-                )
-            corrective = (
-                f"Your last response did not parse as valid JSON.\n\n"
-                f"Parse error:\n{e}\n\n"
-                f"Start of your failed output (first 200 chars):\n{raw_text[:200]}\n\n"
-                f"Respond again with ONLY valid JSON -- no preamble, no prose, "
-                f"no code fence, just the JSON object the pass asked for."
-            )
-            retry_response = RunAgentLoop.continue_conversation(
-                thread_id=response.thread_id,
-                message=corrective,
-                system_prompt=system_prompts.pass_prompt(pass_id),
-                model=model,
-                provider_name=provider_name,
-                temperature=temperature,
-                # A retry is the SAME pass continuing. Omitting this would
-                # strip the pass's gated tools on exactly the attempt where
-                # the model is already struggling, and the only symptom
-                # would be a second malformed answer.
-                authorization=authorization,
-            )
-            _record_granted_calls(pass_id, retry_response, authorization)
-            raw_text = retry_response.text
-
-    # Last attempt: validate one more time and either return or raise.
-    _parse_json_response(raw_text)
-    return raw_text
+    return retry_until_json(
+        response,
+        label=pass_id,
+        # pass_prompt(), NOT the raw pass file: BOTH the original attempt
+        # and its retry must carry the same catalogs, or a retry silently
+        # sees a different tool set than the attempt it is correcting.
+        system_prompt=system_prompts.pass_prompt(pass_id),
+        model=model,
+        provider_name=provider_name,
+        trace=trace,
+        temperature=temperature,
+        authorization=authorization,
+        on_response=lambda r: _record_granted_calls(pass_id, r, authorization),
+    )
 
 
 def _claim_from_json(raw: dict) -> Claim:
