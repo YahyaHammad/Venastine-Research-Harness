@@ -49,10 +49,18 @@ async def _settle(pilot, predicate, tries: int = 120):
 
 @pytest.fixture
 def _mocked_loop(mocker):
-    """A loop whose model call is canned: one tool call, then plain text."""
+    """A loop whose model call is canned: one tool call, then plain text.
+
+    The example tool is web_search rather than shell because shell is
+    globally permission-disabled by default -- and since the loop now
+    checks reachability BEFORE prompting (review f55), a globally denied
+    tool never reaches a modal at all. Demonstrating the permission
+    round-trip on a tool the model can never actually call was proving
+    the wrong thing.
+    """
     mocker.patch("core.loop.api_initialization", return_value=object())
     with_tool = make_model_response(
-        text="", tool_calls=[{"id": "t1", "name": "shell", "input": {"command": "ls"}}],
+        text="", tool_calls=[{"id": "t1", "name": "web_search", "input": {"query": "x"}}],
     )
     done = make_model_response(text="all done")
     mocker.patch(
@@ -92,8 +100,8 @@ async def test_ac2_approving_a_permission_prompt_resumes_the_same_generator(_moc
         assert await _settle(pilot, lambda: dispatch.called), "tool never dispatched"
 
     name, params = dispatch.call_args[0][0], dispatch.call_args[0][1]
-    assert name == "shell"
-    assert params == {"command": "ls"}
+    assert name == "web_search"
+    assert params == {"query": "x"}
 
 
 @pytest.mark.asyncio
@@ -419,3 +427,119 @@ async def test_effort_lookup_does_not_block_the_ui_thread(mocker):
         release.set()
         assert await _settle(pilot, lambda: app.effort == "high"), \
             "the effort change never landed"
+
+
+# ---------------------------------------------------------------------------
+# ---- Thread state and input handling (f43, f44, f45, r1-3) ---------------
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_launching_and_quitting_persists_no_thread(mocker):
+    """Constructing a ConversationMemory persists a ConversationThread
+    row, so building one at mount left a phantom empty thread behind
+    every launch -- and the Ctrl+T picker filled with rows carrying only
+    an id and a timestamp."""
+    made = mocker.patch("tui.app.ConversationMemory")
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        made.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_a_turn_still_creates_the_thread(_mocked_loop):
+    """Control: deferring must not mean never."""
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        assert app._memory is None
+        app.query_one("#prompt").value = "hello"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app._memory is not None
+
+
+@pytest.mark.asyncio
+async def test_a_rejected_mid_turn_submission_is_not_discarded(_mocked_loop):
+    """The input was cleared BEFORE the busy check, so a follow-up typed
+    during a long turn (/research holds _busy for a whole ten-pass
+    pipeline) was wiped and had to be retyped from memory."""
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        app._busy = True
+        app.query_one("#prompt").value = "my carefully typed follow-up"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert app.query_one("#prompt").value == "my carefully typed follow-up"
+
+
+@pytest.mark.asyncio
+async def test_new_thread_is_refused_mid_turn(_mocked_loop):
+    """Swapping memory mid-turn leaves the worker running against the OLD
+    one: its response persists into the abandoned thread while rendering
+    under the new one."""
+    from tui.app import _cmd_new
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        app.query_one("#prompt").value = "hello"
+        await pilot.press("enter")
+        await pilot.pause()
+        before = app._memory
+
+        app._busy = True
+        _cmd_new(app, "")
+        assert app._memory is before, "memory was swapped mid-turn"
+
+
+@pytest.mark.asyncio
+async def test_new_thread_clears_a_stale_goal_banner(_mocked_loop):
+    """The banner is per-thread state, and /goal was the only path that
+    refreshed it -- so after /new it kept showing the previous thread's
+    objective, misrepresenting what governs the session."""
+    from tui.app import _cmd_new
+    from tui.widgets import GoalBanner
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        app.memory.set_extra("goal", "ship the review fixes")
+        app.refresh_goal_banner()
+        await pilot.pause()
+        assert app.query_one("#goal-banner", GoalBanner).goal is not None
+
+        _cmd_new(app, "")
+        await pilot.pause()
+        assert app.query_one("#goal-banner", GoalBanner).goal is None
+
+
+@pytest.mark.asyncio
+async def test_same_state_reassignment_does_not_redraw_the_raven():
+    """always_update=True made watch_state fire on every same-value
+    reassignment -- and every token_delta reassigns state to THINKING, so
+    the watcher reset the frame, called Static.update() and re-paused the
+    timer once per token for the whole stream. That is precisely the
+    per-token redraw loop pause_animation exists to eliminate."""
+    from tui import ravens
+    from tui.widgets import RavenPanel
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        raven = app.query_one("#raven", RavenPanel)
+        raven.state = ravens.THINKING
+        await pilot.pause()
+
+        # Count re-renders rather than watcher calls: _render_state is
+        # what actually costs a redraw, and it is called by the watcher.
+        calls = []
+        original = raven._render_state
+        raven._render_state = lambda: (calls.append(1), original())[1]
+
+        for _ in range(20):            # 20 token deltas, same state
+            raven.state = ravens.THINKING
+        await pilot.pause()
+        assert calls == [], f"{len(calls)} redraws for 20 identical deltas"
+
+        raven.state = ravens.IDLE      # a genuine transition still fires
+        await pilot.pause()
+        assert calls, "a real state change stopped updating the raven"

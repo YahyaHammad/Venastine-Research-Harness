@@ -245,3 +245,26 @@ def test_snake_case_spelling_still_accepted(roots):
            {"srv": {"command": "npx", "auto_approve": True}})
     cfgs = mcp_config.load_server_configs(str(roots["project"]), trusted=False)
     assert cfgs["srv"].auto_approve is True
+
+
+def test_non_list_args_becomes_a_named_failure(roots):
+    """list("--verbose") is ['-','-','v',...]. A natural hand edit became
+    a per-character argv and failed at connect with an opaque error
+    naming none of the cause -- defeating this module's rule that a bad
+    entry becomes that ONE server's named failure."""
+    _write(roots["user"] / "mcp.json",
+           {"srv": {"command": "npx", "args": "--verbose"}})
+    cfg = mcp_config.load_server_configs(str(roots["project"]),
+                                         trusted=False)["srv"]
+
+    assert cfg.transport == "unknown"
+    assert "args" in cfg.error
+    assert "UNUSABLE" in cfg.describe()
+
+
+def test_list_args_still_accepted(roots):
+    _write(roots["user"] / "mcp.json",
+           {"srv": {"command": "npx", "args": ["-y", "pkg"]}})
+    cfg = mcp_config.load_server_configs(str(roots["project"]),
+                                         trusted=False)["srv"]
+    assert cfg.args == ["-y", "pkg"]

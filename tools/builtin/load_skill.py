@@ -48,8 +48,19 @@ def has_skills() -> bool:
 
 
 def run(params: dict) -> dict:
-    skill = config_loader.get_skill(params["name"])
+    # params.get, not params[]. NO provider validates tool inputs against
+    # the schema, so a call with the key missing or misspelled raised a
+    # bare KeyError -- and _run() catches only ToolCallDenied, so it
+    # aborted the whole turn, skipped any remaining batched tool calls,
+    # and persisted no tool_result for the tool_use id. An error dict
+    # lets the model see what it got wrong and correct itself, which is
+    # what the unknown-name branch two lines down already does.
+    name = params.get("name")
+    if not name:
+        return {"error": "load_skill requires a 'name' -- the skill's name "
+                         "exactly as listed in the available skills catalog."}
+    skill = config_loader.get_skill(name)
     if skill is None:
-        return {"error": f"Unknown skill: {params['name']!r} is not in "
+        return {"error": f"Unknown skill: {name!r} is not in "
                          f"the available skills catalog."}
     return {"result": skill.body}

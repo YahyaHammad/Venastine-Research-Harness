@@ -47,9 +47,13 @@ DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant."
 DEFAULT_PROVIDER = "ANTHROPIC"
 
 # The headless callability notice (§18) names tools hidden by
-# schemas(callable_only=True). Once per process: research runs make ten
-# _run() calls per pipeline, and the list only changes with config.
-_headless_notice_shown = False
+# schemas(callable_only=True). Deduplicated on the HIDDEN SET, not once
+# per process: the set is context-dependent, so a once-per-process flag
+# reported only the first run's and left every later one silent. A
+# subagent whose definition tightens approval for another tool hides a
+# strictly larger set, and that difference was exactly what never got
+# logged -- the quiet invisibility this notice exists to prevent.
+_headless_notices_shown: set = set()
 
 
 def with_goal(system_prompt: str, memory: ConversationMemory) -> str:
@@ -137,15 +141,14 @@ class RunAgentLoop:
         headless = permission_channel is None
         tool_schemas = registry.schemas(context, callable_only=headless)
         if headless:
-            global _headless_notice_shown
-            hidden = registry.headless_hidden(context)
-            if hidden and not _headless_notice_shown:
-                _headless_notice_shown = True
+            hidden = tuple(sorted(registry.headless_hidden(context)))
+            if hidden and hidden not in _headless_notices_shown:
+                _headless_notices_shown.add(hidden)
                 logger.warning(
                     "Headless run (no permission channel): not advertising "
                     "%s -- they require approval and nothing here can "
-                    "grant it. Run the TUI to use them.",
-                    ", ".join(sorted(hidden)),
+                    "grant it.",
+                    ", ".join(hidden),
                 )
         run_info = RunInfo(
             model=model, provider_name=provider_name, effort=effort,
@@ -210,6 +213,16 @@ class RunAgentLoop:
                 # a context restriction from a global policy denial.
                 needs_approval = registry.approval_needed(
                     call.name, call.input, context)
+                # Reachability before approval. Asking first meant a
+                # context-excluded tool prompted the user, who clicked
+                # Allow, and was then denied anyway -- and headless, it
+                # reported "requires approval and was not given", telling
+                # the model to retry with approval when the actionable
+                # answer is "not available in this context". dispatch()
+                # still enforces the denial; this only stops asking a
+                # question whose answer cannot matter.
+                if needs_approval and not registry.is_allowed(call.name, context):
+                    needs_approval = False
                 # §18 sign-off (S1): a tool whose grant_scope is "run" is
                 # asked about once per run, not once per call. The loop
                 # names no tool -- it asks the registry, the same way it

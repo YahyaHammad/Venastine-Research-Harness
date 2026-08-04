@@ -297,10 +297,19 @@ def test_f1_bad_settings_key_exits_cleanly_with_the_reason(tmp_path, monkeypatch
     assert "Traceback" not in err
 
 
-def test_f1_corrupt_trust_store_exits_cleanly(tmp_path, monkeypatch, capsys):
-    """json.JSONDecodeError subclasses ValueError, so a corrupt
-    trusted_projects.json lands in the same handler rather than raising
-    out of is_trusted() during startup."""
+@pytest.mark.parametrize("body", ["{not json", "[]", '"a string"'])
+def test_f1_corrupt_trust_store_fails_closed_instead_of_exiting(
+        tmp_path, monkeypatch, capsys, body):
+    """A damaged trust store must mean "nothing is trusted", not "the
+    harness will not start" (review f23/f25).
+
+    It used to exit 1 on EVERY invocation in EVERY project until the user
+    found and deleted the file by hand -- a partial write from a Ctrl+C
+    or a full disk was enough. And a valid-JSON-but-non-object store
+    (`[]`) escaped the handler entirely as an AttributeError on .get.
+    Both now degrade to an untrusted project, which is this module's
+    stated posture for unknown state and re-triggers the prompt.
+    """
     from main import load_project_config
 
     home = tmp_path / "home"
@@ -308,16 +317,18 @@ def test_f1_corrupt_trust_store_exits_cleanly(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("HOME", str(home))
     user_dir = home / ".config" / "venastine"
     user_dir.mkdir(parents=True)
-    (user_dir / "trusted_projects.json").write_text("{not json", encoding="utf-8")
+    (user_dir / "trusted_projects.json").write_text(body, encoding="utf-8")
 
     proj = tmp_path / "proj"
     (proj / ".venastine").mkdir(parents=True)
+    (proj / ".venastine" / "settings.json").write_text(
+        '{"default_model": "project-model"}', encoding="utf-8")
 
-    with pytest.raises(SystemExit) as exc_info:
-        load_project_config(str(proj), False)
+    # Starts, rather than exiting.
+    settings = load_project_config(str(proj), False)
 
-    assert exc_info.value.code == 1
-    assert "Configuration error" in capsys.readouterr().err
+    # And the project's content did NOT load: fail closed, not open.
+    assert settings.get("default_model") != "project-model"
 
 
 def test_f1_clean_config_returns_settings(tmp_path, monkeypatch):

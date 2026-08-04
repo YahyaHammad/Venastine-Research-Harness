@@ -71,6 +71,21 @@ class TestDetectShell:
 # ===========================================================================
 
 class TestDockerAvailable:
+    """is_docker_available() is lru_cached for the process (review f41),
+    so each case has to clear it -- otherwise the first test's answer
+    would be the only one any of them measured."""
+
+    @pytest.fixture(autouse=True)
+    def _clear_probe_cache(self):
+        # getattr, so removing the cache makes the COUNT test fail with
+        # its own message rather than erroring every case in this class
+        # on a missing attribute -- an error that masks the assertion is
+        # the same "environment could not manifest the failure" shape the
+        # revert-check discipline exists to catch.
+        clear = getattr(is_docker_available, "cache_clear", lambda: None)
+        clear()
+        yield
+        clear()
 
     def test_docker_found(self):
         with patch("security.sandbox.subprocess.run") as mock_run:
@@ -86,6 +101,19 @@ class TestDockerAvailable:
         with patch("security.sandbox.subprocess.run") as mock_run:
             mock_run.side_effect = subprocess.TimeoutExpired(cmd="docker", timeout=10)
             assert is_docker_available() is False
+
+    def test_the_probe_runs_once_per_process(self):
+        """The point of the cache: §18's headless filter calls
+        approval_needed(name, {}) for every advertised tool on every
+        schema build, and shell's approval_check reaches this -- roughly
+        two `docker info` subprocesses per _run(), each up to 10s when
+        the daemon is unresponsive."""
+        with patch("security.sandbox.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            is_docker_available()
+            is_docker_available()
+            is_docker_available()
+            assert mock_run.call_count == 1
 
 
 # ===========================================================================

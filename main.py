@@ -233,6 +233,21 @@ def resolve_runtime_defaults(args, settings: dict) -> tuple[str, str]:
     return provider, model
 
 
+def _ask(prompt: str) -> str:
+    """input() that treats EOF as an empty answer.
+
+    Ctrl+D (Ctrl+Z on Windows) at a startup prompt raised EOFError out of
+    a bare input(), giving a traceback where the default-No path was
+    wanted. run_chat's loop already handles this; the one-shot startup
+    prompts did not. Every caller here defaults to No, so "" declines.
+    """
+    try:
+        return input(prompt)
+    except EOFError:
+        print()
+        return ""
+
+
 def _ensure_workspace_trust(project_path: str, trust_flag: bool) -> None:
     """D17 one-time confirmation. Shows what would load (file list plus
     settings.json verbatim -- a project's settings can pick the provider
@@ -250,7 +265,7 @@ def _ensure_workspace_trust(project_path: str, trust_flag: bool) -> None:
         return
     if sys.stdin.isatty():
         print(summary)
-        answer = input("Trust this project's .venastine/ content? [y/N]: ")
+        answer = _ask("Trust this project's .venastine/ content? [y/N]: ")
         if answer.strip().lower() in ("y", "yes"):
             workspace_trust.grant_trust(project_path)
             print("Trust granted for this project.\n")
@@ -322,7 +337,7 @@ def _confirm_user_level_servers(configs: dict) -> dict:
             approved.pop(cfg.name, None)
             continue
         print(f"\nNew MCP server in your user config:\n  {cfg.describe()}")
-        answer = input("Connect to it? [y/N]: ")
+        answer = _ask("Connect to it? [y/N]: ")
         if answer.strip().lower() in ("y", "yes"):
             mcp_config.remember_server(cfg)
         else:
@@ -409,6 +424,14 @@ if __name__ == "__main__":
         parser.error("--tui does not take --mode research; use /research inside the TUI.")
     if args.mode == "research" and not args.tui and not args.query:
         parser.error("--mode research requires a positional query argument.")
+    if args.tui and args.query:
+        # The parser help says a positional query is "sent as the first
+        # message", and tui.app.run() has no first-message parameter --
+        # so this combination silently dropped it. Refusing is honest;
+        # adding a first-message path to the TUI is §16 scope.
+        parser.error(
+            "--tui does not take a positional query; start the TUI and "
+            "type your message, or drop --tui to send it directly.")
 
     mcp = setup_mcp(project_path)
     try:

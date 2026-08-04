@@ -178,6 +178,18 @@ class ToolRegistry:
         )
         return tool_level or requires_approval(tool_name, params, context)
 
+    def is_allowed(
+        self, tool_name: str, context: Optional["ToolContext"] = None,
+    ) -> bool:
+        """Whether policy permits this tool at all, in this context.
+
+        The loop needs this to avoid prompting for a call it will refuse
+        regardless. Exposed here rather than importing is_tool_allowed
+        into core/loop.py: this file is the only one that talks to
+        security.permissions, and that boundary is the point.
+        """
+        return is_tool_allowed(tool_name, context)
+
     def grant_scope(self, tool_name: str) -> Optional[str]:
         """"run" if approving this tool once covers the rest of the run.
 

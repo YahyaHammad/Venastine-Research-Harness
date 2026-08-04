@@ -7,7 +7,6 @@ or reaches into harness state; tui/app.py feeds them.
 
 from rich.syntax import Syntax
 from rich.text import Text
-from textual.containers import Vertical
 from textual.reactive import reactive
 from textual.widgets import RichLog, Static
 
@@ -22,7 +21,12 @@ ANIMATION_INTERVAL = 0.4
 class RavenPanel(Static):
     """Corner raven: what the harness is doing right now."""
 
-    state = reactive(ravens.IDLE, always_update=True)
+    # NOT always_update=True. Every token_delta reassigns state to
+    # THINKING, so always_update fired watch_state once per token for the
+    # whole stream -- resetting the frame, calling Static.update() and
+    # re-pausing the timer -- which is exactly the per-token redraw loop
+    # pause_animation exists to eliminate. Genuine transitions still fire.
+    state = reactive(ravens.IDLE)
 
     def __init__(self, animations: bool = True, **kwargs):
         super().__init__(**kwargs)
@@ -86,9 +90,19 @@ class GoalBanner(Static):
 class Transcript(RichLog):
     """The conversation. Code fences render highlighted via Rich's Syntax.
 
-    Streams token deltas into a single growing line rather than one log
-    entry per delta -- RichLog appends, so writing per-delta would produce
-    one row per token.
+    Token deltas are BUFFERED, not rendered as they arrive: RichLog
+    appends, so writing per delta would produce one row per token. The
+    buffer is committed by flush_stream() at the next boundary -- a tool
+    call, a system line, or the end of the turn -- which is what makes
+    code-fence highlighting possible at all, since a fence cannot be
+    parsed until it closes.
+
+    The visible consequence, stated because the previous docstring
+    implied otherwise: a plain answer with no tool calls shows nothing
+    until the turn ends. No output is lost (every turn-end path flushes),
+    but this is not progressive rendering, and anyone chasing streaming
+    latency should look here first rather than for a render path that
+    does not exist.
     """
 
     def __init__(self, **kwargs):
@@ -143,40 +157,3 @@ def _split_fences(text: str):
             language, _, code = part.partition("\n")
             out.append((language.strip() or None, code))
     return out
-
-
-class ResearchProgress(Vertical):
-    """Coarse research-mode progress (§16).
-
-    Deliberately coarse, and the reason is worth stating precisely:
-    run_deep_research_pipeline() is synchronous and returns only its
-    finished PipelineRun. It reports nothing while running -- each pass is
-    drained through run_to_completion() inside the orchestrator, so no
-    LoopEvent escapes, and the per-pass checkpoints it does write go to the
-    database rather than to a caller.
-
-    So §16 gives the honest version: the pipeline runs on a worker (the app
-    stays responsive, the raven animates), and the trace and report render
-    when it completes. Live pass-by-pass progress, per-claim tier updates,
-    and token streaming inside a pass all require the pipeline to emit
-    events -- that is §22, and pretending otherwise here would mean a
-    progress bar that is really just a spinner with pass names guessed at.
-    """
-
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self._log = RichLog(wrap=True, markup=False)
-        self._current = Static("")
-
-    def compose(self):
-        yield self._current
-        yield self._log
-
-    def set_pass(self, pass_id: str) -> None:
-        self._current.update(Text(f"▸ {pass_id}", style="bold"))
-
-    def add_trace(self, line: str) -> None:
-        self._log.write(Text(f"  {line}", style="dim"))
-
-    def finish(self) -> None:
-        self._current.update(Text("✓ complete", style="bold green"))

@@ -14,6 +14,8 @@ directly (not through run_to_completion):
        final assistant turn (D20 invariant).
 """
 
+import queue
+
 import pytest
 
 from core.events import LoopEvent
@@ -292,7 +294,7 @@ def test_permission_channel_yields_request_and_dispatches_on_approval(mocker):
     memory = _FakeMemory()
     canned = make_model_response(
         text="",
-        tool_calls=[{"id": "t1", "name": "shell", "input": {"command": ["rm"]}}],
+        tool_calls=[{"id": "t1", "name": "web_search", "input": {"query": "x"}}],
         usage={"input_tokens": 10, "output_tokens": 5},
     )
     done = make_model_response(text="Done.", tool_calls=None)
@@ -326,16 +328,16 @@ def test_permission_channel_yields_request_and_dispatches_on_approval(mocker):
     perm = [e.permission_request for e in events if e.permission_request is not None]
     assert len(perm) == 1, "a permission_request event must be yielded"
     # `notice` is the §18 sign-off's channel for "what does approving
-    # this actually authorise" (ToolSpec.approval_notice); shell supplies
-    # none, so it is None here rather than absent.
-    assert perm[0] == {"tool_name": "shell", "params": {"command": ["rm"]},
+    # this actually authorise" (ToolSpec.approval_notice); web_search
+    # supplies none, so it is None here rather than absent.
+    assert perm[0] == {"tool_name": "web_search", "params": {"query": "x"},
                        "notice": None}
 
     # Approved → dispatch called once with a callback that returns True.
     assert len(dispatched) == 1
     name, cb = dispatched[0]
-    assert name == "shell"
-    assert cb is not None and cb("shell", {}) is True
+    assert name == "web_search"
+    assert cb is not None and cb("web_search", {}) is True
 
     # The tool result is the dispatch return value, not a denial error.
     tool_results = [e.tool_result for e in events if e.tool_result is not None]
@@ -351,7 +353,7 @@ def test_permission_channel_denial_when_not_approved(mocker):
     memory = _FakeMemory()
     canned = make_model_response(
         text="",
-        tool_calls=[{"id": "t1", "name": "shell", "input": {"command": ["rm"]}}],
+        tool_calls=[{"id": "t1", "name": "web_search", "input": {"query": "x"}}],
         usage={"input_tokens": 10, "output_tokens": 5},
     )
     done = make_model_response(text="Done.", tool_calls=None)
@@ -378,3 +380,67 @@ def test_permission_channel_denial_when_not_approved(mocker):
     tool_results = [e.tool_result for e in events if e.tool_result is not None]
     assert "error" in tool_results[0]["result"]
     assert "approval" in tool_results[0]["result"]["error"].lower()
+
+
+def test_an_unreachable_tool_is_not_prompted_for(mocker):
+    """Reachability is checked BEFORE approval (review f55).
+
+    Asking first meant a context-excluded tool prompted the user, who
+    clicked Allow, and was denied anyway -- and headless it reported
+    "requires approval and was not given", telling the model to retry
+    with approval when the actionable answer is "not available in this
+    context". The denial itself was always enforced; the question was
+    the part that could not matter.
+    """
+    from tools.context import ToolContext
+
+    memory = _FakeMemory()
+    with_tool = make_model_response(
+        text="", tool_calls=[
+            {"id": "t1", "name": "web_search", "input": {"query": "x"}}])
+    done = make_model_response(text="fine")
+    mocker.patch("core.loop.api_initialization", return_value=object())
+    mocker.patch("core.loop.call_model_stream",
+                 side_effect=make_stream_sequence(with_tool, done))
+    mocker.patch("core.loop.registry.approval_needed", return_value=True)
+
+    channel = queue.Queue()
+    channel.put(True)          # an answer IS available, if one is asked for
+
+    events = list(RunAgentLoop._run(
+        memory, "p", "ANTHROPIC", "m",
+        ToolContext(allowed_tools={"get_time"}),   # excludes web_search
+        max_steps=2, permission_channel=channel,
+    ))
+
+    assert not [e for e in events if e.permission_request is not None], \
+        "prompted for a tool that policy refuses regardless of the answer"
+    results = [e.tool_result for e in events if e.tool_result is not None]
+    assert "not available in this context" in results[0]["result"]["error"]
+
+
+def test_a_reachable_tool_is_still_prompted_for(mocker):
+    """Control: the reachability check must not swallow real prompts."""
+    from tools.context import ToolContext
+
+    memory = _FakeMemory()
+    with_tool = make_model_response(
+        text="", tool_calls=[
+            {"id": "t1", "name": "web_search", "input": {"query": "x"}}])
+    done = make_model_response(text="fine")
+    mocker.patch("core.loop.api_initialization", return_value=object())
+    mocker.patch("core.loop.call_model_stream",
+                 side_effect=make_stream_sequence(with_tool, done))
+    mocker.patch("core.loop.registry.approval_needed", return_value=True)
+    mocker.patch("core.loop.registry.dispatch", return_value={"result": "ran"})
+
+    channel = queue.Queue()
+    channel.put(True)
+
+    events = list(RunAgentLoop._run(
+        memory, "p", "ANTHROPIC", "m",
+        ToolContext(allowed_tools={"web_search"}),
+        max_steps=2, permission_channel=channel,
+    ))
+
+    assert [e for e in events if e.permission_request is not None]

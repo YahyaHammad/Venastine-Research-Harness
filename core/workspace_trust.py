@@ -107,15 +107,36 @@ def grant_trust(project_path: str) -> None:
 
 
 def _load_trust_store() -> dict:
+    """The store, or {} for anything unreadable.
+
+    Fails CLOSED, in both senses. An empty store means nothing is
+    trusted, so a damaged file re-triggers the prompt -- which is this
+    module's stated posture for unknown state. Previously a partial write
+    (a kill, a Ctrl+C, a full disk) raised JSONDecodeError out of
+    is_trusted() at EVERY startup for EVERY project until the user found
+    and deleted the file by hand, and a valid-JSON-but-non-object store
+    escaped as an AttributeError on .get instead.
+    """
     path = _trust_store_path()
     if not os.path.exists(path):
         return {}
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+    try:
+        with open(path, "r", encoding="utf-8-sig") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def _save_trust_store(store: dict) -> None:
+    """Write via a temp file and os.replace, which is atomic on POSIX and
+    on Windows. A truncate-then-write leaves the store empty for the
+    length of the write, and permanently damaged if the process dies
+    inside it -- for a file whose whole job is remembering a security
+    decision."""
     path = _trust_store_path()
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(store, f, indent=2)
+    os.replace(tmp, path)

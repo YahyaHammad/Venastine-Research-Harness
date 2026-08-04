@@ -136,9 +136,18 @@ def _parse_entry(name: str, entry: Any, tier: str, path: str) -> ServerConfig:
 
     declared = str(entry.get("type") or "").lower()
     if entry.get("command"):
+        raw_args = entry.get("args") or []
+        if not isinstance(raw_args, list):
+            # list("--verbose") is ['-', '-', 'v', ...]. A natural hand
+            # edit therefore became a per-character argv and failed at
+            # connect with an opaque error naming none of the cause,
+            # defeating this module's rule that a bad entry becomes that
+            # one server's NAMED failure.
+            cfg.error = "'args' must be an array of strings"
+            return cfg
         cfg.transport = "stdio"
         cfg.command = str(entry["command"])
-        cfg.args = list(entry.get("args") or [])
+        cfg.args = list(raw_args)
     elif entry.get("url") and (not declared or declared in _HTTP_TYPES):
         cfg.transport = "http"
         cfg.url = str(entry["url"])
@@ -157,7 +166,10 @@ def _read_file(path: str, tier: str) -> dict:
     if not os.path.exists(path):
         return {}
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        # utf-8-sig: mcp.json is commonly copied between hosts and hand
+        # edited, so a BOM is realistic and would otherwise be reported as
+        # invalid JSON at character 0.
+        with open(path, "r", encoding="utf-8-sig") as f:
             data = json.load(f)
     except (OSError, ValueError) as e:
         logger.warning("Could not read %s-level mcp.json at %s: %s", tier, path, e)
@@ -238,7 +250,7 @@ def load_known_servers() -> dict:
     if not os.path.exists(path):
         return {}
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, "r", encoding="utf-8-sig") as f:
             data = json.load(f)
         return data if isinstance(data, dict) else {}
     except (OSError, ValueError):

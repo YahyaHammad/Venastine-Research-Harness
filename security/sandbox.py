@@ -25,6 +25,7 @@ that other tools needing safe command execution can reuse it.
 
 from __future__ import annotations
 
+import functools
 import logging
 import os
 import platform
@@ -80,8 +81,19 @@ def detect_shell() -> str:
 # ---------------------------------------------------------------------------
 
 
+@functools.lru_cache(maxsize=1)
 def is_docker_available() -> bool:
-    """Probe whether the Docker daemon is reachable."""
+    """Probe whether the Docker daemon is reachable.
+
+    Cached for the process. §18's headless callability filter calls
+    approval_needed(name, {}) for every advertised tool on every schema
+    build, and shell's approval_check reaches this -- so an uncached
+    probe meant roughly two `docker info` subprocesses per _run() (about
+    twenty per research pipeline), each up to the 10s timeout when the
+    daemon is unresponsive. Docker's availability does not change
+    meaningfully inside one process; a wrong answer costs a restart,
+    while the uncached version cost a subprocess per schema build.
+    """
     try:
         result = subprocess.run(
             ["docker", "info"],

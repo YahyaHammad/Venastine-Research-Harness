@@ -257,3 +257,29 @@ class TestErrorChannelRedaction:
             "mcp__srv__tool",
             {"error": {"detail": {"message": self.SECRET}}})
         assert "sk-ant-api03" not in str(out)
+
+
+class TestDepthCapFailsClosed:
+    """The bound stops a hostile structure exhausting the stack. Returning
+    the container UNTOUCHED at the cap turned it into a deterministic
+    bypass instead: a server placing a credential 13 levels down under a
+    scanned key passed straight through, and third-party
+    structured_content is exactly the threat _redact_value names."""
+
+    SECRET = "sk-ant-api03-BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+
+    def _nest(self, depth):
+        value = {"leaf": self.SECRET}
+        for _ in range(depth):
+            value = {"next": value}
+        return value
+
+    def test_secret_below_the_cap_is_redacted(self):
+        out = check_output_policy("t", {"result": self._nest(3)})
+        assert self.SECRET not in str(out)
+
+    def test_secret_beyond_the_cap_does_not_escape(self):
+        """It need not be redacted in place -- but it must not come back
+        verbatim."""
+        out = check_output_policy("t", {"result": self._nest(40)})
+        assert self.SECRET not in str(out)

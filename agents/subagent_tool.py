@@ -83,9 +83,19 @@ def run(params: dict, parent_context=None, parent_run=None,
         return {"error": f"Maximum subagent nesting depth "
                          f"({config.SUBAGENT_MAX_DEPTH}) reached"}
 
-    agent = manager.get(params["agent_name"])
+    # .get, not []. No provider validates tool inputs against the schema,
+    # and a bare KeyError here escapes _run() (which catches only
+    # ToolCallDenied) and takes down the turn -- where an error dict lets
+    # the model correct itself. Same pattern as load_skill.
+    name = params.get("agent_name")
+    task = params.get("task")
+    if not name or not task:
+        return {"error": "spawn_subagent requires both 'agent_name' and "
+                         "'task'."}
+
+    agent = manager.get(name)
     if agent is None:
-        return {"error": f"Unknown agent: {params['agent_name']!r} is not "
+        return {"error": f"Unknown agent: {name!r} is not "
                          f"in the available agents catalog."}
 
     child = manager.child_context(agent, parent)
@@ -107,7 +117,7 @@ def run(params: dict, parent_context=None, parent_run=None,
     effort = parent_run.effort if parent_run else None
 
     response = RunAgentLoop.run_agent_conversation(
-        user_goal=params["task"],
+        user_goal=task,
         model=model,
         provider_name=provider,
         max_steps=agent.max_steps or config.MAX_ITERATIONS,

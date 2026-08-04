@@ -137,7 +137,12 @@ def _parse_md_file(path: str, kind: str, tier: str):
     None (with a warning) for malformed files -- a broken definition
     warns and skips rather than taking down startup."""
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        # utf-8-sig, not utf-8: a BOM (Notepad's default on this project's
+        # platform) is decoded as a leading ﻿, so the frontmatter's
+        # ^--- no longer sits at position 0 and the file is skipped with
+        # the false diagnosis "does not begin with a YAML frontmatter
+        # block". utf-8-sig strips a BOM and is a no-op without one.
+        with open(path, "r", encoding="utf-8-sig") as f:
             text = f.read()
         fm, body = _parse_frontmatter(text)
     except (OSError, ValueError, yaml.YAMLError) as e:
@@ -317,7 +322,9 @@ def _validate_settings(data, source: str) -> None:
 def _read_settings_file(path: str) -> dict:
     if not os.path.exists(path):
         return {}
-    with open(path, "r", encoding="utf-8") as f:
+    # utf-8-sig for the same reason as _parse_md_file: a BOM'd
+    # settings.json makes json.load raise at the first character.
+    with open(path, "r", encoding="utf-8-sig") as f:
         data = json.load(f)  # json.JSONError propagates as ValueError
     _validate_settings(data, path)
     return data

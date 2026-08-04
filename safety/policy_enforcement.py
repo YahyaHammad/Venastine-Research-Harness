@@ -131,7 +131,14 @@ def _redact_value(value, depth: int = 0):
     if isinstance(value, str):
         return redact_secrets(value)
     if depth >= _MAX_REDACT_DEPTH:
-        return value
+        # Fail CLOSED. Returning the container untouched made the depth
+        # bound a deterministic bypass: a server placing a credential 13
+        # levels down under a scanned key passed straight through, and
+        # third-party structured_content is precisely the threat this
+        # function's docstring names. The cap exists to stop a hostile
+        # structure exhausting the stack, so refusing to descend must
+        # mean refusing to emit, not emitting unchecked.
+        return "[REDACTED: nested beyond scan depth]"
     if isinstance(value, dict):
         return {k: _redact_value(v, depth + 1) for k, v in value.items()}
     if isinstance(value, (list, tuple)):

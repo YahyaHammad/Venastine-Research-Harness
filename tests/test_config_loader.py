@@ -556,3 +556,33 @@ def test_readable_context_md_still_loads(_redirect_roots):
     config_loader.initialize(str(_redirect_roots["project"]))
     assert config_loader.context_for_agent(
         config_loader.get_agent("reader")) == "Real notes."
+
+
+# ---------------------------------------------------------------------------
+# ---- A BOM must not look like malformed content (review f22) --------------
+# ---------------------------------------------------------------------------
+
+def test_bom_prefixed_agent_file_still_parses(_redirect_roots):
+    """Notepad writes UTF-8 with a BOM by default on this project's
+    platform. Read as plain utf-8 the BOM survives as a leading \ufeff,
+    so the frontmatter's ^--- is no longer at position 0 and the file was
+    skipped with the false diagnosis "does not begin with a YAML
+    frontmatter block"."""
+    d = _redirect_roots["user"] / "agents"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "bommed.md").write_bytes(
+        "---\nname: bommed\ndescription: d\n---\n\nBody.\n".encode("utf-8-sig"))
+
+    config_loader.initialize(str(_redirect_roots["project"]))
+    assert config_loader.get_agent("bommed") is not None
+
+
+def test_bom_prefixed_settings_still_parses(_redirect_roots):
+    """json.load raises on a BOM at character 0, which for settings.json
+    means SystemExit(1) at startup rather than a working config."""
+    _redirect_roots["user"].mkdir(parents=True, exist_ok=True)
+    (_redirect_roots["user"] / "settings.json").write_bytes(
+        '{"default_model": "bommed-model"}'.encode("utf-8-sig"))
+
+    config_loader.initialize(str(_redirect_roots["project"]))
+    assert config_loader.get_settings()["default_model"] == "bommed-model"

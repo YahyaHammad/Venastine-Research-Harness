@@ -46,6 +46,9 @@ from typing import Optional
 
 from mcp import Client
 from mcp.client.stdio import StdioServerParameters, stdio_client
+from mcp.client.streamable_http import (
+    create_mcp_http_client, streamable_http_client,
+)
 from mcp.shared.exceptions import MCPError
 
 logger = logging.getLogger(__name__)
@@ -184,7 +187,20 @@ class MCPClient:
                 cwd=cfg.cwd,
             ))
         if cfg.transport == "http":
-            return cfg.url
+            if not cfg.headers:
+                return cfg.url
+            # `headers` was parsed into ServerConfig and then never used:
+            # a bare URL carries none of them, so a server configured with
+            # an Authorization header connected UNAUTHENTICATED, with
+            # nothing indicating they had been discarded. In v2 headers
+            # live on the httpx2 client, and the SDK ships the helper that
+            # applies its own MCP defaults alongside them -- so this uses
+            # that rather than hand-building a client and losing the
+            # SSE-friendly timeouts.
+            return streamable_http_client(
+                cfg.url,
+                http_client=create_mcp_http_client(headers=dict(cfg.headers)),
+            )
         raise ValueError(cfg.error or "unusable server configuration")
 
     async def _manager(self):

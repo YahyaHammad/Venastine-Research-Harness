@@ -90,3 +90,16 @@ def test_prompt_unchanged_without_skills(tmp_path, monkeypatch):
 
 def test_prompt_unchanged_before_initialize():
     assert system_prompts.with_skill_catalog("BASE") == "BASE"
+
+
+def test_missing_name_returns_an_error_not_a_keyerror(_user_skill):
+    """No provider validates tool inputs against the schema, so a call
+    with the key missing or misspelled raised a bare KeyError -- and
+    _run() catches only ToolCallDenied, so it aborted the whole turn,
+    skipped any remaining batched tool calls, and persisted no
+    tool_result for the tool_use id. An error dict lets the model see
+    what it got wrong."""
+    for params in ({}, {"skill": "crypto"}, {"name": ""}):
+        result = load_skill.run(params)
+        assert "error" in result, params
+        assert "name" in result["error"]

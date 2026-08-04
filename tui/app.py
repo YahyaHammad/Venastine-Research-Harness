@@ -136,7 +136,7 @@ class VenastineApp(App):
         self._animations = tui_settings.get("animations", True)
         self.effort = tui_settings.get("effort") or config.DEFAULT_EFFORT
 
-        self.memory: ConversationMemory | None = None
+        self._memory: ConversationMemory | None = None
         self._permission_channel: queue.Queue | None = None
         self._busy = False
         # §18 session-scoped active agent (/agent switch). None = default
@@ -161,7 +161,6 @@ class VenastineApp(App):
         themes.register_all(self)
         self.theme = self._theme_name
         self.query_one("#effort-raven", EffortRaven).effort = self.effort
-        self.memory = ConversationMemory()
         self.refresh_goal_banner()
         self._transcript.write_system(
             f"{self.provider_name} | {self.model} | theme {self._theme_name}"
@@ -248,8 +247,30 @@ class VenastineApp(App):
         self.query_one("#effort-raven", EffortRaven).effort = self.effort
         self._transcript.write_system(f"Effort set to {self.effort or 'auto'}.")
 
+    @property
+    def memory(self) -> ConversationMemory:
+        """The active thread, created on first USE rather than at mount.
+
+        on_mount used to build one immediately, and constructing a
+        ConversationMemory persists a ConversationThread row -- so
+        launching the TUI, reading /help and quitting left a phantom
+        empty thread behind, and the Ctrl+T picker filled with rows
+        carrying nothing but an id and a timestamp, indistinguishable
+        from real ones. The CLI has always created memory only when a
+        turn actually happens.
+        """
+        if self._memory is None:
+            self._memory = ConversationMemory()
+        return self._memory
+
+    @memory.setter
+    def memory(self, value) -> None:
+        self._memory = value
+
     def refresh_goal_banner(self) -> None:
-        goal = self.memory.extra.get("goal") if self.memory else None
+        # self._memory, NOT self.memory: reading the banner must not be
+        # what creates the thread this property exists to defer.
+        goal = self._memory.extra.get("goal") if self._memory else None
         self.query_one("#goal-banner", GoalBanner).goal = goal
 
     @property
@@ -264,18 +285,22 @@ class VenastineApp(App):
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         text = event.value.strip()
-        event.input.value = ""
         if not text:
+            event.input.value = ""
             return
+        # Clear AFTER the busy check, not before. /research holds _busy
+        # for a whole ten-pass pipeline, so a follow-up typed during one
+        # was wiped and had to be retyped from memory.
+        if not text.startswith("/") and self._busy:
+            self._transcript.write_error("Still working — wait for this turn to finish.")
+            return
+        event.input.value = ""
         if text.startswith("/"):
             if not commands.dispatch(self, text):
                 name = text[1:].split(" ")[0]
                 self._transcript.write_error(
                     f"Unknown command /{name}. Try /help."
                 )
-            return
-        if self._busy:
-            self._transcript.write_error("Still working — wait for this turn to finish.")
             return
         self.run_agent_turn(text)
 
@@ -496,6 +521,15 @@ class VenastineApp(App):
     # -- actions -------------------------------------------------------------
 
     def action_pick_thread(self) -> None:
+        # Swapping self.memory mid-turn leaves the worker running _run()
+        # against the OLD memory: its response and tool results persist
+        # into the abandoned thread while rendering under the new one, so
+        # transcript and stored history diverge. Plain chat, /research and
+        # /grill-me all enforce this guard already.
+        if self._busy:
+            self._transcript.write_error(
+                "Still working — wait for this turn to finish.")
+            return
         threads = storage.list_threads()
 
         def chosen(thread_id) -> None:
@@ -504,6 +538,10 @@ class VenastineApp(App):
             self.memory = ConversationMemory(
                 thread_id=thread_id if isinstance(thread_id, UUID) else UUID(str(thread_id))
             )
+            # The banner is per-thread state; without this it kept showing
+            # the PREVIOUS thread's objective, misrepresenting what
+            # governs the session. /goal was the only path that refreshed.
+            self.refresh_goal_banner()
             self._transcript.write_system(f"Resumed thread {thread_id}.")
 
         self.push_screen(ThreadPickerScreen(threads), chosen)
@@ -553,9 +591,12 @@ def _cmd_effort(app: VenastineApp, args: str) -> None:
 def _cmd_research(app: VenastineApp, args: str) -> None:
     """Run the deep-research pipeline on a query, off the UI thread.
 
-    Coarse by construction -- see ResearchProgress's docstring. The worker
-    keeps the app responsive and the raven animating; the trace and report
-    land when the pipeline returns.
+    Coarse by construction: run_deep_research_pipeline() is synchronous
+    and returns only its finished PipelineRun, so nothing escapes while
+    it runs -- each pass is drained through run_to_completion() inside
+    the orchestrator. Live pass-by-pass progress needs the pipeline to
+    emit events, which is §22. The worker keeps the app responsive and
+    the raven animating; the trace and report land when it returns.
     """
     if not args:
         app._transcript.write_error("Usage: /research <query>")
@@ -595,7 +636,14 @@ def _cmd_threads(app: VenastineApp, args: str) -> None:
 
 
 def _cmd_new(app: VenastineApp, args: str) -> None:
-    app.memory = ConversationMemory()
+    if app._busy:
+        app._transcript.write_error(
+            "Still working — wait for this turn to finish.")
+        return
+    # None, not a fresh ConversationMemory: /new followed by /new should
+    # not leave two empty threads behind. The next turn creates it.
+    app.memory = None
+    app.refresh_goal_banner()
     app._transcript.write_system("Started a new thread.")
 
 

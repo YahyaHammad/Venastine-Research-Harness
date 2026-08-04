@@ -261,20 +261,34 @@ def test_headless_filter_warning_names_hidden_tool(_mcp_tool, caplog,
         yield StreamToken(final_response=make_model_response(text="hi"))
 
     mocker.patch("core.loop.call_model_stream", side_effect=fake_stream)
-    core.loop._headless_notice_shown = False
+    core.loop._headless_notices_shown.clear()
     try:
         with caplog.at_level("WARNING", logger="core.loop"):
             list(RunAgentLoop._run(_Mem(), "p", "ANTHROPIC", "m", None, 2))
         assert any("mcp__probe__tool" in r.message for r in caplog.records)
-        # once per process: a second headless run logs nothing new.
+
+        # The dedup half must NOT be arranged by the test. Setting the
+        # flag by hand (as this test used to) made both halves pass with
+        # the production dedup deleted -- so every headless run re-logged,
+        # ten times per research pipeline, with the suite green.
         caplog.clear()
-        core.loop._headless_notice_shown = True
         with caplog.at_level("WARNING", logger="core.loop"):
             list(RunAgentLoop._run(_Mem(), "p", "ANTHROPIC", "m", None, 2))
         assert not [r for r in caplog.records
                     if "mcp__probe__tool" in r.message]
+
+        # A DIFFERENT hidden set is a different notice. Keying once per
+        # PROCESS silenced this case entirely: a subagent tightening
+        # approval for another tool hides strictly more, and that
+        # difference was exactly what never got logged.
+        caplog.clear()
+        wider = ToolContext(approval_overrides={"get_time": True})
+        with caplog.at_level("WARNING", logger="core.loop"):
+            list(RunAgentLoop._run(_Mem(), "p", "ANTHROPIC", "m", wider, 2))
+        assert any("get_time" in r.message for r in caplog.records), \
+            "a larger hidden set was silently absorbed by the dedup"
     finally:
-        core.loop._headless_notice_shown = False
+        core.loop._headless_notices_shown.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -600,3 +614,14 @@ def test_grant_does_not_leak_into_the_next_turn(mocker):
     a = _RunInfo(model="m", provider_name="p")
     a.granted_tools.add("spawn_subagent")
     assert _RunInfo(model="m", provider_name="p").granted_tools == set()
+
+
+@pytest.mark.parametrize("params", [
+    {}, {"task": "t"}, {"agent_name": "x"}, {"agent_name": "", "task": "t"},
+])
+def test_spawn_subagent_missing_params_return_errors_not_keyerrors(params):
+    """Same defect as load_skill's: a bare KeyError escapes _run(), which
+    catches only ToolCallDenied, and takes the whole turn down where an
+    error dict would let the model correct itself."""
+    result = subagent_tool.run(params, parent_context=ToolContext())
+    assert "error" in result

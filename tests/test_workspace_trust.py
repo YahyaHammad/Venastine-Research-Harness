@@ -168,3 +168,45 @@ def test_regular_file_contents_still_change_the_digest(tmp_path):
 
     assert workspace_trust._content_hash(str(a)) != \
         workspace_trust._content_hash(str(b))
+
+
+# ---------------------------------------------------------------------------
+# ---- The store fails closed, never crashes (review f23, f25) -------------
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("body", ["{truncated", "[]", "null", '"text"'])
+def test_damaged_store_means_untrusted_not_a_crash(tmp_path,
+                                                   _redirect_trust_store, body):
+    """A partial write (Ctrl+C, full disk) or a non-object store used to
+    raise out of is_trusted() at EVERY startup for EVERY project until
+    the file was deleted by hand. Unknown state must mean untrusted --
+    which re-triggers the prompt -- not unstartable."""
+    store = _redirect_trust_store / ".config" / "venastine"
+    store.mkdir(parents=True, exist_ok=True)
+    (store / "trusted_projects.json").write_text(body, encoding="utf-8")
+
+    proj = _make_project(tmp_path, {"settings.json": "{}"})
+    assert workspace_trust.is_trusted(str(proj)) is False
+
+
+def test_grant_is_written_atomically(tmp_path, _redirect_trust_store,
+                                     monkeypatch):
+    """A truncate-then-write leaves the store empty for the length of the
+    write and permanently damaged if the process dies inside it. Asserted
+    by failing the serialization midway: the ORIGINAL file must survive
+    intact, which a direct write cannot manage."""
+    first = _make_project(tmp_path, {"settings.json": "{}"}, name="first")
+    workspace_trust.grant_trust(str(first))
+    path = _redirect_trust_store / ".config" / "venastine" / "trusted_projects.json"
+    before = path.read_text(encoding="utf-8")
+
+    def _explode(*a, **kw):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(workspace_trust.json, "dump", _explode)
+    second = _make_project(tmp_path, {"settings.json": "{}"}, name="second")
+    with pytest.raises(RuntimeError):
+        workspace_trust.grant_trust(str(second))
+
+    assert path.read_text(encoding="utf-8") == before
+    assert workspace_trust.is_trusted(str(first)) is True
