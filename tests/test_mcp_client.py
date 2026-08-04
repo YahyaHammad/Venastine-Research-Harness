@@ -89,6 +89,10 @@ def client(monkeypatch):
 def _clean_dynamic_approvals():
     yield
     permissions.clear_dynamic_approval_defaults()
+    # register_all() records what it registered so unregister_all() can
+    # remove exactly that; a test that registers without disconnecting
+    # would otherwise carry its names into the next one.
+    registration._registered.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -511,5 +515,107 @@ def test_per_server_connect_timeout_does_not_starve_the_others(monkeypatch):
         assert "good" in c.clients, c.failures
         assert "wedged" in c.failures
         assert c.call_tool("good", "add", {"a": 1, "b": 1})["result"] == {"result": 2}
+    finally:
+        c.disconnect_all()
+
+
+# ---------------------------------------------------------------------------
+# ---- `mcp__<server>__<tool>` is a name, not a parser (review f8) ---------
+# ---------------------------------------------------------------------------
+#
+# Neither `__` in a server name nor `__` in a tool name is illegal, and
+# both occur. Fixing it by REJECTING such names would be the up-front
+# schema validation decision G rules out, so registration records exactly
+# what it registered instead.
+
+def _named_server(server_name: str, tool_names: list):
+    srv = MCPServer(server_name)
+    for tool_name in tool_names:
+        def _make(tn):
+            def _fn() -> str:
+                return tn
+            _fn.__name__ = tn
+            return _fn
+        srv.tool()(_make(tool_name))
+    return srv
+
+
+@pytest.fixture
+def two_servers(monkeypatch):
+    """Server 'fs' with tool 'read', and server 'fs__read' with tool 'x'.
+
+    Chosen so BOTH over-match layers bite. mcp__fs__read__x begins with
+    the registry teardown prefix (mcp__fs__) AND with the other server's
+    full tool name (mcp__fs__read), which is what the approval store used
+    to clear by.
+    """
+    servers = {
+        "fs": _named_server("fs", ["read"]),
+        "fs__read": _named_server("fs__read", ["x"]),
+    }
+    monkeypatch.setattr(MCPClient, "_transport_for",
+                        lambda self, cfg: servers[cfg.name])
+    c = MCPClient({name: _cfg(name) for name in servers})
+    c.connect_all()
+    yield c
+    c.disconnect_all()
+
+
+def test_unregistering_one_server_leaves_a_prefix_sibling_intact(two_servers):
+    """Disconnecting 'fs' scanned for 'mcp__fs__', which also matches
+    every tool of the still-connected 'fs__legacy' -- silently
+    unregistering live tools mid-session."""
+    reg = ToolRegistry()
+    registration.register_all(two_servers, reg)
+    assert "mcp__fs__read" in reg._tools
+    assert "mcp__fs__read__x" in reg._tools
+
+    registration.unregister_all(reg, "fs")
+
+    assert "mcp__fs__read" not in reg._tools
+    assert "mcp__fs__read__x" in reg._tools, \
+        "a still-connected server's tools were taken down with its neighbour"
+
+
+def test_approval_defaults_are_cleared_by_exact_name(two_servers):
+    """The same over-match one layer down. permissions cleared by PREFIX,
+    so removing mcp__fs__read also removed mcp__fs__read__x -- returning
+    a live, auto-approved tool to requiring approval it was configured
+    not to need."""
+    reg = ToolRegistry()
+    registration.register_all(two_servers, reg)
+    permissions.set_dynamic_approval_default("mcp__fs__read__x", False)
+
+    registration.unregister_all(reg, "fs")
+
+    assert permissions.requires_approval("mcp__fs__read__x", {}) is False
+
+
+def test_colliding_tool_name_is_refused_not_silently_overwritten(monkeypatch):
+    """tool_name_for("a", "b__c") == tool_name_for("a__b", "c"). Left
+    alone, registry.register overwrites, so a tool the user believes is
+    approval-gated on server `a` executes server `a__b`'s handler under
+    a__b's autoApprove -- a trusted project's mcp.json picks the name."""
+    servers = {
+        "a": _named_server("a", ["b__c"]),
+        "a__b": _named_server("a__b", ["c"]),
+    }
+    monkeypatch.setattr(MCPClient, "_transport_for",
+                        lambda self, cfg: servers[cfg.name])
+    c = MCPClient({
+        "a": _cfg("a"),
+        "a__b": _cfg("a__b", auto_approve=True),
+    })
+    c.connect_all()
+    try:
+        reg = ToolRegistry()
+        names = registration.register_all(c, reg)
+
+        # One registration for the shared name, not two.
+        assert names.count("mcp__a__b__c") == 1
+        # And it is the FIRST one -- the auto-approved impostor did not
+        # replace the gated tool's handler or its approval policy.
+        assert reg._tools["mcp__a__b__c"].handler is not None
+        assert permissions.requires_approval("mcp__a__b__c", {}) is True
     finally:
         c.disconnect_all()

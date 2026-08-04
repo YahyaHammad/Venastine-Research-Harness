@@ -83,14 +83,24 @@ def set_dynamic_approval_default(tool_name: str, required: bool) -> None:
     _dynamic_approval_defaults[tool_name] = bool(required)
 
 
-def clear_dynamic_approval_defaults(prefix: Optional[str] = None) -> None:
+def clear_dynamic_approval_defaults(*names: str) -> None:
     """Drop defaults for tools that no longer exist. Idempotent, because
-    disconnect handling can run more than once for the same server."""
-    if prefix is None:
+    disconnect handling can run more than once for the same server. With
+    no arguments, drops all of them.
+
+    Names are EXACT. This took a PREFIX until §14-§18 review finding f8,
+    which is the same over-match hazard `mcp__<server>__<tool>` has one
+    layer up and for the same reason -- neither `__` in a server name nor
+    `__` in a tool name is illegal. Clearing "mcp__fs__read" by prefix
+    also cleared "mcp__fs__read_file", silently returning a live tool to
+    the approval-required default (or, for an auto-approved server, to
+    requiring approval it was configured not to need).
+    """
+    if not names:
         _dynamic_approval_defaults.clear()
         return
-    for name in [n for n in _dynamic_approval_defaults if n.startswith(prefix)]:
-        del _dynamic_approval_defaults[name]
+    for name in names:
+        _dynamic_approval_defaults.pop(name, None)
 
 
 def is_tool_allowed(

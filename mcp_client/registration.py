@@ -28,6 +28,29 @@ logger = logging.getLogger(__name__)
 
 NAME_PREFIX = "mcp__"
 
+# server name -> the exact tool names registered for it.
+#
+# THE PREFIX IS NOT A PARSER. `mcp__<server>__<tool>` cannot be taken
+# apart again: neither `__` in a server name nor `__` in a tool name is
+# illegal anywhere, and both occur. Two consequences, both silent:
+#
+#   * teardown by prefix over-matches. Disconnecting server "fs" scans for
+#     "mcp__fs__", which also matches every tool of a still-connected
+#     server named "fs__legacy" -- unregistering live tools and dropping
+#     their approval defaults.
+#   * names collide. tool_name_for("a", "b__c") and
+#     tool_name_for("a__b", "c") are the same string, so registry.register
+#     silently overwrites: a tool the user believes is approval-gated on
+#     server `a` runs server `a__b`'s handler under a__b's autoApprove.
+#
+# A trusted project's .venastine/mcp.json can choose the colliding server
+# name -- the D29 impersonation threat, one separator away.
+#
+# Recording what was actually registered fixes both without rejecting any
+# mcp.json content, which decision G rules out: validation here is by
+# CONNECTING, not by schema.
+_registered: dict = {}
+
 
 def tool_name_for(server_name: str, tool_name: str) -> str:
     return f"{NAME_PREFIX}{server_name}__{tool_name}"
@@ -84,6 +107,18 @@ def register_all(client, registry) -> list:
 
         for tool in tools:
             name = tool_name_for(server_name, tool.name)
+            if name in registry._tools:
+                # Never overwrite. The colliding registration would replace
+                # BOTH the handler and (via set_dynamic_approval_default
+                # below) the approval policy of a tool already in place --
+                # so refusing loudly is the only outcome that can't be
+                # mistaken for the tool the user thinks they are calling.
+                logger.warning(
+                    "MCP tool name collision: %r from server %r is already "
+                    "registered; skipping it. Rename one of the servers or "
+                    "tools -- '__' in a name makes these ambiguous.",
+                    name, server_name)
+                continue
             # Base approval default BEFORE registering, so there is no
             # window in which the tool is callable without its policy set.
             permissions.set_dynamic_approval_default(name, not auto_approve)
@@ -92,6 +127,7 @@ def register_all(client, registry) -> list:
                 schema=schema_for(server_name, tool),
                 handler=_make_handler(client, server_name, tool.name),
             ))
+            _registered.setdefault(server_name, []).append(name)
             registered.append(name)
 
         if auto_approve:
@@ -105,8 +141,14 @@ def register_all(client, registry) -> list:
 def unregister_all(registry, server_name: str = None) -> None:
     """Remove MCP tools from the registry and drop their approval
     defaults. Idempotent -- disconnect handling can run more than once
-    for the same server, which is why registry.unregister() is too."""
-    prefix = f"{NAME_PREFIX}{server_name}__" if server_name else NAME_PREFIX
-    for name in [n for n in list(registry._tools) if n.startswith(prefix)]:
-        registry.unregister(name)
-    permissions.clear_dynamic_approval_defaults(prefix)
+    for the same server, which is why registry.unregister() is too.
+
+    Removes exactly what register_all() put in, by name. A prefix scan
+    would take a sibling server's tools with it whenever one server's
+    name is a `__`-prefix of another's (see _registered above).
+    """
+    servers = [server_name] if server_name is not None else list(_registered)
+    for server in servers:
+        for name in _registered.pop(server, []):
+            registry.unregister(name)
+            permissions.clear_dynamic_approval_defaults(name)
