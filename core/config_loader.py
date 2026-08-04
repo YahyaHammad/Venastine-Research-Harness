@@ -75,8 +75,20 @@ RESEARCH_APPROVAL_MODES = ("none", "attended")
 _KNOWN_COMPACTION = {
     "strength": int,
     "keep_recent_tokens": int,
-    "buffer_tokens": int,
+    # ROADMAP_v2 §21 (M1). This was `buffer_tokens` while §21 was specified
+    # as "headroom before the model's context window". It is not headroom:
+    # the trigger is a WORKING-SET TARGET, because MAX_TOKEN_BUDGET makes a
+    # turn unusable at well under half of any modern window and a
+    # window-derived threshold sits at a size the thread can never reach in
+    # working order. Renamed rather than redefined -- a key that keeps its
+    # name and changes its meaning is worse than one that moves, and these
+    # keys have been inert since §14 so nothing depends on the old spelling.
+    "trigger_tokens": int,
     "warning_margin_tokens": int,
+    # §21 M5 / M2 / retry bound.
+    "keep_recent_turns": int,
+    "strategy": str,
+    "max_retries": int,
 }
 # ROADMAP_v2 §16. TUI preferences live here rather than in a dotfile of
 # their own because unknown settings keys RAISE (§14 amendment 1) -- a
@@ -416,6 +428,108 @@ def _validate_settings(data, source: str) -> None:
                     f"got {value!r}")
 
 
+# ---------------------------------------------------------------------------
+# ---- Compaction settings (ROADMAP_v2 §21, D27) ----------------------------
+# ---------------------------------------------------------------------------
+#
+# Resolution lives HERE rather than in core/compaction.py because
+# config_loader already owns the settings merge, and core/compaction.py
+# reaches agents.manager, which imports this module -- resolving there and
+# validating here would be a cycle. One function, called at startup so a
+# bad value is a startup error, and called again per compaction so a
+# per-invocation `/compact --strength 4` composes with the same rules.
+
+_COMPACTION_DEFAULTS = {
+    "trigger_tokens": "COMPACTION_TRIGGER_TOKENS",
+    "warning_margin_tokens": "COMPACTION_WARNING_MARGIN_TOKENS",
+    "keep_recent_tokens": "COMPACTION_KEEP_RECENT_TOKENS",
+    "keep_recent_turns": "COMPACTION_KEEP_RECENT_TURNS",
+    "strength": "COMPACTION_STRENGTH",
+    "max_retries": "COMPACTION_MAX_RETRIES",
+    "strategy": "COMPACTION_STRATEGY",
+}
+
+
+def effective_compaction(overrides: Optional[dict] = None) -> dict:
+    """The compaction values actually in force, and where they came from.
+
+    config.py default -> user settings.json -> trusted project
+    settings.json -> `overrides` (a per-invocation `/compact --strength 4`,
+    which applies to that one run and persists nothing). Nearest wins,
+    which is the precedence the rest of the config system already uses.
+
+    RELATIONSHIPS ARE VALIDATED, not just documented -- §21's own
+    instruction about warning_margin, which is the one value whose wrong
+    setting is not self-correcting: a margin at or above the trigger fires
+    the warning after the thing it warns about, which is no warning at all.
+
+    Raises ValueError on a value that cannot produce coherent trigger
+    math. That is the same posture settings.json already takes toward an
+    unknown key: a project's settings are content the user may not have
+    authored (D17's premise), and while nothing here can destroy anything
+    -- the archive is never edited by compaction, which is exactly the
+    property that makes this safe -- an absurd trigger would force
+    compaction constantly, and every compaction is a real model call the
+    user pays for.
+    """
+    import config
+
+    values = {
+        key: getattr(config, attr) for key, attr in _COMPACTION_DEFAULTS.items()
+    }
+    values.update(get_settings().get("compaction") or {})
+    values.update({k: v for k, v in (overrides or {}).items() if v is not None})
+
+    strength = values["strength"]
+    if strength not in config.COMPACTION_TARGET_RATIOS:
+        raise ValueError(
+            f"compaction.strength must be one of "
+            f"{sorted(config.COMPACTION_TARGET_RATIOS)}, got {strength!r}")
+    if values["strategy"] not in config.COMPACTION_STRATEGIES:
+        raise ValueError(
+            f"compaction.strategy must be one of "
+            f"{', '.join(config.COMPACTION_STRATEGIES)}, "
+            f"got {values['strategy']!r}")
+    if values["trigger_tokens"] < 1:
+        raise ValueError(
+            f"compaction.trigger_tokens must be positive, got "
+            f"{values['trigger_tokens']}")
+    if values["warning_margin_tokens"] >= values["trigger_tokens"]:
+        raise ValueError(
+            f"compaction.warning_margin_tokens ({values['warning_margin_tokens']}) "
+            f"must be strictly less than trigger_tokens "
+            f"({values['trigger_tokens']}), or the early warning fires after "
+            f"the compaction it is warning about.")
+    if values["keep_recent_tokens"] >= values["trigger_tokens"]:
+        raise ValueError(
+            f"compaction.keep_recent_tokens ({values['keep_recent_tokens']}) "
+            f"must be strictly less than trigger_tokens "
+            f"({values['trigger_tokens']}), or every message is protected at "
+            f"the moment compaction fires and there is nothing to summarize.")
+    for key in ("keep_recent_turns", "max_retries"):
+        if values[key] < 0:
+            raise ValueError(f"compaction.{key} must not be negative, "
+                             f"got {values[key]}")
+
+    # M1's arithmetic, enforced rather than left in a comment. The prompt
+    # is re-billed on every step of a tool-using turn, so a turn starting
+    # at T tokens and running k steps spends roughly k*T against
+    # MAX_TOKEN_BUDGET. A trigger too close to the budget lets a thread
+    # reach a size where the budget stop ends the turn after one response
+    # -- compaction would then only ever fire on the turn AFTER the one it
+    # should have saved.
+    headroom = config.MAX_TOKEN_BUDGET / max(values["trigger_tokens"], 1)
+    if headroom < 3:
+        logger.warning(
+            "compaction.trigger_tokens (%s) leaves room for only ~%.1f model "
+            "calls within MAX_TOKEN_BUDGET (%s), because a tool-using turn "
+            "re-sends its whole prompt each step. Turns on a nearly-full "
+            "thread will stop early with token_budget_exceeded before "
+            "compaction gets a chance. Lower the trigger or raise the budget.",
+            values["trigger_tokens"], headroom, config.MAX_TOKEN_BUDGET)
+    return values
+
+
 def _read_settings_file(path: str) -> dict:
     if not os.path.exists(path):
         return {}
@@ -472,11 +586,6 @@ def initialize(project_path: str) -> None:
             project_path,
         )
     settings = _load_merged_settings(project_path, trusted)
-    if "compaction" in settings:
-        logger.warning(
-            "compaction settings present but not implemented yet "
-            "(ROADMAP_v2 §21); ignored.",
-        )
     context = None
     if trusted:
         context_path = os.path.join(
@@ -502,6 +611,13 @@ def initialize(project_path: str) -> None:
         "settings": settings,
         "context": context,
     }
+    # AFTER _state is assigned, because effective_compaction() reads
+    # get_settings(). Called here so an incoherent compaction block is a
+    # STARTUP error naming the file, rather than a ValueError from inside
+    # a compaction three hours into a long thread -- which is the one
+    # moment the user least wants to find out. §21's "reject at load time,
+    # not incoherent trigger math later".
+    effective_compaction()
 
 
 def reset() -> None:

@@ -337,6 +337,11 @@ class FakeStorage:
                     changed += 1
         return changed
 
+    def _ordered_rows(self, thread_id):
+        """Mirrors storage._ordered_rows: raw column values, oldest first.
+        core/compaction.py resolves a fold boundary through this."""
+        return self._messages_by_thread.get(thread_id, [])
+
     def latest_checkpoint(self, thread_id):
         return self._checkpoints.get(thread_id)
 
@@ -395,9 +400,19 @@ MEMORY_STORAGE_SYMBOLS = (
     "message_ids_from", "set_pinned",
 )
 
+# Everything FakeStorage stands in for, including the reads only
+# core/compaction.py makes. Patched onto the `storage` MODULE as well as
+# onto core.memory, because compaction imports lazily inside its functions
+# -- a `from storage import x` at call time reads the module attribute,
+# so patching the module covers every lazy importer at once, present and
+# future. core.memory imports at module top and so needs its own redirect.
+STORAGE_SYMBOLS = MEMORY_STORAGE_SYMBOLS + (
+    "archive_history", "history_through", "save_checkpoint", "_ordered_rows",
+)
+
 
 def install_fake_storage(set_attr, storage) -> None:
-    """Redirect core/memory.py's storage imports at `storage`.
+    """Redirect storage reads and writes at `storage`.
 
     `set_attr` is whatever the caller has for patching -- `monkeypatch.setattr`
     or `mocker.patch.object`, which take the same (target, name, value)
@@ -405,9 +420,12 @@ def install_fake_storage(set_attr, storage) -> None:
     usable from both fixture and test bodies.
     """
     import core.memory as memory_mod
+    import storage as storage_mod
 
     for name in MEMORY_STORAGE_SYMBOLS:
         set_attr(memory_mod, name, getattr(storage, name))
+    for name in STORAGE_SYMBOLS:
+        set_attr(storage_mod, name, getattr(storage, name))
 
 
 @pytest.fixture

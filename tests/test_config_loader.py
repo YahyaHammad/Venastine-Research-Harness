@@ -230,14 +230,22 @@ def test_settings_wrong_type_raises(_redirect_roots):
         config_loader.initialize(str(_redirect_roots["project"]))
 
 
-def test_settings_compaction_present_warns_unimplemented(_redirect_roots, caplog):
+def test_settings_compaction_is_consumed(_redirect_roots, caplog):
+    """ROADMAP_v2 §21 replaced the "present but not implemented yet"
+    warning this test used to assert. The warning was the right thing
+    while the keys were inert -- §14's rule is that nothing silently
+    no-ops -- and the honest successor is proving they now reach the
+    values compaction actually runs on."""
     _write_settings(_redirect_roots["user"],
-                    {"compaction": {"strength": 3, "keep_recent_tokens": 4000}})
+                    {"compaction": {"strength": 5, "keep_recent_tokens": 1234}})
 
     with caplog.at_level("WARNING", logger="core.config_loader"):
         config_loader.initialize(str(_redirect_roots["project"]))
 
-    assert any("not implemented" in r.message for r in caplog.records)
+    effective = config_loader.effective_compaction()
+    assert effective["strength"] == 5
+    assert effective["keep_recent_tokens"] == 1234
+    assert not any("not implemented" in r.message for r in caplog.records)
 
 
 def test_get_settings_before_initialize_is_empty():
@@ -314,21 +322,21 @@ def test_f2_compaction_deep_merges_across_tiers(_redirect_roots):
 
     Every other setting is a scalar, so whole-value replacement IS per-key
     override for them. `compaction` is the one nested key, and a plain
-    dict.update() would let a project setting `buffer_tokens` silently
+    dict.update() would let a project setting `trigger_tokens` silently
     discard the user's `strength` -- the same operation behaving as a
     per-key override everywhere else and a wholesale reset here, purely
     because of the value's type. §21 consumes these, so it is pinned now.
     """
     _write_settings(_redirect_roots["user"],
-                    {"compaction": {"strength": 3, "buffer_tokens": 500}})
+                    {"compaction": {"strength": 3, "trigger_tokens": 50_000}})
     _write_settings(_redirect_roots["project"] / ".venastine",
-                    {"compaction": {"buffer_tokens": 100}})
+                    {"compaction": {"trigger_tokens": 30_000}})
     workspace_trust.grant_trust(str(_redirect_roots["project"]))
 
     config_loader.initialize(str(_redirect_roots["project"]))
     compaction = config_loader.get_settings()["compaction"]
 
-    assert compaction["buffer_tokens"] == 100   # project wins on its own key
+    assert compaction["trigger_tokens"] == 30_000  # project wins on its own key
     assert compaction["strength"] == 3          # user's sibling key survives
 
 

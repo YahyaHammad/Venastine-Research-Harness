@@ -29,9 +29,27 @@ MAX_JSON_RETRIES = 2  # max corrective follow-up attempts when a pass returns ma
 # New, separate from MAX_TOKENS (which caps a single call's output).
 # This caps TOTAL tokens (input+output, summed across every call) spent
 # within one RunAgentLoop._run() invocation -- applies to both regular
-# conversation and every research pass. Placeholder default; tune based
-# on actual usage patterns once you have real runs to look at.
-MAX_TOKEN_BUDGET = 100_000
+# conversation and every research pass.
+#
+# IT IS A SPEND METER, NOT A CONTEXT LIMIT, and the difference is
+# load-bearing (ROADMAP_v2 §21, M1). The prompt is resent on every step of
+# a tool-using turn, so the provider bills it again and this counter adds
+# it again. That is correct as billing and quadratic as anything else: at
+# ~2k of tool result per step, a 20k-token thread gets about 9 steps, a
+# 50k thread about 2, and a 100k thread exactly one response with no tool
+# calls at all.
+#
+# Raised from 100_000 at §21. The old value was labelled a placeholder by
+# its own comment, and it was small enough that COMPACTION_TRIGGER_TOKENS
+# could not be reached: for compaction at threshold T to fire and still
+# leave k usable steps, this needs to be roughly k*T. At 250k a compacted
+# ~40k thread gets its full run of steps, and a genuine runaway still
+# stops well short of anything ruinous.
+#
+# core/config_loader.py WARNS if a configured trigger is too close to this
+# to leave room for a multi-step turn -- the relationship is validated
+# rather than left in a comment.
+MAX_TOKEN_BUDGET = 250_000
 
 # Deferred for now (core sequential pipeline only, per current scope):
 #   (none remaining -- ensemble_mode/ensemble_n built in ROADMAP §10,
@@ -190,6 +208,120 @@ MAX_REVIEW_FINDINGS = 25
 MAX_REVIEW_REFINEMENTS = 3
 
 
+# ---------------------------------------------------------------------------
+# --- Compaction (ROADMAP_v2 §21) -------------------------------------------
+# ---------------------------------------------------------------------------
+#
+# D27: these are DEFAULTS, not settings. Every value is a starting point
+# chosen to be reasonable and explicitly not claimed to be right, and every
+# one is overridable through the existing settings mechanism -- config.py
+# default -> user ~/.config/venastine/settings.json -> trusted project
+# .venastine/settings.json -> a per-invocation `/compact --strength N`.
+# The architecture is what's locked; the numbers are expected to move once
+# there are real long threads to look at.
+
+# The working-set size compaction maintains. Compaction fires when the last
+# measured input_tokens reaches this.
+#
+# M1: NOT `context_limit - buffer`. §21 parameterized the trigger against
+# the model's context window on the assumption that the window is what a
+# long thread hits first. On this codebase it is not -- MAX_TOKEN_BUDGET
+# above makes a turn unusable at well under half of any modern window, so a
+# window-derived trigger sits at a size the thread can never reach in
+# working order. Compaction defends per-turn cost and step headroom; the
+# window is a backstop below.
+#
+# This also makes MODEL_CONTEXT_WINDOWS much less dangerous to get wrong,
+# which was a risk §21 flagged about its own design.
+COMPACTION_TRIGGER_TOKENS = 40_000
+
+# Fires this many tokens BEFORE the trigger, so there is room to do
+# something about it -- pin a message, wrap up a thought, run /compact at a
+# natural break. §21 singles this out as the one value whose wrong setting
+# is not self-correcting: too small and it is an alert with no time
+# attached to it. Validated to be strictly less than the trigger.
+COMPACTION_WARNING_MARGIN_TOKENS = 8_000
+
+# The most recent tokens that always stay verbatim, never compacted.
+COMPACTION_KEEP_RECENT_TOKENS = 4_000
+
+# M5: a FLOOR in turns, on top of the token floor above, and the two
+# compose -- whichever protects more wins, plus the current turn, which is
+# never foldable at all. A single tool-heavy turn can consume the whole
+# keep-token budget by itself, leaving the immediately preceding exchange
+# summarized; a follow-up like "no, the other one" then has no referent.
+COMPACTION_KEEP_RECENT_TURNS = 3
+
+# 1-5, mapping to the target compression ratios below.
+COMPACTION_STRENGTH = 3
+
+# Bounded corrective retries when the compactor misses its target ratio.
+COMPACTION_MAX_RETRIES = 2
+
+# §21: strength is an objectively measurable target, not a qualitative
+# instruction. "Be more aggressive" behaves differently across models with
+# different summarization tendencies and no amount of prompting fixes that;
+# a ratio is checkable after the fact. Qualitative guidance still belongs
+# in the compactor's prompt, shaping WHAT survives within the budget.
+COMPACTION_TARGET_RATIOS = {1: 0.40, 2: 0.25, 3: 0.15, 4: 0.10, 5: 0.05}
+
+# How far outside the target a summary may land before it is sent back.
+# Under-shooting is not an error: a summary tighter than asked for has
+# already done the job, and rejecting it would spend a second call to make
+# the context bigger.
+COMPACTION_RATIO_TOLERANCE = 0.5
+
+# M2. "rederive" summarizes the ORIGINAL messages every time, so exactly
+# one summarization step always sits between an original message and what
+# the model sees -- which is what makes an early trigger free in fidelity
+# terms rather than a tradeoff. "chain" summarizes the previous summary
+# plus what followed it: constant cost per compaction forever, at the price
+# of loss that compounds over a long-lived thread.
+#
+# rederive falls back to chain on its own when the span outgrows a single
+# call, and says so. Setting "chain" here forces it always.
+COMPACTION_STRATEGY = "rederive"
+COMPACTION_STRATEGIES = ("rederive", "chain")
+
+# The agent that does the summarizing. §21: this is the shape of an agent
+# call -- a system prompt, a task, a judgment-based output -- so it runs
+# through the same RunAgentLoop as everything else rather than needing its
+# own LLM-calling path, and that is also what gives it real autonomy over
+# WHAT to preserve. Mechanical truncation cannot exercise judgment at all.
+COMPACTOR_AGENT = "compactor"
+
+# M6. A research pass is headless and unattended, and each one already
+# returns a distillation, so routine compaction there would spend on a
+# judgment call nobody is watching. Passes compact only when approaching
+# the model's actual context window -- a safety net against a hard provider
+# error mid-pipeline, not a working-set policy.
+COMPACTION_PIPELINE_BACKSTOP_TOKENS = 20_000
+
+# The backstop's source, and M1's remaining use for a window table.
+#
+# Deliberately NOT a per-provider API query: APICredentials lists thirteen
+# providers, most reaching the same OpenAI-compatible path, and there is no
+# uniform endpoint exposing context length across them -- thirteen adapters
+# to avoid a fallback constant they would all still need. A static table is
+# honest about being incomplete, and under M1 an incomplete entry costs
+# much less than it would have: the working-set trigger does not consult
+# this at all.
+MODEL_CONTEXT_WINDOWS: dict[str, int] = {
+    "claude-opus-5": 200_000,
+    "claude-sonnet-5": 200_000,
+    "claude-fable-5": 200_000,
+    "claude-opus-4-8": 200_000,
+    "claude-opus-4-7": 200_000,
+    "claude-haiku-4-5-20251001": 200_000,
+    "gpt-5.1": 400_000,
+    "gemini-2.5-pro": 1_000_000,
+}
+# Logged at WARNING when used, per §21 -- a wrong-by-default window means
+# the backstop fires at the wrong time in whichever direction the guess is
+# wrong, and silent guessing turns a tuning problem into a mystery.
+DEFAULT_CONTEXT_WINDOW = 128_000
+
+
 @dataclass
 class APICredentials:
     provider_name: str # Pick one of the following (ensure correct spelling & capitalization) {OPENAI, ANTHROPIC, GOOGLE, OPENROUTER, DEEPSEEK, GROK, MISTRAL, GROQ, TOGETHERAI, PERPLEXITY, FIREWORKS, QWEN, Z.AI, COHERE]
@@ -224,6 +356,10 @@ class ToolPermissions:
     # approval -- the spawned run's own tools are each gated by policy,
     # intersection-capped by the parent's context (C6).
     spawn_subagent: bool = True
+    # §21/D26. Thread-scoped, reversible, and it takes effect inside a
+    # conversation the user is watching -- a wrong pin costs some context
+    # budget and nothing else.
+    pin: bool = True
 
 @dataclass
 class ToolApprovals:
@@ -264,3 +400,13 @@ class ToolApprovals:
     # The child then runs headless with nothing granted, since
     # spawn_subagent forwards a grant only alongside a permission_channel.
     spawn_subagent: bool = True
+    # §21/D26: pin does NOT require approval, and the asymmetry with
+    # remember (§21b) is the decision. They differ on the axis that already
+    # separates `read` from `write` -- pin is thread-scoped and reversible,
+    # while remember writes something that outlives the thread and silently
+    # shapes conversations the user has not started yet.
+    #
+    # Consequence, named rather than discovered: this is what lets pin work
+    # on the CLI and inside a research pass, where an approval-gated tool
+    # is not merely denied but not advertised at all (§13).
+    pin: bool = False

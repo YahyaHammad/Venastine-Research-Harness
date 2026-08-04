@@ -17,7 +17,7 @@ python main.py --mode research --grant "q"        # §25: pick gated tools to au
 python main.py --mode research --attended "q"     # §25: approve every gated call as it happens
 python main.py --mode research --review "q"       # §20: review the finished run, consent to each correction
 
-pytest                                            # 776 tests, offline, ~25s (first run ~30s: matplotlib font cache)
+pytest                                            # 810 tests, offline, ~25s (first run ~30s: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure

@@ -1,0 +1,478 @@
+"""
+test_compaction.py
+
+ROADMAP_v2 §21: the trigger, the floors that bound what may be folded, and
+the compactor run itself.
+
+The rules under test are the ones tracing §21 against the code turned up as
+holes or as unfireable:
+
+  M1  the trigger is a working-set target, not context_limit - buffer
+  M2  re-derive from the archive by default; chain as configured/fallback
+  M4  the fold boundary is always a turn start
+  M5  three floors, earliest wins, and the current turn is never foldable
+  M6  a research pass compacts only at a hard backstop
+  M10 the ratio is measured by characters, and never compared to a token count
+"""
+
+import pytest
+
+import config
+from core import compaction, config_loader
+from core.memory import ConversationMemory
+
+
+# ---------------------------------------------------------------------------
+# ---- Helpers ---------------------------------------------------------------
+# ---------------------------------------------------------------------------
+
+class _Resp:
+    def __init__(self, text="", tool_calls=()):
+        self.text = text
+        self.tool_calls = list(tool_calls)
+
+
+@pytest.fixture(autouse=True)
+def _real_agents():
+    """The compactor is a real harness-tier agent, and conftest resets the
+    loader before every test. Initializing for real (rather than stubbing
+    manager.get) is what keeps this suite honest about the agent file
+    existing and parsing."""
+    config_loader.initialize(".")
+    yield
+    config_loader.reset()
+
+
+@pytest.fixture(autouse=True)
+def _guard_released():
+    """The re-entrancy flag is module state. A test that leaves it set
+    would make every later one silently no-op, which is the failure mode
+    hardest to read from a test report."""
+    yield
+    compaction._compacting = False
+
+
+def _thread(memory, turns=6, body="x" * 200):
+    for index in range(turns):
+        memory.add_user_message(f"question {index} {body}")
+        memory.add_assistant_message(_Resp(f"answer {index} {body}"))
+
+
+OVERRIDES = {"keep_recent_turns": 2, "keep_recent_tokens": 1,
+             "trigger_tokens": 1000, "warning_margin_tokens": 100}
+
+
+# ---------------------------------------------------------------------------
+# ---- The trigger (M1, M6) --------------------------------------------------
+# ---------------------------------------------------------------------------
+
+def test_the_trigger_is_a_working_set_target_not_the_window():
+    """M1. §21 put this at `context_limit - buffer`, which on this codebase
+    can never fire: MAX_TOKEN_BUDGET re-bills the whole prompt on every
+    step, so a thread is already unusable at well under half of any modern
+    window. A window-derived threshold sits at a size the thread cannot
+    reach in working order."""
+    _, compact_at = compaction.thresholds("claude-sonnet-5")
+
+    assert compact_at == config.COMPACTION_TRIGGER_TOKENS
+    assert compact_at < compaction.context_limit("claude-sonnet-5") / 2
+
+
+def test_the_warning_fires_strictly_before_the_compaction():
+    """AC4, and §21 singles this out as the one value whose wrong setting
+    is not self-correcting -- a margin at or above the trigger warns after
+    the thing it warns about."""
+    warn_at, compact_at = compaction.thresholds("claude-sonnet-5")
+
+    assert warn_at < compact_at
+    assert compaction.should_compact(warn_at, "claude-sonnet-5") == "warn"
+    assert compaction.should_compact(compact_at, "claude-sonnet-5") == "compact"
+    assert compaction.should_compact(warn_at - 1, "claude-sonnet-5") == ""
+
+
+def test_a_research_pass_only_compacts_near_the_window(caplog):
+    """M6. A pass is headless and unattended and already returns a
+    distillation, so routine compaction there would spend on a judgment
+    call nobody is watching. The backstop is a safety net against a hard
+    provider error, not a working-set policy."""
+    used = config.COMPACTION_TRIGGER_TOKENS + 1
+
+    assert compaction.should_compact(used, "claude-sonnet-5") == "compact"
+    assert compaction.should_compact(used, "claude-sonnet-5", mode="backstop") == ""
+
+    near = compaction.context_limit("claude-sonnet-5")
+    assert compaction.should_compact(near, "claude-sonnet-5", mode="backstop") == "compact"
+
+
+def test_an_unknown_model_warns_about_its_assumed_window(caplog):
+    """§21: silent guessing turns a tuning problem into a mystery. Much
+    less dangerous than §21 assumed, though -- M1 moved the ordinary
+    trigger off this table, so a missing entry costs a mistimed backstop
+    rather than mistimed compaction."""
+    with caplog.at_level("WARNING", logger="core.compaction"):
+        assert compaction.context_limit("some-new-model") == config.DEFAULT_CONTEXT_WINDOW
+
+    assert "MODEL_CONTEXT_WINDOWS" in caplog.text
+
+
+def test_the_reentrancy_guard_stops_the_compactor_compacting():
+    """M3. The compactor is an agent, so compacting runs the loop, which
+    evaluates the trigger, which could compact. `allowed_tools: []` stops
+    it calling anything; this stops it recursing."""
+    compaction._compacting = True
+
+    assert compaction.should_compact(10_000_000, "claude-sonnet-5") == ""
+
+
+# ---------------------------------------------------------------------------
+# ---- What may be folded (M4, M5) -------------------------------------------
+# ---------------------------------------------------------------------------
+
+def test_the_fold_boundary_is_always_a_turn_start(fake_storage):
+    """M4. A fold that separates an assistant message carrying tool_calls
+    from the tool results answering them is an HTTP 400 on Anthropic -- a
+    hard wire error on the next call, on a thread that worked a moment
+    ago. So the watermark is always the message just before a user
+    message."""
+    memory = ConversationMemory()
+    _thread(memory)
+    rows = fake_storage._messages_by_thread[memory.thread_id]
+
+    watermark = compaction.compactable_span(memory, overrides=OVERRIDES)
+
+    index = [r["id"] for r in rows].index(watermark)
+    assert rows[index + 1]["role"] == "user"
+
+
+def test_the_current_turn_is_never_foldable(fake_storage):
+    """M5's structural floor. A summary that swallowed the messages the
+    model is reasoning about right now would rewrite the question
+    mid-answer."""
+    memory = ConversationMemory()
+    _thread(memory)
+    rows = fake_storage._messages_by_thread[memory.thread_id]
+
+    # Pretend the turn that starts at index 2 is the one in progress.
+    watermark = compaction.compactable_span(
+        memory, current_turn_start=1, overrides=OVERRIDES)
+
+    assert watermark == rows[1]["id"]
+
+
+def test_the_keep_turns_floor_protects_recent_exchanges(fake_storage):
+    """M5. A single tool-heavy turn can consume the whole keep-token budget
+    by itself, leaving the immediately preceding exchange summarized -- and
+    a follow-up like "no, the other one" then has no referent."""
+    memory = ConversationMemory()
+    _thread(memory, turns=6)
+    rows = fake_storage._messages_by_thread[memory.thread_id]
+
+    watermark = compaction.compactable_span(
+        memory, overrides={**OVERRIDES, "keep_recent_turns": 4})
+
+    # 6 turns, keep 4 -> fold everything before turn 2, whose first
+    # message is row 4 (two rows per turn).
+    assert watermark == rows[3]["id"]
+
+
+def test_the_keep_tokens_floor_can_win_over_the_turn_floor(fake_storage):
+    """The floors compose -- whichever protects MORE wins. A large
+    keep_recent_tokens reaches further back than keep_recent_turns and
+    must not be overridden by it."""
+    memory = ConversationMemory()
+    _thread(memory, turns=6)
+    rows = fake_storage._messages_by_thread[memory.thread_id]
+
+    lenient = compaction.compactable_span(memory, overrides=OVERRIDES)
+    # ~105 estimated tokens per turn here, so 400 reaches back four turns
+    # while keep_recent_turns=2 reaches back two.
+    strict = compaction.compactable_span(
+        memory, overrides={**OVERRIDES, "keep_recent_tokens": 400})
+
+    ids = [r["id"] for r in rows]
+    assert ids.index(strict) < ids.index(lenient)
+
+
+def test_a_fully_protected_thread_folds_nothing(fake_storage):
+    """A real state, not a failure: three enormous turns can be over the
+    trigger and entirely protected. compact() reports it rather than
+    silently doing nothing, because "context is full" and "context is full
+    and I can't help" are different things to be told."""
+    memory = ConversationMemory()
+    _thread(memory, turns=2)
+
+    assert compaction.compactable_span(
+        memory, overrides={**OVERRIDES, "keep_recent_turns": 5}) is None
+
+
+def test_an_empty_thread_folds_nothing(fake_storage):
+    assert compaction.compactable_span(
+        ConversationMemory(), overrides=OVERRIDES) is None
+
+
+# ---------------------------------------------------------------------------
+# ---- The compactor run (M2) ------------------------------------------------
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def summaries(mocker):
+    """Drives RunAgentLoop from inside compaction, returning canned
+    summaries in order and logging what it was asked."""
+    def _install(*texts):
+        calls = []
+
+        def _first(**kwargs):
+            calls.append(kwargs)
+            return _Response(texts[0])
+
+        def _more(**kwargs):
+            calls.append(kwargs)
+            return _Response(texts[min(len(calls) - 1, len(texts) - 1)])
+
+        mocker.patch("core.loop.RunAgentLoop.run_agent_conversation",
+                     side_effect=_first)
+        mocker.patch("core.loop.RunAgentLoop.continue_conversation",
+                     side_effect=_more)
+        return calls
+    return _install
+
+
+class _Response:
+    def __init__(self, text):
+        self.text = text
+        self.thread_id = "compactor-thread"
+
+
+def test_compaction_records_a_checkpoint_and_rebuilds_the_view(
+        fake_storage, summaries):
+    memory = ConversationMemory()
+    _thread(memory)
+    summaries("A short summary.")
+    before = len(memory.messages)
+
+    notice = compaction.compact(memory, "claude-sonnet-5", "ANTHROPIC",
+                                overrides=OVERRIDES)
+
+    assert notice["kind"] == "compaction"
+    assert fake_storage.latest_checkpoint(memory.thread_id).strategy == "rederive"
+    assert len(memory.messages) < before
+    assert memory.messages[0]["content"].endswith("A short summary.")
+
+
+def test_the_archive_is_untouched_by_repeated_compaction(
+        fake_storage, summaries):
+    """AC1, run more than once -- the property has to hold however many
+    times this fires, which is the whole basis for triggering early."""
+    memory = ConversationMemory()
+    _thread(memory)
+    summaries("Summary one.", "Summary two.")
+    everything = fake_storage.archive_history(memory.thread_id)
+
+    compaction.compact(memory, "claude-sonnet-5", "ANTHROPIC", overrides=OVERRIDES)
+    _thread(memory, turns=2)
+    compaction.compact(memory, "claude-sonnet-5", "ANTHROPIC", overrides=OVERRIDES)
+
+    assert fake_storage.archive_history(memory.thread_id)[:len(everything)] == everything
+
+
+def test_rederive_summarizes_the_originals_not_the_last_summary(
+        fake_storage, summaries):
+    """M2, and the reason an early trigger is free in fidelity terms:
+    exactly one summarization step always sits between an original message
+    and what the model sees, however many compactions have run."""
+    memory = ConversationMemory()
+    _thread(memory)
+    calls = summaries("PRIOR SUMMARY TEXT", "Second summary.")
+    compaction.compact(memory, "claude-sonnet-5", "ANTHROPIC", overrides=OVERRIDES)
+    _thread(memory, turns=3)
+
+    compaction.compact(memory, "claude-sonnet-5", "ANTHROPIC", overrides=OVERRIDES)
+
+    assert "PRIOR SUMMARY TEXT" not in calls[-1]["user_goal"]
+    assert "question 0" in calls[-1]["user_goal"]
+
+
+def test_chaining_feeds_the_previous_summary_back_in(fake_storage, summaries):
+    """The configured alternative: constant cost per compaction forever,
+    at the price of loss that compounds."""
+    memory = ConversationMemory()
+    _thread(memory)
+    chain = {**OVERRIDES, "strategy": "chain"}
+    calls = summaries("PRIOR SUMMARY TEXT", "Second summary.")
+    compaction.compact(memory, "claude-sonnet-5", "ANTHROPIC", overrides=chain)
+    _thread(memory, turns=3)
+
+    compaction.compact(memory, "claude-sonnet-5", "ANTHROPIC", overrides=chain)
+
+    assert "PRIOR SUMMARY TEXT" in calls[-1]["user_goal"]
+    assert fake_storage.latest_checkpoint(memory.thread_id).strategy == "chain"
+
+
+def test_an_oversized_summary_is_sent_back(fake_storage, summaries):
+    """§3's retry loop with a length check in place of a parse. The
+    corrective message re-enters the compactor's OWN thread, so it sees
+    its own output rather than being asked cold."""
+    memory = ConversationMemory()
+    _thread(memory)
+    calls = summaries("z" * 5000, "Tight summary.")
+
+    compaction.compact(memory, "claude-sonnet-5", "ANTHROPIC", overrides=OVERRIDES)
+
+    assert len(calls) == 2
+    assert calls[1]["thread_id"] == "compactor-thread"
+    assert "Tight summary." in fake_storage.latest_checkpoint(
+        memory.thread_id).summary_text
+
+
+def test_a_summary_under_target_is_accepted_immediately(fake_storage, summaries):
+    """Undershooting is not an error. Rejecting a summary for being too
+    small would spend a second model call to make the context bigger."""
+    memory = ConversationMemory()
+    _thread(memory)
+    calls = summaries("Tiny.")
+
+    compaction.compact(memory, "claude-sonnet-5", "ANTHROPIC", overrides=OVERRIDES)
+
+    assert len(calls) == 1
+
+
+def test_a_summary_still_oversized_after_retries_is_used_anyway(
+        fake_storage, summaries, caplog):
+    """It is still smaller than what it replaces, which is the point.
+    Discarding it would spend every retry and keep the full history --
+    leaving the thread exactly as stuck as before, with less budget left
+    to fix it."""
+    memory = ConversationMemory()
+    _thread(memory)
+    summaries("z" * 5000)
+
+    with caplog.at_level("WARNING", logger="core.compaction"):
+        notice = compaction.compact(memory, "claude-sonnet-5", "ANTHROPIC",
+                                    overrides=OVERRIDES)
+
+    assert notice["kind"] == "compaction"
+    assert "missed its target" in caplog.text
+
+
+def test_an_empty_summary_skips_compaction(fake_storage, summaries):
+    """Recording an empty checkpoint would replace real history with
+    nothing at all -- the one outcome worse than not compacting."""
+    memory = ConversationMemory()
+    _thread(memory)
+    summaries("")
+
+    assert compaction.compact(memory, "claude-sonnet-5", "ANTHROPIC",
+                              overrides=OVERRIDES) is None
+    assert fake_storage.latest_checkpoint(memory.thread_id) is None
+
+
+def test_a_fully_protected_thread_says_so(fake_storage, summaries):
+    memory = ConversationMemory()
+    _thread(memory, turns=2)
+    summaries("unused")
+
+    notice = compaction.compact(
+        memory, "claude-sonnet-5", "ANTHROPIC",
+        overrides={**OVERRIDES, "keep_recent_turns": 5})
+
+    assert notice["kind"] == "compaction_blocked"
+    assert fake_storage.latest_checkpoint(memory.thread_id) is None
+
+
+def test_a_missing_compactor_agent_is_a_skip_not_a_crash(
+        fake_storage, summaries, mocker, caplog):
+    """Same containment §20 applies to a missing reviewer: an optional
+    stage that cannot run must not take the turn down with it."""
+    memory = ConversationMemory()
+    _thread(memory)
+    summaries("unused")
+    mocker.patch("agents.manager.manager.get", return_value=None)
+
+    with caplog.at_level("WARNING", logger="core.compaction"):
+        assert compaction.compact(memory, "claude-sonnet-5", "ANTHROPIC",
+                                  overrides=OVERRIDES) is None
+
+    assert "compactor" in caplog.text
+
+
+def test_the_guard_is_released_after_a_compaction(fake_storage, summaries):
+    """It is set around a model call that can raise. Left set, every later
+    compaction in the process silently no-ops -- a failure that reads as
+    "compaction just never fires" rather than as an error."""
+    memory = ConversationMemory()
+    _thread(memory)
+    summaries("A summary.")
+
+    compaction.compact(memory, "claude-sonnet-5", "ANTHROPIC", overrides=OVERRIDES)
+
+    assert compaction._compacting is False
+
+
+def test_the_guard_is_released_when_the_compactor_raises(
+        fake_storage, mocker):
+    memory = ConversationMemory()
+    _thread(memory)
+    mocker.patch("core.loop.RunAgentLoop.run_agent_conversation",
+                 side_effect=RuntimeError("provider down"))
+
+    with pytest.raises(RuntimeError):
+        compaction.compact(memory, "claude-sonnet-5", "ANTHROPIC",
+                           overrides=OVERRIDES)
+
+    assert compaction._compacting is False
+
+
+def test_the_compactor_runs_with_no_tools(fake_storage, summaries):
+    """`allowed_tools: []` in the agent definition, asserted through the
+    context the run actually gets -- an empty list parsed as "no opinion"
+    would hand a summarizer the whole tool set."""
+    memory = ConversationMemory()
+    _thread(memory)
+    calls = summaries("A summary.")
+
+    compaction.compact(memory, "claude-sonnet-5", "ANTHROPIC", overrides=OVERRIDES)
+
+    assert calls[0]["context"].allowed_tools == set()
+
+
+# ---------------------------------------------------------------------------
+# ---- Settings validation (D27, AC8) ----------------------------------------
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("overrides,fragment", [
+    ({"strength": 9}, "strength"),
+    ({"strength": 0}, "strength"),
+    ({"strategy": "vibes"}, "strategy"),
+    ({"trigger_tokens": 0}, "positive"),
+    ({"warning_margin_tokens": 40_000}, "warning_margin_tokens"),
+    ({"keep_recent_tokens": 40_000}, "keep_recent_tokens"),
+    ({"keep_recent_turns": -1}, "keep_recent_turns"),
+    ({"max_retries": -1}, "max_retries"),
+])
+def test_an_incoherent_value_is_rejected(overrides, fragment):
+    """AC8. §21's own instruction: validate the relationships, don't just
+    document them. A margin at or above the trigger is not a preference,
+    it is a warning that fires after the thing it warns about."""
+    with pytest.raises(ValueError, match=fragment):
+        config_loader.effective_compaction(overrides)
+
+
+def test_a_trigger_too_close_to_the_budget_warns(caplog):
+    """M1's arithmetic, enforced rather than left in a comment. A turn
+    re-sends its whole prompt each step, so a trigger near
+    MAX_TOKEN_BUDGET lets a thread reach a size where the budget stop ends
+    the turn after one response -- compaction would then only ever fire on
+    the turn AFTER the one it should have saved."""
+    with caplog.at_level("WARNING", logger="core.config_loader"):
+        config_loader.effective_compaction({"trigger_tokens": 200_000})
+
+    assert "token_budget_exceeded" in caplog.text
+
+
+def test_the_shipped_defaults_leave_room_for_a_multi_step_turn(caplog):
+    """The control for the test above: the values this harness actually
+    ships with must not themselves trip the warning."""
+    with caplog.at_level("WARNING", logger="core.config_loader"):
+        config_loader.effective_compaction()
+
+    assert "token_budget_exceeded" not in caplog.text

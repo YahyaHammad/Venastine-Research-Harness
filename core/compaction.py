@@ -1,0 +1,424 @@
+"""
+core/compaction.py
+
+ROADMAP_v2 §21. Decides WHEN a thread should be compacted, WHAT may be
+folded, and runs the compactor agent to do it.
+
+The archive is never touched. Compaction adds a CompactionCheckpoint row
+and nothing else; storage.archive_history() keeps returning every message
+ever written, however many times this has run (AC1). That is the property
+that makes an early, frequent trigger safe -- nothing is destroyed, only
+hidden from the next call.
+
+WHAT THIS MODULE OWNS
+  should_compact()   the trigger, in both its modes
+  compactable_span() what may be folded, and the three floors that bound it
+  compact()          run the compactor, record the checkpoint, rebuild the view
+
+WHAT IT DOES NOT OWN
+  Where the trigger is evaluated -- core/loop.py calls in, at a turn
+  boundary and between steps. Assembling the derived view -- core/memory.py
+  owns that, and compact() asks it to rebuild rather than splicing a
+  summary in from here. Resolving settings -- core/config_loader.py's
+  effective_compaction(), because it owns the merge and this module reaches
+  agents.manager, which imports it.
+
+MEASUREMENT IS BY CHARACTERS, AND SAYS SO (M10). §21 asks for the summary's
+tokens to be counted; no tokenizer is available offline, and
+usage["input_tokens"] measures a whole prompt rather than a segment of one.
+Chars/4 applied to both sides of a ratio is self-consistent, which is all a
+ratio check needs -- it is never compared against a provider's count.
+"""
+
+import logging
+from typing import Optional
+
+import config
+from core import config_loader
+
+logger = logging.getLogger(__name__)
+
+# M10. Rough and deliberately uncalibrated: it appears on both sides of
+# every comparison this module makes, so its accuracy cancels out. Never
+# compare a value derived from it against a provider's token count.
+CHARS_PER_TOKEN = 4
+
+# The re-entrancy guard (M3). The compactor is an agent, so compacting runs
+# the loop, which evaluates the trigger, which could compact. A thread-local
+# would be more precise, but the loop is synchronous and a compaction runs
+# to completion before its caller resumes -- and a module flag has the
+# property that matters more: it is impossible to be half-set.
+_compacting = False
+
+
+def _chars(messages) -> int:
+    """Size of a neutral-shape message list, in characters."""
+    total = 0
+    for message in messages:
+        total += len(str(message.get("content", "")))
+        total += len(str(message.get("text", "")))
+        for call in message.get("tool_calls", ()) or ():
+            total += len(str(call))
+    return total
+
+
+def estimated_tokens(messages) -> int:
+    """A character-based estimate of what a message list will cost to send.
+
+    Only used when nothing has been MEASURED yet -- a thread written before
+    §21 existed, resumed for the first time. Every other evaluation reads
+    memory.last_input_tokens, which is the provider's own count of exactly
+    what it was sent and needs no estimate at all.
+    """
+    return _chars(messages) // CHARS_PER_TOKEN
+
+
+def context_limit(model: str) -> int:
+    """The model's context window, for the pipeline backstop (M6).
+
+    Warned on fallback, per §21: a wrong-by-default window means the
+    backstop fires at the wrong time in whichever direction the guess is
+    wrong, and silent guessing turns a tuning problem into a mystery. Much
+    less load-bearing than §21 assumed, though -- M1 moved the ordinary
+    trigger off this table entirely, so a missing entry costs a mistimed
+    backstop rather than mistimed compaction.
+    """
+    window = config.MODEL_CONTEXT_WINDOWS.get(model)
+    if window is None:
+        logger.warning(
+            "No context window known for model %r; assuming %s. Add it to "
+            "config.MODEL_CONTEXT_WINDOWS -- the compaction backstop fires "
+            "against this number.", model, config.DEFAULT_CONTEXT_WINDOW)
+        return config.DEFAULT_CONTEXT_WINDOW
+    return window
+
+
+def thresholds(model: str, mode: str = "working_set",
+               overrides: Optional[dict] = None) -> tuple:
+    """(warn_at, compact_at) in tokens, for this mode.
+
+    TWO MODES, because a research pass and a chat turn want different
+    answers (M6). "working_set" is the ordinary one: compaction keeps the
+    thread small enough that turns stay cheap and keep their tool steps,
+    at a threshold largely independent of the model's window.
+    "backstop" is what a pipeline pass gets -- it fires only near the
+    actual context window, because a pass is headless and unattended and
+    each one already returns a distillation, so routine compaction there
+    would spend on a judgment call nobody is watching.
+    """
+    settings = config_loader.effective_compaction(overrides)
+    if mode == "backstop":
+        compact_at = max(
+            1, context_limit(model) - config.COMPACTION_PIPELINE_BACKSTOP_TOKENS)
+        return compact_at, compact_at
+    compact_at = settings["trigger_tokens"]
+    return compact_at - settings["warning_margin_tokens"], compact_at
+
+
+def should_compact(used: int, model: str, mode: str = "working_set",
+                   overrides: Optional[dict] = None) -> str:
+    """"" | "warn" | "compact", from a measured context size.
+
+    `used` is ModelResponse.usage["input_tokens"] from the most recent
+    call -- the provider's own measurement of everything it was sent, which
+    is exact but retrospective. That is why the check runs AFTER a response
+    and acts before the next call.
+
+    D21 is what makes this work rather than pedantry: a streaming path that
+    silently reported zero usage would leave `used` at 0 forever, so
+    compaction would never fire and the harness would run into a hard
+    context-limit error from the provider instead. The budget stop
+    condition and this trigger fail together, from the same cause.
+    """
+    if _compacting:
+        return ""
+    warn_at, compact_at = thresholds(model, mode, overrides)
+    if used >= compact_at:
+        return "compact"
+    if used >= warn_at:
+        return "warn"
+    return ""
+
+
+def compactable_span(memory, current_turn_start: Optional[int] = None,
+                     overrides: Optional[dict] = None):
+    """The id of the last message that may be folded, or None if nothing
+    may be.
+
+    THREE FLOORS, AND THE EARLIEST WINS (M5):
+
+      * the current turn -- structural, never foldable at all. A summary
+        that swallowed the messages the model is reasoning about right now
+        would rewrite the question mid-answer.
+      * the last N COMPLETED turns, verbatim. A single tool-heavy turn can
+        consume the whole keep-token budget by itself, leaving the
+        immediately preceding exchange summarized, and a follow-up like
+        "no, the other one" then has no referent.
+      * keep_recent_tokens, the token floor §21 specifies.
+
+    THE BOUNDARY IS ALWAYS A TURN START (M4). Every floor resolves to one,
+    so a fold can never separate an assistant message carrying tool_calls
+    from the tool results that answer them. That is not a quality concern:
+    a tool_result with no preceding tool_use is an HTTP 400 on Anthropic --
+    a hard wire error on the next call, on a thread that was working a
+    moment ago.
+
+    Returns None when the floors leave nothing, which is a real state and
+    not a failure: a thread of three enormous turns is over the trigger and
+    entirely protected. The caller reports it rather than silently doing
+    nothing.
+    """
+    from storage import turn_start_ids
+
+    settings = config_loader.effective_compaction(overrides)
+    starts = turn_start_ids(memory.thread_id)
+    if not starts:
+        return None
+
+    # Every candidate boundary is "fold everything strictly before turn i".
+    # The floors each veto some suffix of the turn list; the surviving
+    # boundary is the earliest turn any of them still allows.
+    cutoff = len(starts) - settings["keep_recent_turns"]
+    if current_turn_start is not None:
+        cutoff = min(cutoff, current_turn_start)
+
+    # The token floor: keep whole turns, walking back from the end, until
+    # keep_recent_tokens is covered.
+    #
+    # Counted FROM THE END on both sides. `starts` comes from the archive
+    # and `memory.messages` is the derived view, which may open with a
+    # summary message belonging to no turn -- so the two lists agree by
+    # position only at their tails. The k-th-from-last turn is the same
+    # turn in both, and the k-th is not.
+    turns = _turns_from_end(memory.messages)
+    kept = 0
+    token_cutoff = len(starts)
+    for back, turn in enumerate(turns, start=1):
+        kept += _chars(turn) // CHARS_PER_TOKEN
+        token_cutoff = len(starts) - back
+        if kept >= settings["keep_recent_tokens"]:
+            break
+    cutoff = min(cutoff, token_cutoff)
+
+    if cutoff < 1:
+        return None
+    # Fold everything strictly before turn `cutoff`, so the watermark is
+    # the message just before that turn's first message.
+    return _message_before(memory, starts[cutoff])
+
+
+def _turns_from_end(messages) -> list:
+    """The derived view sliced into turns, MOST RECENT FIRST.
+
+    Most-recent-first is the ordering the keep-tokens floor walks, and the
+    only ordering that lines up with the archive's turn list: a compacted
+    view opens with a summary and pinned rows that belong to no turn of
+    their own, so the two agree by position from the end and not from the
+    start.
+    """
+    users = [i for i, m in enumerate(messages) if m.get("role") == "user"]
+    bounds = users + [len(messages)]
+    return [messages[bounds[i]:bounds[i + 1]]
+            for i in range(len(users) - 1, -1, -1)]
+
+
+def _message_before(memory, message_id):
+    """The archive id immediately preceding `message_id`, or None if it is
+    the first row."""
+    from storage import _ordered_rows
+
+    rows = _ordered_rows(memory.thread_id)
+    for index, row in enumerate(rows):
+        if row["id"] == message_id:
+            return rows[index - 1]["id"] if index else None
+    return None
+
+
+def _target_chars(original_chars: int, strength: int) -> int:
+    return int(original_chars * config.COMPACTION_TARGET_RATIOS[strength])
+
+
+def _instruction(segment_text: str, target: int, original: int) -> str:
+    return (
+        f"Summarize the conversation excerpt below.\n\n"
+        f"The original is {original} characters. Your summary must be at "
+        f"most {target} characters -- shorter is fine, longer will be "
+        f"rejected.\n\n"
+        f"--- BEGIN EXCERPT ---\n{segment_text}\n--- END EXCERPT ---"
+    )
+
+
+def _as_text(messages) -> str:
+    lines = []
+    for message in messages:
+        role = message.get("role", "?")
+        if role == "assistant":
+            body = message.get("text", "")
+            calls = message.get("tool_calls") or []
+            if calls:
+                body = f"{body}\n[called: {', '.join(c.get('name', '?') for c in calls)}]"
+        else:
+            body = str(message.get("content", ""))
+        lines.append(f"{role}: {body}")
+    return "\n\n".join(lines)
+
+
+def compact(memory, model: str, provider_name: str,
+            current_turn_start: Optional[int] = None,
+            overrides: Optional[dict] = None,
+            authorization=None) -> Optional[dict]:
+    """Compact `memory`'s thread. Returns a notice dict, or None if
+    nothing could be folded.
+
+    Runs the compactor as an ORDINARY AGENT through the same
+    RunAgentLoop everything else uses. §21 is explicit that summarizing is
+    the shape of an agent call -- a system prompt, a task, a judgment-based
+    output -- and that routing it through the shared machinery is also what
+    gives it real autonomy over WHAT to preserve. Mechanical truncation
+    cannot exercise judgment at all.
+
+    The compactor's own run gets its own fresh thread, no tools
+    (`allowed_tools: []` in its definition), and the re-entrancy guard, so
+    it can neither call anything nor trigger a compaction of its own.
+    """
+    global _compacting
+
+    from agents.manager import manager
+    from core.loop import RunAgentLoop, DEFAULT_SYSTEM_PROMPT
+    from storage import history_through, latest_checkpoint, save_checkpoint
+
+    if _compacting:
+        return None
+
+    settings = config_loader.effective_compaction(overrides)
+    watermark = compactable_span(memory, current_turn_start, overrides)
+    if watermark is None:
+        logger.warning(
+            "Compaction wanted on thread %s but every message is protected "
+            "by the keep floors; nothing folded.", memory.thread_id)
+        return {
+            "kind": "compaction_blocked",
+            "text": ("Context is full but the most recent turns fill it "
+                     "entirely -- nothing could be compacted."),
+        }
+
+    agent = manager.get(config.COMPACTOR_AGENT)
+    if agent is None:
+        logger.warning(
+            "Compaction wanted but the %r agent is not available; skipped.",
+            config.COMPACTOR_AGENT)
+        return None
+
+    previous = latest_checkpoint(memory.thread_id)
+    # M2. Re-derive from the archive by default, so exactly one
+    # summarization step always sits between an original message and what
+    # the model sees -- that is what makes an early trigger free in
+    # fidelity terms rather than a tradeoff. Chaining is the configured
+    # alternative and the automatic fallback below.
+    chaining = settings["strategy"] == "chain" and previous is not None
+    lower = previous.covers_up_to_message_id if chaining else None
+    segment = history_through(memory.thread_id, watermark, after_message_id=lower)
+    if not segment and not chaining:
+        return None
+
+    segment_text = _as_text(segment)
+    if chaining:
+        segment_text = (
+            f"Summary of everything before this point:\n"
+            f"{previous.summary_text}\n\n{segment_text}")
+
+    original = len(segment_text)
+    target = _target_chars(original, settings["strength"])
+
+    _compacting = True
+    try:
+        summary = _summarize(
+            RunAgentLoop, manager, agent, DEFAULT_SYSTEM_PROMPT,
+            segment_text, target, original, model, provider_name,
+            settings["max_retries"], authorization)
+    finally:
+        _compacting = False
+
+    if summary is None:
+        return None
+
+    strategy = "chain" if chaining else "rederive"
+    save_checkpoint(memory.thread_id, summary, watermark, strategy)
+    memory.apply_checkpoint()
+    folded = len(segment)
+    logger.info("Compacted thread %s: %s messages -> %s chars (%s).",
+                memory.thread_id, folded, len(summary), strategy)
+    return {
+        "kind": "compaction",
+        "text": f"{folded} earlier messages compacted into a summary",
+    }
+
+
+def _summarize(loop_cls, manager, agent, base_prompt, segment_text, target,
+               original, model, provider_name, max_retries, authorization):
+    """Run the compactor, retrying while the summary overshoots its target.
+
+    STRUCTURALLY §3's JSON-retry loop with a length constraint in place of
+    a parse -- a corrective follow-up into the SAME thread, so the model
+    sees its own output and can tighten it, bounded by a retry cap.
+    Deliberately not routed through core/reasoning/json_retry.py: that
+    module is pipeline-shaped (it takes a run trace and names passes), and
+    bending it to serve memory would invert the dependency for three lines
+    of shared structure.
+
+    UNDERSHOOTING IS NOT AN ERROR. A summary tighter than asked for has
+    already done the job, and rejecting it would spend a second model call
+    to make the context bigger.
+
+    A summary still too long after the last retry is USED ANYWAY, with a
+    warning. It is smaller than what it replaces, which is the whole point;
+    discarding it would spend the calls and keep the full history, leaving
+    the thread exactly as stuck as before with less budget to fix it.
+    """
+    context = manager.active_context(agent)
+    system_prompt = manager.system_prompt_for(agent, base_prompt, context=context)
+    tolerance = int(target * (1 + config.COMPACTION_RATIO_TOLERANCE))
+
+    response = loop_cls.run_agent_conversation(
+        user_goal=_instruction(segment_text, target, original),
+        model=agent.model or model,
+        provider_name=agent.provider or provider_name,
+        max_steps=1,
+        context=context,
+        system_prompt=system_prompt,
+        authorization=authorization,
+    )
+    summary = (response.text or "").strip()
+
+    for _ in range(max_retries):
+        if not summary:
+            logger.warning("Compactor returned nothing; compaction skipped.")
+            return None
+        if len(summary) <= tolerance:
+            return summary
+        response = loop_cls.continue_conversation(
+            thread_id=response.thread_id,
+            message=(
+                f"That summary is {len(summary)} characters; the target is "
+                f"{target}. Tighten it -- drop the least important material "
+                f"rather than making the remaining facts vaguer. Output only "
+                f"the summary."),
+            system_prompt=system_prompt,
+            model=agent.model or model,
+            provider_name=agent.provider or provider_name,
+            max_steps=1,
+            context=context,
+            authorization=authorization,
+        )
+        summary = (response.text or "").strip()
+
+    if not summary:
+        logger.warning("Compactor returned nothing; compaction skipped.")
+        return None
+    if len(summary) > tolerance:
+        logger.warning(
+            "Compactor missed its target after %s retries (%s chars against a "
+            "target of %s); using it anyway -- it is still smaller than the "
+            "%s characters it replaces.", max_retries, len(summary), target,
+            original)
+    return summary
