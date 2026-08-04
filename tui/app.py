@@ -609,6 +609,14 @@ class VenastineApp(App):
             screen.dismiss(("reject", ""))
             self._transcript.write_system(
                 "[no answer — correction rejected; the review continues]")
+        else:
+            # They DID answer, microseconds after the timeout claimed the
+            # slot, and their answer went nowhere. Saying nothing leaves
+            # them to discover it in the "N applied" summary and conclude
+            # the button is broken.
+            self._transcript.write_system(
+                "[answer arrived after the timeout — that correction was "
+                "already rejected; the review continues]")
 
     def _timed_out_permission(self, screen, tool_name: str) -> None:
         if screen in self.screen_stack:

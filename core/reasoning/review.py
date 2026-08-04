@@ -6,15 +6,19 @@ codebase where a model's proposal can change a finished run's output.
 
 Three functions, in the order they run:
 
-  run_review()    ask the reviewer agent what is wrong. No mutation.
-  walk_consent()  put each finding to the human. No mutation.
-  apply()         mutate what the human accepted. No asking.
+  run_review()      ask the reviewer agent what is wrong. No mutation.
+  walk_consent()    put each finding to the human. No mutation.
+  apply_deferred()  build the corrected claim set. No asking, no commit.
 
 Kept separate because they fail differently and because the middle one is
 the whole security argument: a reviewer that could apply its own findings
 would be a model with write access to the report, and the pipeline reads
 attacker-controlled web pages by design. Splitting proposal from
 application means the mutation step has no model in it at all.
+
+The third one returns a COPY rather than mutating in place, and a
+direct-mutation variant is the thing not to reintroduce -- see its
+docstring for the ordering bug that shape produces.
 
 WHY THE ORCHESTRATOR CALLS THIS AND NOT THE SHELL (V3). The obvious
 alternative -- a post-pipeline stage each shell invokes, mirroring
@@ -197,7 +201,11 @@ def _validated(raw, run) -> list:
         return []
 
     known = {c.id for c in run.claims}
-    out, dropped = [], 0
+    # TWO counters, because they are two different things to know. A
+    # duplicate is neither malformed nor unresolvable -- it is a
+    # well-formed finding the reviewer raised twice -- and one number
+    # covering both causes tells the reader neither.
+    out, dropped, duplicates = [], 0, 0
     seen_targets = set()
     for item in raw:
         if not isinstance(item, dict):
@@ -230,11 +238,14 @@ def _validated(raw, run) -> list:
         # both applied. Keep the first (the reviewer orders by severity,
         # most serious first) and drop the rest, traced (review r1-3).
         if (claim_id, kind) in seen_targets:
-            dropped += 1
+            duplicates += 1
             continue
         seen_targets.add((claim_id, kind))
         out.append(item)
 
+    if duplicates:
+        run.log(f"Review: dropped {duplicates} duplicate finding(s) "
+                f"(same claim and kind as an earlier, higher-severity one).")
     if dropped:
         run.log(f"Review: dropped {dropped} malformed or unresolvable "
                 f"finding(s) before asking.")
@@ -437,33 +448,12 @@ def _reviewer_prompt() -> str:
 # ---- Stage 3: apply what was accepted -------------------------------------
 # ===========================================================================
 
-def apply(run, decisions) -> bool:
-    """Mutates the run for every accepted decision. Returns whether
-    anything changed -- the orchestrator uses that to decide whether the
-    report needs re-synthesising (V2).
-
-    No model call happens here, deliberately. This is the step with write
-    access to a finished run's output, and it does exactly what a human
-    approved and nothing else.
-    """
-    changed = False
-    for decision in decisions:
-        if decision.get("decision") != ACCEPT:
-            run.log(f"Review: {_describe(decision)} -- declined.")
-            continue
-        if _apply_one(run, decision):
-            changed = True
-            run.log(f"Review: {_describe(decision)} -- accepted and applied.")
-        else:
-            run.log(f"Review: {_describe(decision)} -- accepted but no "
-                    f"longer applicable; skipped.")
-    return changed
-
-
 def apply_deferred(run, decisions):
-    """Same rules as apply(), against a deep COPY of the claims.
+    """Applies every accepted decision to a deep COPY of the claims.
 
-    V2's contradiction, closed at the ordering level (review f4): the
+    The copy is the whole point, and a direct-mutation version of this
+    function is the thing not to reintroduce however much simpler it
+    looks. V2's contradiction lives at the ORDERING level (review f4): the
     orchestrator re-synthesises from the corrected set and commits claims
     + report only after the synthesis succeeds. Applying to the live run
     first meant a failed re-synthesis persisted corrected claims beside

@@ -261,11 +261,26 @@ def _review_stage(run: PipelineRun, model: str, provider_name: str,
                 _synthesis_input(run, review_module.synthesis_directives(decisions)),
                 model, provider_name, authorization=authorization,
             )
-        except Exception:
+        except Exception as e:
+            # CONTAINED, not re-raised. A provider error on this one call
+            # is the same transient class as a reviewer call failing, and
+            # f1 settled that an optional stage must not flip a finished
+            # ten-pass run to status='failed'. The deferred commit already
+            # guarantees a consistent record: the pre-review claims and the
+            # report generated from them, which is a complete run's output
+            # minus the corrections -- and the trace says which.
+            #
+            # A failure that escapes this STAGE (a bug, not a transient
+            # provider error) still reaches the pipeline's except and
+            # records status='failed'. That distinction is the whole
+            # policy, and both halves are test-pinned.
+            logger.exception("Review re-synthesis failed; corrections not applied.")
             run.claims = original_claims
-            run.log("Review: re-synthesis failed; accepted corrections NOT "
-                    "applied -- claims and report left unchanged.")
-            raise
+            review_module.log_outcomes(run, decisions, applied, committed=False)
+            run.log(f"Review: re-synthesis failed ({e}); accepted corrections "
+                    f"NOT applied -- claims and report left unchanged.")
+            update_pipeline_run(run.run_id, run)
+            return
         review_module.log_outcomes(run, decisions, applied, committed=True)
         # NOT re-reviewed. The regress is cut deliberately: a review of the
         # re-synthesised report would need its own consent pass, and so on.

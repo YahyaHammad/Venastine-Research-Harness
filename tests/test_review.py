@@ -729,6 +729,24 @@ class TestReviewHardening:
 
         assert len(out) == 1
         assert out[0]["proposed"] == "corrected text"
+        # Traced as a DUPLICATE, not folded into the malformed count. A
+        # duplicate is a well-formed finding raised twice, and one number
+        # covering both causes tells the reader neither.
+        assert any("duplicate" in line for line in run.trace)
+        assert not any("malformed or unresolvable" in line
+                       for line in run.trace)
+
+    def test_malformed_and_duplicate_are_counted_separately(self):
+        run = _reviewed_run()
+        review_module._validated(
+            [TEXT_FINDING,                              # kept
+             dict(TEXT_FINDING, proposed="other"),      # duplicate
+             dict(TEXT_FINDING, claim_id="nope")],      # unresolvable
+            run)
+
+        assert any("1 duplicate finding(s)" in line for line in run.trace)
+        assert any("1 malformed or unresolvable" in line
+                   for line in run.trace)
 
     def test_a_tier_override_rewrites_the_annotation(self, mocker):
         """r3-1: the stale '[HIGH]' tag beside a corrected tier
@@ -759,18 +777,29 @@ class TestReviewHardening:
     def test_a_failed_re_synthesis_leaves_claims_and_report_unchanged(
             self, mocker):
         """f4: deferred commit. A re-synthesis failure must not persist
-        corrected claims beside the stale report."""
+        corrected claims beside the stale report.
+
+        And it is CONTAINED, not raised: a provider error on this one call
+        is the same transient class as a reviewer call failing, which f1
+        settled must not flip a finished ten-pass run to status='failed'.
+        The run keeps the report its ten passes produced; the trace says
+        the corrections did not land.
+        """
         run = _reviewed_run()
         _stub_reviewer(mocker, [TEXT_FINDING])
         mocker.patch.object(RunAgentLoop, "run_deep_research_mode",
                             side_effect=RuntimeError("provider down"))
 
-        with pytest.raises(RuntimeError):
-            _stage(run, mocker, consent=_consent(("accept", "")))
+        # No pytest.raises: the stage returns normally, so the pipeline's
+        # terminal update_pipeline_run(status='complete') is reached.
+        _stage(run, mocker, consent=_consent(("accept", "")))
 
         assert run.claims[0].final_text == "original text"
         assert run.final_report == "REPORT v1"
         assert any("NOT applied" in line for line in run.trace)
+        # The accepted correction must NOT be traced as applied -- the
+        # record has to agree with the claims it sits beside.
+        assert not any("accepted and applied" in line for line in run.trace)
 
     def test_retry_continuations_carry_the_reviewer_context(self, mocker):
         """r2-1: the restriction binds on EVERY turn of the review, not
@@ -895,6 +924,59 @@ class TestTheReviewerInheritsTheRunsAuthorization:
 
 class TestTheStageIsWiredIntoThePipeline:
 
+    def test_a_failed_re_synthesis_still_completes_the_run(self, mocker):
+        """The other half of f1's policy, composed with the pipeline so it
+        can actually see the status.
+
+        A provider error on the re-synthesis is the same transient class
+        as a reviewer call failing. Containing it inside the stage is only
+        half the claim -- the half that matters is that the pipeline then
+        reaches status='complete', keeping the record its ten passes
+        earned. The stage-level test cannot see that.
+        """
+        from core.reasoning import orchestrator
+
+        mocker.patch.object(orchestrator, "create_pipeline_run",
+                            return_value=uuid4())
+        mocker.patch.object(orchestrator, "run_confidence_tiering")
+        # Pass 2 yields the claim TEXT_FINDING targets -- without a real
+        # claim to correct, apply_deferred reports nothing changed and the
+        # re-synthesis this test is about never runs.
+        canned = dict(_CANNED, **{
+            "Pass 2": json.dumps([{"id": "c1", "text": "original text",
+                                   "type": "synthesis"}])})
+        mocker.patch.object(
+            orchestrator, "_run_pass_with_json_retry",
+            side_effect=lambda pass_id, *a, **k: canned[pass_id])
+        update = mocker.patch.object(orchestrator, "update_pipeline_run")
+
+        # The FIRST final synthesis succeeds; the review's re-run raises.
+        calls = {"n": 0}
+
+        def _synth(pass_id, *a, **k):
+            if pass_id != "Final synthesis":
+                return "x"
+            calls["n"] += 1
+            if calls["n"] > 1:
+                raise RuntimeError("provider down")
+            return "REPORT v1"
+
+        mocker.patch.object(orchestrator, "_run_pass", side_effect=_synth)
+        mocker.patch.object(
+            review_module, "run_review",
+            side_effect=lambda run, *a, **k: ([TEXT_FINDING], uuid4()))
+
+        run = orchestrator.run_deep_research_pipeline(
+            user_query="q", model="m", provider_name="ANTHROPIC",
+            subagent_review=True,
+            review=_consent(("accept", "")))
+
+        assert calls["n"] == 2, "the re-synthesis must actually have been tried"
+        assert run.final_report == "REPORT v1"
+        assert update.call_args_list[-1].kwargs.get("status") == "complete"
+        assert not any(c.kwargs.get("status") == "failed"
+                       for c in update.call_args_list)
+
     def test_a_review_stage_failure_lands_on_the_pipelines_failed_path(
             self, mocker):
         """f16: compose the raising stage with the pipeline's try/except.
@@ -953,14 +1035,17 @@ class TestTheStageIsWiredIntoThePipeline:
         assert order[-2:] == ["Final synthesis", "review"]
 
 
+_CANNED = {
+    "Pass 0": '{"key_entities_or_subjects": []}',
+    "Pass 2": "[]",
+    "Pass 3c": '{"gaps": [], "coverage_score": 1}',
+    "Pass 5": '{"per_claim_flags": {}}',
+}
+
+
 def _canned_for(pass_id):
-    """Minimal valid JSON per pass for the wiring test above."""
-    return {
-        "Pass 0": '{"key_entities_or_subjects": []}',
-        "Pass 2": "[]",
-        "Pass 3c": '{"gaps": [], "coverage_score": 1}',
-        "Pass 5": '{"per_claim_flags": {}}',
-    }[pass_id]
+    """Minimal valid JSON per pass for the pipeline-composing tests."""
+    return _CANNED[pass_id]
 
 
 def test_a_missing_reviewer_agent_skips_rather_than_failing(mocker):
@@ -1345,7 +1430,12 @@ class TestTuiReviewLifecycle:
 
     def test_the_no_answer_line_only_prints_when_there_was_no_answer(self):
         """f15: printing '[no answer]' after the user already answered
-        contradicts what they just did."""
+        contradicts what they just did.
+
+        But saying NOTHING is its own bug: their answer went nowhere, and
+        without a line they discover it in the "N applied" summary and
+        conclude the button is broken. Two branches, two different
+        messages, neither of them silence."""
         from tui.app import VenastineApp
 
         class _Rec:
@@ -1380,9 +1470,17 @@ class TestTuiReviewLifecycle:
 
         app._stack = []                # the user answered; screen is gone
         app._timed_out_review(screen)
-        assert app._transcript.lines == []
-        assert screen.dismissed is None
+        assert screen.dismissed is None, (
+            "a screen the user already dismissed must not be dismissed again")
+        assert not any("no answer" in line
+                       for line in app._transcript.lines), (
+            "'no answer' would contradict the answer they just gave")
+        assert any("after the timeout" in line
+                   for line in app._transcript.lines), (
+            "their answer went nowhere; silence sends them to the summary "
+            "to work that out")
 
+        app._t.lines.clear()
         app._stack = [screen]
         app._timed_out_review(screen)
         assert screen.dismissed == ("reject", "")
