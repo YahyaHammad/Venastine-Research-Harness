@@ -46,7 +46,7 @@ Venastine Research Harness/
 ├── pytest.ini                      # testpaths=tests, --strict-markers
 ├── DEVLOG.md                       # implementation notes for built ROADMAP sections -- see §0
 │
-├── tests/                          # 634 tests, all offline, ~25s (first run ~7s for matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
+├── tests/                          # 697 tests, all offline, ~25s (first run ~7s for matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
 │   ├── conftest.py                 # fixtures: make_model_response, make_stream_from_response, make_stream_sequence, FakeStorage, ...
 │   ├── BREAKING_CHANGES.md         # what-breaks-it / symptom / fix per area
 │   ├── test_cli.py                 # 20 tests -- ROADMAP §1 thread_id passthrough + UUID validation + §14 parser defaults/resolution/trust flow
@@ -83,6 +83,7 @@ Venastine Research Harness/
 │   ├── test_attended.py            # 12 tests -- ROADMAP_v2 §25 R9-R11: ApprovalProvider consulted, headless lifted, run-scope declined
 │   ├── test_research_authorization.py # 41 tests -- ROADMAP_v2 §25 R1/R3/R4/R12: candidates, grant-spec parsing, both shells' flags, settings precedence
 │   ├── test_granted_calls_artifact.py # 5 tests -- ROADMAP_v2 §25 audit artifact + R7 provenance framing in the universal preamble
+│   ├── test_review.py              # 61 tests -- ROADMAP_v2 §20 V1-V9: the reviewer agent, consent as data, the accept/reject/refine walk, both shells, 07_review.json
 │   └── test_skills.py              # 34 tests -- ROADMAP_v2 §19 K1-K6: stateless manager, body pinning, precondition check, /skill, the pass-prompt boundary
 │
 ├── core/
@@ -92,13 +93,15 @@ Venastine Research Harness/
 │   ├── workspace_trust.py         # ROADMAP_v2 §14 (D17): trust store keyed by resolved path + content hash; is_trusted/grant_trust; sorted-walk deterministic hash with path-in-hash
 │   ├── config_loader.py           # ROADMAP_v2 §14: three-tier .md discovery (harness/project/user), line-anchored frontmatter parse, settings.json merge with loud unknown-key rejection, CONTEXT.md opt-in, frontmatter-only skill catalog
 │   ├── memory.py                  # ConversationMemory -- in-run message list, provider-NEUTRAL shape, backed by storage.py + resume-shape fix
-│   ├── approval.py                # ROADMAP_v2 §25: GrantBudget / ApprovalProvider / RunAuthorization -- how a run obtains human authorization, as DATA. Leaf module, no project imports
+│   ├── approval.py                # ROADMAP_v2 §25/§20: GrantBudget / ApprovalProvider / RunAuthorization / ReviewConsent -- how a run obtains a human's answer, as DATA. Leaf module, no project imports
 │   │
 │   └── reasoning/
-│       ├── base.py                # Claim / PipelineRun data model for the research pipeline (now carries run_id + §25 granted_calls)
+│       ├── base.py                # Claim / PipelineRun data model for the research pipeline (now carries run_id + §25 granted_calls + §20 subagent_reviews)
 │       ├── authorization.py       # ROADMAP_v2 §25: the pipeline's grant POLICY -- candidates(), parse_grant_spec(), PIPELINE_UNGRANTABLE. Shared by both shells so they cannot drift
 │       ├── confidence_scoring.py  # Pass 4 -- deterministic scoring, ZERO LLM calls
-│       ├── orchestrator.py        # sequences all 10 passes + D0/D1/D2 + _run_pass_with_json_retry + §5 per-pass checkpoints + §11 critic-model routing + §25 authorization passthrough
+│       ├── orchestrator.py        # sequences all 10 passes + D0/D1/D2 + _run_pass_with_json_retry + §5 per-pass checkpoints + §11 critic-model routing + §25 authorization passthrough + §20's _review_stage
+│       ├── review.py              # ROADMAP_v2 §20: the post-pipeline review -- propose (run_review) / consent (walk_consent) / correct (apply), three functions so the mutating one has no model in it
+│       ├── json_retry.py          # ROADMAP §3's malformed-JSON recovery, shared by the ten passes and §20's reviewer. Takes an ALREADY-OBTAINED response; each caller starts its own first attempt
 │       ├── pipeline_storage.py    # ROADMAP §5: PipelineRunRecord table + create/update/load_pipeline_run
 │       └── output_writer.py      # ROADMAP §12: write_run_artifacts -- human-browsable /output/<run_id>/ directory
 │
@@ -361,7 +364,7 @@ Covered in full in §7 below. The short version of the file boundary: `base.py` 
   - `provider_factory` / `client_for_provider` — return a mock-`api_initialization`-compatible tuple for translation tests.
   - `clear_client_cache` (autouse) — resets `api_initialization`'s cached clients before each test.
 - **`tests/BREAKING_CHANGES.md`** — per-file tables documenting what breaks each test when production code changes, the symptom, and the fix. Created because `test_orchestrator.py` was identified as the suite's most fragile mock — its mock dict is keyed by pass_id strings that ROADMAP §3 and §10 will modify.
-- **36 test files** (6 per ROADMAP §4 + 2 from §4's own additions: `test_memory_write_through.py`, `test_loop_tool_dispatch.py`; + 2 from §3/§5: `test_json_retry.py`, `test_pipeline_storage.py`; + 2 from §1: `test_cli.py`, `test_e2e.py`; + 1 from §12: `test_output_writer.py`; + 1 from audit: `test_logging_setup.py`; + 1 from §6: `test_file_ops.py`; + 1 from §7: `test_shell.py`; + 1 from §8: `test_policy_enforcement.py`; + 2 from §13: `test_client_streaming.py`, `test_streaming_loop.py`; + 3 from ROADMAP_v2 §14: `test_workspace_trust.py`, `test_config_loader.py`, `test_load_skill.py`; + 1 from §15: `test_permission_context.py`; + 1 from §11: `test_critic_routing.py`; + 1 from §16: `test_client_effort.py`; + 1 from §10's fix: `test_ensemble_guard.py`; + 3 from §17: `test_mcp_client.py`, `test_mcp_config.py`, `test_mcp_integration.py`; + 1 from §16: `test_tui.py`; + 1 from §18: `test_agents.py`; + 4 from §25: `test_grants.py`, `test_attended.py`, `test_research_authorization.py`, `test_granted_calls_artifact.py`; + 1 from §19: `test_skills.py`).
+- **37 test files** (6 per ROADMAP §4 + 2 from §4's own additions: `test_memory_write_through.py`, `test_loop_tool_dispatch.py`; + 2 from §3/§5: `test_json_retry.py`, `test_pipeline_storage.py`; + 2 from §1: `test_cli.py`, `test_e2e.py`; + 1 from §12: `test_output_writer.py`; + 1 from audit: `test_logging_setup.py`; + 1 from §6: `test_file_ops.py`; + 1 from §7: `test_shell.py`; + 1 from §8: `test_policy_enforcement.py`; + 2 from §13: `test_client_streaming.py`, `test_streaming_loop.py`; + 3 from ROADMAP_v2 §14: `test_workspace_trust.py`, `test_config_loader.py`, `test_load_skill.py`; + 1 from §15: `test_permission_context.py`; + 1 from §11: `test_critic_routing.py`; + 1 from §16: `test_client_effort.py`; + 1 from §10's fix: `test_ensemble_guard.py`; + 3 from §17: `test_mcp_client.py`, `test_mcp_config.py`, `test_mcp_integration.py`; + 1 from §16: `test_tui.py`; + 1 from §18: `test_agents.py`; + 4 from §25: `test_grants.py`, `test_attended.py`, `test_research_authorization.py`, `test_granted_calls_artifact.py`; + 1 from §19: `test_skills.py`; + 1 from §20: `test_review.py`).
 
 **What belongs here:** tests that run offline (~24s; first run ~30s for the matplotlib font cache), with zero network access and zero real API keys. Stubs in root `conftest.py` catch import-time module resolution; fixtures in `tests/conftest.py` provide `ModelResponse` construction and storage mocking; individual test files cover production code's behavior.
 
@@ -445,6 +448,22 @@ Covered in full in §7 below. The short version of the file boundary: `base.py` 
 **Goal mode lives in `ConversationThread.extra_data`.** `storage.update_thread_extra()` / `ConversationMemory.extra` + `set_extra()` persist it; `core/loop.with_goal()` appends the `## Persistent objective` section in EVERY shell (applied centrally inside `run_agent_conversation()`; the TUI worker calls it explicitly because it drives `_run()` directly, and there are exactly those two call sites -- `main.py` has none); `tui/widgets.GoalBanner` mirrors it. `/goal` is the only writer.
 
 **Does NOT belong here:** discovery / frontmatter parsing / tier precedence (`core/config_loader.py`), skill activation (§19), the slash registry mechanism (`tui/commands.py`), thread persistence (`storage.py`), or any LLM call — `spawn_subagent` and `/grill-me` both route through `RunAgentLoop`, never a bespoke client path.
+
+### 4.19 `core/reasoning/review.py` + `json_retry.py` — the post-pipeline review (ROADMAP_v2 §20)
+
+**What belongs here:** proposing corrections to a finished run, obtaining consent for each, and applying the accepted ones. Three functions, in that order, and the split is the security argument rather than a style choice — the pipeline reads attacker-controlled web pages by design, so the step with write access to a finished run's output (`apply`) has no model call in it at all.
+
+**What does NOT belong here:** pass sequencing (`orchestrator.py` decides *when* the stage runs and re-runs final synthesis when something was accepted), how to reach a human (`ReviewConsent` arrives from the shell), or what may be granted (§25's `authorization.py`, unchanged — the reviewer inherits the run's bundle rather than getting an axis of its own).
+
+**Two parameters, not one.** `run_deep_research_pipeline(subagent_review=..., review=...)` separates "does the review run" from "can anyone be asked". Collapsing them loses the case that matters: `build_review_consent()` returns `None` on a non-tty stdin (V6 by construction), so if the consent object alone enabled the stage, `--review` on a piped run would skip the review entirely and report nothing. `subagent_review=None` falls back to `config.SUBAGENT_REVIEW`, matching `ensemble_mode`.
+
+**Standing constraint (V8): a review adds no `Claim` field and no database column.** A `Claim` field would be a fourth thing every `vars(c)` site must keep JSON-native. A `PipelineRunRecord` column is worse — `create_db_and_tables()` creates missing *tables* and never `ALTER`s, so adding one breaks every existing database at the first `SELECT`. A reviewer tier override therefore marks the **existing** `score_breakdown` dict with `review_override`, without which `04_confidence.json` shows a stale raw_score beside a downgraded tier and reads as a bug in the scoring formula.
+
+**The report is regenerated, never edited.** `final_report` was synthesised *from* the claims, so a correction that changes a claim and leaves the report alone gives one run two artifacts that contradict each other. `_synthesis_input` is a function for exactly this reason: reusing the string built before the review would regenerate from the *uncorrected* claims, so the report would change for no reason while the correction went nowhere. **The re-synthesised report is not re-reviewed** — that regress is cut deliberately and is not a gap to close.
+
+**`json_retry.py` is shared, so it must not assume it serves a pass.** It takes an already-obtained response plus what is needed to continue that response's thread; hardcoding `pass_prompt(label)` inside it looks right for all ten passes and hands the reviewer a source-grounding prompt mid-review. Its `on_response` hook is where §25's granted-call record attaches, so every retry response must reach it — not just the last or the successful one.
+
+**`write_run_artifacts` now has two production call sites** (`main.run_research` and the TUI's `/research` worker). It had one, which is why a TUI research run produced no `/output/<run_id>/` at all — the same "whichever shell remembers it" failure that put §20's own invocation in the orchestrator instead. `07_review.json` follows `granted_calls.json`'s rule: written only when non-empty, so its presence is itself the signal that a run was reviewed, and it is the only durable record on a run with no consent route.
 
 ## 5. Request lifecycle — regular conversation, traced end to end
 

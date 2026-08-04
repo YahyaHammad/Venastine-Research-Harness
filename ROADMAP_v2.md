@@ -72,7 +72,7 @@ Every decision below was made through a structured clarification cycle with the 
 - 17. MCP client — stdio + HTTP/SSE + `mcp.json` + async bridge + workspace trust
 - 18. Agent system — agent `.md` format + manager + subagent tool + per-agent scoping + intersection rule
 - 19. Skill system — skill `.md` format + manager + activation + default skills
-- 20. Subagent reviewing — opt-in post-pipeline review
+- 20. Subagent reviewing — opt-in post-pipeline review with consented correction **(BUILT)**
 - 21. Memory system — compaction, archive, thread-scoped pinning, user/project memory
 - 22. Pipeline observability — orchestrator events + the live research view **(added during §16)**
 - 23. Interactive tools — question tool, todo list, and the response channel they share **(added during §16)**
@@ -851,7 +851,7 @@ because the same hole applied to any tool returning nested data under a scanned 
 
 ### `AgentManager` (`agents/manager.py`)
 
-Discovers agent `.md` files across all three tiers (§14), parses frontmatter into an agent definition, and exposes lookup by name. **Before this is built, verify `AgentManager` actually exposes every method §20 (subagent review) calls on it** — a review pass flagged a plausible mismatch here (methods referenced by a consumer section not confirmed present in the manager's own spec); treat this as an open verification item, not a settled fact either way, until checked against the real implementation.
+Discovers agent `.md` files across all three tiers (§14), parses frontmatter into an agent definition, and exposes lookup by name. ~~Before this is built, verify `AgentManager` actually exposes every method §20 (subagent review) calls on it~~ — **SETTLED at §20's build.** The flagged mismatch was not real: §20 calls `get()`, `active_context()` and `system_prompt_for()`, all of which exist and none of which needed a signature change. See §20's "§18 AC3, closed".
 
 ### Subagent tool access: intersection, never union (fixes C6, locked in)
 
@@ -906,7 +906,7 @@ Implemented; full decision record in DEVLOG §18, file contract in ARCHITECTURE.
 - `/agent <name>` is **session-scoped** (switch until `/agent default`); `/grill-me` runs one `continue_conversation` turn in the CURRENT thread; both register into §16's slash registry from `agents/tui_commands.py`. CLI unchanged (TUI-only commands, D12).
 - Goal mode: persistent per-thread objective in `ConversationThread.extra_data`, written only by `/goal`, injected into every shell's prompt by `core.loop.with_goal()`, mirrored by a TUI `GoalBanner`.
 - The §15–17 headless finalization landed here, widened from approval-only to callability per the owner: `schemas(callable_only=True)` drops approval-gated tools when no `permission_channel` exists, paired with a once-per-process WARNING naming them (no quiet invisibility).
-- AC1/AC2 verified by `tests/test_agents.py` with revert-checks (union and disabled-filter both fail their tests). AC3: the current consumer surface is `get()/names()/all()`; §20 must re-verify against its own call sites when built, per the criterion's own wording.
+- AC1/AC2 verified by `tests/test_agents.py` with revert-checks (union and disabled-filter both fail their tests). AC3: **verified at §20's build and closed** — §20's call sites are `get()`, `active_context()` and `system_prompt_for()`, all present, no mismatch.
 
 ---
 
@@ -947,11 +947,64 @@ It is therefore a **declaration of need**: `SkillManager.missing_tools()` checks
 
 ---
 
-## 20. Subagent reviewing — opt-in post-pipeline review
+## 20. Subagent reviewing — opt-in post-pipeline review with consented correction — BUILT
 
-**Unchanged from Rev. 1.** Passes the pipeline's already-distilled `run.trace` (not raw per-pass conversation threads) into the reviewer subagent's prompt — this was checked during review and found consistent with the existing "distill, don't share raw history" principle already established for the pipeline's own passes, not a new risk.
+**Materially expanded at build, by the project owner's decision.** Rev. 1 specified a read-only commentary stage: run a reviewer subagent over the finished run, record what it said. The owner's requirement was that the reviewer be able to **update incorrect information**, with **user consent for every change**. That turns a stage that could not affect anything into the only place in this codebase where a model's proposal can alter a finished run's output — which is where all the design work went.
 
-**Dependency to verify before this is built:** confirm `AgentManager`'s actual method surface (§18) matches what this section's integration code expects to call on it.
+### What changed from the Rev. 1 sketch, and why
+
+**The reviewer reads more than `run.trace`.** Rev. 1's one line said the trace, and that was right for commentary: it is the audit log, and it was verified not to leak raw per-pass history. It cannot support *correction*. Trace is process log lines (`"Pass 2: extracted 14 claim(s)"`) describing what happened, not what was concluded, so nothing in it can be checked for truth. The reviewer now gets the annotated claims with their tiers, grounding and score breakdowns, the coverage gaps, the report, and the trace. Those are still the pipeline's own distilled outputs — the same artifacts a human reads — so "distill, don't share raw history" holds unchanged; no per-pass conversation thread is shared.
+
+**The report is regenerated, not edited.** `final_report` was synthesised *from* the claims, so a correction that changes a claim and leaves the report alone produces one run with two artifacts that contradict each other. For a harness whose output is meant to be auditable, that is worse than either error alone.
+
+### Decisions (V1–V9)
+
+| # | Decision | Why |
+|---|---|---|
+| **V1** | The reviewer reads the distilled artifacts and proposes corrections to `Claim.final_text`, `Claim.confidence_tier`, or the synthesis | `run.trace` alone cannot support correction; the claims are still distilled, so the principle it was checked against is intact |
+| **V2** | An accepted correction re-runs final synthesis; a review where everything was rejected does not | Nothing else keeps `report.md` and `02_claims.json` telling the same story. The re-synthesised report is **not** re-reviewed — that regress is cut deliberately |
+| **V3** | The orchestrator invokes the stage; the shell supplies consent as data on a new `review=` parameter | The alternative — a post-pipeline stage each shell invokes, mirroring `write_run_artifacts` — is exactly the shape that produced this project's live asymmetry: that function had ONE production call site, so `/research` in the TUI wrote no output directory at all |
+| **V4** | Three outcomes per finding — accept / reject / **refine with notes** — plus a reject-all-remaining escape | Refine is the case where the human knows something the reviewer missed. Reject-all is safe by construction because it only ever *declines*; the affordance that must not exist is the one that accepts in bulk |
+| **V5** | Refine re-enters the **same reviewer thread** via `continue_conversation()`, scoped to that finding | §3's JSON-retry pattern reused — the one place this codebase already makes a model confront its own output. A stateless call loses why it proposed what it did, so a note can come back as the same error from another angle. A note about #3 must not silently redraft #7 |
+| **V6** | No consent route ⇒ nothing is applied. The review still runs and still records | Mirrors §25's "headless means unable to ask". This is the property that keeps a *mutating* stage from widening the security stance |
+| **V7** | The reviewer inherits the run's `RunAuthorization` unchanged — same grants, same provider, same `GrantBudget` **instance** | No new security axis. Its calls spend from the ceiling the launcher set and land in the same `granted_calls.json`. A rebuilt budget would silently raise that ceiling, which is §25's named failure mode |
+| **V8** | No new `Claim` field and no new database column | A `Claim` field would be a fourth thing every `vars(c)` site must stay JSON-native for; a `PipelineRunRecord` column would break every existing database, because `create_all()` creates missing *tables* and never `ALTER`s. Provenance goes to `subagent_reviews` → `07_review.json`, one trace line per decision, and a `review_override` key inside the existing `score_breakdown` dict |
+| **V9** | The TUI writes artifacts too | See V3. Fixing the asymmetry rather than moving the write into the orchestrator, which would trade it for the loss of the pipeline's freedom from filesystem side effects — load-bearing for testability and documented in `output_writer.py` |
+
+### The distinction found at build: "requested" is not "can be asked"
+
+`build_review_consent()` returns `None` when stdin is not a terminal — V6 by construction rather than by a check somewhere downstream. That makes the two facts separable and they must be separated: if the consent object alone enabled the stage, `--review` on a piped run would skip the review **entirely** and report nothing, on exactly the run the user asked to have checked. `run_deep_research_pipeline` therefore takes `subagent_review` (does it run) alongside `review` (can anyone be asked), with `None` falling back to `config.SUBAGENT_REVIEW` exactly as `ensemble_mode` does.
+
+### The `synthesis` finding kind
+
+A third kind beside `text` and `tier`, added because "the report overstates claim 4" has no correction target under claims-and-tiers-only: the claim is right, the prose is wrong. An accepted `synthesis` finding edits nothing — it appends a directive to the re-synthesis input, so the fix still travels through the same generation step every other correction does, rather than letting a model rewrite the report directly.
+
+### Acceptance criteria
+
+1. A run with `SUBAGENT_REVIEW` off and no consent route makes no reviewer call. ✓
+2. A review with findings and **no consent route** leaves every claim and the report byte-identical, and still records the findings. ✓ (V6)
+3. An accepted correction changes the claim **and** re-runs final synthesis from the corrected set; a fully-rejected review re-runs nothing. ✓ (V2 — both halves, since either alone passes against a version that always or never re-synthesises)
+4. A refinement re-enters the reviewer's own thread and replaces only its own finding. ✓ (V5)
+5. The reviewer's loop invocation carries the run's grants, provider and the *same* `GrantBudget` instance. ✓ (V7)
+6. Both shells produce `/output/<run_id>/`, and `07_review.json` appears only on a reviewed run. ✓ (V9)
+7. **`AgentManager`'s method surface matches every call site here** — §18's AC3, carried since Rev. 2 and now settled. ✓ See below.
+
+### §18 AC3, closed
+
+§18 could not resolve this against §20 because neither existed. §20's call sites are exactly three:
+
+- `manager.get("pipeline-reviewer")`
+- `manager.active_context(agent)` — depth 0, since the orchestrator is not running under a parent context
+- `manager.system_prompt_for(agent, DEFAULT_SYSTEM_PROMPT)`
+
+All three exist on `AgentManager` and none needed a signature change. **No mismatch.** The verification item is closed, not deferred.
+
+### Built
+
+Implemented; decision record in DEVLOG §20, file contracts in ARCHITECTURE.md. Two things landed alongside it because §20 was the first consumer that needed them:
+
+- **`core/reasoning/json_retry.py`** — §3's malformed-JSON recovery, extracted from `orchestrator._run_pass_with_json_retry`, which hardcoded `run_deep_research_mode` as the first attempt and `pass_prompt(pass_id)` as the prompt to continue under. The reviewer is agent-shaped, so it needed the same recovery under a different prompt. The orchestrator's function keeps its name, signature and behaviour.
+- **`authorization=` on `run_agent_conversation`** — the only public loop entry point that could not carry a `RunAuthorization`. §25 added it to the other two and stopped because nothing agent-shaped needed it yet. Passing it *and* `granted_tools` now raises rather than resolving silently.
 
 ---
 
@@ -1231,7 +1284,7 @@ Earlier in Rev. 3, three more were closed by verification rather than by choice,
 
 Distinct from the above — these need checking against real code at a specific point, but nobody has to choose anything:
 
-- **`AgentManager`'s method surface vs. what §20 calls on it** (was Open Question 3). Still unresolvable in principle until §18 exists — neither side is built, so there is nothing to compare. Verify when §18 lands, before §20 is considered complete. Carried in §18's acceptance criteria.
+- ~~**`AgentManager`'s method surface vs. what §20 calls on it**~~ (was Open Question 3). **CLOSED at §20's build**, both sides now existing: the call sites are `get()`, `active_context()` and `system_prompt_for()`, all present on `AgentManager`, none needing a signature change. The flagged mismatch was not real.
 - **Re-verify the pinned `mcp` version's client API** against §17's call shapes at implementation time (D22). The version boundary was live when this was written, so this document's snapshot has a short shelf life by construction.
 
 ### Lower-priority items tracked but not re-litigated in this revision

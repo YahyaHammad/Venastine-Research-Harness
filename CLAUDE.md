@@ -15,8 +15,9 @@ python main.py --tui                              # Textual TUI (§16); the CLI 
 python main.py --trust-project                    # grant D17 workspace trust non-interactively
 python main.py --mode research --grant "q"        # §25: pick gated tools to authorise for this run
 python main.py --mode research --attended "q"     # §25: approve every gated call as it happens
+python main.py --mode research --review "q"       # §20: review the finished run, consent to each correction
 
-pytest                                            # 634 tests, offline, ~25s (first run ~30s: matplotlib font cache)
+pytest                                            # 697 tests, offline, ~25s (first run ~30s: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -34,7 +35,7 @@ MCP servers are a *third* config file again — `mcp.json`, user-level or `.vena
 Read these before changing anything non-trivial — they carry design decisions that are locked, not defaults to re-derive.
 
 - **ARCHITECTURE.md** — what's built, file-by-file contracts ("what belongs here / what does NOT"), known gotchas (§11).
-- **ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **ROADMAP_v2.md** (§13–§25; §13–§19 and §25 built) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R12 from §25 and K1–K7 from §19). Section and D-numbers are stable and cross-referenced everywhere.
+- **ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **ROADMAP_v2.md** (§13–§25; §13–§20 and §25 built) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R12 from §25, K1–K7 from §19 and V1–V9 from §20). Section and D-numbers are stable and cross-referenced everywhere.
 - **DEVLOG.md** — per-section implementation notes: what was followed verbatim, what was deviated from (every deviation was an explicit user decision — do not silently override).
 - **tests/BREAKING_CHANGES.md** — what breaks each test when production code changes, the symptom, and the fix.
 - **QWEN.md** — a sibling agent-context file. Stale (it predates §13–§16 and disagrees with itself on test counts); prefer ARCHITECTURE.md and the code.
@@ -140,6 +141,8 @@ Invariants that look like simplification opportunities but are not:
 - **Pass 4, D0, D1, D2, and Pass 6b make zero LLM calls.** Thresholds, routing, retry caps, dedup, and annotation are pure Python. Adding a model call to any of them is a rearchitecture, not a fix.
 - **The scoring formula caps before subtracting the assumption penalty**, not after. Cap-after was a real bug, caught by a test comparing a flagged and unflagged claim landing on the same tier.
 - **Pass 6c does not re-run Pass 5.** Assumption-flagged claims exhaust retries and fall to UNVERIFIED. Known design gap, not a bug.
+- **§20's review runs AFTER final synthesis, and the report it regenerates is NOT re-reviewed.** The regress is cut deliberately — reviewing the corrected report would need its own consent pass, and so on. Do not "fix" this. The stage is also inside the pipeline's `try`, so a reviewer failure lands on the same durable `status='failed'` path as any other pass rather than discarding a completed ten-pass run.
+- **`_synthesis_input` is a function, not a string built once.** §20 re-runs synthesis after an accepted correction; reusing the earlier string regenerates the report from the UNCORRECTED claims, so the report changes for no reason while the correction silently goes nowhere.
 - **`vars(c)` serializes `Claim` at every site** (orchestrator passes 3a/3b/5/6a/6c/final synthesis, `pipeline_storage.update_pipeline_run`, `output_writer.write_run_artifacts`). Adding a nested-dataclass field to `Claim` requires migrating *all* of them to `dataclasses.asdict(c)` in one change.
 - **`update_pipeline_run(status=...)` defaults to `None`, not `"running"`** — so a data-only checkpoint can't reset a `complete`/`failed` row.
 - **The orchestrator CARRIES a `RunAuthorization`, it does not interpret one** (§25). Which tools may be granted is `core/reasoning/authorization.py`; enforcement is `core/loop.py`; building it from a human's answer is the shell's job. `authorization=None` is the default and means the pre-§25 behaviour: no grants, nobody to ask, every gated tool hidden from every pass.
@@ -156,6 +159,18 @@ The pipeline could not call any approval-gated tool in any shell — `run_deep_r
 - **The grant list is never persistable; the mode is** (R12). A persisted mode can only add prompts; a persisted grant list could only remove them, and `settings.json` is the one config file where project tier beats user tier. `research.granted_tools` is rejected *by name* so nobody "fixes" the omission.
 
 The eight JSON-emitting passes go through `_run_pass_with_json_retry()`, which re-enters the *same* pass thread via `continue_conversation()` so the model sees its own malformed output. Passes 1 and final synthesis are plain text and use bare `_run_pass()`.
+
+### Post-pipeline review (§20)
+
+The research pipeline can now review its own finished output and correct it, one consented change at a time. Off by default (D9: `config.SUBAGENT_REVIEW`, `settings.json` `research.subagent_review`, `--review` / `--no-review`, `/research --review`).
+
+- **The orchestrator invokes it; the shell supplies consent as data** (V3). `core/reasoning/review.py` owns what may be corrected, `run_deep_research_pipeline` decides when. The alternative — a post-pipeline stage each shell calls, mirroring `write_run_artifacts` — is exactly the shape that left `/research` in the TUI writing no output directory at all.
+- **"Requested" and "can be asked" are two parameters** (`subagent_review` and `review`). `build_review_consent()` returns `None` on a non-tty stdin, so collapsing them would make `--review` on a piped run skip the review entirely and report nothing.
+- **No consent route means nothing is applied** (V6). The review still runs and still records. Same rule §25 applies to gated tools: the inability to ask is not permission to proceed.
+- **The reviewer inherits the run's `RunAuthorization` unchanged** (V7) — same grants, same provider, same `GrantBudget` **instance**. No new security axis.
+- **A refinement re-enters the reviewer's own thread** (V5, via `continue_conversation`) and touches only its own finding. A note about #3 must not redraft #7.
+- **Four consent outcomes, and only one of them can ever accept.** `reject_all` is the escape a long review needs precisely because it only declines; an accept-all shortcut is the affordance that must not exist, since an injected "correction" needs one reflexive yes.
+- **Every unclear answer is a rejection** — an unrecognised string, a callback that raises, a timeout, a TUI modal dismissed with the bare `False` its shutdown path puts. This is the fifth place the "every dismissal carries a value" invariant applies and the first where the unsafe failure is silently applying an edit rather than hanging a worker.
 
 ### Config loading and workspace trust (ROADMAP_v2 §14)
 

@@ -1519,3 +1519,192 @@ was written specifically to see the leak, and the pass-prompt test caught
 it — which is the point of testing a boundary rather than a behaviour.
 
 - Full suite: **634 tests** (was 587), plus the opt-in `integration` test.
+
+
+---
+
+# §20 — Post-pipeline review with consented correction
+
+Rev. 1 specified four sentences: opt-in via `SUBAGENT_REVIEW = False`
+(D9), pass `run.trace` into a reviewer subagent, add `subagent_reviews`
+to `PipelineRun`, and verify `AgentManager`'s surface first. That is a
+read-only commentary stage.
+
+The owner's requirement was that the reviewer be able to **update
+incorrect information**, with **user consent for every change**. That
+makes it the only place in this codebase where a model's proposal can
+alter a finished run's output, and everything below follows from taking
+that seriously rather than from the original four sentences.
+
+## Two findings that shaped the design
+
+**`run.trace` cannot support correction.** Rev. 1's choice of the trace
+was right for commentary — it is the audit log, and a review pass had
+already confirmed it leaks no raw per-pass history. But trace is process
+log lines (`"Pass 2: extracted 14 claim(s)"`) describing what happened,
+not what was concluded. Nothing in it can be checked for truth. The
+reviewer now reads the annotated claims, their tiers, grounding and score
+breakdowns, the coverage gaps and the report. Those are still the
+pipeline's own distilled outputs — the same artifacts a human reads — so
+the principle the original choice was protecting is intact; no per-pass
+conversation thread is shared.
+
+**The claims and the report are upstream/downstream of each other.**
+`final_report` was synthesised *from* the claims. Correcting a claim and
+leaving the report alone gives one run two artifacts that contradict each
+other, which for a harness whose selling point is auditable output is
+worse than either error alone. Hence V2: corrections land on claims, and
+the report is *regenerated* from the corrected set rather than edited.
+
+`_synthesis_input` became a function for exactly this. Reusing the string
+built before the review would regenerate the report from the
+**uncorrected** claims — so the report would change for no reason while
+the correction silently went nowhere. That is a bug that looks like
+success in every artifact.
+
+## Decisions (V1–V9)
+
+The table is in ROADMAP_v2 §20. Four worth restating:
+
+**V3 — the orchestrator invokes; the shell supplies consent.** The
+obvious alternative was a post-pipeline stage each shell calls, mirroring
+`output_writer.py`'s stated contract ("writing files is the CALLER's
+decision"). Reading the code to check that precedent is what found the
+counterexample: `write_run_artifacts` has **one** production call site, so
+`/research` in the TUI produced no `/output/<run_id>/` at all. The
+precedent argued against itself. The decision to run is now in one place;
+only the consent object comes from the shell, because only a shell knows
+how to reach a human.
+
+**V6 — no consent route means nothing is applied.** This is the property
+that keeps a mutating stage from widening the security stance, and it is
+the same rule §25 applies to gated tools: the inability to ask is not
+permission to proceed. A piped CLI, a cron job or any shell that cannot
+reach a human gets the findings and an unmodified report.
+
+**V7 — the reviewer inherits the run's authorization unchanged.** No new
+security axis. An unauthorised run gives it no tools and it reviews what
+it was handed; a `--grant web_search` run lets it actually re-check a
+source, spending from the *same* `GrantBudget` instance and landing in
+the same `granted_calls.json`. The test asserts budget **identity**, not
+equality — a rebuilt budget with the same limit is §25's named failure
+mode wearing a disguise.
+
+**V8 — no new `Claim` field and no new column.** A `Claim` field would be
+a fourth thing every `vars(c)` site must stay JSON-native for.
+A `PipelineRunRecord` column would be worse: `create_db_and_tables()`
+creates missing *tables* and never `ALTER`s, so adding one breaks every
+existing database at the first `SELECT`. Provenance instead goes to
+`subagent_reviews` → `07_review.json`, one trace line per decision (trace
+*is* persisted), and a `review_override` key inside the **existing**
+`score_breakdown` dict — without which `04_confidence.json` would show a
+0.91 raw_score beside a reviewer-downgraded LOW and read as a bug in the
+scoring formula.
+
+## The distinction found while wiring the CLI
+
+`build_review_consent()` returns `None` when stdin is not a terminal.
+That was deliberate — V6 by construction rather than by a check somewhere
+downstream that could be forgotten — but it exposed that "the user asked
+for a review" and "someone can be asked about its findings" are different
+facts. If the consent object alone enabled the stage, `--review` on a
+piped run would skip the review **entirely** and report nothing, on
+exactly the run the user asked to have checked.
+
+So `run_deep_research_pipeline` takes `subagent_review` (does it run)
+alongside `review` (can anyone be asked), with `None` falling back to
+`config.SUBAGENT_REVIEW` exactly as `ensemble_mode` does. A consent
+object with the flag off still runs it, because a caller that went to the
+trouble of building one wants the review.
+
+## The `synthesis` finding kind
+
+Added beyond the locked "claims and tiers" answer, and flagged as such at
+plan time. "The report overstates claim 4" has no correction target when
+only claims and tiers can change: the claim is right, the prose is wrong.
+An accepted `synthesis` finding edits nothing — it appends a directive to
+the re-synthesis input, so the fix travels through the same generation
+step every other correction does rather than letting a model rewrite the
+report directly.
+
+## Two things that landed alongside, because §20 was the first consumer
+
+**`core/reasoning/json_retry.py`.** §3's malformed-JSON recovery lived in
+`orchestrator._run_pass_with_json_retry` with two pass-specific facts
+baked in: `run_deep_research_mode` as the first attempt and
+`pass_prompt(pass_id)` as the prompt to continue under. The reviewer is
+agent-shaped and starts through `run_agent_conversation`. Copying twenty
+lines would have put two copies of the corrective wording, the attempt
+arithmetic and the trace format in one codebase — the shape CLAUDE.md
+names by name. The shared loop takes an already-obtained response;
+each caller starts its own first attempt. Two new tests pin what a
+re-inlining would undo: continuing under the *caller's* prompt (hardcoding
+`pass_prompt(label)` looks right for all ten passes and hands the reviewer
+a source-grounding prompt mid-review), and every retry response reaching
+the `on_response` hook where §25's granted-call record hangs.
+
+**`authorization=` on `run_agent_conversation`.** It was the only public
+loop entry point that could not carry a `RunAuthorization` — §25 added it
+to the other two and stopped, because nothing agent-shaped needed it.
+Passing it *and* `granted_tools` raises rather than resolving silently:
+they set the same underlying argument, and if the bundle lost, a reviewer
+would run with no budget and no provider while every call site read as if
+it were authorised.
+
+## §18 AC3, closed
+
+Carried since Rev. 2 as "verify `AgentManager`'s surface against §20's
+call sites before §20 is complete" — unresolvable while neither side
+existed. §20 calls exactly three methods: `get("pipeline-reviewer")`,
+`active_context(agent)` (depth 0, since the orchestrator runs under no
+parent context) and `system_prompt_for(agent, DEFAULT_SYSTEM_PROMPT)`.
+All present, none needing a signature change. **The flagged mismatch was
+not real.** Closed in place in three locations rather than left dangling.
+
+## The reviewer agent
+
+`agents/builtin/pipeline-reviewer.md`, at the harness tier so a cloned
+repo cannot replace the methodology that judges its output (D18). It
+excludes `spawn_subagent` for the reason §25's R4 excludes it from
+pipeline grants — a reviewer delegating its own review compounds
+authority for nothing — and opts out of both project context and thread
+memory, neither of which is evidence about whether a claim is true and
+both of which are places a steer could be planted.
+
+Its body is the rigour spec: what counts as a finding (a claim its own
+sources do not support; a contradiction; a tier the evidence does not
+justify; a report that misstates a claim it is built from), what does not
+(style, ordering, "this could be expanded", hedging something already
+correct), and that finding nothing is a legitimate outcome — a review
+that always finds something is one nobody can act on.
+
+Being in `agents/builtin/` also puts it in the agent catalog, so a chat
+model could spawn it. That is the cost of D9's "subagent reviewing" shape
+and there is no hidden-agent flag to opt out of it. Noted rather than
+worked around.
+
+## What the revert checks caught
+
+Forty-one across five commits, all red, none missed. The ones worth
+naming are the paired ones, because each half alone proves nothing:
+
+- **V2 both ways.** "Accept re-runs synthesis" passes against a version
+  that *always* re-synthesises; "reject re-runs nothing" passes against
+  one that *never* does. Only both together pin the behaviour.
+- **V6 both ways.** Applying findings when nobody was asked, and
+  discarding the findings entirely when nobody was asked, are opposite
+  failures of the same decision.
+- **Ordering, not just presence.** Reverting the stage to run *before*
+  final synthesis keeps every call happening — it just hands the reviewer
+  an empty report to judge. The wiring test asserts the last two steps in
+  order for that reason.
+
+Every place the safe direction could be inverted was checked and is red:
+an unrecognised consent answer, a consent callback that raises, the TUI
+decoder receiving the bare `False` its shutdown path puts, and the review
+modal's escape dismissing with no value. That last one is the fifth place
+this project's "every dismissal must carry a value" invariant applies, and
+the first where the unsafe failure is silently *applying an edit* rather
+than merely hanging a worker.
+
+- Full suite: **697 tests** (was 634), plus the opt-in `integration` test.

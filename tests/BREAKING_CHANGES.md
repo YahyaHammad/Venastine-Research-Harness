@@ -411,3 +411,56 @@ breaks multiple tests across multiple files:
 | Stop passing `active_skills` into catalog assembly | `test_the_catalog_marks_active_skills_in_the_same_prompt` | The list must reach the catalog to MARK entries — just never to expand them |
 | Make `active_skills` class-level or thread-persisted | `TestSessionScope` | K5: session-scoped like `/agent`, not persisted like `/goal` |
 | Give a shipped default a tool it cannot have | `test_their_declared_tools_are_actually_available` | A builtin reporting a missing tool on every activation reads as the feature being broken |
+
+
+## §20 — post-pipeline review with consented correction
+
+Every row below was applied to the production code and confirmed to turn
+the named test red. The paired rows exist because each half alone proves
+nothing: "accept re-runs synthesis" passes against a version that always
+re-synthesises, and "reject re-runs nothing" passes against one that
+never does.
+
+| Change | What breaks | Fix / why |
+|---|---|---|
+| Make `run_agent_conversation` ignore `authorization=` | `test_the_bundle_is_unpacked_into_the_loop` | §20's reviewer needs the run's grants, provider and budget; without this it runs unauthorised while every call site reads as if it were authorised |
+| Drop the `authorization` + `granted_tools` guard | `test_passing_both_raises_rather_than_picking_one` | They set the same underlying argument, so one silently wins |
+| Give `pipeline-reviewer` `spawn_subagent` | `test_it_cannot_spawn_subagents` | A reviewer delegating its own review compounds authority for nothing — §25's R4 excludes spawning from pipeline grants for the same reason |
+| Declare a globally-denied tool on `pipeline-reviewer` | `test_its_declared_tools_are_actually_available` | `allowed_tools` narrows, so the name is dead weight; a builtin reporting missing tools reads as the feature being broken |
+| Let the reviewer read project context or thread memory | `test_it_does_not_read_project_context_or_thread_memory` | Neither is evidence about whether a claim is true, and both are places a steer could be planted |
+| Add a `consent` field to `RunAuthorization` | `test_run_authorization_has_no_consent_field` | That bundle answers "may this gated call proceed?"; consent answers "may this edit be applied?". §25's docstring warns against multiplying kinds of authorization inside it |
+| Hardcode `pass_prompt(label)` inside the shared retry loop | `test_the_retry_continues_under_the_callers_system_prompt` | Looks right for all ten passes and hands the reviewer a source-grounding prompt mid-review |
+| Fire `on_response` only on the final retry | `test_every_retry_response_reaches_the_on_response_hook` | §25's granted-call record hangs off it; a grant spent on the struggling attempt is exactly the call an unattended run's audit trail exists to show |
+| **Apply findings when consent is None** | `TestNobodyToAskAppliesNothing` | **V6.** The property that keeps a mutating stage from widening the security stance — the inability to ask is not permission to proceed |
+| **Discard findings when consent is None** | `TestNobodyToAskAppliesNothing` | The opposite failure of the same decision. An advisory review whose findings vanish is not advisory, it is discarded |
+| **Re-synthesise unconditionally** | `test_reject_leaves_everything_alone` | **V2.** A fully-rejected review must change nothing |
+| **Never re-synthesise** | `test_accept_rewrites_the_claim_and_re_runs_synthesis` | **V2, other half.** Otherwise `report.md` and `02_claims.json` contradict each other |
+| Reuse the pre-review synthesis input | `test_the_re_synthesis_reads_the_CORRECTED_claims` | Regenerates from the UNCORRECTED claims — the report changes for no reason while the correction silently goes nowhere |
+| Skip the `review_override` marker on a tier change | `test_a_tier_override_marks_the_score_breakdown` | `04_confidence.json` then shows a 0.91 raw_score beside a downgraded LOW and reads as a bug in the scoring formula |
+| Apply every finding a refinement returns | `test_refinement_touches_only_its_own_finding` | A note about #1 must not silently redraft #2 — the user consented to reconsidering one thing |
+| Let `reject_all` keep asking | `test_reject_all_stops_asking` | The escape a long review needs; it only ever declines, so it cannot turn fatigue into a reflexive accept |
+| Treat an unrecognised consent answer as accept | `test_an_unrecognised_answer_is_a_rejection` | Every unclear answer is a rejection |
+| Treat a raising consent callback as accept | `test_a_consent_callback_that_raises_is_a_rejection` | A shell torn down mid-prompt must not have its silence read as approval |
+| Skip validation of `claim_id` / tier before asking | `TestFindingsAreValidatedBeforeAnyoneIsAsked` | Asking solicits consent for something that then silently does nothing |
+| Truncate past `MAX_REVIEW_FINDINGS` silently, or not at all | `test_findings_past_the_cap_are_dropped_and_traced` | No silent caps — an untold truncation reads as "the reviewer found twenty-five things" |
+| Pass `authorization=None` to the reviewer | `test_the_same_bundle_object_reaches_the_reviewer` | **V7.** Asserted on IDENTITY of the `GrantBudget`: a rebuilt one multiplies the run's ceiling while reading as if it enforced one |
+| Run the reviewer with `context=None` | `test_the_reviewer_runs_under_the_reviewer_agents_context` | Its `.md` excludes `spawn_subagent`, and that only binds if the context built from it is the one the run uses |
+| Stop recording the reviewer's granted calls | `test_the_reviewers_granted_calls_join_the_runs_audit_trail` | §25 keeps ONE list so a call cannot be authorised in one place and recorded in another |
+| Make the review stage non-opt-in | `test_no_flag_and_no_consent_means_no_reviewer_call` | D9: it is an extra model call plus a re-synthesis |
+| Require the config flag even with a consent route | `test_a_consent_route_alone_enables_it` | A shell that offered the user a consent route should not also need the flag |
+| Never call `_review_stage` from the pipeline | `test_the_pipeline_calls_the_stage_after_final_synthesis` | Without this every other §20 test passes against code nothing calls |
+| **Run the stage before final synthesis** | `test_the_pipeline_calls_the_stage_after_final_synthesis` | Every call still happens — the reviewer is just handed an empty report to judge. The test asserts ORDER for this reason |
+| Make a missing reviewer agent fatal | `test_a_missing_reviewer_agent_skips_rather_than_failing` | Losing a completed ten-pass run over an optional stage is the wrong trade |
+| Collapse `enabled` into `review is not None` | `test_enabled_with_no_consent_still_runs_and_reports` | `--review` on a piped run would then skip the review entirely and report nothing |
+| Stop falling back to `config.SUBAGENT_REVIEW` | `test_the_pipeline_resolves_the_flag_from_config_when_unset` | Both shells pass `None`, so the config flag would do nothing |
+| Default `--review` to `False` in argparse | `test_the_flag_defaults_to_none_so_settings_can_supply_it` | "Flag absent" must stay distinguishable from "flag given as false", or settings.json can never be honoured |
+| Let settings beat the explicit flag | `test_precedence_is_flag_then_settings_then_config` | `--no-review` must escape a persisted `true` for one run |
+| Build a consent object on a non-tty stdin | `test_a_non_tty_stdin_gets_no_consent_object` | V6 by construction; reading a decision off a pipe answers on the user's behalf with whatever bytes were there |
+| Make the TUI decoder trust whatever arrives | `test_the_modal_answer_decoder_fails_safe` | The shutdown release puts a bare `False`; the first place where the unsafe failure is silently applying an edit |
+| Let `ReviewScreen`'s escape dismiss with no value | `test_every_review_screen_dismissal_carries_a_decision` | The worker parks on a Queue inside the consent callback — fifth place this invariant applies |
+| **Drop `write_run_artifacts` from the TUI worker** | `test_the_tui_worker_writes_them_too` | **V9.** It had ONE call site, so `/research` produced no `/output/<run_id>/` at all |
+| Let an artifact failure propagate in the TUI | `test_a_writer_failure_does_not_lose_the_tui_run` | A full disk must not discard ten passes of completed work |
+| Write `07_review.json` unconditionally | `test_absent_when_it_was_not` | Its presence is the signal that a run was reviewed; an always-empty file reads as "nothing happened here" |
+| Remove `subagent_review` from `_KNOWN_RESEARCH` | `test_subagent_review_is_accepted` | Unknown settings keys RAISE, so an undeclared key is a startup error |
+
+**Signature changes that ripple into existing tests.** `_split_research_flags` now returns `(attended, review, grant_spec, query)` — a 4-tuple, updated across `TestTheTuiFlagSplitter`. `run_deep_research_pipeline` takes `review=` and `subagent_review=`, both asserted positionally in `test_e2e.py` so a future default of "review and apply" cannot slip through. `_review_stage` takes `enabled=`.
