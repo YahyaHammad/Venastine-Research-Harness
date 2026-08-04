@@ -109,6 +109,16 @@ class PipelineRun:
     # unattended ten-pass run is precisely where "the user said yes once"
     # needs a record of what that yes actually covered.
     granted_calls: list[dict] = field(default_factory=list)
+    # §20: one record per finding the reviewer raised, carrying what it
+    # proposed and what the human decided. Populated only on a run that
+    # was reviewed, which is off by default (D9).
+    #
+    # A dict, not a dataclass, and deliberately: a nested dataclass field
+    # here would require migrating EVERY vars(c)/vars(run) site to
+    # asdict() in one change (see the Claim note above). It is also why
+    # the reviewer's tier overrides are marked inside the existing
+    # score_breakdown dict rather than in a new Claim field.
+    subagent_reviews: list[dict] = field(default_factory=list)
     final_report: str = ""
 
     def log(self, message: str) -> None:

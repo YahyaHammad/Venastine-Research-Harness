@@ -173,6 +173,77 @@ def _apply_assumption_flags(claims: list[Claim], assumptions: dict) -> None:
             claim.assumption_flags = flags
 
 
+def _synthesis_input(run: PipelineRun, directives: list | None = None) -> str:
+    """What final synthesis reads.
+
+    A FUNCTION, not a string built once. §20 re-runs synthesis after a
+    correction is accepted, and reusing the string built before the review
+    would regenerate the report from the UNCORRECTED claims -- producing a
+    report that changed for no reason while the correction silently went
+    nowhere.
+    """
+    text = (
+        f"Original query:\n{run.user_query}\n\n"
+        f"Final annotated claims:\n{json.dumps([vars(c) for c in run.claims])}\n\n"
+        f"Coverage gaps:\n{json.dumps(run.coverage_gaps)}"
+    )
+    if directives:
+        text += (
+            "\n\nA reviewer raised the following about the previous draft of "
+            "this report, and a human approved each one. Address them:\n"
+            + "\n".join(f"- {d}" for d in directives)
+        )
+    return text
+
+
+def _review_stage(run: PipelineRun, model: str, provider_name: str,
+                  authorization, review) -> None:
+    """ROADMAP_v2 §20. Opt-in review of the finished run, with every
+    correction consented to individually.
+
+    Called from INSIDE the orchestrator (V3) rather than left to each
+    shell. The obvious alternative -- a post-pipeline stage the caller
+    invokes, mirroring write_run_artifacts -- is exactly the shape that
+    produced this project's live asymmetry: that function has one
+    production call site, so /research in the TUI writes no output
+    directory at all. The consent OBJECT still comes from the shell,
+    because only a shell knows how to reach a human.
+
+    `review is not None` also enables the stage, so a shell that offered
+    the user a consent route does not additionally need the config flag
+    set. The flag alone (D9) runs it with nobody to ask, which V6 makes
+    advisory.
+    """
+    if not config.SUBAGENT_REVIEW and review is None:
+        return
+
+    from core.reasoning import review as review_module
+
+    findings, thread_id = review_module.run_review(
+        run, model, provider_name, authorization)
+    run.log(f"Review: {len(findings)} finding(s) raised.")
+    update_pipeline_run(run.run_id, run)
+
+    decisions = review_module.walk_consent(
+        findings, review, run, model=model, provider_name=provider_name,
+        thread_id=thread_id, authorization=authorization)
+    run.subagent_reviews = decisions
+
+    if review_module.apply(run, decisions):
+        accepted = sum(1 for d in decisions if d.get("decision") == "accept")
+        run.final_report = _run_pass(
+            "Final synthesis",
+            _synthesis_input(run, review_module.synthesis_directives(decisions)),
+            model, provider_name, authorization=authorization,
+        )
+        # NOT re-reviewed. The regress is cut deliberately: a review of the
+        # re-synthesised report would need its own consent pass, and so on.
+        run.log(f"Review: {accepted} correction(s) accepted; final synthesis "
+                f"re-run. The re-synthesised report is not re-reviewed.")
+    else:
+        run.log("Review: no correction applied; report unchanged.")
+
+
 def _apply_fallback(claim: Claim) -> None:
     """D2 exhausted / fallback branch -- pure code, no LLM call."""
     claim.confidence_tier = "UNVERIFIED"
@@ -194,13 +265,21 @@ def run_deep_research_pipeline(
     ensemble_mode: bool | None = None,
     ensemble_n: int | None = None,
     authorization=None,
+    review=None,
 ) -> PipelineRun:
     """authorization (§25): a core.approval.RunAuthorization built by the
     shell that launched this run, or None for the pre-§25 behaviour (no
     grants, nobody to ask, every approval-gated tool hidden from every
     pass). Carried, not interpreted -- the decisions about WHAT may be
     granted live in core/reasoning/authorization.py, and the enforcement
-    lives in core/loop.py."""
+    lives in core/loop.py.
+
+    review (§20): a core.approval.ReviewConsent, or None. Carried the same
+    way and for the same reason -- only a shell knows how to reach a
+    human. A SECOND parameter rather than a field on the authorization
+    bundle: that bundle answers "may this gated call proceed?" and this
+    answers "may this edit be applied?". None means nothing is applied,
+    even when the review itself runs (V6)."""
     ensemble_mode = config.ENSEMBLE_MODE if ensemble_mode is None else ensemble_mode
     ensemble_n = config.ENSEMBLE_N if ensemble_n is None else ensemble_n
 
@@ -394,13 +473,12 @@ def run_deep_research_pipeline(
         update_pipeline_run(run.run_id, run)
 
         # --- Final synthesis ---
-        synthesis_input = (
-            f"Original query:\n{user_query}\n\n"
-            f"Final annotated claims:\n{json.dumps([vars(c) for c in run.claims])}\n\n"
-            f"Coverage gaps:\n{json.dumps(run.coverage_gaps)}"
-        )
-        run.final_report = _run_pass("Final synthesis", synthesis_input, model, provider_name, authorization=authorization)
+        run.final_report = _run_pass("Final synthesis", _synthesis_input(run), model, provider_name, authorization=authorization)
         run.log("Final synthesis complete.")
+        update_pipeline_run(run.run_id, run)
+
+        # --- §20: review, consent, correct ---
+        _review_stage(run, model, provider_name, authorization, review)
 
         update_pipeline_run(run.run_id, run, status="complete")
         return run
