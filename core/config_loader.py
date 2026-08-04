@@ -100,10 +100,22 @@ _NESTED_SETTINGS = {
 class SkillDef:
     name: str
     description: str
+    # ROADMAP_v2 §19 (K2): the tools this skill's methodology DEPENDS on,
+    # not tools it grants. It cannot grant any -- ToolContext.allowed_tools
+    # is a whitelist that narrows, and D14 forbids widening -- so this is
+    # checked at activation and reported, never applied. See SkillManager.
     additional_tools: list
     body: str
     tier: str
     path: str
+    # §19 (K4): folder path from the tier root, posix separators, "" for a
+    # skill sitting directly in skills/. Metadata, not identity -- the name
+    # stays global, so load_skill, /skill and D18's collision rule are
+    # untouched by where a file lives. Used to GROUP the catalog, which is
+    # the point: progressive disclosure puts every skill's name and
+    # description in every system prompt, and a flat list of forty is
+    # exactly what that design exists to avoid.
+    category: str = ""
 
 
 @dataclass
@@ -152,7 +164,7 @@ def _parse_frontmatter(text: str) -> tuple[dict, str]:
     return yaml.safe_load(frontmatter_text), body
 
 
-def _parse_md_file(path: str, kind: str, tier: str):
+def _parse_md_file(path: str, kind: str, tier: str, category: str = ""):
     """Parse one agent/skill .md file. Returns a SkillDef/AgentDef, or
     None (with a warning) for malformed files -- a broken definition
     warns and skips rather than taking down startup."""
@@ -187,6 +199,7 @@ def _parse_md_file(path: str, kind: str, tier: str):
             body=body,
             tier=tier,
             path=path,
+            category=category,
         )
     allowed = fm.get("allowed_tools")
     if allowed is not None and not isinstance(allowed, list):
@@ -261,15 +274,49 @@ def _tier_dirs(kind: str, project_path: str, trusted: bool) -> list:
     return dirs
 
 
+def _md_files(directory: str, recursive: bool):
+    """(absolute path, category) for every .md file in a tier directory.
+
+    ROADMAP_v2 §19 (K4): SKILLS nest under category folders --
+    `skills/builtin/<category>/<skill>.md` -- and agents stay flat, since
+    `agents/builtin/` holds one file and speculative structure for it
+    would be structure nobody asked for. One branch here rather than a
+    second discovery function, so tier handling and collision handling
+    cannot diverge between the two kinds.
+
+    The category is DERIVED from the folder, never authored: a `category:`
+    frontmatter key would immediately be able to disagree with where the
+    file actually sits, and then two places would claim to know.
+
+    Walk order matches workspace_trust.content_files() -- dirs.sort() plus
+    sorted(files) -- because same-name collisions resolve first-wins, so a
+    nondeterministic order would make WHICH definition loads depend on the
+    filesystem.
+    """
+    if not recursive:
+        return [
+            (os.path.join(directory, f), "")
+            for f in sorted(os.listdir(directory)) if f.endswith(".md")
+        ]
+    out = []
+    for dirpath, dirs, files in os.walk(directory):
+        dirs.sort()
+        category = os.path.relpath(dirpath, directory).replace(os.sep, "/")
+        if category == ".":
+            category = ""
+        for fname in sorted(files):
+            if fname.endswith(".md"):
+                out.append((os.path.join(dirpath, fname), category))
+    return out
+
+
 def _discover(kind: str, project_path: str, trusted: bool) -> dict:
     found = {}
     for tier, directory in _tier_dirs(kind, project_path, trusted):
         if not os.path.isdir(directory):
             continue
-        for fname in sorted(os.listdir(directory)):
-            if not fname.endswith(".md"):
-                continue
-            defn = _parse_md_file(os.path.join(directory, fname), kind, tier)
+        for path, category in _md_files(directory, recursive=(kind == "skills")):
+            defn = _parse_md_file(path, kind, tier, category)
             if defn is None:
                 continue
             if defn.name in found:
@@ -504,13 +551,25 @@ def context_for_agent(agent: Optional[AgentDef]) -> Optional[str]:
     return _state["context"]
 
 
-def skill_catalog_text() -> str:
+def skill_catalog_text(active: Optional[list] = None) -> str:
     """Frontmatter-only catalog for system prompt injection. Bodies are
     deliberately absent -- the model requests them via load_skill.
     Empty string when uninitialized or when no skills exist, so prompt
-    assembly is a no-op append."""
+    assembly is a no-op append.
+
+    GROUPED BY CATEGORY (§19 K4). Uncategorised skills come first, then
+    categories alphabetically, so a flat catalog reads exactly as it did
+    before any category folder existed.
+
+    `active` names skills whose full body is already pinned into this
+    prompt (§19 K1). They are MARKED rather than omitted: dropping them
+    would make the catalog disagree with `/skill`'s listing, and leaving
+    them unmarked invites the model to spend a turn calling load_skill for
+    text it can already read.
+    """
     if _state is None or not _state["skills"]:
         return ""
+    active_set = set(active or ())
     lines = [
         "## Available skills",
         "The skills below are available in this session. Only their "
@@ -518,9 +577,19 @@ def skill_catalog_text() -> str:
         "skill name to view a skill's full instructions before "
         "following one.",
     ]
+    by_category: dict = {}
     for name in sorted(_state["skills"]):
         skill = _state["skills"][name]
-        lines.append(f"- {skill.name}: {skill.description}")
+        by_category.setdefault(skill.category, []).append(skill)
+    # "" sorts before any real category name, which is the order wanted:
+    # uncategorised first, then categories alphabetically.
+    for category in sorted(by_category):
+        if category:
+            lines.append(f"### {category}")
+        for skill in by_category[category]:
+            suffix = (" [ACTIVE — full text below]"
+                      if skill.name in active_set else "")
+            lines.append(f"- {skill.name}: {skill.description}{suffix}")
     return "\n".join(lines)
 
 

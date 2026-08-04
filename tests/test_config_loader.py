@@ -49,6 +49,19 @@ def _write_skill(base, name, body="Body.", description="desc"):
     _write_md(base, "skills", name, [f"name: {name}", f"description: {description}"], body)
 
 
+def _write_skill_in(base, category, name, body="Body.", description="desc",
+                    kind="skills"):
+    """A skill inside a category folder (§19 K4). `category` may contain
+    '/' for nesting deeper than one level."""
+    d = base / kind
+    if category:
+        d = d / category
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{name}.md").write_text(
+        f"---\nname: {name}\ndescription: {description}\n---\n\n{body}\n",
+        encoding="utf-8")
+
+
 def _write_settings(base, data):
     base.mkdir(parents=True, exist_ok=True)
     (base / "settings.json").write_text(json.dumps(data), encoding="utf-8")
@@ -590,3 +603,160 @@ def test_bom_prefixed_settings_still_parses(_redirect_roots):
 
     config_loader.initialize(str(_redirect_roots["project"]))
     assert config_loader.get_settings()["default_model"] == "bommed-model"
+
+
+# ===========================================================================
+# ---- §19 K4: category folders for skills ----------------------------------
+# ===========================================================================
+#
+# Progressive disclosure puts every skill's name and description in EVERY
+# system prompt, so a flat list of forty is exactly what that design exists
+# to avoid. Categories are folders, derived rather than declared, and are
+# metadata rather than identity -- the name stays global, so load_skill,
+# /skill and D18's collision rule are untouched by where a file lives.
+
+class TestCategoryDiscovery:
+
+    def test_a_nested_skill_loads_with_its_folder_as_category(self, _redirect_roots):
+        _write_skill_in(_redirect_roots["user"], "security", "recon")
+        config_loader.initialize(str(_redirect_roots["project"]))
+
+        skill = config_loader.get_skill("recon")
+        assert skill is not None, "a skill in a category folder was not discovered"
+        assert skill.category == "security"
+
+    def test_a_flat_skill_still_loads_with_no_category(self, _redirect_roots):
+        """Existing layouts keep working -- categories are additive."""
+        _write_skill(_redirect_roots["user"], "flat")
+        config_loader.initialize(str(_redirect_roots["project"]))
+
+        assert config_loader.get_skill("flat").category == ""
+
+    def test_nesting_deeper_than_one_level_keeps_the_full_path(self, _redirect_roots):
+        """Not just the immediate parent. A two-level layout is a
+        reasonable thing to write, and truncating it would silently merge
+        two distinct groups in the catalog."""
+        _write_skill_in(_redirect_roots["user"], "security/web", "xss")
+        config_loader.initialize(str(_redirect_roots["project"]))
+
+        assert config_loader.get_skill("xss").category == "security/web"
+
+    def test_the_name_is_not_namespaced_by_the_category(self, _redirect_roots):
+        """K4: category is metadata, not identity. If the name became
+        'security/recon' then load_skill, /skill and the D18 collision rule
+        would all be operating on a different key than the catalog shows."""
+        _write_skill_in(_redirect_roots["user"], "security", "recon")
+        config_loader.initialize(str(_redirect_roots["project"]))
+
+        assert config_loader.get_skill("recon") is not None
+        assert config_loader.get_skill("security/recon") is None
+
+    def test_agents_stay_flat(self, _redirect_roots):
+        """K4 is skills-only: agents/builtin/ holds one file, and
+        speculative structure for it is structure nobody asked for.
+        Asserted so flipping the branch is a test failure rather than a
+        silent behaviour change in the other kind."""
+        d = _redirect_roots["user"] / "agents" / "nested"
+        d.mkdir(parents=True)
+        (d / "buried.md").write_text(
+            "---\nname: buried\ndescription: d\n---\n\nBody.\n", encoding="utf-8")
+        config_loader.initialize(str(_redirect_roots["project"]))
+
+        assert config_loader.get_agent("buried") is None
+
+    def test_a_project_tier_category_folder_loads_when_trusted(self, _redirect_roots):
+        _write_skill_in(_redirect_roots["project"] / ".venastine", "crypto", "aes")
+        workspace_trust.grant_trust(str(_redirect_roots["project"]))
+        config_loader.initialize(str(_redirect_roots["project"]))
+
+        skill = config_loader.get_skill("aes")
+        assert skill is not None and skill.category == "crypto"
+        assert skill.tier == "project"
+
+    def test_a_nested_project_skill_is_covered_by_the_trust_hash(
+            self, _redirect_roots):
+        """D17 keys trust to a hash of everything under .venastine/. A
+        skill hidden one folder deeper must not be a way to change what
+        loads without re-triggering the trust prompt. content_files()
+        already walks recursively -- this is the test that says so, rather
+        than the assumption that it does."""
+        _write_skill_in(_redirect_roots["project"] / ".venastine", "crypto", "aes")
+        workspace_trust.grant_trust(str(_redirect_roots["project"]))
+        assert workspace_trust.is_trusted(str(_redirect_roots["project"]))
+
+        (_redirect_roots["project"] / ".venastine" / "skills" / "crypto"
+         / "aes.md").write_text(
+            "---\nname: aes\ndescription: d\n---\n\nINJECTED.\n", encoding="utf-8")
+
+        assert not workspace_trust.is_trusted(str(_redirect_roots["project"]))
+
+    def test_same_name_in_two_categories_collides_and_warns(
+            self, _redirect_roots, caplog):
+        """Names stay global (K4), so this IS a collision. It resolves
+        first-wins by walk order, and says so -- silently shadowing is how
+        someone spends an afternoon editing a file that never loads."""
+        _write_skill_in(_redirect_roots["user"], "alpha", "dup", body="FIRST")
+        _write_skill_in(_redirect_roots["user"], "beta", "dup", body="SECOND")
+
+        with caplog.at_level("WARNING"):
+            config_loader.initialize(str(_redirect_roots["project"]))
+
+        assert config_loader.get_skill("dup").body == "FIRST"
+        assert "dup" in caplog.text
+
+    def test_walk_order_is_deterministic(self, _redirect_roots):
+        """Collisions resolve first-wins, so a nondeterministic order would
+        make WHICH definition loads depend on the filesystem."""
+        for category in ("zulu", "alpha", "mike"):
+            _write_skill_in(_redirect_roots["user"], category, f"s-{category}")
+
+        seen = []
+        for _ in range(3):
+            config_loader.initialize(str(_redirect_roots["project"]))
+            seen.append([s.category for s in
+                         sorted(config_loader.get_skills().values(),
+                                key=lambda s: s.path)])
+        assert seen[0] == seen[1] == seen[2]
+
+
+class TestGroupedCatalog:
+
+    def test_categories_become_headings(self, _redirect_roots):
+        _write_skill_in(_redirect_roots["user"], "security", "recon",
+                        description="Find hosts")
+        config_loader.initialize(str(_redirect_roots["project"]))
+
+        text = config_loader.skill_catalog_text()
+        assert "### security" in text
+        assert "- recon: Find hosts" in text
+
+    def test_uncategorised_skills_come_first_and_get_no_heading(
+            self, _redirect_roots):
+        """So a catalog with no category folders reads exactly as it did
+        before §19 -- categories are additive, not a reformat."""
+        _write_skill(_redirect_roots["user"], "flat")
+        _write_skill_in(_redirect_roots["user"], "security", "recon")
+        config_loader.initialize(str(_redirect_roots["project"]))
+
+        text = config_loader.skill_catalog_text()
+        assert text.index("- flat:") < text.index("### security")
+
+    def test_active_skills_are_marked_not_omitted(self, _redirect_roots):
+        """§19 K1 pins an active skill's body into the same prompt. Omitting
+        it here would make the catalog disagree with /skill's listing;
+        leaving it unmarked invites the model to spend a turn calling
+        load_skill for text it can already read."""
+        _write_skill_in(_redirect_roots["user"], "security", "recon")
+        _write_skill_in(_redirect_roots["user"], "security", "quiet")
+        config_loader.initialize(str(_redirect_roots["project"]))
+
+        text = config_loader.skill_catalog_text(active=["recon"])
+        assert "- recon: desc [ACTIVE" in text
+        assert "- quiet: desc" in text
+        assert "- quiet: desc [ACTIVE" not in text
+
+    def test_no_active_argument_marks_nothing(self, _redirect_roots):
+        _write_skill(_redirect_roots["user"], "flat")
+        config_loader.initialize(str(_redirect_roots["project"]))
+
+        assert "ACTIVE" not in config_loader.skill_catalog_text()
