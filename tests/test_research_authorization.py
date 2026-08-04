@@ -186,37 +186,151 @@ class TestTheCliFlag:
 class TestTheTuiFlagSplitter:
 
     def _split(self, text):
-        from tui.app import _split_grant_flag
-        return _split_grant_flag(text)
+        from tui.app import _split_research_flags
+        return _split_research_flags(text)
 
     def test_no_flag(self):
-        assert self._split("what is entropy") == (None, "what is entropy")
+        assert self._split("what is entropy") == (False, None, "what is entropy")
 
-    def test_bare_flag(self):
+    def test_bare_grant(self):
         assert self._split("--grant what is entropy") == \
-            (GRANT_PICKER, "what is entropy")
+            (False, GRANT_PICKER, "what is entropy")
 
-    def test_flag_with_value(self):
+    def test_grant_with_value(self):
         assert self._split("--grant=a,b what is entropy") == \
-            ("a,b", "what is entropy")
+            (False, "a,b", "what is entropy")
 
-    def test_a_query_merely_mentioning_the_flag_is_still_a_query(self):
-        """Prefix test, not a search. '/research what does --grant do' is a
-        research question about the flag, and treating it as an invocation
-        would silently swallow the query."""
+    def test_attended_alone(self):
+        assert self._split("--attended q") == (True, None, "q")
+
+    @pytest.mark.parametrize("text", [
+        "--attended --grant=a q",
+        "--grant=a --attended q",
+    ])
+    def test_the_two_flags_compose_in_either_order(self, text):
+        """R10 makes the combination the useful case: the grant covers what
+        you do not want asked about, attended catches everything else.
+        Handling one flag and then the other in a fixed sequence left
+        '--grant --attended q' with '--attended q' as the research
+        question."""
+        assert self._split(text) == (True, "a", "q")
+
+    def test_a_query_merely_mentioning_a_flag_is_still_a_query(self):
+        """Leading tokens only, not a search. '/research what does --grant
+        do' is a research question about the flag, and treating it as an
+        invocation would silently swallow the query."""
         assert self._split("what does --grant do") == \
-            (None, "what does --grant do")
+            (False, None, "what does --grant do")
 
     def test_bare_flag_with_no_query_yields_no_query(self):
-        assert self._split("--grant") == (GRANT_PICKER, "")
+        assert self._split("--grant") == (False, GRANT_PICKER, "")
 
     def test_the_cli_spelling_is_accepted_here_too(self):
         """The CLI needs two flag names because argparse would eat the
         query as an optional value; here the value is attached with =, so
         both names can mean one thing and muscle memory from either shell
         works."""
-        assert self._split("--grant-tools=a,b q") == ("a,b", "q")
-        assert self._split("--grant-tools q") == (GRANT_PICKER, "q")
+        assert self._split("--grant-tools=a,b q") == (False, "a,b", "q")
+        assert self._split("--grant-tools q") == (False, GRANT_PICKER, "q")
+
+
+# ===========================================================================
+# ---- R9/R10/R11/R12: attended mode ----------------------------------------
+# ===========================================================================
+
+class TestAttendedModeResolution:
+
+    def _args(self, argv):
+        import main
+        return main.build_parser().parse_args(argv)
+
+    def test_flag_absent_and_no_setting_is_off(self):
+        import main
+        assert main.resolve_attended(
+            self._args(["--mode", "research", "q"]), {}) is False
+
+    def test_settings_can_turn_it_on(self):
+        """R12: the MODE is persistable where the grant list is not,
+        because a persisted mode can only ever ADD prompts."""
+        import main
+        assert main.resolve_attended(
+            self._args(["--mode", "research", "q"]),
+            {"research": {"approval_mode": "attended"}}) is True
+
+    def test_the_flag_wins_over_settings(self):
+        """§14's CLI > settings.json > config.py precedence, which works
+        only because the argparse default stays None."""
+        import main
+        args = self._args(["--mode", "research", "--attended", "q"])
+        assert main.resolve_attended(args, {"research": {}}) is True
+
+
+class TestSettingsRejectsAPersistedGrantList:
+
+    def _validate(self, block):
+        from core.config_loader import _validate_settings
+        _validate_settings({"research": block}, "test-settings.json")
+
+    def test_approval_mode_is_accepted(self):
+        self._validate({"approval_mode": "attended"})
+        self._validate({"approval_mode": "none"})
+
+    def test_an_unknown_mode_is_rejected(self):
+        with pytest.raises(ValueError, match="approval_mode"):
+            self._validate({"approval_mode": "yolo"})
+
+    def test_granted_tools_is_rejected_by_name(self):
+        """R12, and the message matters as much as the rejection. Falling
+        through to the generic "unknown key" branch would read as an
+        oversight for someone to fix by adding support -- turning a
+        per-run decision into standing authorization that a cloned repo
+        would carry, in the one config file where project tier beats
+        user tier."""
+        with pytest.raises(ValueError) as exc:
+            self._validate({"granted_tools": ["mcp__lib__search"]})
+        assert "deliberately not supported" in str(exc.value)
+        assert "--grant" in str(exc.value)
+
+
+class TestAttendedProviderSemantics:
+
+    def test_the_provider_declines_run_scope(self):
+        """R11. grant_scope="run" is a shortcut for a chat turn, where
+        re-asking about the same tool seconds later is noise. In a mode
+        whose entire purpose is per-call supervision, honouring it would
+        let one yes silently cover every later call."""
+        import main
+        assert main.build_attended_provider().honour_run_scope is False
+
+    def test_attended_alone_builds_a_bundle_with_no_grants(self, mocker):
+        """A provider with an empty grant set is the strictest useful
+        configuration: nothing is pre-authorised, but gated tools stop
+        being hidden because someone can now be asked."""
+        import main
+        mocker.patch("core.reasoning.authorization.candidates", return_value=[])
+        auth = main.build_research_authorization(None, attended=True)
+        assert auth is not None
+        assert auth.granted_tools == set()
+        assert auth.provider is not None
+        assert auth.budget is None      # nothing granted, nothing to meter
+
+    def test_neither_flag_still_means_no_authorization(self, mocker):
+        import main
+        mocker.patch("core.reasoning.authorization.candidates", return_value=[])
+        assert main.build_research_authorization(None, attended=False) is None
+
+    def test_grants_and_attended_combine(self, mocker):
+        """R10. Strictly more useful than either alone and strictly safer
+        than grants alone, because the fallback for an ungranted tool
+        becomes ask rather than deny."""
+        import main
+        mocker.patch("core.reasoning.authorization.candidates",
+                     return_value=[("mcp__lib__search", "Search.")])
+        auth = main.build_research_authorization(
+            "mcp__lib__search", attended=True)
+        assert auth.granted_tools == {"mcp__lib__search"}
+        assert auth.provider is not None
+        assert auth.budget is not None
 
 
 # ===========================================================================

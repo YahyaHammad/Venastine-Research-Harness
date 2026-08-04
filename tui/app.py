@@ -43,7 +43,7 @@ from core.loop import (
     DEFAULT_PROVIDER, DEFAULT_SYSTEM_PROMPT, RunAgentLoop, with_goal,
 )
 from core.memory import ConversationMemory
-# Module scope, not inside _cmd_research: _split_grant_flag needs the
+# Module scope, not inside _cmd_research: _split_research_flags needs the
 # sentinel too, and two shells comparing against two different object()
 # instances would look identical and behave differently.
 from core.reasoning.authorization import GRANT_PICKER
@@ -479,6 +479,46 @@ class VenastineApp(App):
         self._release_permission_channel()
         return super().exit(*args, **kwargs)
 
+    def ask_permission_blocking(self, tool_name: str, params: dict,
+                                notice) -> bool:
+        """Show the permission modal and BLOCK until answered. §25 R9.
+
+        Called from the /research worker thread, not the UI thread. The
+        chat path cannot use this: there the loop yields a LoopEvent the UI
+        already reacts to, so the modal is pushed from on_loop_event and
+        the worker parks on the channel. A research pass drains its
+        generator inside run_to_completion(), which DISCARDS that event, so
+        the question has to be carried here instead -- which is the whole
+        reason ApprovalProvider exists as a callable rather than a queue.
+
+        The same PermissionScreen and the same channel field as the chat
+        path, so `_release_permission_channel` covers this too: quitting
+        with a research approval open must not leave a non-daemon worker
+        parked on a Queue.get() nothing will ever answer (review f10, and
+        this is the fourth place that invariant applies).
+        """
+        channel: queue.Queue = queue.Queue()
+        self._permission_channel = channel
+        screen = PermissionScreen(tool_name, params, notice)
+        self.call_from_thread(
+            self.push_screen, screen, lambda ok: channel.put(bool(ok)))
+        try:
+            return channel.get(timeout=config.ATTENDED_APPROVAL_TIMEOUT_S)
+        except queue.Empty:
+            # Deny and keep going (R9). Leaving the modal on screen would
+            # also leave the user answering a question whose answer no
+            # longer goes anywhere.
+            self.call_from_thread(self._timed_out_permission, screen, tool_name)
+            return False
+        finally:
+            self._permission_channel = None
+
+    def _timed_out_permission(self, screen, tool_name: str) -> None:
+        if screen in self.screen_stack:
+            screen.dismiss(False)
+        self._transcript.write_system(
+            f"[no answer for {tool_name} — denied; the run continues]")
+
     def _ask_permission(self, request: dict) -> None:
         channel = self._permission_channel
 
@@ -612,9 +652,14 @@ def _cmd_research(app: VenastineApp, args: str) -> None:
         candidates, parse_grant_spec, GrantSpecError,
     )
 
-    grant_spec, query = _split_grant_flag(args)
+    attended, grant_spec, query = _split_research_flags(args)
+    if not attended:
+        attended = app._settings.get("research", {}).get(
+            "approval_mode") == "attended"
+    app._research_attended = attended
     if not query:
-        app._transcript.write_error("Usage: /research [--grant[=a,b]] <query>")
+        app._transcript.write_error(
+            "Usage: /research [--attended] [--grant[=a,b]] <query>")
         return
     if app._busy:
         app._transcript.write_error("Still working — wait for this turn to finish.")
@@ -651,46 +696,70 @@ def _cmd_research(app: VenastineApp, args: str) -> None:
 
 
 def _authorization_for(app: VenastineApp, granted: set):
-    """A RunAuthorization for a set of granted names, or None for none."""
-    from core.approval import GrantBudget, RunAuthorization
+    """A RunAuthorization for this run, or None when there is no
+    authorization of any kind (the pre-§25 status quo)."""
+    from core.approval import ApprovalProvider, GrantBudget, RunAuthorization
 
+    provider = None
+    if getattr(app, "_research_attended", False):
+        # honour_run_scope=False (R11): a mode whose purpose is per-call
+        # supervision must not let one yes cover later calls.
+        provider = ApprovalProvider(
+            ask=lambda name, params, notice:
+                app.ask_permission_blocking(name, params, notice),
+            honour_run_scope=False,
+        )
+        app._transcript.write_system(
+            "Attended: every approval-gated call will be asked about as it "
+            f"happens; {config.ATTENDED_APPROVAL_TIMEOUT_S}s with no answer "
+            "denies that call and the run continues.")
     if not granted:
-        return None
+        return RunAuthorization(provider=provider) if provider else None
     app._transcript.write_system(
         f"Authorised for this run only: {', '.join(sorted(granted))}. "
         f"Ceiling {config.MAX_GRANTED_TOOL_CALLS} granted calls; every use "
         f"is recorded in granted_calls.json.")
     return RunAuthorization(
         granted_tools=set(granted),
+        provider=provider,
         budget=GrantBudget(config.MAX_GRANTED_TOOL_CALLS),
     )
 
 
-def _split_grant_flag(args: str):
-    """Split a leading --grant / --grant=a,b off the query.
+def _split_research_flags(args: str):
+    """Strip leading /research flags off the query.
 
-    Returns (grant_spec, query) where grant_spec is None (absent),
-    GRANT_PICKER (bare flag), or the raw comma-separated string.
+    Returns (attended, grant_spec, query), where grant_spec is None
+    (absent), GRANT_PICKER (bare flag), or the raw comma-separated string.
 
-    A leading flag only. `/research what does --grant do` must stay a
-    research query about the flag rather than an invocation of it, which
-    is why this is a prefix test and not a search.
+    A LOOP over leading tokens, so --grant and --attended compose in
+    either written order -- R10 makes the combination the useful case, and
+    handling one flag then the other in a fixed sequence left
+    `--grant --attended q` with "--attended q" as the research question.
+
+    Leading tokens only. `/research what does --grant do` stays a research
+    question about the flag; treating it as an invocation would silently
+    swallow the query. --grant-tools= is accepted as an alias for --grant=
+    because that is the CLI's spelling for the same thing (the CLI needs
+    two flag names because argparse would eat the query as an optional
+    value; here the value is attached with =, so both names can mean one
+    thing and muscle memory from either shell works).
     """
     text = (args or "").strip()
-    if not text.startswith("--grant"):
-        return None, text
-    head, _, rest = text.partition(" ")
-    if head in ("--grant", "--grant-tools"):
-        return GRANT_PICKER, rest.strip()
-    # --grant-tools= is accepted as an alias for --grant= because that is
-    # the CLI's spelling for the same thing. The CLI needs two flag names
-    # (argparse would eat the query as an optional value); here the value
-    # is attached with =, so both names can mean one thing and muscle
-    # memory from either shell works.
-    for prefix in ("--grant=", "--grant-tools="):
-        if head.startswith(prefix):
-            return head[len(prefix):], rest.strip()
-    return None, text
+    attended = False
+    grant_spec = None
+    while text:
+        head, _sep, rest = text.partition(" ")
+        if head == "--attended":
+            attended = True
+        elif head in ("--grant", "--grant-tools"):
+            grant_spec = GRANT_PICKER
+        elif head.startswith("--grant=") or head.startswith("--grant-tools="):
+            grant_spec = head.split("=", 1)[1]
+        else:
+            break
+        text = rest.strip()
+    return attended, grant_spec, text
 
 
 def _start_research(app: VenastineApp, query: str, authorization) -> None:

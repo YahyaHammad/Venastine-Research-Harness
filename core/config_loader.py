@@ -49,7 +49,24 @@ _KNOWN_SETTINGS = {
     "ensemble_n": int,
     "compaction": dict,
     "tui": dict,
+    "research": dict,
 }
+# ROADMAP_v2 §25 (R12). The authorization MODE is persistable and the
+# grant LIST deliberately is not.
+#
+# The asymmetry is the design. A persisted mode can only ever ADD prompts,
+# so the worst a hostile settings.json can do is make your runs more
+# annoying. A persisted grant list could only ever REMOVE them -- standing
+# authorization for named tools, carried by any repo you clone, and
+# settings.json is the one config file where project tier beats user tier.
+#
+# `granted_tools` is therefore rejected BY NAME rather than left to the
+# unknown-key branch, because "unknown key" reads as an oversight to be
+# fixed by adding support for it. See _validate_settings.
+_KNOWN_RESEARCH = {
+    "approval_mode": str,   # "none" (default) or "attended"
+}
+RESEARCH_APPROVAL_MODES = ("none", "attended")
 _KNOWN_COMPACTION = {
     "strength": int,
     "keep_recent_tokens": int,
@@ -75,6 +92,7 @@ _KNOWN_TUI = {
 _NESTED_SETTINGS = {
     "compaction": _KNOWN_COMPACTION,
     "tui": _KNOWN_TUI,
+    "research": _KNOWN_RESEARCH,
 }
 
 
@@ -311,6 +329,18 @@ def _validate_settings(data, source: str) -> None:
             raise ValueError(
                 f"settings.json at {source}: {section!r} must be an object")
         for key, value in block.items():
+            if section == "research" and key == "granted_tools":
+                # §25 R12: rejected BY NAME, not as an unknown key. The
+                # generic message reads as an oversight someone should fix
+                # by adding support; this one says the omission is the
+                # design, so nobody "fixes" it into standing authorization
+                # that a cloned repo would carry.
+                raise ValueError(
+                    f"settings.json at {source}: research.granted_tools is "
+                    f"deliberately not supported -- a persisted grant list "
+                    f"would authorise named tools for every future run, and "
+                    f"a project's settings.json beats the user's. Grant per "
+                    f"run with --grant / --grant-tools instead.")
             if key not in known_keys:
                 raise ValueError(
                     f"settings.json at {source}: unknown {section} key {key!r}")
@@ -319,6 +349,12 @@ def _validate_settings(data, source: str) -> None:
                 raise ValueError(
                     f"settings.json at {source}: {section} key {key!r} must be "
                     f"{expected.__name__}, got {type(value).__name__}")
+            if section == "research" and key == "approval_mode" and \
+                    value not in RESEARCH_APPROVAL_MODES:
+                raise ValueError(
+                    f"settings.json at {source}: research.approval_mode must "
+                    f"be one of {', '.join(RESEARCH_APPROVAL_MODES)}, "
+                    f"got {value!r}")
 
 
 def _read_settings_file(path: str) -> dict:

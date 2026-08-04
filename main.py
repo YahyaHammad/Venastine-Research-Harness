@@ -119,8 +119,8 @@ def run_chat(
         print()
 
 
-def build_research_authorization(grant_spec):
-    """Turn --grant-tools into a RunAuthorization, prompting if asked to.
+def build_research_authorization(grant_spec, attended: bool = False):
+    """Turn --grant/--grant-tools/--attended into a RunAuthorization.
 
     ROADMAP_v2 §25. Lives here rather than in the orchestrator because it
     is a SHELL concern -- knowing how to reach the human is exactly what
@@ -135,14 +135,23 @@ def build_research_authorization(grant_spec):
     from core.approval import GrantBudget, RunAuthorization
     from core.reasoning.authorization import candidates, parse_grant_spec, GrantSpecError
 
-    if grant_spec is None:
+    if grant_spec is None and not attended:
         return None
 
+    provider = build_attended_provider() if attended else None
     offered = candidates()
     if not offered:
-        print("[grant] no approval-gated tool is available to this run, so "
-              "there is nothing to authorise.", file=sys.stderr)
-        return None
+        # Attended mode is still worth building: `candidates()` lists only
+        # what is GRANTABLE, and a provider can answer for the per-call
+        # tools a grant could never cover.
+        if grant_spec is not None:
+            print("[grant] no approval-gated tool can be granted in this "
+                  "run, so there is nothing to authorise up front.",
+                  file=sys.stderr)
+        return _attended_only(provider)
+
+    if grant_spec is None:
+        return _attended_only(provider)
 
     if grant_spec is GRANT_PICKER:
         if not sys.stdin.isatty():
@@ -154,7 +163,7 @@ def build_research_authorization(grant_spec):
                   "script. Skipping:", file=sys.stderr)
             for name, description in offered:
                 print(f"  - {name}", file=sys.stderr)
-            return None
+            return _attended_only(provider)
         granted = _pick_tools_to_grant(offered)
     else:
         try:
@@ -163,17 +172,116 @@ def build_research_authorization(grant_spec):
             raise SystemExit(f"--grant-tools: {e}")
 
     if not granted:
-        print("[grant] nothing granted; approval-gated tools stay hidden "
-              "from this run.\n")
-        return None
+        if provider is None:
+            print("[grant] nothing granted; approval-gated tools stay "
+                  "hidden from this run.\n")
+        return _attended_only(provider)
 
     print(f"[grant] authorised for this run only: {', '.join(sorted(granted))}")
     print(f"[grant] ceiling: {config.MAX_GRANTED_TOOL_CALLS} granted calls; "
-          f"every use is recorded in granted_calls.json.\n")
+          f"every use is recorded in granted_calls.json.")
+    if provider is not None:
+        # R10: the two compose. A grant covers what you do not want to be
+        # asked about; everything else raises a live prompt instead of
+        # being silently denied, which is strictly more useful AND
+        # strictly safer than a grant alone.
+        print("[grant] attended: anything not granted will be asked about "
+              "as it happens.")
+    print()
     return RunAuthorization(
         granted_tools=granted,
+        provider=provider,
         budget=GrantBudget(config.MAX_GRANTED_TOOL_CALLS),
     )
+
+
+def _attended_only(provider):
+    """A bundle carrying just a provider, or None when there is no
+    authorization of any kind -- which is the pre-§25 status quo."""
+    from core.approval import RunAuthorization
+
+    if provider is None:
+        return None
+    print("[attended] every approval-gated call will be asked about as it "
+          f"happens; {config.ATTENDED_APPROVAL_TIMEOUT_S}s with no answer "
+          "denies that call and the run continues.\n")
+    return RunAuthorization(provider=provider)
+
+
+class _StdinReader:
+    """One background thread reading stdin, so a prompt can time out.
+
+    input() cannot be interrupted, and spawning a reader per prompt would
+    leave several threads racing for the same stdin after the first
+    timeout -- whichever won would answer the wrong question. One
+    long-lived daemon reader with a queue keeps that single-threaded.
+
+    Stale input is dropped before each prompt: a line typed after a
+    question timed out was an answer to THAT question, and letting it fall
+    through would approve the next call on the strength of it.
+    """
+
+    def __init__(self):
+        self._lines = __import__("queue").Queue()
+        self._thread = None
+
+    def _pump(self):
+        for line in sys.stdin:
+            self._lines.put(line)
+
+    def ask(self, prompt: str, timeout: float):
+        """Returns the typed line, or None if nobody answered in time."""
+        import queue as _queue
+
+        if self._thread is None:
+            import threading
+            self._thread = threading.Thread(target=self._pump, daemon=True)
+            self._thread.start()
+        while True:                      # drop anything typed too late
+            try:
+                self._lines.get_nowait()
+            except _queue.Empty:
+                break
+        print(prompt, end="", flush=True)
+        try:
+            return self._lines.get(timeout=timeout)
+        except _queue.Empty:
+            print()
+            return None
+
+
+def build_attended_provider():
+    """An ApprovalProvider that asks at the terminal (§25 R9).
+
+    honour_run_scope=False: this mode exists for per-call supervision, so
+    one yes must not silently cover later calls of the same tool -- the
+    shortcut §18 added for chat turns is exactly wrong here.
+    """
+    from core.approval import ApprovalProvider
+
+    reader = _StdinReader()
+
+    def ask(tool_name: str, params: dict, notice) -> bool:
+        import json as _json
+
+        print(f"\n[approval] {tool_name}")
+        if notice:
+            print(f"  {notice}")
+        try:
+            rendered = _json.dumps(params, indent=2, default=str)
+        except (TypeError, ValueError):
+            rendered = repr(params)
+        for line in rendered.splitlines():
+            print(f"  {line}")
+        answer = reader.ask(
+            f"  Allow? [y/N] ({config.ATTENDED_APPROVAL_TIMEOUT_S}s): ",
+            config.ATTENDED_APPROVAL_TIMEOUT_S)
+        if answer is None:
+            print("  [no answer — denied; the run continues]")
+            return False
+        return answer.strip().lower() in ("y", "yes")
+
+    return ApprovalProvider(ask=ask, honour_run_scope=False)
 
 
 def _pick_tools_to_grant(offered) -> set:
@@ -325,6 +433,24 @@ def build_parser() -> argparse.ArgumentParser:
              "(comma-separated) for this run. Works without a terminal. "
              "Never persisted.",
     )
+    # R9/R12. Default None so settings.json can supply it and an explicit
+    # flag still wins (§14's CLI > settings.json > config.py precedence,
+    # which only works because argparse defaults stay None).
+    #
+    # The MODE is persistable where the grant list is not, and the
+    # asymmetry is the point: a persisted mode can only ever ADD prompts,
+    # so a hostile settings.json makes your runs more annoying and never
+    # more permissive. A persisted grant list could only ever remove them.
+    parser.add_argument(
+        "--attended",
+        dest="attended",
+        action="store_const",
+        const=True,
+        default=None,
+        help="Research mode: ask about every approval-gated call as it "
+             "happens, instead of hiding those tools. Combines with "
+             "--grant, which covers the tools you do not want asked about.",
+    )
     parser.add_argument(
         "--tui",
         action="store_true",
@@ -349,6 +475,17 @@ def resolve_runtime_defaults(args, settings: dict) -> tuple[str, str]:
     provider = args.provider or settings.get("default_provider") or DEFAULT_PROVIDER
     model = args.model or settings.get("default_model") or config.MODEL_NAME
     return provider, model
+
+
+def resolve_attended(args, settings: dict) -> bool:
+    """§25 R12. --attended > settings.json research.approval_mode > off.
+
+    Same precedence and the same mechanism as provider/model: it only
+    works because the argparse default is None, so "flag absent" is
+    distinguishable from "flag given as false"."""
+    if args.attended is not None:
+        return bool(args.attended)
+    return settings.get("research", {}).get("approval_mode") == "attended"
 
 
 def _ask(prompt: str) -> str:
@@ -550,15 +687,16 @@ if __name__ == "__main__":
         parser.error(
             "--tui does not take a positional query; start the TUI and "
             "type your message, or drop --tui to send it directly.")
-    if args.grant_tools is not None and args.mode != "research":
+    if (args.grant_tools is not None or args.attended is not None) \
+            and args.mode != "research":
         # Chat is interactive by definition, so a pre-flight grant there
         # would be authorising up front what is about to be asked anyway --
         # and silently widening chat is not what a flag documented for
         # research should do. --tui lands here too (its mode is chat),
         # which is why the message names the in-TUI spelling.
         parser.error(
-            "--grant/--grant-tools applies to --mode research. Inside the "
-            "TUI, use /research --grant <query>.")
+            "--grant/--grant-tools/--attended apply to --mode research. "
+            "Inside the TUI, use /research --grant --attended <query>.")
 
     mcp = setup_mcp(project_path)
     try:
@@ -573,7 +711,8 @@ if __name__ == "__main__":
                 args.query, provider, model,
                 ensemble_mode=settings.get("ensemble_mode"),
                 ensemble_n=settings.get("ensemble_n"),
-                authorization=build_research_authorization(args.grant_tools),
+                authorization=build_research_authorization(
+                    args.grant_tools, resolve_attended(args, settings)),
             )
         else:
             run_chat(args.thread, provider, model, first_message=args.query)

@@ -73,6 +73,59 @@ async def test_research_grant_picker_authorises_the_run(mocker):
 
 
 @pytest.mark.asyncio
+async def test_research_attended_flag_gives_the_pipeline_a_provider(mocker):
+    """§25 R9/R10 in the TUI: /research --attended reaches the pipeline as
+    a RunAuthorization carrying a provider, so gated tools stop being
+    hidden and each call raises the modal instead.
+
+    Asserted on the bundle the pipeline receives. Testing the flag splitter
+    alone would pass against a shell that parses --attended perfectly and
+    then never builds anything from it.
+    """
+    from tui.app import _cmd_research
+
+    mocker.patch("core.reasoning.authorization.candidates", return_value=[])
+    captured = {}
+    mocker.patch(
+        "core.reasoning.orchestrator.run_deep_research_pipeline",
+        side_effect=lambda **kw: (captured.update(kw), _stub_run())[1])
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        _cmd_research(app, "--attended what is entropy")
+        assert await _settle(pilot, lambda: "authorization" in captured)
+
+    auth = captured["authorization"]
+    assert auth is not None, "--attended produced no authorization"
+    assert auth.provider is not None
+    assert auth.provider.honour_run_scope is False   # R11
+    assert auth.granted_tools == set()               # attended, nothing granted
+    assert captured["user_query"] == "what is entropy"
+
+
+@pytest.mark.asyncio
+async def test_research_attended_can_be_persisted_in_settings(mocker):
+    """R12's asymmetry from the TUI side: the MODE comes out of
+    settings.json, and a persisted mode can only ever ADD prompts."""
+    from tui.app import _cmd_research
+
+    mocker.patch("core.reasoning.authorization.candidates", return_value=[])
+    captured = {}
+    mocker.patch(
+        "core.reasoning.orchestrator.run_deep_research_pipeline",
+        side_effect=lambda **kw: (captured.update(kw), _stub_run())[1])
+
+    app = VenastineApp("ANTHROPIC", "test-model",
+                       {"research": {"approval_mode": "attended"}})
+    async with app.run_test() as pilot:
+        _cmd_research(app, "what is entropy")     # no flag
+        assert await _settle(pilot, lambda: "authorization" in captured)
+
+    assert captured["authorization"] is not None
+    assert captured["authorization"].provider is not None
+
+
+@pytest.mark.asyncio
 async def test_cancelling_the_grant_picker_cancels_the_run(mocker):
     """Dismissing with None means "I did not mean to start this", which is
     a different answer from ticking nothing. Running anyway would start a
@@ -96,6 +149,85 @@ async def test_cancelling_the_grant_picker_cancels_the_run(mocker):
             await pilot.pause()
         assert started == [], "cancelling the picker still started the run"
         assert app._busy is False
+
+
+@pytest.mark.asyncio
+async def test_attended_research_shows_the_modal_and_returns_the_answer():
+    """§25 R9 in the TUI: a research pass asking mid-run gets the same
+    PermissionScreen the chat path uses, and the worker's blocking call
+    returns what the user clicked.
+
+    Driven through ask_permission_blocking directly on a worker thread,
+    because that is the exact call an ApprovalProvider makes -- going via
+    a whole pipeline run would test the orchestrator instead.
+    """
+    import threading
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        answer = {}
+
+        def worker():
+            answer["value"] = app.ask_permission_blocking(
+                "mcp__a__gated", {"q": "x"}, "notice text")
+
+        t = threading.Thread(target=worker, daemon=True)
+        t.start()
+
+        assert await _settle(
+            pilot, lambda: isinstance(app.screen, PermissionScreen)), \
+            "the research approval modal never opened"
+        app.screen.dismiss(True)
+
+        assert await _settle(pilot, lambda: "value" in answer), \
+            "the worker never unblocked"
+        assert answer["value"] is True
+
+
+@pytest.mark.asyncio
+async def test_quitting_during_an_attended_research_prompt_releases_the_worker():
+    """The f10 invariant, fourth instance. Textual runs thread workers on
+    NON-daemon executor threads and cannot interrupt one blocked in
+    Queue.get(), so an exit that does not answer the channel leaves
+    App.run() unable to return -- a hang, not an error.
+
+    ask_permission_blocking reuses `_permission_channel` precisely so the
+    existing release path covers it; a private queue would have been a
+    fourth uncovered dismissal route.
+
+    Asserted on the REGISTRATION and on what the release path put, not on
+    the worker thread unblocking. Textual dismisses open screens during
+    shutdown, which fires the modal's own callback and answers the queue
+    anyway -- so "the thread finished" stays true even with the release
+    wiring removed, and a liveness assertion here proves nothing. Same
+    lesson as the chat-side f10 test, which asserts channel.puts == [False].
+    """
+    import threading
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        answer = {}
+
+        def worker():
+            answer["value"] = app.ask_permission_blocking(
+                "mcp__a__gated", {}, None)
+
+        t = threading.Thread(target=worker, daemon=True)
+        t.start()
+        assert await _settle(
+            pilot, lambda: isinstance(app.screen, PermissionScreen))
+
+        # THE assertion: the research prompt's channel is the one the
+        # existing release path knows about. A private queue here would
+        # leave a worker parked on a Queue.get() nothing can answer.
+        assert app._permission_channel is not None, \
+            "the research approval channel is invisible to _release_permission_channel"
+
+        app.exit()
+
+        t.join(timeout=10)
+        assert not t.is_alive(), "exit() left the worker blocked on approval"
+        assert answer["value"] is False, "an unanswered exit must deny"
 
 
 def _stub_run():

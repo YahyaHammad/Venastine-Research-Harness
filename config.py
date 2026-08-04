@@ -159,6 +159,15 @@ INERT_COMMANDS = [
 # ration ordinary work across ten passes.
 MAX_GRANTED_TOOL_CALLS = 150
 
+# ROADMAP_v2 §25 (R9). How long an attended research run waits for a human
+# to answer one approval prompt before DENYING that call and carrying on.
+#
+# Denial is the safe direction, and continuing is the useful one: walking
+# away from an attended run degrades it rather than wedging it, so nine
+# completed passes are not lost to one unanswered question. Generous by
+# default because the whole point of the mode is that someone is there.
+ATTENDED_APPROVAL_TIMEOUT_S = 600
+
 
 @dataclass
 class APICredentials:
