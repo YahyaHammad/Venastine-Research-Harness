@@ -186,3 +186,143 @@ def test_non_anthropic_uses_the_table_without_querying():
     ))
     levels = effort_levels_for_model(client, "OPENAI", "gpt-unknown")
     assert levels == config.DEFAULT_EFFORT_LEVELS
+
+
+# ---------------------------------------------------------------------------
+# ---- effort_for: validate against the model that will RECEIVE it --------
+# ---------------------------------------------------------------------------
+#
+# Nothing checked a level against its destination model. Three ways a
+# wrong one reached the wire: a persisted settings.json value trusted
+# as-is, the TUI's level inherited by an agent declaring its OWN
+# model/provider, and no revalidation after a switch. Each 400'd every
+# turn until the user intervened by hand.
+
+def _capable_client(*levels):
+    return SimpleNamespace(models=SimpleNamespace(
+        retrieve=lambda model: SimpleNamespace(
+            capabilities={"effort": {lv: {"supported": True} for lv in levels}})))
+
+
+def _failing_client(exc=RuntimeError("network down")):
+    def boom(model):
+        raise exc
+    return SimpleNamespace(models=SimpleNamespace(retrieve=boom))
+
+
+def test_effort_for_passes_through_a_supported_level():
+    client = _capable_client("low", "high")
+    assert client_module.effort_for(client, "ANTHROPIC", "m", "high") == "high"
+
+
+def test_effort_for_drops_an_unsupported_level(caplog):
+    """The r1-2 scenario: a level valid on the model the user picked it
+    on, sent to the different model an agent declares."""
+    client = _capable_client("low", "high")
+    with caplog.at_level(logging.WARNING, logger="core.client"):
+        assert client_module.effort_for(client, "ANTHROPIC", "m", "xhigh") is None
+    assert any("Dropping effort" in r.getMessage() for r in caplog.records)
+
+
+def test_effort_for_drops_everything_when_the_model_has_no_effort_control():
+    client = _capable_client()
+    assert client_module.effort_for(client, "ANTHROPIC", "m", "high") is None
+
+
+def test_effort_for_passes_none_through_untouched():
+    """None already means 'send nothing', the one universally safe value;
+    it must not become a lookup."""
+    assert client_module.effort_for(None, "ANTHROPIC", "m", None) is None
+
+
+def test_effort_for_keeps_the_level_when_the_lookup_fails(caplog):
+    """A transient network blip must not silently downgrade a deliberate
+    choice. A genuinely wrong level still fails at the provider, which is
+    the honest outcome; a silently-dropped one is not."""
+    with caplog.at_level(logging.WARNING, logger="core.client"):
+        out = client_module.effort_for(_failing_client(), "ANTHROPIC", "m", "xhigh")
+    assert out == "xhigh"
+    assert any("Could not verify effort" in r.getMessage() for r in caplog.records)
+
+
+def test_a_failed_lookup_is_not_cached(caplog):
+    """Caching a failure-derived guess made ONE transient error suppress
+    the capability query for the whole process: the picker would offer a
+    guessed level set forever, with no way back short of a restart."""
+    failing = _failing_client()
+    with caplog.at_level(logging.WARNING, logger="core.client"):
+        effort_levels_for_model(failing, "ANTHROPIC", "m")
+    assert ("ANTHROPIC", "m") not in client_module._effort_levels_cache
+
+    # The next call sees the real answer instead of the cached guess.
+    assert effort_levels_for_model(_capable_client("max"), "ANTHROPIC", "m") == ["max"]
+
+
+def test_a_successful_lookup_is_still_cached():
+    """Control: the no-cache rule must apply to failures only, or every
+    turn would re-query the Models API."""
+    calls = []
+
+    def retrieve(model):
+        calls.append(model)
+        return SimpleNamespace(capabilities={"effort": {"high": {"supported": True}}})
+
+    client = SimpleNamespace(models=SimpleNamespace(retrieve=retrieve))
+    effort_levels_for_model(client, "ANTHROPIC", "m")
+    effort_levels_for_model(client, "ANTHROPIC", "m")
+    assert len(calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# ---- The loop is the enforcement point ------------------------------------
+# ---------------------------------------------------------------------------
+
+def test_run_validates_effort_against_the_model_it_is_about_to_call(mocker):
+    """Validation lives in _run(), not at each caller, because EVERY path
+    to the wire goes through it -- CLI chat, each research pass, a TUI
+    turn, a spawned subagent. Asserted on what call_model_stream actually
+    received: a check that ran but didn't change the outgoing value would
+    pass a test that only inspected effort_for.
+
+    This is r1-2's scenario. The parent runs at 'xhigh'; an agent declares
+    its own model, which accepts only 'low'. The parent's level must not
+    ride along."""
+    from core.loop import RunAgentLoop, run_to_completion
+    from tests.conftest import make_model_response, make_stream_sequence
+
+    mocker.patch("core.loop.api_initialization",
+                 return_value=_capable_client("low"))
+    stream = mocker.patch(
+        "core.loop.call_model_stream",
+        side_effect=make_stream_sequence(make_model_response(text="done")))
+
+    memory = mocker.MagicMock()
+    memory.messages = []
+    run_to_completion(RunAgentLoop._run(
+        memory=memory, system_prompt="s", provider_name="ANTHROPIC",
+        model="agent-model", context=None, max_steps=2, effort="xhigh"))
+
+    # call_model_stream(client, provider, model, messages, prompt,
+    #                   schemas, temperature, effort)
+    assert stream.call_args[0][7] is None, \
+        "the parent's unsupported effort was sent to the agent's model"
+
+
+def test_run_keeps_a_supported_effort(mocker):
+    """Control: validation must not strip a level the model does accept."""
+    from core.loop import RunAgentLoop, run_to_completion
+    from tests.conftest import make_model_response, make_stream_sequence
+
+    mocker.patch("core.loop.api_initialization",
+                 return_value=_capable_client("low", "high"))
+    stream = mocker.patch(
+        "core.loop.call_model_stream",
+        side_effect=make_stream_sequence(make_model_response(text="done")))
+
+    memory = mocker.MagicMock()
+    memory.messages = []
+    run_to_completion(RunAgentLoop._run(
+        memory=memory, system_prompt="s", provider_name="ANTHROPIC",
+        model="m", context=None, max_steps=2, effort="high"))
+
+    assert stream.call_args[0][7] == "high"

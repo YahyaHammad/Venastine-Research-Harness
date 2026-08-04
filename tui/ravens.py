@@ -115,8 +115,9 @@ def state_for_tool(tool_name: str) -> RavenState:
 # --- Effort raven -----------------------------------------------------------
 # A separate, one-line raven whose plumage reflects the current reasoning
 # effort, so the setting is visible rather than remembered. Ordered
-# least-to-most; an unknown or unset level renders as "auto" (the provider's
-# own default, which is what effort=None sends).
+# least-to-most. An UNSET level renders as "auto" (the provider's own
+# default, which is what effort=None sends); an unknown one renders by
+# name with no bar, since its rank is exactly what we don't know.
 EFFORT_PLUMAGE = {
     "low": "▁",
     "medium": "▃",
@@ -127,8 +128,18 @@ EFFORT_PLUMAGE = {
 
 
 def effort_raven(effort: str | None) -> str:
-    """One-line effort indicator: a small raven plus a plumage bar."""
+    """One-line effort indicator: a small raven plus a plumage bar.
+
+    An unknown level keeps its NAME but gets no plumage, rather than
+    borrowing "low"'s single bar. Levels are discovered at runtime from
+    the Models API, so a provider reporting one outside this table is a
+    reachable state -- and drawing it as the least-effort setting
+    misreports the rank while the comment above promised the neutral
+    display.
+    """
     if not effort:
         return "<o)~ auto"
-    plumage = EFFORT_PLUMAGE.get(effort, "▁")
+    plumage = EFFORT_PLUMAGE.get(effort)
+    if plumage is None:
+        return f"<o)~ {effort}"
     return f"<o)~ {plumage * 3} {effort}"

@@ -331,3 +331,91 @@ async def test_exit_without_a_pending_prompt_is_harmless(_mocked_loop):
         assert app._permission_channel is None
         app.exit()
         await pilot.pause()
+
+
+# ---------------------------------------------------------------------------
+# ---- Effort: validated, and never on the UI thread (f11, f42, f46) -------
+# ---------------------------------------------------------------------------
+
+def test_unknown_effort_level_renders_by_name_without_a_bar():
+    """Levels are discovered at runtime from the Models API, so one
+    outside the hardcoded table is reachable. Drawing it with "low"'s
+    single bar misreported its rank as the least-effort setting, while
+    the module comment promised the neutral display."""
+    from tui import ravens
+
+    assert ravens.effort_raven(None) == "<o)~ auto"
+    assert "▁▁▁" in ravens.effort_raven("low")
+    unknown = ravens.effort_raven("minimal")
+    assert "minimal" in unknown
+    assert "▁" not in unknown
+
+
+@pytest.mark.asyncio
+async def test_persisted_effort_is_validated_at_mount(mocker):
+    """A stale or mistyped tui.effort was trusted as-is and sent on every
+    turn -- unlike the sibling tui.theme, which gets themes.resolve()'s
+    fallback in the same constructor."""
+    mocker.patch("tui.app.api_initialization", return_value=object())
+    mocker.patch("tui.app.effort_levels_for_model", return_value=["low", "high"])
+
+    app = VenastineApp("ANTHROPIC", "test-model", {"tui": {"effort": "xhigh"}})
+    async with app.run_test() as pilot:
+        assert await _settle(pilot, lambda: app.effort is None), \
+            "an unusable persisted effort was kept"
+
+
+@pytest.mark.asyncio
+async def test_valid_persisted_effort_survives_validation(mocker):
+    """Control: the check must not clear a level the model does accept."""
+    mocker.patch("tui.app.api_initialization", return_value=object())
+    mocker.patch("tui.app.effort_levels_for_model", return_value=["low", "high"])
+
+    app = VenastineApp("ANTHROPIC", "test-model", {"tui": {"effort": "high"}})
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        assert app.effort == "high"
+
+
+@pytest.mark.asyncio
+async def test_effort_lookup_does_not_block_the_ui_thread(mocker):
+    """/effort made a synchronous Models API call (SDK default timeout:
+    600s) on the UI thread, freezing the whole app until it returned.
+    Asserted by holding the lookup open and checking the app still
+    responds -- a test that only checked the final level would pass
+    against the frozen version."""
+    import threading
+    import time
+
+    release = threading.Event()
+
+    def slow_lookup(*a, **kw):
+        release.wait(timeout=10)
+        return ["low", "high"]
+
+    mocker.patch("tui.app.api_initialization", return_value=object())
+    mocker.patch("tui.app.effort_levels_for_model", side_effect=slow_lookup)
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        app.query_one("#prompt").value = "/effort high"
+
+        # The measurement IS the assertion. Run inline, the command still
+        # completes and still sets the level -- it just does it after the
+        # UI has been frozen for the whole call, so only elapsed time
+        # distinguishes the two implementations.
+        started = time.monotonic()
+        await pilot.press("enter")
+        elapsed = time.monotonic() - started
+        assert elapsed < 3.0, \
+            f"/effort blocked the UI thread for {elapsed:.1f}s"
+
+        # And the UI is genuinely live while the lookup is outstanding.
+        app.query_one("#prompt").value = "still alive"
+        await pilot.pause()
+        assert app.query_one("#prompt").value == "still alive"
+
+        release.set()
+        assert await _settle(pilot, lambda: app.effort == "high"), \
+            "the effort change never landed"

@@ -317,6 +317,45 @@ def _sampling_kwargs(provider_name: str, model: str, temperature) -> dict:
     return {"temperature": temperature}
 
 
+def effort_for(client, provider_name: str, model: str,
+               requested: Optional[str]) -> Optional[str]:
+    """The effort level to actually SEND to (provider_name, model), or None.
+
+    One validator for every send site, because nothing else checked a
+    level against the model that would receive it. Three ways a wrong one
+    used to reach the wire, all of them 400ing every turn until the user
+    intervened by hand:
+
+      * a persisted settings.json `tui.effort` was trusted as-is;
+      * the TUI's current level was inherited by an agent that declares
+        its OWN model/provider, so a level validated for one model was
+        sent to a different one;
+      * nothing revalidated after a /model or agent switch.
+
+    `effort=None` sends nothing on every provider and is the one
+    universally safe value, so dropping is always available as an answer.
+
+    On a FAILED lookup the requested level is passed through unverified
+    with a warning rather than dropped: a transient network blip must not
+    silently downgrade a deliberate choice. A genuinely wrong level still
+    fails at the provider, which is the honest outcome.
+    """
+    if not requested:
+        return None
+    levels, authoritative = _effort_levels(client, provider_name, model)
+    if requested in levels:
+        return requested
+    if not authoritative:
+        logger.warning(
+            "Could not verify effort %r for %s/%s; sending it unverified.",
+            requested, provider_name, model)
+        return requested
+    logger.warning(
+        "Dropping effort %r: %s/%s accepts %s. Sending no effort parameter.",
+        requested, provider_name, model, levels or "no effort control")
+    return None
+
+
 def effort_levels_for_model(client, provider_name: str, model: str) -> list[str]:
     """Reasoning-effort levels this model accepts, most-to-least capable last.
 
@@ -334,17 +373,30 @@ def effort_levels_for_model(client, provider_name: str, model: str) -> list[str]
     Returns [] when the model supports no effort control, which callers must
     treat as "offer no picker and send no effort parameter".
     """
+    return _effort_levels(client, provider_name, model)[0]
+
+
+def _effort_levels(client, provider_name: str, model: str) -> tuple:
+    """(levels, authoritative).
+
+    `authoritative` is False when the answer came from the static table
+    after the capability QUERY failed, as opposed to because no query was
+    ever possible for that provider. Only effort_for() needs the
+    distinction -- an unverified answer must not be used to drop a level
+    the user deliberately chose.
+    """
     key = (provider_name, model)
     if key in _effort_levels_cache:
-        return _effort_levels_cache[key]
+        return _effort_levels_cache[key], True
 
     levels: Optional[list[str]] = None
+    query_failed = False
     if provider_name == "GOOGLE" and not _google_supports_thinking_budget():
         # Reporting no levels is the honest answer, not a silent [] : on the
         # pinned SDK there is no field to put a budget in, so a picker
         # offering levels would be offering something unsendable.
         _effort_levels_cache[key] = []
-        return []
+        return [], True
     if provider_name == "ANTHROPIC":
         try:
             capabilities = client.models.retrieve(model).capabilities
@@ -357,6 +409,7 @@ def effort_levels_for_model(client, provider_name: str, model: str) -> list[str]
         except Exception as e:
             # Network failure, an SDK too old to expose capabilities, or a
             # model the endpoint doesn't know. Fall through to the table.
+            query_failed = True
             logger.warning(
                 "Could not read effort capabilities for %r from the Anthropic "
                 "Models API (%s); falling back to the static table.", model, e,
@@ -372,8 +425,16 @@ def effort_levels_for_model(client, provider_name: str, model: str) -> list[str]
             )
             levels = list(config.DEFAULT_EFFORT_LEVELS)
 
+    if query_failed:
+        # Do NOT cache a failure-derived guess. Caching it made one
+        # transient error permanently suppress the query that is this
+        # function's entire reason to exist: for the whole process life
+        # the picker would offer a guessed level set, and every selection
+        # from it could 400 with no path back short of a restart.
+        return levels, False
+
     _effort_levels_cache[key] = levels
-    return levels
+    return levels, True
 
 
 _google_budget_support: Optional[bool] = None

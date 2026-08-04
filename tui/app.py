@@ -81,6 +81,28 @@ class TurnFinished(Message):
         super().__init__()
 
 
+class EffortLevelsReady(Message):
+    """The effort-level lookup finished, off the UI thread.
+
+    For ANTHROPIC this is an HTTP call to the Models API carrying the
+    SDK's default 600s timeout. Running it inline froze the entire TUI --
+    no redraw, no input handling -- until it returned, and behind a
+    black-holing proxy for the full timeout: exactly the unresponsiveness
+    _cmd_research goes to worker lengths to avoid.
+
+    `validate_only` distinguishes the startup check (is the level we
+    restored from settings.json actually accepted?) from a user-issued
+    /effort, because the two report differently.
+    """
+
+    def __init__(self, levels, error, requested, validate_only=False):
+        self.levels = levels
+        self.error = error
+        self.requested = requested
+        self.validate_only = validate_only
+        super().__init__()
+
+
 class OneShotFinished(Message):
     """A one-shot turn (/grill-me) ran to completion in the CURRENT
     thread via continue_conversation. Carries the final text, or the
@@ -146,6 +168,85 @@ class VenastineApp(App):
         )
         self._transcript.write_system("Type /help for commands.")
         self.query_one("#prompt", Input).focus()
+        if self.effort:
+            # A persisted tui.effort was trusted as-is and sent on every
+            # turn, unlike the sibling tui.theme three lines up which gets
+            # themes.resolve()'s fallback. A stale or mistyped level meant
+            # every turn failed with a provider 400 until the user
+            # happened to run /effort auto. Verified off the UI thread,
+            # so a slow or unreachable Models API delays the check, not
+            # the app.
+            self.start_effort_lookup(None, validate_only=True)
+
+    def start_effort_lookup(self, requested, validate_only=False) -> None:
+        """Fetch this model's accepted effort levels in a worker."""
+        def work() -> None:
+            try:
+                client = api_initialization(self.provider_name)
+                levels = effort_levels_for_model(
+                    client, self.provider_name, self.model)
+                self.post_message(
+                    EffortLevelsReady(levels, None, requested, validate_only))
+            except Exception as e:  # noqa: BLE001 - reported to the user
+                self.post_message(
+                    EffortLevelsReady(None, e, requested, validate_only))
+
+        self.run_worker(work, thread=True, exit_on_error=False,
+                        name="effort-levels")
+
+    def on_effort_levels_ready(self, message: EffortLevelsReady) -> None:
+        if message.validate_only:
+            self._apply_effort_validation(message)
+            return
+        self._apply_effort_command(message)
+
+    def _apply_effort_validation(self, message: EffortLevelsReady) -> None:
+        if message.error is not None:
+            # Keep the level rather than silently downgrading a deliberate
+            # choice on a transient failure; a genuinely wrong one still
+            # fails at the provider, which is the honest outcome.
+            self._transcript.write_system(
+                f"Could not verify effort {self.effort!r} ({message.error}); "
+                "keeping it.")
+            return
+        if self.effort in message.levels:
+            return
+        if message.levels:
+            detail = f"{self.model} accepts {', '.join(message.levels)}"
+        else:
+            detail = f"{self.model} exposes no reasoning-effort control"
+        self._transcript.write_error(
+            f"Persisted effort {self.effort!r} is not usable: {detail}. "
+            "Falling back to auto.")
+        self.effort = None
+        self.query_one("#effort-raven", EffortRaven).effort = None
+
+    def _apply_effort_command(self, message: EffortLevelsReady) -> None:
+        if message.error is not None:
+            self._transcript.write_error(
+                f"Could not read effort levels: {message.error}")
+            return
+        levels, args = message.levels, message.requested
+        if not levels:
+            self._transcript.write_system(
+                f"{self.model} exposes no reasoning-effort control.")
+            return
+        if not args:
+            self._transcript.write_system(
+                f"Effort: {self.effort or 'auto'}. "
+                f"Available: {', '.join(levels)} (or 'auto').")
+            return
+        if args == "auto":
+            self.effort = None
+        elif args in levels:
+            self.effort = args
+        else:
+            self._transcript.write_error(
+                f"{self.model} does not support effort {args!r}. "
+                f"Available: {', '.join(levels)}.")
+            return
+        self.query_one("#effort-raven", EffortRaven).effort = self.effort
+        self._transcript.write_system(f"Effort set to {self.effort or 'auto'}.")
 
     def refresh_goal_banner(self) -> None:
         goal = self.memory.extra.get("goal") if self.memory else None
@@ -441,35 +542,11 @@ def _cmd_effort(app: VenastineApp, args: str) -> None:
     The level set comes from effort_levels_for_model(), which QUERIES the
     Anthropic Models API and falls back to a static table elsewhere -- so a
     newly released Anthropic model needs no entry anywhere in this repo.
+    The query runs in a worker (see start_effort_lookup); the answer comes
+    back as an EffortLevelsReady message, so the UI stays live while a
+    slow or unreachable Models API is waited on.
     """
-    try:
-        client = api_initialization(app.provider_name)
-        levels = effort_levels_for_model(client, app.provider_name, app.model)
-    except Exception as e:
-        app._transcript.write_error(f"Could not read effort levels: {e}")
-        return
-
-    if not levels:
-        app._transcript.write_system(
-            f"{app.model} exposes no reasoning-effort control."
-        )
-        return
-    if not args:
-        app._transcript.write_system(
-            f"Effort: {app.effort or 'auto'}. Available: {', '.join(levels)} (or 'auto')."
-        )
-        return
-    if args == "auto":
-        app.effort = None
-    elif args in levels:
-        app.effort = args
-    else:
-        app._transcript.write_error(
-            f"{app.model} does not support effort {args!r}. Available: {', '.join(levels)}."
-        )
-        return
-    app.query_one("#effort-raven", EffortRaven).effort = app.effort
-    app._transcript.write_system(f"Effort set to {app.effort or 'auto'}.")
+    app.start_effort_lookup(args)
 
 
 def _cmd_research(app: VenastineApp, args: str) -> None:

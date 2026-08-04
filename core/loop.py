@@ -33,7 +33,9 @@ from uuid import UUID
 
 import config
 import prompts.system_prompts as system_prompts
-from core.client import api_initialization, call_model_stream, ModelResponse
+from core.client import (
+    api_initialization, call_model_stream, effort_for, ModelResponse,
+)
 from core.events import LoopEvent
 from core.memory import ConversationMemory
 from tools.context import ToolContext, RunInfo
@@ -111,6 +113,14 @@ class RunAgentLoop:
         dispatch() with no approval_callback.
         """
         client = api_initialization(provider_name)
+        # Validate the level against the model that will RECEIVE it, here
+        # rather than at each caller. Every path -- CLI chat, each research
+        # pass, a TUI turn, a spawned subagent -- reaches the wire through
+        # this function, so this is the one place that cannot be bypassed
+        # by a new caller forgetting to check. It also makes the agent case
+        # correct by construction: an agent declaring its own model is
+        # validated against THAT model, not the one the parent was using.
+        effort = effort_for(client, provider_name, model, effort)
         # §18 headless callability rule (user-widened from approval-only):
         # with no permission_channel, a tool that needs approval is
         # uncallable in this configuration, so it is not advertised --
