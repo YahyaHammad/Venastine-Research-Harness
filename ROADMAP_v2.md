@@ -910,7 +910,7 @@ Implemented; full decision record in DEVLOG §18, file contract in ARCHITECTURE.
 
 ---
 
-## 19. Skill system — skill `.md` format + manager + activation + default skills
+## 19. Skill system — skill `.md` format + manager + activation + default skills — BUILT
 
 **Unchanged from Rev. 1 in overall shape.** One resolved gap: Rev. 1 described a skill's `additional_tools` as merging into scope via "`ToolContext.allowed_tools` expansion **or** adding to the scoped registry" — presented as either/or without picking one, and the two have different semantics. Resolved by the same "stricter wins" principle as §15: **a skill can never grant a tool an active agent's `allowed_tools` has excluded.** The composition across however many layers happen to be active (global policy, the active agent, every currently-active skill) is: intersect every layer's allowed set; a tool is available only if every layer that expresses an opinion agrees. A skill's `additional_tools` only takes effect for tools the current agent (if any) hasn't already restricted away — it narrows what's *offered*, never widens past what's already been restricted.
 
@@ -918,10 +918,32 @@ Implemented; full decision record in DEVLOG §18, file contract in ARCHITECTURE.
 
 Cybersecurity research, cryptography verification, proof writing, literature review — shipped as `skills/builtin/*.md`.
 
+### Decisions record (K1–K7), added at build time
+
+Two things forced decisions rather than transcription. **`additional_tools` could not do what its name said**, and **category folders** were requested during planning.
+
+| # | Decision |
+|---|---|
+| **K1** | **Activation pins the skill's body into the system prompt** for every subsequent turn. `load_skill` already returns any body on request, so activation cannot be about *reading* one — a tool result is a single message that scrolls away and is subject to §21 compaction, while an activated skill governs the session. This is what gives `/skill` a purpose distinct from the tool. |
+| **K2** | **`additional_tools` is a precondition, checked at activation, that does not block it.** See below. |
+| **K3** | **`SkillManager` holds no state**; `activate`/`deactivate` take and return the active list, and the shell owns it. §25 demonstrated what "TUI-only" costs when a capability turns out to be needed elsewhere. |
+| **K4** | **Recursive discovery for skills; category is metadata, not identity.** `skills/builtin/<category>/<skill>.md`, category derived from the folder. Names stay global, so `load_skill`, `/skill` and D18 are untouched and flat layouts keep working. Agents stay flat. |
+| **K5** | **Activation is session-scoped and unpersisted**, matching `/agent` rather than `/goal`. |
+| **K6** | **Active bodies are appended OUTSIDE `with_catalogs()`**, which feeds `pass_prompt()` — pinning inside it would inject a skill activated in a TUI chat session into all ten research passes. |
+| **K7** | **Schemas need no mid-loop refresh.** Settles the Rev. 3 verification item below. |
+
+### Why `additional_tools` was respecified
+
+Rev. 1 described it as merging into scope; Rev. 4 resolved the composition as *intersection* ("stricter wins"). Both readings assume the field can add something. It cannot: `ToolContext.allowed_tools` is a **whitelist that narrows** — `None` means no opinion, a set restricts *to* that set. With no active agent everything globally allowed is already available; with one, AC1 forbids widening; a globally disabled tool is unreachable by D14 unconditionally. There is no configuration in which the field widens anything, so as a grant it is **inert in every case**.
+
+It is therefore a **declaration of need**: `SkillManager.missing_tools()` checks each declared tool against the live `ToolContext` via `registry.is_allowed` — the same policy function that would refuse the call later — and `/skill` reports what is unavailable. Activation still succeeds, because a skill is often useful without an optional tool and refusing would make a restrictive agent silently un-pairable with half the catalog.
+
 ### Acceptance criteria
 
-1. An active agent restricted to `{read}` plus an active skill wanting to add `shell` does NOT result in `shell` being available.
-2. Multiple simultaneously-active skills each adding different tools compose correctly (union of skill additions, still capped by the agent's restriction if one is active).
+1. An active agent restricted to `{read}` plus an active skill wanting to add `shell` does NOT result in `shell` being available. ✓ — and the skill says so at activation rather than the model discovering it mid-turn.
+2. Multiple simultaneously-active skills each adding different tools compose correctly (union of skill additions, still capped by the agent's restriction if one is active). ✓ **as a union of REQUIREMENTS** — this criterion's wording predates K2, and with additions impossible the thing that composes is what the skills need, each still capped by the agent's restriction.
+3. *(added at build)* A skill activated in a chat session never appears in a research pass's system prompt (K6).
+4. *(added at build)* Each shipped default declares only tools that are available under default config — a builtin reporting a missing tool on every activation would read as the feature being broken.
 
 ---
 
@@ -1220,7 +1242,9 @@ These came from the tool-assisted review pass, assessed as real but either alrea
 - MCP server connections during `connect_all()` could run in parallel rather than sequentially — a performance refinement once §17 exists to optimize. **(Rev. 3)** Note this interacts with the `AsyncExitStack` design: parallel connection is `asyncio.gather` over the per-server enters, all still on the single MCP loop, so it stays compatible.
 - Test infrastructure for the streaming (§13), async bridge (§17), and TUI (§16) pieces needs its own planning pass once those are being built — flagged as real work, not deferred as unimportant. **(Rev. 3)** Two constraints on that pass are now known: §13's tests must assert against persisted `MessageLog` state and against `total_tokens_used`, not only against returned `ModelResponse` objects (D20, D21 — both failure modes are invisible to return-value assertions); and if §17 ends up on the SDK's v2 line, its in-memory transport removes the need to spawn real subprocesses for bridge tests entirely.
 - `run_to_completion()`'s exact placement was open in Rev. 1 (S16) — resolved above (`core/loop.py`).
-- **(Rev. 3)** `registry.schemas(allowed_tools)` is computed once at the top of `_run()` and never refreshed. Fine today, but §15 introduces runtime `register()`/`unregister()` and §19 allows activating a skill mid-session — so a long-running loop can hold a stale tool list. Not urgent (activation happens between turns in the current design), but decide deliberately whether schemas refresh per iteration when §19 lands, rather than discovering it as a bug.
+- **(Rev. 3, SETTLED at the §19 build as K7 — no refresh)** `registry.schemas(allowed_tools)` is computed once at the top of `_run()` and never refreshed. Activation happens *between turns* via a slash command, and `_run()` is called once per turn, so it recomputes schemas before every turn that could be affected — a turn can never hold a tool list that went stale during it. Two things would reopen this: a tool that activates a skill (making activation mid-turn), or MCP servers connecting after startup. Neither exists; if either is built, revisit here rather than rediscovering it as a bug.
+
+  Note the §19 answer does not depend on this: `additional_tools` is a precondition, not a grant (K2), so activating a skill does not change the tool set at all. The refresh question is only about runtime `register()`/`unregister()`.
 
 ---
 

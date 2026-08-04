@@ -46,7 +46,7 @@ Venastine Research Harness/
 ├── pytest.ini                      # testpaths=tests, --strict-markers
 ├── DEVLOG.md                       # implementation notes for built ROADMAP sections -- see §0
 │
-├── tests/                          # 587 tests, all offline, ~24s (first run ~7s for matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
+├── tests/                          # 634 tests, all offline, ~25s (first run ~7s for matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
 │   ├── conftest.py                 # fixtures: make_model_response, make_stream_from_response, make_stream_sequence, FakeStorage, ...
 │   ├── BREAKING_CHANGES.md         # what-breaks-it / symptom / fix per area
 │   ├── test_cli.py                 # 20 tests -- ROADMAP §1 thread_id passthrough + UUID validation + §14 parser defaults/resolution/trust flow
@@ -59,7 +59,7 @@ Venastine Research Harness/
 │   ├── test_loop_stop_conditions.py# 3 tests (ROADMAP verbatim)
 │   ├── test_streaming_loop.py      # 9 tests -- ROADMAP §13 generator event ordering, exception propagation, D20 persistence, permission_channel
 │   ├── test_workspace_trust.py     # 16 tests -- ROADMAP_v2 §14 AC1/AC2 + hash-control properties (path-in-hash, determinism)
-│   ├── test_config_loader.py       # 41 tests -- ROADMAP_v2 §14 frontmatter AC4, tier precedence D8/D18, settings merge, CONTEXT opt-in AC5, catalog
+│   ├── test_config_loader.py       # 54 tests -- ROADMAP_v2 §14 frontmatter AC4, tier precedence D8/D18, settings merge, CONTEXT opt-in AC5, catalog
 │   ├── test_load_skill.py          # 7 tests -- load_skill view-only retrieval, D24 permission declaration, catalog prompt injection
 │   ├── test_orchestrator.py        # 11 tests -- full pipeline mocked + JSON-retry + §5 failure/success/acceptance
 │   ├── test_registry_permissions.py# 11 tests -- allow/deny/approval
@@ -82,7 +82,8 @@ Venastine Research Harness/
 │   ├── test_grants.py              # 19 tests -- ROADMAP_v2 §25 R2/R6: grantability, the loop enforcing it, GrantBudget, the audit list
 │   ├── test_attended.py            # 12 tests -- ROADMAP_v2 §25 R9-R11: ApprovalProvider consulted, headless lifted, run-scope declined
 │   ├── test_research_authorization.py # 41 tests -- ROADMAP_v2 §25 R1/R3/R4/R12: candidates, grant-spec parsing, both shells' flags, settings precedence
-│   └── test_granted_calls_artifact.py # 5 tests -- ROADMAP_v2 §25 audit artifact + R7 provenance framing in the universal preamble
+│   ├── test_granted_calls_artifact.py # 5 tests -- ROADMAP_v2 §25 audit artifact + R7 provenance framing in the universal preamble
+│   └── test_skills.py              # 34 tests -- ROADMAP_v2 §19 K1-K6: stateless manager, body pinning, precondition check, /skill, the pass-prompt boundary
 │
 ├── core/
 │   ├── client.py                  # ONE model call, normalized across providers; provider-specific wire formats live ONLY here. §13 adds call_model_stream() (3 streaming impls) + collect_response() + StreamToken
@@ -136,6 +137,15 @@ Venastine Research Harness/
 │   ├── tui_commands.py            # /agent, /goal, /grill-me registered into §16's slash registry (TUI-only commands)
 │   └── builtin/
 │       └── grill-me.md            # built-in agent: surfaces what still needs a decision in the current thread
+│
+├── skills/                        # ROADMAP_v2 §19: skill system. Namespace package, mirroring agents/
+│   ├── manager.py                 # SkillManager -- HOLDS NO STATE (K3): activate/deactivate take and return the active list; missing_tools (K2); prompt_fragment (K1)
+│   ├── tui_commands.py            # /skill registered into §16's slash registry
+│   └── builtin/                   # D10 defaults, under CATEGORY FOLDERS (K4) -- category is derived from the folder, never authored
+│       ├── security/cybersecurity-research.md
+│       ├── crypto/cryptography-verification.md
+│       ├── math/proof-writing.md
+│       └── research/literature-review.md
 │
 ├── tui/                           # ROADMAP_v2 §16: the Textual shell. Hosts capabilities; owns none (D12 keeps the CLI first-class)
 │   ├── app.py                     # the App -- worker, LoopEvent routing, slash dispatch, permission bridge, both ravens; §18 active-agent state + goal banner
@@ -309,7 +319,7 @@ Covered in full in §7 below. The short version of the file boundary: `base.py` 
 
 **`ToolSpec.available_check` (§15):** an optional `Callable[[], bool]` meaning "do I have anything to act on right now?", consulted by `schemas()` only. Distinct from permissions — the tool is allowed, it just has nothing to do yet (`load_skill` with an empty skill catalog). `dispatch()` deliberately ignores it: a tool declaring itself unavailable is expected to return a clean error if called anyway.
 
-**`registry.schemas(context)` advertises only what is actually callable** (§15) — filtered by `is_tool_allowed(name, context)` and by `available_check`. Advertising an uncallable tool is not harmless: the model keeps choosing it and burning a turn per attempt, with the only signal a denial string buried in a tool result. That is exactly what the `fetch_url` defect did for its entire life. Under default config this is 11 of 16 registered tools (`read`/`write`/`edit`/`shell` are permission `False`; `load_skill` has no catalog until skills are discovered). `spawn_subagent` is advertised but approval-gated (§18 sign-off), so `schemas(callable_only=True)` drops it on headless runs.
+**`registry.schemas(context)` advertises only what is actually callable** (§15) — filtered by `is_tool_allowed(name, context)` and by `available_check`. Advertising an uncallable tool is not harmless: the model keeps choosing it and burning a turn per attempt, with the only signal a denial string buried in a tool result. That is exactly what the `fetch_url` defect did for its entire life. Under default config this is 12 of 16 registered tools (`read`/`write`/`edit`/`shell` are permission `False`). It was 11 before §19: `load_skill`'s `available_check` hid it while no skills existed, and §19 ships four builtins, so it is now advertised for the first time — which is also the first time the D10 defaults make `load_skill`'s progressive disclosure do anything. `spawn_subagent` is advertised but approval-gated (§18 sign-off), so `schemas(callable_only=True)` drops it on headless runs.
 
 **`register()` / `unregister()` (D15):** registration works at runtime, not just import time, for MCP (§17). `unregister()` is idempotent because disconnect handling can run more than once for the same server. This is why `dispatch()`'s unknown-tool `ValueError` guard matters more since §15, not less — a stale tool name is now a reachable state rather than a programmer error.
 
@@ -351,7 +361,7 @@ Covered in full in §7 below. The short version of the file boundary: `base.py` 
   - `provider_factory` / `client_for_provider` — return a mock-`api_initialization`-compatible tuple for translation tests.
   - `clear_client_cache` (autouse) — resets `api_initialization`'s cached clients before each test.
 - **`tests/BREAKING_CHANGES.md`** — per-file tables documenting what breaks each test when production code changes, the symptom, and the fix. Created because `test_orchestrator.py` was identified as the suite's most fragile mock — its mock dict is keyed by pass_id strings that ROADMAP §3 and §10 will modify.
-- **35 test files** (6 per ROADMAP §4 + 2 from §4's own additions: `test_memory_write_through.py`, `test_loop_tool_dispatch.py`; + 2 from §3/§5: `test_json_retry.py`, `test_pipeline_storage.py`; + 2 from §1: `test_cli.py`, `test_e2e.py`; + 1 from §12: `test_output_writer.py`; + 1 from audit: `test_logging_setup.py`; + 1 from §6: `test_file_ops.py`; + 1 from §7: `test_shell.py`; + 1 from §8: `test_policy_enforcement.py`; + 2 from §13: `test_client_streaming.py`, `test_streaming_loop.py`; + 3 from ROADMAP_v2 §14: `test_workspace_trust.py`, `test_config_loader.py`, `test_load_skill.py`; + 1 from §15: `test_permission_context.py`; + 1 from §11: `test_critic_routing.py`; + 1 from §16: `test_client_effort.py`; + 1 from §10's fix: `test_ensemble_guard.py`; + 3 from §17: `test_mcp_client.py`, `test_mcp_config.py`, `test_mcp_integration.py`; + 1 from §16: `test_tui.py`; + 1 from §18: `test_agents.py`; + 4 from §25: `test_grants.py`, `test_attended.py`, `test_research_authorization.py`, `test_granted_calls_artifact.py`).
+- **36 test files** (6 per ROADMAP §4 + 2 from §4's own additions: `test_memory_write_through.py`, `test_loop_tool_dispatch.py`; + 2 from §3/§5: `test_json_retry.py`, `test_pipeline_storage.py`; + 2 from §1: `test_cli.py`, `test_e2e.py`; + 1 from §12: `test_output_writer.py`; + 1 from audit: `test_logging_setup.py`; + 1 from §6: `test_file_ops.py`; + 1 from §7: `test_shell.py`; + 1 from §8: `test_policy_enforcement.py`; + 2 from §13: `test_client_streaming.py`, `test_streaming_loop.py`; + 3 from ROADMAP_v2 §14: `test_workspace_trust.py`, `test_config_loader.py`, `test_load_skill.py`; + 1 from §15: `test_permission_context.py`; + 1 from §11: `test_critic_routing.py`; + 1 from §16: `test_client_effort.py`; + 1 from §10's fix: `test_ensemble_guard.py`; + 3 from §17: `test_mcp_client.py`, `test_mcp_config.py`, `test_mcp_integration.py`; + 1 from §16: `test_tui.py`; + 1 from §18: `test_agents.py`; + 4 from §25: `test_grants.py`, `test_attended.py`, `test_research_authorization.py`, `test_granted_calls_artifact.py`; + 1 from §19: `test_skills.py`).
 
 **What belongs here:** tests that run offline (~24s; first run ~30s for the matplotlib font cache), with zero network access and zero real API keys. Stubs in root `conftest.py` catch import-time module resolution; fixtures in `tests/conftest.py` provide `ModelResponse` construction and storage mocking; individual test files cover production code's behavior.
 
@@ -379,7 +389,9 @@ Covered in full in §7 below. The short version of the file boundary: `base.py` 
 
 **Does NOT belong here:** skill activation semantics (`additional_tools`, slash commands — §19), agent execution (§18), `mcp.json` loading (§17), compaction consumption (§21), and the trust-prompt UX — `main.py` owns prompting (interactive y/N on a TTY showing `describe_project_content()` output, `--trust-project` for scripts/CI, notice-and-skip on non-TTY); `workspace_trust.py` owns only the store.
 
-**Progressive disclosure (user decision, §14 build):** system prompts list skills as name + one-line description ONLY; full bodies enter context exclusively as a `load_skill` tool result (view-only — activation stays in §19). Assembly lives in ONE place, `prompts/system_prompts.py`'s `with_skill_catalog()` / `pass_prompt()`, used by the chat loop, every research pass, and the §3 JSON-retry path, so the catalog cannot diverge between an attempt and its retry. `load_skill` is a normal registered tool with declared `ToolPermissions`/`ToolApprovals` fields (D24).
+**Progressive disclosure (user decision, §14 build):** system prompts list skills as name + one-line description ONLY; full bodies enter context via a `load_skill` tool result, or — since §19 — by being *activated*. Assembly lives in ONE place, `prompts/system_prompts.py`'s `with_skill_catalog()` / `pass_prompt()`, used by the chat loop, every research pass, and the §3 JSON-retry path, so the catalog cannot diverge between an attempt and its retry. `load_skill` is a normal registered tool with declared `ToolPermissions`/`ToolApprovals` fields (D24). The catalog is grouped by category (§19 K4) and marks active skills, so it never invites `load_skill` for a body already pinned into the same prompt.
+
+**§19 K6 — active skill bodies are appended OUTSIDE `with_catalogs()`.** That function feeds `pass_prompt()`, so anything added inside it lands in all ten research passes; a skill activated in a TUI chat session has no business governing a pipeline run started separately. `with_catalogs(base, active_skills)` passes the active list only as far as the catalog, where it MARKS entries. The bodies themselves are pinned by the shell, beside its `with_goal()` call, via `skills.manager.prompt_fragment()`. This is the one cross-shell leak the design can have, and `test_skills.py` drives real pass prompts to assert it does not.
 
 **Load-bearing invariants:** untrusted project content is ABSENT, not loaded-but-disabled (no partial trust); the trust store path and user config dir resolve at call time, not import time (tests redirect them via env/monkeypatch); provider/model resolution is CLI > settings.json > `config.py` in `main.resolve_runtime_defaults()`, which is only possible because the argparse defaults are `None` — an argparse-filled default would be indistinguishable from an explicit choice and would silently always beat settings.json.
 

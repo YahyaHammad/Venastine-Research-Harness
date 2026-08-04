@@ -16,7 +16,7 @@ python main.py --trust-project                    # grant D17 workspace trust no
 python main.py --mode research --grant "q"        # §25: pick gated tools to authorise for this run
 python main.py --mode research --attended "q"     # §25: approve every gated call as it happens
 
-pytest                                            # 587 tests, offline, ~24s (first run ~30s: matplotlib font cache)
+pytest                                            # 634 tests, offline, ~25s (first run ~30s: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -34,7 +34,7 @@ MCP servers are a *third* config file again — `mcp.json`, user-level or `.vena
 Read these before changing anything non-trivial — they carry design decisions that are locked, not defaults to re-derive.
 
 - **ARCHITECTURE.md** — what's built, file-by-file contracts ("what belongs here / what does NOT"), known gotchas (§11).
-- **ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **ROADMAP_v2.md** (§13–§25; §13–§18 and §25 built) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review and R1–R12 from §25). Section and D-numbers are stable and cross-referenced everywhere.
+- **ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **ROADMAP_v2.md** (§13–§25; §13–§19 and §25 built) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R12 from §25 and K1–K7 from §19). Section and D-numbers are stable and cross-referenced everywhere.
 - **DEVLOG.md** — per-section implementation notes: what was followed verbatim, what was deviated from (every deviation was an explicit user decision — do not silently override).
 - **tests/BREAKING_CHANGES.md** — what breaks each test when production code changes, the symptom, and the fix.
 - **QWEN.md** — a sibling agent-context file. Stale (it predates §13–§16 and disagrees with itself on test counts); prefer ARCHITECTURE.md and the code.
@@ -79,6 +79,16 @@ Three stop conditions, all in `_run()`: no tool calls (`complete`), `max_steps` 
 ### The TUI (`tui/`, §16)
 
 A **shell**, not a feature home. D12 makes the CLI a permanent fallback, so anything implemented in `tui/` is invisible to the CLI *and* the research pipeline — which is why the question tool, todo list, goal mode, `/init`, session summaries and cross-thread referencing are all specified in §18/§21/§23/§24 instead. `tui/commands.py` is a registry other sections register into.
+
+§19 follows the same split: `skills/manager.py` holds **no session state** (K3), so the TUI owning `active_skills` is a call-site fact rather than a design one. §25 is the cautionary tale — the pipeline could not reach a whole capability, and undoing that was a section of work.
+
+### Skills (`skills/`, §19)
+
+- **Activation pins the body into the system prompt** (K1). `load_skill` already returns any body on request, so activation is not about *reading* one — a tool result scrolls away and is subject to §21 compaction; an activated skill governs the session.
+- **`additional_tools` is a declaration of need, never a grant** (K2). It cannot be a grant: `allowed_tools` is a whitelist that narrows and D14 forbids widening, so there is no configuration in which it adds anything. `SkillManager.missing_tools()` reports, and activation proceeds anyway.
+- **Category folders; category is metadata, not identity** (K4). `_discover` recurses for skills and stays flat for agents. The name stays global, so `load_skill`, `/skill` and D18's collision rule are untouched by where a file sits — and two same-named skills in different categories still collide.
+- **Active bodies are appended outside `with_catalogs()`** (K6) — see the progressive-disclosure note in ARCHITECTURE §4. This is the one cross-shell leak the design can have.
+- **Schemas need no mid-loop refresh** (K7, settling ROADMAP_v2's Rev. 3 verification item). Activation happens between turns, and `_run()` recomputes `registry.schemas()` at the top of every call.
 
 Two things in `tui/app.py` are load-bearing and easy to break silently:
 - **`run_worker(..., exit_on_error=False)` + `on_worker_state_changed`.** Textual's default tears the whole app down on a transient worker exception.

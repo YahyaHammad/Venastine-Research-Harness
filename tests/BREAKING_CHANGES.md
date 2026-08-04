@@ -216,7 +216,10 @@ changed, and one behavioural default changed with them.
 
 **Behaviour:** `schemas()` now returns only tools that pass
 `is_tool_allowed(name, context)` and any `ToolSpec.available_check`. Under
-default config that is 11 of 16 registered tools.
+default config that is **12 of 16** registered tools — `read`/`write`/
+`edit`/`shell` are permission `False`. It was 11 until §19: `load_skill`
+has an `available_check` that hid it while no skills existed, and §19
+shipped four builtins, so it is now advertised for the first time.
 
 ### What breaks these
 
@@ -383,3 +386,28 @@ breaks multiple tests across multiple files:
 | Set `scan_keys=False` on the input path | `test_secret_in_an_argument_key_is_refused` | A dict key is a legal place to put a string and the model writes them |
 | Fail open at the input depth cap | `TestInputDepthCapFailsClosed` | Same reasoning as the output cap: refusing to descend must mean refusing to proceed |
 | Remove the provenance framing from the universal preamble | `TestProvenanceFraming` | Defence-in-depth only — but it is one line in one place, and every pass inherits it |
+
+
+## §19 — the skill system
+
+| Change | What breaks | Fix / why |
+|---|---|---|
+| Make `_md_files` non-recursive for skills | `TestCategoryDiscovery` (5) | Category folders are the payoff: progressive disclosure puts every skill's name in every prompt, so a flat list of forty is what it exists to avoid |
+| Make agents recurse too | `test_agents_stay_flat` | K4 is skills-only; `agents/builtin/` holds one file and speculative structure for it is structure nobody asked for |
+| Stop deriving `category` from the folder | `TestCategoryDiscovery` (3) | Derived, never authored — a `category:` frontmatter key could disagree with where the file sits |
+| Truncate `category` to the immediate parent | `test_nesting_deeper_than_one_level_keeps_the_full_path` | Silently merges two distinct groups in the catalog |
+| Drop `dirs.sort()` from the walk | `test_same_name_in_two_categories_collides_and_warns` | Collisions resolve first-wins, so filesystem order would decide WHICH definition loads |
+| Namespace the name by category (`security/recon`) | `test_the_name_is_not_namespaced_by_the_category` | `load_skill`, `/skill` and D18 all key on the name; changing it makes them operate on a different key than the catalog shows |
+| Un-group `skill_catalog_text()` | `TestGroupedCatalog` (2) | — |
+| Stop marking active skills in the catalog | `test_active_skills_are_marked_not_omitted` | Invites the model to spend a turn calling `load_skill` for a body already pinned into the same prompt |
+| Give `SkillManager` session state (mutate the list in place) | `TestManagerHoldsNoState` | K3: the shell owns the active list. A stateful manager is what would make wiring a second shell a redesign rather than a call site |
+| Sort activation order | `test_activation_order_is_preserved_not_sorted` | It is the order bodies are pinned in; a user activating general-then-specific is expressing a precedence |
+| Pin every discovered skill rather than the active ones | `TestPromptFragment` | Defeats progressive disclosure entirely |
+| Raise on an active name that no longer resolves | `test_an_active_name_that_no_longer_resolves_is_skipped` | Skills are rediscovered on `initialize()`; a name can legitimately stop resolving mid-session |
+| Make `missing_tools()` ignore the `ToolContext` | `TestMissingTools` (2) | Note AC1's own example (`shell`) CANNOT catch this — it is globally disabled anyway. The discriminating case is a globally allowed tool the agent excluded |
+| Make `missing_tools()` answer from anywhere but `registry.is_allowed` | `TestMissingTools` | Reporting one thing at activation and enforcing another mid-turn is the divergence the check exists to prevent |
+| Make missing tools REFUSE activation | `test_activation_reports_missing_tools_without_refusing` | K2 reports and proceeds; refusing makes a restrictive agent silently un-pairable with half the catalog |
+| **Append active bodies inside `with_catalogs()`** | `TestPromptAssembly`, incl. `test_k6_a_pass_prompt_never_carries_an_active_body` | **K6.** That function feeds `pass_prompt()`, so a skill activated in a TUI chat session would govern all ten passes of a separate research run |
+| Stop passing `active_skills` into catalog assembly | `test_the_catalog_marks_active_skills_in_the_same_prompt` | The list must reach the catalog to MARK entries — just never to expand them |
+| Make `active_skills` class-level or thread-persisted | `TestSessionScope` | K5: session-scoped like `/agent`, not persisted like `/goal` |
+| Give a shipped default a tool it cannot have | `test_their_declared_tools_are_actually_available` | A builtin reporting a missing tool on every activation reads as the feature being broken |

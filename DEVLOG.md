@@ -1403,3 +1403,119 @@ Thirty-four revert checks across five commits. Four were not simple passes:
   go through Python, not PowerShell redirection.
 
 - Full suite: **587 tests** (was 489), plus the opt-in `integration` test.
+
+
+---
+
+# §19 — The skill system
+
+§14 had already built half of this: discovery, frontmatter parsing, tier
+precedence, `SkillDef`, the frontmatter-only catalog, and `load_skill` for
+reading one body on demand. What was missing was everything the phrase
+implies beyond *reading* one — a manager, activation, and D10's four
+default skills. `skills/builtin/` did not exist, and
+`SkillDef.additional_tools` was parsed, stored, and consumed nowhere.
+
+The user also asked for category folders under `builtin/`, following
+Hermes' layout.
+
+## The finding: `additional_tools` could not do what its name said
+
+§19 (Rev. 4) resolves the field's composition as intersection — "stricter
+wins", a skill can never grant what an agent excluded. Rev. 1 had left it
+as "`allowed_tools` expansion **or** adding to the scoped registry",
+presented as either/or.
+
+Both readings assume the field can add something. It cannot.
+`ToolContext.allowed_tools` is a **whitelist that narrows**: `None` means
+"no opinion", and a set restricts *to* that set. So:
+
+- no active agent → everything globally allowed is already available, and
+  adding a name changes nothing;
+- an agent restricted to `{read}` → AC1 explicitly forbids widening;
+- globally disabled → D14 forbids re-enabling, unconditionally, before any
+  context is consulted.
+
+There is no configuration in which the field widens anything. As a grant it
+was **inert in every case**, which is why it had survived two revisions
+being parsed and never read.
+
+K2 makes it a *declaration of need*. `SkillManager.missing_tools()` checks
+each declared tool against the live `ToolContext` through
+`registry.is_allowed` — the same policy function that would refuse the call
+later, so `/skill` cannot report one thing while the loop enforces another.
+Activation still succeeds: a skill is often useful without an optional
+tool, and refusing would make a restrictive agent silently un-pairable with
+half the catalog.
+
+**This reinterprets AC2.** Its "union of skill additions" wording predates
+the finding. With additions impossible, the thing that composes across
+several active skills is a union of *requirements*, each still capped by
+the agent's restriction. Recorded here rather than quietly satisfied.
+
+## Decisions (K1–K7)
+
+The table is in ROADMAP_v2 §19. Three worth restating:
+
+**K1 — activation pins the body.** `load_skill` already returns any body on
+request, so activation cannot be about reading one. It pins the body into
+every subsequent turn's system prompt: a tool result is a single message
+that scrolls away and is subject to §21 compaction, while an activated
+skill governs the session. Without this, `/skill` would have had nothing to
+do that the tool does not already do — and given K2, nothing at all.
+
+**K3 — the manager holds no state.** `activate`/`deactivate` take the
+active list and return a new one; `tui/app.py` owns it, exactly as it owns
+`active_agent`. §25 is the reason this was worth being deliberate about: a
+capability built into the TUI turned out to be needed by the pipeline, and
+undoing that was a section of work. A manager holding session state is
+precisely what would make wiring a second shell a redesign rather than a
+call site.
+
+**K6 — the pipeline boundary.** `with_catalogs()` feeds `pass_prompt()`, so
+pinning bodies inside it would inject a skill activated in a TUI chat
+session into all ten passes of a research run the user started separately.
+Bodies are appended by the shell instead, beside its `with_goal()` call.
+`active_skills` reaches catalog assembly only far enough to MARK entries —
+so the catalog does not invite `load_skill` for text already present — and
+never to expand them. Three tests cover this, one driving real pass
+prompts, because it is the only cross-shell leak the design can have.
+
+## K4, and what it deliberately does not change
+
+Category is **metadata, not identity**: the name stays global, so
+`load_skill`, `/skill` and D18's harness-wins collision rule are untouched
+by where a file sits, and existing flat layouts keep working. Two
+same-named skills in different categories therefore still collide and still
+take the existing shadow warning.
+
+Derived from the folder, never authored — a `category:` frontmatter key
+could immediately disagree with where the file actually is, and then two
+places would claim to know.
+
+Recursion is skills-only. `agents/builtin/` holds one file, and speculative
+structure for it is structure nobody asked for. A test asserts agents stay
+flat, so flipping the branch is a failure rather than a silent change in
+the other kind.
+
+`workspace_trust.content_files()` already walked recursively, so a
+project's nested `.venastine/skills/<category>/` was already inside the D17
+trust hash. Now asserted by a test rather than assumed.
+
+## What the revert checks caught
+
+Twenty-five across three commits. One MISSED, and it was a real weakness in
+the test rather than in the code:
+
+**AC1's own example cannot prove the context is consulted.** The criterion
+says "an agent restricted to `{read}` plus a skill wanting `shell`" — but
+`shell` is permission `False` globally, so it reports missing whether or
+not the `ToolContext` is passed through at all. The discriminating case is
+a globally **allowed** tool that only the agent excludes (`web_search`),
+and that test now exists alongside the literal AC1 one.
+
+Also worth noting: the K6 revert (pinning bodies inside `with_catalogs`)
+was written specifically to see the leak, and the pass-prompt test caught
+it — which is the point of testing a boundary rather than a behaviour.
+
+- Full suite: **634 tests** (was 587), plus the opt-in `integration` test.
