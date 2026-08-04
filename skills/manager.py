@@ -50,10 +50,13 @@ class SkillManager:
         system prompt's catalog cannot present different structures for
         the same set of files.
         """
+        # One snapshot: get_skills() builds a fresh copy per call, so the
+        # old N+1 pattern copied the dict once per skill and read two
+        # independent snapshots where the intent is one (review f23).
+        skills = config_loader.get_skills()
         out: dict = {}
-        for name in sorted(config_loader.get_skills()):
-            skill = config_loader.get_skills()[name]
-            out.setdefault(skill.category, []).append(skill)
+        for name in sorted(skills):
+            out.setdefault(skills[name].category, []).append(skills[name])
         return out
 
     @staticmethod
@@ -73,12 +76,18 @@ class SkillManager:
         same policy function that would refuse the call later. Reporting
         one thing at activation and enforcing another mid-turn is the
         divergence this routes around.
+
+        Registration is checked too (review §19-20 f12): policy alone says
+        "allowed" for an mcp__ name whose server was never connected, and
+        the activation note would then silently miss exactly the tools
+        that will fail mid-turn.
         """
         from tools.registry import registry
 
         return [
             name for name in (skill.additional_tools or [])
             if not registry.is_allowed(name, context)
+            or not registry.is_registered(name)
         ]
 
     @staticmethod

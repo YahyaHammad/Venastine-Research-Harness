@@ -51,7 +51,9 @@ def parse_json_response(text: str) -> Any:
     try:
         return json.loads(cleaned)
     except json.JSONDecodeError as e:
-        raise ValueError(f"Pass did not return valid JSON: {e}\n\nRaw text:\n{text[:500]}") from e
+        # Caller-neutral wording: this module also serves §20's reviewer,
+        # which is not a pass (review §19-20 r5-1).
+        raise ValueError(f"Response did not return valid JSON: {e}\n\nRaw text:\n{text[:500]}") from e
 
 
 def retry_until_json(
@@ -65,6 +67,7 @@ def retry_until_json(
     authorization=None,
     max_retries: int = MAX_JSON_RETRIES,
     on_response: Optional[Callable] = None,
+    context=None,
 ) -> str:
     """Returns the first response text that parses as JSON, retrying by
     continuing `response`'s thread.
@@ -79,6 +82,11 @@ def retry_until_json(
                   belong on the same audit trail, and a retry that spent a
                   grant invisibly is exactly the record §25 exists to
                   keep.
+    context       the ToolContext the caller's first attempt ran under.
+                  A retry is the SAME run continuing, so it must carry
+                  the same tool restriction -- defaulting to None would
+                  re-advertise globally-allowed tools an agent-shaped
+                  caller excluded on turn 1 (review §19-20 r2-1).
     """
     from core.loop import RunAgentLoop
 
@@ -99,8 +107,13 @@ def retry_until_json(
                 f"Your last response did not parse as valid JSON.\n\n"
                 f"Parse error:\n{e}\n\n"
                 f"Start of your failed output (first 200 chars):\n{raw_text[:200]}\n\n"
+                # Caller-neutral: "the JSON your original instructions asked
+                # for" is true for a pass (object) and for §20's reviewer
+                # (array) alike. Naming a shape the caller never promised
+                # could talk the model out of its own output contract.
                 f"Respond again with ONLY valid JSON -- no preamble, no prose, "
-                f"no code fence, just the JSON object the pass asked for."
+                f"no code fence, just the JSON your original instructions "
+                f"asked for."
             )
             retry_response = RunAgentLoop.continue_conversation(
                 thread_id=response.thread_id,
@@ -114,6 +127,7 @@ def retry_until_json(
                 # model is already struggling, and the only symptom would
                 # be a second malformed answer.
                 authorization=authorization,
+                context=context,
             )
             if on_response is not None:
                 on_response(retry_response)

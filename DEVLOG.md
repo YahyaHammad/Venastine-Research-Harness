@@ -1520,6 +1520,40 @@ it — which is the point of testing a boundary rather than a behaviour.
 
 - Full suite: **634 tests** (was 587), plus the opt-in `integration` test.
 
+## Review-driven hardening (2026-08-04)
+
+The §19–§20 review (report: `.qwen/reviews/2026-08-04-223903-local.md`)
+landed fixes here; the high-level themes and remaining-by-design debt live
+in `TECHNICAL_DEBT.md`. Deviations from the original §19 build, each an
+owner decision:
+
+- **`skills/__init__.py` deleted.** The build shipped an empty `__init__.py`
+  while ARCHITECTURE.md called skills/ a namespace package mirroring
+  agents/. Owner chose to delete the file (convention wins); the doc was
+  already true.
+- **Element types validated at load (f6).** `_parse_md_file` checked only
+  `isinstance(tools, list)`; `[123]` parsed clean and crashed `/skill` at
+  first consumption (after "Activated…" was shown, whole TUI exits). Now
+  warn-and-skips non-string elements like every other malformed shape.
+- **`missing_tools` also checks registration (f12).** Policy alone says
+  "allowed" for an `mcp__` name whose server never connected, so the K2
+  note missed exactly the tools that fail mid-turn. New
+  `ToolRegistry.is_registered()`; `/agent` switches re-run the check and
+  note newly-denied tools (f21, advisory — enforcement was always
+  per-call).
+- **One-shot turns pin active skill bodies (f22).** `run_one_shot`
+  (/grill-me) previously carried no activated bodies; K1 said "every
+  subsequent turn". Owner chose to pin, mirroring `run_agent_turn`.
+- **Tests made mutation-sighted.** The K1 test drove `prompt_fragment`
+  directly (f13) — it now drives `run_agent_turn` and captures the loop's
+  system prompt; `test_walk_order_is_deterministic` re-sorted away the
+  order it existed to check (r3-2) — it now monkeypatches `os.walk` to
+  present a hostile enumeration and asserts sorted order wins.
+- `by_category` takes one snapshot instead of N+1 `get_skills()` copies
+  (f23).
+
+- Full suite after the §19+§20 hardening: **718 tests** (was 697).
+
 
 ---
 
@@ -1708,3 +1742,72 @@ the first where the unsafe failure is silently *applying an edit* rather
 than merely hanging a worker.
 
 - Full suite: **697 tests** (was 634), plus the opt-in `integration` test.
+
+## Review-driven hardening (2026-08-04)
+
+The §19–§20 review (report: `.qwen/reviews/2026-08-04-223903-local.md`)
+found the stage fail-safe in direction but loose at the edges. Fixes, with
+the locked decisions they came from (owner-decided via question rounds;
+high-level themes and remaining-by-design debt in `TECHNICAL_DEBT.md`):
+
+- **Containment policy unified (f1).** The build stated opposite policies:
+  review.py's prose said an optional stage must not lose a completed run;
+  CLAUDE.md said reviewer failures land on `status='failed'`. Owner chose
+  containment: a transient reviewer failure (provider error, unrecoverable
+  JSON) is a traced skip and the run completes, like the missing-agent
+  branch. CLAUDE.md's invariant rewritten to the single policy. A failure
+  that escapes the stage itself still lands on the failed path, and is now
+  pinned by a test that composes the raising stage with the pipeline's
+  `except` (f16) — the old direct-call form could never see a containment
+  mutation of the call site.
+- **Deferred commit (f4).** `apply()` mutated `run.claims` before the
+  re-synthesis; a failed re-synthesis persisted corrected claims beside
+  the stale report — V2's one-run-two-artifacts contradiction, durable.
+  Corrections now land on a deep copy (`apply_deferred`) and commit only
+  after the synthesis succeeds; the failure path restores and traces "NOT
+  applied".
+- **Refinement economics and record (f2, r4-2).** The loop made MAX+1
+  send-backs — the fourth spent a grant on a revision no consent round
+  displayed, persisted as the "rejected" proposal. Now exactly MAX
+  refinements for MAX+1 asks, and the record carries
+  `refinements: [{round, note, superseded}]` so the consent *process* is
+  auditable, not just its outcome.
+- **Input sanitisation (r2-2, r1-3).** `_validated`'s membership tests
+  raised `TypeError` on unhashable `kind`/`claim_id` (escaping into the
+  f1 path) and accepted non-string `proposed`; type guards now drop with
+  a trace. Duplicate `(claim_id, kind)` findings are dropped (keep first)
+  instead of silently overwriting while both record "applied".
+- **Coherence and no-ops (r3-1, r4-1).** A tier override rewrites
+  `claim.annotation` (the stale `[OLD-TIER]` tag contradicted the
+  corrected tier inside the re-synthesis input and every `vars(c)` dump);
+  an equal-value "correction" is a no-op that spends no re-synthesis.
+- **Retry neutrality (f5, r5-1, r2-1).** `_refine` routes through
+  `retry_until_json` (a prose-wrapped revision recovers instead of
+  permanently rejecting the engaged finding); the shared corrective no
+  longer says "the JSON object the pass asked for" (caller-neutral);
+  `retry_until_json` takes and forwards `context`, so the reviewer's
+  tool restriction binds on every turn, not just turn 1 — the
+  `spawn_subagent` re-advertisement on continuations is gone. The
+  reviewer's prompt is built with `catalogs=False` (f19): no invitations
+  to tools its `allowed_tools` excludes.
+- **Durability of the walk (r1-2, f10).** Per-finding trace lines land
+  before the consent walk (a kill mid-walk used to leave only the count),
+  and the stage checkpoints after the decisions and after the outcome.
+- **Shell lifecycle (f3, r1-1, f15, f25, r4-3, f14).** One
+  `_StdinReader` per process shared by the attended provider and the
+  review consent (two pumps racing for one stdin made `--attended
+  --review` unanswerable); `exit()` sets `_shutting_down`, consulted by
+  both blocking asks so a post-exit re-arm cannot park a non-daemon
+  worker; "[no answer]" prints only when there was none; the timeout path
+  funnels through `_decode_review_answer` like the other two dismissal
+  paths; the research-finished summary says "artifact write FAILED" when
+  the swallowed write failed instead of pointing at a 07_review.json that
+  was never written; both `/research` usage strings show
+  `[--review|--no-review]`.
+- **Tests.** +21 regression tests (hardening class, TUI lifecycle, stdin
+  singleton, fail-closed refine branches, review-ON handoff); three
+  pre-existing tests updated where the fixes changed their target shapes
+  (cap-test findings now need distinct targets because of the dedupe; the
+  reject_all test likewise).
+
+- Full suite after the §19+§20 hardening: **718 tests** (was 697).

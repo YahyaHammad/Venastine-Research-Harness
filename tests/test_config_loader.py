@@ -49,11 +49,10 @@ def _write_skill(base, name, body="Body.", description="desc"):
     _write_md(base, "skills", name, [f"name: {name}", f"description: {description}"], body)
 
 
-def _write_skill_in(base, category, name, body="Body.", description="desc",
-                    kind="skills"):
+def _write_skill_in(base, category, name, body="Body.", description="desc"):
     """A skill inside a category folder (§19 K4). `category` may contain
     '/' for nesting deeper than one level."""
-    d = base / kind
+    d = base / "skills"
     if category:
         d = d / category
     d.mkdir(parents=True, exist_ok=True)
@@ -704,19 +703,46 @@ class TestCategoryDiscovery:
         assert config_loader.get_skill("dup").body == "FIRST"
         assert "dup" in caplog.text
 
-    def test_walk_order_is_deterministic(self, _redirect_roots):
-        """Collisions resolve first-wins, so a nondeterministic order would
-        make WHICH definition loads depend on the filesystem."""
-        for category in ("zulu", "alpha", "mike"):
-            _write_skill_in(_redirect_roots["user"], category, f"s-{category}")
+    def test_walk_order_is_deterministic(self, _redirect_roots,
+                                         monkeypatch):
+        """Collisions resolve first-wins, so a nondeterministic order
+        would make WHICH definition loads depend on the filesystem.
+        Observing the filesystem three times (the old form, review §19-20
+        r3-2) proves nothing on a machine whose enumeration is stable --
+        present a HOSTILE order instead and assert sorted order wins."""
+        import os
 
-        seen = []
+        _write_skill_in(_redirect_roots["user"], "alpha", "dup", body="FIRST")
+        _write_skill_in(_redirect_roots["user"], "beta", "dup", body="SECOND")
+        _write_skill_in(_redirect_roots["user"], "zulu", "s-zulu")
+
+        real_walk = os.walk
+
+        def hostile_walk(top, *args, **kwargs):
+            for root, dirs, files in real_walk(top, *args, **kwargs):
+                dirs[:] = sorted(dirs, reverse=True)
+                yield root, dirs, sorted(files, reverse=True)
+
+        monkeypatch.setattr(os, "walk", hostile_walk)
         for _ in range(3):
             config_loader.initialize(str(_redirect_roots["project"]))
-            seen.append([s.category for s in
-                         sorted(config_loader.get_skills().values(),
-                                key=lambda s: s.path)])
-        assert seen[0] == seen[1] == seen[2]
+            assert config_loader.get_skill("dup").body == "FIRST"
+
+    def test_non_string_additional_tools_skips_the_file(
+            self, _redirect_roots):
+        """The container check alone parsed `additional_tools: [123]`
+        clean, and the crash surfaced at /skill after 'Activated' was
+        shown (review §19-20 f6). Element types are validated at load,
+        like every other malformed shape."""
+        d = _redirect_roots["user"] / "skills" / "security"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "bad.md").write_text(
+            "---\nname: bad\ndescription: d\nadditional_tools: [123]\n"
+            "---\n\nBody.\n", encoding="utf-8")
+
+        config_loader.initialize(str(_redirect_roots["project"]))
+
+        assert config_loader.get_skill("bad") is None
 
 
 class TestGroupedCatalog:

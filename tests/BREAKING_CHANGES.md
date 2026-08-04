@@ -396,7 +396,7 @@ breaks multiple tests across multiple files:
 | Make agents recurse too | `test_agents_stay_flat` | K4 is skills-only; `agents/builtin/` holds one file and speculative structure for it is structure nobody asked for |
 | Stop deriving `category` from the folder | `TestCategoryDiscovery` (3) | Derived, never authored — a `category:` frontmatter key could disagree with where the file sits |
 | Truncate `category` to the immediate parent | `test_nesting_deeper_than_one_level_keeps_the_full_path` | Silently merges two distinct groups in the catalog |
-| Drop `dirs.sort()` from the walk | `test_same_name_in_two_categories_collides_and_warns` | Collisions resolve first-wins, so filesystem order would decide WHICH definition loads |
+| Drop `dirs.sort()` from the walk | `test_walk_order_is_deterministic` (adversarial-enumeration form, review §19-20 r3-2) and `test_same_name_in_two_categories_collides_and_warns` | Collisions resolve first-wins, so filesystem order would decide WHICH definition loads. The old determinism test re-sorted by path before comparing and could not see this revert; it now monkeypatches the enumeration to present a hostile order and asserts sorted order beats filesystem order |
 | Namespace the name by category (`security/recon`) | `test_the_name_is_not_namespaced_by_the_category` | `load_skill`, `/skill` and D18 all key on the name; changing it makes them operate on a different key than the catalog shows |
 | Un-group `skill_catalog_text()` | `TestGroupedCatalog` (2) | — |
 | Stop marking active skills in the catalog | `test_active_skills_are_marked_not_omitted` | Invites the model to spend a turn calling `load_skill` for a body already pinned into the same prompt |
@@ -444,7 +444,7 @@ never does.
 | Skip validation of `claim_id` / tier before asking | `TestFindingsAreValidatedBeforeAnyoneIsAsked` | Asking solicits consent for something that then silently does nothing |
 | Truncate past `MAX_REVIEW_FINDINGS` silently, or not at all | `test_findings_past_the_cap_are_dropped_and_traced` | No silent caps — an untold truncation reads as "the reviewer found twenty-five things" |
 | Pass `authorization=None` to the reviewer | `test_the_same_bundle_object_reaches_the_reviewer` | **V7.** Asserted on IDENTITY of the `GrantBudget`: a rebuilt one multiplies the run's ceiling while reading as if it enforced one |
-| Run the reviewer with `context=None` | `test_the_reviewer_runs_under_the_reviewer_agents_context` | Its `.md` excludes `spawn_subagent`, and that only binds if the context built from it is the one the run uses |
+| Run the reviewer (or its retry/refine continuations) with `context=None` | `test_the_reviewer_runs_under_the_reviewer_agents_context` plus the continuation-context tests (review §19-20 r2-1) | Its `.md` excludes `spawn_subagent`, and that only binds if the context built from it is the one EVERY turn of the review uses — turn 1 and every `retry_until_json`/`_refine` continuation. `retry_until_json` therefore takes a `context` parameter and forwards it |
 | Stop recording the reviewer's granted calls | `test_the_reviewers_granted_calls_join_the_runs_audit_trail` | §25 keeps ONE list so a call cannot be authorised in one place and recorded in another |
 | Make the review stage non-opt-in | `test_no_flag_and_no_consent_means_no_reviewer_call` | D9: it is an extra model call plus a re-synthesis |
 | Require the config flag even with a consent route | `test_a_consent_route_alone_enables_it` | A shell that offered the user a consent route should not also need the flag |

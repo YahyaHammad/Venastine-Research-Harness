@@ -369,6 +369,9 @@ class _StubApp:
     def __init__(self, memory):
         self.memory = memory
         self.active_agent = None
+        # Part of the real app's contract since §19; /agent re-checks
+        # active skills against the new context (review §19-20 f21).
+        self.active_skills = []
         self._transcript = _StubTranscript()
         self._busy = False
         self.one_shots = []

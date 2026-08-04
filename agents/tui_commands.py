@@ -33,6 +33,7 @@ def _cmd_agent(app, args: str) -> None:
     if args == "default":
         app.active_agent = None
         app._transcript.write_system("Active agent cleared — default harness.")
+        _note_skills_under_new_context(app)
         return
     agent = manager.get(args)
     if agent is None:
@@ -44,6 +45,29 @@ def _cmd_agent(app, args: str) -> None:
     app.active_agent = agent
     app._transcript.write_system(
         f"Active agent: {agent.name} — {agent.description}")
+    _note_skills_under_new_context(app)
+
+
+def _note_skills_under_new_context(app) -> None:
+    """K2's activation note is computed against the context active at
+    activation time; an /agent switch changes the context for every
+    subsequent turn, so re-check active skills and say what is now
+    denied (review §19-20 f21). Advisory only -- enforcement still
+    happens per call via is_tool_allowed."""
+    from skills.manager import manager as skill_manager
+
+    context = (manager.active_context(app.active_agent)
+               if app.active_agent is not None else None)
+    label = app.active_agent.name if app.active_agent is not None else "default"
+    for name in app.active_skills:
+        skill = skill_manager.get(name)
+        if skill is None:
+            continue
+        missing = skill_manager.missing_tools(skill, context)
+        if missing:
+            app._transcript.write_system(
+                f"Note: {name} expects {', '.join(missing)}, which are "
+                f"not available under agent {label}.")
 
 
 def _cmd_goal(app, args: str) -> None:

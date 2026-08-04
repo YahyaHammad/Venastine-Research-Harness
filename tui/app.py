@@ -74,11 +74,18 @@ class LoopEventMessage(Message):
 
 
 class ResearchFinished(Message):
-    """A /research run ended. Carries the PipelineRun, or the exception."""
+    """A /research run ended. Carries the PipelineRun, or the exception.
 
-    def __init__(self, run, error: BaseException | None) -> None:
+    artifacts_ok (review §19-20 r4-3): the worker swallows artifact-write
+    failures so a disk error cannot discard a completed run -- but the
+    summary line must not then point the user at a 07_review.json that
+    was never written."""
+
+    def __init__(self, run, error: BaseException | None,
+                 artifacts_ok: bool = True) -> None:
         self.run = run
         self.error = error
+        self.artifacts_ok = artifacts_ok
         super().__init__()
 
 
@@ -159,6 +166,11 @@ class VenastineApp(App):
         # new session starts clean. A LIST, not a set: activation order is
         # the order the bodies are pinned in.
         self.active_skills: list = []
+        # Set by exit(); the blocking ask paths consult it so a walk that
+        # re-arms AFTER the one-shot channel release cannot park a
+        # non-daemon worker on a queue nobody will ever answer (review
+        # §19-20 r1-1).
+        self._shutting_down = False
 
     # -- layout --------------------------------------------------------------
 
@@ -408,6 +420,12 @@ class VenastineApp(App):
         self._raven.state = ravens.THINKING
         thread_id = self.memory.thread_id
         model, provider = self.model, self.provider_name
+        # K1 holds for one-shot turns too (review §19-20 f22 decision):
+        # an activated skill governs the /grill-me turn in the same
+        # thread, mirroring run_agent_turn's pinning.
+        fragment = skills.prompt_fragment(self.active_skills)
+        if fragment:
+            system_prompt = f"{system_prompt}\n\n{fragment}"
 
         def work() -> None:
             error = None
@@ -499,6 +517,7 @@ class VenastineApp(App):
         # Every exit route funnels through here (action_quit, ctrl+c, and
         # any programmatic exit), which is why the release lives here
         # rather than on the quit binding alone.
+        self._shutting_down = True
         self._release_permission_channel()
         return super().exit(*args, **kwargs)
 
@@ -520,6 +539,10 @@ class VenastineApp(App):
         parked on a Queue.get() nothing will ever answer (review f10, and
         this is the fourth place that invariant applies).
         """
+        if self._shutting_down:
+            # The one-shot release already fired; parking here would hang
+            # the worker (and the interpreter) forever (review r1-1).
+            return False
         channel: queue.Queue = queue.Queue()
         self._permission_channel = channel
         screen = PermissionScreen(tool_name, params, notice)
@@ -552,6 +575,11 @@ class VenastineApp(App):
         rejection: a new dismissal path added later fails safe instead of
         silently applying an edit.
         """
+        if self._shutting_down:
+            # Same hang as ask_permission_blocking: exit()'s release is
+            # one-shot, and this ask would re-arm a queue nobody answers
+            # (review r1-1).
+            return ("reject", "")
         channel: queue.Queue = queue.Queue()
         self._permission_channel = channel
         screen = ReviewScreen(finding, round_index,
@@ -563,15 +591,24 @@ class VenastineApp(App):
                 channel.get(timeout=config.ATTENDED_APPROVAL_TIMEOUT_S))
         except queue.Empty:
             self.call_from_thread(self._timed_out_review, screen)
-            return ("reject", "")
+            # Through the decoder, same as the modal and release paths:
+            # the docstring promises one rule for all three, and a
+            # rejection shape that gains content must not skip this one
+            # (review §19-20 f25). _decode_review_answer(None) is
+            # ("reject", "") today.
+            return _decode_review_answer(None)
         finally:
             self._permission_channel = None
 
     def _timed_out_review(self, screen) -> None:
+        # Only say "no answer" when there genuinely was none: if the user
+        # clicked between the get() timeout and this callback, the screen
+        # is gone and the message would contradict what they just did
+        # (review §19-20 f15).
         if screen in self.screen_stack:
             screen.dismiss(("reject", ""))
-        self._transcript.write_system(
-            "[no answer — correction rejected; the review continues]")
+            self._transcript.write_system(
+                "[no answer — correction rejected; the review continues]")
 
     def _timed_out_permission(self, screen, tool_name: str) -> None:
         if screen in self.screen_stack:
@@ -618,9 +655,12 @@ class VenastineApp(App):
         if run.subagent_reviews:
             accepted = sum(1 for d in run.subagent_reviews
                            if d.get("decision") == "accept")
+            record = ("full record in 07_review.json"
+                      if message.artifacts_ok
+                      else "artifact write FAILED — no 07_review.json")
             self._transcript.write_system(
                 f"[review: {len(run.subagent_reviews)} finding(s), "
-                f"{accepted} applied — full record in 07_review.json]")
+                f"{accepted} applied — {record}]")
         if run.run_id:
             self._transcript.write_system(f"[run id: {run.run_id}]")
 
@@ -748,7 +788,8 @@ def _cmd_research(app: VenastineApp, args: str) -> None:
     app._research_review = review
     if not query:
         app._transcript.write_error(
-            "Usage: /research [--attended] [--review] [--grant[=a,b]] <query>")
+            "Usage: /research [--attended] [--review|--no-review] "
+            "[--grant[=a,b]] <query>")
         return
     if app._busy:
         app._transcript.write_error("Still working — wait for this turn to finish.")
@@ -903,12 +944,16 @@ def _start_research(app: VenastineApp, query: str, authorization) -> None:
             # (main.py), so a TUI research run produced no /output/<run_id>/
             # at all -- the shipped consequence of leaving a post-pipeline
             # stage to whichever shell remembers it. Best-effort, matching
-            # the CLI: a disk failure must not discard a completed run.
+            # the CLI: a disk failure must not discard a completed run --
+            # but the outcome rides on the message so the summary cannot
+            # assert a record that was never written (review r4-3).
+            artifacts_ok = True
             try:
                 write_run_artifacts(run)
             except Exception:
                 logger.exception("Could not write artifacts")
-            app.post_message(ResearchFinished(run, None))
+                artifacts_ok = False
+            app.post_message(ResearchFinished(run, None, artifacts_ok))
         except BaseException as e:  # noqa: BLE001 — reported, then re-raised
             error = e
             app.post_message(ResearchFinished(None, e))
@@ -947,7 +992,8 @@ def register_builtin_commands() -> None:
         SlashCommand("effort", "switch reasoning effort", _cmd_effort, "[level|auto]"),
         SlashCommand("research", "run the deep-research pipeline",
                      _cmd_research,
-                     "[--attended] [--review] [--grant[=a,b]] <query>"),
+                     "[--attended] [--review|--no-review] "
+                     "[--grant[=a,b]] <query>"),
         SlashCommand("threads", "resume a saved thread", _cmd_threads),
         SlashCommand("new", "start a new thread", _cmd_new),
         SlashCommand("quit", "exit", _cmd_quit),

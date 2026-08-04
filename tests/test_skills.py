@@ -294,7 +294,7 @@ class TestShippedDefaults:
 
 class TestSlashSkill:
 
-    def _app(self, loaded_defs):
+    def _app(self):
         """A stand-in for the app object the slash registry passes in.
         tui.app is deliberately not imported by skills/tui_commands, so the
         handler only ever touches these three attributes."""
@@ -331,7 +331,7 @@ class TestSlashSkill:
         from skills.tui_commands import _cmd_skill
 
         loaded(_skill("alpha"))
-        app = self._app(loaded)
+        app = self._app()
         _cmd_skill(app, "alpha")
 
         assert app.active_skills == ["alpha"]
@@ -340,7 +340,7 @@ class TestSlashSkill:
         from skills.tui_commands import _cmd_skill
 
         loaded(_skill("alpha"))
-        app = self._app(loaded)
+        app = self._app()
         _cmd_skill(app, "nope")
 
         assert app.active_skills == []
@@ -350,7 +350,7 @@ class TestSlashSkill:
         from skills.tui_commands import _cmd_skill
 
         loaded(_skill("alpha"), _skill("beta"))
-        app = self._app(loaded)
+        app = self._app()
         _cmd_skill(app, "alpha")
         _cmd_skill(app, "beta")
         _cmd_skill(app, "off alpha")
@@ -361,7 +361,7 @@ class TestSlashSkill:
         from skills.tui_commands import _cmd_skill
 
         loaded(_skill("alpha"), _skill("beta"))
-        app = self._app(loaded)
+        app = self._app()
         _cmd_skill(app, "alpha")
         _cmd_skill(app, "beta")
         _cmd_skill(app, "clear")
@@ -374,7 +374,7 @@ class TestSlashSkill:
         from skills.tui_commands import _cmd_skill
 
         loaded(_skill("alpha", category="security"))
-        app = self._app(loaded)
+        app = self._app()
         _cmd_skill(app, "")
 
         assert app.active_skills == []
@@ -388,7 +388,7 @@ class TestSlashSkill:
         from skills.tui_commands import _cmd_skill
 
         loaded(_skill("alpha", tools=["shell"]))
-        app = self._app(loaded)
+        app = self._app()
         _cmd_skill(app, "alpha")
 
         assert app.active_skills == ["alpha"], "activation was refused"
@@ -399,25 +399,148 @@ class TestSlashSkill:
         from skills.tui_commands import _cmd_skill
 
         loaded(_skill("alpha", tools=["web_search"]))
-        app = self._app(loaded)
+        app = self._app()
         _cmd_skill(app, "alpha")
 
         assert not any("not available" in line for line in app.system)
+
+    def test_missing_tools_flags_unregistered_mcp_names(self, loaded):
+        """Policy alone says 'allowed' for an mcp__ name whose server was
+        never connected; the activation note must still flag it, or the
+        K2 warning silently misses exactly the tools that fail mid-turn
+        (review §19-20 f12)."""
+        from tools.registry import registry
+
+        skill = _skill("alpha", tools=["mcp__notes__search"])
+        loaded(skill)
+
+        assert registry.is_allowed("mcp__notes__search", None)
+        assert "mcp__notes__search" in manager.missing_tools(skill, None)
+
+    def test_an_agent_switch_rechecks_active_skills(self, loaded,
+                                                    monkeypatch):
+        """K2's note is computed at activation; /agent changes the context
+        for every later turn, so the switch must re-check and say what is
+        now denied (review §19-20 f21)."""
+        from agents import tui_commands
+        from core.config_loader import AgentDef
+
+        loaded(_skill("lit", tools=["web_search"]))
+        narrow = AgentDef(
+            name="narrow", description="d", model=None, provider=None,
+            allowed_tools=["read"], approval_overrides={},
+            use_project_context=False, use_memory=False, max_steps=None,
+            body="b", tier="harness", path="/narrow.md")
+        monkeypatch.setattr(
+            tui_commands.manager, "get",
+            lambda name: narrow if name == "narrow" else None)
+
+        app = self._app()
+        app.active_skills = ["lit"]
+        tui_commands._cmd_agent(app, "narrow")
+
+        assert any("web_search" in line and "not available" in line
+                   for line in app.system)
 
 
 class TestPromptAssembly:
     """K1 end to end, and K6 -- the one cross-shell leak this design can
     have."""
 
-    def test_an_active_skill_body_reaches_the_turn_prompt(self, loaded, mocker):
+    def test_an_active_skill_body_reaches_the_turn_prompt(
+            self, loaded, mocker, fake_storage):
+        """K1's pinning SITE is run_agent_turn's prompt assembly -- a test
+        that calls prompt_fragment directly passes no matter what the app
+        does with it (review §19-20 f13). Drive the real method and
+        capture the system prompt the loop receives."""
         from tui.app import VenastineApp
+        from core.loop import RunAgentLoop
+        from core.memory import ConversationMemory
+        from core.events import LoopEvent
+        from tests.conftest import make_model_response
 
         loaded(_skill("alpha", body="ALPHA-METHODOLOGY"))
-        app = VenastineApp.__new__(VenastineApp)
-        app.active_skills = ["alpha"]
 
-        fragment = manager.prompt_fragment(app.active_skills)
-        assert "ALPHA-METHODOLOGY" in fragment
+        class _T:
+            def write_user(self, t): pass
+            def write_system(self, t): pass
+            def write_error(self, t): pass
+            def flush_stream(self): pass
+
+        class _Bare(VenastineApp):
+            # _transcript is a read-only property on the real app; the
+            # bare instance needs an injectable one.
+            @property
+            def _transcript(self):
+                return self._t
+
+        app = _Bare.__new__(_Bare)
+        app._t = _T()
+        app.active_skills = ["alpha"]
+        app.active_agent = None
+        app.memory = ConversationMemory()
+        app.model = "m"
+        app.provider_name = "ANTHROPIC"
+        app.effort = None
+        captured = {}
+
+        def _fake_run(memory, system_prompt, *args, **kwargs):
+            captured["system_prompt"] = system_prompt
+            yield LoopEvent(final_response=make_model_response(text="ok"),
+                            stop_reason="complete")
+
+        mocker.patch.object(RunAgentLoop, "_run", side_effect=_fake_run)
+        app.post_message = lambda m: None
+        app.run_worker = lambda work, **kw: work()
+
+        app.run_agent_turn("hello")
+
+        assert "ALPHA-METHODOLOGY" in captured["system_prompt"]
+
+    def test_a_one_shot_turn_pins_active_skill_bodies(self, loaded, mocker):
+        """K1 covers /grill-me turns too (review §19-20 f22, owner
+        decision): the methodology a thread is grilled against must be in
+        the grill turn's prompt."""
+        from types import SimpleNamespace
+        from uuid import uuid4
+        from tui.app import VenastineApp
+        from core.loop import RunAgentLoop
+        from tests.conftest import make_model_response
+
+        loaded(_skill("alpha", body="ALPHA-METHODOLOGY"))
+
+        class _R:
+            state = None
+
+        class _Bare(VenastineApp):
+            # _raven is a read-only property on the real app; the bare
+            # instance needs an injectable one.
+            @property
+            def _raven(self):
+                return self._r
+
+        app = _Bare.__new__(_Bare)
+        app._r = _R()
+        app.active_skills = ["alpha"]
+        app.memory = SimpleNamespace(thread_id=uuid4())
+        app._busy = False
+        app.model = "m"
+        app.provider_name = "ANTHROPIC"
+        app.effort = None
+        captured = {}
+
+        def _continue(**kwargs):
+            captured.update(kwargs)
+            return make_model_response(text="ok")
+
+        mocker.patch.object(RunAgentLoop, "continue_conversation",
+                            side_effect=_continue)
+        app.post_message = lambda m: None
+        app.run_worker = lambda work, **kw: work()
+
+        app.run_one_shot("BASE PROMPT", "grill")
+
+        assert "ALPHA-METHODOLOGY" in captured["system_prompt"]
 
     def test_the_catalog_marks_active_skills_in_the_same_prompt(
             self, loaded, monkeypatch):

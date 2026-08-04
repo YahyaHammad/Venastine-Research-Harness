@@ -197,6 +197,13 @@ def _parse_md_file(path: str, kind: str, tier: str, category: str = ""):
         if not isinstance(tools, list):
             logger.warning("Skipping skill file %s: additional_tools is not a list", path)
             return None
+        # Element types, not just the container (review §19-20 f6): the
+        # first consumer feeds each element to a startswith() check, so a
+        # non-string element parsed cleanly here and crashed /skill at
+        # first consumption -- after "Activated" was already shown.
+        if not all(isinstance(t, str) for t in tools):
+            logger.warning("Skipping skill file %s: additional_tools is not a list of strings", path)
+            return None
         return SkillDef(
             name=name,
             description=str(fm.get("description", "")),

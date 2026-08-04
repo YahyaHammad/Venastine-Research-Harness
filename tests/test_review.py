@@ -494,6 +494,34 @@ class TestRefinement:
         assert run.subagent_reviews[0]["decision"] == "reject"
         assert len(consent.asked) == config.MAX_REVIEW_REFINEMENTS + 1
 
+    def test_an_unavailable_thread_records_reject_not_apply(self, mocker):
+        """f18: fail-closed branch. A refactor that read 'make this
+        better' as 'apply this' would put an unconsented correction into
+        the report with the suite green."""
+        run = _reviewed_run()
+        _stub_reviewer(mocker, [TEXT_FINDING], thread_id=None)
+        _stub_resynthesis(mocker)
+
+        _stage(run, mocker, consent=_consent(("refine", "note")))
+
+        assert run.claims[0].final_text == "original text"
+        assert run.subagent_reviews[0]["decision"] == "reject"
+
+    def test_a_failed_refinement_records_reject_not_apply(self, mocker):
+        """f18: the other fail-closed branch -- a refinement that raises
+        must reject, never fall through to an accept of the unrefined or
+        half-revised proposal."""
+        run = _reviewed_run()
+        _stub_reviewer(mocker, [TEXT_FINDING])
+        _stub_resynthesis(mocker)
+        mocker.patch.object(RunAgentLoop, "continue_conversation",
+                            side_effect=RuntimeError("thread gone"))
+
+        _stage(run, mocker, consent=_consent(("refine", "note")))
+
+        assert run.claims[0].final_text == "original text"
+        assert run.subagent_reviews[0]["decision"] == "reject"
+
 
 class TestConsentEdges:
 
@@ -503,7 +531,10 @@ class TestConsentEdges:
         accept."""
         run = _reviewed_run()
         second = dict(TEXT_FINDING, claim_id="c2", proposed="rewrite two")
-        third = dict(TEXT_FINDING, claim_id="c1", proposed="rewrite three")
+        # Distinct (claim_id, kind) targets: same-target duplicates are
+        # dropped by _validated's dedupe (review §19-20 r1-3), and this
+        # test is about reject_all, not dedupe.
+        third = dict(TIER_FINDING, proposed="LOW")
         _stub_reviewer(mocker, [TEXT_FINDING, second, third])
         resynth = _stub_resynthesis(mocker)
         consent = _consent(("reject_all", ""))
@@ -574,7 +605,15 @@ class TestFindingsAreValidatedBeforeAnyoneIsAsked:
         """No silent caps. A truncation nobody is told about reads as 'the
         reviewer found twenty-five things'."""
         run = _reviewed_run()
-        many = [dict(TEXT_FINDING, proposed=f"p{i}")
+        # Distinct (claim_id, kind) per finding: same-target duplicates
+        # are dropped by _validated's dedupe (review §19-20 r1-3) before
+        # the cap could ever be observed, and this test is about the cap.
+        for i in range(2, config.MAX_REVIEW_FINDINGS + 5):
+            run.claims.append(
+                Claim(id=f"c{i + 1}", text="t", type="factual",
+                      final_text="t", confidence_tier="HIGH",
+                      score_breakdown={}, annotation="[HIGH]"))
+        many = [dict(TEXT_FINDING, claim_id=f"c{i + 1}", proposed=f"p{i}")
                 for i in range(config.MAX_REVIEW_FINDINGS + 5)]
         _stub_reviewer(mocker, many)
         _stub_resynthesis(mocker)
@@ -583,6 +622,204 @@ class TestFindingsAreValidatedBeforeAnyoneIsAsked:
 
         assert len(consent.asked) == config.MAX_REVIEW_FINDINGS
         assert any("MAX_REVIEW_FINDINGS" in line for line in run.trace)
+
+
+class TestReviewHardening:
+    """Regression tests from the §19-20 review: containment, refinement
+    economics, input sanitisation, dedupe, annotation coherence, and the
+    deferred-commit ordering."""
+
+    def test_a_reviewer_call_failure_skips_the_review_not_the_run(
+            self, mocker):
+        """f1: an optional stage must not flip a finished run to failed.
+        A transient reviewer failure is a traced skip, like the
+        missing-agent branch."""
+        from core import config_loader
+        from core.reasoning import review as review_module
+
+        config_loader.initialize(".")
+        run = _reviewed_run()
+        mocker.patch.object(RunAgentLoop, "run_agent_conversation",
+                            side_effect=RuntimeError("429 rate limited"))
+
+        findings, thread_id = review_module.run_review(run, "m", "ANTHROPIC")
+
+        assert findings == []
+        assert thread_id is None
+        assert any("reviewer call failed" in line for line in run.trace)
+
+    def test_refinement_makes_exactly_max_send_backs(self, mocker):
+        """f2 + r4-2: MAX refinements for MAX+1 asks (the extra send-back
+        spent a grant on a revision nobody was shown), and the refinement
+        process lands in the decision record."""
+        run = _reviewed_run()
+        _stub_reviewer(mocker, [TEXT_FINDING])
+        _stub_resynthesis(mocker)
+        calls = {"n": 0}
+
+        def _continue(**kwargs):
+            calls["n"] += 1
+            r = make_model_response(text=json.dumps(
+                [dict(TEXT_FINDING, proposed=f"v{calls['n']}")]))
+            r.thread_id = uuid4()
+            return r
+
+        mocker.patch.object(RunAgentLoop, "continue_conversation",
+                            side_effect=_continue)
+        consent = _consent(*[("refine", "note")] * 10)
+        _stage(run, mocker, consent=consent)
+
+        assert calls["n"] == config.MAX_REVIEW_REFINEMENTS
+        assert len(consent.asked) == config.MAX_REVIEW_REFINEMENTS + 1
+        record = run.subagent_reviews[0]
+        assert record["decision"] == "reject"
+        # The LAST version shown, not one more (f2's unseen fourth).
+        assert record["proposed"] == f"v{config.MAX_REVIEW_REFINEMENTS}"
+        assert len(record["refinements"]) == config.MAX_REVIEW_REFINEMENTS
+        assert record["refinements"][0]["note"] == "note"
+
+    def test_a_prose_wrapped_refinement_gets_the_corrective_retry(
+            self, mocker):
+        """f5: refine responses go through retry_until_json, so a
+        prose-wrapped revision recovers instead of permanently rejecting
+        the engaged finding."""
+        run = _reviewed_run()
+        _stub_reviewer(mocker, [TEXT_FINDING])
+        _stub_resynthesis(mocker)
+        responses = iter([
+            make_model_response(text="let me rethink that..."),
+            make_model_response(
+                text=json.dumps([dict(TEXT_FINDING, proposed="better")])),
+        ])
+
+        def _continue(**kwargs):
+            return next(responses)
+
+        mocker.patch.object(RunAgentLoop, "continue_conversation",
+                            side_effect=_continue)
+        _stage(run, mocker, consent=_consent(("refine", "n"), ("accept", "")))
+
+        assert run.claims[0].final_text == "better"
+        assert any("retrying with corrective" in line for line in run.trace)
+
+    def test_unhashable_and_non_string_shapes_are_dropped_not_raised(self):
+        """r2-2: the membership tests must not see unhashable values, and
+        a non-string proposed is dropped, not applied."""
+        from core.reasoning import review as review_module
+
+        run = _reviewed_run()
+        assert review_module._validated(
+            [{"kind": ["text"], "claim_id": "c1", "proposed": "x"}],
+            run) == []
+        assert review_module._validated(
+            [{"kind": "text", "claim_id": ["c1"], "proposed": "x"}],
+            run) == []
+        assert review_module._validated(
+            [{"kind": "text", "claim_id": "c1",
+              "proposed": {"not": "a string"}}], run) == []
+
+    def test_a_second_finding_on_the_same_target_is_dropped(self):
+        """r1-3: two corrections to one claim+kind would overwrite
+        silently while both record as applied; keep the first."""
+        from core.reasoning import review as review_module
+
+        run = _reviewed_run()
+        out = review_module._validated(
+            [TEXT_FINDING, dict(TEXT_FINDING, proposed="other")], run)
+
+        assert len(out) == 1
+        assert out[0]["proposed"] == "corrected text"
+
+    def test_a_tier_override_rewrites_the_annotation(self, mocker):
+        """r3-1: the stale '[HIGH]' tag beside a corrected tier
+        contradicts it inside the re-synthesis input and every vars(c)
+        dump."""
+        run = _reviewed_run()
+        _stub_reviewer(mocker, [TIER_FINDING])
+        _stub_resynthesis(mocker)
+
+        _stage(run, mocker, consent=_consent(("accept", "")))
+
+        assert run.claims[0].confidence_tier == "LOW"
+        assert run.claims[0].annotation == "[LOW]"
+        assert run.claims[0].score_breakdown["review_override"] == "LOW"
+
+    def test_an_equal_value_correction_is_a_no_op(self, mocker):
+        """r4-1: accepting a 'correction' equal to the current value must
+        not spend a re-synthesis nor claim to have applied anything."""
+        run = _reviewed_run()
+        _stub_reviewer(mocker, [dict(TEXT_FINDING, proposed="original text")])
+        resynth = _stub_resynthesis(mocker)
+
+        _stage(run, mocker, consent=_consent(("accept", "")))
+
+        assert resynth == []
+        assert any("no longer applicable" in line for line in run.trace)
+
+    def test_a_failed_re_synthesis_leaves_claims_and_report_unchanged(
+            self, mocker):
+        """f4: deferred commit. A re-synthesis failure must not persist
+        corrected claims beside the stale report."""
+        run = _reviewed_run()
+        _stub_reviewer(mocker, [TEXT_FINDING])
+        mocker.patch.object(RunAgentLoop, "run_deep_research_mode",
+                            side_effect=RuntimeError("provider down"))
+
+        with pytest.raises(RuntimeError):
+            _stage(run, mocker, consent=_consent(("accept", "")))
+
+        assert run.claims[0].final_text == "original text"
+        assert run.final_report == "REPORT v1"
+        assert any("NOT applied" in line for line in run.trace)
+
+    def test_retry_continuations_carry_the_reviewer_context(self, mocker):
+        """r2-1: the restriction binds on EVERY turn of the review, not
+        just turn 1 -- a context-less retry would re-advertise
+        spawn_subagent."""
+        from tools.registry import registry
+
+        run = _reviewed_run()
+        _stub_resynthesis(mocker)
+        first = make_model_response(text="not json")
+        first.thread_id = uuid4()
+        mocker.patch.object(RunAgentLoop, "run_agent_conversation",
+                            return_value=first)
+        captured = {}
+
+        def _continue(**kwargs):
+            captured.update(kwargs)
+            r = make_model_response(text="[]")
+            r.thread_id = first.thread_id
+            return r
+
+        mocker.patch.object(RunAgentLoop, "continue_conversation",
+                            side_effect=_continue)
+        _stage(run, mocker, consent=_consent())
+
+        ctx = captured.get("context")
+        assert ctx is not None
+        assert not registry.is_allowed("spawn_subagent", ctx)
+
+    def test_the_reviewer_prompt_carries_no_catalogs(self, mocker):
+        """f19: the catalogs invite load_skill / spawn_subagent, two tools
+        the reviewer's allowed_tools excludes."""
+        run = _reviewed_run()
+        captured = {}
+
+        def _conv(**kwargs):
+            captured.update(kwargs)
+            r = make_model_response(text="[]")
+            r.thread_id = uuid4()
+            return r
+
+        mocker.patch.object(RunAgentLoop, "run_agent_conversation",
+                            side_effect=_conv)
+        _stub_resynthesis(mocker)
+
+        _stage(run, mocker, consent=_consent())
+
+        assert "load_skill" not in captured["system_prompt"]
+        assert "spawn_subagent" not in captured["system_prompt"]
 
 
 class TestTheReviewerInheritsTheRunsAuthorization:
@@ -658,22 +895,34 @@ class TestTheReviewerInheritsTheRunsAuthorization:
 
 class TestTheStageIsWiredIntoThePipeline:
 
-    def test_a_reviewer_failure_propagates_to_the_pipelines_failure_path(
+    def test_a_review_stage_failure_lands_on_the_pipelines_failed_path(
             self, mocker):
-        """Inside the try. A reviewer blowing up must reach the
-        orchestrator's own except block -- which records status='failed'
-        with the partial run -- rather than being swallowed into a run
-        that completes as though the review had happened."""
+        """f16: compose the raising stage with the pipeline's try/except.
+        Transient reviewer failures are contained INSIDE run_review (f1),
+        but a failure that does escape the stage must reach the
+        orchestrator's except block and record status='failed' -- the
+        old direct-call form proved the stage doesn't swallow, yet could
+        never see a containment mutation of the call site."""
         from core.reasoning import orchestrator
 
-        run = _reviewed_run()
-        mocker.patch.object(orchestrator, "update_pipeline_run")
-        mocker.patch.object(review_module, "run_review",
+        mocker.patch.object(orchestrator, "create_pipeline_run",
+                            return_value=uuid4())
+        mocker.patch.object(orchestrator, "run_confidence_tiering")
+        mocker.patch.object(orchestrator, "_run_pass", return_value="REPORT")
+        mocker.patch.object(
+            orchestrator, "_run_pass_with_json_retry",
+            side_effect=lambda pass_id, *a, **k: _canned_for(pass_id))
+        update = mocker.patch.object(orchestrator, "update_pipeline_run")
+        mocker.patch.object(orchestrator, "_review_stage",
                             side_effect=RuntimeError("reviewer exploded"))
 
         with pytest.raises(RuntimeError, match="reviewer exploded"):
-            orchestrator._review_stage(run, "m", "ANTHROPIC", None, None,
-                                       enabled=True)
+            orchestrator.run_deep_research_pipeline(
+                user_query="q", model="m", provider_name="ANTHROPIC",
+                subagent_review=True)
+
+        assert any(c.kwargs.get("status") == "failed"
+                   for c in update.call_args_list)
 
     def test_the_pipeline_calls_the_stage_after_final_synthesis(self, mocker):
         """Without this, every test above passes against a _review_stage
@@ -934,6 +1183,36 @@ class TestTheTuiShell:
             "escape must decline explicitly, not dismiss with no value")
 
 
+class TestOneStdinReaderPerProcess:
+
+    def test_attended_and_review_share_one_reader(self, mocker):
+        """f3: two _StdinReader pumps racing for one stdin is exactly the
+        shape the class docstring forbids -- under --attended --review the
+        attended pump swallows the review walk's answers."""
+        from types import SimpleNamespace
+        import main
+
+        mocker.patch.object(main.sys, "stdin",
+                            SimpleNamespace(isatty=lambda: True))
+        calls = {"n": 0}
+        real = main._StdinReader
+
+        class _Counting(real):
+            def __init__(self):
+                calls["n"] += 1
+                super().__init__()
+
+        mocker.patch.object(main, "_StdinReader", _Counting)
+        main._STDIN_READER = None
+        try:
+            main.build_attended_provider()
+            main.build_review_consent()
+            assert calls["n"] == 1
+            assert main._stdin_reader() is main._STDIN_READER
+        finally:
+            main._STDIN_READER = None
+
+
 class TestBothShellsWriteArtifacts:
     """V9. write_run_artifacts had ONE production call site, so a TUI
     research run produced no /output/<run_id>/ at all."""
@@ -1021,6 +1300,122 @@ class _NullTranscript:
 
 class _NullRaven:
     state = None
+
+
+class TestTuiReviewLifecycle:
+    """The TUI consent path's shutdown and summary behaviour (review
+    §19-20 f17, r1-1, f15, r4-3)."""
+
+    def test_the_review_on_path_forwards_flag_and_consent(self, mocker):
+        """f17: the TUI's review-ON handoff was untested -- a dropped
+        guard would prompt users who never asked, or silently skip."""
+        from tui import app as tui_app
+        from core.approval import ReviewConsent
+
+        run = _reviewed_run()
+        captured = {}
+
+        def fake_pipeline(**kwargs):
+            captured.update(kwargs)
+            return run
+
+        mocker.patch(
+            "core.reasoning.orchestrator.run_deep_research_pipeline",
+            side_effect=fake_pipeline)
+        mocker.patch("core.reasoning.output_writer.write_run_artifacts",
+                     return_value="/out")
+
+        app = _FakeTuiApp(review=True)
+        tui_app._start_research(app, "q", None)
+        app.run_the_worker()
+
+        assert captured["subagent_review"] is True
+        assert isinstance(captured["review"], ReviewConsent)
+
+    def test_asks_after_exit_reject_instantly(self):
+        """r1-1: a walk that re-arms after exit()'s one-shot release must
+        not park a non-daemon worker on a queue nobody will answer."""
+        from tui.app import VenastineApp
+
+        app = VenastineApp.__new__(VenastineApp)
+        app._shutting_down = True
+
+        assert app.ask_review_blocking({}, 0) == ("reject", "")
+        assert app.ask_permission_blocking("shell", {}, None) is False
+
+    def test_the_no_answer_line_only_prints_when_there_was_no_answer(self):
+        """f15: printing '[no answer]' after the user already answered
+        contradicts what they just did."""
+        from tui.app import VenastineApp
+
+        class _Rec:
+            def __init__(self):
+                self.lines = []
+
+            def write_system(self, t):
+                self.lines.append(t)
+
+        class _Screen:
+            def __init__(self):
+                self.dismissed = None
+
+            def dismiss(self, value):
+                self.dismissed = value
+
+        class _Bare(VenastineApp):
+            # _transcript and screen_stack are read-only properties on
+            # the real app; the bare instance needs injectable ones.
+            @property
+            def _transcript(self):
+                return self._t
+
+            @property
+            def screen_stack(self):
+                return self._stack
+
+        app = _Bare.__new__(_Bare)
+        app._t = _Rec()
+        app._stack = []
+        screen = _Screen()
+
+        app._stack = []                # the user answered; screen is gone
+        app._timed_out_review(screen)
+        assert app._transcript.lines == []
+        assert screen.dismissed is None
+
+        app._stack = [screen]
+        app._timed_out_review(screen)
+        assert screen.dismissed == ("reject", "")
+        assert any("no answer" in line for line in app._transcript.lines)
+
+    def test_a_writer_failure_is_said_so_in_the_summary(self):
+        """r4-3: the summary must not point at a 07_review.json that the
+        swallowed write failure never produced."""
+        from tui import app as tui_app
+
+        run = _reviewed_run()
+        run.subagent_reviews = [{"kind": "text", "decision": "accept"}]
+
+        class _Rec(_NullTranscript):
+            def __init__(self):
+                self.lines = []
+
+            def write_system(self, t):
+                self.lines.append(t)
+
+            def write(self, t):
+                self.lines.append(t)
+
+        app = _FakeTuiApp(review=True)
+        app._transcript = _Rec()
+        message = tui_app.ResearchFinished(run, None, artifacts_ok=False)
+
+        tui_app.VenastineApp.on_research_finished(app, message)
+
+        assert any("artifact write FAILED" in line
+                   for line in app._transcript.lines)
+        assert not any("full record in 07_review.json" in line
+                       for line in app._transcript.lines)
 
 
 class TestTheReviewArtifact:

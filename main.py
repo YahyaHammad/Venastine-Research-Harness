@@ -250,6 +250,21 @@ class _StdinReader:
             return None
 
 
+_STDIN_READER: "_StdinReader | None" = None
+
+
+def _stdin_reader() -> _StdinReader:
+    """ONE reader per process (review §19-20 f3). Two _StdinReader pumps
+    racing for one stdin is exactly the shape the class docstring
+    forbids: with --attended --review the attended pump swallows the
+    review walk's answers and every consent question times out to a
+    reject. Both builders share this instance."""
+    global _STDIN_READER
+    if _STDIN_READER is None:
+        _STDIN_READER = _StdinReader()
+    return _STDIN_READER
+
+
 def build_attended_provider():
     """An ApprovalProvider that asks at the terminal (§25 R9).
 
@@ -259,7 +274,7 @@ def build_attended_provider():
     """
     from core.approval import ApprovalProvider
 
-    reader = _StdinReader()
+    reader = _stdin_reader()
 
     def ask(tool_name: str, params: dict, notice) -> bool:
         import json as _json
@@ -551,7 +566,7 @@ def build_review_consent():
     if not sys.stdin.isatty():
         return None
 
-    reader = _StdinReader()
+    reader = _stdin_reader()
 
     def decide(finding, round_index):
         kind = finding.get("kind")

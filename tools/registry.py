@@ -190,6 +190,18 @@ class ToolRegistry:
         """
         return is_tool_allowed(tool_name, context)
 
+    def is_registered(self, tool_name: str) -> bool:
+        """Whether a tool with this name is currently registered.
+
+        Policy and registration are different questions (review §19-20
+        f12): is_allowed answers "would policy refuse this call", and for
+        unknown mcp__ names it says no-refuse by design -- the server may
+        connect later. A caller that needs to know whether the tool
+        EXISTS (e.g. §19's activation notice, which should flag a
+        declared tool that is not callable right now) asks this.
+        """
+        return tool_name in self._tools
+
     def grantable(self, tool_name: str) -> bool:
         """Whether approving this tool BY NAME, before any call exists, is
         meaningful consent (ROADMAP_v2 §25, R2).

@@ -55,7 +55,9 @@ logger = logging.getLogger(__name__)
 DEFAULT_PROVIDER = "ANTHROPIC"
 FLAGGED_TIERS = {"LOW", "UNVERIFIED"}
 MAX_RETRIES = getattr(config, "MAX_PIPELINE_RETRIES", 2)
-MAX_JSON_RETRIES = getattr(config, "MAX_JSON_RETRIES", 2)
+# The JSON-retry budget lives in core/reasoning/json_retry.py since the
+# §20 extraction; a second constant here was a dead knob that invited
+# no-op patches (review §19-20 f9).
 
 _CLAIM_INPUT_FIELDS = {"id", "text", "type", "entities", "source_span", "asserted_by_candidates"}
 
@@ -112,10 +114,11 @@ def _run_pass_with_json_retry(
     system prompt to continue under, and that a retry's tool calls belong
     on the same §25 audit trail as the original attempt's.
 
-    ROADMAP §3: attempts = MAX_JSON_RETRIES + 1 (1 initial +
-    MAX_JSON_RETRIES corrective). Unrecoverable failure raises ValueError
-    with the final parse error attached; the caller's try/except turns
-    that into a durable status='failed' record.
+    ROADMAP §3: attempts = max_retries + 1 (1 initial +
+    config.MAX_JSON_RETRIES corrective, per core/reasoning/json_retry.py).
+    Unrecoverable failure raises ValueError with the final parse error
+    attached; the caller's try/except turns that into a durable
+    status='failed' record.
     """
     response = RunAgentLoop.run_deep_research_mode(
         pass_input=pass_input, model=model, pass_id=pass_id, provider_name=provider_name,
@@ -227,26 +230,52 @@ def _review_stage(run: PipelineRun, model: str, provider_name: str,
     findings, thread_id = review_module.run_review(
         run, model, provider_name, authorization)
     run.log(f"Review: {len(findings)} finding(s) raised.")
+    # The findings' CONTENT is durable from this checkpoint on (review
+    # r1-2): a kill during the consent walk used to leave only the count,
+    # with what the reviewer found unrecoverable. Trace is serialized by
+    # every update_pipeline_run, so this needs no new column (V8).
+    for f in findings:
+        target = f.get("claim_id") or "report"
+        excerpt = str(f.get("proposed") or "")[:80]
+        run.log(f"Review: finding -- {f.get('kind')} correction to {target}"
+                + (f": {excerpt}" if excerpt else ""))
     update_pipeline_run(run.run_id, run)
 
     decisions = review_module.walk_consent(
         findings, review, run, model=model, provider_name=provider_name,
         thread_id=thread_id, authorization=authorization)
     run.subagent_reviews = decisions
+    update_pipeline_run(run.run_id, run)
 
-    if review_module.apply(run, decisions):
-        accepted = sum(1 for d in decisions if d.get("decision") == "accept")
-        run.final_report = _run_pass(
-            "Final synthesis",
-            _synthesis_input(run, review_module.synthesis_directives(decisions)),
-            model, provider_name, authorization=authorization,
-        )
+    # Deferred commit (review f4): corrections land on a copy, and the
+    # live claims/report change only after the re-synthesis succeeds. A
+    # failed re-synthesis therefore persists a consistent record -- the
+    # pre-fix order stored corrected claims beside the stale report.
+    changed, corrected, applied = review_module.apply_deferred(run, decisions)
+    if changed:
+        original_claims = run.claims
+        run.claims = corrected
+        try:
+            run.final_report = _run_pass(
+                "Final synthesis",
+                _synthesis_input(run, review_module.synthesis_directives(decisions)),
+                model, provider_name, authorization=authorization,
+            )
+        except Exception:
+            run.claims = original_claims
+            run.log("Review: re-synthesis failed; accepted corrections NOT "
+                    "applied -- claims and report left unchanged.")
+            raise
+        review_module.log_outcomes(run, decisions, applied, committed=True)
         # NOT re-reviewed. The regress is cut deliberately: a review of the
         # re-synthesised report would need its own consent pass, and so on.
-        run.log(f"Review: {accepted} correction(s) accepted; final synthesis "
-                f"re-run. The re-synthesised report is not re-reviewed.")
+        run.log(f"Review: {len(applied)} correction(s) accepted; final "
+                f"synthesis re-run. The re-synthesised report is not "
+                f"re-reviewed.")
     else:
+        review_module.log_outcomes(run, decisions, applied, committed=False)
         run.log("Review: no correction applied; report unchanged.")
+    update_pipeline_run(run.run_id, run)
 
 
 def _apply_fallback(claim: Claim) -> None:

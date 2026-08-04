@@ -71,7 +71,7 @@ Every decision below was made through a structured clarification cycle with the 
 - 16. TUI — Textual app + widgets + slash commands + streaming integration
 - 17. MCP client — stdio + HTTP/SSE + `mcp.json` + async bridge + workspace trust
 - 18. Agent system — agent `.md` format + manager + subagent tool + per-agent scoping + intersection rule
-- 19. Skill system — skill `.md` format + manager + activation + default skills
+- 19. Skill system — skill `.md` format + manager + activation + default skills **(BUILT)**
 - 20. Subagent reviewing — opt-in post-pipeline review with consented correction **(BUILT)**
 - 21. Memory system — compaction, archive, thread-scoped pinning, user/project memory
 - 22. Pipeline observability — orchestrator events + the live research view **(added during §16)**
