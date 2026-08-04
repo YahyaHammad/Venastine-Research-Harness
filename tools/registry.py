@@ -32,7 +32,7 @@ from tools.builtin import (
 from security.permissions import (
     assert_permissions_declared, is_tool_allowed, requires_approval,
 )
-from safety.policy_enforcement import check_output_policy
+from safety.policy_enforcement import check_input_policy, check_output_policy
 from agents import subagent_tool
 
 logger = logging.getLogger(__name__)
@@ -248,6 +248,17 @@ class ToolRegistry:
             approved = approval_callback(tool_name, params) if approval_callback else False
             if not approved:
                 raise ToolCallDenied(f"{tool_name} requires approval and was not given")
+
+        # §25 (R5): content policy on the ARGUMENTS, the mirror of the
+        # check_output_policy call below. Runs AFTER the approval check,
+        # deliberately -- approving a call does not authorise smuggling a
+        # credential out inside it, and a user who just clicked Allow is
+        # the last person positioned to notice that the parameters were
+        # chosen by a model reading an attacker's web page.
+        refusal = check_input_policy(tool_name, params)
+        if refusal is not None:
+            logger.warning("%s", refusal)
+            raise ToolCallDenied(refusal)
 
         # §18: hand the live run-scoped values to handlers that declared
         # them (spawn_subagent wants both). Handlers that didn't are

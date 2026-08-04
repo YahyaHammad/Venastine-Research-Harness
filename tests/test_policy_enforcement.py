@@ -12,6 +12,7 @@ import pytest
 
 from safety.policy_enforcement import (
     BLOCKED_DOMAINS,
+    check_input_policy,
     check_output_policy,
     is_domain_blocked,
     redact_secrets,
@@ -290,3 +291,153 @@ class TestDepthCapFailsClosed:
         verbatim."""
         out = check_output_policy("t", {"result": self._nest(40)})
         assert self.SECRET not in str(out)
+
+
+# ===========================================================================
+# ---- check_input_policy (ROADMAP_v2 §25, R5) -------------------------------
+# ===========================================================================
+#
+# The symmetric half of check_output_policy. Two holes it closes, both
+# older than the research-pipeline work that surfaced them:
+#
+#   1. Results were scanned for secrets and ARGUMENTS never were, so an
+#      approved tool could be handed text drawn from context and nothing
+#      was watching the one direction that leaves the harness.
+#   2. BLOCKED_DOMAINS was enforced only by the two tools that import
+#      is_domain_blocked(). Every other tool taking a URL bypassed it.
+#
+# Every test here goes through a tool that opted into NEITHER check, so a
+# pass proves dispatch() enforces it rather than the tool doing its own
+# work -- which is the whole claim.
+
+SECRET = "sk-ant-api03-CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC"
+
+
+@pytest.fixture
+def spy_tool(mocker):
+    """A registered tool with no approval_check, no domain check and no
+    secret handling, which RECORDS whether its handler ran."""
+    from tools.registry import registry, ToolSpec
+
+    calls = []
+    registry.register(ToolSpec(
+        "spy", {"name": "spy"}, lambda params: calls.append(params) or {"result": "ok"}))
+    mocker.patch("tools.registry.is_tool_allowed", return_value=True)
+    mocker.patch("tools.registry.requires_approval", return_value=False)
+    try:
+        yield calls
+    finally:
+        registry.unregister("spy")
+
+
+class TestArgumentSecretsAreRefused:
+
+    def test_secret_in_a_flat_argument_is_refused(self):
+        assert check_input_policy("spy", {"text": f"here: {SECRET}"}) is not None
+
+    def test_clean_arguments_pass(self):
+        """Control. Without it every test above would also pass against an
+        implementation that refuses unconditionally."""
+        assert check_input_policy("spy", {"text": "an ordinary query"}) is None
+
+    def test_refusal_reason_does_not_echo_the_secret(self):
+        """The reason travels into model context, the TUI transcript and
+        the persisted MessageLog. Quoting the credential to report that a
+        credential leaked would leak it three more places."""
+        reason = check_input_policy("spy", {"text": SECRET})
+        assert SECRET not in reason
+        assert "credential" in reason
+
+    def test_secret_nested_in_an_argument_is_refused(self):
+        """A values-only top-level scan is what the §17 output hole was.
+        Nesting an argument is no harder than nesting a result."""
+        params = {"payload": {"body": [{"note": SECRET}]}}
+        assert check_input_policy("spy", params) is not None
+
+    def test_secret_in_an_argument_key_is_refused(self):
+        """scan_keys=True on the input side only. A dict KEY is a legal
+        place to put a string, and a scan that reads values alone is
+        bypassed by one that the model can write directly."""
+        assert check_input_policy("spy", {SECRET: "x"}) is not None
+
+
+class TestArgumentUrlsAreCheckedAgainstTheBlocklist:
+
+    def test_blocked_url_refused_for_a_tool_that_never_opted_in(self, monkeypatch):
+        monkeypatch.setattr("safety.policy_enforcement.BLOCKED_DOMAINS", {"evil.com"})
+        reason = check_input_policy("spy", {"target": "https://evil.com/payload"})
+        assert reason is not None
+        assert "evil.com" in reason
+
+    def test_allowed_url_passes(self, monkeypatch):
+        monkeypatch.setattr("safety.policy_enforcement.BLOCKED_DOMAINS", {"evil.com"})
+        assert check_input_policy("spy", {"target": "https://example.com/x"}) is None
+
+    def test_url_embedded_in_prose_is_still_found(self, monkeypatch):
+        monkeypatch.setattr("safety.policy_enforcement.BLOCKED_DOMAINS", {"evil.com"})
+        params = {"note": "see https://evil.com/a for details"}
+        assert check_input_policy("spy", params) is not None
+
+    def test_a_bare_domain_is_deliberately_not_refused(self, monkeypatch):
+        """A documented judgment, not an oversight. This harness researches
+        security topics, so a blocked domain's NAME appears in legitimate
+        queries, claims and reports constantly. Refusing every mention
+        would break normal use while blocking nothing an attacker could not
+        rephrase -- the scheme is what marks an attempt to REACH it."""
+        monkeypatch.setattr("safety.policy_enforcement.BLOCKED_DOMAINS", {"evil.com"})
+        assert check_input_policy("spy", {"query": "what is evil.com"}) is None
+
+
+class TestInputDepthCapFailsClosed:
+    """Same bound as the output side, opposite action: output substitutes a
+    placeholder, input refuses. Both are 'do not emit what you did not
+    scan'; only the direction of the data differs."""
+
+    def test_arguments_nested_beyond_the_cap_are_refused(self):
+        value = {"leaf": "harmless"}
+        for _ in range(40):
+            value = {"next": value}
+        reason = check_input_policy("spy", value)
+        assert reason is not None
+        assert "depth" in reason
+
+    def test_arguments_within_the_cap_are_not(self):
+        value = {"leaf": "harmless"}
+        for _ in range(3):
+            value = {"next": value}
+        assert check_input_policy("spy", value) is None
+
+
+class TestDispatchEnforcesItBeforeTheHandlerRuns:
+    """The load-bearing one. check_input_policy() being correct is not the
+    claim -- the claim is that every tool passes through it, including one
+    that imports nothing from this module."""
+
+    def test_refused_call_raises_and_the_handler_never_runs(self, spy_tool):
+        from tools.registry import registry, ToolCallDenied
+
+        with pytest.raises(ToolCallDenied) as exc:
+            registry.dispatch("spy", {"text": SECRET})
+        assert SECRET not in str(exc.value)
+        assert spy_tool == [], "the handler ran despite the refusal"
+
+    def test_clean_call_reaches_the_handler(self, spy_tool):
+        """Control for the above: proves the fixture's tool is dispatchable
+        at all, so the refusal test is measuring the refusal."""
+        from tools.registry import registry
+
+        registry.dispatch("spy", {"text": "fine"})
+        assert spy_tool == [{"text": "fine"}]
+
+    def test_approval_does_not_waive_it(self, spy_tool, mocker):
+        """Runs after the approval gate, deliberately. Approving a call
+        authorises the ACTION, not smuggling a credential out inside its
+        parameters -- and a user who just clicked Allow is the last person
+        positioned to notice which arguments the model chose."""
+        from tools.registry import registry, ToolCallDenied
+
+        mocker.patch("tools.registry.requires_approval", return_value=True)
+        with pytest.raises(ToolCallDenied):
+            registry.dispatch("spy", {"text": SECRET},
+                              approval_callback=lambda n, p: True)
+        assert spy_tool == []

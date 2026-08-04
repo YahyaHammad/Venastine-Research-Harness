@@ -528,6 +528,15 @@ async def test_same_state_reassignment_does_not_redraw_the_raven():
         raven.state = ravens.THINKING
         await pilot.pause()
 
+        # Pause the ANIMATION first. _render_state has two callers -- the
+        # watcher and the 0.4s frame timer -- and only the watcher is under
+        # test here. Counting both made this flaky rather than wrong: a
+        # timer tick landing inside the measurement window shows up as a
+        # redraw the reactive did not cause, which happens under full-suite
+        # load and not when the file runs alone. This is also what the TUI
+        # itself does while tokens stream, so it is not an artificial state.
+        raven.pause_animation()
+
         # Count re-renders rather than watcher calls: _render_state is
         # what actually costs a redraw, and it is called by the watcher.
         calls = []
