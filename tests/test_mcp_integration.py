@@ -43,19 +43,32 @@ def _child_pids() -> set:
     Get-CimInstance is the supported replacement.
     """
     if sys.platform == "win32":
-        # `$_.Name -eq 'python.exe'` is not cosmetic. Without it the query
+        # `$_.Name -eq '<exe>'` is not cosmetic. Without it the query
         # matches ITSELF: the needle appears in the PowerShell process's
         # own command line, so every call reported a phantom orphan and
         # this test failed against a teardown that was working correctly.
         # A test that cries leak is as useless as one that can't see one.
-        out = subprocess.run(
+        #
+        # The name is DERIVED from sys.executable rather than hardcoded to
+        # python.exe: under an interpreter named python3.exe (MSYS2) the
+        # live child would never match, and the POSIX branch below imposes
+        # no name filter at all.
+        exe = os.path.basename(sys.executable)
+        result = subprocess.run(
             ["powershell", "-NoProfile", "-NonInteractive", "-Command",
              "Get-CimInstance Win32_Process | Where-Object { "
-             "$_.Name -eq 'python.exe' -and "
+             f"$_.Name -eq '{exe}' -and "
              "$_.CommandLine -like '*stdio_server_fixture*' } | "
              "ForEach-Object { $_.ProcessId }"],
-            capture_output=True, text=True).stdout
-        return {int(t) for t in out.split() if t.isdigit()}
+            capture_output=True, text=True)
+        # A failed query returns empty stdout, which is indistinguishable
+        # from "no children" -- so the spawn assertion would fail and
+        # blame the MCP server for what is a restricted-WMI problem.
+        if result.returncode != 0:
+            pytest.fail(
+                "could not enumerate processes, so this test cannot tell a "
+                f"leak from a clean shutdown: {result.stderr.strip()}")
+        return {int(t) for t in result.stdout.split() if t.isdigit()}
 
     out = subprocess.run(["ps", "-eo", "pid,args"],
                          capture_output=True, text=True).stdout

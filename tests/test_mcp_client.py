@@ -288,9 +288,15 @@ def test_ac4_a_hanging_tool_times_out_via_the_protocol_not_the_caller(client):
     elapsed = time.time() - t0
 
     assert "error" in result
-    # Fired at 8.0 - _TIMEOUT_MARGIN_S, comfortably before the caller
-    # deadline. Delete read_timeout_seconds and this runs the full 8s.
-    assert elapsed < 7.0, f"caller-side timeout won the race ({elapsed:.1f}s)"
+    # Fired at 8.0 - _TIMEOUT_MARGIN_S, before the caller deadline.
+    # DERIVED from the margin, not hardcoded: a bound of 7.0 silently
+    # assumed _TIMEOUT_MARGIN_S >= 1.0, so tightening that tunable to 0.5
+    # would fail a CORRECT implementation with the false diagnosis
+    # "caller-side timeout won the race" -- flagging the very regression
+    # this test exists to catch, in a run that does not have it.
+    from mcp_client.client import _TIMEOUT_MARGIN_S
+    budget = 8.0 - _TIMEOUT_MARGIN_S + 1.0
+    assert elapsed < budget,         f"caller-side timeout won the race ({elapsed:.1f}s > {budget:.1f}s)"
     # The SDK's message, not our local fallback's ("MCP tool ... timed out").
     assert "MCP call failed" in result["error"]
 

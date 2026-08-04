@@ -71,11 +71,19 @@ def test_added_file_revokes_trust(tmp_path):
 
 
 def test_hash_sees_paths_not_just_content(tmp_path):
-    """Two projects whose files swap names but keep the same content
-    multiset must hash differently -- the relative path is part of the
-    digest (Rev. 3 correction 2)."""
-    proj_a = _make_project(tmp_path, {"a.md": "X", "b.md": "Y"}, name="pa")
-    proj_b = _make_project(tmp_path, {"a.md": "Y", "b.md": "X"}, name="pb")
+    """The relative path is part of the digest (Rev. 3 correction 2).
+
+    Identical content in identical WALK ORDER, differing only in where
+    the file lives. The previous version swapped two files' names, which
+    cannot detect its own regression: os.walk descends sorted, so file
+    positions are fixed by name and the two projects hash differently
+    whether or not the path bytes are fed in. That left the actual
+    failure untested -- a relocation preserving the content sequence
+    inheriting trust silently, which is precisely what path-in-hash
+    exists to catch.
+    """
+    proj_a = _make_project(tmp_path, {"agents/x.md": "C"}, name="pa")
+    proj_b = _make_project(tmp_path, {"skills/x.md": "C"}, name="pb")
     assert workspace_trust._content_hash(str(proj_a)) != \
         workspace_trust._content_hash(str(proj_b))
 

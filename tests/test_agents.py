@@ -417,7 +417,12 @@ def test_cmd_goal_sets_and_clears(_roots, fake_storage):
     assert app.banner_refreshes == 2
 
 
-def test_cmd_grill_me_uses_current_thread(tmp_path, fake_storage):
+def test_cmd_grill_me_routes_to_run_one_shot(tmp_path, fake_storage):
+    """Named for what it can actually see. The stub replaces
+    run_one_shot, which is WHERE "current thread" is implemented, so this
+    pins the routing and the prompt only -- the thread property itself is
+    pinned in test_tui.py against the real method.
+    """
     from agents.tui_commands import _cmd_grill
     from core.memory import ConversationMemory
 
@@ -625,3 +630,42 @@ def test_spawn_subagent_missing_params_return_errors_not_keyerrors(params):
     error dict would let the model correct itself."""
     result = subagent_tool.run(params, parent_context=ToolContext())
     assert "error" in result
+
+
+def test_run_agent_conversation_forwards_system_prompt_to_the_loop(mocker):
+    """§18's agent identity rests entirely on this parameter reaching
+    _run(), and its only production consumer (spawn_subagent) is tested
+    with run_agent_conversation mocked away -- so a version that ignored
+    the argument and always used the default harness prompt would leave
+    every subagent running without its methodology, with all of
+    test_agents green.
+    """
+    captured = {}
+
+    def _fake_run(memory, system_prompt, *args, **kwargs):
+        captured["prompt"] = system_prompt
+        yield LoopEvent(final_response=make_model_response(text="ok"),
+                        stop_reason="complete")
+
+    mocker.patch.object(RunAgentLoop, "_run", side_effect=_fake_run)
+    RunAgentLoop.run_agent_conversation(
+        user_goal="t", model="m", system_prompt="CUSTOM AGENT PROMPT")
+
+    assert "CUSTOM AGENT PROMPT" in captured["prompt"]
+
+
+def test_run_agent_conversation_defaults_to_the_catalog_prompt(mocker):
+    """Control: forwarding must not break the None case, which is every
+    ordinary chat turn."""
+    captured = {}
+
+    def _fake_run(memory, system_prompt, *args, **kwargs):
+        captured["prompt"] = system_prompt
+        yield LoopEvent(final_response=make_model_response(text="ok"),
+                        stop_reason="complete")
+
+    mocker.patch.object(RunAgentLoop, "_run", side_effect=_fake_run)
+    RunAgentLoop.run_agent_conversation(user_goal="t", model="m")
+
+    assert "CUSTOM" not in captured["prompt"]
+    assert captured["prompt"]

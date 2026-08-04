@@ -362,9 +362,13 @@ def test_f3_user_over_project_collision_warns(_redirect_roots, caplog):
         config_loader.initialize(str(_redirect_roots["project"]))
 
     assert config_loader.get_skill("shared").description == "user version"
-    shadow = [r.message for r in caplog.records if "shadowed" in r.message]
+    shadow = [r.getMessage() for r in caplog.records if "shadowed" in r.getMessage()]
     assert shadow, "cross-tier shadowing must be announced"
-    assert "project-tier" in shadow[0] and "user-tier" in shadow[0]
+    # POSITIONAL, not just present. Substring checks pass either way, so
+    # swapping the two tier arguments -- "user-tier ... is shadowed by
+    # the project-tier definition" -- shipped green while sending anyone
+    # debugging a shadowed skill to edit the file that already lost.
+    assert shadow[0].index("project-tier") < shadow[0].index("user-tier"),         f"the message names the winner first: {shadow[0]!r}"
 
 
 def test_f4_file_not_starting_with_frontmatter_is_rejected(_redirect_roots, caplog):

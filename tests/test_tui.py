@@ -27,7 +27,6 @@ import queue
 
 import pytest
 
-from core.events import LoopEvent
 from tests.conftest import make_model_response, make_stream_sequence
 from tui.app import VenastineApp
 from tui.screens import PermissionScreen
@@ -543,3 +542,32 @@ async def test_same_state_reassignment_does_not_redraw_the_raven():
         raven.state = ravens.IDLE      # a genuine transition still fires
         await pilot.pause()
         assert calls, "a real state change stopped updating the raven"
+
+
+@pytest.mark.asyncio
+async def test_grill_me_runs_in_the_current_thread(mocker, tmp_path, fake_storage):
+    """The locked §18 decision: /grill-me reads the LIVE history rather
+    than a digest of it. That lives in run_one_shot, which passes
+    self.memory.thread_id to continue_conversation -- so a version that
+    spawned a fresh thread would grill an empty one.
+
+    Driven through the real run_one_shot. test_agents' version stubs that
+    method out, so it cannot see this at all.
+    """
+    from core import config_loader
+
+    config_loader.initialize(str(tmp_path))
+    continue_conv = mocker.patch(
+        "core.loop.RunAgentLoop.continue_conversation",
+        return_value=make_model_response(text="grilled"))
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        expected = app.memory.thread_id
+        app.query_one("#prompt").value = "/grill-me"
+        await pilot.press("enter")
+
+        assert await _settle(pilot, lambda: continue_conv.called), \
+            "/grill-me never ran"
+
+    assert continue_conv.call_args.kwargs["thread_id"] == expected

@@ -343,7 +343,11 @@ def test_main_registers_every_table_before_creating_the_database():
     import ast
     import pathlib
 
-    tree = ast.parse(pathlib.Path("main.py").read_text(encoding="utf-8"))
+    # Anchored on THIS file, not the process cwd. Running pytest from
+    # anywhere but the repo root made the guard raise FileNotFoundError
+    # instead of asserting -- an unrelated error in place of the check.
+    repo_root = pathlib.Path(__file__).resolve().parents[1]
+    tree = ast.parse((repo_root / "main.py").read_text(encoding="utf-8"))
     imported = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):

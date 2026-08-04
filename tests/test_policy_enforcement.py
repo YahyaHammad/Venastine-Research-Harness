@@ -6,6 +6,8 @@ blocked domain checking, output policy enforcement, and registry
 integration (dispatch redacts secrets from tool output).
 """
 
+import sys
+
 import pytest
 
 from safety.policy_enforcement import (
@@ -174,8 +176,13 @@ class TestCheckOutputPolicy:
         """Bounded descent: this scans output from code the user didn't
         write, so a pathological structure must degrade rather than blow
         the stack."""
+        # Past the interpreter's own limit, not merely deep. 200 levels
+        # is ~400 frames against a default limit of 1000 -- nothing in
+        # this repo lowers it -- so deleting the depth guard raised
+        # nothing and this test passed against the unbounded walk it was
+        # written to catch.
         nested = inner = {}
-        for _ in range(200):
+        for _ in range(sys.getrecursionlimit() + 100):
             inner["next"] = {}
             inner = inner["next"]
         inner["v"] = "sk-ant-abc123def456ghi789jkl012mno345pqr678stu901"

@@ -60,8 +60,16 @@ def test_no_temperature_means_no_key_at_all():
 def test_default_model_is_in_the_reject_set():
     """Regression guard for the defect's root condition. If the shipped
     default model ever accepts sampling params again this test should be
-    updated deliberately, not discovered by a 400 in production."""
-    assert config.MODEL_NAME in config.MODELS_REJECTING_SAMPLING_PARAMS
+    updated deliberately, not discovered by a 400 in production.
+
+    Asserted against the SHIPPED literal, not config.MODEL_NAME, which
+    reads AGENT_MODEL from the environment. Keying on it made this fail
+    for anyone using the documented override -- and, worse, made it pass
+    if config.py's default ever moved to a sampling-ACCEPTING model while
+    AGENT_MODEL happened to point at a rejecting one, shipping exactly
+    the regression the docstring names.
+    """
+    assert "claude-sonnet-5" in config.MODELS_REJECTING_SAMPLING_PARAMS
 
 
 # ---------------------------------------------------------------------------
@@ -119,6 +127,27 @@ def test_google_reports_no_levels_when_the_sdk_cannot_carry_a_budget(monkeypatch
 def test_google_unknown_level_sends_nothing(monkeypatch):
     monkeypatch.setattr(client_module, "_google_budget_support", True)
     assert _thinking_for_provider("GOOGLE", "nonsense") == {}
+
+
+@pytest.mark.parametrize("fields, expected", [
+    ({"include_thoughts": object()}, False),          # the PINNED shape
+    ({"include_thoughts": object(), "thinking_budget": object()}, True),
+])
+def test_google_gate_inspects_the_sdk_class(monkeypatch, fields, expected):
+    """The gate's whole substance is which fields ThinkingConfig has, and
+    every other test here monkeypatches the CACHED answer instead -- so
+    mutating the field name it looks for ("thinking_budget" ->
+    "include_thoughts") left the suite green while a Google user
+    selecting an offered level got a TypeError'd turn in production.
+
+    The conftest fake even disagrees with the pinned SDK, so asserting
+    through it would prove the fake, not the code.
+    """
+    monkeypatch.setattr(client_module, "_google_budget_support", None)
+    monkeypatch.setattr(client_module.genai_types, "ThinkingConfig",
+                        SimpleNamespace(model_fields=fields))
+
+    assert client_module._google_supports_thinking_budget() is expected
 
 
 # ---------------------------------------------------------------------------

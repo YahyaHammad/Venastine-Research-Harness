@@ -264,3 +264,48 @@ def test_list_threads_empty_when_no_threads(fake_storage):
     """list_threads() on a fresh storage with zero threads returns an
     empty list, not None or an error."""
     assert fake_storage.list_threads() == []
+
+
+# ===========================================================================
+# ---- update_thread_extra reassigns rather than mutates (review f29) ------
+# ===========================================================================
+
+def test_update_thread_extra_assigns_a_fresh_dict(monkeypatch):
+    """The reassignment in storage.update_thread_extra is load-bearing
+    and invisible: extra_data is a plain JSON column, so SQLAlchemy's
+    change detection sees an ASSIGNMENT but not an in-place mutation. A
+    "simplification" to `thread.extra_data[key] = value` emits no UPDATE
+    and /goal silently stops persisting across sessions.
+
+    A PROXY for that, and stated as one. The honest test is a real-SQLite
+    round trip, which this suite has no swap for -- the root conftest
+    installs a fake sqlmodel at import time, and test_memory_write_through
+    documents why undoing it is not worth the mess. What is asserted
+    instead is the property the real test would rest on: the object bound
+    to extra_data afterwards is not the object that was there before.
+    """
+    import storage as storage_mod
+    from uuid import uuid4
+
+    original = {"goal": "old"}
+    seen = {}
+
+    class _Thread:
+        def __init__(self):
+            self.extra_data = original
+
+    class _Session:
+        def __init__(self, engine): self._thread = _Thread()
+        def __enter__(self): return self
+        def __exit__(self, *exc): return False
+        def get(self, model, ident): return self._thread
+        def add(self, obj): seen["assigned"] = obj.extra_data
+        def commit(self): pass
+
+    monkeypatch.setattr(storage_mod, "Session", _Session)
+    storage_mod.update_thread_extra(uuid4(), "goal", "new")
+
+    assert seen["assigned"] == {"goal": "new"}
+    assert seen["assigned"] is not original, \
+        "extra_data was mutated in place; SQLAlchemy will not see the change"
+    assert original == {"goal": "old"}, "the original dict was mutated"
