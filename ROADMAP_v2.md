@@ -1106,7 +1106,9 @@ Generalise the approval bridge into a response channel that carries a typed requ
 
 Up to 4 options, multi-select, a write-your-own answer, and a "chat about this" escape that returns control to the conversation instead of forcing a choice.
 
-**Headless behaviour is decided (matches D26/`remember()`): with no response channel the call is DENIED**, and the model receives an error result it can work around. The CLI and every research pass are headless. This is deliberate for the same reason `remember()` is: a ten-pass pipeline running unattended is exactly where a blocking prompt nobody will answer turns into a hang, and where an injected question from fetched web content would be least noticed.
+**Headless behaviour is decided (matches D26/`remember()`): with no response channel the call is DENIED**, and the model receives an error result it can work around. This is deliberate for the same reason `remember()` is: a ten-pass pipeline running unattended is exactly where a blocking prompt nobody will answer turns into a hang, and where an injected question from fetched web content would be least noticed.
+
+**Amended by §25.** "The CLI and every research pass are headless" was true when this was written and is now conditional: a research run started with `--attended` carries an `ApprovalProvider` and *can* ask. The decision above is unchanged — the DEFAULT is still headless, and the deny-cleanly path is still what an unattended run gets — but the criterion below must be read as "with no way to ask" rather than "in the pipeline", or a question tool will be denied in an attended run where a human is sitting there waiting to answer it.
 
 Per D24 the tool needs declared fields in both `ToolPermissions` and `ToolApprovals`, or the import-time check fails.
 
@@ -1118,9 +1120,9 @@ Open question to settle at build time: whether the list is thread-scoped state i
 
 ### Acceptance criteria
 
-1. `permission_channel` is one case of the general channel, not a second mechanism alongside it.
-1b. **Per-tool subagent sign-off is a named consumer of this channel.** The §14-§18 review shipped §18's sign-off as all-or-nothing (decision S1) precisely because the boolean channel cannot carry a list-out/subset-back exchange: approving a spawn authorises the child's entire approval-gated set. The per-tool version -- request carries the candidate tools, response carries the approved subset, and rejected names are removed from the child's `allowed_tools` -- is deliberately deferred here rather than built on a bespoke second channel. `ToolSpec.approval_notice` and `ToolSpec.grant_scope` already exist and generalise to it.
-2. Both tools deny cleanly with no channel present, on the CLI and in every pipeline pass, and say why.
+1. `permission_channel` is one case of the general channel, not a second mechanism alongside it. **§25 added a second case that this must ABSORB rather than replace:** `core.approval.ApprovalProvider` — a caller-supplied `ask(tool_name, params, notice) -> bool` plus an `honour_run_scope` flag. It exists because `run_to_completion()` discards the `permission_request` event, so the CLI and the research pipeline (which drain the generator rather than watching it) would otherwise block on a queue with nothing displayed. Its `ask` signature is the request/response pair this section generalises; folding it in means one mechanism with three consumers, and NOT folding it in means the third bespoke channel this section exists to prevent.
+1b. **Per-tool subagent sign-off is a named consumer of this channel.** (§25 R1 built the per-tool selection for *pipeline* grants, where the prompt is a shell-side question before the run rather than a mid-loop exchange — so it needed no channel and does not discharge this criterion.) The §14-§18 review shipped §18's sign-off as all-or-nothing (decision S1) precisely because the boolean channel cannot carry a list-out/subset-back exchange: approving a spawn authorises the child's entire approval-gated set. The per-tool version -- request carries the candidate tools, response carries the approved subset, and rejected names are removed from the child's `allowed_tools` -- is deliberately deferred here rather than built on a bespoke second channel. `ToolSpec.approval_notice` and `ToolSpec.grant_scope` already exist and generalise to it.
+2. Both tools deny cleanly **with no way to ask** — no response channel and no `ApprovalProvider` — and say why. (Amended by §25: "in every pipeline pass" is no longer the same condition; an attended run can ask.)
 3. Both tools have declared permission/approval fields (D24).
 4. The todo panel re-renders from an event, not from polling.
 
@@ -1141,6 +1143,51 @@ Open question to settle at build time: whether the list is thread-scoped state i
 1. Running `/init` on a trusted project leaves it trusted, without weakening the content hash.
 2. The generated file is the user's to edit — regeneration must not silently overwrite hand-edits without saying so.
 3. The write goes through the permission layer.
+
+---
+
+## 25. Authorized tool use in the research pipeline — BUILT
+
+**Added and built after §18.** The ten-pass pipeline could not call **any** approval-gated tool, in any shell. This was structural, not a wiring oversight: `run_deep_research_mode` had no `permission_channel` parameter, so `_run()` always saw `None`, set `headless = True`, and `schemas(callable_only=True)` dropped every gated tool. Launching from the TUI's `/research` changed nothing. No MCP tool outside an `autoApprove` server was reachable from research, and neither was `spawn_subagent` after the §14–§18 review gated it. §15's `fetch_url` approval default was itself chosen around this limitation.
+
+The goal was to lift that **without weakening the stance the harness holds**: no tool runs without an explicit human decision, the human sees what they are authorizing, and no lower-trust layer can loosen a gate (D14).
+
+### The shape
+
+Authorization is **two independent axes**, not a mode enum: a *grant set* (possibly empty) and an *`ApprovalProvider`* (possibly absent). Both absent is the default, and is exactly the pre-§25 behaviour — no existing invocation changes and no prompt appears unless one is asked for.
+
+`core/approval.py` holds the data (`GrantBudget`, `ApprovalProvider`, `RunAuthorization`); `core/reasoning/authorization.py` holds the pipeline's policy and is shared by both shells; `core/loop.py` enforces; the shells build. The pipeline carries the bundle and interprets nothing.
+
+### Decisions record (R1–R12)
+
+| # | Decision |
+|---|---|
+| **R1** | **Per-tool selection**, not all-or-nothing. Unlike §18's S1, the pre-flight prompt is a shell-side question before the run, not the boolean `permission_channel` — so a subset is expressible here. |
+| **R2** | **Only tools with no `approval_check` are name-grantable** (`registry.grantable`). A per-call gate was never consented to by name. **This narrows §18's shipped S1**, at the shared mechanism: a signed-off subagent calling `shell` now prompts its parent. |
+| **R3** | `--grant` / `--grant-tools` are **per-run flags, never persisted**; `/research` takes the same values through the same parser. |
+| **R4** | **`spawn_subagent` is excluded from pipeline grants** (`PIPELINE_UNGRANTABLE`). Approving a spawn *is* the §18 sign-off, so pre-granting it unattended compounds one yes into unbounded delegated authority across ten passes. |
+| **R5** | **Argument-side content policy at `dispatch()`**, all tools, all modes, **refusing** rather than redacting. |
+| **R6** | **`GrantBudget`**, `config.MAX_GRANTED_TOOL_CALLS = 150`, counting granted calls only. Exhaustion falls back to *asking*. One instance shared by reference across all passes. |
+| **R7** | **Provenance framing** in the universal pass preamble. Defence-in-depth, explicitly **not** counted as a control. |
+| **R8** | **No per-pass grant scoping.** The pass that wants a granted search tool is the pass ingesting the most untrusted content, so separation buys little for a per-pass `ToolContext` the orchestrator does not have. |
+| **R9** | **Attended mode** via `ApprovalProvider`. Unanswered → **deny that call** after `config.ATTENDED_APPROVAL_TIMEOUT_S`, run continues. |
+| **R10** | **Grants and attended compose.** Grants cover the boring set; anything ungranted asks instead of being denied. |
+| **R11** | **Attended providers set `honour_run_scope = False`** — a mode whose purpose is granularity must not let one yes cover later calls. |
+| **R12** | **The mode is persistable in `settings.json`; the grant list never is.** Asymmetric on purpose: a persisted mode can only ever ADD prompts, a persisted grant list only ever removes them — and `settings.json` is the one config file where project tier beats user tier. `research.granted_tools` is rejected *by name*. |
+
+### Why the pipeline needed its own answer
+
+It is the harness's highest prompt-injection surface by construction: it fetches web pages and feeds them to a model that then chooses tools, unattended, across ten passes. §23 reasoned identically when it decided the question tool denies headless. Two of the mitigations here are therefore not pipeline features at all but repairs to older gaps (R5): results were scanned for secrets and **arguments never were**, and `BLOCKED_DOMAINS` was enforced only by the two tools that opted into it.
+
+### Acceptance criteria
+
+1. An unflagged `--mode research` run behaves exactly as before: no prompt, no grants, every gated tool hidden. ✓
+2. A granted tool is callable from a pass, and every use of it appears in `granted_calls.json`. ✓
+3. A tool with an `approval_check` is never covered by a name-level grant, in the pipeline **or** in §18's subagent sign-off. ✓
+4. Budget exhaustion asks (with a provider) or denies (without one) — never fails the run. ✓
+5. Attended mode raises a prompt per call, ignores run-scope, and a timeout denies one call without killing the run. ✓
+6. `research.granted_tools` in `settings.json` is rejected with a message explaining why it is absent. ✓
+7. A credential-shaped argument, or a blocked-domain URL, is refused at `dispatch()` for a tool that imports nothing from `safety/`. ✓
 
 ---
 

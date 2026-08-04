@@ -1240,6 +1240,14 @@ every change rather than a sample.
   TUI-only. This follows the rule already in force for MCP tools, and the
   notice names it, but it is a real capability change to two shipped
   modes.
+
+  *Amended by §25:* research is no longer permanently excluded. An
+  `--attended` run can approve a spawn live, which is a per-call human
+  decision and exactly what the gate exists for. It can never be
+  PRE-granted (R4), because approving a spawn hands the child a whole
+  gated set and one launch-time tick would compound into unbounded
+  delegated authority across ten unattended passes. CLI chat is still
+  excluded.
 - **The AC2 permission tests used `shell`**, which is globally
   permission-disabled — so with reachability now checked before approval
   (f55) it never reaches a modal at all. They were demonstrating the
@@ -1263,3 +1271,135 @@ arranged the state it was supposed to observe.
 Three more covered nothing at all and got real tests (f29, f52, f53).
 
 - Full suite: **489 tests** (was 395), plus the opt-in `integration` test.
+
+---
+
+# §25 — Authorized tool use in the research pipeline
+
+Prompted by a question rather than a review: *"just to confirm, you said
+research mode can't use spawn_subagent even in the TUI?"* It could not —
+and the answer was stronger than the question assumed. `run_deep_research_mode`
+had **no `permission_channel` parameter at all**, so every pass ran headless
+regardless of which shell launched it, and `schemas(callable_only=True)`
+dropped every approval-gated tool. The shell was irrelevant; there was no
+caller-side fix.
+
+The follow-up set the actual goal: *"I do want the research pipeline to be
+able to use tools that require approval in general, how can we design that
+such that it doesn't completely compromise the security stance we've been
+holding?"*
+
+## What was decided (R1–R12)
+
+The full table lives in ROADMAP_v2 §25. The load-bearing shape: authorization
+is **two independent axes**, a grant set and an `ApprovalProvider`, not a
+mode enum. Both absent is the default and is precisely the pre-§25
+behaviour, so no shipped invocation changed.
+
+Four decisions are worth restating because they constrain future work:
+
+**R2 narrows §18's shipped S1.** `registry.grantable()` is False for any
+tool declaring an `approval_check`, so a name-level grant cannot cover a
+decision made from the arguments. Before this, a signed-off subagent could
+run *any* shell command for the rest of the turn on the strength of one
+prompt reading "shell". Fixed at the shared mechanism rather than in the
+pipeline alone — the alternative was two grant semantics behind one
+`RunInfo` field, which is the divergence shape the producer rule exists to
+prevent. `candidate_approvals()` filters to the same rule so the list the
+user reads and the authority the child receives stay one list.
+
+**R4 excludes `spawn_subagent` from pipeline grants.** It is grantable in
+the ordinary sense — no `approval_check`, so approving the name is
+meaningful consent. It is excluded for what that consent then authorises:
+approving a spawn *is* the sign-off, handing the child its whole gated set.
+One launch-time tick would become every gated tool, for every child, across
+ten unattended passes, with the depth limit as the only bound. Nothing is
+lost: research passes never could delegate.
+
+**R6's budget degrades to asking, not to failing.** Pre-flight authorization
+trades a per-call decision for one up-front decision, and the thing it gives
+up is the natural bound on how many times the tool runs. `GrantBudget` puts
+that back; exhaustion makes the grant stop applying, so a supervised run
+keeps working and a headless one denies exactly as it would for any gated
+tool. One instance is shared **by reference** across all ten passes — a
+per-pass budget would multiply the ceiling by ten while reading as if it
+enforced one.
+
+**R12's asymmetry is the design.** `research.approval_mode` is persistable
+in `settings.json`; `research.granted_tools` is rejected *by name*, with a
+message saying the omission is deliberate. A persisted mode can only ever
+ADD prompts, so a hostile `settings.json` makes runs more annoying and never
+more permissive. A persisted grant list could only ever remove them — and
+`settings.json` is the one config file where project tier beats user tier,
+so a cloned repo would carry it. Falling through to the generic
+"unknown key" branch would have read as an oversight for someone to fix.
+
+## Deviations from the plan, and why
+
+- **The audit trail moved from Part 6 into Part 2.** It lands at the same
+  code site as the grant check; adding the list later would have meant
+  committing dead code in between.
+- **`_run_pass` accumulates onto the authorization bundle**, not module
+  state and not a thirteenth argument. The bundle is already shared by
+  reference across every pass — that is how the budget counts one ceiling
+  rather than ten — and what the authorization was *spent on* is
+  authorization state. A module global would break the moment two pipelines
+  ran.
+- **`run.granted_calls` IS the bundle's list, not a copy.** Sharing one
+  object is what puts the trail on the failure path and every §5 checkpoint.
+  Copying at the end would lose it on exactly the runs most worth auditing,
+  and two writers of related data is the shape §22 warns about by name.
+- **The CLI needed TWO flags, not one `nargs="?"`.** An optional-value flag
+  reads the next token as its value, so `--grant-tools "what is entropy"`
+  consumed the *query* and then failed with "requires a positional query
+  argument" — an error about the wrong thing entirely, on the documented
+  spelling of the common case. `--grant` (store_const) and `--grant-tools`
+  (value) share one dest in a mutually exclusive group. The TUI keeps one
+  spelling because it parses its own arguments and the value attaches with
+  `=`; it accepts `--grant-tools=` as an alias so muscle memory carries.
+- **`/research`'s flag parsing became one loop over leading tokens.**
+  Handling `--attended` and `--grant` in a fixed sequence left
+  `--grant --attended q` with "--attended q" as the research question.
+
+## What the revert checks caught
+
+Thirty-four revert checks across five commits. Four were not simple passes:
+
+1. **A test that hung instead of failing.** `test_grants.py` under-supplied
+   answers on a permission channel, and `_run()` blocks in `Queue.get()` —
+   so the suite stalled rather than naming a regression. Fixed structurally
+   with an `_AnswerQueue` that returns False when empty: a starved test now
+   *fails*. This is the second time this shape has bitten; §18's sign-off
+   test hit it first.
+2. **A revert aimed at the wrong code.** Removing the research approval
+   channel's registration "missed" — because `run_agent_turn` has the
+   identical two-line channel/registration pair *earlier* in the file, so a
+   one-shot `replace` reverted the chat path and left the research path
+   intact. The needle now includes the `PermissionScreen` line.
+3. **A test asserting the wrong observable.** The f10-style exit test
+   asserted the worker thread finished. Textual dismisses open screens
+   during shutdown, which fires the modal's callback and answers the queue
+   anyway — so "the thread finished" stayed true with the release wiring
+   removed. It now asserts the channel is *registered* where
+   `_release_permission_channel` can see it, which is the actual fix.
+4. **A genuine coverage gap, twice.** Nothing asserted that
+   `run_deep_research_mode` *unpacks* the bundle into `_run()`'s primitives
+   (every other test mocked over that layer, so all of them could pass with
+   the tools still hidden), and nothing asserted that the TUI builds a
+   provider from `--attended`. Both tests were written because the revert
+   list had nothing to point at.
+
+## Incidental fixes
+
+- **A flaky test, pinned rather than retried.** `_render_state` has two
+  callers — the reactive watcher and the raven's 0.4s frame timer — and
+  counting both made a full-suite timer tick look like a redraw the reactive
+  did not cause. The test pauses the animation first, which is also what the
+  TUI itself does while tokens stream. Verified it still fails against
+  `always_update=True`.
+- **Two files were double-encoded** by a `Get-Content | Set-Content`
+  round-trip during bulk editing (UTF-8 read as ANSI, rewritten as UTF-8,
+  plus a BOM). Repaired and verified repo-wide. Bulk text edits on this repo
+  go through Python, not PowerShell redirection.
+
+- Full suite: **587 tests** (was 489), plus the opt-in `integration` test.

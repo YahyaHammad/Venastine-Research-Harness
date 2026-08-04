@@ -13,8 +13,10 @@ python main.py --mode research "some query"       # ten-pass deep-research pipel
 python main.py --provider OPENAI --model gpt-5.1  # override provider/model
 python main.py --tui                              # Textual TUI (§16); the CLI stays the default (D12)
 python main.py --trust-project                    # grant D17 workspace trust non-interactively
+python main.py --mode research --grant "q"        # §25: pick gated tools to authorise for this run
+python main.py --mode research --attended "q"     # §25: approve every gated call as it happens
 
-pytest                                            # 489 tests, offline, ~20s (first run ~25s: matplotlib font cache)
+pytest                                            # 587 tests, offline, ~24s (first run ~30s: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -32,7 +34,7 @@ MCP servers are a *third* config file again — `mcp.json`, user-level or `.vena
 Read these before changing anything non-trivial — they carry design decisions that are locked, not defaults to re-derive.
 
 - **ARCHITECTURE.md** — what's built, file-by-file contracts ("what belongs here / what does NOT"), known gotchas (§11).
-- **ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **ROADMAP_v2.md** (§13–§24; §13–§18 built) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review). Section and D-numbers are stable and cross-referenced everywhere.
+- **ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **ROADMAP_v2.md** (§13–§25; §13–§18 and §25 built) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review and R1–R12 from §25). Section and D-numbers are stable and cross-referenced everywhere.
 - **DEVLOG.md** — per-section implementation notes: what was followed verbatim, what was deviated from (every deviation was an explicit user decision — do not silently override).
 - **tests/BREAKING_CHANGES.md** — what breaks each test when production code changes, the symptom, and the fix.
 - **QWEN.md** — a sibling agent-context file. Stale (it predates §13–§16 and disagrees with itself on test counts); prefer ARCHITECTURE.md and the code.
@@ -67,6 +69,8 @@ A from-scratch agentic harness (no LangChain). Two modes — regular tool-using 
 Three stop conditions, all in `_run()`: no tool calls (`complete`), `max_steps` exhausted (`max_steps_reached`), cumulative input+output tokens ≥ `max_total_tokens` (`token_budget_exceeded`). `stop_reason` and `thread_id` are set by `_run()`/the wrappers, never by `call_model()`.
 
 **D20 — persist before branch.** `memory.add_assistant_message(response)` runs immediately after the call returns, *before* any stop-condition branching. Moving it into a conditional silently drops plain-text final answers and budget-truncated responses from the persisted thread, and breaks the §3 JSON-retry path. This has been reintroduced once already; `test_streaming_loop.py` AC6 fails if it happens again.
+
+**"Headless" means unable to ask, not "not a TUI."** `_run()` hides approval-gated tools when there is neither a `permission_channel` nor an `approval_provider` (§25 broadened this from the channel alone). A research pass in attended mode can ask, so its gated tools are advertised.
 
 **Approval single source of truth:** `ToolRegistry.approval_needed(name, params, context)` — the tool's own `approval_check` **OR'd with** the config/context lookup (§15; it used to *replace* it, which made agent overrides inert for `read`/`write`/`edit`/`shell`). Both `dispatch()` and `_run()`'s permission bridge call it, so they cannot diverge. `_run()` checks reachability (`registry.is_allowed`) *before* asking, so a context-excluded tool reports the context denial instead of prompting and then being denied anyway. A tool already in `run_info.granted_tools` skips the prompt entirely — that is §18's per-turn subagent sign-off, keyed off `ToolSpec.grant_scope`, so no tool name appears in the loop. §15's spec sketch inlines this into `dispatch()` because it predates §13 — don't follow it there.
 
@@ -128,6 +132,18 @@ Invariants that look like simplification opportunities but are not:
 - **Pass 6c does not re-run Pass 5.** Assumption-flagged claims exhaust retries and fall to UNVERIFIED. Known design gap, not a bug.
 - **`vars(c)` serializes `Claim` at every site** (orchestrator passes 3a/3b/5/6a/6c/final synthesis, `pipeline_storage.update_pipeline_run`, `output_writer.write_run_artifacts`). Adding a nested-dataclass field to `Claim` requires migrating *all* of them to `dataclasses.asdict(c)` in one change.
 - **`update_pipeline_run(status=...)` defaults to `None`, not `"running"`** — so a data-only checkpoint can't reset a `complete`/`failed` row.
+- **The orchestrator CARRIES a `RunAuthorization`, it does not interpret one** (§25). Which tools may be granted is `core/reasoning/authorization.py`; enforcement is `core/loop.py`; building it from a human's answer is the shell's job. `authorization=None` is the default and means the pre-§25 behaviour: no grants, nobody to ask, every gated tool hidden from every pass.
+- **`run.granted_calls` IS the bundle's list, not a copy.** Sharing one object is what puts the audit trail on the failure path and every §5 checkpoint; copying at the end would lose it on exactly the runs most worth auditing.
+
+### Authorized tool use in the pipeline (§25)
+
+The pipeline could not call any approval-gated tool in any shell — `run_deep_research_mode` had no way to receive a `permission_channel`, so every pass ran headless. Authorization is now **two independent axes**, not a mode: a grant set (possibly empty) and an `ApprovalProvider` (possibly absent). Both absent is the default and changes nothing.
+
+- **A grant covers only tools with no `approval_check`** (R2, `registry.grantable`). A per-call gate was never consented to by name. This *narrowed* §18's shipped sign-off at the shared mechanism — a signed-off subagent calling `shell` now prompts its parent.
+- **`spawn_subagent` is excluded from pipeline grants** (R4, `PIPELINE_UNGRANTABLE`): approving a spawn *is* the §18 sign-off, so pre-granting it unattended compounds one yes into unbounded delegated authority.
+- **`GrantBudget` exhaustion degrades to *asking*, not to failing.** One instance shared by reference across all ten passes; rebuilding per pass would multiply the ceiling by ten while reading as if it enforced one.
+- **`ApprovalProvider` exists because `run_to_completion()` discards the `permission_request` event.** A bare queue would block with nothing displayed. §23 should absorb it into the general response channel, not add a third mechanism.
+- **The grant list is never persistable; the mode is** (R12). A persisted mode can only add prompts; a persisted grant list could only remove them, and `settings.json` is the one config file where project tier beats user tier. `research.granted_tools` is rejected *by name* so nobody "fixes" the omission.
 
 The eight JSON-emitting passes go through `_run_pass_with_json_retry()`, which re-enters the *same* pass thread via `continue_conversation()` so the model sees its own malformed output. Passes 1 and final synthesis are plain text and use bare `_run_pass()`.
 

@@ -46,34 +46,43 @@ Venastine Research Harness/
 ├── pytest.ini                      # testpaths=tests, --strict-markers
 ├── DEVLOG.md                       # implementation notes for built ROADMAP sections -- see §0
 │
-├── tests/                          # 395 tests, all offline, ~14s (first run ~7s for matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
+├── tests/                          # 587 tests, all offline, ~24s (first run ~7s for matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
 │   ├── conftest.py                 # fixtures: make_model_response, make_stream_from_response, make_stream_sequence, FakeStorage, ...
 │   ├── BREAKING_CHANGES.md         # what-breaks-it / symptom / fix per area
-│   ├── test_cli.py                 # 13 tests -- ROADMAP §1 thread_id passthrough + UUID validation + §14 parser defaults/resolution/trust flow
+│   ├── test_cli.py                 # 20 tests -- ROADMAP §1 thread_id passthrough + UUID validation + §14 parser defaults/resolution/trust flow
 │   ├── test_e2e.py                 # 5 tests -- e2e chat (multi-turn + tool use), research mode, error handling ×3
 │   ├── test_logging_setup.py       # 1 test -- configure_logging fallback on bad log path
 │   ├── test_output_writer.py       # 6 tests -- ROADMAP §12 artifact file layout, contents, chart PNG, None guard, tier counts
-│   ├── test_confidence_scoring.py  # 5 tests (3 ROADMAP verbatim regressions)
-│   ├── test_client_translation.py  # 20 tests -- all three provider translation branches + batching + Google call_model
-│   ├── test_client_streaming.py    # 8 tests -- ROADMAP §13 direct call_model_stream coverage (3 providers + D21 + fragment accumulation)
+│   ├── test_confidence_scoring.py  # 9 tests (3 ROADMAP verbatim regressions)
+│   ├── test_client_translation.py  # 27 tests -- all three provider translation branches + batching + Google call_model
+│   ├── test_client_streaming.py    # 9 tests -- ROADMAP §13 direct call_model_stream coverage (3 providers + D21 + fragment accumulation)
 │   ├── test_loop_stop_conditions.py# 3 tests (ROADMAP verbatim)
-│   ├── test_streaming_loop.py      # 7 tests -- ROADMAP §13 generator event ordering, exception propagation, D20 persistence, permission_channel
-│   ├── test_workspace_trust.py     # 8 tests -- ROADMAP_v2 §14 AC1/AC2 + hash-control properties (path-in-hash, determinism)
-│   ├── test_config_loader.py       # 18 tests -- ROADMAP_v2 §14 frontmatter AC4, tier precedence D8/D18, settings merge, CONTEXT opt-in AC5, catalog
-│   ├── test_load_skill.py          # 6 tests -- load_skill view-only retrieval, D24 permission declaration, catalog prompt injection
-│   ├── test_orchestrator.py        # 9 tests -- full pipeline mocked + JSON-retry + §5 failure/success/acceptance
-│   ├── test_registry_permissions.py# 8 tests -- allow/deny/approval
+│   ├── test_streaming_loop.py      # 9 tests -- ROADMAP §13 generator event ordering, exception propagation, D20 persistence, permission_channel
+│   ├── test_workspace_trust.py     # 16 tests -- ROADMAP_v2 §14 AC1/AC2 + hash-control properties (path-in-hash, determinism)
+│   ├── test_config_loader.py       # 41 tests -- ROADMAP_v2 §14 frontmatter AC4, tier precedence D8/D18, settings merge, CONTEXT opt-in AC5, catalog
+│   ├── test_load_skill.py          # 7 tests -- load_skill view-only retrieval, D24 permission declaration, catalog prompt injection
+│   ├── test_orchestrator.py        # 11 tests -- full pipeline mocked + JSON-retry + §5 failure/success/acceptance
+│   ├── test_registry_permissions.py# 11 tests -- allow/deny/approval
 │   ├── test_math_tools.py          # 14 tests -- symbolic equivalence + injection regression
-│   ├── test_memory_write_through.py# 9 tests -- write-through + storage-path-mismatch catch + resume-shape + list_threads
-│   ├── test_loop_tool_dispatch.py  # 5 tests -- _run tool-dispatch branches
+│   ├── test_memory_write_through.py# 10 tests -- write-through + storage-path-mismatch catch + resume-shape + list_threads
+│   ├── test_loop_tool_dispatch.py  # 7 tests -- _run tool-dispatch branches
 │   ├── test_json_retry.py          # 7 tests -- ROADMAP §3 malformed-JSON recovery (incl. crux test)
-│   ├── test_pipeline_storage.py    # 7 tests -- ROADMAP §5 create/update/load_pipeline_run + inner-failure caplog
+│   ├── test_pipeline_storage.py    # 9 tests -- ROADMAP §5 create/update/load_pipeline_run + inner-failure caplog
 │   ├── test_file_ops.py            # 31 tests -- ROADMAP §6 path resolution, approval, read/write/edit, registry
-│   ├── test_shell.py               # 44 tests -- ROADMAP §7 sandbox routing, inert/network classification, approval, backend internals
-│   ├── test_policy_enforcement.py  # 22 tests -- ROADMAP §8 secret redaction, domain blocking, output policy, registry integration
+│   ├── test_shell.py               # 45 tests -- ROADMAP §7 sandbox routing, inert/network classification, approval, backend internals
+│   ├── test_policy_enforcement.py  # 44 tests -- ROADMAP §8 secret redaction, domain blocking, output policy, registry integration
 │   ├── test_critic_routing.py      # 2 tests -- ROADMAP §11 critic-model routing (3a/3b/6c to critic, rest to main)
 │   ├── test_permission_context.py  # 21 tests -- ROADMAP_v2 §15 AC1-AC7 (stricter wins, mcp default, redaction survives, D24, unregister) + schemas filtering
-│   └── test_agents.py              # 16 tests -- ROADMAP_v2 §18 AC1-AC3 (intersection, depth, manager surface), dispatch injection, headless filter + warning, goal mode, catalog, D24, TUI commands
+│   ├── test_agents.py              # 31 tests -- ROADMAP_v2 §18 AC1-AC3 (intersection, depth, manager surface), dispatch injection, headless filter + warning, goal mode, catalog, D24, TUI commands
+│   ├── test_client_effort.py       # 26 tests -- ROADMAP_v2 §16 effort levels: queried for Anthropic, table fallback, effort_for validation, cache behaviour
+│   ├── test_ensemble_guard.py      # 3 tests -- §10 revisit: refuse ensemble mode on a model that rejects sampling params
+│   ├── test_tui.py                 # 29 tests -- ROADMAP_v2 §16 AC1-AC3 (thread picker, permission round-trip, worker survives a raising tool) + §25 grant picker / attended modal
+│   ├── test_mcp_config.py          # 26 tests -- ROADMAP_v2 §17 mcp.json discovery, tier precedence D29, unknown-key tolerance, strict flag parsing
+│   ├── test_mcp_client.py          # 30 tests -- ROADMAP_v2 §17 bridge, cancel-scope task affinity, v2 field names, normalization, teardown
+│   ├── test_grants.py              # 19 tests -- ROADMAP_v2 §25 R2/R6: grantability, the loop enforcing it, GrantBudget, the audit list
+│   ├── test_attended.py            # 12 tests -- ROADMAP_v2 §25 R9-R11: ApprovalProvider consulted, headless lifted, run-scope declined
+│   ├── test_research_authorization.py # 41 tests -- ROADMAP_v2 §25 R1/R3/R4/R12: candidates, grant-spec parsing, both shells' flags, settings precedence
+│   └── test_granted_calls_artifact.py # 5 tests -- ROADMAP_v2 §25 audit artifact + R7 provenance framing in the universal preamble
 │
 ├── core/
 │   ├── client.py                  # ONE model call, normalized across providers; provider-specific wire formats live ONLY here. §13 adds call_model_stream() (3 streaming impls) + collect_response() + StreamToken
@@ -82,11 +91,13 @@ Venastine Research Harness/
 │   ├── workspace_trust.py         # ROADMAP_v2 §14 (D17): trust store keyed by resolved path + content hash; is_trusted/grant_trust; sorted-walk deterministic hash with path-in-hash
 │   ├── config_loader.py           # ROADMAP_v2 §14: three-tier .md discovery (harness/project/user), line-anchored frontmatter parse, settings.json merge with loud unknown-key rejection, CONTEXT.md opt-in, frontmatter-only skill catalog
 │   ├── memory.py                  # ConversationMemory -- in-run message list, provider-NEUTRAL shape, backed by storage.py + resume-shape fix
+│   ├── approval.py                # ROADMAP_v2 §25: GrantBudget / ApprovalProvider / RunAuthorization -- how a run obtains human authorization, as DATA. Leaf module, no project imports
 │   │
 │   └── reasoning/
-│       ├── base.py                # Claim / PipelineRun data model for the research pipeline (now carries run_id)
+│       ├── base.py                # Claim / PipelineRun data model for the research pipeline (now carries run_id + §25 granted_calls)
+│       ├── authorization.py       # ROADMAP_v2 §25: the pipeline's grant POLICY -- candidates(), parse_grant_spec(), PIPELINE_UNGRANTABLE. Shared by both shells so they cannot drift
 │       ├── confidence_scoring.py  # Pass 4 -- deterministic scoring, ZERO LLM calls
-│       ├── orchestrator.py        # sequences all 10 passes + D0/D1/D2 + _run_pass_with_json_retry + §5 per-pass checkpoints + §11 critic-model routing
+│       ├── orchestrator.py        # sequences all 10 passes + D0/D1/D2 + _run_pass_with_json_retry + §5 per-pass checkpoints + §11 critic-model routing + §25 authorization passthrough
 │       ├── pipeline_storage.py    # ROADMAP §5: PipelineRunRecord table + create/update/load_pipeline_run
 │       └── output_writer.py      # ROADMAP §12: write_run_artifacts -- human-browsable /output/<run_id>/ directory
 │
@@ -112,7 +123,7 @@ Venastine Research Harness/
 │
 ├── safety/
 │   ├── __init__.py                # package init
-│   └── policy_enforcement.py      # ROADMAP §8: content-level output policy -- blocked domains + secret redaction
+│   └── policy_enforcement.py      # ROADMAP §8 + §25: content-level policy BOTH directions -- blocked domains + secret redaction on results, and refusal on arguments
 │
 ├── mcp_client/                    # ROADMAP_v2 §17: MCP client. NAMED mcp_client, NOT mcp -- a root mcp/ shadows the installed SDK
 │   ├── client.py                  # the background thread + one event loop + the manager task; MCPClient; _normalize (D23)
@@ -304,11 +315,19 @@ Covered in full in §7 below. The short version of the file boundary: `base.py` 
 
 **`safety/policy_enforcement.check_output_policy` (ROADMAP §8):** `registry.dispatch()` also calls `check_output_policy(tool_name, result)` after every tool handler returns, applying content-level policy (secret redaction) to the result before it reaches the caller. This is a post-call filter, not a pre-call gate — distinct from `security/permissions.py`'s access control.
 
-### 4.11 `safety/policy_enforcement.py` — content-level output policy (ROADMAP §8)
+### 4.11 `safety/policy_enforcement.py` — content-level policy, both directions (ROADMAP §8, ROADMAP_v2 §25)
 
-**Belongs here:** `BLOCKED_DOMAINS` (centralized set of harmful domains), `is_domain_blocked(url)` (used by `web_search.py` and `fetch_url.py` to reject URLs before fetching), `_SECRET_PATTERNS` (7 regex patterns for OpenAI/Anthropic/GitHub/AWS/Google/Slack/PEM keys), `redact_secrets(text)` (replaces matches with `[REDACTED]`), and `check_output_policy(tool_name, result)` (scans `content`/`result`/`stdout`/`stderr` keys in tool output dicts). Called by `registry.dispatch()` after every tool handler — a post-call filter, not a pre-call gate.
+**Belongs here:** `BLOCKED_DOMAINS` (centralized set of harmful domains), `is_domain_blocked(url)` (used by `web_search.py` and `fetch_url.py` to reject URLs before fetching), `_SECRET_PATTERNS` (7 regex patterns for OpenAI/Anthropic/GitHub/AWS/Google/Slack/PEM keys), `redact_secrets(text)` (replaces matches with `[REDACTED]`), `check_output_policy(tool_name, result)` (scans `content`/`result`/`stdout`/`stderr`/`error` keys in tool output dicts), and `check_input_policy(tool_name, params)` (scans a call's ARGUMENTS, returning a refusal reason or `None`). `registry.dispatch()` calls the input check before the handler and the output check after it.
 
-**Does NOT belong here:** access control (that's `security/permissions.py`'s job, applied before a tool runs). Do not add `is_tool_allowed` or `requires_approval` logic here — the two files answer different questions at different points in the dispatch lifecycle.
+**One traversal, two callers.** `_walk(value, leaf, on_cap, scan_keys=)` is shared: redaction and argument scanning differ only in what they do at a leaf and at the depth bound. Writing it twice is how a nested-INPUT hole would appear beside the nested-output hole §17 already found and fixed.
+
+**Input REFUSES, output REDACTS, and the asymmetry is deliberate.** Rewriting an argument silently changes what the call does, so the tool would run with parameters neither the model nor the user chose and report success; a denial is legible to both (the same reasoning D24 settled for uncallable tools). `scan_keys=True` on the input side only, because rewriting a result's dict keys would change the shape consumers see, while a secret in an argument key is a plausible way past a values-only scan.
+
+**The input check closes two holes older than §25.** Results were scanned and arguments never were, so an approved tool could be handed context-derived text with nothing watching the one direction that leaves the harness. And `BLOCKED_DOMAINS` was enforced only by the two tools that import `is_domain_blocked()` — every other tool taking a URL bypassed it, which is the `fetch_url` shape again: a control that exists, is documented, and does not cover what it claims to. Both are fixed at `dispatch()` so they hold for every tool in every mode, not at the pipeline boundary that prompted them.
+
+**Bare domains are deliberately not refused at dispatch, only scheme-bearing URLs.** This harness researches security topics, so a blocked domain's NAME appears in legitimate queries, claims and reports constantly; refusing every mention would break normal use while blocking nothing an attacker could not rephrase. `fetch_url.py` keeps its own bare-domain check for the value it is handed.
+
+**Does NOT belong here:** access control (that's `security/permissions.py`'s job — "may this run at all?" vs. "is this content acceptable?"). Do not add `is_tool_allowed` or `requires_approval` logic here even though both files now run before the handler; they answer different questions.
 
 ### 4.12 `logging_setup.py` — logging infrastructure
 
@@ -332,9 +351,9 @@ Covered in full in §7 below. The short version of the file boundary: `base.py` 
   - `provider_factory` / `client_for_provider` — return a mock-`api_initialization`-compatible tuple for translation tests.
   - `clear_client_cache` (autouse) — resets `api_initialization`'s cached clients before each test.
 - **`tests/BREAKING_CHANGES.md`** — per-file tables documenting what breaks each test when production code changes, the symptom, and the fix. Created because `test_orchestrator.py` was identified as the suite's most fragile mock — its mock dict is keyed by pass_id strings that ROADMAP §3 and §10 will modify.
-- **30 test files** (6 per ROADMAP §4 + 2 from §4's own additions: `test_memory_write_through.py`, `test_loop_tool_dispatch.py`; + 2 from §3/§5: `test_json_retry.py`, `test_pipeline_storage.py`; + 2 from §1: `test_cli.py`, `test_e2e.py`; + 1 from §12: `test_output_writer.py`; + 1 from audit: `test_logging_setup.py`; + 1 from §6: `test_file_ops.py`; + 1 from §7: `test_shell.py`; + 1 from §8: `test_policy_enforcement.py`; + 2 from §13: `test_client_streaming.py`, `test_streaming_loop.py`; + 3 from ROADMAP_v2 §14: `test_workspace_trust.py`, `test_config_loader.py`, `test_load_skill.py`; + 1 from §15: `test_permission_context.py`; + 1 from §11: `test_critic_routing.py`; + 1 from §16: `test_client_effort.py`; + 1 from §10's fix: `test_ensemble_guard.py`; + 3 from §17: `test_mcp_client.py`, `test_mcp_config.py`, `test_mcp_integration.py`; + 1 from §16: `test_tui.py`; + 1 from §18: `test_agents.py`).
+- **35 test files** (6 per ROADMAP §4 + 2 from §4's own additions: `test_memory_write_through.py`, `test_loop_tool_dispatch.py`; + 2 from §3/§5: `test_json_retry.py`, `test_pipeline_storage.py`; + 2 from §1: `test_cli.py`, `test_e2e.py`; + 1 from §12: `test_output_writer.py`; + 1 from audit: `test_logging_setup.py`; + 1 from §6: `test_file_ops.py`; + 1 from §7: `test_shell.py`; + 1 from §8: `test_policy_enforcement.py`; + 2 from §13: `test_client_streaming.py`, `test_streaming_loop.py`; + 3 from ROADMAP_v2 §14: `test_workspace_trust.py`, `test_config_loader.py`, `test_load_skill.py`; + 1 from §15: `test_permission_context.py`; + 1 from §11: `test_critic_routing.py`; + 1 from §16: `test_client_effort.py`; + 1 from §10's fix: `test_ensemble_guard.py`; + 3 from §17: `test_mcp_client.py`, `test_mcp_config.py`, `test_mcp_integration.py`; + 1 from §16: `test_tui.py`; + 1 from §18: `test_agents.py`; + 4 from §25: `test_grants.py`, `test_attended.py`, `test_research_authorization.py`, `test_granted_calls_artifact.py`).
 
-**What belongs here:** tests that run offline (~1.9s; first run ~7s for the matplotlib font cache), with zero network access and zero real API keys. Stubs in root `conftest.py` catch import-time module resolution; fixtures in `tests/conftest.py` provide `ModelResponse` construction and storage mocking; individual test files cover production code's behavior.
+**What belongs here:** tests that run offline (~24s; first run ~30s for the matplotlib font cache), with zero network access and zero real API keys. Stubs in root `conftest.py` catch import-time module resolution; fixtures in `tests/conftest.py` provide `ModelResponse` construction and storage mocking; individual test files cover production code's behavior.
 
 **What does NOT belong here:** any test that requires a real API key, any test that makes an outbound HTTP call, any test that depends on a specific file on disk (unless the fixture creates and cleans it). If you need to test a provider's real wire format, write an integration test in a separate directory (`tests_integration/` or similar) that is excluded by `pytest.ini`'s `testpaths`.
 
@@ -403,9 +422,13 @@ Covered in full in §7 below. The short version of the file boundary: `base.py` 
 
 **Dispatch injection is the §18 mechanism.** `tools/registry.dispatch()` inspects handler signatures at `register()` time and hands `parent_context` / `parent_run` (a `tools.context.RunInfo`: model / provider / effort) to handlers that declare them. `spawn_subagent` declares both; the twelve pre-§18 tools declare neither and are byte-for-byte untouched. Generalised on purpose so §23's response-channel tools add a third injectable name without reopening `dispatch()`.
 
-**The headless callability rule (§15–17 finalization, user-widened).** `schemas(callable_only=True)` drops any tool whose `approval_needed(name, {}, context)` is True when the run has no `permission_channel` — it is uncallable in that configuration, and advertising uncallable tools is the `fetch_url` damage class. `core/loop._run()` passes `callable_only=(permission_channel is None)` and logs a WARNING naming `headless_hidden()` output -- deduplicated on the hidden SET, not once per process, because the set is context-dependent and a per-process flag left every later run's larger set silent. autoApproved MCP servers stay advertised because they need no approval.
+**The headless callability rule (§15–17 finalization, user-widened; §25 broadened the condition).** `schemas(callable_only=True)` drops any tool whose `approval_needed(name, {}, context)` is True when the run has **no way to ask** — it is uncallable in that configuration, and advertising uncallable tools is the `fetch_url` damage class. `core/loop._run()` passes `callable_only=(permission_channel is None and approval_provider is None)` and logs a WARNING naming `headless_hidden()` output -- deduplicated on the hidden SET, not once per process, because the set is context-dependent and a per-process flag left every later run's larger set silent. autoApproved MCP servers stay advertised because they need no approval.
+
+"Headless" means *unable to ask*, not *not a TUI*. A research pass carrying an `ApprovalProvider` (§25 attended mode) can ask, so hiding its gated tools would report a limitation the run does not have.
 
 **The `{}`-params probe is an approximation, and only for param-DEPENDENT checks.** `approval_needed(name, {})` cannot resolve a `ToolSpec.approval_check` that depends on arguments (file_ops outside the workspace, shell on a non-inert command), so once `read`/`write`/`edit` are globally enabled a headless run advertises them while a specific call can still require approval and be denied mid-run. That is a clean denial, not a bypass -- the security-relevant direction holds in every config -- but "advertises only what is actually callable" is exact for approval-by-configuration and approximate for approval-by-argument.
+
+**§25 turns that same distinction into a rule about GRANTS.** `registry.grantable(name)` is False for any tool declaring an `approval_check`, because a name-level grant given before any call exists cannot be informed consent for a decision made from the arguments -- ticking a box labelled "shell" is not agreeing to whatever command the model later chooses. The loop re-checks grantability on every call rather than trusting the set it was handed, so a stale or hand-built grant cannot widen anything, and `agents/manager.candidate_approvals()` filters to the same rule so a sign-off notice never promises authority the grant will not carry. Non-grantable tools are not blocked: they fall back to being asked.
 
 **Goal mode lives in `ConversationThread.extra_data`.** `storage.update_thread_extra()` / `ConversationMemory.extra` + `set_extra()` persist it; `core/loop.with_goal()` appends the `## Persistent objective` section in EVERY shell (applied centrally inside `run_agent_conversation()`; the TUI worker calls it explicitly because it drives `_run()` directly, and there are exactly those two call sites -- `main.py` has none); `tui/widgets.GoalBanner` mirrors it. `/goal` is the only writer.
 

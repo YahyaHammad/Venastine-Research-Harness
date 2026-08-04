@@ -229,7 +229,17 @@ class ToolApprovals:
     # Approving a spawn is the §18 subagent sign-off: it authorises the
     # child's whole approval-gated tool set for the rest of the turn, so
     # delegation itself has to be the thing approved. Consequence, named
-    # rather than discovered: the headless callability filter therefore
-    # drops spawn_subagent from CLI chat and every research pass, so
-    # delegation is TUI-only. The once-per-run notice names it.
+    # rather than discovered: the headless callability filter drops
+    # spawn_subagent anywhere nothing can grant the approval -- CLI chat,
+    # and any research run that is neither attended nor granting. The
+    # once-per-run notice names it.
+    #
+    # §25 R4 keeps it out of PIPELINE_UNGRANTABLE's reach deliberately: it
+    # can never be PRE-granted for a research run, because approving a
+    # spawn hands the child a whole gated set and one launch-time tick
+    # would compound into unbounded delegated authority across ten
+    # unattended passes. An ATTENDED run can still approve a spawn live,
+    # which is a per-call human decision and exactly what the gate is for.
+    # The child then runs headless with nothing granted, since
+    # spawn_subagent forwards a grant only alongside a permission_channel.
     spawn_subagent: bool = True
