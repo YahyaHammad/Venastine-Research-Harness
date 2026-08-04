@@ -126,14 +126,19 @@ class AgentManager:
         )
 
     @staticmethod
-    def system_prompt_for(agent: AgentDef, base_prompt: str) -> str:
+    def system_prompt_for(agent: AgentDef, base_prompt: str,
+                          active_skills=None) -> str:
         """The full system prompt for a run AS this agent: base + skill /
         agent catalogs, then the agent's own body, then the project's
         CONTEXT.md iff the agent opts in (use_project_context). One
-        assembly point so every caller produces the same prompt."""
+        assembly point so every caller produces the same prompt.
+
+        active_skills (§19) reaches only the catalog, where it MARKS the
+        skills whose bodies the shell pins separately. Bodies are not
+        added here -- see with_catalogs' K6 note."""
         import prompts.system_prompts as system_prompts
 
-        prompt = system_prompts.with_catalogs(base_prompt)
+        prompt = system_prompts.with_catalogs(base_prompt, active_skills)
         prompt = f"{prompt}\n\n## Agent: {agent.name}\n\n{agent.body}"
         context = config_loader.context_for_agent(agent)
         if context:

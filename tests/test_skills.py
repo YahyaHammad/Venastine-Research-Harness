@@ -286,3 +286,205 @@ class TestShippedDefaults:
             skill = config_loader.get_skill(name)
             assert skill.description.strip()
             assert len(skill.body) > 200, f"{name} body is a stub"
+
+
+# ===========================================================================
+# ---- K1/K5/K6: /skill, prompt pinning, and the pipeline boundary ----------
+# ===========================================================================
+
+class TestSlashSkill:
+
+    def _app(self, loaded_defs):
+        """A stand-in for the app object the slash registry passes in.
+        tui.app is deliberately not imported by skills/tui_commands, so the
+        handler only ever touches these three attributes."""
+        class _T:
+            def __init__(self):
+                self.system = []
+                self.errors = []
+
+            def write_system(self, text):
+                self.system.append(text)
+
+            def write_error(self, text):
+                self.errors.append(text)
+
+        class _App:
+            def __init__(self):
+                self._transcript = _T()
+                self.active_agent = None
+                self.active_skills = []
+
+            # Convenience proxies so assertions read against what the user
+            # would see, not against the transcript's internals.
+            @property
+            def system(self):
+                return self._transcript.system
+
+            @property
+            def errors(self):
+                return self._transcript.errors
+
+        return _App()
+
+    def test_activating_records_the_name(self, loaded):
+        from skills.tui_commands import _cmd_skill
+
+        loaded(_skill("alpha"))
+        app = self._app(loaded)
+        _cmd_skill(app, "alpha")
+
+        assert app.active_skills == ["alpha"]
+
+    def test_an_unknown_name_errors_and_changes_nothing(self, loaded):
+        from skills.tui_commands import _cmd_skill
+
+        loaded(_skill("alpha"))
+        app = self._app(loaded)
+        _cmd_skill(app, "nope")
+
+        assert app.active_skills == []
+        assert app.errors and "nope" in app.errors[0]
+
+    def test_off_deactivates_one(self, loaded):
+        from skills.tui_commands import _cmd_skill
+
+        loaded(_skill("alpha"), _skill("beta"))
+        app = self._app(loaded)
+        _cmd_skill(app, "alpha")
+        _cmd_skill(app, "beta")
+        _cmd_skill(app, "off alpha")
+
+        assert app.active_skills == ["beta"]
+
+    def test_clear_deactivates_all(self, loaded):
+        from skills.tui_commands import _cmd_skill
+
+        loaded(_skill("alpha"), _skill("beta"))
+        app = self._app(loaded)
+        _cmd_skill(app, "alpha")
+        _cmd_skill(app, "beta")
+        _cmd_skill(app, "clear")
+
+        assert app.active_skills == []
+
+    def test_bare_command_lists_without_activating(self, loaded):
+        """A listing that silently activated something would be a
+        surprising way to change what governs the session."""
+        from skills.tui_commands import _cmd_skill
+
+        loaded(_skill("alpha", category="security"))
+        app = self._app(loaded)
+        _cmd_skill(app, "")
+
+        assert app.active_skills == []
+        assert "alpha" in app.system[0]
+        assert "[security]" in app.system[0]
+
+    def test_activation_reports_missing_tools_without_refusing(self, loaded):
+        """K2: report, do not refuse. A skill is often useful without an
+        optional tool, and refusing would make a restrictive agent silently
+        un-pairable with half the catalog."""
+        from skills.tui_commands import _cmd_skill
+
+        loaded(_skill("alpha", tools=["shell"]))
+        app = self._app(loaded)
+        _cmd_skill(app, "alpha")
+
+        assert app.active_skills == ["alpha"], "activation was refused"
+        assert any("shell" in line for line in app.system)
+
+    def test_a_skill_whose_tools_are_available_reports_no_note(self, loaded):
+        """Control: the note must be about the tools, not printed always."""
+        from skills.tui_commands import _cmd_skill
+
+        loaded(_skill("alpha", tools=["web_search"]))
+        app = self._app(loaded)
+        _cmd_skill(app, "alpha")
+
+        assert not any("not available" in line for line in app.system)
+
+
+class TestPromptAssembly:
+    """K1 end to end, and K6 -- the one cross-shell leak this design can
+    have."""
+
+    def test_an_active_skill_body_reaches_the_turn_prompt(self, loaded, mocker):
+        from tui.app import VenastineApp
+
+        loaded(_skill("alpha", body="ALPHA-METHODOLOGY"))
+        app = VenastineApp.__new__(VenastineApp)
+        app.active_skills = ["alpha"]
+
+        fragment = manager.prompt_fragment(app.active_skills)
+        assert "ALPHA-METHODOLOGY" in fragment
+
+    def test_the_catalog_marks_active_skills_in_the_same_prompt(
+            self, loaded, monkeypatch):
+        """The catalog and the pinned bodies live in one prompt, so the
+        catalog must not invite load_skill for text already present."""
+        import prompts.system_prompts as system_prompts
+        from core import config_loader as cl
+
+        loaded(_skill("alpha"))
+        monkeypatch.setattr(
+            cl, "_state", {"skills": {"alpha": manager.get("alpha")},
+                           "agents": {}, "settings": {}, "context": None})
+
+        marked = system_prompts.with_catalogs("BASE", ["alpha"])
+        unmarked = system_prompts.with_catalogs("BASE")
+
+        assert "[ACTIVE" in marked
+        assert "[ACTIVE" not in unmarked
+
+    def test_k6_a_pass_prompt_never_carries_an_active_body(
+            self, loaded, monkeypatch):
+        """THE K6 test. with_catalogs feeds pass_prompt(), so pinning
+        bodies inside it would inject a skill activated in a TUI chat
+        session into all ten passes of a research run the user started
+        separately. The bodies are added by the shell instead, beside
+        with_goal."""
+        import prompts.system_prompts as system_prompts
+        from core import config_loader as cl
+
+        loaded(_skill("alpha", body="ALPHA-METHODOLOGY"))
+        monkeypatch.setattr(
+            cl, "_state", {"skills": {"alpha": manager.get("alpha")},
+                           "agents": {}, "settings": {}, "context": None})
+
+        for pass_id in list(system_prompts.passes_prompts)[:3]:
+            prompt = system_prompts.pass_prompt(pass_id)
+            assert "ALPHA-METHODOLOGY" not in prompt, pass_id
+            # The catalog still lists it -- the pipeline may still
+            # load_skill it deliberately. Only the PINNING is excluded.
+            assert "alpha" in prompt
+
+    def test_with_catalogs_does_not_pin_even_when_told_what_is_active(
+            self, loaded, monkeypatch):
+        """The narrower version of the same guarantee: passing the active
+        list into catalog assembly must MARK, never expand."""
+        import prompts.system_prompts as system_prompts
+        from core import config_loader as cl
+
+        loaded(_skill("alpha", body="ALPHA-METHODOLOGY"))
+        monkeypatch.setattr(
+            cl, "_state", {"skills": {"alpha": manager.get("alpha")},
+                           "agents": {}, "settings": {}, "context": None})
+
+        assert "ALPHA-METHODOLOGY" not in system_prompts.with_catalogs(
+            "BASE", ["alpha"])
+
+
+class TestSessionScope:
+
+    def test_a_new_app_starts_with_nothing_active(self):
+        """K5: session-scoped and unpersisted, matching /agent rather than
+        /goal. A module-level or thread-persisted store would silently make
+        one activation permanent."""
+        from tui.app import VenastineApp
+
+        a = VenastineApp("ANTHROPIC", "m", {})
+        a.active_skills.append("alpha")
+        b = VenastineApp("ANTHROPIC", "m", {})
+
+        assert b.active_skills == []

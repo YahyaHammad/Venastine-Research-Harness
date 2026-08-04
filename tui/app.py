@@ -37,6 +37,8 @@ import config
 import storage
 from agents.manager import manager
 from agents.tui_commands import register_agent_commands
+from skills.manager import manager as skills
+from skills.tui_commands import register_skill_commands
 from core import config_loader
 from core.client import api_initialization, effort_levels_for_model
 from core.loop import (
@@ -148,6 +150,12 @@ class VenastineApp(App):
         # §18 session-scoped active agent (/agent switch). None = default
         # harness. Applies to subsequent turns until switched or cleared.
         self.active_agent = None
+        # §19 K5: active skills, session-scoped and unpersisted, matching
+        # /agent rather than /goal. A skill is a working-mode choice, not
+        # a property of the thread -- switching threads keeps them, and a
+        # new session starts clean. A LIST, not a set: activation order is
+        # the order the bodies are pinned in.
+        self.active_skills: list = []
 
     # -- layout --------------------------------------------------------------
 
@@ -324,17 +332,29 @@ class VenastineApp(App):
             agent = self.active_agent
             context = manager.active_context(agent)
             base_prompt = manager.system_prompt_for(
-                agent, DEFAULT_SYSTEM_PROMPT)
+                agent, DEFAULT_SYSTEM_PROMPT, self.active_skills)
             model = agent.model or self.model
             provider = agent.provider or self.provider_name
             max_steps = agent.max_steps or config.MAX_ITERATIONS
         else:
             context = None
-            base_prompt = system_prompts.with_catalogs(DEFAULT_SYSTEM_PROMPT)
+            base_prompt = system_prompts.with_catalogs(
+                DEFAULT_SYSTEM_PROMPT, self.active_skills)
             model = self.model
             provider = self.provider_name
             max_steps = config.MAX_ITERATIONS
         prompt = with_goal(base_prompt, self.memory)
+        # §19 K1/K6: active skill bodies are pinned HERE, beside with_goal,
+        # and deliberately NOT inside with_catalogs -- that function feeds
+        # pass_prompt(), so pinning there would inject a skill activated in
+        # this chat session into all ten passes of a research run.
+        #
+        # Last in the prompt on purpose: an activated skill is the most
+        # specific instruction the user has given, and should read as
+        # governing what precedes it.
+        fragment = skills.prompt_fragment(self.active_skills)
+        if fragment:
+            prompt = f"{prompt}\n\n{fragment}"
 
         channel: queue.Queue = queue.Queue()
         self._permission_channel = channel
@@ -830,6 +850,7 @@ def register_builtin_commands() -> None:
 
 register_builtin_commands()
 register_agent_commands()  # §18: /agent, /goal, /grill-me
+register_skill_commands()  # §19: /skill
 
 
 def run(provider_name: str, model: str, settings: dict | None = None) -> None:

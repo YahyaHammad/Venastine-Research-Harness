@@ -42,14 +42,20 @@ def get_system_prompts() -> dict:
 passes_prompts = get_system_prompts()
 
 
-def with_skill_catalog(base_prompt: str) -> str:
+def with_skill_catalog(base_prompt: str, active=None) -> str:
     """Appends the frontmatter-only skill catalog (ROADMAP_v2 §14) when
-    skills were discovered at startup; a no-op append otherwise. Skill
-    bodies never enter the prompt -- the model requests them via the
-    load_skill tool."""
+    skills were discovered at startup; a no-op append otherwise.
+
+    Skill BODIES never enter the prompt from here -- the model requests
+    them via load_skill, and §19's activation pins them separately and
+    deliberately outside this function (K6, see with_catalogs).
+
+    `active` only MARKS entries whose body is already pinned elsewhere in
+    the same prompt, so the catalog does not invite the model to spend a
+    turn loading text it can already read."""
     from core import config_loader
 
-    catalog = config_loader.skill_catalog_text()
+    catalog = config_loader.skill_catalog_text(active)
     if not catalog:
         return base_prompt
     return f"{base_prompt}\n\n{catalog}"
@@ -76,10 +82,18 @@ def agent_catalog_text() -> str:
     return "\n".join(lines)
 
 
-def with_catalogs(base_prompt: str) -> str:
+def with_catalogs(base_prompt: str, active_skills=None) -> str:
     """Both frontmatter-only catalogs (skills §14, agents §18) appended;
-    the single assembly point every default system prompt goes through."""
-    prompt = with_skill_catalog(base_prompt)
+    the single assembly point every default system prompt goes through.
+
+    §19 K6 -- ACTIVE SKILL BODIES MUST NOT BE APPENDED HERE. This function
+    feeds pass_prompt(), so anything added inside it lands in all ten
+    research passes; a skill the user activated in a TUI chat session has
+    no business governing a pipeline run they started separately. Bodies
+    are pinned by the shell, next to its with_goal() call, via
+    skills.manager.prompt_fragment(). `active_skills` reaches only as far
+    as the catalog, where it marks entries rather than expanding them."""
+    prompt = with_skill_catalog(base_prompt, active_skills)
     catalog = agent_catalog_text()
     if catalog:
         prompt = f"{prompt}\n\n{catalog}"
