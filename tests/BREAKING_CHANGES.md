@@ -464,3 +464,43 @@ never does.
 | Remove `subagent_review` from `_KNOWN_RESEARCH` | `test_subagent_review_is_accepted` | Unknown settings keys RAISE, so an undeclared key is a startup error |
 
 **Signature changes that ripple into existing tests.** `_split_research_flags` now returns `(attended, review, grant_spec, query)` — a 4-tuple, updated across `TestTheTuiFlagSplitter`. `run_deep_research_pipeline` takes `review=` and `subagent_review=`, both asserted positionally in `test_e2e.py` so a future default of "review and apply" cannot slip through. `_review_stage` takes `enabled=`.
+
+
+## §19–§20 review follow-up (2026-08-05)
+
+Every row applied to the production code and confirmed to turn the named
+test red — except the one marked, whose failure mode is a *skip* and which
+therefore has a direct test instead. That distinction is the standing
+lesson from this pass: a revert check cannot see silence.
+
+| Change | What breaks | Fix / why |
+|---|---|---|
+| Re-raise on a failed re-synthesis | `test_a_failed_re_synthesis_still_completes_the_run` | A provider error on that one call is the same transient class as a reviewer call failing, which f1 settled must not flip a finished ten-pass run to `failed`. Pinned by a test that composes with the real pipeline — the stage-level test cannot see a status |
+| `log_outcomes(committed=True)` on the failure path | `test_a_failed_re_synthesis_leaves_claims_and_report_unchanged` | Traces "accepted and applied" beside claims that were reverted; the record has to agree with what it sits next to |
+| Reinstate direct mutation in place of `apply_deferred`'s copy | `test_a_failed_re_synthesis_leaves_claims_and_report_unchanged` | Reopens f4 — a failed re-synthesis persists corrected claims beside the stale report, one run with two contradicting artifacts, durable |
+| Count duplicates into the malformed counter | `test_malformed_and_duplicate_are_counted_separately` | A duplicate is a well-formed finding raised twice; one number covering two causes tells the reader neither |
+| Go silent on the raced-click timeout branch | `test_the_no_answer_line_only_prints_when_there_was_no_answer` | Their answer went nowhere; silence sends them to the "N applied" summary to work that out and conclude the button is broken |
+| **Make `with_catalogs` ignore the context** | `TestCatalogsFollowTheContext` (2) | The catalogs *instruct* the model to call `load_skill` / `spawn_subagent`; a restricted agent is told to call a tool it does not have and burns a denied call against `max_steps` |
+| **Suppress both catalogs unconditionally** | `test_an_unrestricted_run_gets_both_catalogs` | **The control.** Without it every other catalog test also passes against a version that strips progressive disclosure from ordinary chat |
+| Make `system_prompt_for` drop the context | `test_a_restricted_NON_reviewer_agent_gets_the_same_treatment` | The point of moving this to the producer: the rule must hold for an agent nobody thought about when writing it |
+| Have `spawn_subagent` pass its own context, not `child` | `test_a_spawned_subagent_inherits_the_PARENTS_suppression` | C6 intersects with the parent, so a parent that excluded spawning must not have the catalog re-invite its child |
+| Pass a context from `pass_prompt()` | `test_pass_prompts_are_unaffected` | The one way this change could reach the research pipeline; verified separately by hashing all ten prompts before and after |
+| Drop `test_docs_consistency`'s narrowing guard | `test_the_documented_count_is_the_real_one` | A filtered run legitimately collects fewer; asserting anyway makes every single-file invocation fail |
+| Loosen the ARCHITECTURE anchor to a bare `(\d+) tests` | `test_the_three_docs_state_the_same_test_count` | ARCHITECTURE lists a per-module count for every test file in its tree, so a loose pattern compares two unrelated numbers forever |
+| Change one doc's count without the others | `test_the_three_docs_state_the_same_test_count` | All three get quoted, by different audiences |
+| **Compare `markexpr` against `None`** | `test_the_default_invocation_is_not_treated_as_narrowed` | **Fails by SKIPPING, not by failing** — `pytest.ini`'s addopts always supplies `-m "not integration"`, so every run would skip and the file would look like coverage while the counts drifted. This is why the guard has a direct test rather than a revert-and-see-red |
+
+
+## Standing: a revert check cannot see a test that SKIPS
+
+The 2026-08-05 follow-up added `tests/test_docs_consistency.py`, whose
+narrowing guard decides whether the count assertion runs at all. Get that
+guard wrong in the permissive direction and a filtered run asserts against
+a session of one item -- loud, obvious, fixed in a minute. Get it wrong in
+the restrictive direction and EVERY run skips: the assertion never
+executes, the file sits there looking like coverage, and the thing it
+polices drifts exactly as before.
+
+Reverting the production behaviour and watching for red cannot catch that,
+because a skip is green. Where a test can decline to run, prove it runs --
+`test_the_default_invocation_is_not_treated_as_narrowed` is the shape.

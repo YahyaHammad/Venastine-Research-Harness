@@ -4,6 +4,12 @@ High-level debt themes surfaced by the §19–§20 review (2026-08-04), with
 what the fix pass did about each and what remains by design. Finding ids
 refer the review report `.qwen/reviews/2026-08-04-223903-local.md`.
 
+**Updated 2026-08-05** after a follow-up pass over the review's own
+output. Three themes moved; the moves are marked inline rather than
+edited away, because a debt file that only ever shows its current state
+loses the thing it is for — which classes of problem this codebase keeps
+producing.
+
 ## 1. Review-stage durability lagged its documentation
 
 The §20 docs promise "the review still runs and still records", but the
@@ -33,6 +39,14 @@ the changeset stated opposite policies (f1).
 - **Remaining:** a failure that escapes the stage itself (a bug, not a
   transient reviewer error) still flips the run to `failed` — intended,
   test-pinned (f16).
+- **Follow-up (2026-08-05):** the re-synthesis path was still doing the
+  opposite of the policy this theme unified. It restored the claims and
+  re-raised, so a provider error on that one call failed a run whose ten
+  passes all succeeded — code and doc back in disagreement one layer below
+  where f1 fixed them. Contained now: the run keeps `status='complete'`
+  with the pre-review report, `log_outcomes(committed=False)` so nothing
+  reads as applied beside claims that were not, and a test that composes
+  with the real pipeline (the stage-level test cannot see a status).
 
 ## 3. The shared JSON-retry abstraction leaked pass-shape
 
@@ -83,6 +97,12 @@ very order it existed to check (r3-2).
 - **Standing practice:** mutation-check any new §19/§20-adjacent test
   before trusting it; the BREAKING_CHANGES tables now name the
   mutation-sighted forms.
+- **Follow-up (2026-08-05):** one class of vacuity a revert check cannot
+  catch is a test that SKIPS. `test_docs_consistency.py`'s narrowing guard
+  would skip on every run if its markexpr comparison were wrong, and the
+  file would sit there looking like coverage — so the guard has a direct
+  test of its own rather than a revert-and-see-red. Worth generalising:
+  where a test can decline to run, prove it runs.
 
 ## 7. Documentation drift
 
@@ -91,10 +111,44 @@ vs a real `__init__.py`; f8 missing **(BUILT)** marker).
 
 - **Fixed:** `skills/__init__.py` deleted (namespace package like
   agents/tools/tui, per owner decision); index marker added.
-- **Standing debt:** doc counts and status lines drift on every section.
-  A mechanical doc-consistency check (test counts, BUILT markers, tree
-  entries) would retire this class permanently; until then every section
-  landing should run the doc cross-check the review agents did by hand.
+- **RETIRED (2026-08-05)** for the part that actually drifted.
+  `tests/test_docs_consistency.py` asserts the three docs quote the same
+  test count and that it matches `len(session.items)` on an unfiltered run
+  (skipped under `-k`, a non-default `-m`, or a file/nodeid arg). It found
+  the drift the follow-up's own commits had just created, before anyone
+  looked. Deliberately narrow: BUILT markers and tree entries are still by
+  hand, because a doc-linting framework nobody asked for would rot faster
+  than the counts it was policing. If those two start drifting the same
+  way, extend this file's check rather than adding a new practice to
+  remember.
+
+## 8. `test_tui.py::_settle` budgets pumps, not time (open)
+
+Found during the 2026-08-05 follow-up, **not fixed**, and the attempted
+fix is the useful part of the record.
+
+`_settle(pilot, predicate, tries=120)` pumps Textual's event loop a fixed
+number of times waiting for a worker thread to hand a message back. A
+count is not a wait: 120 bare `pilot.pause()` calls elapse in microseconds
+on an idle machine and rather longer on a loaded one, so
+`test_ac2_approving_a_permission_prompt_resumes_the_same_generator` failed
+roughly one full-suite run in five while passing every time in isolation.
+A false failure is worse than a slow test.
+
+The obvious fix -- a wall-clock deadline with `await pilot.pause(0.01)` --
+made things **worse**: it turned a 1-in-5 flake in one test into a
+deterministic failure of
+`test_quitting_during_an_attended_research_prompt_releases_the_worker`,
+whose worker then never unblocked at all. `pilot.pause(delay)` evidently
+does not drive the message pump the way a bare `pilot.pause()` does, so
+the two are not interchangeable and the delay changes what the helper is
+actually waiting for. Reverted.
+
+Left open deliberately rather than half-fixed. Whoever takes it should
+start from what `pilot.pause(delay)` does to the message queue, not from
+the timeout value. Six consecutive full-suite runs were clean afterwards,
+so it is rare -- rare enough that a fix applied without understanding it
+will look like it worked.
 
 ## Accepted risks noted in the review, deliberately not "fixed"
 
@@ -102,5 +156,16 @@ vs a real `__init__.py`; f8 missing **(BUILT)** marker).
   reviewed is the documented signal; trace.md still carries the count line.
 - Advisory-only K2 notes after `/agent` switch (f21 fixed to re-notify;
   enforcement was always per-call by design).
-- Reviewer prompt catalogs suppressed via `catalogs=False` (f19); other
-  agents keep catalogs — the suppression is opt-in per caller.
+- ~~Reviewer prompt catalogs suppressed via `catalogs=False` (f19); other
+  agents keep catalogs — the suppression is opt-in per caller.~~
+  **RESOLVED at the producer (2026-08-05).** The catalogs' prose
+  *instructs* the model to call a tool ("call the load_skill tool", "can
+  be spawned with the spawn_subagent tool") and neither knew the
+  `ToolContext`, so every restricted agent was being told to call a tool
+  it does not have — the reviewer was just the first one anyone noticed.
+  `with_catalogs` now takes the context and suppresses each catalog whose
+  tool is unreachable; the per-caller flag is gone. This was the
+  fix-at-the-consumer shape CLAUDE.md names by name, and it is worth
+  reading as the recurring lesson rather than a one-off: a per-case opt-out
+  added to a shared assembly point usually means the condition belongs
+  inside it.

@@ -1811,3 +1811,122 @@ high-level themes and remaining-by-design debt in `TECHNICAL_DEBT.md`):
   reject_all test likewise).
 
 - Full suite after the §19+§20 hardening: **718 tests** (was 697).
+
+
+---
+
+# Follow-up on the §19–§20 review (2026-08-05)
+
+The review (`84f97ec`) found real defects and fixed them correctly. Worth
+recording which, because they are the kind this project keeps producing:
+
+- **r1-1** — `exit()`'s permission-channel release is one-shot, and the
+  review walk re-arms per finding, so quitting mid-review parked a
+  non-daemon worker forever. §20 reused `_permission_channel`
+  *specifically* so the release would cover it; that reasoning is right
+  for one parked ask and wrong for a loop that asks N times.
+- **f3** — `--attended --review` built two `_StdinReader`s racing for one
+  stdin, which that class's own docstring forbids in as many words.
+- **f4** — `apply()` mutated the claims before the re-synthesis, so a
+  failed re-synthesis persisted corrected claims beside the stale report:
+  V2's contradiction surviving inside the code written to prevent it.
+- **f2** — the refinement loop made MAX+1 send-backs; the last spent a
+  call, possibly a grant, on a revision no consent round ever displayed.
+- **r2-1** — `retry_until_json` did not forward `context`, so
+  continuations re-advertised `spawn_subagent` to the reviewer. §20's own
+  test asserted the restriction on turn 1 only.
+- **r2-2** — an unhashable `kind`/`claim_id` raised `TypeError` out of the
+  function whose entire job is dropping bad shapes.
+
+All of those stand. Three things did not.
+
+## The re-synthesis path did the opposite of the policy it had just unified
+
+`f1` settled that an optional stage must not flip a finished ten-pass run
+to `status='failed'`, and rewrote CLAUDE.md to say so. The re-synthesis
+path then restored the claims and **re-raised**, failing a run whose ten
+passes all succeeded and whose first report was intact. Code and doc were
+back in disagreement one layer below where `f1` fixed them.
+
+Contained now. The deferred commit already guarantees a consistent record
+— pre-review claims beside the report generated from them — so the run
+keeps `status='complete'` and the trace says the corrections did not land.
+`log_outcomes` is called with `committed=False` there, so nothing reads as
+"accepted and applied" beside claims that were not.
+
+The distinction `f16` pins is untouched: a failure that escapes the
+*stage* still records `status='failed'`. Both halves are now test-pinned,
+and the new half composes with the real pipeline — a stage-level test
+cannot see a status, which is the same gap `f16` itself closed one call
+site up.
+
+## `apply()` became dead code and stayed advertised
+
+`apply_deferred` + `log_outcomes` replaced it; nothing called it. But the
+module docstring still listed `run_review / walk_consent / apply` as the
+three stages, so the obvious wiring was the one that reopens `f4`. Deleted,
+and the docstring now names the three that exist plus why the third works
+on a copy.
+
+## `catalogs=False` was a consumer-side fix
+
+This is the one worth generalising. Both catalogs' prose *instructs* the
+model to call a tool — "call the load_skill tool with a skill name",
+"can be spawned with the spawn_subagent tool" — and neither knew the
+`ToolContext`. Every agent whose `allowed_tools` excluded one has been
+told to call a tool it does not have; a model that complies burns a
+denied call against `max_steps`. §20's reviewer was simply the first
+caller anyone looked at closely.
+
+`f19` fixed it there, with a flag each caller opts into. `with_catalogs`
+now takes the context and suppresses each catalog whose tool is
+unreachable — independently, since they are two conditions and not one
+switch. The flag is gone; `system_prompt_for` forwards a context instead,
+because a flag saying what the context already knows is a second source of
+truth for one fact.
+
+`spawn_subagent` passes `child`, the C6 intersection, so a parent that
+excluded spawning cannot have the catalog re-invite its child to spawn.
+`/grill-me` passes none, because `run_one_shot` gives
+`continue_conversation` no context and that turn genuinely is
+unrestricted — passing the agent's own context there would suppress
+catalogs for a run that is not actually restricted.
+
+`pass_prompt()` passes no context, so research prompts are byte-identical
+— verified by hashing all ten before and after, since that was the one way
+this could have reached the pipeline. K6 is untouched: this adds a
+suppression condition, never a body.
+
+The control test is the load-bearing one. An unrestricted run must still
+get both catalogs; without that assertion, every other one here also
+passes against a version that suppresses catalogs for everyone, silently
+stripping progressive disclosure from ordinary chat.
+
+## Doc drift, retired mechanically
+
+The documented test count has now drifted three times. The review's remedy
+was standing practice — "run the doc cross-check every section landing" —
+which is the instruction already forgotten twice.
+`tests/test_docs_consistency.py` asserts the three docs agree with each
+other (always) and match `len(session.items)` on an unfiltered run. It
+found the drift this follow-up's own commits had just created.
+
+One thing it taught: **a revert check cannot catch a test that skips.**
+The narrowing guard would skip on every run if its `markexpr` comparison
+were wrong — `pytest.ini`'s addopts always supplies `-m "not integration"`,
+so comparing against `None` skips always — and the file would sit there
+looking like coverage while the counts drifted exactly as before. That
+guard therefore has a direct test rather than a revert-and-see-red. Where
+a test can decline to run, prove it runs.
+
+## Two smaller ones
+
+`_validated` counted deduplicated findings into the "malformed or
+unresolvable" line; a duplicate is neither, and one number covering two
+causes tells the reader neither. And `_timed_out_review` went silent when
+a click raced the timeout — `f15` was right that "no answer" contradicts
+the answer they just gave, but silence sends them to the "N applied"
+summary to work out that their click went nowhere. Two branches, two
+messages, neither of them silence.
+
+- Full suite after the follow-up: **729 tests** (was 718).
