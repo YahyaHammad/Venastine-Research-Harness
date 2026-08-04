@@ -94,7 +94,15 @@ def redact_secrets(text: str) -> str:
 
 # Keys in tool result dicts that carry text content which might contain
 # leaked secrets. Scanned by check_output_policy after every tool call.
-_SCANNED_KEYS = ("content", "result", "stdout", "stderr")
+#
+# "error" is here because failure text is not harness-authored. An MCP
+# server reports a failed call IN BAND, and _normalize() puts that text --
+# written by third-party code, and often quoting the credential that was
+# rejected ("invalid key: sk-...") -- under this key. Scanning only the
+# success keys left the one channel most likely to carry someone else's
+# string as the one channel nothing scanned, and it reaches model context,
+# the TUI transcript and the persisted MessageLog alike.
+_SCANNED_KEYS = ("content", "result", "stdout", "stderr", "error")
 
 
 # How deep to descend into nested values. Bounded so a pathological or

@@ -339,6 +339,7 @@ def setup_mcp(project_path: str):
     not stop the harness from starting -- individual failures are already
     reported per server by connect_all().
     """
+    client = None
     try:
         from mcp_client import config as mcp_config
         from mcp_client import registration
@@ -366,6 +367,12 @@ def setup_mcp(project_path: str):
     except Exception as e:
         logger.debug("MCP setup failed", exc_info=True)
         print(f"[mcp] setup failed, continuing without MCP: {e}", file=sys.stderr)
+        # Returning None here without unwinding is how spawned stdio
+        # servers become orphans: teardown_mcp(None) is a no-op, so a
+        # failure AFTER connect_all() (registration raising, a partial
+        # connect timing out) left live child processes with no owner and
+        # nothing left holding a reference to close them.
+        teardown_mcp(client)
         return None
 
 

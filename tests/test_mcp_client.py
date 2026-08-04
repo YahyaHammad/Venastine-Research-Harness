@@ -27,6 +27,7 @@ import threading
 
 import pytest
 
+from mcp import Client
 from mcp.server import MCPServer
 
 from mcp_client import config as mcp_config
@@ -406,3 +407,109 @@ def test_unregister_all_is_idempotent_and_clears_approval_defaults(client):
     assert not any(n.startswith("mcp__") for n in reg._tools)
     # Back to the named default, not a stale False left behind.
     assert permissions.requires_approval("mcp__probe__add", {}) is True
+
+
+# ---------------------------------------------------------------------------
+# ---- call_tool returns ONE error shape, always (review f6) ---------------
+# ---------------------------------------------------------------------------
+#
+# D23 says call_tool returns a plain dict. MCPError was not the only thing
+# v2 raises: an outputSchema violation surfaces as a bare RuntimeError and
+# a malformed payload as a pydantic ValidationError. dispatch() has no
+# handler-exception catch and _run() catches only ToolCallDenied, so
+# anything escaping here takes down the entire conversation -- or all ten
+# research passes -- on one buggy third-party server.
+
+@pytest.mark.parametrize("exc", [
+    RuntimeError("Output validation error: 'x' is not of type 'integer'"),
+    ValueError("malformed payload"),
+    KeyError("meta"),
+])
+def test_non_mcperror_exceptions_become_error_dicts(client, monkeypatch, exc):
+    async def _raise(*a, **kw):
+        raise exc
+
+    monkeypatch.setattr(client.clients["probe"], "call_tool", _raise)
+
+    result = client.call_tool("probe", "add", {"a": 1, "b": 2})
+
+    assert isinstance(result, dict)
+    assert "MCP call failed" in result["error"]
+    assert type(exc).__name__ in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# ---- a timed-out connect must not strand the manager (review f7) ---------
+# ---------------------------------------------------------------------------
+
+def test_connect_timeout_cancels_the_manager_task(monkeypatch):
+    """Before the fix a connect timeout abandoned the manager task: it
+    stayed parked mid-connect holding every child process already
+    spawned, and NOTHING could close it -- disconnect_all() waits on
+    _done, which a stuck manager never sets. One hung server therefore
+    orphaned every OTHER server's subprocess, inverting this module's
+    'one unreachable server must never take down the others' invariant.
+    """
+    class _Hanging:
+        def __init__(self, transport):
+            pass
+
+        async def __aenter__(self):
+            await asyncio.sleep(3600)
+
+        async def __aexit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(MCPClient, "_transport_for", lambda self, cfg: object())
+    monkeypatch.setattr("mcp_client.client.Client", _Hanging)
+
+    c = MCPClient({"wedged": _cfg("wedged")})
+    with pytest.raises(Exception):
+        c.connect_all(timeout=1.0)
+
+    # The manager was cancelled and released, not left running.
+    assert c._task is None
+    assert c.clients == {}
+
+    # And shutting down afterwards is a no-op rather than a second hang.
+    c.disconnect_all(timeout=5.0)
+
+
+def test_per_server_connect_timeout_does_not_starve_the_others(monkeypatch):
+    """v2's list_tools() takes no read_timeout_seconds, so without a
+    per-server bound one hung handshake spends the whole shared connect
+    budget and every server after it in the loop is starved of time it
+    never got to use."""
+    srv = _build_server()
+
+    class _HangsOnNone:
+        """Real Client for every server but the wedged one, which never
+        answers -- the shape of a server that spawns and then goes quiet."""
+
+        def __init__(self, transport):
+            self._inner = None if transport is None else Client(transport)
+
+        async def __aenter__(self):
+            if self._inner is None:
+                await asyncio.sleep(3600)
+            return await self._inner.__aenter__()
+
+        async def __aexit__(self, *exc):
+            if self._inner is None:
+                return False
+            return await self._inner.__aexit__(*exc)
+
+    monkeypatch.setattr(
+        MCPClient, "_transport_for",
+        lambda self, cfg: None if cfg.name == "wedged" else srv)
+    monkeypatch.setattr("mcp_client.client.Client", _HangsOnNone)
+    monkeypatch.setattr("mcp_client.client.SERVER_CONNECT_TIMEOUT_S", 2.0)
+
+    c = MCPClient({"wedged": _cfg("wedged"), "good": _cfg("good")})
+    try:
+        c.connect_all(timeout=30.0)
+        assert "good" in c.clients, c.failures
+        assert "wedged" in c.failures
+        assert c.call_tool("good", "add", {"a": 1, "b": 1})["result"] == {"result": 2}
+    finally:
+        c.disconnect_all()

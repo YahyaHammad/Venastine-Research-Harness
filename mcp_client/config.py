@@ -86,6 +86,24 @@ def project_config_path(project_path: str) -> str:
     return os.path.join(os.path.realpath(project_path), ".venastine", "mcp.json")
 
 
+def _flag(server: str, key: str, value: Any) -> bool:
+    """A JSON boolean, or False with a warning.
+
+    NOT bool(value): bool("false") is True, so `"autoApprove": "false"`
+    -- a plausible hand edit, and a shape other MCP hosts tolerate --
+    would turn the D28 approval gate OFF on a server the user was trying
+    to keep gated. Failing closed is the only safe direction for both
+    flags: an unexpectedly-gated server prompts, an unexpectedly-enabled
+    one runs third-party code unannounced.
+    """
+    if isinstance(value, bool):
+        return value
+    logger.warning(
+        "mcp.json server %r: %s must be true or false, got %r; using false.",
+        server, key, value)
+    return False
+
+
 def _parse_entry(name: str, entry: Any, tier: str, path: str) -> ServerConfig:
     """Turns one raw JSON value into a ServerConfig. Never raises: a bad
     entry is returned with transport == 'unknown' and an error string, so
@@ -109,8 +127,10 @@ def _parse_entry(name: str, entry: Any, tier: str, path: str) -> ServerConfig:
         headers=entry.get("headers") or {},
         # accept either spelling; ours is camelCase to match the file's
         # existing style, but a snake_case one shouldn't silently no-op
-        auto_approve=bool(entry.get("autoApprove", entry.get("auto_approve", False))),
-        disabled=bool(entry.get("disabled", False)),
+        auto_approve=_flag(
+            name, "autoApprove",
+            entry.get("autoApprove", entry.get("auto_approve", False))),
+        disabled=_flag(name, "disabled", entry.get("disabled", False)),
         raw=entry,
     )
 

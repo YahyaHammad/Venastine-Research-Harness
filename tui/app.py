@@ -323,6 +323,30 @@ class VenastineApp(App):
             if event.stop_reason and event.stop_reason != "complete":
                 transcript.write_system(f"[stopped early: {event.stop_reason}]")
 
+    def _release_permission_channel(self) -> None:
+        """Unblock a worker parked on permission_channel.get(), denying.
+
+        ARCHITECTURE §4.14 already states the invariant -- every
+        permission dismissal path must put a boolean on the channel --
+        but listed only the modal's own paths. Exiting is a dismissal
+        too, and it was the uncovered one: the worker blocks in
+        Queue.get() with no timeout, Textual cannot interrupt a thread
+        blocked there, and it runs thread workers on NON-daemon executor
+        threads. So quitting with a prompt open left App.run() unable to
+        return and the interpreter unable to exit -- a hang, not an error.
+        """
+        channel = self._permission_channel
+        self._permission_channel = None
+        if channel is not None:
+            channel.put(False)
+
+    def exit(self, *args, **kwargs):
+        # Every exit route funnels through here (action_quit, ctrl+c, and
+        # any programmatic exit), which is why the release lives here
+        # rather than on the quit binding alone.
+        self._release_permission_channel()
+        return super().exit(*args, **kwargs)
+
     def _ask_permission(self, request: dict) -> None:
         channel = self._permission_channel
 

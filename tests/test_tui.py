@@ -23,6 +23,8 @@ to asyncio_mode=auto: ARCHITECTURE §4.13 records "no asyncio" as a property
 of pytest.ini, and per-test markers keep that true.
 """
 
+import queue
+
 import pytest
 
 from core.events import LoopEvent
@@ -261,3 +263,71 @@ async def test_effort_reaches_the_model_call(_mocked_loop):
     # call_model_stream(client, provider, model, messages, system, tools,
     #                   temperature, effort)
     assert stream.call_args[0][7] == "high"
+
+
+# ---------------------------------------------------------------------------
+# ---- Quitting is a dismissal path too (review f10) ------------------------
+# ---------------------------------------------------------------------------
+#
+# ARCHITECTURE §4.14 already states the invariant -- every permission
+# dismissal path must put a boolean on the channel -- but listed only the
+# modal's own paths. Exiting was the uncovered one. The worker blocks in
+# Queue.get() with no timeout, Textual cannot interrupt a thread blocked
+# there, and it runs thread workers on NON-daemon executor threads. So
+# quitting with a prompt open left App.run() unable to return and the
+# interpreter unable to exit: a hang, not an error.
+
+class _RecordingQueue(queue.Queue):
+    """A Queue that remembers what was put on it.
+
+    The assertion has to be on the PUT, not on the turn finishing:
+    App.exit() stops the message pump, so TurnFinished never arrives and
+    _busy stays True whether or not the worker was released. What
+    distinguishes the fix from the hang is solely whether a boolean
+    reached the channel the worker is parked on.
+    """
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.puts = []
+
+    def put(self, item, *a, **kw):
+        self.puts.append(item)
+        super().put(item, *a, **kw)
+
+
+@pytest.mark.asyncio
+async def test_quitting_with_a_prompt_open_releases_the_blocked_worker(
+        _mocked_loop, monkeypatch):
+    _mocked_loop.patch("core.loop.registry.approval_needed", return_value=True)
+    dispatch = _mocked_loop.patch("core.loop.registry.dispatch")
+    monkeypatch.setattr("tui.app.queue.Queue", _RecordingQueue)
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        app.query_one("#prompt").value = "do a thing"
+        await pilot.press("enter")
+        assert await _settle(pilot, lambda: isinstance(app.screen, PermissionScreen))
+
+        channel = app._permission_channel
+        assert channel is not None and channel.puts == []
+
+        app.exit()
+        await pilot.pause()
+
+        assert channel.puts == [False], \
+            "exit() left the worker blocked on the permission channel"
+
+    dispatch.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_exit_without_a_pending_prompt_is_harmless(_mocked_loop):
+    """Control: the release must be a no-op when nothing is waiting, or
+    every ordinary quit would push a stray value onto a dead channel."""
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert app._permission_channel is None
+        app.exit()
+        await pilot.pause()

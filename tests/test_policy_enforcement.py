@@ -209,3 +209,51 @@ class TestRegistryIntegration:
         finally:
             # Clean up
             del registry._tools["fake_secret_tool"]
+
+
+# ===========================================================================
+# ---- The 'error' channel is scanned too (review r2-1) --------------------
+# ===========================================================================
+
+class TestErrorChannelRedaction:
+    """MCP reports a failed tool call IN BAND, and _normalize() puts that
+    text -- written by third-party code, and often quoting the credential
+    that was just rejected -- under the 'error' key. Scanning only the
+    success keys left the one channel most likely to carry someone else's
+    string as the one channel nothing scanned."""
+
+    SECRET = "invalid key: sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+
+    def test_error_string_is_redacted(self):
+        out = check_output_policy("mcp__srv__tool", {"error": self.SECRET})
+        assert "sk-ant-api03" not in out["error"]
+        assert "[REDACTED]" in out["error"]
+
+    def test_error_is_redacted_through_dispatch(self, mocker):
+        """End to end on the path the loop actually runs: the handler
+        returns the normalized error dict, dispatch() applies the policy,
+        and the result is what reaches model context, the transcript and
+        the persisted MessageLog."""
+        import json as _json
+        from tools.registry import registry, ToolSpec
+
+        registry.register(ToolSpec(
+            "mcp__srv__leak", {"name": "mcp__srv__leak"},
+            lambda params: {"error": self.SECRET}))
+        try:
+            mocker.patch("tools.registry.is_tool_allowed", return_value=True)
+            mocker.patch("tools.registry.requires_approval", return_value=False)
+
+            out = _json.dumps(registry.dispatch("mcp__srv__leak", {}))
+            assert "sk-ant-api03" not in out
+            assert "REDACTED" in out.upper()
+        finally:
+            registry.unregister("mcp__srv__leak")
+
+    def test_nested_error_payload_is_redacted(self):
+        """The recursion fix and the key list have to both hold: a secret
+        nested inside an error payload is the union of the two defects."""
+        out = check_output_policy(
+            "mcp__srv__tool",
+            {"error": {"detail": {"message": self.SECRET}}})
+        assert "sk-ant-api03" not in str(out)

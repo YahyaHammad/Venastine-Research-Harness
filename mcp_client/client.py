@@ -56,6 +56,12 @@ DEFAULT_CALL_TIMEOUT_S = 180.0
 CONNECT_TIMEOUT_S = 60.0
 SHUTDOWN_TIMEOUT_S = 15.0
 
+# Per-server, inside the manager. CONNECT_TIMEOUT_S is the caller-side
+# budget for ALL servers together; without a per-server bound one hung
+# handshake spends it and every server after it in the loop is starved of
+# time it never got to use.
+SERVER_CONNECT_TIMEOUT_S = 20.0
+
 # How far below the caller-side timeout the protocol-level timeout sits.
 # Both are set, and they do different jobs: read_timeout_seconds cancels
 # the REQUEST at the protocol level, while future.result(timeout=) only
@@ -192,14 +198,21 @@ class MCPClient:
                         logger.info("MCP server %r is disabled; skipping.", name)
                         continue
                     try:
-                        client = await stack.enter_async_context(
-                            Client(self._transport_for(cfg))
-                        )
-                        # Validation is by connection (§17 decision G):
-                        # a server that connects AND lists its tools is
-                        # usable. Listing here also gives registration
-                        # its catalogue without a second round trip.
-                        tools = await client.list_tools()
+                        # PER-SERVER bound, not just the caller's blanket
+                        # one. v2's list_tools() takes no
+                        # read_timeout_seconds, so a server that spawns and
+                        # then never answers the handshake would otherwise
+                        # consume the whole shared connect budget and starve
+                        # every server after it in this loop.
+                        async with asyncio.timeout(SERVER_CONNECT_TIMEOUT_S):
+                            client = await stack.enter_async_context(
+                                Client(self._transport_for(cfg))
+                            )
+                            # Validation is by connection (§17 decision G):
+                            # a server that connects AND lists its tools is
+                            # usable. Listing here also gives registration
+                            # its catalogue without a second round trip.
+                            tools = await client.list_tools()
                         self.clients[name] = client
                         logger.info("MCP server %r connected (%d tools).",
                                     name, len(tools.tools))
@@ -235,7 +248,21 @@ class MCPClient:
             self._task = loop.create_task(self._manager())
             await self._ready.wait()
 
-        asyncio.run_coroutine_threadsafe(_start(), loop).result(timeout=timeout)
+        try:
+            asyncio.run_coroutine_threadsafe(_start(), loop).result(timeout=timeout)
+        except Exception:
+            # A timeout here used to abandon the manager permanently. It
+            # would still be parked mid-connect holding every child process
+            # already spawned, and NOTHING could close it: disconnect_all()
+            # waits on _done, which a stuck manager never sets. So one hung
+            # server orphaned every other server's subprocess -- the exact
+            # inversion of this file's "one unreachable server must never
+            # take down the others" invariant.
+            self._cancel_manager()
+            self.clients.clear()
+            self._task = None
+            _shutdown_loop()
+            raise
 
     # -- calling ---------------------------------------------------------
 
@@ -278,8 +305,42 @@ class MCPClient:
             # can't outlive the call.
             future.cancel()
             return {"error": f"MCP tool {tool_name!r} timed out after {timeout}s"}
+        except Exception as e:
+            # LAST, so the two specific branches above keep their handling
+            # (notably future.cancel()). MCPError is not the only thing v2
+            # raises: an outputSchema violation surfaces as a bare
+            # RuntimeError and a malformed payload as a pydantic
+            # ValidationError. dispatch() has no handler-exception catch
+            # and _run() catches only ToolCallDenied, so anything escaping
+            # here takes down the whole conversation -- or all ten research
+            # passes -- on one buggy third-party server. D23 promises this
+            # function returns ONE error shape; that has to mean always.
+            logger.debug("MCP call raised", exc_info=True)
+            return {"error": f"MCP call failed: {type(e).__name__}: {e}"}
 
     # -- shutdown --------------------------------------------------------
+
+    def _cancel_manager(self, timeout: float = SHUTDOWN_TIMEOUT_S) -> None:
+        """Force the manager task to unwind its exit stack.
+
+        Cancellation is the ONLY way to close the stack from outside the
+        graceful path, and it works for the same reason the graceful path
+        does: CancelledError is raised inside the manager's `async with`,
+        so __aexit__ runs in the task that entered it. Calling aclose()
+        from any other task is the cancel-scope error this module's
+        docstring is about.
+        """
+        task, loop = self._task, _loop
+        if task is None or loop is None:
+            return
+        try:
+            async def _cancel():
+                task.cancel()
+                if self._done is not None:
+                    await self._done.wait()
+            asyncio.run_coroutine_threadsafe(_cancel(), loop).result(timeout=timeout)
+        except Exception as e:
+            logger.warning("MCP manager task did not cancel cleanly: %s", e)
 
     def disconnect_all(self, timeout: float = SHUTDOWN_TIMEOUT_S) -> None:
         """Close every session and stop the loop thread.
@@ -292,14 +353,20 @@ class MCPClient:
         if self._task is None or _loop is None:
             _shutdown_loop()
             return
+        graceful = False
         try:
             async def _stop():
                 self._shutdown.set()
                 await self._done.wait()
             asyncio.run_coroutine_threadsafe(_stop(), _loop).result(timeout=timeout)
+            graceful = True
         except Exception as e:
             logger.warning("MCP shutdown did not complete cleanly: %s", e)
-        finally:
-            self.clients.clear()
-            self._task = None
-            _shutdown_loop()
+        if not graceful:
+            # The stack is still open and the children are still ours.
+            # Asking politely didn't work, so cancel -- otherwise this
+            # returns having reaped nothing while reporting only a warning.
+            self._cancel_manager(timeout)
+        self.clients.clear()
+        self._task = None
+        _shutdown_loop()

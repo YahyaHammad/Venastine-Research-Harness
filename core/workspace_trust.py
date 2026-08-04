@@ -73,8 +73,19 @@ def _content_hash(project_path: str) -> str:
             rel = os.path.relpath(path, root).replace(os.sep, "/")
             hasher.update(rel.encode("utf-8"))
             hasher.update(b"\0")
-            with open(path, "rb") as f:
-                hasher.update(f.read())
+            # Bounded reads, and regular files only. This hash runs BEFORE
+            # the user has consented to anything, over content that arrived
+            # with a directory they cloned: f.read() on a multi-GB blob is
+            # one unbounded allocation at startup, and open() on a FIFO
+            # (os.walk lists it, and a symlink to one resolves) blocks
+            # forever. Neither is content worth reading to decide whether
+            # to trust it -- its presence and name are enough.
+            if os.path.isfile(path):
+                with open(path, "rb") as f:
+                    for chunk in iter(lambda: f.read(1 << 16), b""):
+                        hasher.update(chunk)
+            else:
+                hasher.update(b"<non-regular file>")
             hasher.update(b"\0")
     return hasher.hexdigest()
 

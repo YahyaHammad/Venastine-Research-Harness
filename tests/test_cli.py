@@ -337,3 +337,86 @@ def test_f1_clean_config_returns_settings(tmp_path, monkeypatch):
     proj.mkdir()
 
     assert load_project_config(str(proj), False)["default_model"] == "cfg-model"
+
+
+# ===========================================================================
+# ---- setup_mcp never abandons a connected client (review f5) -------------
+# ===========================================================================
+#
+# stdio servers are child processes THIS harness spawned. Returning None
+# from the blanket except without unwinding is how they become orphans:
+# teardown_mcp(None) is a no-op, so a failure AFTER connect_all() left
+# live children with no owner and nothing holding a reference to close
+# them. On Windows they survive the parent and accumulate across sessions.
+
+class _SpyClient:
+    """Stands in for MCPClient: records whether it was shut down."""
+
+    def __init__(self, configs):
+        self.server_configs = configs
+        self.clients = {"srv": object()}
+        self.failures = {}
+        self.disconnected = False
+
+    def connect_all(self, timeout=None):
+        pass
+
+    def disconnect_all(self, timeout=None):
+        self.disconnected = True
+
+
+@pytest.fixture
+def _mcp_setup(monkeypatch, tmp_path):
+    """Wire setup_mcp to a spy client with one configured server."""
+    import main
+    from mcp_client import config as mcp_config
+
+    cfg = mcp_config.ServerConfig(
+        name="srv", tier="user", path="<test>", transport="stdio",
+        command="unused")
+    monkeypatch.setattr(mcp_config, "load_server_configs",
+                        lambda project, trusted: {"srv": cfg})
+    monkeypatch.setattr(main, "_confirm_user_level_servers", lambda configs: configs)
+
+    created = []
+
+    def _factory(configs):
+        client = _SpyClient(configs)
+        created.append(client)
+        return client
+
+    monkeypatch.setattr("mcp_client.client.MCPClient", _factory)
+    return {"created": created, "project": str(tmp_path)}
+
+
+def test_f5_registration_failure_still_disconnects_the_client(
+        _mcp_setup, monkeypatch, capsys):
+    """The specific abandoned-client path: connect_all() succeeded and
+    spawned the children, then something after it raised."""
+    import main
+    from mcp_client import registration
+
+    def _boom(client, registry):
+        raise RuntimeError("registration exploded")
+
+    monkeypatch.setattr(registration, "register_all", _boom)
+
+    assert main.setup_mcp(_mcp_setup["project"]) is None
+    assert _mcp_setup["created"], "the spy client was never constructed"
+    assert _mcp_setup["created"][0].disconnected is True
+    assert "setup failed" in capsys.readouterr().err
+
+
+def test_f5_successful_setup_returns_a_live_client(_mcp_setup, monkeypatch):
+    """Control: the cleanup must not fire on the happy path, or every
+    successful startup would disconnect the servers it just connected."""
+    import main
+    from mcp_client import registration
+
+    monkeypatch.setattr(registration, "register_all",
+                        lambda client, registry: ["mcp__srv__tool"])
+
+    client = main.setup_mcp(_mcp_setup["project"])
+
+    assert client is _mcp_setup["created"][0]
+    assert client.disconnected is False

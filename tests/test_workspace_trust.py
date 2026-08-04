@@ -104,3 +104,67 @@ def test_content_files_sorted_and_relative(tmp_path):
     assert workspace_trust.content_files(str(proj)) == [
         "agents/a.md", "skills/z.md"]
     assert workspace_trust.content_files(str(tmp_path / "missing")) == []
+
+
+# ---------------------------------------------------------------------------
+# ---- Bounded, regular-files-only hashing (review f4) ----------------------
+# ---------------------------------------------------------------------------
+#
+# This hash runs BEFORE the user has consented to anything, over content
+# that arrived with a directory they cloned. Reading it with one f.read()
+# made a multi-GB blob a single unbounded allocation at startup, and
+# open() on a FIFO (os.walk lists it; a symlink to one resolves) blocks
+# forever. Neither is content worth reading to decide whether to trust it.
+
+def test_large_file_hashes_correctly_in_chunks(tmp_path):
+    """A file well past the 64 KiB chunk size must produce the same digest
+    a whole-file read would. A chunk loop that reads once and stops looks
+    fine on small fixtures and silently ignores the tail of every real
+    one."""
+    import hashlib
+
+    blob = ("A" * 4096 + "B" * 4096) * 32          # 256 KiB, 4 chunks
+    proj = _make_project(tmp_path, {"big.md": blob})
+
+    expected = hashlib.sha256()
+    expected.update(b"big.md")
+    expected.update(b"\0")
+    expected.update(blob.encode("utf-8"))
+    expected.update(b"\0")
+
+    assert workspace_trust._content_hash(str(proj)) == expected.hexdigest()
+
+
+def test_non_regular_file_is_hashed_by_name_and_never_opened(
+        tmp_path, monkeypatch):
+    """A path that isn't a regular file contributes its NAME to the
+    digest, not its contents -- because opening it is what hangs. Two
+    projects differing only in such a file's bytes must therefore hash
+    identically; before the fix they hashed differently, which is the
+    proof the bytes were being read."""
+    real_isfile = os.path.isfile
+
+    def fake_isfile(path):
+        # Stand in for a FIFO/device, which cannot be created portably.
+        if os.path.basename(path) == "pipe.dat":
+            return False
+        return real_isfile(path)
+
+    monkeypatch.setattr(os.path, "isfile", fake_isfile)
+
+    a = _make_project(tmp_path, {"pipe.dat": "AAAA"}, name="a")
+    b = _make_project(tmp_path, {"pipe.dat": "ZZZZ"}, name="b")
+
+    assert workspace_trust._content_hash(str(a)) == \
+        workspace_trust._content_hash(str(b))
+
+
+def test_regular_file_contents_still_change_the_digest(tmp_path):
+    """Control for the test above: without the isfile patch, differing
+    contents MUST differ -- otherwise the first test would pass against
+    an implementation that ignores every file's content."""
+    a = _make_project(tmp_path, {"pipe.dat": "AAAA"}, name="a")
+    b = _make_project(tmp_path, {"pipe.dat": "ZZZZ"}, name="b")
+
+    assert workspace_trust._content_hash(str(a)) != \
+        workspace_trust._content_hash(str(b))

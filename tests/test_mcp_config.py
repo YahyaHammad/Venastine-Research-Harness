@@ -195,3 +195,53 @@ def test_an_unreadable_acknowledgement_store_fails_closed(roots):
     (roots["user"] / "known_mcp_servers.json").write_text("{corrupt",
                                                           encoding="utf-8")
     assert mcp_config.is_known(cfg) is False
+
+
+# ---------------------------------------------------------------------------
+# ---- flags are parsed, not coerced (review r1-1) -------------------------
+# ---------------------------------------------------------------------------
+#
+# bool("false") is True. mcp.json is hand-edited and shared with other MCP
+# hosts, so a string where a JSON boolean belongs is a realistic mistake --
+# and for autoApprove it turns the D28 approval gate OFF on a server the
+# user was trying to keep gated. Both flags fail CLOSED.
+
+@pytest.mark.parametrize("value", ["false", "no", "0", 0, None, []])
+def test_non_boolean_auto_approve_falls_back_to_false(roots, value, caplog):
+    _write(roots["user"] / "mcp.json",
+           {"srv": {"command": "npx", "autoApprove": value}})
+
+    with caplog.at_level("WARNING", logger="mcp_client.config"):
+        cfgs = mcp_config.load_server_configs(str(roots["project"]), trusted=False)
+
+    assert cfgs["srv"].auto_approve is False
+    assert any("autoApprove" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize("value", ["false", "no", 0, None])
+def test_non_boolean_disabled_falls_back_to_false(roots, value):
+    """The mirror defect: `"disabled": "false"` skipped a server the user
+    meant to keep running."""
+    _write(roots["user"] / "mcp.json",
+           {"srv": {"command": "npx", "disabled": value}})
+    cfgs = mcp_config.load_server_configs(str(roots["project"]), trusted=False)
+    assert cfgs["srv"].disabled is False
+
+
+def test_real_booleans_are_honoured_both_ways(roots):
+    """Control: strict parsing must not break the documented spelling."""
+    _write(roots["user"] / "mcp.json", {
+        "on": {"command": "npx", "autoApprove": True, "disabled": False},
+        "off": {"command": "npx", "autoApprove": False, "disabled": True},
+    })
+    cfgs = mcp_config.load_server_configs(str(roots["project"]), trusted=False)
+
+    assert cfgs["on"].auto_approve is True and cfgs["on"].disabled is False
+    assert cfgs["off"].auto_approve is False and cfgs["off"].disabled is True
+
+
+def test_snake_case_spelling_still_accepted(roots):
+    _write(roots["user"] / "mcp.json",
+           {"srv": {"command": "npx", "auto_approve": True}})
+    cfgs = mcp_config.load_server_configs(str(roots["project"]), trusted=False)
+    assert cfgs["srv"].auto_approve is True

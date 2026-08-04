@@ -447,3 +447,112 @@ def test_tui_deep_merges_like_compaction(_redirect_roots):
 
     assert tui["theme"] == "light-blue"      # project wins on its own key
     assert tui["animations"] is False        # user's sibling key survives
+
+# ---------------------------------------------------------------------------
+# ---- Frontmatter values are VALIDATED, not coerced (review f1, f2) --------
+# ---------------------------------------------------------------------------
+#
+# Both defects had the same shape: a value from a file the user wrote was
+# handed to a Python builtin that accepts anything. isinstance(True, int)
+# is True and bool("false") is True, so a malformed definition became a
+# silently WRONG one instead of a rejected one.
+
+@pytest.mark.parametrize("value", ["yes", "true", "on"])
+def test_yaml_boolean_max_steps_is_rejected_not_read_as_one(
+        _redirect_roots, value, caplog):
+    """`max_steps: yes` is a YAML boolean, and isinstance(True, int) is
+    True -- so a bare int check passes it through as True, which every
+    step-budget comparison then reads as 1. The agent would silently stop
+    after a single step instead of the file being rejected at load."""
+    _write_agent(_redirect_roots["user"], "truthy", (f"max_steps: {value}",))
+
+    with caplog.at_level("WARNING", logger="core.config_loader"):
+        config_loader.initialize(str(_redirect_roots["project"]))
+
+    assert config_loader.get_agent("truthy") is None
+    assert any("max_steps" in r.getMessage() for r in caplog.records)
+
+
+def test_integer_max_steps_still_loads(_redirect_roots):
+    """The guard must reject booleans WITHOUT rejecting real integers."""
+    _write_agent(_redirect_roots["user"], "counted", ("max_steps: 7",))
+    config_loader.initialize(str(_redirect_roots["project"]))
+    assert config_loader.get_agent("counted").max_steps == 7
+
+
+@pytest.mark.parametrize("key", ["use_memory", "use_project_context"])
+def test_string_boolean_opt_out_is_rejected_not_coerced(_redirect_roots, key):
+    """bool("false") is True. These two fields are exactly the ones a
+    restrictive agent definition uses to opt OUT, so coercing them
+    inverts a deliberate restriction with no warning at all."""
+    _write_agent(_redirect_roots["user"], "stringy", (f'{key}: "false"',))
+    config_loader.initialize(str(_redirect_roots["project"]))
+    assert config_loader.get_agent("stringy") is None
+
+
+def test_real_booleans_still_load_with_their_value(_redirect_roots):
+    _write_agent(_redirect_roots["user"], "opted",
+                 ("use_memory: false", "use_project_context: true"))
+    config_loader.initialize(str(_redirect_roots["project"]))
+    agent = config_loader.get_agent("opted")
+    assert agent.use_memory is False
+    assert agent.use_project_context is True
+
+
+# ---------------------------------------------------------------------------
+# ---- Undecodable content degrades, it does not abort (f3, r2-2) ----------
+# ---------------------------------------------------------------------------
+
+def test_undecodable_settings_in_untrusted_project_does_not_break_the_prompt(
+        _redirect_roots):
+    """describe_project_content() runs ONLY for untrusted projects -- by
+    definition the adversarial case. UnicodeDecodeError is a ValueError,
+    not an OSError, so it escaped the except and killed startup BEFORE
+    the trust prompt rendered, making trust ungrantable for that project
+    by any path including --trust-project."""
+    venastine = _redirect_roots["project"] / ".venastine"
+    venastine.mkdir(parents=True, exist_ok=True)
+    (venastine / "settings.json").write_bytes(
+        '{"default_model": "x"}'.encode("utf-16"))
+
+    summary = config_loader.describe_project_content(
+        str(_redirect_roots["project"]))
+
+    assert "settings.json" in summary
+    assert "could not be read" in summary
+
+
+def test_undecodable_context_md_in_trusted_project_degrades(
+        _redirect_roots, caplog):
+    """A trusted project's CONTEXT.md is content the USER wrote, and this
+    module's policy for malformed content everywhere else is warn-and-
+    skip. Raising instead reached main.load_project_config's
+    (ValueError, OSError) handler and SystemExit(1)'d every invocation in
+    that directory -- including plain chat, which never reads the file."""
+    venastine = _redirect_roots["project"] / ".venastine"
+    venastine.mkdir(parents=True, exist_ok=True)
+    (venastine / "CONTEXT.md").write_bytes("Project notes".encode("utf-16"))
+    _write_agent(_redirect_roots["user"], "reader",
+                 ("use_project_context: true",))
+    workspace_trust.grant_trust(str(_redirect_roots["project"]))
+
+    with caplog.at_level("WARNING", logger="core.config_loader"):
+        config_loader.initialize(str(_redirect_roots["project"]))
+
+    assert config_loader.context_for_agent(
+        config_loader.get_agent("reader")) is None
+    assert any("CONTEXT.md" in r.getMessage() for r in caplog.records)
+
+
+def test_readable_context_md_still_loads(_redirect_roots):
+    """Control: the degradation must not swallow the working case."""
+    venastine = _redirect_roots["project"] / ".venastine"
+    venastine.mkdir(parents=True, exist_ok=True)
+    (venastine / "CONTEXT.md").write_text("Real notes.", encoding="utf-8")
+    _write_agent(_redirect_roots["user"], "reader",
+                 ("use_project_context: true",))
+    workspace_trust.grant_trust(str(_redirect_roots["project"]))
+
+    config_loader.initialize(str(_redirect_roots["project"]))
+    assert config_loader.context_for_agent(
+        config_loader.get_agent("reader")) == "Real notes."

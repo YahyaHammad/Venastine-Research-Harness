@@ -172,9 +172,28 @@ def _parse_md_file(path: str, kind: str, tier: str):
         logger.warning("Skipping agent file %s: approval_overrides is not a mapping", path)
         return None
     max_steps = fm.get("max_steps")
-    if max_steps is not None and not isinstance(max_steps, int):
+    # `isinstance(True, int)` is True in Python, and YAML reads `yes`/`on`
+    # as booleans -- so `max_steps: yes` would pass a bare int check and
+    # arrive as True, which every step-budget comparison then treats as 1.
+    # A malformed definition must be rejected here, not silently turned
+    # into a one-step agent.
+    if max_steps is not None and (isinstance(max_steps, bool)
+                                  or not isinstance(max_steps, int)):
         logger.warning("Skipping agent file %s: max_steps is not an integer", path)
         return None
+    # Booleans are VALIDATED, not coerced. bool("false") is True, so
+    # `use_memory: "false"` would invert a deliberate opt-out with no
+    # warning -- and these two fields are exactly the ones a restrictive
+    # agent definition uses to opt OUT. Same warn-and-skip contract every
+    # other typed field in this function has.
+    flags = {}
+    for key, default in (("use_project_context", False), ("use_memory", True)):
+        value = fm.get(key, default)
+        if not isinstance(value, bool):
+            logger.warning(
+                "Skipping agent file %s: %s is not a boolean", path, key)
+            return None
+        flags[key] = value
     return AgentDef(
         name=name,
         description=str(fm.get("description", "")),
@@ -182,8 +201,8 @@ def _parse_md_file(path: str, kind: str, tier: str):
         provider=fm.get("provider"),
         allowed_tools=allowed,
         approval_overrides=overrides,
-        use_project_context=bool(fm.get("use_project_context", False)),
-        use_memory=bool(fm.get("use_memory", True)),
+        use_project_context=flags["use_project_context"],
+        use_memory=flags["use_memory"],
         max_steps=max_steps,
         body=body,
         tier=tier,
@@ -359,8 +378,18 @@ def initialize(project_path: str) -> None:
         context_path = os.path.join(
             workspace_trust.venastine_dir(project_path), "CONTEXT.md")
         if os.path.exists(context_path):
-            with open(context_path, "r", encoding="utf-8") as f:
-                context = f.read()
+            # Degrade, don't abort. UnicodeDecodeError is a ValueError, so
+            # an unreadable CONTEXT.md would reach main.load_project_config's
+            # handler and SystemExit(1) EVERY invocation in this directory
+            # -- including plain chat, which never reads the file. Every
+            # other malformed content file in this module warns and skips.
+            try:
+                with open(context_path, "r", encoding="utf-8-sig") as f:
+                    context = f.read()
+            except (OSError, UnicodeDecodeError) as e:
+                logger.warning(
+                    "Could not read %s; continuing without project "
+                    "context: %s", context_path, e)
     _state = {
         "project_path": os.path.realpath(project_path),
         "trusted": trusted,
@@ -473,9 +502,15 @@ def describe_project_content(project_path: str) -> str:
         if not os.path.exists(path):
             continue
         try:
-            with open(path, "r", encoding="utf-8") as f:
+            with open(path, "r", encoding="utf-8-sig") as f:
                 body = f.read()
-        except OSError as e:
+        except (OSError, UnicodeDecodeError) as e:
+            # This function runs ONLY for untrusted projects, i.e. content
+            # that is adversarial by definition. UnicodeDecodeError is a
+            # ValueError, not an OSError, so without it here a UTF-16
+            # settings.json kills startup before the trust prompt renders
+            # -- including the non-TTY notice and the --trust-project path,
+            # making trust ungrantable for that project.
             lines.append(f"{fname}: could not be read ({e})")
             continue
         lines.append(label)

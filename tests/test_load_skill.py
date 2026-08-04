@@ -69,6 +69,16 @@ def test_prompt_unchanged_without_skills(tmp_path, monkeypatch):
     # empty dir: this test's contract is "no skills AND no agents ->
     # the prompt is byte-identical".
     monkeypatch.setattr(config_loader, "HARNESS_ROOT", str(tmp_path / "harness"))
+    # ALL THREE tiers must be redirected, not two. initialize() always
+    # scans the user tier, so without this the test reads the developer's
+    # real ~/.config/venastine and fails on any machine that has defined a
+    # user-level skill or agent -- a first-class feature this project
+    # ships. CI stays green; the configured machine goes red.
+    home = tmp_path / "home"
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(config_loader, "_user_config_dir",
+                        lambda: str(home / ".config" / "venastine"))
     project = tmp_path / "empty"
     project.mkdir()
     config_loader.initialize(str(project))
