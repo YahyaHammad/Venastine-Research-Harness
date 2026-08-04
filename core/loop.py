@@ -67,6 +67,51 @@ def with_goal(system_prompt: str, memory: ConversationMemory) -> str:
     return f"{system_prompt}\n\n## Persistent objective\n{goal}"
 
 
+def _authorization_kwargs(authorization) -> dict:
+    """Unpack a RunAuthorization into _run()'s primitives.
+
+    ONE unpacking point, so the pipeline entry point and its JSON-retry
+    twin cannot disagree about what a bundle means. The retry re-enters the
+    SAME pass thread through continue_conversation(): passing the bundle
+    there and not here (or the reverse) would strip a pass's tools on
+    exactly the attempt where the model is already struggling, and the only
+    symptom would be a second malformed answer.
+    """
+    if authorization is None:
+        return {}
+    return {
+        "granted_tools": authorization.granted_tools or None,
+        "grant_budget": authorization.budget,
+        "approval_provider": authorization.provider,
+    }
+
+
+def _obtain_approval(permission_channel, approval_provider,
+                     tool_name: str, params: dict, notice) -> bool:
+    """Get the human's answer for one gated call, by whichever route this
+    run has. False when there is no route at all.
+
+    TWO routes, because they solve different problems and §23 has not yet
+    merged them. A queue is a thread handoff: the TUI's worker parks here
+    while its UI thread renders the modal, and the question travels in the
+    LoopEvent yielded just above. A provider is a callable the shell
+    supplies, and it exists because run_to_completion() DISCARDS that
+    event -- so the CLI and the research pipeline, which drain the
+    generator rather than watching it, would otherwise block on a queue
+    with nothing displayed.
+
+    The channel wins when both are present: it is the more specific
+    arrangement (a live UI is already showing the request), and the
+    provider would be asking a second time about a question already on
+    screen.
+    """
+    if permission_channel is not None:
+        return bool(permission_channel.get())
+    if approval_provider is not None:
+        return bool(approval_provider.ask(tool_name, params, notice))
+    return False
+
+
 def run_to_completion(gen) -> ModelResponse:
     """Consumes a _run() generator fully, discarding intermediate events,
     and returns the final ModelResponse — this is what keeps
@@ -100,6 +145,7 @@ class RunAgentLoop:
         permission_channel: Optional[queue.Queue] = None,
         granted_tools: Optional[set] = None,
         grant_budget=None,
+        approval_provider=None,
     ):
         """Generator yielding LoopEvent objects as the loop progresses.
 
@@ -141,10 +187,14 @@ class RunAgentLoop:
         # validated against THAT model, not the one the parent was using.
         effort = effort_for(client, provider_name, model, effort)
         # §18 headless callability rule (user-widened from approval-only):
-        # with no permission_channel, a tool that needs approval is
-        # uncallable in this configuration, so it is not advertised --
-        # but named once in a WARNING so the hiding is never silent.
-        headless = permission_channel is None
+        # with no way to ask, a tool that needs approval is uncallable in
+        # this configuration, so it is not advertised -- but named once in
+        # a WARNING so the hiding is never silent.
+        #
+        # §25: "no way to ask" now means neither route. A research pass
+        # with an ApprovalProvider CAN ask, so hiding its gated tools would
+        # be reporting a limitation the run does not have.
+        headless = permission_channel is None and approval_provider is None
         tool_schemas = registry.schemas(context, callable_only=headless)
         if headless:
             hidden = tuple(sorted(registry.headless_hidden(context)))
@@ -267,22 +317,29 @@ class RunAgentLoop:
                     granted_calls.append(
                         {"tool": call.name, "params": call.input})
                 if needs_approval:
+                    notice = registry.approval_notice(
+                        call.name, call.input, context)
                     yield LoopEvent(permission_request={
                         "tool_name": call.name, "params": call.input,
-                        "notice": registry.approval_notice(
-                            call.name, call.input, context),
+                        "notice": notice,
                     })
-                    approved = (
-                        permission_channel.get()
-                        if permission_channel is not None
-                        else False
-                    )
+                    approved = _obtain_approval(
+                        permission_channel, approval_provider,
+                        call.name, call.input, notice)
                     if not approved:
                         result = {
                             "error": f"{call.name} requires approval and was not given",
                         }
                     else:
-                        if registry.grant_scope(call.name) == "run":
+                        # §25 R11: run-scope is a shortcut for a chat turn,
+                        # where re-asking about the same tool seconds later
+                        # is noise. A provider that declines it is saying
+                        # its whole purpose is per-call supervision --
+                        # attended mode -- and one yes must not silently
+                        # cover later calls there.
+                        if (registry.grant_scope(call.name) == "run"
+                                and (approval_provider is None
+                                     or approval_provider.honour_run_scope)):
                             run_info.granted_tools.add(call.name)
                         # Approval already obtained — pass a callback that
                         # returns True so dispatch()'s internal re-check
@@ -376,6 +433,7 @@ class RunAgentLoop:
         temperature: Optional[float] = None,
         effort: Optional[str] = None,
         context: Optional[ToolContext] = None,
+        authorization=None,
     ) -> ModelResponse:
         """
         Runs ONE research pass. `pass_input` is whatever the orchestrator
@@ -383,6 +441,11 @@ class RunAgentLoop:
         accumulated PipelineContext summary for every pass after that) --
         this function doesn't know or care which. A fresh ConversationMemory
         is created per call: each pass gets its own thread, not a shared one.
+
+        authorization (§25): a core.approval.RunAuthorization, or None for
+        the pre-§25 behaviour -- no grants, nobody to ask, every gated tool
+        hidden. Built by the SHELL that launched the pipeline and passed
+        down unchanged; this function takes no view on what it contains.
         """
         memory = ConversationMemory()
         memory.add_user_message(pass_input)
@@ -390,6 +453,7 @@ class RunAgentLoop:
         response = run_to_completion(RunAgentLoop._run(
             memory, system_prompt, provider_name, model, context,
             max_steps, max_total_tokens, temperature=temperature, effort=effort,
+            **_authorization_kwargs(authorization),
         ))
         response.thread_id = memory.thread_id
         return response
@@ -406,6 +470,7 @@ class RunAgentLoop:
         temperature: Optional[float] = None,
         effort: Optional[str] = None,
         context: Optional[ToolContext] = None,
+        authorization=None,
     ) -> ModelResponse:
         """
         Sends a follow-up message into an EXISTING conversation thread and
@@ -418,12 +483,21 @@ class RunAgentLoop:
         returned malformed JSON: the corrective follow-up is sent into
         the same thread the failed pass used, so the model sees its own
         prior output in context and can correct it.
+
+        authorization (§25) is NOT optional in practice for that path. A
+        retry is the same pass continuing, so it must run with the same
+        authorization; omitting it would silently strip the pass's gated
+        tools on precisely the attempt where the model is already
+        struggling, and the only symptom would be a second malformed
+        answer. The budget carries across, so retries spend from the same
+        ceiling rather than resetting it.
         """
         memory = ConversationMemory(thread_id=thread_id)
         memory.add_user_message(message)
         response = run_to_completion(RunAgentLoop._run(
             memory, system_prompt, provider_name, model, context,
             max_steps, max_total_tokens, temperature=temperature, effort=effort,
+            **_authorization_kwargs(authorization),
         ))
         response.thread_id = thread_id
         return response

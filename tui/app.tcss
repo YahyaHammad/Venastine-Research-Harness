@@ -67,6 +67,34 @@ ThreadPickerScreen {
     align: center middle;
 }
 
+/* §25 research grant picker. Warning-bordered like the permission modal
+   rather than primary-bordered like the thread picker: both are
+   authorization decisions, and looking like the neutral list-of-threads
+   dialog would undersell what confirming here does. */
+#grant-dialog {
+    width: 76;
+    height: auto;
+    max-height: 26;
+    padding: 1 2;
+    border: thick $warning;
+    background: $surface;
+}
+
+#grant-title {
+    text-style: bold;
+}
+
+#grant-help {
+    padding-bottom: 1;
+    color: $text-muted;
+}
+
+#grant-list {
+    height: auto;
+    max-height: 14;
+    margin-bottom: 1;
+}
+
 #thread-dialog {
     width: 70;
     height: auto;

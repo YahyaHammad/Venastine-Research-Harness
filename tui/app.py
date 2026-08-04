@@ -43,10 +43,16 @@ from core.loop import (
     DEFAULT_PROVIDER, DEFAULT_SYSTEM_PROMPT, RunAgentLoop, with_goal,
 )
 from core.memory import ConversationMemory
+# Module scope, not inside _cmd_research: _split_grant_flag needs the
+# sentinel too, and two shells comparing against two different object()
+# instances would look identical and behave differently.
+from core.reasoning.authorization import GRANT_PICKER
 from prompts import system_prompts
 from tui import ravens, themes
 from tui.commands import SlashCommand, registry as commands
-from tui.screens import PermissionScreen, ThreadPickerScreen
+from tui.screens import (
+    GrantPickerScreen, PermissionScreen, ThreadPickerScreen,
+)
 from tui.widgets import EffortRaven, GoalBanner, RavenPanel, Transcript
 
 
@@ -597,16 +603,101 @@ def _cmd_research(app: VenastineApp, args: str) -> None:
     the orchestrator. Live pass-by-pass progress needs the pipeline to
     emit events, which is §22. The worker keeps the app responsive and
     the raven animating; the trace and report land when it returns.
+
+    §25: --grant [names] takes the same values as the CLI flag and goes
+    through the same parser, so the two shells cannot offer different
+    sets. Bare --grant opens the picker.
     """
-    if not args:
-        app._transcript.write_error("Usage: /research <query>")
+    from core.reasoning.authorization import (
+        candidates, parse_grant_spec, GrantSpecError,
+    )
+
+    grant_spec, query = _split_grant_flag(args)
+    if not query:
+        app._transcript.write_error("Usage: /research [--grant[=a,b]] <query>")
         return
     if app._busy:
         app._transcript.write_error("Still working — wait for this turn to finish.")
         return
 
+    offered = candidates()
+    if grant_spec is GRANT_PICKER:
+        if not offered:
+            app._transcript.write_system(
+                "No approval-gated tool is available to this run, so there "
+                "is nothing to authorise.")
+            _start_research(app, query, None)
+            return
+
+        def _picked(selected) -> None:
+            # None means the user cancelled the RUN; an empty set means
+            # "run, granting nothing". Two different answers.
+            if selected is None:
+                app._transcript.write_system("Research cancelled.")
+                return
+            _start_research(app, query, _authorization_for(app, selected))
+
+        app.push_screen(GrantPickerScreen(offered), _picked)
+        return
+
+    granted = set()
+    if grant_spec is not None:
+        try:
+            granted = parse_grant_spec(grant_spec, offered)
+        except GrantSpecError as e:
+            app._transcript.write_error(f"/research --grant: {e}")
+            return
+    _start_research(app, query, _authorization_for(app, granted))
+
+
+def _authorization_for(app: VenastineApp, granted: set):
+    """A RunAuthorization for a set of granted names, or None for none."""
+    from core.approval import GrantBudget, RunAuthorization
+
+    if not granted:
+        return None
+    app._transcript.write_system(
+        f"Authorised for this run only: {', '.join(sorted(granted))}. "
+        f"Ceiling {config.MAX_GRANTED_TOOL_CALLS} granted calls; every use "
+        f"is recorded in granted_calls.json.")
+    return RunAuthorization(
+        granted_tools=set(granted),
+        budget=GrantBudget(config.MAX_GRANTED_TOOL_CALLS),
+    )
+
+
+def _split_grant_flag(args: str):
+    """Split a leading --grant / --grant=a,b off the query.
+
+    Returns (grant_spec, query) where grant_spec is None (absent),
+    GRANT_PICKER (bare flag), or the raw comma-separated string.
+
+    A leading flag only. `/research what does --grant do` must stay a
+    research query about the flag rather than an invocation of it, which
+    is why this is a prefix test and not a search.
+    """
+    text = (args or "").strip()
+    if not text.startswith("--grant"):
+        return None, text
+    head, _, rest = text.partition(" ")
+    if head in ("--grant", "--grant-tools"):
+        return GRANT_PICKER, rest.strip()
+    # --grant-tools= is accepted as an alias for --grant= because that is
+    # the CLI's spelling for the same thing. The CLI needs two flag names
+    # (argparse would eat the query as an optional value); here the value
+    # is attached with =, so both names can mean one thing and muscle
+    # memory from either shell works.
+    for prefix in ("--grant=", "--grant-tools="):
+        if head.startswith(prefix):
+            return head[len(prefix):], rest.strip()
+    return None, text
+
+
+def _start_research(app: VenastineApp, query: str, authorization) -> None:
+    """Kick off the worker. Split from _cmd_research because the picker
+    path resolves asynchronously and lands here from a callback."""
     app._busy = True
-    app._transcript.write_user(f"/research {args}")
+    app._transcript.write_user(f"/research {query}")
     app._transcript.write_system("Running the ten-pass pipeline. This takes a while.")
     app._raven.state = ravens.THINKING
 
@@ -615,11 +706,12 @@ def _cmd_research(app: VenastineApp, args: str) -> None:
         error = None
         try:
             run = run_deep_research_pipeline(
-                user_query=args,
+                user_query=query,
                 model=app.model,
                 provider_name=app.provider_name,
                 ensemble_mode=app._settings.get("ensemble_mode"),
                 ensemble_n=app._settings.get("ensemble_n"),
+                authorization=authorization,
             )
             app.post_message(ResearchFinished(run, None))
         except BaseException as e:  # noqa: BLE001 — reported, then re-raised
@@ -658,7 +750,8 @@ def register_builtin_commands() -> None:
         SlashCommand("help", "list commands", _cmd_help),
         SlashCommand("theme", "switch colour theme", _cmd_theme, "[name]"),
         SlashCommand("effort", "switch reasoning effort", _cmd_effort, "[level|auto]"),
-        SlashCommand("research", "run the deep-research pipeline", _cmd_research, "<query>"),
+        SlashCommand("research", "run the deep-research pipeline",
+                     _cmd_research, "[--grant[=a,b]] <query>"),
         SlashCommand("threads", "resume a saved thread", _cmd_threads),
         SlashCommand("new", "start a new thread", _cmd_new),
         SlashCommand("quit", "exit", _cmd_quit),

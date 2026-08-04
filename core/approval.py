@@ -109,3 +109,10 @@ class RunAuthorization:
     granted_tools: set = field(default_factory=set)
     provider: Optional[ApprovalProvider] = None
     budget: Optional[GrantBudget] = None
+    # Calls that proceeded on the grant, accumulated across every pass of
+    # one run. Lives here rather than in module state or a per-pass return
+    # value for the same reason the budget does: the bundle is already
+    # shared by reference, and what the authorization was SPENT ON is
+    # authorization state. The orchestrator copies it onto the PipelineRun
+    # at the end, where write_run_artifacts can serialise it.
+    granted_calls: list = field(default_factory=list)

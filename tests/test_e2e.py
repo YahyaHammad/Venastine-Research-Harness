@@ -203,6 +203,11 @@ def test_research_mode_e2e_prints_report_and_trace(mocker, capsys):
         provider_name="ANTHROPIC",
         ensemble_mode=None,
         ensemble_n=None,
+        # §25: None is the default and the status quo -- no grants, nobody
+        # to ask, every approval-gated tool hidden from every pass. Asserted
+        # positionally here rather than left out, so a future default of
+        # "grant something" cannot slip through this test unnoticed.
+        authorization=None,
     )
 
     # --- Verify write_run_artifacts was called with the run ---

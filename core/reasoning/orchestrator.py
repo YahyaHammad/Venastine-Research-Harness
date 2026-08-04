@@ -64,14 +64,34 @@ _CLAIM_INPUT_FIELDS = {"id", "text", "type", "entities", "source_span", "asserte
 # ============================================================================
 
 def _run_pass(pass_id: str, pass_input: str, model: str, provider_name: str,
-              temperature: float | None = None) -> str:
+              temperature: float | None = None, authorization=None) -> str:
     """One LLM-backed pass. Every actual model call in this file goes
     through this single function."""
     response = RunAgentLoop.run_deep_research_mode(
         pass_input=pass_input, model=model, pass_id=pass_id, provider_name=provider_name,
-        temperature=temperature,
+        temperature=temperature, authorization=authorization,
     )
+    _record_granted_calls(pass_id, response, authorization)
     return response.text
+
+
+def _record_granted_calls(pass_id: str, response, authorization) -> None:
+    """Note calls that ran on a pre-flight grant (§25 audit trail).
+
+    Authorization moved up-front, so accountability moves after: this is
+    the record of what one launch-time yes actually authorised, for a run
+    nobody was watching.
+
+    Accumulated ON THE AUTHORIZATION BUNDLE rather than in module state or
+    a thirteenth argument. The bundle is already shared by reference across
+    every pass -- that is how GrantBudget counts one ceiling rather than
+    ten -- and what the authorization was spent on is authorization state.
+    A module global would also break the moment two pipelines ran.
+    """
+    if authorization is None:
+        return
+    for call in getattr(response, "granted_calls", ()) or ():
+        authorization.granted_calls.append({"pass": pass_id, **call})
 
 
 def _parse_json_response(text: str) -> Any:
@@ -96,6 +116,7 @@ def _run_pass_with_json_retry(
     provider_name: str,
     trace: list[str] | None = None,
     temperature: float | None = None,
+    authorization=None,
 ) -> str:
     """Runs one JSON-emitting pass and recovers from malformed JSON by
     sending a corrective follow-up into the SAME thread the pass used.
@@ -113,8 +134,9 @@ def _run_pass_with_json_retry(
     """
     response = RunAgentLoop.run_deep_research_mode(
         pass_input=pass_input, model=model, pass_id=pass_id, provider_name=provider_name,
-        temperature=temperature,
+        temperature=temperature, authorization=authorization,
     )
+    _record_granted_calls(pass_id, response, authorization)
     raw_text = response.text
 
     for attempt in range(MAX_JSON_RETRIES):
@@ -142,7 +164,13 @@ def _run_pass_with_json_retry(
                 model=model,
                 provider_name=provider_name,
                 temperature=temperature,
+                # A retry is the SAME pass continuing. Omitting this would
+                # strip the pass's gated tools on exactly the attempt where
+                # the model is already struggling, and the only symptom
+                # would be a second malformed answer.
+                authorization=authorization,
             )
+            _record_granted_calls(pass_id, retry_response, authorization)
             raw_text = retry_response.text
 
     # Last attempt: validate one more time and either return or raise.
@@ -204,7 +232,14 @@ def run_deep_research_pipeline(
     provider_name: str = DEFAULT_PROVIDER,
     ensemble_mode: bool | None = None,
     ensemble_n: int | None = None,
+    authorization=None,
 ) -> PipelineRun:
+    """authorization (§25): a core.approval.RunAuthorization built by the
+    shell that launched this run, or None for the pre-§25 behaviour (no
+    grants, nobody to ask, every approval-gated tool hidden from every
+    pass). Carried, not interpreted -- the decisions about WHAT may be
+    granted live in core/reasoning/authorization.py, and the enforcement
+    lives in core/loop.py."""
     ensemble_mode = config.ENSEMBLE_MODE if ensemble_mode is None else ensemble_mode
     ensemble_n = config.ENSEMBLE_N if ensemble_n is None else ensemble_n
 
@@ -228,6 +263,16 @@ def run_deep_research_pipeline(
 
     run = PipelineRun(user_query=user_query)
 
+    # §25 audit trail: ONE list, shared, not two kept in step. The run and
+    # the authorization bundle now refer to the same object, so a granted
+    # call is visible on the PipelineRun the moment it happens -- including
+    # at every §5 checkpoint and on the FAILURE path, which is where an
+    # unattended run's record matters most. Copying at the end instead
+    # would lose the trail on exactly the runs most worth auditing, and two
+    # writers of related data is the bug shape §22 warns about by name.
+    if authorization is not None:
+        run.granted_calls = authorization.granted_calls
+
     # ROADMAP §5 minimal core: create the durable record up front. On a
     # mid-pipeline crash, the except block below flips status to 'failed'
     # and persists a snapshot of the partial run before re-raising.
@@ -240,7 +285,7 @@ def run_deep_research_pipeline(
 
     try:
         # --- Pass 0: preliminary plan ---
-        run.plan = _parse_json_response(_run_pass_with_json_retry("Pass 0", user_query, model, provider_name, run.trace))
+        run.plan = _parse_json_response(_run_pass_with_json_retry("Pass 0", user_query, model, provider_name, run.trace, authorization=authorization))
         run.log(f"Pass 0: plan produced ({len(run.plan.get('key_entities_or_subjects', []))} key entities anticipated).")
         update_pipeline_run(run.run_id, run)
 
@@ -249,7 +294,8 @@ def run_deep_research_pipeline(
         if ensemble_mode:
             candidates = [
                 _run_pass("Pass 1", pass1_input, model, provider_name,
-                          temperature=config.ENSEMBLE_TEMPERATURE)
+                          temperature=config.ENSEMBLE_TEMPERATURE,
+                          authorization=authorization)
                 for _ in range(ensemble_n)
             ]
             run.raw_response = candidates[0]
@@ -258,13 +304,13 @@ def run_deep_research_pipeline(
             )
             run.log(f"Pass 1: ensemble mode — {ensemble_n} candidates generated.")
         else:
-            run.raw_response = _run_pass("Pass 1", pass1_input, model, provider_name)
+            run.raw_response = _run_pass("Pass 1", pass1_input, model, provider_name, authorization=authorization)
             pass2_input = f"Response to extract claims from:\n{run.raw_response}"
             run.log("Pass 1: initial generation complete.")
         update_pipeline_run(run.run_id, run)
 
         # --- Pass 2: claim extraction & classification ---
-        claims_json = _parse_json_response(_run_pass_with_json_retry("Pass 2", pass2_input, model, provider_name, run.trace))
+        claims_json = _parse_json_response(_run_pass_with_json_retry("Pass 2", pass2_input, model, provider_name, run.trace, authorization=authorization))
         run.claims = [_claim_from_json(c) for c in claims_json]
         run.log(f"Pass 2: extracted {len(run.claims)} claim(s).")
         update_pipeline_run(run.run_id, run)
@@ -286,7 +332,7 @@ def run_deep_research_pipeline(
                 f"Deduplicated entities to research (search each ONCE, map results back "
                 f"to every claim referencing it):\n{json.dumps(unique_entities)}"
             )
-            grounding_json = _parse_json_response(_run_pass_with_json_retry("Pass 3a", pass3a_input, critic_model, critic_provider, run.trace))
+            grounding_json = _parse_json_response(_run_pass_with_json_retry("Pass 3a", pass3a_input, critic_model, critic_provider, run.trace, authorization=authorization))
             _apply_grounding(run.claims, grounding_json)
             run.log(f"Pass 3a: grounded {len(unique_entities)} unique entities across {len(factual_claims)} factual claim(s).")
             update_pipeline_run(run.run_id, run)
@@ -295,7 +341,7 @@ def run_deep_research_pipeline(
                 f"Raw response:\n{run.raw_response}\n\n"
                 f"Factual claims with grounding:\n{json.dumps([vars(c) for c in factual_claims])}"
             )
-            critic_json = _parse_json_response(_run_pass_with_json_retry("Pass 3b", pass3b_input, critic_model, critic_provider, run.trace))
+            critic_json = _parse_json_response(_run_pass_with_json_retry("Pass 3b", pass3b_input, critic_model, critic_provider, run.trace, authorization=authorization))
             _apply_critic(run.claims, critic_json)
             run.log("Pass 3b: critique complete for factual claims.")
             update_pipeline_run(run.run_id, run)
@@ -305,7 +351,7 @@ def run_deep_research_pipeline(
 
         # --- Pass 3c: completeness, independent of Pass 1's raw_response ---
         pass3c_input = f"Original query:\n{user_query}\n\nPreliminary plan:\n{json.dumps(run.plan)}"
-        run.completeness = _parse_json_response(_run_pass_with_json_retry("Pass 3c", pass3c_input, model, provider_name, run.trace))
+        run.completeness = _parse_json_response(_run_pass_with_json_retry("Pass 3c", pass3c_input, model, provider_name, run.trace, authorization=authorization))
         run.log(
             f"Pass 3c: coverage_score={run.completeness.get('coverage_score')}, "
             f"{len(run.completeness.get('gaps', []))} gap(s) identified."
@@ -318,7 +364,7 @@ def run_deep_research_pipeline(
             f"All claims:\n{json.dumps([vars(c) for c in run.claims])}\n\n"
             f"Completeness findings:\n{json.dumps(run.completeness)}"
         )
-        run.assumptions = _parse_json_response(_run_pass_with_json_retry("Pass 5", pass5_input, model, provider_name, run.trace))
+        run.assumptions = _parse_json_response(_run_pass_with_json_retry("Pass 5", pass5_input, model, provider_name, run.trace, authorization=authorization))
         _apply_assumption_flags(run.claims, run.assumptions)
         run.log(f"Pass 5: assumption audit complete, {len(run.assumptions.get('per_claim_flags', {}))} claim(s) flagged.")
         update_pipeline_run(run.run_id, run)
@@ -344,7 +390,7 @@ def run_deep_research_pipeline(
                 }
                 for c in flagged
             ])
-            revisions = _parse_json_response(_run_pass_with_json_retry("Pass 6a", pass6a_input, model, provider_name, run.trace))
+            revisions = _parse_json_response(_run_pass_with_json_retry("Pass 6a", pass6a_input, model, provider_name, run.trace, authorization=authorization))
             for rev in revisions:
                 claim = run.claim_by_id(rev["claim_id"])
                 if claim:
@@ -355,7 +401,7 @@ def run_deep_research_pipeline(
 
             # --- Pass 6c: re-validate the revised subset only (batched, reuses Pass 4's code) ---
             pass6c_input = json.dumps([vars(c) for c in flagged])
-            revalidation = _parse_json_response(_run_pass_with_json_retry("Pass 6c", pass6c_input, critic_model, critic_provider, run.trace))
+            revalidation = _parse_json_response(_run_pass_with_json_retry("Pass 6c", pass6c_input, critic_model, critic_provider, run.trace, authorization=authorization))
             _apply_grounding(run.claims, revalidation.get("grounding", []))
             _apply_critic(run.claims, revalidation.get("critic", []))
             run_confidence_tiering(run, ensemble_n=ensemble_n if ensemble_mode else 0)  # Pass 4's function again -- code, not a call
@@ -392,7 +438,7 @@ def run_deep_research_pipeline(
             f"Final annotated claims:\n{json.dumps([vars(c) for c in run.claims])}\n\n"
             f"Coverage gaps:\n{json.dumps(run.coverage_gaps)}"
         )
-        run.final_report = _run_pass("Final synthesis", synthesis_input, model, provider_name)
+        run.final_report = _run_pass("Final synthesis", synthesis_input, model, provider_name, authorization=authorization)
         run.log("Final synthesis complete.")
 
         update_pipeline_run(run.run_id, run, status="complete")

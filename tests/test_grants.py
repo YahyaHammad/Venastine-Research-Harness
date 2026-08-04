@@ -1,7 +1,7 @@
-﻿"""
+"""
 test_grants.py
 
-ROADMAP_v2 Â§25, decisions R2 and R6 -- what a PRE-FLIGHT grant covers and
+ROADMAP_v2 §25, decisions R2 and R6 -- what a PRE-FLIGHT grant covers and
 what it does not.
 
 A grant records that the user answered the approval question early. It is
@@ -50,7 +50,7 @@ class _AnswerQueue(queue.Queue):
     test that under-supplies answers HANGS THE WHOLE SUITE rather than
     naming the regression -- and a hang is a worse signal than a failure,
     because it stalls every test after it and gives no assertion to read.
-    This bit once already, in the Â§18 sign-off tests.
+    This bit once already, in the §18 sign-off tests.
 
     Returning False on empty is also the honest fallback: nobody answered
     is a denial, which is exactly what a headless run does.
@@ -241,7 +241,7 @@ class TestGrantBudget:
         assert budget.used == 3, "the second pass got a fresh ceiling"
 
     def test_no_budget_means_no_ceiling(self, gated_pair, mocker):
-        """None is not zero. Every caller before Â§25 passes nothing."""
+        """None is not zero. Every caller before §25 passes nothing."""
         prompts, _ = _drive("mcp__t__plain", granted={"mcp__t__plain"},
                             budget=None, channel=_AnswerQueue(), calls=5,
                             mocker=mocker)
@@ -288,14 +288,14 @@ class TestGrantedCallsAreRecorded:
 class TestRunAuthorization:
 
     def test_defaults_are_the_status_quo(self):
-        """Every caller before Â§25 gets a bundle that authorises nothing
+        """Every caller before §25 gets a bundle that authorises nothing
         and can ask nobody -- i.e. today's behaviour."""
         a = RunAuthorization()
         assert a.granted_tools == set()
         assert a.provider is None and a.budget is None
 
     def test_provider_defaults_to_honouring_run_scope(self):
-        """Chat keeps Â§18's once-per-turn shortcut; only attended mode
+        """Chat keeps §18's once-per-turn shortcut; only attended mode
         turns it off (R11), and it must do so explicitly."""
         p = ApprovalProvider(ask=lambda n, p, notice: True)
         assert p.honour_run_scope is True

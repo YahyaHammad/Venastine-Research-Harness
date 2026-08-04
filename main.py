@@ -28,6 +28,7 @@ from uuid import UUID
 import config
 from core import config_loader, workspace_trust
 from core.loop import RunAgentLoop, DEFAULT_PROVIDER
+from core.reasoning.authorization import GRANT_PICKER
 from database import create_db_and_tables
 from logging_setup import configure_logging
 
@@ -118,17 +119,99 @@ def run_chat(
         print()
 
 
+def build_research_authorization(grant_spec):
+    """Turn --grant-tools into a RunAuthorization, prompting if asked to.
+
+    ROADMAP_v2 §25. Lives here rather than in the orchestrator because it
+    is a SHELL concern -- knowing how to reach the human is exactly what
+    distinguishes main.py from tui/app.py, and the pipeline is deliberately
+    ignorant of both. The policy about what may be offered is shared
+    (core/reasoning/authorization.py), so the CLI and the TUI cannot drift
+    into presenting different sets.
+
+    Returns None when nothing was granted, which keeps the whole feature
+    absent from every run that did not ask for it.
+    """
+    from core.approval import GrantBudget, RunAuthorization
+    from core.reasoning.authorization import candidates, parse_grant_spec, GrantSpecError
+
+    if grant_spec is None:
+        return None
+
+    offered = candidates()
+    if not offered:
+        print("[grant] no approval-gated tool is available to this run, so "
+              "there is nothing to authorise.", file=sys.stderr)
+        return None
+
+    if grant_spec is GRANT_PICKER:
+        if not sys.stdin.isatty():
+            # Same shape as the trust prompt and the MCP confirmation: a
+            # non-TTY run declines rather than hanging on input(), and says
+            # what it skipped instead of proceeding as though asked.
+            print("[grant] --grant-tools needs a terminal to show the "
+                  "picker; pass the names explicitly to grant them in a "
+                  "script. Skipping:", file=sys.stderr)
+            for name, description in offered:
+                print(f"  - {name}", file=sys.stderr)
+            return None
+        granted = _pick_tools_to_grant(offered)
+    else:
+        try:
+            granted = parse_grant_spec(grant_spec, offered)
+        except GrantSpecError as e:
+            raise SystemExit(f"--grant-tools: {e}")
+
+    if not granted:
+        print("[grant] nothing granted; approval-gated tools stay hidden "
+              "from this run.\n")
+        return None
+
+    print(f"[grant] authorised for this run only: {', '.join(sorted(granted))}")
+    print(f"[grant] ceiling: {config.MAX_GRANTED_TOOL_CALLS} granted calls; "
+          f"every use is recorded in granted_calls.json.\n")
+    return RunAuthorization(
+        granted_tools=granted,
+        budget=GrantBudget(config.MAX_GRANTED_TOOL_CALLS),
+    )
+
+
+def _pick_tools_to_grant(offered) -> set:
+    """One y/N per tool, showing what each one says it does.
+
+    Per-tool rather than one prompt for the set (R1): the harness cannot
+    tell a read-only tool from one that writes or sends -- MCP exposes no
+    such metadata -- so the description and the individual choice are the
+    entire substance of informed consent here.
+    """
+    print("\nThese tools need approval, which nothing can give during an "
+          "unattended run.")
+    print("Granting one authorises it for THIS RUN ONLY. Nothing is saved.\n")
+    granted = set()
+    for name, description in offered:
+        print(f"  {name}")
+        if description:
+            print(f"      {description}")
+        if _ask(f"  Grant {name} for this run? [y/N]: ").strip().lower() in ("y", "yes"):
+            granted.add(name)
+        print()
+    return granted
+
+
 def run_research(
     query: str,
     provider_name: str,
     model: str,
     ensemble_mode: bool | None = None,
     ensemble_n: int | None = None,
+    authorization=None,
 ) -> None:
     """Run the full deep-research pipeline, write artifacts to disk,
     and print the results. ensemble_mode/ensemble_n come from
     settings.json (§14); None means the pipeline falls back to the
-    config.py defaults."""
+    config.py defaults. authorization (§25) comes from
+    build_research_authorization(); None means no gated tool is reachable,
+    which is the behaviour every research run had before §25."""
     from core.reasoning.orchestrator import run_deep_research_pipeline
     from core.reasoning.output_writer import write_run_artifacts
 
@@ -139,6 +222,7 @@ def run_research(
         run = run_deep_research_pipeline(
             user_query=query, model=model, provider_name=provider_name,
             ensemble_mode=ensemble_mode, ensemble_n=ensemble_n,
+            authorization=authorization,
         )
     except Exception as e:
         logger.exception("Research pipeline failed")
@@ -206,6 +290,40 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=f"Model name (default: settings.json, else "
              f"{config.MODEL_NAME}).",
+    )
+    # ROADMAP_v2 §25. TWO flags onto ONE dest, in a mutually exclusive
+    # group, rather than a single nargs="?" flag with an optional value.
+    # nargs="?" reads the NEXT TOKEN as its value when one is present, so
+    #     --mode research --grant-tools "what is entropy"
+    # consumed the query as the grant list and then failed with "--mode
+    # research requires a positional query argument" -- an error about the
+    # wrong thing entirely, on the documented spelling of the common case.
+    #
+    # Absent means no grants, which is what every invocation before §25 did
+    # and still does: no prompt appears unless one is asked for.
+    #
+    # NOT persistable: a settings.json equivalent would turn a per-run
+    # decision into standing authorization, carried by any repo you clone
+    # (R12). The MODE is persistable precisely because it can only ever ADD
+    # prompts, where a grant list can only ever remove them.
+    grant = parser.add_mutually_exclusive_group()
+    grant.add_argument(
+        "--grant",
+        dest="grant_tools",
+        action="store_const",
+        const=GRANT_PICKER,
+        default=None,
+        help="Research mode: pick approval-gated tools to authorise for "
+             "this run, interactively. Needs a terminal. Never persisted.",
+    )
+    grant.add_argument(
+        "--grant-tools",
+        dest="grant_tools",
+        default=None,
+        metavar="NAMES",
+        help="Research mode: authorise exactly these approval-gated tools "
+             "(comma-separated) for this run. Works without a terminal. "
+             "Never persisted.",
     )
     parser.add_argument(
         "--tui",
@@ -432,6 +550,15 @@ if __name__ == "__main__":
         parser.error(
             "--tui does not take a positional query; start the TUI and "
             "type your message, or drop --tui to send it directly.")
+    if args.grant_tools is not None and args.mode != "research":
+        # Chat is interactive by definition, so a pre-flight grant there
+        # would be authorising up front what is about to be asked anyway --
+        # and silently widening chat is not what a flag documented for
+        # research should do. --tui lands here too (its mode is chat),
+        # which is why the message names the in-TUI spelling.
+        parser.error(
+            "--grant/--grant-tools applies to --mode research. Inside the "
+            "TUI, use /research --grant <query>.")
 
     mcp = setup_mcp(project_path)
     try:
@@ -439,10 +566,14 @@ if __name__ == "__main__":
             from tui.app import run as run_tui
             run_tui(provider, model, settings)
         elif args.mode == "research":
+            # AFTER setup_mcp: the tools a grant can cover are named at
+            # connection time, so asking any earlier would offer a list
+            # that is empty for exactly the servers this exists to reach.
             run_research(
                 args.query, provider, model,
                 ensemble_mode=settings.get("ensemble_mode"),
                 ensemble_n=settings.get("ensemble_n"),
+                authorization=build_research_authorization(args.grant_tools),
             )
         else:
             run_chat(args.thread, provider, model, first_message=args.query)

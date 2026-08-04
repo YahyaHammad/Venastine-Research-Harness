@@ -32,6 +32,79 @@ from tui.app import VenastineApp
 from tui.screens import PermissionScreen
 
 
+@pytest.mark.asyncio
+async def test_research_grant_picker_authorises_the_run(mocker):
+    """§25 R1 end to end in the TUI: /research --grant opens the picker,
+    and what the user ticks becomes the RunAuthorization the pipeline
+    receives.
+
+    Asserted on the pipeline's authorization argument, not on the modal
+    rendering -- the same reasoning as AC2. A picker that appears and then
+    drops the answer would look correct on screen and grant nothing.
+    """
+    from tui.app import _cmd_research
+    from tui.screens import GrantPickerScreen
+
+    mocker.patch("core.reasoning.authorization.candidates",
+                 return_value=[("mcp__lib__search", "Search."),
+                               ("mcp__lib__write", "Write.")])
+    captured = {}
+    mocker.patch(
+        "core.reasoning.orchestrator.run_deep_research_pipeline",
+        side_effect=lambda **kw: (captured.update(kw), _stub_run())[1])
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        _cmd_research(app, "--grant what is entropy")
+        assert await _settle(
+            pilot, lambda: isinstance(app.screen, GrantPickerScreen)), \
+            "the picker never opened"
+
+        app.screen.dismiss({"mcp__lib__search"})
+        assert await _settle(pilot, lambda: "authorization" in captured), \
+            "the pipeline never started after the picker was answered"
+
+    auth = captured["authorization"]
+    assert auth is not None
+    assert auth.granted_tools == {"mcp__lib__search"}
+    # The one the user did NOT tick stays gated -- per-tool, not per-set.
+    assert "mcp__lib__write" not in auth.granted_tools
+    assert captured["user_query"] == "what is entropy"
+
+
+@pytest.mark.asyncio
+async def test_cancelling_the_grant_picker_cancels_the_run(mocker):
+    """Dismissing with None means "I did not mean to start this", which is
+    a different answer from ticking nothing. Running anyway would start a
+    ten-pass job the user just tried to back out of."""
+    from tui.app import _cmd_research
+    from tui.screens import GrantPickerScreen
+
+    mocker.patch("core.reasoning.authorization.candidates",
+                 return_value=[("mcp__lib__search", "Search.")])
+    started = []
+    mocker.patch("core.reasoning.orchestrator.run_deep_research_pipeline",
+                 side_effect=lambda **kw: (started.append(kw), _stub_run())[1])
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        _cmd_research(app, "--grant what is entropy")
+        assert await _settle(
+            pilot, lambda: isinstance(app.screen, GrantPickerScreen))
+        app.screen.dismiss(None)
+        for _ in range(20):
+            await pilot.pause()
+        assert started == [], "cancelling the picker still started the run"
+        assert app._busy is False
+
+
+def _stub_run():
+    from core.reasoning.base import PipelineRun
+    run = PipelineRun(user_query="q")
+    run.final_report = "report"
+    return run
+
+
 async def _settle(pilot, predicate, tries: int = 120):
     """Pump the event loop until `predicate()` holds.
 

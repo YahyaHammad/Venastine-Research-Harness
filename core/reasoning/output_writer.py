@@ -60,6 +60,7 @@ def write_run_artifacts(run: PipelineRun) -> str:
       04_confidence.json      Pass 4 tier + score breakdown per claim
       05_assumptions.json     Pass 5 assumption audit
       06_revisions.json       6a/6c revisions (only if any claim was revised)
+      granted_calls.json      §25 audit trail (only if a grant was spent)
       confidence_chart.png    Tier distribution bar chart (matplotlib)
       trace.md                Full trace log
       report.md               Final synthesis report
@@ -112,6 +113,14 @@ def write_run_artifacts(run: PipelineRun) -> str:
              for c in revised],
             indent=2,
         ))
+
+    # §25: written ONLY when the run actually spent a grant, so its
+    # presence in an output directory is itself the signal that this run
+    # ran with pre-flight authorization. An always-empty file next to
+    # twelve populated ones reads as "nothing happened here" and would be
+    # skimmed past, which is the opposite of an audit trail's job.
+    if run.granted_calls:
+        write("granted_calls.json", json.dumps(run.granted_calls, indent=2))
 
     # Essential human-readable artifacts first -- a supplementary-file
     # failure (chart, PDF) must not prevent these from being written.

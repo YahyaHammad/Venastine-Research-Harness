@@ -101,6 +101,14 @@ class PipelineRun:
     coverage_gaps: list[dict] = field(default_factory=list)    # Pass 4-derived: gaps tagged UNVERIFIED_COVERAGE
     assumptions: dict = field(default_factory=dict)            # Pass 5
     trace: list[str] = field(default_factory=list)
+    # §25: tool calls that ran on a PRE-FLIGHT grant rather than a live
+    # approval, one dict per call ({"pass", "tool", "params"}). Empty for
+    # every run that granted nothing, which is every run by default.
+    #
+    # Authorization moved up-front, so accountability moves after: an
+    # unattended ten-pass run is precisely where "the user said yes once"
+    # needs a record of what that yes actually covered.
+    granted_calls: list[dict] = field(default_factory=list)
     final_report: str = ""
 
     def log(self, message: str) -> None:
