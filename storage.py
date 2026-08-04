@@ -22,6 +22,44 @@ class MessageLog(SQLModel, table=True):
     name: Optional[str] = None
     tool_call_id: Optional[str] = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    # ROADMAP_v2 §21. Compaction-exempt within this thread (D26's pin
+    # tool). This is the first field this project has ever added to a
+    # table that already exists on disk, which is why database.py grew
+    # ensure_columns() -- create_all() would have left every existing
+    # app.db without it and failed at the next SELECT (M7).
+    pinned: bool = Field(default=False)
+
+
+class CompactionCheckpoint(SQLModel, table=True):
+    """One compaction of one thread (ROADMAP_v2 §21).
+
+    THE ARCHIVE IS NEVER EDITED. Compaction only ever ADDS a row here;
+    MessageLog is append-only and stays complete forever, which is what
+    AC1 is about and what makes an aggressive compaction trigger safe --
+    nothing is ever destroyed, only hidden from the next call. See
+    archive_history() for the read that proves it.
+
+    `summary_text` represents every message in this thread through
+    `covers_up_to_message_id` EXCEPT the pinned ones (AC2), which is why
+    the derived view has to re-include them separately (M9) -- a single
+    watermark cannot express "everything up to K except rows 5 and 6".
+
+    `strategy` records which way this summary was produced: "rederive"
+    (summarized the original messages, so exactly one summarization step
+    sits between an original message and what the model sees) or "chain"
+    (summarized the previous summary plus what followed it, bounded cost,
+    compounding loss). M2 makes rederive the default and chain the
+    configurable/fallback case; storing it per row means a thread's
+    history of the two is auditable rather than inferred from settings
+    that may since have changed.
+    """
+
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    thread_id: UUID = Field(foreign_key="conversationthread.id", index=True)
+    summary_text: str
+    covers_up_to_message_id: UUID
+    strategy: str = Field(default="rederive")
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 def create_thread() -> UUID:
@@ -104,46 +142,239 @@ def list_threads() -> List[dict]:
         return [{"id": t.id, "created_at": t.created_at} for t in threads]
 
 
-def get_session_history(thread_id: UUID) -> List[dict]:
-    """
-    Reconstructs the exact neutral shape core/memory.py's add_* methods
+def _to_neutral(msg: dict) -> dict:
+    """Reconstructs the exact neutral shape core/memory.py's add_* methods
     write, per msg.role -- this is the counterpart to memory.py only ever
     persisting the role-specific payload (see that file's docstring for
     why there's no separate normalization step on the read side either).
+
+    ONE reconstruction point. Every read below is a filter over the same
+    rows fed through this function, so a change to the neutral shape
+    cannot reach one read and miss another -- which is the same reason
+    memory.py fixes shapes on the write side rather than per-role at each
+    reader. tests/conftest.py's FakeStorage mirrors this function; if it
+    changes, that changes identically.
+    """
+    decoded = json.loads(msg["content"])
+    role = msg["role"]
+
+    if role == "assistant":
+        # decoded is {"text": ..., "tool_calls": [...]} -- exactly
+        # what add_assistant_message persisted, nothing nested.
+        payload = {
+            "role": "assistant",
+            "text": decoded.get("text", ""),
+            "tool_calls": decoded.get("tool_calls", []),
+        }
+    elif role == "tool":
+        # decoded is the plain result string add_tool_result persisted.
+        payload = {"role": "tool", "tool_call_id": msg["tool_call_id"], "content": decoded}
+    else:
+        # user (and any future plain-content role): decoded is
+        # already the right value for "content".
+        payload = {"role": role, "content": decoded}
+        if msg["tool_call_id"]:
+            payload["tool_call_id"] = msg["tool_call_id"]
+
+    if msg["name"]:
+        payload["name"] = msg["name"]
+
+    return payload
+
+
+def _ordered_rows(thread_id: UUID) -> List[dict]:
+    """Every row of a thread as plain column values, oldest first.
+
+    Ordered by (created_at, id) rather than created_at alone. Timestamps
+    have microsecond resolution so ties are unlikely, but "unlikely" is
+    not an ordering guarantee, and §21's watermark arithmetic slices this
+    list by position -- an unstable sort there would move the fold
+    boundary between two reads of the same thread.
+
+    Plain dicts rather than ORM instances because every caller below
+    reads these after the Session has closed, and what a detached
+    instance will still hand back depends on what happened to be loaded.
+    Copying six columns removes the question.
+
+    `pinned` is coerced to bool: a database migrated by
+    database.ensure_columns() gets the column with a DEFAULT, but a row
+    written by an older build through some other path could still read
+    back NULL, and None is not the same thing as "not pinned" to a
+    caller doing `if row["pinned"]`.
     """
     with Session(engine) as session:
         statement = (
             select(MessageLog)
             .where(MessageLog.thread_id == thread_id)
-            .order_by(MessageLog.created_at.asc())
+            .order_by(MessageLog.created_at.asc(), MessageLog.id.asc())
         )
-        db_messages = session.exec(statement).all()
+        return [
+            {
+                "id": m.id, "role": m.role, "content": m.content,
+                "name": m.name, "tool_call_id": m.tool_call_id,
+                "pinned": bool(m.pinned),
+            }
+            for m in session.exec(statement).all()
+        ]
 
-        formatted_history = []
-        for msg in db_messages:
-            decoded = json.loads(msg.content)
 
-            if msg.role == "assistant":
-                # decoded is {"text": ..., "tool_calls": [...]} -- exactly
-                # what add_assistant_message persisted, nothing nested.
-                payload = {
-                    "role": "assistant",
-                    "text": decoded.get("text", ""),
-                    "tool_calls": decoded.get("tool_calls", []),
-                }
-            elif msg.role == "tool":
-                # decoded is the plain result string add_tool_result persisted.
-                payload = {"role": "tool", "tool_call_id": msg.tool_call_id, "content": decoded}
-            else:
-                # user (and any future plain-content role): decoded is
-                # already the right value for "content".
-                payload = {"role": msg.role, "content": decoded}
-                if msg.tool_call_id:
-                    payload["tool_call_id"] = msg.tool_call_id
+def _split_at(rows: List[dict], message_id: Optional[UUID]) -> int:
+    """Index just past `message_id` in `rows`, or 0 when it isn't there.
 
-            if msg.name:
-                payload["name"] = msg.name
+    Resolving a watermark by POSITION in the already-loaded, already-ordered
+    list rather than by a `(created_at, id) > (t, i)` SQL predicate. The
+    comparison a tuple-ordered watermark needs is awkward to express
+    portably over a UUID column, and a thread is at most a few thousand
+    rows that this function's callers are loading anyway. Simplicity wins
+    over a query that has to be right about UUID collation.
 
-            formatted_history.append(payload)
+    A watermark that names a row this thread does not have returns 0 --
+    i.e. nothing is treated as covered. That is the safe direction: the
+    caller shows the whole thread rather than silently hiding a prefix
+    on the strength of an id it could not find.
+    """
+    if message_id is None:
+        return 0
+    for index, row in enumerate(rows):
+        if row["id"] == message_id:
+            return index + 1
+    return 0
 
-        return formatted_history
+
+def get_session_history(
+    thread_id: UUID, after_message_id: Optional[UUID] = None,
+) -> List[dict]:
+    """The thread's messages in neutral shape, oldest first.
+
+    `after_message_id` (ROADMAP_v2 §21) loads only the UNCOMPACTED TAIL --
+    everything strictly after that row. The rows before it are not gone;
+    they are represented by a CompactionCheckpoint summary that
+    core/memory.py prepends, and they remain readable in full via
+    archive_history(). None (the default) returns the whole thread, which
+    is what every pre-§21 caller gets and why their behaviour is
+    unchanged.
+    """
+    rows = _ordered_rows(thread_id)
+    return [_to_neutral(m) for m in rows[_split_at(rows, after_message_id):]]
+
+
+def archive_history(thread_id: UUID) -> List[dict]:
+    """Every message ever written to this thread, compaction or not.
+
+    This is ROADMAP_v2 §21 AC1 made greppable: compaction adds
+    CompactionCheckpoint rows and never edits or deletes a MessageLog
+    row, so this read is complete no matter how many times a thread has
+    been compacted. It is a distinct name rather than a comment on
+    get_session_history because the guarantee is what callers want to
+    find -- and because a future watermark default on that function
+    would silently take this one with it.
+    """
+    return get_session_history(thread_id)
+
+
+def pinned_through(thread_id: UUID, message_id: Optional[UUID]) -> List[dict]:
+    """Pinned rows at or before the watermark, in neutral shape (§21 M9).
+
+    A summary covers a contiguous span, but AC2 says a pinned message is
+    never summarized -- so pinned rows INSIDE the covered span have to
+    come back verbatim, and a single `covers_up_to_message_id` cannot say
+    "everything through K except these". The derived view is therefore
+    summary + these rows + tail.
+
+    Empty when nothing in the span is pinned, which is every thread until
+    someone calls pin().
+    """
+    rows = _ordered_rows(thread_id)
+    return [_to_neutral(m) for m in rows[:_split_at(rows, message_id)] if m["pinned"]]
+
+
+def history_through(
+    thread_id: UUID, message_id: Optional[UUID],
+    after_message_id: Optional[UUID] = None,
+) -> List[dict]:
+    """The span a compaction is about to summarize, in neutral shape.
+
+    Pinned rows are EXCLUDED (AC2: a pinned message is never included in
+    what the compactor is asked to summarize). `after_message_id` is what
+    makes chaining possible -- M2's chain strategy summarizes only what
+    followed the previous checkpoint, while rederive passes None and
+    summarizes the whole span from the top.
+    """
+    rows = _ordered_rows(thread_id)
+    start = _split_at(rows, after_message_id)
+    end = _split_at(rows, message_id)
+    return [_to_neutral(m) for m in rows[start:end] if not m["pinned"]]
+
+
+def turn_start_ids(thread_id: UUID) -> List[UUID]:
+    """Ids of the rows that BEGIN each turn, oldest first.
+
+    A turn starts at a user message: the wrapper adds one, then the loop
+    appends assistant and tool rows until it stops. §21's M4 needs this
+    because a fold boundary that lands anywhere else can separate an
+    assistant message from its tool results, and a tool_result with no
+    preceding tool_use is an HTTP 400 on Anthropic -- a hard wire error,
+    not a degraded answer. M5's "keep the last N turns" needs it too.
+    """
+    return [m["id"] for m in _ordered_rows(thread_id) if m["role"] == "user"]
+
+
+def message_ids_from(thread_id: UUID, message_id: UUID) -> List[UUID]:
+    """Ids of `message_id` and everything after it. Resolves pin()'s
+    ordinal ("the last N turns") into the real row ids the pinned flag is
+    written against -- §21 keeps MessageLog.id an implementation detail
+    the model never sees, so the ordinal-to-id mapping has to happen
+    somewhere below the tool."""
+    rows = _ordered_rows(thread_id)
+    start = _split_at(rows, message_id)
+    if not start:
+        return []
+    return [message_id] + [m["id"] for m in rows[start:]]
+
+
+def set_pinned(message_ids: List[UUID], pinned: bool = True) -> int:
+    """Flag rows compaction-exempt. Returns how many rows changed."""
+    if not message_ids:
+        return 0
+    changed = 0
+    with Session(engine) as session:
+        for message_id in message_ids:
+            row = session.get(MessageLog, message_id)
+            if row is None or row.pinned == pinned:
+                continue
+            row.pinned = pinned
+            session.add(row)
+            changed += 1
+        session.commit()
+    return changed
+
+
+def latest_checkpoint(thread_id: UUID) -> Optional[CompactionCheckpoint]:
+    """The most recent compaction of this thread, or None if it has never
+    been compacted (which is every thread until the trigger first fires)."""
+    with Session(engine) as session:
+        statement = (
+            select(CompactionCheckpoint)
+            .where(CompactionCheckpoint.thread_id == thread_id)
+            .order_by(CompactionCheckpoint.created_at.desc(),
+                      CompactionCheckpoint.id.desc())
+        )
+        return next(iter(session.exec(statement).all()), None)
+
+
+def save_checkpoint(
+    thread_id: UUID, summary_text: str, covers_up_to_message_id: UUID,
+    strategy: str = "rederive",
+) -> UUID:
+    """Record one compaction. Adds a row; touches nothing else (AC1)."""
+    with Session(engine) as session:
+        checkpoint = CompactionCheckpoint(
+            thread_id=thread_id,
+            summary_text=summary_text,
+            covers_up_to_message_id=covers_up_to_message_id,
+            strategy=strategy,
+        )
+        session.add(checkpoint)
+        session.commit()
+        session.refresh(checkpoint)
+        return checkpoint.id
