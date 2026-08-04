@@ -77,6 +77,14 @@ class ModelResponse:
                                       # continue_conversation) so callers can persist/retry
                                       # against the same thread. call_model() itself NEVER
                                       # sets this -- it has no thread concept.
+    # §25: calls that proceeded on a PRE-FLIGHT grant rather than a live
+    # approval. Set by _run() (like stop_reason), never by call_model().
+    #
+    # Authorization moved up-front, so accountability moves after: this is
+    # the record of what a single launch-time yes actually authorised,
+    # written into the run artifacts for a pipeline nobody was watching.
+    # Empty for every run that granted nothing, which is every run today.
+    granted_calls: list = field(default_factory=list)
 
 
 @dataclass

@@ -147,6 +147,19 @@ INERT_COMMANDS = [
 ]
 
 
+# ROADMAP_v2 §25 (R6). Ceiling on how many PRE-GRANTED tool calls one
+# research run may make without being asked again. Counts granted calls
+# only -- web_search, arxiv_search and every math tool are approval-free
+# and never touch it, so this is not a cap on tool use.
+#
+# Pre-flight authorization trades a per-call decision for one up-front
+# decision, and the thing it gives up is the natural bound on how many
+# times the granted tool runs. Set generously: the ceiling exists to stop
+# an injected loop spending the whole authorization unattended, not to
+# ration ordinary work across ten passes.
+MAX_GRANTED_TOOL_CALLS = 150
+
+
 @dataclass
 class APICredentials:
     provider_name: str # Pick one of the following (ensure correct spelling & capitalization) {OPENAI, ANTHROPIC, GOOGLE, OPENROUTER, DEEPSEEK, GROK, MISTRAL, GROQ, TOGETHERAI, PERPLEXITY, FIREWORKS, QWEN, Z.AI, COHERE]

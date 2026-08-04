@@ -99,6 +99,7 @@ class RunAgentLoop:
         effort: Optional[str] = None,
         permission_channel: Optional[queue.Queue] = None,
         granted_tools: Optional[set] = None,
+        grant_budget=None,
     ):
         """Generator yielding LoopEvent objects as the loop progresses.
 
@@ -124,6 +125,11 @@ class RunAgentLoop:
         records an approval given early, which is why it lives on RunInfo
         rather than in the ToolContext's approval_overrides (those OR, and
         so can only tighten).
+
+        grant_budget: a core.approval.GrantBudget capping how many granted
+        calls may skip the prompt (§25 R6), or None for no cap. Shared by
+        reference across every pass of a pipeline run. Exhaustion makes
+        the grant stop applying, so calls fall back to being asked.
         """
         client = api_initialization(provider_name)
         # Validate the level against the model that will RECEIVE it, here
@@ -152,8 +158,14 @@ class RunAgentLoop:
                 )
         run_info = RunInfo(
             model=model, provider_name=provider_name, effort=effort,
-            granted_tools=set(granted_tools or ()))
+            granted_tools=set(granted_tools or ()),
+            grant_budget=grant_budget)
         total_tokens_used = 0
+        # §25 audit trail. Attached to the response object below rather
+        # than at each of the three return points, so a stop condition
+        # added later cannot forget to carry it -- the list is shared by
+        # reference and keeps filling as tools dispatch.
+        granted_calls: list = []
 
         response = None
         for _ in range(max_steps):
@@ -179,6 +191,7 @@ class RunAgentLoop:
 
             # D20: persist EVERY assistant turn BEFORE any branching.
             memory.add_assistant_message(response)
+            response.granted_calls = granted_calls
 
             if max_total_tokens is not None and total_tokens_used >= max_total_tokens:
                 response.stop_reason = "token_budget_exceeded"
@@ -223,12 +236,36 @@ class RunAgentLoop:
                 # question whose answer cannot matter.
                 if needs_approval and not registry.is_allowed(call.name, context):
                     needs_approval = False
-                # §18 sign-off (S1): a tool whose grant_scope is "run" is
-                # asked about once per run, not once per call. The loop
-                # names no tool -- it asks the registry, the same way it
-                # asks whether approval is needed at all.
-                if needs_approval and call.name in run_info.granted_tools:
+                # §18 sign-off (S1), narrowed by §25 (R2): a tool whose
+                # grant_scope is "run" is asked about once per run, not
+                # once per call. The loop names no tool -- it asks the
+                # registry, the same way it asks whether approval is
+                # needed at all.
+                #
+                # THREE conditions, and the last two are the §25 change:
+                #
+                #   registry.grantable -- a tool deciding approval from its
+                #     PARAMS was never consented to by name. Before this,
+                #     a signed-off subagent could run any shell command for
+                #     the rest of the turn on the strength of one prompt
+                #     that said "shell". Re-checked here rather than
+                #     trusted from the set, so a stale or hand-built grant
+                #     cannot widen anything.
+                #
+                #   grant_budget.take() -- pre-flight authorization trades
+                #     a per-call decision for one up-front decision, and
+                #     gives up the natural bound on how many times the
+                #     tool runs. Exhaustion falls back to ASKING, not to
+                #     failing: supervised runs continue, headless ones deny
+                #     exactly as they would for any gated tool.
+                if (needs_approval
+                        and call.name in run_info.granted_tools
+                        and registry.grantable(call.name)
+                        and (run_info.grant_budget is None
+                             or run_info.grant_budget.take())):
                     needs_approval = False
+                    granted_calls.append(
+                        {"tool": call.name, "params": call.input})
                 if needs_approval:
                     yield LoopEvent(permission_request={
                         "tool_name": call.name, "params": call.input,

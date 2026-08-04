@@ -512,6 +512,37 @@ def test_candidate_approvals_is_the_list_the_prompt_shows(_roots, _mcp_tool):
     assert "mcp__probe__tool" in notice
 
 
+def test_candidate_approvals_omits_tools_the_grant_cannot_cover(
+        _roots, monkeypatch):
+    """§25 R2 narrows S1: a tool deciding approval from its PARAMS was
+    never grantable by name, and the loop now enforces that. Listing it in
+    the sign-off notice anyway would promise authority the grant does not
+    carry -- worse than not offering it, because the user reads the list as
+    what they are authorising.
+
+    `shell` is the case that matters: before this, one prompt reading
+    "shell" authorised every command the child ran for the rest of the
+    turn. It has to be ENABLED here to be visible at all -- shipped
+    permission is False -- so this models the only configuration in which
+    the defect was reachable, which is also the one a user who wants shell
+    would create. Patched via a factory, not setattr on the dataclass:
+    ToolPermissions() reads __init__ defaults bound at class creation."""
+    monkeypatch.setattr(config, "ToolPermissions",
+                        lambda: type("P", (), {"shell": True})())
+    monkeypatch.setattr(config, "ToolApprovals",
+                        lambda: type("A", (), {"shell": True})())
+
+    _write_harness_agent(_roots, "worker")
+    config_loader.initialize(str(_roots["project"]))
+    agent = manager.get("worker")
+    child = manager.child_context(agent, ToolContext())
+
+    # It IS approval-gated and would be hidden headless...
+    assert "shell" in registry.headless_hidden(child)
+    # ...but it is not something a name-level yes can cover.
+    assert "shell" not in manager.candidate_approvals(child)
+
+
 def test_spawn_forwards_the_channel_and_the_grant(_roots, _mcp_tool, mocker):
     """r3-1: without the channel the child ran headless, so
     schemas(callable_only=True) dropped every approval-gated tool -- the

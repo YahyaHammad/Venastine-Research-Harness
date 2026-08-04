@@ -190,6 +190,27 @@ class ToolRegistry:
         """
         return is_tool_allowed(tool_name, context)
 
+    def grantable(self, tool_name: str) -> bool:
+        """Whether approving this tool BY NAME, before any call exists, is
+        meaningful consent (ROADMAP_v2 §25, R2).
+
+        False for any tool declaring its own approval_check. Those decide
+        per call, from the params -- read/write/edit on a path outside the
+        workspace, shell on a non-inert command -- so a name-level grant
+        would authorise a call the user never saw. `shell` is the sharp
+        case: granting the NAME would wave through every command for the
+        rest of the run, which is not what anyone ticking a checkbox
+        labelled "shell" is agreeing to.
+
+        A registration-time property, not an inference about params, and
+        the same rule for §18's subagent sign-off as for §25's pipeline
+        grants -- one mechanism, so the two cannot drift into different
+        ideas of what a grant covers. A non-grantable tool is not blocked:
+        it falls back to being asked, exactly as it is today.
+        """
+        spec = self._tools.get(tool_name)
+        return spec is not None and spec.approval_check is None
+
     def grant_scope(self, tool_name: str) -> Optional[str]:
         """"run" if approving this tool once covers the rest of the run.
 

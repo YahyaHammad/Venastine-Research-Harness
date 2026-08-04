@@ -64,3 +64,13 @@ class RunInfo:
     # returning True does; it is deliberately not an approval_overrides
     # entry, because those OR and can therefore only ever tighten (D14).
     granted_tools: set = field(default_factory=set)
+    # §25: the ceiling on how many granted calls may proceed without being
+    # asked about. A core.approval.GrantBudget, or None for no ceiling.
+    #
+    # Typed as object so this module stays a leaf with no project imports
+    # (see the module docstring) -- the same reason ToolContext is
+    # type-hinted from security/permissions.py under TYPE_CHECKING only.
+    # One budget instance is SHARED by every pass of a pipeline run; a
+    # per-pass budget would multiply the ceiling by the pass count while
+    # reading as if it enforced one.
+    grant_budget: Optional[object] = None

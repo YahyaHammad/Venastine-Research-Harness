@@ -109,10 +109,21 @@ class AgentManager:
         approval_check (file_ops outside the workspace, shell on a
         non-inert command) cannot be resolved before the call exists, so
         those still prompt at call time through the inherited channel.
+
+        §25 (R2) filters those tools OUT of the list rather than merely
+        letting them re-prompt. They were never grantable by name, and the
+        loop now enforces that -- so leaving them here would make the
+        sign-off notice promise authority the grant does not carry, which
+        is worse than not offering it. What the user reads and what the
+        child receives have to be the same list; that is the whole
+        substance of a sign-off, and this helper exists to keep them one.
         """
         from tools.registry import registry
 
-        return sorted(registry.headless_hidden(child_context))
+        return sorted(
+            name for name in registry.headless_hidden(child_context)
+            if registry.grantable(name)
+        )
 
     @staticmethod
     def system_prompt_for(agent: AgentDef, base_prompt: str) -> str:
