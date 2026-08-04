@@ -82,7 +82,7 @@ def agent_catalog_text() -> str:
     return "\n".join(lines)
 
 
-def with_catalogs(base_prompt: str, active_skills=None) -> str:
+def with_catalogs(base_prompt: str, active_skills=None, context=None) -> str:
     """Both frontmatter-only catalogs (skills §14, agents §18) appended;
     the single assembly point every default system prompt goes through.
 
@@ -92,10 +92,31 @@ def with_catalogs(base_prompt: str, active_skills=None) -> str:
     no business governing a pipeline run they started separately. Bodies
     are pinned by the shell, next to its with_goal() call, via
     skills.manager.prompt_fragment(). `active_skills` reaches only as far
-    as the catalog, where it marks entries rather than expanding them."""
-    prompt = with_skill_catalog(base_prompt, active_skills)
+    as the catalog, where it marks entries rather than expanding them.
+
+    `context` (§19-§20 review f19, generalised): each catalog's prose
+    INSTRUCTS the model to call a tool -- "call the load_skill tool",
+    "can be spawned with the spawn_subagent tool". Neither knew the
+    ToolContext, so every agent whose allowed_tools excludes one of those
+    was invited to call a tool it does not have, and a model that follows
+    the invitation burns a denied call against max_steps. §20's reviewer
+    was the first caller to notice; the condition belongs here rather
+    than as a per-caller opt-out, because a flag saying what the context
+    already knows is a second source of truth for the same fact.
+
+    None means no restriction and both catalogs apply -- which is what
+    pass_prompt() passes, so research prompts are unchanged."""
+    from tools.registry import registry
+
+    prompt = base_prompt
+    # A catalog whose tool is unreachable is not "less useful", it is an
+    # instruction that cannot be followed. Suppress the whole section:
+    # listing the skills without the means to load one is worse than
+    # silence, since the model can then only guess at their contents.
+    if registry.is_allowed("load_skill", context):
+        prompt = with_skill_catalog(prompt, active_skills)
     catalog = agent_catalog_text()
-    if catalog:
+    if catalog and registry.is_allowed("spawn_subagent", context):
         prompt = f"{prompt}\n\n{catalog}"
     return prompt
 

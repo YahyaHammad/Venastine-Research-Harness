@@ -122,11 +122,11 @@ def run_review(run, model: str, provider_name: str, authorization=None):
         return [], None
 
     context = manager.active_context(agent)
-    # catalogs=False: the catalogs invite load_skill / spawn_subagent, two
-    # tools this agent's allowed_tools excludes -- advertising an
-    # uncallable tool burns a denied call against max_steps (review f19).
+    # The context suppresses both catalogs here, because this agent's
+    # allowed_tools excludes load_skill and spawn_subagent -- but the rule
+    # lives in with_catalogs, not in this call (review f19, generalised).
     prompt = manager.system_prompt_for(agent, DEFAULT_SYSTEM_PROMPT,
-                                       catalogs=False)
+                                       context=context)
     try:
         response = RunAgentLoop.run_agent_conversation(
             user_goal=_review_input(run),
@@ -438,10 +438,11 @@ def _reviewer_prompt() -> str:
     from core.loop import DEFAULT_SYSTEM_PROMPT
 
     agent = manager.get(REVIEWER_AGENT)
-    # catalogs=False, same reason as run_review: the catalogs advertise
-    # tools the reviewer's allowed_tools excludes.
-    return manager.system_prompt_for(agent, DEFAULT_SYSTEM_PROMPT,
-                                     catalogs=False)
+    # The SAME context run_review built, so a refinement continues under
+    # the prompt its own first turn ran under.
+    return manager.system_prompt_for(
+        agent, DEFAULT_SYSTEM_PROMPT,
+        context=manager.active_context(agent))
 
 
 # ===========================================================================

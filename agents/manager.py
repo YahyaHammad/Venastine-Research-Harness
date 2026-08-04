@@ -127,7 +127,7 @@ class AgentManager:
 
     @staticmethod
     def system_prompt_for(agent: AgentDef, base_prompt: str,
-                          active_skills=None, catalogs: bool = True) -> str:
+                          active_skills=None, context=None) -> str:
         """The full system prompt for a run AS this agent: base + skill /
         agent catalogs, then the agent's own body, then the project's
         CONTEXT.md iff the agent opts in (use_project_context). One
@@ -137,17 +137,18 @@ class AgentManager:
         skills whose bodies the shell pins separately. Bodies are not
         added here -- see with_catalogs' K6 note.
 
-        catalogs=False (§20 review f19): the catalogs invite load_skill /
-        spawn_subagent by name. For an agent whose allowed_tools excludes
-        those tools the invitation is an advertised-uncallable tool -- a
-        model that follows it burns a denied call against max_steps.
-        Callers whose context narrows the tools away pass False."""
+        context (§20 review f19, generalised): the ToolContext this run
+        will actually use. It reaches with_catalogs, which suppresses a
+        catalog whose tool the context excludes -- otherwise a restricted
+        agent is told to "call the load_skill tool" it does not have.
+        Pass the SAME context the run gets: child_context() for a spawned
+        subagent, so a parent's restriction suppresses the invitation too;
+        active_context() for a /agent switch. None means the run is under
+        global policy only, and both catalogs apply."""
         import prompts.system_prompts as system_prompts
 
-        if catalogs:
-            prompt = system_prompts.with_catalogs(base_prompt, active_skills)
-        else:
-            prompt = base_prompt
+        prompt = system_prompts.with_catalogs(base_prompt, active_skills,
+                                              context)
         prompt = f"{prompt}\n\n## Agent: {agent.name}\n\n{agent.body}"
         context = config_loader.context_for_agent(agent)
         if context:

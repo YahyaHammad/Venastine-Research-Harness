@@ -123,7 +123,11 @@ def run(params: dict, parent_context=None, parent_run=None,
         max_steps=agent.max_steps or config.MAX_ITERATIONS,
         context=child,
         effort=effort,
-        system_prompt=manager.system_prompt_for(agent, DEFAULT_SYSTEM_PROMPT),
+        # `child`, not the agent's own context: C6 intersects with the
+        # parent, so a parent that excluded spawn_subagent must not have
+        # the catalog re-invite its child to spawn one (review f19).
+        system_prompt=manager.system_prompt_for(
+            agent, DEFAULT_SYSTEM_PROMPT, context=child),
         permission_channel=permission_channel,
         granted_tools=granted if permission_channel is not None else None,
     )

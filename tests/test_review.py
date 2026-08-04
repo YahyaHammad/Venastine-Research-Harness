@@ -1576,3 +1576,119 @@ class TestTheSettingsKey:
         persisted grant list could only ever remove them."""
         with pytest.raises(ValueError, match="granted_tools"):
             self._validate({"granted_tools": ["read"]})
+
+
+# ===========================================================================
+# ---- The catalog invitation is suppressed at the PRODUCER -----------------
+# ===========================================================================
+#
+# Both catalogs' prose instructs the model to call a tool -- "call the
+# load_skill tool", "can be spawned with the spawn_subagent tool". Neither
+# knew the ToolContext, so any agent whose allowed_tools excluded one was
+# invited to call a tool it does not have. §20's reviewer was the first
+# caller to notice; the review fixed it there with a catalogs=False flag,
+# which leaves the next restricted agent with the same bug.
+#
+# These tests pin the rule at with_catalogs, not at any one caller.
+
+from tools.context import ToolContext
+
+
+class TestCatalogsFollowTheContext:
+
+    @pytest.fixture(autouse=True)
+    def _discovered(self):
+        from core import config_loader
+        config_loader.initialize(".")
+
+    def _prompt(self, allowed):
+        import prompts.system_prompts as system_prompts
+        from tools.context import ToolContext
+
+        context = None if allowed is None else ToolContext(
+            allowed_tools=set(allowed))
+        return system_prompts.with_catalogs("BASE", context=context)
+
+    def test_an_unrestricted_run_gets_both_catalogs(self):
+        """THE CONTROL. Without it every assertion below also passes
+        against a version that suppresses catalogs for everyone, which
+        would silently strip progressive disclosure from ordinary chat."""
+        prompt = self._prompt(None)
+
+        assert "## Available skills" in prompt
+        assert "## Available agents" in prompt
+
+    def test_an_agent_without_load_skill_is_not_told_to_call_it(self):
+        prompt = self._prompt({"web_search", "spawn_subagent"})
+
+        assert "load_skill" not in prompt
+        assert "## Available skills" not in prompt
+        # The agent catalog is unaffected -- the two are independent
+        # conditions, not one switch.
+        assert "## Available agents" in prompt
+
+    def test_an_agent_without_spawn_subagent_is_not_told_to_spawn_one(self):
+        prompt = self._prompt({"web_search", "load_skill"})
+
+        assert "spawn_subagent" not in prompt
+        assert "## Available agents" not in prompt
+        assert "## Available skills" in prompt
+
+    def test_a_restricted_NON_reviewer_agent_gets_the_same_treatment(self):
+        """The whole point of moving this to the producer. §20's reviewer
+        was one caller; the rule has to hold for an agent nobody thought
+        about when writing it."""
+        from agents.manager import manager
+        from core import config_loader
+
+        agent = config_loader.get_agent("grill-me")
+        context = ToolContext(allowed_tools={"web_search"})
+        prompt = manager.system_prompt_for(
+            agent, "BASE", context=context)
+
+        assert "load_skill" not in prompt
+        assert "spawn_subagent" not in prompt
+        assert "## Agent: grill-me" in prompt, (
+            "suppressing catalogs must not suppress the agent's own body"
+        )
+
+    def test_a_spawned_subagent_inherits_the_PARENTS_suppression(self, mocker):
+        """C6 intersects with the parent, so a parent that excluded
+        spawn_subagent must not have the catalog re-invite its child to
+        spawn one. This is why the call site passes `child` and not the
+        agent's own context."""
+        from agents import subagent_tool
+        from agents.manager import manager
+        from core import config_loader
+
+        captured = {}
+
+        def _conv(**kwargs):
+            captured.update(kwargs)
+            return make_model_response(text="done")
+
+        mocker.patch.object(RunAgentLoop, "run_agent_conversation",
+                            side_effect=_conv)
+        agent = config_loader.get_agent("grill-me")
+        assert agent is not None
+        # A parent restricted to read + web_search: whatever grill-me
+        # declares, the child cannot spawn.
+        parent = ToolContext(allowed_tools={"read", "web_search"})
+        subagent_tool.run({"agent_name": "grill-me", "task": "t"},
+                          parent_context=parent)
+
+        assert "spawn_subagent" not in captured["system_prompt"]
+        # And the context the prompt was built from is the one the run
+        # actually uses -- not two independently-computed contexts.
+        assert captured["context"].allowed_tools == \
+            manager.child_context(agent, parent).allowed_tools
+
+    def test_pass_prompts_are_unaffected(self):
+        """pass_prompt() passes no context, so research passes keep both
+        catalogs. This is the one way the change could have reached the
+        pipeline."""
+        import prompts.system_prompts as system_prompts
+
+        prompt = system_prompts.pass_prompt("Pass 0")
+        assert "## Available skills" in prompt
+        assert "## Available agents" in prompt

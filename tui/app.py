@@ -347,7 +347,8 @@ class VenastineApp(App):
             agent = self.active_agent
             context = manager.active_context(agent)
             base_prompt = manager.system_prompt_for(
-                agent, DEFAULT_SYSTEM_PROMPT, self.active_skills)
+                agent, DEFAULT_SYSTEM_PROMPT, self.active_skills,
+                context=context)
             model = agent.model or self.model
             provider = agent.provider or self.provider_name
             max_steps = agent.max_steps or config.MAX_ITERATIONS

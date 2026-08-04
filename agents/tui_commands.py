@@ -102,6 +102,11 @@ def _cmd_grill(app, args: str) -> None:
         return
     app._transcript.write_user("/grill-me")
     app.run_one_shot(
+        # No context, deliberately: run_one_shot passes none to
+        # continue_conversation, so this turn runs under global policy and
+        # both catalogs are genuinely callable. Passing the agent's own
+        # context here would suppress catalogs for a run that is not
+        # actually restricted (review f19, generalised).
         manager.system_prompt_for(agent, DEFAULT_SYSTEM_PROMPT),
         "Grill this thread: surface what still needs a decision.",
     )
