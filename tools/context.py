@@ -52,3 +52,15 @@ class RunInfo:
     model: str
     provider_name: str
     effort: Optional[str] = None
+    # Tools already signed off for the rest of THIS run (§18 subagent
+    # sign-off, S1). A RunInfo is built once per _run() call and _run() is
+    # called once per turn, so run-scope is turn-scope -- which is the
+    # granularity the sign-off was specified at: approving a spawn covers
+    # every subagent in that turn, including nested ones, and nothing
+    # beyond it.
+    #
+    # A GRANT, not a policy override. It records that the user answered
+    # the approval question early, exactly as an approval_callback
+    # returning True does; it is deliberately not an approval_overrides
+    # entry, because those OR and can therefore only ever tighten (D14).
+    granted_tools: set = field(default_factory=set)

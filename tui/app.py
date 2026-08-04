@@ -459,7 +459,8 @@ class VenastineApp(App):
             self._raven.state = ravens.THINKING
 
         self.push_screen(
-            PermissionScreen(request["tool_name"], request["params"]),
+            PermissionScreen(request["tool_name"], request["params"],
+                             request.get("notice")),
             answered,
         )
 

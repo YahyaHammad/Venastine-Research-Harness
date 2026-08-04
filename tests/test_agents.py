@@ -242,7 +242,10 @@ def test_headless_filter_hides_approval_gated_mcp_tool(_mcp_tool):
 
     headless = [s["name"] for s in registry.schemas(None, callable_only=True)]
     assert "mcp__probe__tool" not in headless
-    assert registry.headless_hidden(None) == ["mcp__probe__tool"]
+    # spawn_subagent joins it here as of the §18 sign-off (S1): approving
+    # a spawn IS the sign-off, so delegation is approval-gated and
+    # therefore uncallable headless too.
+    assert "mcp__probe__tool" in registry.headless_hidden(None)
 
 
 def test_headless_filter_warning_names_hidden_tool(_mcp_tool, caplog,
@@ -327,9 +330,12 @@ def test_agent_catalog_frontmatter_only(_roots):
 def test_spawn_subagent_permission_declared():
     assert "spawn_subagent" in registry._tools
     assert config.ToolPermissions().spawn_subagent is True
-    assert config.ToolApprovals().spawn_subagent is False
+    # Approval is True as of the §18 sign-off (S1): the thing being
+    # approved is delegation itself, which authorises the child's whole
+    # approval-gated tool set for the rest of the turn.
+    assert config.ToolApprovals().spawn_subagent is True
     assert is_tool_allowed("spawn_subagent", None) is True
-    assert requires_approval("spawn_subagent", {}) is False
+    assert requires_approval("spawn_subagent", {}) is True
 
 
 # ---------------------------------------------------------------------------
@@ -414,3 +420,183 @@ def test_cmd_grill_me_uses_current_thread(tmp_path, fake_storage):
     prompt, message = app.one_shots[0]
     assert "grill" in prompt.lower()
     assert "decision" in message.lower()
+
+
+# ===========================================================================
+# ---- Subagent sign-off (review f12 + f16/r3-1, decisions S1 and S2) ------
+# ===========================================================================
+#
+# Two defects in opposite directions, fixed together because either fix
+# alone is wrong:
+#
+#   f12  the child dropped the parent's approval tightenings, so a tool
+#        the parent gated ran ungated one hop down.
+#   r3-1 the child ran headless (run_agent_conversation took no
+#        permission_channel), so it silently lost every approval-gated
+#        tool -- and the SAME agent behaved differently depending on
+#        whether it was activated with /agent or spawned.
+
+def test_s2_parent_approval_tightenings_reach_the_child(_roots):
+    """C6 intersects allowed_tools precisely to stop a restricted parent
+    escaping via a permissive child. The approval axis had the same hole:
+    §18's sketch built the child's overrides from the agent definition
+    alone."""
+    _write_harness_agent(_roots, "quiet")
+    config_loader.initialize(str(_roots["project"]))
+    agent = manager.get("quiet")
+
+    parent = ToolContext(approval_overrides={"web_search": True})
+    child = manager.child_context(agent, parent)
+
+    assert child.approval_overrides.get("web_search") is True
+    # And through the real policy function, not the arithmetic.
+    assert requires_approval("web_search", {}, child) is True
+
+
+def test_s2_union_only_carries_true_entries(_roots):
+    """A False override is indistinguishable from absent under D14's OR,
+    so carrying it would imply a relaxation the ratchet cannot express."""
+    _write_harness_agent(_roots, "quiet")
+    config_loader.initialize(str(_roots["project"]))
+    agent = manager.get("quiet")
+
+    child = manager.child_context(
+        agent, ToolContext(approval_overrides={"web_search": False}))
+
+    assert "web_search" not in child.approval_overrides
+
+
+def test_s2_child_own_overrides_still_apply(_roots):
+    """Control: unioning must not drop what the agent itself declares."""
+    _write_harness_agent(_roots, "strict",
+                         ["approval_overrides: {get_time: true}"])
+    config_loader.initialize(str(_roots["project"]))
+    agent = manager.get("strict")
+
+    child = manager.child_context(agent, ToolContext())
+    assert child.approval_overrides.get("get_time") is True
+
+
+def test_candidate_approvals_is_the_list_the_prompt_shows(_roots, _mcp_tool):
+    """One helper, two callers. If the notice and the grant computed the
+    list separately they could drift, and the drift IS the defect: the
+    user would approve one set and the child would receive another."""
+    _write_harness_agent(_roots, "worker")
+    config_loader.initialize(str(_roots["project"]))
+    agent = manager.get("worker")
+    child = manager.child_context(agent, ToolContext())
+
+    candidates = manager.candidate_approvals(child)
+    assert "mcp__probe__tool" in candidates
+
+    notice = subagent_tool.approval_notice({"agent_name": "worker"}, None)
+    assert "mcp__probe__tool" in notice
+
+
+def test_spawn_forwards_the_channel_and_the_grant(_roots, _mcp_tool, mocker):
+    """r3-1: without the channel the child ran headless, so
+    schemas(callable_only=True) dropped every approval-gated tool -- the
+    same agent keeping them under /agent and losing them when spawned."""
+    _write_harness_agent(_roots, "worker")
+    config_loader.initialize(str(_roots["project"]))
+
+    captured = {}
+
+    def _fake_run(**kwargs):
+        captured.update(kwargs)
+        return make_model_response(text="child done")
+
+    mocker.patch.object(RunAgentLoop, "run_agent_conversation",
+                        side_effect=_fake_run)
+
+    channel = object()
+    subagent_tool.run({"agent_name": "worker", "task": "t"},
+                      parent_context=ToolContext(),
+                      permission_channel=channel)
+
+    assert captured["permission_channel"] is channel
+    assert "mcp__probe__tool" in captured["granted_tools"]
+
+
+def test_spawn_grants_nothing_when_there_is_no_channel(_roots, _mcp_tool,
+                                                       mocker):
+    """A grant without a channel would be a pure relaxation: nothing could
+    have asked the user, so nothing was approved. Headless spawns keep the
+    old behaviour rather than silently gaining unprompted access."""
+    _write_harness_agent(_roots, "worker")
+    config_loader.initialize(str(_roots["project"]))
+
+    captured = {}
+    mocker.patch.object(
+        RunAgentLoop, "run_agent_conversation",
+        side_effect=lambda **kw: (captured.update(kw),
+                                  make_model_response(text="x"))[1])
+
+    subagent_tool.run({"agent_name": "worker", "task": "t"},
+                      parent_context=ToolContext())
+
+    assert captured["permission_channel"] is None
+    assert captured["granted_tools"] is None
+
+
+def test_s1_grant_means_one_prompt_per_turn_not_per_spawn(mocker):
+    """S1's chosen scope: a parent spawning several subagents in one turn
+    is asked ONCE. _run() is called once per turn, so run-scope is
+    turn-scope -- and the loop learns which tools work this way from the
+    registry rather than naming spawn_subagent itself."""
+    import queue as _queue
+
+    class _Mem:
+        messages = []
+        extra = {}
+        def add_user_message(self, m): pass
+        def add_assistant_message(self, r): pass
+        def add_tool_result(self, i, r): pass
+
+    two_spawns = make_model_response(text="", tool_calls=[
+        {"id": "s1", "name": "spawn_subagent",
+         "input": {"agent_name": "a", "task": "t"}},
+        {"id": "s2", "name": "spawn_subagent",
+         "input": {"agent_name": "b", "task": "t"}},
+    ])
+    done = make_model_response(text="done")
+
+    def _stream(*a, **kw):
+        for r in (two_spawns, done)[_stream.i:_stream.i + 1]:
+            _stream.i += 1
+            yield StreamToken(final_response=r)
+    _stream.i = 0
+
+    mocker.patch("core.loop.api_initialization", return_value=object())
+    mocker.patch("core.loop.effort_for", return_value=None)
+    mocker.patch("core.loop.call_model_stream", side_effect=_stream)
+    mocker.patch("core.loop.registry.dispatch", return_value={"result": "ok"})
+
+    # Two answers available, so a re-asking loop gets served rather than
+    # deadlocking on an empty queue. The COUNT is the assertion: a test
+    # that starved the loop instead would hang on revert, and a hang is a
+    # worse signal than a failure -- it stalls the suite rather than
+    # naming the regression.
+    channel = _queue.Queue()
+    channel.put(True)
+    channel.put(True)
+
+    events = list(RunAgentLoop._run(
+        memory=_Mem(), system_prompt="s", provider_name="ANTHROPIC",
+        model="m", context=None, max_steps=2, permission_channel=channel))
+
+    prompts_shown = [e for e in events if e.permission_request is not None]
+    assert len(prompts_shown) == 1, \
+        "the second spawn in the same turn re-asked despite the grant"
+
+
+def test_grant_does_not_leak_into_the_next_turn(mocker):
+    """The grant lives on RunInfo, which is built per _run() call. A
+    module-level or app-level store would silently make one approval
+    permanent."""
+    from tools.context import RunInfo as _RunInfo
+
+    assert _RunInfo(model="m", provider_name="p").granted_tools == set()
+    a = _RunInfo(model="m", provider_name="p")
+    a.granted_tools.add("spawn_subagent")
+    assert _RunInfo(model="m", provider_name="p").granted_tools == set()

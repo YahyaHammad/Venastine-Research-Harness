@@ -62,7 +62,20 @@ class AgentManager:
         child. C3: depth increments so the nesting limit is enforceable.
 
         An agent that declares no allowed_tools inherits the parent's
-        restriction unchanged (it may not widen it either)."""
+        restriction unchanged (it may not widen it either).
+
+        APPROVAL COMPOSES THE SAME WAY (§14-§18 review f12, decision S2).
+        §18's spec sketch built the child's overrides from the agent
+        definition alone, which drops the parent's. C6 reasoned about
+        allowed_tools and never considered the approval axis, so the same
+        escalation it exists to prevent was open one field over: a parent
+        declaring `approval_overrides: {web_search: true}` prompts on
+        every search, then spawns a child that computes
+        approval_needed(web_search) == False and runs it ungated.
+
+        Union rather than replace. Only True entries carry -- a False is
+        indistinguishable from absent under D14's OR, so unioning can
+        only ever tighten, which is what makes it safe to do silently."""
         parent = parent_context or ToolContext()
         if agent.allowed_tools is not None:
             own = set(agent.allowed_tools)
@@ -75,11 +88,31 @@ class AgentManager:
                 set(parent.allowed_tools)
                 if parent.allowed_tools is not None else None
             )
+        overrides = {k: v for k, v in parent.approval_overrides.items() if v}
+        overrides.update(agent.approval_overrides)
         return ToolContext(
             allowed_tools=child_allowed,
-            approval_overrides=dict(agent.approval_overrides),
+            approval_overrides=overrides,
             subagent_depth=parent.subagent_depth + 1,
         )
+
+    @staticmethod
+    def candidate_approvals(child_context: ToolContext) -> list:
+        """Tools the subagent could reach that would each need approval.
+
+        ONE helper, TWO callers -- the sign-off prompt's notice text and
+        the grant the child actually receives. Computing the list twice
+        would let what the user approved drift from what the child got,
+        which is the whole substance of the sign-off.
+
+        Params are empty because there are none yet: a path-dependent
+        approval_check (file_ops outside the workspace, shell on a
+        non-inert command) cannot be resolved before the call exists, so
+        those still prompt at call time through the inherited channel.
+        """
+        from tools.registry import registry
+
+        return sorted(registry.headless_hidden(child_context))
 
     @staticmethod
     def system_prompt_for(agent: AgentDef, base_prompt: str) -> str:

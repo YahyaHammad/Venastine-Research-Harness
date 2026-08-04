@@ -94,6 +94,7 @@ class RunAgentLoop:
         temperature: Optional[float] = None,
         effort: Optional[str] = None,
         permission_channel: Optional[queue.Queue] = None,
+        granted_tools: Optional[set] = None,
     ):
         """Generator yielding LoopEvent objects as the loop progresses.
 
@@ -111,6 +112,14 @@ class RunAgentLoop:
         thread). If None (CLI/pipeline paths), any tool call that would
         need approval is denied by default — same behavior as today's
         dispatch() with no approval_callback.
+
+        granted_tools: names the user has ALREADY approved for this run
+        (§18 subagent sign-off). A spawned subagent receives the set the
+        user signed off when approving the spawn, so it does not re-ask
+        for tools already covered. A grant, not a policy relaxation: it
+        records an approval given early, which is why it lives on RunInfo
+        rather than in the ToolContext's approval_overrides (those OR, and
+        so can only tighten).
         """
         client = api_initialization(provider_name)
         # Validate the level against the model that will RECEIVE it, here
@@ -139,7 +148,8 @@ class RunAgentLoop:
                     ", ".join(sorted(hidden)),
                 )
         run_info = RunInfo(
-            model=model, provider_name=provider_name, effort=effort)
+            model=model, provider_name=provider_name, effort=effort,
+            granted_tools=set(granted_tools or ()))
         total_tokens_used = 0
 
         response = None
@@ -200,9 +210,17 @@ class RunAgentLoop:
                 # a context restriction from a global policy denial.
                 needs_approval = registry.approval_needed(
                     call.name, call.input, context)
+                # §18 sign-off (S1): a tool whose grant_scope is "run" is
+                # asked about once per run, not once per call. The loop
+                # names no tool -- it asks the registry, the same way it
+                # asks whether approval is needed at all.
+                if needs_approval and call.name in run_info.granted_tools:
+                    needs_approval = False
                 if needs_approval:
                     yield LoopEvent(permission_request={
                         "tool_name": call.name, "params": call.input,
+                        "notice": registry.approval_notice(
+                            call.name, call.input, context),
                     })
                     approved = (
                         permission_channel.get()
@@ -214,6 +232,8 @@ class RunAgentLoop:
                             "error": f"{call.name} requires approval and was not given",
                         }
                     else:
+                        if registry.grant_scope(call.name) == "run":
+                            run_info.granted_tools.add(call.name)
                         # Approval already obtained — pass a callback that
                         # returns True so dispatch()'s internal re-check
                         # doesn't deny an already-approved call.
@@ -222,6 +242,7 @@ class RunAgentLoop:
                                 call.name, call.input, context=context,
                                 approval_callback=lambda n, p: True,
                                 parent_run=run_info,
+                                permission_channel=permission_channel,
                             )
                         except ToolCallDenied as e:
                             result = {"error": str(e)}
@@ -229,7 +250,8 @@ class RunAgentLoop:
                     try:
                         result = registry.dispatch(
                             call.name, call.input, context=context,
-                            parent_run=run_info)
+                            parent_run=run_info,
+                            permission_channel=permission_channel)
                     except ToolCallDenied as e:
                         result = {"error": str(e)}
 
@@ -254,6 +276,8 @@ class RunAgentLoop:
         effort: Optional[str] = None,
         context: Optional[ToolContext] = None,
         system_prompt: Optional[str] = None,
+        permission_channel: Optional[queue.Queue] = None,
+        granted_tools: Optional[set] = None,
     ) -> ModelResponse:
         """Regular conversation — full tool set, default system prompt,
         one continuous thread. Pass thread_id to resume an existing
@@ -265,7 +289,14 @@ class RunAgentLoop:
 
         A thread's persistent goal (§18 goal mode) is appended to WHICHEVER
         prompt is used, so it applies in every shell without the callers
-        knowing about it."""
+        knowing about it.
+
+        permission_channel / granted_tools exist for spawn_subagent (§18
+        S1). Without the channel a spawned subagent ran HEADLESS while its
+        parent could prompt, so it silently lost every approval-gated tool
+        -- including all MCP tools -- and the same agent behaved
+        differently depending on whether it was activated with /agent or
+        spawned."""
         memory = ConversationMemory(thread_id=thread_id)
         memory.add_user_message(user_goal)
         prompt = with_goal(
@@ -278,6 +309,7 @@ class RunAgentLoop:
             memory, prompt,
             provider_name, model, context,
             max_steps, max_total_tokens, temperature=temperature, effort=effort,
+            permission_channel=permission_channel, granted_tools=granted_tools,
         ))
         response.thread_id = memory.thread_id
         return response

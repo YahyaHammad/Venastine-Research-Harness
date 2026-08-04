@@ -204,4 +204,10 @@ class ToolApprovals:
     edit: bool = False
     shell: bool = True
     load_skill: bool = False
-    spawn_subagent: bool = False
+    # Approving a spawn is the §18 subagent sign-off: it authorises the
+    # child's whole approval-gated tool set for the rest of the turn, so
+    # delegation itself has to be the thing approved. Consequence, named
+    # rather than discovered: the headless callability filter therefore
+    # drops spawn_subagent from CLI chat and every research pass, so
+    # delegation is TUI-only. The once-per-run notice names it.
+    spawn_subagent: bool = True

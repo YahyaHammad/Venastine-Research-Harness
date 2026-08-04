@@ -27,3 +27,19 @@ class ToolSpec:
     # expected to return a clean error if called anyway, and a second denial
     # path would only add a worse message.
     available_check: Optional[Callable[[], bool]] = None
+    # Optional "once approved in this run, don't ask again" marker. Only
+    # "run" is defined; None (the default) means every call is asked about
+    # independently, which is the existing behaviour for every builtin.
+    #
+    # Exists so §18's subagent sign-off is a property of spawn_subagent
+    # rather than a tool name hard-coded into core/loop.py -- the loop asks
+    # the registry what a tool's grant scope is, the same way it asks
+    # whether approval is needed at all. §23's response channel reuses it.
+    grant_scope: Optional[str] = None
+    # Optional extra text shown in the approval prompt, above the params.
+    # Signature: (params, context) -> str. Lets a tool explain what
+    # approving actually authorises when the params alone don't say --
+    # spawn_subagent uses it to list the tools the subagent would then be
+    # able to run without asking again. Keeps that knowledge in the tool
+    # instead of teaching the TUI about agents.
+    approval_notice: Optional[Callable[[dict, object], str]] = None

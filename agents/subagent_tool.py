@@ -48,7 +48,31 @@ TOOL_SCHEMA = {
 }
 
 
-def run(params: dict, parent_context=None, parent_run=None) -> dict:
+def approval_notice(params: dict, context=None) -> str:
+    """What approving this spawn actually authorises (§18 S1).
+
+    The params alone say only which agent and which task. What the user
+    is really being asked is whether that agent may run a set of tools
+    without asking again -- so the prompt has to name them. Computed
+    through manager.candidate_approvals(), the SAME helper that builds
+    the grant, so the list shown and the list granted cannot drift.
+    """
+    from agents.manager import manager
+
+    agent = manager.get(params.get("agent_name", ""))
+    if agent is None:
+        return ""
+    child = manager.child_context(agent, context or ToolContext())
+    candidates = manager.candidate_approvals(child)
+    if not candidates:
+        return f"{agent.name} needs no approval-gated tools."
+    listed = "\n".join(f"  - {name}" for name in candidates)
+    return (f"{agent.name} may use these without asking again, for the "
+            f"rest of this turn:\n{listed}")
+
+
+def run(params: dict, parent_context=None, parent_run=None,
+        permission_channel=None) -> dict:
     from core.loop import (
         RunAgentLoop, DEFAULT_PROVIDER, DEFAULT_SYSTEM_PROMPT,
     )
@@ -65,6 +89,13 @@ def run(params: dict, parent_context=None, parent_run=None) -> dict:
                          f"in the available agents catalog."}
 
     child = manager.child_context(agent, parent)
+    # The channel is inherited, and it is NOT redundant with the grant.
+    # The grant covers what approval_needed(name, {}) can enumerate; a
+    # path-dependent approval_check (file_ops outside the workspace, shell
+    # on a non-inert command) only resolves once the call exists, so those
+    # still have to reach a human mid-run. Without the channel the child
+    # ran headless and lost every approval-gated tool silently.
+    granted = manager.candidate_approvals(child)
 
     # Inherit the parent run's identity only where the agent definition
     # is silent -- an agent's declared model/provider is its identity.
@@ -83,6 +114,8 @@ def run(params: dict, parent_context=None, parent_run=None) -> dict:
         context=child,
         effort=effort,
         system_prompt=manager.system_prompt_for(agent, DEFAULT_SYSTEM_PROMPT),
+        permission_channel=permission_channel,
+        granted_tools=granted if permission_channel is not None else None,
     )
     return {
         "result": response.text,

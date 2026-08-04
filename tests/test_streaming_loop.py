@@ -305,7 +305,7 @@ def test_permission_channel_yields_request_and_dispatches_on_approval(mocker):
 
     dispatched = []
     def fake_dispatch(name, params, context=None, approval_callback=None,
-                      parent_run=None):
+                      parent_run=None, permission_channel=None):
         dispatched.append((name, approval_callback))
         return {"ok": True}
     mocker.patch.object(registry, "dispatch", side_effect=fake_dispatch)
@@ -325,7 +325,11 @@ def test_permission_channel_yields_request_and_dispatches_on_approval(mocker):
 
     perm = [e.permission_request for e in events if e.permission_request is not None]
     assert len(perm) == 1, "a permission_request event must be yielded"
-    assert perm[0] == {"tool_name": "shell", "params": {"command": ["rm"]}}
+    # `notice` is the §18 sign-off's channel for "what does approving
+    # this actually authorise" (ToolSpec.approval_notice); shell supplies
+    # none, so it is None here rather than absent.
+    assert perm[0] == {"tool_name": "shell", "params": {"command": ["rm"]},
+                       "notice": None}
 
     # Approved → dispatch called once with a callback that returns True.
     assert len(dispatched) == 1

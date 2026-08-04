@@ -24,16 +24,23 @@ class PermissionScreen(ModalScreen[bool]):
 
     BINDINGS = [("escape", "deny", "Deny")]
 
-    def __init__(self, tool_name: str, params: dict):
+    def __init__(self, tool_name: str, params: dict, notice: str = None):
         super().__init__()
         self._tool_name = tool_name
         self._params = params
+        # Supplied by the tool via ToolSpec.approval_notice, not composed
+        # here: what approving authorises is the TOOL's knowledge.
+        # spawn_subagent uses it to list the tools the subagent could then
+        # run unprompted, which the params alone never say.
+        self._notice = notice
 
     def compose(self) -> ComposeResult:
         try:
             rendered = json.dumps(self._params, indent=2, default=str)
         except (TypeError, ValueError):
             rendered = repr(self._params)
+        if self._notice:
+            rendered = f"{self._notice}\n\n{rendered}"
         yield Grid(
             Label(f"Allow {self._tool_name}?", id="permission-title"),
             Static(rendered, id="permission-params"),

@@ -20,6 +20,7 @@ ROADMAP_v2 §15:
 """
 
 import inspect
+import logging
 from typing import Optional, TYPE_CHECKING
 
 from tools.base import ToolSpec
@@ -34,6 +35,8 @@ from security.permissions import (
 from safety.policy_enforcement import check_output_policy
 from agents import subagent_tool
 
+logger = logging.getLogger(__name__)
+
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from tools.context import ToolContext, RunInfo
 
@@ -42,7 +45,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 # live value; handlers that don't are called with params only. Generalised
 # so §23's response-channel tools can add a third name later without
 # touching dispatch() again.
-_INJECTABLE_PARAMS = ("parent_context", "parent_run")
+_INJECTABLE_PARAMS = ("parent_context", "parent_run", "permission_channel")
 
 
 class ToolCallDenied(Exception):
@@ -175,11 +178,41 @@ class ToolRegistry:
         )
         return tool_level or requires_approval(tool_name, params, context)
 
+    def grant_scope(self, tool_name: str) -> Optional[str]:
+        """"run" if approving this tool once covers the rest of the run.
+
+        Mechanism, not policy: the loop asks rather than knowing which
+        tools work this way, so the tool name stays out of core/loop.py.
+        """
+        spec = self._tools.get(tool_name)
+        return spec.grant_scope if spec is not None else None
+
+    def approval_notice(
+        self, tool_name: str, params: dict,
+        context: Optional["ToolContext"] = None,
+    ) -> Optional[str]:
+        """Extra text for the approval prompt, or None.
+
+        Never raises: a tool whose notice callable blows up must still be
+        approvable, because the alternative is a prompt that cannot be
+        rendered and therefore a call that can never be allowed.
+        """
+        spec = self._tools.get(tool_name)
+        if spec is None or spec.approval_notice is None:
+            return None
+        try:
+            return spec.approval_notice(params, context)
+        except Exception:  # noqa: BLE001 - a broken notice must not block
+            logger.warning("approval_notice for %r failed", tool_name,
+                           exc_info=True)
+            return None
+
     def dispatch(
         self, tool_name: str, params: dict,
         context: Optional["ToolContext"] = None,
         approval_callback=None,
         parent_run: Optional["RunInfo"] = None,
+        permission_channel=None,
     ) -> dict:
         # Unknown-tool guard: ValueError, deliberately NOT ToolCallDenied.
         # The two exception types separate "you misnamed it" from "policy
@@ -208,9 +241,17 @@ class ToolRegistry:
         # them (spawn_subagent wants both). Handlers that didn't are
         # called with params only -- the twelve pre-§18 tools are
         # byte-for-byte untouched by this.
-        injected = {}
-        for param in self._injectable.get(tool_name, ()):
-            injected[param] = context if param == "parent_context" else parent_run
+        # An explicit map, not a ternary. The two-value version silently
+        # mis-injected any THIRD name: _declared_injections would advertise
+        # it and dispatch would hand it parent_run, a wrong-typed value
+        # with no error at register or dispatch time. A name added to
+        # _INJECTABLE_PARAMS and forgotten here now raises immediately.
+        available = {
+            "parent_context": context,
+            "parent_run": parent_run,
+            "permission_channel": permission_channel,
+        }
+        injected = {p: available[p] for p in self._injectable.get(tool_name, ())}
         result = spec.handler(params, **injected)
         # ROADMAP §8 secret redaction -- a post-call filter, not a pre-call
         # gate. Load-bearing: §15's own Rev. 2 sketch dropped this line,
@@ -236,7 +277,15 @@ registry.register(ToolSpec("write", file_ops.WRITE_TOOL_SCHEMA, file_ops.write_r
 registry.register(ToolSpec("edit", file_ops.EDIT_TOOL_SCHEMA, file_ops.edit_run, approval_check=file_ops._file_approval_check))
 registry.register(ToolSpec("shell", shell.TOOL_SCHEMA, shell.run, approval_check=shell._shell_approval_check))
 registry.register(ToolSpec("load_skill", load_skill.TOOL_SCHEMA, load_skill.run, available_check=load_skill.has_skills))
-registry.register(ToolSpec("spawn_subagent", subagent_tool.TOOL_SCHEMA, subagent_tool.run))
+registry.register(ToolSpec(
+    "spawn_subagent", subagent_tool.TOOL_SCHEMA, subagent_tool.run,
+    # Approving a spawn IS the subagent sign-off (§18 S1): it authorises
+    # the child's whole approval-gated tool set for the rest of the turn,
+    # which is why grant_scope is "run" -- a second spawn in the same turn
+    # reuses the answer rather than re-asking.
+    grant_scope="run",
+    approval_notice=subagent_tool.approval_notice,
+))
 
 # D24: fail loudly at import if any statically registered tool has no
 # declared permission/approval field. Runs here rather than in
