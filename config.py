@@ -283,6 +283,18 @@ COMPACTION_RATIO_TOLERANCE = 0.5
 COMPACTION_STRATEGY = "rederive"
 COMPACTION_STRATEGIES = ("rederive", "chain")
 
+# ROADMAP_v2 §21b (M14). Ceiling on how many durable memories reach one
+# prompt. Newest first, and the truncation is stated in the fragment the
+# model reads rather than only in a log.
+#
+# Every in-scope memory would otherwise enter every turn forever, which is
+# the unbounded context growth §21 exists to fight -- a memory feature that
+# quietly reintroduces the problem compaction solves would be a poor trade.
+# Recency is the ordering because it is the only staleness signal available
+# without asking a model, and /forget is how a still-relevant old memory
+# gets kept ahead of the cap.
+MAX_INJECTED_MEMORIES = 50
+
 # The agent that does the summarizing. §21: this is the shape of an agent
 # call -- a system prompt, a task, a judgment-based output -- so it runs
 # through the same RunAgentLoop as everything else rather than needing its
