@@ -79,6 +79,7 @@ Every decision below was made through a structured clarification cycle with the 
 - 24. `/init` — generate `CONTEXT.md` from the project **(added during §16)**
 - 25. Authorized tool use in the research pipeline **(BUILT)**
 - 26. Research legibility — pass internals, code stages, the claims view, colour, copy **(added after §22's first live run; BUILT)**
+- 27. Thread legibility — thread `kind`, chat-only picker, transcript replay on resume **(added after §26's first live session)**
 - **Open Questions — None Remaining** (Rev. 3 — all decisions locked; verification items only)
 - **Why these calls, not just what they are** (Rev. 3 — the reasoning patterns behind several decisions above)
 
@@ -1599,6 +1600,78 @@ per D22, and pinned by a test that presses the key with text in the input.
 4. Colour comes from theme variables only, so all eight themes restyle without edits, and a widget renders unstyled rather than raising when there is no running app. ✓
 5. Text is retrievable from the session without terminal selection, by a route whose success is not overclaimed. ✓
 6. Both shells render the new kinds. ✓
+
+---
+
+## 27. Thread legibility — resume actually resumes, and a thread knows what it is
+
+**Added after §26's first live TUI session.** Two bugs, both about threads, independent of
+each other, and both found by using the app rather than by reading it.
+
+| # | What the session showed | Where it lives |
+|---|---|---|
+| 1 | Resuming a thread (ctrl+t) displays nothing — and leaves the *previous* thread's transcript on screen under the new thread's id | `tui/app.py` + `tui/widgets.py` |
+| 2 | The picker lists far more threads than there have ever been conversations | `storage.py` |
+
+**Bug 1 is display-only.** `action_pick_thread`'s `chosen()` callback swaps `self.memory`,
+refreshes the goal banner, writes `Resumed thread <uuid>.` and stops. The data loads
+correctly — `ConversationMemory(thread_id=...)` reads the full history at construction —
+but nothing renders it and nothing clears what was already on screen. `main.py`'s
+`--thread` path has the identical gap, which §26's L6 makes in scope rather than optional.
+
+**Bug 2 is not what it looks like.** `core/loop.py`'s `stream_deep_research_mode` builds a
+bare `ConversationMemory()` per pass, so one research run creates ~10 threads, plus up to
+4 more for the 6a/6c retry rounds, plus the §20 reviewer's. **That is a locked invariant,
+not the defect** — "each pass gets its own fresh thread; passes share distilled JSON,
+never raw history" is what stops a later pass reading how an earlier one argued. The
+defect is that `ConversationThread` has no field saying what a thread *is*, so
+`list_threads()` returns pass threads and conversations undifferentiated.
+
+### Decisions record (T1–T5)
+
+| # | Decision |
+|---|---|
+| **T1** | Threads carry a `kind` (`chat` / `research_pass` / `subagent`); the picker lists `chat` only. A **column**, not `extra_data` — that field exists and needs no migration, but it is an opaque JSON blob, so filtering would mean loading every row and testing in Python. `list_threads()` is the one query that must scale with a database gaining ten rows per run. |
+| **T2** | Pass thread ids are recorded on the run (`PipelineRun.pass_threads`), so hiding a pass thread from the picker does not make it unreachable. A `list[dict]`, matching `granted_calls` and `subagent_reviews` — a nested dataclass would force every `vars(run)`/`vars(c)` site to `asdict()` in one change. |
+| **T3** | Replay renders the **archive** (`storage.archive_history`), never the derived view. `memory.messages` begins with the synthesized `SUMMARY_PREFIX` message on any compacted thread, and replaying it would render harness-generated text under a `you ›` label — precisely what M8 says that message must never be mistaken for. |
+| **T4** | Replay shows user/assistant text in full and each tool call as a one-line marker; tool **results** are skipped. A grounding-heavy thread would otherwise replay thousands of lines of fetched page text. |
+| **T5** | Both shells replay. §26's L6 again. |
+
+### What this repeats, and must not
+
+- **`ensure_columns()` is additive only** (M7) and explicitly never backfills. So every
+  existing row takes `kind='chat'` from the default, and the hundreds of pass threads
+  already in a user's database would still clutter the picker. That needs a **separate,
+  idempotent one-time classification**, not a widening of `ensure_columns`' contract — if
+  that function ever grows a `DROP` or a backfill, the project has outgrown it.
+- **The classification signal is structural, not heuristic:** a thread created between a
+  `PipelineRunRecord`'s `started_at` and `finished_at` is a pass thread of that run. A
+  chat thread cannot be created in that window — the CLI is blocked inside the pipeline
+  call, and the TUI's `_busy` guard already refuses `/new` and thread switching mid-run.
+  A run with `finished_at IS NULL` (§22's abandoned-generator case, which deliberately
+  leaves `status='running'`) has no closing bound, so **those threads stay `chat`**.
+  Under-classifying leaves a straggler in the picker; over-classifying hides a real
+  conversation, and only one of those is recoverable by the user.
+- **`_param_digest` must not be copied.** §26 established redact-*then*-truncate because
+  truncating first can cut a credential below the 20 characters its pattern needs. It is
+  currently private to `orchestrator.py`; the replay renderer is its second caller, so it
+  moves to a shared home beside `redact_secrets`. A second copy is how that ordering
+  silently regresses in one of them — the project's canonical "fix at the producer" bug.
+- **`ConversationMemory` must not learn about `kind`.** It owns active in-run state and
+  must stay unaware of what data exists; that is `storage.py`'s boundary. The kwarg goes
+  `loop → storage.create_thread`, passing through `__init__` and nothing more.
+- **Resuming must reset per-thread state.** `_last_run` and `_live_claims` survive a
+  thread switch today, so `/claims` after a resume would show the *previous* thread's run.
+  Exactly the class of bug the goal banner already fixed in this same callback.
+
+### Acceptance criteria
+
+1. `create_thread()` defaults to `chat`; a research pass creates `research_pass`; a subagent creates `subagent`.
+2. `list_threads()` returns conversations only; `list_threads(kind=None)` returns everything.
+3. `ensure_columns()` adds `kind` to a database created without it, and the one-time classification labels a thread created inside a run's window while leaving one created outside it — and one belonging to an unfinished run — alone.
+4. Resuming a thread replays its history, clears what was on screen, and resets `_last_response`, `_last_run` and `_live_claims` to the resumed thread.
+5. Replaying a **compacted** thread shows the original first user message, not the summary.
+6. Both shells replay, and a run's pass threads are reachable from the run.
 
 ---
 
