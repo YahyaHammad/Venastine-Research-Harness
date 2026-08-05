@@ -22,6 +22,7 @@ from typing import Optional
 
 from core import config_loader
 from core.config_loader import AgentDef
+from memories.manager import manager as memory_manager
 from tools.context import ToolContext
 
 
@@ -153,6 +154,14 @@ class AgentManager:
         context = config_loader.context_for_agent(agent)
         if context:
             prompt = f"{prompt}\n\n## Project context\n\n{context}"
+        # ROADMAP_v2 §21b: durable memories, the third context tier beside
+        # CONTEXT.md and gated the same way (use_memory). Appended HERE and
+        # not inside with_catalogs, which feeds pass_prompt() -- injecting
+        # there would put every memory into all ten research passes, which
+        # is §19's K6 trap in its second instance.
+        memories = memory_manager.prompt_fragment(agent)
+        if memories:
+            prompt = f"{prompt}\n\n{memories}"
         return prompt
 
 

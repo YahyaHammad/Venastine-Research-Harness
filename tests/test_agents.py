@@ -116,7 +116,8 @@ def test_ac2_nesting_beyond_max_depth_returns_error(_roots, mocker):
     assert str(config.SUBAGENT_MAX_DEPTH) in result["error"]
 
 
-def test_ac2_spawn_builds_child_context_and_inherits_run(_roots, mocker):
+def test_ac2_spawn_builds_child_context_and_inherits_run(_roots, mocker,
+                                                        fake_storage):
     _write_harness_agent(_roots, "worker", ["allowed_tools: [get_time]"])
     config_loader.initialize(str(_roots["project"]))
 
@@ -541,7 +542,8 @@ def test_candidate_approvals_omits_tools_the_grant_cannot_cover(
     assert "shell" not in manager.candidate_approvals(child)
 
 
-def test_spawn_forwards_the_channel_and_the_grant(_roots, _mcp_tool, mocker):
+def test_spawn_forwards_the_channel_and_the_grant(_roots, _mcp_tool, mocker,
+                                                  fake_storage):
     """r3-1: without the channel the child ran headless, so
     schemas(callable_only=True) dropped every approval-gated tool -- the
     same agent keeping them under /agent and losing them when spawned."""
@@ -567,6 +569,7 @@ def test_spawn_forwards_the_channel_and_the_grant(_roots, _mcp_tool, mocker):
 
 
 def test_spawn_grants_nothing_when_there_is_no_channel(_roots, _mcp_tool,
+                                                       fake_storage,
                                                        mocker):
     """A grant without a channel would be a pure relaxation: nothing could
     have asked the user, so nothing was approved. Headless spawns keep the

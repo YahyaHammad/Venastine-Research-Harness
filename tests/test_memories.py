@@ -112,17 +112,18 @@ def test_another_projects_memories_are_absent(fake_storage):
     assert "uses yarn" not in fragment
 
 
-def test_no_resolved_project_yields_global_only(fake_storage, monkeypatch):
-    """Before initialize() there is no project. Guessing one would surface
-    another codebase's facts on the strength of not knowing where we are."""
+def test_no_resolved_project_means_no_memories_at_all(fake_storage, monkeypatch):
+    """scope_path() is None exactly when config_loader.initialize() has not
+    run, and main.py runs it at startup -- so this is "there is no session",
+    not "this session is outside a project". Following the convention
+    get_agents()/get_skills() already set is also what keeps every prompt
+    -assembly test that never initializes the loader from needing a
+    database."""
     _remember(fake_storage, "uses pnpm")
     _remember(fake_storage, "prefers concise answers", scope="global")
     monkeypatch.setattr("core.config_loader.get_project_path", lambda: None)
 
-    fragment = manager.prompt_fragment()
-
-    assert "prefers concise answers" in fragment
-    assert "uses pnpm" not in fragment
+    assert manager.prompt_fragment() == ""
 
 
 # ---------------------------------------------------------------------------

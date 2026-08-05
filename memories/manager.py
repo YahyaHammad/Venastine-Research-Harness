@@ -54,14 +54,23 @@ class MemoryManager:
         """Every memory this session may see, newest first.
 
         Global rows plus the project rows recorded against exactly this
-        path. Before initialize() there is no project, and that resolves
-        to global-only rather than to everything -- guessing a project
-        would surface another codebase's facts on the strength of not
-        knowing where we are.
+        path (AC6).
+
+        NO RESOLVED PROJECT MEANS NO MEMORIES AT ALL, not global-only.
+        scope_path() is None exactly when config_loader.initialize() has
+        not run, and main.py runs it at startup -- so this is "there is no
+        session", not "this session happens to be outside a project". It
+        follows the convention get_agents()/get_skills() already set:
+        uninitialized is materially the same state as initialized-and-empty
+        for every consumer, and answering with rows would mean reading a
+        database on behalf of a session that does not exist.
         """
         from storage import list_memories
 
-        return list_memories(project_path=self.scope_path(), scope=scope)
+        path = self.scope_path()
+        if path is None:
+            return []
+        return list_memories(project_path=path, scope=scope)
 
     def wants_memories(self, agent) -> bool:
         """Does this run get memories injected?

@@ -67,6 +67,28 @@ def with_goal(system_prompt: str, memory: ConversationMemory) -> str:
     return f"{system_prompt}\n\n## Persistent objective\n{goal}"
 
 
+def with_memories(system_prompt: str, agent=None) -> str:
+    """Append §21b's durable-memory tier to a prompt. No-op when this run
+    is opted out or nothing is in scope.
+
+    Beside with_goal for the same reason: both shells assemble a plain-chat
+    prompt themselves, so a single named function is what stops the CLI and
+    the TUI drifting apart. §23's response channel is where all three of
+    these (goal, skills, memories) should eventually converge into one
+    assembly point rather than three parallel ones.
+
+    MUST NOT move inside prompts.system_prompts.with_catalogs() -- that
+    feeds pass_prompt(), so memories would land in all ten research passes.
+    §19's K6, second instance.
+    """
+    from memories.manager import manager as memory_manager
+
+    fragment = memory_manager.prompt_fragment(agent)
+    if not fragment:
+        return system_prompt
+    return f"{system_prompt}\n\n{fragment}"
+
+
 def _authorization_kwargs(authorization) -> dict:
     """Unpack a RunAuthorization into _run()'s primitives.
 
@@ -546,6 +568,12 @@ class RunAgentLoop:
             else system_prompts.with_catalogs(DEFAULT_SYSTEM_PROMPT),
             memory,
         )
+        # §21b (M13). Only when there is no agent-built prompt: an agent
+        # run got its memories inside system_prompt_for(), and appending
+        # again here would duplicate them. `agent=None` is what makes a
+        # plain chat turn count as opted in -- see memories.manager.
+        if system_prompt is None:
+            prompt = with_memories(prompt)
         auth_kwargs = (
             _authorization_kwargs(authorization) if authorization is not None
             else {"granted_tools": granted_tools}

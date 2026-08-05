@@ -44,6 +44,7 @@ from core import config_loader
 from core.client import api_initialization, effort_levels_for_model
 from core.loop import (
     DEFAULT_PROVIDER, DEFAULT_SYSTEM_PROMPT, RunAgentLoop, with_goal,
+    with_memories,
 )
 from core.memory import ConversationMemory
 # Module scope, not inside _cmd_research: _split_research_flags needs the
@@ -360,6 +361,11 @@ class VenastineApp(App):
             provider = self.provider_name
             max_steps = config.MAX_ITERATIONS
         prompt = with_goal(base_prompt, self.memory)
+        # §21b (M13). Only for a plain turn -- an active agent already got
+        # its memories inside system_prompt_for(), and appending here too
+        # would duplicate them.
+        if self.active_agent is None:
+            prompt = with_memories(prompt)
         # §19 K1/K6: active skill bodies are pinned HERE, beside with_goal,
         # and deliberately NOT inside with_catalogs -- that function feeds
         # pass_prompt(), so pinning there would inject a skill activated in

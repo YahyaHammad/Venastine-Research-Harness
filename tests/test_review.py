@@ -1634,7 +1634,8 @@ class TestCatalogsFollowTheContext:
         assert "## Available agents" not in prompt
         assert "## Available skills" in prompt
 
-    def test_a_restricted_NON_reviewer_agent_gets_the_same_treatment(self):
+    def test_a_restricted_NON_reviewer_agent_gets_the_same_treatment(
+            self, fake_storage):
         """The whole point of moving this to the producer. §20's reviewer
         was one caller; the rule has to hold for an agent nobody thought
         about when writing it."""
@@ -1652,7 +1653,8 @@ class TestCatalogsFollowTheContext:
             "suppressing catalogs must not suppress the agent's own body"
         )
 
-    def test_a_spawned_subagent_inherits_the_PARENTS_suppression(self, mocker):
+    def test_a_spawned_subagent_inherits_the_PARENTS_suppression(
+            self, mocker, fake_storage):
         """C6 intersects with the parent, so a parent that excluded
         spawn_subagent must not have the catalog re-invite its child to
         spawn one. This is why the call site passes `child` and not the
