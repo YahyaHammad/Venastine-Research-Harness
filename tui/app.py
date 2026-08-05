@@ -487,6 +487,16 @@ class VenastineApp(App):
             if isinstance(result, dict) and "error" in result:
                 transcript.write_error(f"  {result['error']}")
 
+        if event.notice:
+            # ROADMAP_v2 §21's "no silent compaction, ever". Flushed first
+            # so the marker lands between messages rather than inside a
+            # half-streamed reply.
+            transcript.flush_stream()
+            if event.notice["kind"] in ("compaction_failed", "compaction_blocked"):
+                transcript.write_error(f"— {event.notice['text']} —")
+            else:
+                transcript.write_system(f"— {event.notice['text']} —")
+
         if event.permission_request:
             self._raven.resume_animation()
             self._raven.state = ravens.WAITING
@@ -988,6 +998,94 @@ def _cmd_new(app: VenastineApp, args: str) -> None:
     app._transcript.write_system("Started a new thread.")
 
 
+def _parse_compact_args(args: str) -> tuple:
+    """(overrides, error). ROADMAP_v2 §21's per-invocation override --
+    applies to this one run and persists nothing, which is the last step
+    of D27's resolution order.
+
+    An unrecognised flag is an ERROR, not something to ignore. Silently
+    dropping `--strenght 4` would compact at the default strength while
+    the user believes they asked for something else, and the result looks
+    exactly like a compaction that obeyed them.
+    """
+    overrides: dict = {}
+    tokens = args.split()
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token in ("--strength", "-s"):
+            index += 1
+            if index >= len(tokens):
+                return None, "--strength needs a value from 1 to 5."
+            try:
+                overrides["strength"] = int(tokens[index])
+            except ValueError:
+                return None, f"--strength needs a number, got {tokens[index]!r}."
+        elif token.startswith("--strength="):
+            value = token.split("=", 1)[1]
+            try:
+                overrides["strength"] = int(value)
+            except ValueError:
+                return None, f"--strength needs a number, got {value!r}."
+        else:
+            return None, f"Unknown option {token!r}. Usage: /compact [--strength N]"
+        index += 1
+    return overrides, None
+
+
+def _cmd_compact(app: VenastineApp, args: str) -> None:
+    """Compact the current thread now, rather than waiting for the
+    trigger. §21: a user-facing summary is the same machinery invoked
+    deliberately instead of by a token threshold.
+
+    Runs on a worker because it is a model call. Nothing here bypasses the
+    floors -- a manual compaction protects the recent turns exactly as an
+    automatic one does, since "summarize this conversation" and "throw
+    away what I just said" are different requests.
+    """
+    if app._busy:
+        app._transcript.write_error(
+            "Still working — wait for this turn to finish.")
+        return
+    if app._memory is None:
+        app._transcript.write_error("Nothing to compact — this thread is empty.")
+        return
+
+    overrides, error = _parse_compact_args(args)
+    if error:
+        app._transcript.write_error(error)
+        return
+    try:
+        # Validate BEFORE spending a model call, and against the same
+        # function the automatic path uses, so `/compact --strength 9`
+        # reports the range rather than failing inside a worker.
+        config_loader.effective_compaction(overrides)
+    except ValueError as e:
+        app._transcript.write_error(str(e))
+        return
+
+    memory = app.memory
+    app._busy = True
+    app._transcript.write_system("Compacting this conversation…")
+
+    def _work() -> None:
+        from core import compaction
+        try:
+            notice = compaction.compact(
+                memory, app.model, app.provider_name, overrides=overrides)
+        except Exception as e:  # noqa: BLE001 — same containment as the loop's
+            app.call_from_thread(
+                app._transcript.write_error, f"Compaction failed: {e}")
+            return
+        finally:
+            app.call_from_thread(setattr, app, "_busy", False)
+        text = (notice["text"] if notice
+                else "Nothing to compact — every recent turn is protected.")
+        app.call_from_thread(app._transcript.write_system, f"— {text} —")
+
+    app.run_worker(_work, thread=True, exit_on_error=False, name="compact")
+
+
 def _cmd_quit(app: VenastineApp, args: str) -> None:
     app.exit()
 
@@ -1003,6 +1101,8 @@ def register_builtin_commands() -> None:
                      _cmd_research,
                      "[--attended] [--review|--no-review] "
                      "[--grant[=a,b]] <query>"),
+        SlashCommand("compact", "summarize this conversation's older turns now",
+                     _cmd_compact, "[--strength 1-5]"),
         SlashCommand("threads", "resume a saved thread", _cmd_threads),
         SlashCommand("new", "start a new thread", _cmd_new),
         SlashCommand("quit", "exit", _cmd_quit),

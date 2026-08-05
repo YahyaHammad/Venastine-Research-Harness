@@ -504,3 +504,73 @@ polices drifts exactly as before.
 Reverting the production behaviour and watching for red cannot catch that,
 because a skip is green. Where a test can decline to run, prove it runs --
 `test_the_default_invocation_is_not_treated_as_narrowed` is the shape.
+
+
+## §21a — compaction, the archive, and pinning (2026-08-05)
+
+Every row below was applied to the production code and confirmed to turn the named
+test red — 75 across the section's six commits, of which the load-bearing ones are
+listed here.
+
+Two rows are marked **CONTROL**. They exist because the assertions next to them pass
+against a broken build without them: a version that compacts unconditionally, or one
+that shows a summary for threads that were never compacted, satisfies almost every
+other test in these files.
+
+| Change | What breaks | Fix / why |
+|---|---|---|
+| Add a field to a table class without touching `ensure_columns` | `test_a_declared_column_missing_from_an_existing_table_is_added` | `create_all()` creates missing TABLES and never ALTERs. Every database predating the field raises "no such column" at read time, silently, and never on a machine with a fresh `app.db` |
+| Drop the `DEFAULT` on an added column | `test_the_existing_row_survives_and_reads_the_declared_default` | SQLite fills existing rows with NULL, so `pinned` reads as None on exactly the messages most likely to be compacted |
+| Compare raw type strings instead of affinity | `test_a_length_specifier_is_not_a_type_mismatch` | `VARCHAR(255)` vs `VARCHAR` warns at every startup; a warning that fires when nothing is wrong is one nobody reads when something is |
+| Make an unrecognised watermark hide the prefix | `test_an_unrecognised_watermark_shows_everything` | A checkpoint naming a row this thread does not have is a fault. Showing everything costs tokens; hiding a prefix loses context and reports nothing |
+| Let `history_through` keep pinned rows | `test_the_summary_span_excludes_pinned_rows` | AC2 — a pinned message is never in what the compactor is asked to summarize |
+| Make `pinned_through` ignore its watermark | `test_a_pin_after_the_watermark_is_not_re_added` | The row is already in the tail; returning it twice grows the context compaction just ran to shrink |
+| Give `archive_history` a checkpoint lookup | `test_archive_history_ignores_compaction_entirely` | AC1. The first version of this test compared two reads that agree trivially on an uncompacted thread — including under the revert. It now runs against a thread that HAS been compacted, the only state where the guarantee can fail |
+| Persist the checkpoint summary as a `MessageLog` row | `test_the_summary_is_never_written_to_the_archive` | Puts derived content in an append-only archive, and the NEXT compaction summarizes the summary as if it were something the user said — chaining by accident on the path that means to re-derive (M8) |
+| Drop the pinned re-inclusion from the derived view | `test_a_pinned_row_inside_the_covered_span_comes_back_verbatim` | One watermark cannot say "everything through K except these" (M9). Without it, the message the user explicitly asked to keep is the one that disappears |
+| Make the summary an assistant message | `test_the_summary_leads_the_view_as_a_user_message` | The neutral shape has no system role; a leading user message is the one form all three providers accept |
+| **Show a summary when there is no checkpoint** | `test_a_thread_with_no_checkpoint_looks_exactly_as_it_did` | **CONTROL.** Every pre-§21 caller resumes an uncompacted thread, and their behaviour must be byte-identical until the trigger first fires |
+| Pin only the turn's first row | `test_pinning_one_turn_covers_the_whole_exchange` | A turn is a question and everything that answered it. Keeping the question while the answer is summarized is not what "keep this" means |
+| Derive the trigger from `context_limit` | `test_the_trigger_is_a_working_set_target_not_the_window` | M1 — it can never fire there. `MAX_TOKEN_BUDGET` re-bills the whole prompt per step, so the thread is unusable at well under half of any modern window |
+| Let a research pass use the working-set trigger | `test_a_research_pass_only_compacts_near_the_window` | M6. A pass is headless and already returns a distillation; routine compaction there spends on a judgment call nobody is watching |
+| Remove the re-entrancy guard | `test_the_reentrancy_guard_stops_the_compactor_compacting` | The compactor is an agent, so compacting runs the loop, which evaluates the trigger |
+| Release the guard only on the error path | `test_the_guard_is_released_after_a_compaction` | Left set, every later compaction in the process silently no-ops — a failure that reads as "compaction just never fires" |
+| Fold up to the turn start rather than before it | `test_the_fold_boundary_is_always_a_turn_start` | M4. A `tool_result` with no preceding `tool_use` is an HTTP 400 on Anthropic — a hard wire error on the next call, not a degraded answer |
+| Ignore any one of the three fold floors | `test_the_current_turn_is_never_foldable`, `test_the_keep_turns_floor_protects_recent_exchanges`, `test_the_keep_tokens_floor_can_win_over_the_turn_floor` | M5 — they compose, earliest wins. The current-turn floor is what makes the mid-turn valve safe by construction |
+| Chain when re-derivation was configured (or never chain) | `test_rederive_summarizes_the_originals_not_the_last_summary`, `test_chaining_feeds_the_previous_summary_back_in` | M2. Re-deriving is what keeps exactly one summarization step between an original message and what the model sees |
+| Accept an oversized summary without retrying | `test_an_oversized_summary_is_sent_back` | The retry re-enters the compactor's own thread so it sees its own output — §3's loop with a length check in place of a parse |
+| Reject an undersized summary too | `test_a_summary_under_target_is_accepted_immediately` | Undershooting has already done the job; rejecting it spends a call to make the context bigger |
+| Discard a summary still over target after retries | `test_a_summary_still_oversized_after_retries_is_used_anyway` | It is smaller than what it replaces. Discarding spends every retry and keeps the full history, leaving the thread as stuck with less budget to fix it |
+| Record an empty summary as a checkpoint | `test_an_empty_summary_skips_compaction` | Replaces real history with nothing at all — the one outcome worse than not compacting |
+| Crash on a missing compactor agent | `test_a_missing_compactor_agent_is_a_skip_not_a_crash` | Same containment §20 applies to a missing reviewer: an optional stage that cannot run must not take the turn down |
+| Remove either loop hook | `test_compaction_fires_before_the_first_call_of_a_turn`, `test_the_valve_fires_between_steps_of_one_turn` | M3. The boundary is primary; the valve exists because one turn can add far more than any buffer covers |
+| Include the in-progress turn in `_completed_turns` | `test_the_valve_never_folds_the_current_turn` | The off-by-one IS the structural floor |
+| Carry notices only on the LoopEvent | `test_the_notice_reaches_the_response_as_well_as_the_event`, `test_the_cli_prints_a_notice_carried_on_the_response` | `run_to_completion()` discards non-final events, so the CLI and the pipeline see only the response. Third time this shape has appeared (§20, §25) |
+| Repeat the early warning on every step | `test_the_early_warning_fires_once_and_compacts_nothing` | The condition holds until compaction fires; the same line eight times in one turn trains the reader to skip it |
+| Let a failed compaction propagate | `test_a_failed_compaction_does_not_fail_the_turn` | It is a model call, and a provider error during it must not take down a turn that was otherwise fine |
+| **Compact unconditionally** | `test_a_thread_under_the_threshold_is_left_alone` | **CONTROL.** Almost every turn is this one |
+| Gate `pin` on approval | `test_pin_needs_no_approval_anywhere` | D26. §13 does not merely deny an approval-gated tool where nothing can ask — it stops advertising it, so `pin` would be invisible on the CLI and in every research pass |
+| Drop `pin`'s `available_check` | `test_pin_is_hidden_when_there_is_no_compactor` | Pinning is protection FROM compaction; with no compactor it only sets a flag nothing reads — the `fetch_url` defect shape (D24) |
+| Check `isinstance(last_n, int)` without excluding bool | `test_a_boolean_count_is_rejected` | `isinstance(True, int)` is True, so `last_n: true` pins one turn while looking understood. Same trap `max_steps` hit in config_loader and column defaults hit in database.py |
+| Stop injecting `memory` into dispatch | `test_the_live_memory_is_injected` | `pin` has no other way to reach the thread |
+| Skip `effective_compaction`'s relationship checks | `test_an_incoherent_value_is_rejected` (8 cases) | AC8, and §21's own instruction. A `warning_margin` at or above the trigger fires the warning after the thing it warns about |
+| Drop the budget-headroom warning | `test_a_trigger_too_close_to_the_budget_warns` | M1's arithmetic, enforced rather than left in a comment |
+| Ignore an unknown `/compact` option | `test_an_unrecognised_option_is_an_error` | `--strenght 4` would compact at the default while the user believes otherwise, and the result looks exactly like a compaction that obeyed them |
+| Skip `/compact`'s pre-flight validation | `test_an_out_of_range_strength_is_refused_before_a_model_call` | Otherwise `--strength 9` spends a call and fails inside a worker |
+| Let `/compact` create a thread | `test_compacting_an_empty_thread_says_so` | Reading `app.memory` persists a `ConversationThread` row for a conversation that never happened — the phantom-thread bug the memory property exists to avoid |
+| Leave `_busy` set when a manual compaction fails | `test_a_failed_manual_compaction_releases_the_busy_flag` | The app then refuses every later turn with "still working", which reads as a hang |
+
+### Two standing notes
+
+**`conftest.MEMORY_STORAGE_SYMBOLS` and `FakeMemory` are single-sourced on
+purpose.** Both existed as several copies before §21a, and both drifted the moment
+production gained a method: five symbols added to `core/memory.py` broke a JSON-retry
+test with `'dict' object has no attribute 'desc'`, and three methods added to the
+memory contract turned 43 tests red at once. Adding a storage import to
+`core/memory.py` means adding one name to that tuple; adding a method the loop calls
+on a memory means adding it to `FakeMemory`. Do not re-copy either.
+
+**`test_shell_compaction.py` has its own `_settle`, copied rather than imported.**
+`test_tui.py`'s version is TECHNICAL_DEBT theme 8 — it budgets event-loop pumps
+rather than time. Importing it would make a fix there silently change this file's
+timing too. Whoever fixes theme 8 should fix both.

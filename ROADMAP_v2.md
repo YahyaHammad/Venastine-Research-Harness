@@ -1008,7 +1008,7 @@ Implemented; decision record in DEVLOG §20, file contracts in ARCHITECTURE.md. 
 
 ---
 
-## 21. Memory system — compaction, archive, thread-scoped pinning, user/project memory
+## 21. Memory system — compaction, archive, thread-scoped pinning, user/project memory — §21a BUILT
 
 **This section fully replaces Rev. 1's placeholder** (D16 originally called it a thin, deferrable truncation strategy). Discussion surfaced that this is, in substance, the long-term memory feature that was deliberately deferred at the very start of this project's build ("persistence yes, extracted long-term memory not yet") — it's arriving on schedule as the harness grows, not as scope creep.
 
@@ -1124,6 +1124,109 @@ Both of these were asked for as TUI features and are really this section's:
 
 - **Session summaries** — the same operation as compaction: an agent distilling a thread segment. `CompactionCheckpoint` and `agents/builtin/compactor.md` (this section) will be this -- neither exists yet, and `config_loader` warns that compaction settings are present but unimplemented; a user-facing summary is that machinery invoked deliberately rather than by a token threshold. Building it separately in §16 would have meant either duplicating the compactor or pre-empting it.
 - **`/ref` cross-thread referencing** — user-initiated: a thread picker (§16 already has one, over `storage.list_threads()`), then the chosen thread's **distilled summary** injected into the current thread. **Decided: user-initiated rather than a model-callable search tool** — the user chooses what crosses, so nothing fetched in one thread can steer another without their say-so. It defers to here rather than to §16 because it needs something to inject, and the compactor is the summariser. Matches the project's "distill, don't share raw history" principle; a model-initiated `search_threads` remains possible later on top of the same retrieval, with an approval gate on D26's reasoning.
+
+### Decisions record (M1–M10), added at build time
+
+§21 was split at build time. **§21a (BUILT)** is compaction, the checkpoint, the
+hyperparameters and `pin`. **§21b** is durable `remember` / `use_memory` / `/forget`;
+**§21c** is `/ref` and session summaries. Each is independently useful and
+independently testable, and §21a is roughly §20-sized on its own.
+
+Tracing this section against the code before writing any surfaced two holes in its
+own acceptance criteria and one parameterization that could never fire. These are
+the resolutions.
+
+**M1 — Compaction defends the working set, not the context window.** The spec above
+puts the trigger at `context_limit - buffer`. It cannot fire there. `core/loop.py`
+counts input tokens *per call* and the prompt is resent on every step of a
+tool-using turn, so `MAX_TOKEN_BUDGET` makes a turn unusable long before any modern
+window: at ~2k of tool result per step, a 20k-token thread gets about 9 steps, a 50k
+thread about 2, and a 100k thread exactly one response with no tool calls at all. A
+window-derived threshold therefore sits at a size the thread can never reach in
+working order. For compaction at threshold `T` to fire *and* leave `k` usable steps,
+the budget must be roughly `k·T`.
+
+So `COMPACTION_TRIGGER_TOKENS` is a working-set target (40k) largely independent of
+the model, `MAX_TOKEN_BUDGET` rises from its self-described placeholder 100k to
+250k, and `effective_compaction()` warns when a configured trigger leaves too little
+headroom — the relationship validated rather than documented. `settings.json`'s
+`compaction.buffer_tokens` is renamed `trigger_tokens` to match; the keys had been
+inert since §14, so nothing depended on the old spelling.
+
+This also defuses a risk this section flagged about itself: `MODEL_CONTEXT_WINDOWS`
+survives only as the pipeline backstop's source, so a missing entry costs a mistimed
+backstop rather than mistimed compaction.
+
+**M2 — Re-derive from the archive; chain only as a bounded fallback.** The spec
+never says whether a later compaction summarizes the originals or the previous
+summary, and that — not the trigger height — is what governs fidelity. Re-deriving
+means exactly one summarization step always sits between an original message and
+what the model sees, however many times compaction has run, which is what makes an
+early trigger free in fidelity terms rather than a tradeoff. `strategy: "chain"`
+forces the constant-cost alternative, and re-derivation falls back to it (traced)
+when the span outgrows a single call.
+
+**M3 — Turn boundary is the primary trigger; a mid-turn valve exists and is
+structurally guarded.** Both live inside `_run()`, the one choke point all three
+shells pass through. A turn can add far more than any buffer covers —
+`MAX_READ_CHARS` alone is ~12.5k tokens per `read` call, up to `max_steps` of them —
+so waiting for the next boundary would let one tool-heavy turn reach the provider's
+hard limit.
+
+**M4 — The fold boundary lands on a turn start and never splits an assistant
+message from its tool results.** Not a quality concern: a `tool_result` with no
+preceding `tool_use` is an HTTP 400 on Anthropic, a hard wire error on the next call
+of a thread that worked a moment ago.
+
+**M5 — Three floors, earliest wins.** The current turn (structural — `_run()`
+records how many turns were complete when it began, so a summary can never rewrite
+the question being answered), the last 3 completed turns, and
+`keep_recent_tokens`. The turn floor is not in the original spec and is needed
+because one tool-heavy turn can consume the whole token budget by itself, leaving
+the immediately preceding exchange summarized — a follow-up like "no, the other one"
+then has no referent. An empty span is a real state, reported rather than silently
+skipped.
+
+**M6 — Research passes compact only at a hard backstop** near the context window,
+never at the working-set trigger. A pass is headless and unattended and already
+returns a distillation, so routine compaction there would spend on a judgment call
+nobody is watching. `run_deep_research_mode` passes the mode explicitly.
+
+**M7 — `MessageLog.pinned` needs a migration, and nothing here had one.**
+`create_db_and_tables()` calls `create_all()`, which creates missing *tables* and
+never `ALTER`s, so this — the first field ever added to a shipped table — would
+break every existing `app.db` on the first `SELECT`, silently, at read time rather
+than at startup, and invisibly on a machine with a fresh database.
+`database.ensure_columns()` closes it: additive only, warning rather than raising on
+a type mismatch, since SQLite has type affinity rather than enforcement and refusing
+to start over a cosmetic difference would be a self-inflicted outage in the one code
+path every launch runs through.
+
+**M8 — The checkpoint summary is a synthesized leading `user` message, never a
+`MessageLog` row.** The neutral shape has no system role, so a leading user message
+is the one form all three providers accept. Persisting it would put derived content
+in an append-only archive whose whole value is being original — and the next
+compaction would summarize the previous summary as if it were something the user
+said, chaining by accident on the code path that means to re-derive.
+
+**M9 — Pinned rows inside the covered span are re-included verbatim.** AC1 (archive
+intact) and AC2 (pinned rows never summarized) cannot both hold through
+`after_message_id` alone: `covers_up_to_message_id` is a single watermark and cannot
+express "everything through K except rows 5 and 6". The view is
+`summary + pinned-rows-before-the-watermark + tail`. Without this the one message a
+user explicitly asked to keep is the one message that disappears.
+
+**M10 — The compression ratio is measured by character proxy, and says so.** The
+spec asks for the summary's tokens to be counted; no tokenizer is available offline
+and `usage["input_tokens"]` measures a whole prompt rather than a segment of one.
+Chars/4 applied to both sides is self-consistent, which is all a ratio check needs —
+it is never compared against a provider's count.
+
+**Carried to §21b**, decided during §21a's design and not built there: wire §25's
+`ApprovalProvider` into CLI chat, so D26's approval-gated `remember` is reachable in
+the default shell. Without it §13's headless rule makes `remember` invisible
+everywhere but the TUI — the §25 cautionary tale, one section later. `pin` needs no
+approval (D26), so §21a does not depend on it.
 
 ### Acceptance criteria
 

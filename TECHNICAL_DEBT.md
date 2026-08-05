@@ -150,6 +150,36 @@ the timeout value. Six consecutive full-suite runs were clean afterwards,
 so it is rare -- rare enough that a fix applied without understanding it
 will look like it worked.
 
+## 9. `MAX_TOKEN_BUDGET` counts the prompt once per step (open)
+
+Raised while building §21a, **deliberately not fixed there**.
+
+`core/loop.py` accumulates `input_tokens + output_tokens` after every call in a
+turn, and the prompt is resent in full on every step — so the counter grows
+quadratically in a tool-using turn. At ~2k of tool result per step, a 20k-token
+thread gets about 9 steps before the budget stops it, a 50k thread about 2, and a
+100k thread exactly one response with no tool calls at all.
+
+This is **correct as a billing meter**: the provider really does charge for the
+resent prompt (nothing here sets `cache_control`, so no prompt caching offsets it).
+It is wrong as anything that reads like "how large may a thread get", and it is easy
+to mistake for one because `token_budget_exceeded` is what a user actually sees when
+a long thread stops working.
+
+§21a worked around it rather than fixing it — M1 moved the compaction trigger onto
+a working-set target and raised the budget to 250k so the two stop competing, and
+`config_loader.effective_compaction()` now warns when a configured trigger leaves
+too little headroom for a multi-step turn.
+
+The real fix is to separate the two instruments: keep the billing total for the
+spend cap, and add a "new tokens this turn" figure for anything reasoning about
+size. That changes an existing, tested stop condition, so it belongs in its own
+change with its own revert checks — not smuggled into a memory feature, which is
+why it was left here. Whoever takes it should decide first whether
+`token_budget_exceeded` is meant to mean "this turn cost too much" or "this turn got
+too big", because the current code answers the first while every caller reads it as
+the second.
+
 ## Accepted risks noted in the review, deliberately not "fixed"
 
 - `07_review.json` absent on zero-finding reviewed runs — presence-implies-

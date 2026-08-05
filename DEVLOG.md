@@ -1930,3 +1930,131 @@ summary to work out that their click went nowhere. Two branches, two
 messages, neither of them silence.
 
 - Full suite after the follow-up: **729 tests** (was 718).
+
+
+---
+
+# §21a — Compaction, the archive, and thread-scoped pinning (2026-08-05)
+
+Built in six commits. §21 was split at design time: **§21a** is compaction, the
+checkpoint, the hyperparameters and `pin`; **§21b** is durable `remember` /
+`use_memory` / `/forget`; **§21c** is `/ref` and session summaries. Each is
+independently useful and testable, and §21a came out roughly §20-sized on its own.
+
+## What the design cycle found before any code was written
+
+ROADMAP_v2 declares "Open Questions — None Remaining", and that is true of the
+*decisions* it names. It was not true of the implementation contracts. Tracing §21
+against the code turned up three things, recorded as M1–M10 in the ROADMAP:
+
+**The trigger as specified could never fire.** §21 puts it at
+`context_limit - buffer`. But `core/loop.py` counts input tokens *per call*, and the
+prompt is resent on every step of a tool-using turn, so `MAX_TOKEN_BUDGET` makes a
+turn unusable long before any modern context window is approached — at ~2k of tool
+result per step, a 20k-token thread gets about 9 steps, a 50k thread about 2, and a
+100k thread exactly one response with no tool calls at all. A window-derived
+threshold therefore sits at a size the thread can never reach in working order.
+
+The arithmetic that matters: for compaction at threshold `T` to fire *and* leave `k`
+usable steps, the budget must be roughly `k·T`. There is no value of
+`MAX_TOKEN_BUDGET` that buys both long threads and many tool steps — you pick. The
+owner picked cost and step headroom, so the trigger is a working-set target (40k)
+and the budget rose from its self-described placeholder 100k to 250k. This also
+largely defuses a risk §21 flagged about itself: `MODEL_CONTEXT_WINDOWS` now feeds
+only the pipeline backstop, so a wrong or missing entry costs a mistimed backstop
+rather than mistimed compaction.
+
+**Two of §21's acceptance criteria could not both hold as written.** AC1 says the
+archive is never edited; AC2 says a pinned message is never summarized. But
+`covers_up_to_message_id` is a single watermark, and a watermark cannot express
+"everything through K *except* rows 5 and 6". The `after_message_id` parameter §21
+adds is not enough on its own — pinned rows inside the covered span had to be
+re-included separately (M9), or the one message a user explicitly asked to keep is
+the one message that disappears.
+
+**A new column on an existing table had no way to arrive.**
+`create_db_and_tables()` calls `create_all()`, which creates missing *tables* and
+never `ALTER`s. `MessageLog.pinned` is the first field this project has ever added
+to a shipped table, and without a migration every existing `app.db` would have
+raised "no such column" on the first read after upgrading — silently, at the point
+of use rather than at startup, and invisibly on a machine with a fresh database.
+
+## Decisions taken during the cycle
+
+| Question | Decision |
+|---|---|
+| What does compaction defend? | Per-turn cost and step headroom, not the context window (M1). The trigger is ~40k regardless of model; `MAX_TOKEN_BUDGET` → 250k. |
+| Re-derive or chain? | Re-derive from the archive by default, chain as a configurable alternative and an automatic fallback (M2). This is what makes an early trigger free in fidelity terms rather than a tradeoff. |
+| When is the trigger evaluated? | Turn boundary as primary, plus a mid-turn valve (M3) — with the current turn structurally unfoldable (M5), so the valve is safe by construction rather than by threshold placement. |
+| How many turns stay verbatim? | 3, as a floor on top of `keep_recent_tokens` (M5). |
+| Does the pipeline compact? | Only at a hard backstop near the real window (M6). |
+| The `pinned` column | An additive-only `ensure_columns()` in `database.py` (M7). |
+| `remember` on the CLI | §21b wires §25's `ApprovalProvider` into CLI chat. Deferred, not dropped — without it D26's gate makes `remember` TUI-only, which is the §25 mistake one section later. |
+| Input-token double-count | Left as-is and documented. It is correct as a billing meter; splitting it is a change to a tested stop condition and belongs in its own commit, not smuggled into a memory feature. |
+
+## Deviations from the spec, and why
+
+- **`compaction.buffer_tokens` → `trigger_tokens`.** Under M1 it is a working-set
+  target, not headroom before a limit. A key that keeps its name and changes its
+  meaning is worse than one that moves; these keys had been inert since §14, so
+  nothing depended on the old spelling.
+- **`ensure_columns` warns rather than raises on a type mismatch**, where the plan
+  said raise. SQLite has type affinity rather than enforcement, so a mismatch usually
+  stores and reads the same values — and an additive migrator cannot fix it either
+  way. Raising would be a self-inflicted outage in the one code path every launch
+  runs through.
+- **The ratio is measured in characters** (M10). §21 asks for the summary's tokens;
+  no tokenizer is available offline and `usage["input_tokens"]` measures a whole
+  prompt, not a segment. The proxy appears on both sides of every comparison, so its
+  accuracy cancels — it is never compared against a provider's count.
+- **A summary still over target after its retries is used anyway**, with a warning.
+  It is smaller than what it replaces, which is the point; discarding it would spend
+  every retry and keep the full history, leaving the thread as stuck as before with
+  less budget to fix it. Same containment call §20 made for a failed reviewer.
+
+## Two duplications the section exposed
+
+Both are the shape CLAUDE.md's canonical bug story warns about, and both were fixed
+at the producer rather than at the call site that happened to break.
+
+**The FakeStorage patch list existed twice** — once in the `fake_storage` fixture and
+once hand-rolled inside `test_json_retry.py`. Adding five storage imports to
+`core/memory.py` left the hand-rolled copy redirecting four of them, so an unpatched
+call reached a real `Session` against the root conftest's *fake* `sqlmodel` and a
+test about JSON retries failed with `'dict' object has no attribute 'desc'`. There is
+now one `MEMORY_STORAGE_SYMBOLS` list and one `install_fake_storage()`, which also
+patches the `storage` module itself so lazy importers (`core/compaction.py`) are
+covered without knowing about them.
+
+**The fake ConversationMemory existed five times** — three near-identical
+`_FakeMemory` classes, two `_Mem` ones, and two `MagicMock`s. Giving `_run()` three
+new things to call on a memory turned 43 tests red on one `AttributeError`. One
+`FakeMemory` in conftest now.
+
+## Tests
+
+729 → 849, all offline. Seven new files; 75 revert checks across the six commits,
+each turning a specifically named test red.
+
+Two controls worth naming, because without them the neighbouring assertions pass
+against a broken build:
+`test_a_thread_with_no_checkpoint_looks_exactly_as_it_did` (every pre-§21 caller
+resumes an uncompacted thread, and their behaviour has to be byte-identical) and
+`test_a_thread_under_the_threshold_is_left_alone` (almost every turn is this one).
+
+One revert check was written vacuous and rewritten: the first
+`archive_history` test compared it against `get_session_history` on an uncompacted
+thread, where the two agree trivially — including under the revert. It now runs
+against a thread that *has* been compacted, which is the only state where the AC1
+guarantee can fail.
+
+`test_tui.py`'s known `_settle` flake (TECHNICAL_DEBT theme 8) fired once during
+this work and did not recur across four consecutive full runs.
+
+## Not verified
+
+The manual passes. Automatic compaction firing on a genuinely long thread, a
+summary that reads well, `/compact --strength 4` end to end in the TUI, and the CLI
+marker on a real run. Everything here is asserted against canned summaries and
+stubbed model calls; nothing has watched the compactor actually summarize a
+conversation. The §19, §20 and §25 manual passes are also still outstanding.

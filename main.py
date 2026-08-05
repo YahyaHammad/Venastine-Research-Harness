@@ -113,6 +113,14 @@ def run_chat(
             print(f"[thread: {current_thread_id}]")
             printed_thread_id = True
 
+        # ROADMAP_v2 §21's "no silent compaction, ever". The CLI drains
+        # the generator through run_to_completion(), which discards every
+        # non-final event -- so these arrive on the response rather than as
+        # LoopEvents. Printed BEFORE the answer, because that is when they
+        # happened.
+        for notice in getattr(response, "notices", ()):
+            print(f"— {notice['text']} —")
+
         print(f"\nAgent: {response.text}")
         if response.stop_reason != "complete":
             print(f"[stopped early: {response.stop_reason}]")

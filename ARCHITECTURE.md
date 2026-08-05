@@ -46,7 +46,7 @@ Venastine Research Harness/
 ├── pytest.ini                      # testpaths=tests, --strict-markers
 ├── DEVLOG.md                       # implementation notes for built ROADMAP sections -- see §0
 │
-├── tests/                          # 832 tests, all offline, ~25s (first run ~7s for matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
+├── tests/                          # 849 tests, all offline, ~25s (first run ~7s for matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
 │   ├── conftest.py                 # fixtures: make_model_response, make_stream_from_response, make_stream_sequence, FakeStorage, ...
 │   ├── BREAKING_CHANGES.md         # what-breaks-it / symptom / fix per area
 │   ├── test_cli.py                 # 20 tests -- ROADMAP §1 thread_id passthrough + UUID validation + §14 parser defaults/resolution/trust flow
@@ -85,15 +85,23 @@ Venastine Research Harness/
 │   ├── test_granted_calls_artifact.py # 5 tests -- ROADMAP_v2 §25 audit artifact + R7 provenance framing in the universal preamble
 │   ├── test_review.py              # 86 tests -- ROADMAP_v2 §20 V1-V9: the reviewer agent, consent as data, the accept/reject/refine walk, both shells, 07_review.json, plus the 2026-08-04 hardening class (containment, deferred commit, sanitisation, shell lifecycle)
 │   ├── test_skills.py              # 37 tests -- ROADMAP_v2 §19 K1-K6: stateless manager, body pinning (incl. one-shot turns), precondition check (incl. registration), /skill, the pass-prompt boundary
-│   └── test_docs_consistency.py    # 3 tests -- the documented test count agrees across README/CLAUDE/ARCHITECTURE and matches the real collected total
+│   ├── test_docs_consistency.py    # 3 tests -- the documented test count agrees across README/CLAUDE/ARCHITECTURE and matches the real collected total
+│   ├── test_schema_migration.py   # 18 tests -- ROADMAP_v2 §21a M7: database.ensure_columns() adds a declared column to a table already on disk, driven against stdlib sqlite3 rather than the fake sqlmodel
+│   ├── test_storage_reads.py      # 12 tests -- ROADMAP_v2 §21a the watermark and pinned reads the derived view is assembled from (M4/M9, AC1/AC2)
+│   ├── test_memory_compaction.py  # 17 tests -- ROADMAP_v2 §21a the derived view (M8/M9) and pin_last's ordinal-to-id mapping
+│   ├── test_compaction.py         # 34 tests -- ROADMAP_v2 §21a the trigger (M1/M6), the three fold floors (M4/M5), the compactor run (M2) and D27's settings validation
+│   ├── test_loop_compaction.py    # 10 tests -- ROADMAP_v2 §21a where the trigger is evaluated (M3) and how notices reach each shell
+│   ├── test_pin_tool.py           # 12 tests -- ROADMAP_v2 §21a D24/D26 declarations, the `memory` injectable, input handling
+│   └── test_shell_compaction.py   # 17 tests -- ROADMAP_v2 §21a §21's visibility rule at both shells, and /compact
 │
 ├── core/
 │   ├── client.py                  # ONE model call, normalized across providers; provider-specific wire formats live ONLY here. §13 adds call_model_stream() (3 streaming impls) + collect_response() + StreamToken
 │   ├── loop.py                    # RunAgentLoop -- §13: _run() is a GENERATOR yielding LoopEvent; run_to_completion() drains it for the 3 public wrappers; permission_channel approval bridge
-│   ├── events.py                  # §13: LoopEvent dataclass -- the single event type _run() yields (token_delta / tool_call_start / tool_result / permission_request / final_response / stop_reason)
+│   ├── events.py                  # §13: LoopEvent dataclass -- the single event type _run() yields (token_delta / tool_call_start / tool_result / permission_request / notice / final_response / stop_reason)
 │   ├── workspace_trust.py         # ROADMAP_v2 §14 (D17): trust store keyed by resolved path + content hash; is_trusted/grant_trust; sorted-walk deterministic hash with path-in-hash
 │   ├── config_loader.py           # ROADMAP_v2 §14: three-tier .md discovery (harness/project/user), line-anchored frontmatter parse, settings.json merge with loud unknown-key rejection, CONTEXT.md opt-in, frontmatter-only skill catalog
-│   ├── memory.py                  # ConversationMemory -- in-run message list, provider-NEUTRAL shape, backed by storage.py + resume-shape fix
+│   ├── memory.py                  # ConversationMemory -- in-run message list, provider-NEUTRAL shape, backed by storage.py + resume-shape fix. §21a: assembles the DERIVED view (checkpoint summary + pinned rows + tail) and owns pin_last's ordinal-to-id mapping
+│   ├── compaction.py              # ROADMAP_v2 §21a: when to compact (M1 working-set trigger, M6 pipeline backstop), what may be folded (M4/M5's three floors), and the compactor agent run + ratio retry. Owns the re-entrancy guard
 │   ├── approval.py                # ROADMAP_v2 §25/§20: GrantBudget / ApprovalProvider / RunAuthorization / ReviewConsent -- how a run obtains a human's answer, as DATA. Leaf module, no project imports
 │   │
 │   └── reasoning/
@@ -140,7 +148,9 @@ Venastine Research Harness/
 │   ├── subagent_tool.py           # spawn_subagent tool (D6 model-initiated); declares parent_context/parent_run for dispatch injection
 │   ├── tui_commands.py            # /agent, /goal, /grill-me registered into §16's slash registry (TUI-only commands)
 │   └── builtin/
-│       └── grill-me.md            # built-in agent: surfaces what still needs a decision in the current thread
+│       ├── grill-me.md            # built-in agent: surfaces what still needs a decision in the current thread
+│       ├── pipeline-reviewer.md   # ROADMAP_v2 §20: reviews a finished research run and proposes corrections. No spawn_subagent, no load_skill
+│       └── compactor.md           # ROADMAP_v2 §21a: condenses an older stretch of a conversation. allowed_tools: [] -- it summarizes, it does not act
 │
 ├── skills/                        # ROADMAP_v2 §19: skill system. Namespace package, mirroring agents/
 │   ├── manager.py                 # SkillManager -- HOLDS NO STATE (K3): activate/deactivate take and return the active list; missing_tools (K2); prompt_fragment (K1)
@@ -170,6 +180,7 @@ Venastine Research Harness/
         ├── fetch_url.py           # fetch a specific URL's content (§15/D24: ToolPermissions/ToolApprovals fields added -- it was registered but denied on every call before that)
         ├── get_time.py            # current UTC time
         ├── load_skill.py          # ROADMAP_v2 §14: view a skill's full body on request (progressive disclosure; view-only, activation is §19)
+        ├── pin.py                 # ROADMAP_v2 §21a/D26: mark recent turns compaction-exempt. Ungated (thread-scoped, reversible) and ordinal (last_n turns), so MessageLog.id stays out of the neutral shape
         ├── arxiv.py               # arXiv paper search
         ├── symbolic_math.py       # algebra, calculus, trig, arithmetic (SymPy)
         ├── linear_algebra.py      # matrices, vectors, low-order tensors (SymPy)
@@ -365,7 +376,7 @@ Covered in full in §7 below. The short version of the file boundary: `base.py` 
   - `provider_factory` / `client_for_provider` — return a mock-`api_initialization`-compatible tuple for translation tests.
   - `clear_client_cache` (autouse) — resets `api_initialization`'s cached clients before each test.
 - **`tests/BREAKING_CHANGES.md`** — per-file tables documenting what breaks each test when production code changes, the symptom, and the fix. Created because `test_orchestrator.py` was identified as the suite's most fragile mock — its mock dict is keyed by pass_id strings that ROADMAP §3 and §10 will modify.
-- **38 test files** (6 per ROADMAP §4 + 2 from §4's own additions: `test_memory_write_through.py`, `test_loop_tool_dispatch.py`; + 2 from §3/§5: `test_json_retry.py`, `test_pipeline_storage.py`; + 2 from §1: `test_cli.py`, `test_e2e.py`; + 1 from §12: `test_output_writer.py`; + 1 from audit: `test_logging_setup.py`; + 1 from §6: `test_file_ops.py`; + 1 from §7: `test_shell.py`; + 1 from §8: `test_policy_enforcement.py`; + 2 from §13: `test_client_streaming.py`, `test_streaming_loop.py`; + 3 from ROADMAP_v2 §14: `test_workspace_trust.py`, `test_config_loader.py`, `test_load_skill.py`; + 1 from §15: `test_permission_context.py`; + 1 from §11: `test_critic_routing.py`; + 1 from §16: `test_client_effort.py`; + 1 from §10's fix: `test_ensemble_guard.py`; + 3 from §17: `test_mcp_client.py`, `test_mcp_config.py`, `test_mcp_integration.py`; + 1 from §16: `test_tui.py`; + 1 from §18: `test_agents.py`; + 4 from §25: `test_grants.py`, `test_attended.py`, `test_research_authorization.py`, `test_granted_calls_artifact.py`; + 1 from §19: `test_skills.py`; + 1 from §20: `test_review.py`; + 1 from the §19–§20 review follow-up: `test_docs_consistency.py`).
+- **45 test files** (6 per ROADMAP §4 + 2 from §4's own additions: `test_memory_write_through.py`, `test_loop_tool_dispatch.py`; + 2 from §3/§5: `test_json_retry.py`, `test_pipeline_storage.py`; + 2 from §1: `test_cli.py`, `test_e2e.py`; + 1 from §12: `test_output_writer.py`; + 1 from audit: `test_logging_setup.py`; + 1 from §6: `test_file_ops.py`; + 1 from §7: `test_shell.py`; + 1 from §8: `test_policy_enforcement.py`; + 2 from §13: `test_client_streaming.py`, `test_streaming_loop.py`; + 3 from ROADMAP_v2 §14: `test_workspace_trust.py`, `test_config_loader.py`, `test_load_skill.py`; + 1 from §15: `test_permission_context.py`; + 1 from §11: `test_critic_routing.py`; + 1 from §16: `test_client_effort.py`; + 1 from §10's fix: `test_ensemble_guard.py`; + 3 from §17: `test_mcp_client.py`, `test_mcp_config.py`, `test_mcp_integration.py`; + 1 from §16: `test_tui.py`; + 1 from §18: `test_agents.py`; + 4 from §25: `test_grants.py`, `test_attended.py`, `test_research_authorization.py`, `test_granted_calls_artifact.py`; + 1 from §19: `test_skills.py`; + 1 from §20: `test_review.py`; + 1 from the §19–§20 review follow-up: `test_docs_consistency.py`; + 7 from §21a: `test_schema_migration.py`, `test_storage_reads.py`, `test_memory_compaction.py`, `test_compaction.py`, `test_loop_compaction.py`, `test_pin_tool.py`, `test_shell_compaction.py`).
 
 **What belongs here:** tests that run offline (~24s; first run ~30s for the matplotlib font cache), with zero network access and zero real API keys. Stubs in root `conftest.py` catch import-time module resolution; fixtures in `tests/conftest.py` provide `ModelResponse` construction and storage mocking; individual test files cover production code's behavior.
 
@@ -389,7 +400,7 @@ Covered in full in §7 below. The short version of the file boundary: `base.py` 
 
 ### 4.15 `core/workspace_trust.py` + `core/config_loader.py` — file syntax, config loading, workspace trust (ROADMAP_v2 §14)
 
-**Belongs here:** `workspace_trust.py` owns the D17 gate ONLY — `is_trusted()`/`grant_trust()` keyed by resolved project path + a sha256 content hash of everything under `.venastine/` (sorted `os.walk` descent, relative paths fed into the hash with `\0` separators so renames/swaps change the digest; posix-normalized separators so the digest is platform-independent). `config_loader.py` owns discovery and parsing: line-anchored `---` frontmatter regex (a bare horizontal rule inside a body must not terminate the block — AC4), three-tier `.md` discovery (harness `<root>/{agents,skills}/builtin/` → project `.venastine/` (trust-gated) → user `~/.config/venastine/`), D18 harness-collision rejection with a warning, `settings.json` merge (trusted project > user; unknown keys RAISE; compaction keys validate but warn as unimplemented until §21), `CONTEXT.md` caching with per-agent opt-in (`context_for_agent`), and the frontmatter-only `skill_catalog_text()`. Startup cache via `initialize(project_path)` / `reset()`.
+**Belongs here:** `workspace_trust.py` owns the D17 gate ONLY — `is_trusted()`/`grant_trust()` keyed by resolved project path + a sha256 content hash of everything under `.venastine/` (sorted `os.walk` descent, relative paths fed into the hash with `\0` separators so renames/swaps change the digest; posix-normalized separators so the digest is platform-independent). `config_loader.py` owns discovery and parsing: line-anchored `---` frontmatter regex (a bare horizontal rule inside a body must not terminate the block — AC4), three-tier `.md` discovery (harness `<root>/{agents,skills}/builtin/` → project `.venastine/` (trust-gated) → user `~/.config/venastine/`), D18 harness-collision rejection with a warning, `settings.json` merge (trusted project > user; unknown keys RAISE; compaction keys are consumed by §21a's effective_compaction(), which also validates the RELATIONSHIPS -- warning_margin < trigger, keep < trigger -- at load rather than leaving incoherent trigger math for later), `CONTEXT.md` caching with per-agent opt-in (`context_for_agent`), and the frontmatter-only `skill_catalog_text()`. Startup cache via `initialize(project_path)` / `reset()`.
 
 **Does NOT belong here:** skill activation semantics (`additional_tools`, slash commands — §19), agent execution (§18), `mcp.json` loading (§17), compaction consumption (§21), and the trust-prompt UX — `main.py` owns prompting (interactive y/N on a TTY showing `describe_project_content()` output, `--trust-project` for scripts/CI, notice-and-skip on non-TTY); `workspace_trust.py` owns only the store.
 
@@ -469,6 +480,36 @@ Covered in full in §7 below. The short version of the file boundary: `base.py` 
 **`json_retry.py` is shared, so it must not assume it serves a pass.** It takes an already-obtained response plus what is needed to continue that response's thread; hardcoding `pass_prompt(label)` inside it looks right for all ten passes and hands the reviewer a source-grounding prompt mid-review. Its `on_response` hook is where §25's granted-call record attaches, so every retry response must reach it — not just the last or the successful one. Caller-neutrality covers three surfaces (2026-08-04 hardening): the corrective wording names no shape ("the JSON your original instructions asked for"), the parse error says "Response" not "Pass", and a `context` parameter is forwarded to every continuation — the reviewer's tool restriction binds on every turn of the review, not just turn 1. The reviewer's own prompt is built with `catalogs=False` so it is never invited to call tools its `allowed_tools` excludes.
 
 **`write_run_artifacts` now has two production call sites** (`main.run_research` and the TUI's `/research` worker). It had one, which is why a TUI research run produced no `/output/<run_id>/` at all — the same "whichever shell remembers it" failure that put §20's own invocation in the orchestrator instead. `07_review.json` follows `granted_calls.json`'s rule: written only when non-empty, so its presence is itself the signal that a run was reviewed, and it is the only durable record on a run with no consent route.
+
+### 4.20 `core/compaction.py` — conversation compaction (ROADMAP_v2 §21a)
+
+**Belongs here:** when a thread should be compacted (`should_compact`, in two modes
+— `working_set` for chat, `backstop` for a research pass, M6), what may be folded
+(`compactable_span` and its three floors, M4/M5), and running the compactor agent
+(`compact`, plus the ratio-retry loop). Owns the re-entrancy guard: the compactor is
+an agent, so compacting runs the loop, which evaluates the trigger.
+
+**Does NOT belong here:** *where* the trigger is evaluated — `core/loop.py` calls in
+at a turn boundary and between steps, because that is the one choke point all three
+shells pass through. Assembling the derived view — `core/memory.py` owns that, and
+`compact()` asks it to rebuild rather than splicing a summary in. Resolving settings
+— `core/config_loader.py`'s `effective_compaction()`, which owns the merge (and
+resolving here would be an import cycle, since this module reaches `agents.manager`).
+
+**The trigger is a working-set target, not `context_limit - buffer`** (M1). §21
+specified the latter and it cannot fire: `MAX_TOKEN_BUDGET` re-counts the whole
+prompt on every step, so a thread is unusable at well under half of any modern
+window. `MODEL_CONTEXT_WINDOWS` now feeds only the pipeline backstop.
+
+**Measurement is by characters and says so** (M10). No tokenizer is available
+offline and `usage["input_tokens"]` measures a whole prompt, not a segment. The
+proxy appears on both sides of every comparison this module makes, so its accuracy
+cancels — never compare a value derived from it against a provider's token count.
+
+**The ratio retry is §3's JSON-retry loop with a length check in place of a parse**,
+deliberately not routed through `core/reasoning/json_retry.py`: that module takes a
+run trace and names passes, and bending it to serve memory would invert the
+dependency for three lines of shared structure.
 
 ## 5. Request lifecycle — regular conversation, traced end to end
 

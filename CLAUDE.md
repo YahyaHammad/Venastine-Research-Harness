@@ -16,8 +16,9 @@ python main.py --trust-project                    # grant D17 workspace trust no
 python main.py --mode research --grant "q"        # §25: pick gated tools to authorise for this run
 python main.py --mode research --attended "q"     # §25: approve every gated call as it happens
 python main.py --mode research --review "q"       # §20: review the finished run, consent to each correction
+# §21a compaction runs automatically in every shell; /compact triggers it by hand in the TUI
 
-pytest                                            # 832 tests, offline, ~25s (first run ~30s: matplotlib font cache)
+pytest                                            # 849 tests, offline, ~25s (first run ~30s: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -35,7 +36,7 @@ MCP servers are a *third* config file again — `mcp.json`, user-level or `.vena
 Read these before changing anything non-trivial — they carry design decisions that are locked, not defaults to re-derive.
 
 - **ARCHITECTURE.md** — what's built, file-by-file contracts ("what belongs here / what does NOT"), known gotchas (§11).
-- **ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **ROADMAP_v2.md** (§13–§25; §13–§20 and §25 built) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R12 from §25, K1–K7 from §19 and V1–V9 from §20). Section and D-numbers are stable and cross-referenced everywhere.
+- **ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **ROADMAP_v2.md** (§13–§25; §13–§20, §21a and §25 built) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R12 from §25, K1–K7 from §19, V1–V9 from §20 and M1–M10 from §21a). Section and D-numbers are stable and cross-referenced everywhere.
 - **DEVLOG.md** — per-section implementation notes: what was followed verbatim, what was deviated from (every deviation was an explicit user decision — do not silently override).
 - **tests/BREAKING_CHANGES.md** — what breaks each test when production code changes, the symptom, and the fix.
 - **QWEN.md** — a sibling agent-context file. Stale (it predates §13–§16 and disagrees with itself on test counts); prefer ARCHITECTURE.md and the code.
@@ -171,6 +172,69 @@ The research pipeline can now review its own finished output and correct it, one
 - **A refinement re-enters the reviewer's own thread** (V5, via `continue_conversation`) and touches only its own finding. A note about #3 must not redraft #7.
 - **Four consent outcomes, and only one of them can ever accept.** `reject_all` is the escape a long review needs precisely because it only declines; an accept-all shortcut is the affordance that must not exist, since an injected "correction" needs one reflexive yes.
 - **Every unclear answer is a rejection** — an unrecognised string, a callback that raises, a timeout, a TUI modal dismissed with the bare `False` its shutdown path puts. This is the fifth place the "every dismissal carries a value" invariant applies and the first where the unsafe failure is silently applying an edit rather than hanging a worker.
+
+### Compaction and pinning (`core/compaction.py`, §21a)
+
+A long thread is now condensed rather than left to hit a wall. Compaction adds a
+`CompactionCheckpoint` row and **never edits the archive** — `storage.archive_history()`
+returns every message ever written however many times this has run (AC1), which is
+what makes an early, frequent trigger safe.
+
+- **The trigger is a working-set target, not `context_limit - buffer`** (M1). §21
+  specified the latter and it can never fire: `core/loop.py` counts input tokens per
+  call and the prompt is resent on every step, so `MAX_TOKEN_BUDGET` makes a turn
+  unusable at well under half of any modern window. For compaction at `T` to fire and
+  leave `k` usable steps the budget must be ~`k·T` — hence a 40k trigger and a 250k
+  budget, with `config_loader.effective_compaction()` warning when a configured
+  trigger leaves too little headroom. `MODEL_CONTEXT_WINDOWS` now only feeds the
+  pipeline backstop, so a missing entry is cheap.
+- **`MAX_TOKEN_BUDGET` is a spend meter, not a context limit.** It re-counts the
+  whole prompt on every step — correct as billing, quadratic as anything else. Do not
+  read it as "how big a thread may get".
+- **The fold boundary is always a turn start** (M4). A summary that swallows an
+  assistant message and leaves its `tool_result` rows is an HTTP 400 on Anthropic — a
+  hard wire error, not a degraded answer.
+- **Three floors bound what may be folded, earliest wins** (M5): the current turn
+  (structural — `_run()` records how many turns were complete when it began), the
+  last 3 completed turns, and `keep_recent_tokens`. The current-turn floor is what
+  makes the mid-turn valve safe by construction rather than by hoping the threshold
+  is far enough away.
+- **Re-derive from the archive by default** (M2). Each compaction summarizes the
+  ORIGINALS, so exactly one summarization step always sits between an original
+  message and what the model sees. Chaining is configurable and is the automatic
+  fallback when a span outgrows one call.
+- **The summary is a synthesized leading `user` message and is NEVER persisted**
+  (M8). Persisting it would put derived content in the archive, and the next
+  compaction would fold a summary into a summary on the path that means to re-derive.
+- **Pinned rows inside the covered span are re-added verbatim** (M9). One watermark
+  cannot say "everything through K except these", so without this the message a user
+  explicitly asked to keep is the one that disappears.
+- **A research pass compacts only at a hard backstop** (M6), near the real context
+  window. Routine compaction in an unattended pass would spend on a judgment call
+  nobody is watching.
+- **The ratio is a character proxy and says so** (M10). No tokenizer offline; it is
+  self-consistent and never compared against a provider's token count.
+- **Notices travel on the ModelResponse AND as a `LoopEvent`.**
+  `run_to_completion()` discards non-final events, so the event route alone is
+  invisible to the CLI and the pipeline. Third time this shape has come up (§20,
+  §25), so it is a rule now.
+- **A failed compaction is contained**, like §20's review stage: the turn completes,
+  a `compaction_failed` notice says so, the thread stays uncompacted.
+- **`pin` is ungated deliberately** (D26). §13 does not merely deny an approval-gated
+  tool where nothing can ask — it stops advertising it, so gating `pin` would make it
+  invisible on the CLI and in every research pass. Its interface is ordinal
+  (`last_n` turns), because `MessageLog.id` is deliberately absent from the neutral
+  message shape.
+
+**`database.ensure_columns()` exists because `create_all()` never `ALTER`s** (M7).
+Adding a field to a table that is already on disk breaks every existing database at
+read time. Additive only — it warns rather than raises on a type mismatch, since
+SQLite's type affinity makes most mismatches harmless and a raise here would brick
+every launch. If it ever grows a `DROP`, the project has outgrown it.
+
+**§21b (durable `remember`) and §21c (`/ref`, session summaries) are not built.**
+§21b's first task is wiring §25's `ApprovalProvider` into CLI chat, or D26's gate
+makes `remember` a TUI-only capability — the §25 mistake again.
 
 ### Config loading and workspace trust (ROADMAP_v2 §14)
 
