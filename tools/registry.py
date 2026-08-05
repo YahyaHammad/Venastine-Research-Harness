@@ -27,7 +27,7 @@ from tools.base import ToolSpec
 from tools.builtin import (
     web_search, fetch_url, get_time, arxiv,
     symbolic_math, linear_algebra, probability_stats, discrete_math, logic, geometry,
-    file_ops, shell, load_skill,
+    file_ops, shell, load_skill, pin,
 )
 from security.permissions import (
     assert_permissions_declared, is_tool_allowed, requires_approval,
@@ -45,7 +45,13 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 # live value; handlers that don't are called with params only. Generalised
 # so §23's response-channel tools can add a third name later without
 # touching dispatch() again.
-_INJECTABLE_PARAMS = ("parent_context", "parent_run", "permission_channel")
+_INJECTABLE_PARAMS = (
+    "parent_context", "parent_run", "permission_channel",
+    # ROADMAP_v2 §21: the live ConversationMemory, for `pin`. The
+    # comment above anticipated a third name arriving without touching
+    # dispatch() again; this is it.
+    "memory",
+)
 
 
 class ToolCallDenied(Exception):
@@ -258,6 +264,7 @@ class ToolRegistry:
         approval_callback=None,
         parent_run: Optional["RunInfo"] = None,
         permission_channel=None,
+        memory=None,
     ) -> dict:
         # Unknown-tool guard: ValueError, deliberately NOT ToolCallDenied.
         # The two exception types separate "you misnamed it" from "policy
@@ -306,6 +313,7 @@ class ToolRegistry:
             "parent_context": context,
             "parent_run": parent_run,
             "permission_channel": permission_channel,
+            "memory": memory,
         }
         injected = {p: available[p] for p in self._injectable.get(tool_name, ())}
         result = spec.handler(params, **injected)
@@ -333,6 +341,7 @@ registry.register(ToolSpec("write", file_ops.WRITE_TOOL_SCHEMA, file_ops.write_r
 registry.register(ToolSpec("edit", file_ops.EDIT_TOOL_SCHEMA, file_ops.edit_run, approval_check=file_ops._file_approval_check))
 registry.register(ToolSpec("shell", shell.TOOL_SCHEMA, shell.run, approval_check=shell._shell_approval_check))
 registry.register(ToolSpec("load_skill", load_skill.TOOL_SCHEMA, load_skill.run, available_check=load_skill.has_skills))
+registry.register(ToolSpec("pin", pin.TOOL_SCHEMA, pin.run, available_check=pin.available))
 registry.register(ToolSpec(
     "spawn_subagent", subagent_tool.TOOL_SCHEMA, subagent_tool.run,
     # Approving a spawn IS the subagent sign-off (§18 S1): it authorises

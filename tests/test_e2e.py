@@ -124,7 +124,8 @@ def test_chat_mode_e2e_multi_turn_with_tool_use(mocker, capsys, fake_storage):
     # §15/§18: the loop forwards its ToolContext (None here -- no agent
     # active) and its RunInfo (parent_run) to every dispatch call.
     mock_dispatch.assert_called_once_with(
-        "get_time", {}, context=None, parent_run=ANY, permission_channel=None)
+        "get_time", {}, context=None, parent_run=ANY, permission_channel=None,
+        memory=ANY)
 
     # --- Verify multi-turn thread resume ---
     # call_model_stream is called with memory.messages as the 4th positional

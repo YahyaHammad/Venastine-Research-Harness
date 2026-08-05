@@ -448,6 +448,7 @@ class RunAgentLoop:
                                 approval_callback=lambda n, p: True,
                                 parent_run=run_info,
                                 permission_channel=permission_channel,
+                                memory=memory,
                             )
                         except ToolCallDenied as e:
                             result = {"error": str(e)}
@@ -456,7 +457,8 @@ class RunAgentLoop:
                         result = registry.dispatch(
                             call.name, call.input, context=context,
                             parent_run=run_info,
-                            permission_channel=permission_channel)
+                            permission_channel=permission_channel,
+                            memory=memory)
                     except ToolCallDenied as e:
                         result = {"error": str(e)}
 

@@ -292,7 +292,8 @@ def test_permission_channel_yields_request_and_dispatches_on_approval(mocker):
 
     dispatched = []
     def fake_dispatch(name, params, context=None, approval_callback=None,
-                      parent_run=None, permission_channel=None):
+                      parent_run=None, permission_channel=None,
+                      memory=None):
         dispatched.append((name, approval_callback))
         return {"ok": True}
     mocker.patch.object(registry, "dispatch", side_effect=fake_dispatch)
