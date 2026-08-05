@@ -72,6 +72,11 @@ def run_chat(
     the interactive loop."""
     current_thread_id = thread_id
     printed_thread_id = False
+    # §21b M16. Built once for the session rather than per turn: the
+    # provider wraps the single _stdin_reader, and building one per turn
+    # would be a new object round the same reader for no gain. None on a
+    # non-tty, which keeps a piped run headless exactly as before.
+    authorization = build_chat_authorization()
 
     print("Venastine Research Harness — chat mode.")
     print(f"Provider: {provider_name} | Model: {model}")
@@ -101,6 +106,7 @@ def run_chat(
                 model=model,
                 provider_name=provider_name,
                 thread_id=current_thread_id,
+                authorization=authorization,
             )
         except Exception as e:
             logger.exception("Chat turn failed")
@@ -273,12 +279,17 @@ def _stdin_reader() -> _StdinReader:
     return _STDIN_READER
 
 
-def build_attended_provider():
+def build_attended_provider(honour_run_scope: bool = False):
     """An ApprovalProvider that asks at the terminal (§25 R9).
 
-    honour_run_scope=False: this mode exists for per-call supervision, so
-    one yes must not silently cover later calls of the same tool -- the
-    shortcut §18 added for chat turns is exactly wrong here.
+    honour_run_scope=False for ATTENDED RESEARCH: that mode exists for
+    per-call supervision, so one yes must not silently cover later calls of
+    the same tool -- the shortcut §18 added for chat turns is exactly wrong
+    there.
+
+    True for CHAT (§21b M16), where the shortcut is exactly right: being
+    asked about the same tool three times in one turn is the noise §18
+    added grant_scope to remove.
     """
     from core.approval import ApprovalProvider
 
@@ -304,7 +315,72 @@ def build_attended_provider():
             return False
         return answer.strip().lower() in ("y", "yes")
 
-    return ApprovalProvider(ask=ask, honour_run_scope=False)
+    return ApprovalProvider(ask=ask, honour_run_scope=honour_run_scope)
+
+
+def run_memory_command(args) -> int:
+    """`--memories` / `--forget`, ROADMAP_v2 §21b (M15).
+
+    Listing exists to make removal usable: the model never shows ids, so
+    without it `--forget` has nothing to be given. Both print the SCOPE of
+    each row, because "which of these follows me to another project" is the
+    question a user pruning memories is actually asking.
+    """
+    from memories.manager import manager as memory_manager
+    from storage import forget_memory
+
+    if args.forget:
+        try:
+            memory_id = UUID(args.forget)
+        except ValueError:
+            print(f"Not a memory id: {args.forget!r}. Run --memories to list them.")
+            return 1
+        if forget_memory(memory_id):
+            print(f"Forgot {memory_id}.")
+            return 0
+        print(f"No memory with id {memory_id}.")
+        return 1
+
+    rows = memory_manager.visible()
+    if not rows:
+        where = memory_manager.scope_path() or "(no project resolved)"
+        print(f"No durable memories visible from {where}.")
+        return 0
+    for row in rows:
+        marker = "global " if row["scope"] == "global" else "project"
+        category = f" [{row['category']}]" if row.get("category") else ""
+        print(f"{row['id']}  {marker}{category}  {row['content']}")
+    return 0
+
+
+def build_chat_authorization():
+    """Authorization for a CLI chat turn: nobody granted anything, but
+    someone is here to ask (ROADMAP_v2 §21b, M16).
+
+    WHAT THIS CHANGES, named rather than discovered. §13 does not merely
+    DENY an approval-gated tool where nothing can answer -- it stops
+    advertising it. So until now CLI chat could not see `shell`,
+    `spawn_subagent`, `remember`, or any MCP tool at all. A provider makes
+    all of them advertised and promptable, which is what the TUI has always
+    done and is the intended outcome; it is also a real change to the
+    default shell's posture, larger than the one tool §21b needed it for.
+
+    A RunAuthorization with an empty grant set rather than a new
+    approval_provider= parameter on run_agent_conversation: the bundle
+    already threads through _authorization_kwargs, and a second spelling of
+    the same argument is what that function exists to prevent.
+
+    None on a non-tty, matching build_review_consent. A piped run has
+    nobody to ask, so it stays headless and behaves exactly as before --
+    which also means `remember` cannot fire there, per D26's consequence 1.
+    """
+    if not sys.stdin.isatty():
+        return None
+
+    from core.approval import RunAuthorization
+
+    return RunAuthorization(provider=build_attended_provider(
+        honour_run_scope=True))
 
 
 def _pick_tools_to_grant(offered) -> set:
@@ -519,6 +595,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Grant workspace trust (D17) for the current directory's "
              ".venastine/ content -- intended for scripts/CI where the "
              "interactive prompt is unavailable.",
+    )
+    # ROADMAP_v2 §21b (M15). The CLI has no slash-command layer, so these
+    # are flags rather than /memories and /forget -- and they exist for the
+    # CLI specifically because M16 makes a CLI-only user able to WRITE a
+    # durable memory, and they would otherwise have no way to remove one.
+    parser.add_argument(
+        "--memories",
+        action="store_true",
+        help="List durable memories visible from this directory and exit "
+             "(ROADMAP_v2 §21b).",
+    )
+    parser.add_argument(
+        "--forget",
+        metavar="ID",
+        help="Delete one durable memory by id (see --memories) and exit.",
     )
     return parser
 
@@ -791,6 +882,12 @@ if __name__ == "__main__":
     project_path = os.getcwd()
     settings = load_project_config(project_path, args.trust_project)
     provider, model = resolve_runtime_defaults(args, settings)
+
+    # §21b M15. AFTER load_project_config, because scoping needs the
+    # resolved project path -- and before any MCP setup, since neither
+    # command runs a model or needs a tool.
+    if args.memories or args.forget:
+        raise SystemExit(run_memory_command(args))
 
     # Argument validation before connecting anything: parser.error() exits,
     # and doing it after setup_mcp() would spawn stdio server subprocesses

@@ -39,6 +39,7 @@ import storage
 from agents.manager import manager
 from agents.tui_commands import register_agent_commands
 from skills.manager import manager as skills
+from memories.tui_commands import register_memory_commands
 from skills.tui_commands import register_skill_commands
 from core import config_loader
 from core.client import api_initialization, effort_levels_for_model
@@ -1119,6 +1120,7 @@ def register_builtin_commands() -> None:
 register_builtin_commands()
 register_agent_commands()  # §18: /agent, /goal, /grill-me
 register_skill_commands()  # §19: /skill
+register_memory_commands()  # §21b: /memories, /forget
 
 
 def run(provider_name: str, model: str, settings: dict | None = None) -> None:
