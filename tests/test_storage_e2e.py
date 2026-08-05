@@ -1,8 +1,24 @@
 """
-test_compaction_e2e.py
+test_storage_e2e.py
 
-ROADMAP_v2 §21a: compaction run REPEATEDLY on one thread, through the loop
-path, against real `storage.py` on a real SQLite database.
+Everything in this project that runs against REAL `storage.py` on a real
+SQLite database, rather than against tests/conftest.py's FakeStorage.
+
+ONE FILE, because there can be only one swap. The root conftest installs a
+FAKE `sqlmodel` before collection; swapping it back out and importing
+`storage` declares the table classes on the real `SQLModel.metadata`, and
+doing that twice raises "Table 'conversationthread' is already defined". A
+second module-scoped fixture elsewhere would hit exactly that. So new
+real-storage tests belong HERE, using the fixture below.
+
+  * ROADMAP_v2 §21a -- compaction run REPEATEDLY on one thread through the
+    loop path, and the monotonic watermark invariant.
+  * ROADMAP_v2 §21b -- durable memory scope filtering (AC6), which is a
+    question about what SQL actually returns and so is worth asking of the
+    real thing.
+
+§21a: compaction run REPEATEDLY on one thread, through the loop path,
+against real `storage.py` on a real SQLite database.
 
 WHY THIS FILE EXISTS. §21a shipped with 849 green tests and a defect none
 of them could see: turn counting was done over the DERIVED VIEW, where M8's
@@ -381,3 +397,104 @@ def test_the_token_floor_measures_the_archive_not_the_view(real_storage, compact
                    "trigger_tokens": 100_000})
 
     assert span is None
+
+
+# ---------------------------------------------------------------------------
+# ---- Durable memory scope filtering (ROADMAP_v2 §21b, AC6) -----------------
+# ---------------------------------------------------------------------------
+
+def test_a_project_memory_is_invisible_from_another_project(real_storage):
+    """AC6, and the reason M12 added a `project_path` column §21's schema
+    block omits. D25 says a project-scoped memory is keyed to the resolved
+    project path; with only a `scope` string, "project" cannot tell two
+    projects apart and this test could not be written at all."""
+    from core.memory import ConversationMemory
+
+    thread = ConversationMemory().thread_id
+    real_storage.save_memory("uses pnpm", thread, project_path="/proj/a")
+    real_storage.save_memory("uses yarn", thread, project_path="/proj/b")
+
+    visible = real_storage.list_memories(project_path="/proj/a")
+
+    assert [m["content"] for m in visible] == ["uses pnpm"]
+
+
+def test_a_global_memory_is_visible_from_every_project(real_storage):
+    """D25's other half. Durable PREFERENCES about how to work are the
+    global-shaped case and must not be trapped in whichever directory the
+    user happened to be in when they said it."""
+    from core.memory import ConversationMemory
+
+    thread = ConversationMemory().thread_id
+    real_storage.save_memory("prefers concise answers", thread, scope="global")
+
+    for path in ("/proj/a", "/proj/b"):
+        assert any(m["content"] == "prefers concise answers"
+                   for m in real_storage.list_memories(project_path=path))
+
+
+def test_a_global_memory_records_no_project_path(real_storage):
+    """Written from within a project, so a naive implementation stamps the
+    path anyway -- and then the row is global in name and project-scoped
+    in effect the moment anything filters on the column."""
+    from core.memory import ConversationMemory
+
+    thread = ConversationMemory().thread_id
+    real_storage.save_memory("global fact", thread, scope="global",
+                             project_path="/proj/a")
+
+    row = next(m for m in real_storage.list_memories(scope="global")
+               if m["content"] == "global fact")
+    assert row["project_path"] is None
+
+
+def test_no_resolved_project_shows_global_memories_only(real_storage):
+    """`project_path=None` means no project was resolved. Showing every
+    project's memories would surface another codebase's facts on the
+    strength of not knowing where we are."""
+    from core.memory import ConversationMemory
+
+    thread = ConversationMemory().thread_id
+    real_storage.save_memory("scoped fact", thread, project_path="/proj/a")
+    real_storage.save_memory("global fact", thread, scope="global")
+
+    contents = [m["content"] for m in real_storage.list_memories()]
+
+    assert "global fact" in contents
+    assert "scoped fact" not in contents
+
+
+def test_memories_come_back_newest_first(real_storage):
+    """M14 injects the most recent N, so the ordering is what decides
+    which memories survive the cap."""
+    from core.memory import ConversationMemory
+
+    thread = ConversationMemory().thread_id
+    for index in range(3):
+        real_storage.save_memory(f"fact {index}", thread, scope="global")
+
+    contents = [m["content"] for m in real_storage.list_memories(scope="global")]
+
+    assert contents[:3] == ["fact 2", "fact 1", "fact 0"]
+
+
+def test_forgetting_removes_the_row(real_storage):
+    """A REAL delete, unlike everything else in storage.py. A UserMemory is
+    a standing assertion the harness keeps repeating, and "this is no
+    longer true" has no useful archived form."""
+    from core.memory import ConversationMemory
+
+    thread = ConversationMemory().thread_id
+    memory_id = real_storage.save_memory("wrong fact", thread, scope="global")
+
+    assert real_storage.forget_memory(memory_id) is True
+    assert not any(m["id"] == memory_id
+                   for m in real_storage.list_memories(scope="global"))
+
+
+def test_forgetting_an_unknown_id_reports_rather_than_raises(real_storage):
+    """The id came from a human reading a list. A typo deserves "no such
+    memory", not a traceback."""
+    from uuid import uuid4
+
+    assert real_storage.forget_memory(uuid4()) is False

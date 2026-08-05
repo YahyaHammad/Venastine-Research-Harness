@@ -65,6 +65,46 @@ class CompactionCheckpoint(SQLModel, table=True):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+class UserMemory(SQLModel, table=True):
+    """One durable fact, carried BETWEEN threads (ROADMAP_v2 §21b).
+
+    Unlike everything else in this file, a row here is not part of any one
+    conversation: `source_thread_id` records where it was learned, but the
+    row outlives that thread and is injected into later ones. That is the
+    whole point, and it is also why D26 gates `remember` and leaves `pin`
+    ungated -- a wrong pin costs some context budget inside a conversation
+    the user is watching, while a wrong memory silently shapes
+    conversations that have not started yet.
+
+    SCOPE IS TWO COLUMNS, not one (M12). §21's schema block carries only
+    `scope`, but D25 says a project-scoped memory is "keyed to the same
+    resolved project path the workspace-trust store uses" -- and with no
+    path recorded, `"project"` cannot tell two projects apart, which makes
+    AC6 untestable rather than merely unenforced. `project_path` is the
+    realpath for `scope="project"` and None for `scope="global"`, taken
+    from config_loader.get_project_path() so "which project" means one
+    thing across trust, config and memory.
+
+    `category` is free text the model may set for its own grouping. It is
+    deliberately not an enum: the harness has no basis to decide what
+    kinds of fact are worth distinguishing, and a wrong enum would push
+    every real memory into "other".
+    """
+
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    content: str
+    category: Optional[str] = None
+    # D25: "project" (default) or "global". Narrow by default because the
+    # two error directions are not symmetric -- a memory that should have
+    # been project-scoped but landed globally contaminates every later
+    # conversation with a stale fact about a codebase you may not be
+    # working in, and presents as the model simply being confident.
+    scope: str = Field(default="project", index=True)
+    project_path: Optional[str] = Field(default=None, index=True)
+    source_thread_id: UUID = Field(foreign_key="conversationthread.id")
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
 def create_thread() -> UUID:
     """Starts a brand-new conversation thread and returns its id."""
     with Session(engine) as session:
@@ -427,3 +467,90 @@ def save_checkpoint(
         session.commit()
         session.refresh(checkpoint)
         return checkpoint.id
+
+# ---------------------------------------------------------------------------
+# ---- Durable memory (ROADMAP_v2 §21b) -------------------------------------
+# ---------------------------------------------------------------------------
+
+def save_memory(
+    content: str, source_thread_id: UUID, scope: str = "project",
+    category: Optional[str] = None, project_path: Optional[str] = None,
+) -> UUID:
+    """Record one durable fact. Returns its id.
+
+    `project_path` is required in substance for scope="project" and
+    meaningless for "global" -- the caller resolves it, because this file
+    knows nothing about config_loader or the trust store. memories/manager.py
+    is the one place that decides.
+    """
+    with Session(engine) as session:
+        row = UserMemory(
+            content=content,
+            category=category,
+            scope=scope,
+            project_path=project_path if scope == "project" else None,
+            source_thread_id=source_thread_id,
+        )
+        session.add(row)
+        session.commit()
+        session.refresh(row)
+        return row.id
+
+
+def list_memories(
+    project_path: Optional[str] = None, scope: Optional[str] = None,
+) -> List[dict]:
+    """Memories visible from `project_path`, NEWEST FIRST.
+
+    Returns global memories plus the project ones recorded against exactly
+    this path -- which is AC6: a memory written in one project does not
+    surface in a thread opened from another. `project_path=None` returns
+    global memories only, which is the honest answer when no project has
+    been resolved rather than a reason to show everything.
+
+    `scope` filters to one kind, for the management commands. Absent means
+    both, which is what prompt assembly wants.
+
+    Plain dicts rather than ORM instances, for the same reason
+    _ordered_rows returns them: every caller reads these after the Session
+    has closed.
+    """
+    with Session(engine) as session:
+        statement = (
+            select(UserMemory)
+            .order_by(UserMemory.created_at.desc(), UserMemory.id.desc())
+        )
+        rows = list(session.exec(statement).all())
+        out = []
+        for row in rows:
+            if scope is not None and row.scope != scope:
+                continue
+            if row.scope == "project" and row.project_path != project_path:
+                continue
+            out.append({
+                "id": row.id, "content": row.content,
+                "category": row.category, "scope": row.scope,
+                "project_path": row.project_path,
+                "source_thread_id": row.source_thread_id,
+                "created_at": row.created_at,
+            })
+        return out
+
+
+def forget_memory(memory_id: UUID) -> bool:
+    """Delete one memory. True if a row was removed.
+
+    A REAL DELETE, unlike everything else here. MessageLog is append-only
+    because a conversation is a record of what happened; a UserMemory is a
+    standing assertion the harness keeps repeating, and "this is no longer
+    true" has no useful archived form. Returning False for an unknown id
+    rather than raising: the id came from a human reading a list, and a
+    typo deserves "no such memory", not a traceback.
+    """
+    with Session(engine) as session:
+        row = session.get(UserMemory, memory_id)
+        if row is None:
+            return False
+        session.delete(row)
+        session.commit()
+        return True

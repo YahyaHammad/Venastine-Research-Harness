@@ -270,6 +270,7 @@ class FakeStorage:
         self._messages_by_thread = {}  # thread_id -> list of neutral-shape dicts
         self._thread_extra = {}   # thread_id -> dict (extra_data mirror)
         self._checkpoints = {}    # thread_id -> the latest CompactionCheckpoint (§21)
+        self._memories = []       # UserMemory rows, oldest first (§21b)
 
     def create_thread(self):
         from datetime import datetime, timezone
@@ -403,6 +404,41 @@ class FakeStorage:
                     changed += 1
         return changed
 
+    # -- ROADMAP_v2 §21b durable memory ------------------------------------
+
+    def save_memory(self, content, source_thread_id, scope="project",
+                    category=None, project_path=None):
+        from uuid import uuid4 as _u
+        from datetime import datetime, timezone
+        row = {
+            "id": _u(), "content": content, "category": category,
+            "scope": scope,
+            "project_path": project_path if scope == "project" else None,
+            "source_thread_id": source_thread_id,
+            "created_at": datetime.now(timezone.utc),
+        }
+        self._memories.append(row)
+        return row["id"]
+
+    def list_memories(self, project_path=None, scope=None):
+        """Mirrors storage.list_memories: newest first, global always
+        visible, project rows only for THIS path (AC6)."""
+        out = []
+        for row in reversed(self._memories):
+            if scope is not None and row["scope"] != scope:
+                continue
+            if row["scope"] == "project" and row["project_path"] != project_path:
+                continue
+            out.append(dict(row))
+        return out
+
+    def forget_memory(self, memory_id):
+        for index, row in enumerate(self._memories):
+            if row["id"] == memory_id:
+                del self._memories[index]
+                return True
+        return False
+
     def _ordered_rows(self, thread_id):
         """Mirrors storage._ordered_rows: raw column values, oldest first.
         core/compaction.py resolves a fold boundary through this."""
@@ -474,6 +510,9 @@ MEMORY_STORAGE_SYMBOLS = (
 # future. core.memory imports at module top and so needs its own redirect.
 STORAGE_SYMBOLS = MEMORY_STORAGE_SYMBOLS + (
     "archive_history", "history_through", "save_checkpoint", "_ordered_rows",
+    # ROADMAP_v2 §21b durable memory. memories/manager.py imports these
+    # lazily, so patching the module covers it.
+    "save_memory", "list_memories", "forget_memory",
 )
 
 

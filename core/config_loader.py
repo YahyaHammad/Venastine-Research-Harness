@@ -663,6 +663,25 @@ def get_settings() -> dict:
     return dict(_state["settings"])
 
 
+def get_project_path() -> Optional[str]:
+    """The RESOLVED project path this session was initialized against.
+
+    ROADMAP_v2 §21b (M12/D25): a project-scoped memory is keyed to "the
+    same resolved project path the workspace-trust store uses", so there
+    has to be exactly one answer to "which project" across trust, config
+    and memory. This is it -- the realpath already computed at
+    initialize() time, not a fresh resolution that could differ.
+
+    None before initialize(), matching every other getter here. A caller
+    that gets None has no project to scope to, which memories/manager.py
+    treats as "global memories only" rather than as "show everything":
+    guessing a project would surface another one's facts.
+    """
+    if _state is None:
+        return None
+    return _state["project_path"]
+
+
 def get_skill(name: str) -> Optional[SkillDef]:
     if _state is None:
         return None
