@@ -609,3 +609,41 @@ root fix is in, the watermark never goes backwards, so `save_checkpoint`'s refus
 calling them directly. A guard with no test making it fire is indistinguishable from a
 guard that does not work — the first revert-check pass of this fix reported four
 MISSes for exactly that reason.
+
+## §21b — durable memory (2026-08-05)
+
+| Change | What breaks | Fix / why |
+|---|---|---|
+| Ignore `project_path` when listing | `test_a_project_memory_is_invisible_from_another_project` | M12. D25 keys project memories to the resolved path; with only a `scope` string, AC6 is unwriteable as a test rather than merely unenforced |
+| Stamp a global row with a project path | `test_a_global_memory_records_no_project_path` | It is then global in name and project-scoped in effect the moment anything filters on the column |
+| Return everything when no project resolved | `test_no_resolved_project_means_no_memories_at_all` | `get_project_path()` is None exactly when `initialize()` has not run — "there is no session", not "this session is outside a project" |
+| List oldest first | `test_memories_come_back_newest_first` | M14 keeps the most recent N, so the ordering decides which memories survive the cap |
+| Make `forget_memory` raise on an unknown id | `test_forgetting_an_unknown_id_reports_rather_than_raises` | The id came from a human reading a list |
+| Treat `agent=None` as opted OUT | `test_a_plain_chat_turn_counts_as_opted_in` | M13. `system_prompt_for` is unreachable without an agent, so the feature would be invisible in the default shell — the §25 shape |
+| Drop the `use_memory` check at the assembly | `test_an_opted_out_agent_gets_no_fragment` | How the compactor and pipeline reviewer stay out of a user's durable facts |
+| Remove M14's cap, or truncate silently | `test_the_cap_limits_how_many_reach_the_prompt`, `test_truncation_is_stated_in_the_prompt_the_model_reads` | Unbounded growth is what §21 exists to fight. The message goes to the MODEL, not only to a log — a log line reaches nobody mid-conversation |
+| Announce truncation that did not happen | `test_nothing_is_said_about_truncation_when_none_happened` | The control. "Showing N of N" on every prompt is noise that trains the reader past the real one |
+| **Append the fragment inside `with_catalogs()`** | `test_no_memory_reaches_a_research_pass_prompt` | **§19's K6, second instance.** That function feeds `pass_prompt()`, so every user memory would land in all ten research passes from a shell that wrote none of them |
+| Stop appending in `run_agent_conversation` | `test_a_real_chat_turn_sends_the_memories` | The CALL SITE. A first version of that test exercised `with_memories` directly and stayed green through this revert — a helper existing proves nothing if nobody calls it |
+| Append for an agent-built prompt too | `test_a_real_chat_turn_with_an_agent_prompt_does_not_double_up` | It already went through `system_prompt_for`; repeating pays twice for the tokens M14's cap bounds |
+| Un-gate `remember`, or gate `pin` | `test_remember_requires_approval_and_pin_does_not` | D26 asserted as the PAIR it is — either half alone reads as arbitrary. Note `remember: bool = True` appears in BOTH permission dataclasses; reverting the wrong one proves nothing |
+| Remove `remember` from `PIPELINE_UNGRANTABLE` | `test_remember_cannot_be_granted_to_a_research_run` | M17. No `approval_check` means R2 calls it grantable, so one `--grant remember` would let ten unattended passes write durable memories — what D26's consequence 1 forbids |
+| Drop the content or the reach from the approval notice | `test_the_notice_shows_the_exact_content`, `test_the_notice_distinguishes_global_from_project_reach` | The gate is only worth having if the prompt shows what it is gating |
+| Coerce an unknown scope to the default | `test_an_unknown_scope_is_refused_rather_than_coerced` | A model asking for "global" and getting a project row believes a preference follows the user everywhere when it does not |
+| Write a project row with no resolved project | `test_a_project_memory_with_no_resolved_project_is_refused` | `list_memories` matches project rows on the path, so it could never be read back — invisible rather than wrong, which is worse |
+| Give a piped run a provider | `test_a_piped_session_stays_headless`, `test_a_piped_chat_turn_carries_none` | M16. Matching `build_review_consent`: nobody is there to ask, so `remember` must not fire |
+| Make chat use attended's `honour_run_scope=False` | `test_the_chat_provider_honours_run_scope` | Chat wants §18's per-run shortcut; attended research exists for per-call supervision. The two builders must not converge |
+| Stop passing the authorization from `run_chat` | `test_a_chat_turn_carries_the_authorization` | Same call-site lesson as above, applied before it could repeat |
+| Let `/forget` match a content substring | `test_forget_refuses_a_substring_rather_than_guessing` | A substring hitting two memories has to pick one, and picking silently deletes what the user did not name |
+| Drop `/forget`'s empty-argument check | `test_forget_with_no_argument_explains_itself` | Asserted on "Usage:" and NOT on "/memories", which both branches mention — the first version of this row stayed green through the revert for exactly that reason |
+
+### Two standing notes
+
+**Prompt assembly now reads storage.** Any test that initializes `config_loader` AND
+builds an agent or chat prompt needs the `fake_storage` fixture — five existing tests
+gained it here. A test that does *not* initialize the loader is unaffected, because
+`get_project_path()` returns None and the manager answers with nothing.
+
+**`test_compaction_e2e.py` is now `tests/test_storage_e2e.py`** and is the home for
+every real-`storage.py` test, not just compaction's. The one-swap rule in the §21a
+notes above still applies and is the reason it is one file.

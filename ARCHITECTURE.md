@@ -93,7 +93,11 @@ Venastine Research Harness/
 │   ├── test_loop_compaction.py    # 13 tests -- ROADMAP_v2 §21a where the trigger is evaluated (M3) and how notices reach each shell
 │   ├── test_pin_tool.py           # 12 tests -- ROADMAP_v2 §21a D24/D26 declarations, the `memory` injectable, input handling
 │   ├── test_shell_compaction.py   # 17 tests -- ROADMAP_v2 §21a §21's visibility rule at both shells, and /compact
-│   └── test_compaction_e2e.py     # 9 tests -- ROADMAP_v2 §21a review: real ConversationMemory + real storage.py on real SQLite, compacting four times through the loop path. The only test at this level, and it found the shipped M11 defect
+│   ├── test_storage_e2e.py     # 9 tests -- ROADMAP_v2 §21a review: real ConversationMemory + real storage.py on real SQLite, compacting four times through the loop path. The only test at this level, and it found the shipped M11 defect
+│   ├── test_memories.py           # 13 tests -- ROADMAP_v2 §21b scope resolution, the injection cap (M14) and the opt-in rule (M13)
+│   ├── test_remember_tool.py      # 16 tests -- ROADMAP_v2 §21b D24/D26 declarations, the approval notice, M17's exclusion from pipeline grants
+│   ├── test_memory_injection.py   # 12 tests -- ROADMAP_v2 §21b the three placements and the with_catalogs boundary (M13/K6), plus AC5/AC6 end to end
+│   └── test_memory_shells.py      # 16 tests -- ROADMAP_v2 §21b M16's CLI approval provider and M15's /memories, /forget
 │
 ├── core/
 │   ├── client.py                  # ONE model call, normalized across providers; provider-specific wire formats live ONLY here. §13 adds call_model_stream() (3 streaming impls) + collect_response() + StreamToken
@@ -152,6 +156,10 @@ Venastine Research Harness/
 │       ├── grill-me.md            # built-in agent: surfaces what still needs a decision in the current thread
 │       ├── pipeline-reviewer.md   # ROADMAP_v2 §20: reviews a finished research run and proposes corrections. No spawn_subagent, no load_skill
 │       └── compactor.md           # ROADMAP_v2 §21a: condenses an older stretch of a conversation. allowed_tools: [] -- it summarizes, it does not act
+│
+├── memories/                      # ROADMAP_v2 §21b: durable memory. Namespace package, mirroring skills/
+│   ├── manager.py                 # scope resolution (D25/M12), the injection cap (M14), prompt_fragment() -- the ONE assembly point
+│   └── tui_commands.py            # /memories, /forget registered into §16's slash registry (M15)
 │
 ├── skills/                        # ROADMAP_v2 §19: skill system. Namespace package, mirroring agents/
 │   ├── manager.py                 # SkillManager -- HOLDS NO STATE (K3): activate/deactivate take and return the active list; missing_tools (K2); prompt_fragment (K1)
@@ -377,7 +385,7 @@ Covered in full in §7 below. The short version of the file boundary: `base.py` 
   - `provider_factory` / `client_for_provider` — return a mock-`api_initialization`-compatible tuple for translation tests.
   - `clear_client_cache` (autouse) — resets `api_initialization`'s cached clients before each test.
 - **`tests/BREAKING_CHANGES.md`** — per-file tables documenting what breaks each test when production code changes, the symptom, and the fix. Created because `test_orchestrator.py` was identified as the suite's most fragile mock — its mock dict is keyed by pass_id strings that ROADMAP §3 and §10 will modify.
-- **46 test files** (6 per ROADMAP §4 + 2 from §4's own additions: `test_memory_write_through.py`, `test_loop_tool_dispatch.py`; + 2 from §3/§5: `test_json_retry.py`, `test_pipeline_storage.py`; + 2 from §1: `test_cli.py`, `test_e2e.py`; + 1 from §12: `test_output_writer.py`; + 1 from audit: `test_logging_setup.py`; + 1 from §6: `test_file_ops.py`; + 1 from §7: `test_shell.py`; + 1 from §8: `test_policy_enforcement.py`; + 2 from §13: `test_client_streaming.py`, `test_streaming_loop.py`; + 3 from ROADMAP_v2 §14: `test_workspace_trust.py`, `test_config_loader.py`, `test_load_skill.py`; + 1 from §15: `test_permission_context.py`; + 1 from §11: `test_critic_routing.py`; + 1 from §16: `test_client_effort.py`; + 1 from §10's fix: `test_ensemble_guard.py`; + 3 from §17: `test_mcp_client.py`, `test_mcp_config.py`, `test_mcp_integration.py`; + 1 from §16: `test_tui.py`; + 1 from §18: `test_agents.py`; + 4 from §25: `test_grants.py`, `test_attended.py`, `test_research_authorization.py`, `test_granted_calls_artifact.py`; + 1 from §19: `test_skills.py`; + 1 from §20: `test_review.py`; + 1 from the §19–§20 review follow-up: `test_docs_consistency.py`; + 7 from §21a: `test_schema_migration.py`, `test_storage_reads.py`, `test_memory_compaction.py`, `test_compaction.py`, `test_loop_compaction.py`, `test_pin_tool.py`, `test_shell_compaction.py`; + 1 from the §21a review: `test_compaction_e2e.py`).
+- **50 test files** (6 per ROADMAP §4 + 2 from §4's own additions: `test_memory_write_through.py`, `test_loop_tool_dispatch.py`; + 2 from §3/§5: `test_json_retry.py`, `test_pipeline_storage.py`; + 2 from §1: `test_cli.py`, `test_e2e.py`; + 1 from §12: `test_output_writer.py`; + 1 from audit: `test_logging_setup.py`; + 1 from §6: `test_file_ops.py`; + 1 from §7: `test_shell.py`; + 1 from §8: `test_policy_enforcement.py`; + 2 from §13: `test_client_streaming.py`, `test_streaming_loop.py`; + 3 from ROADMAP_v2 §14: `test_workspace_trust.py`, `test_config_loader.py`, `test_load_skill.py`; + 1 from §15: `test_permission_context.py`; + 1 from §11: `test_critic_routing.py`; + 1 from §16: `test_client_effort.py`; + 1 from §10's fix: `test_ensemble_guard.py`; + 3 from §17: `test_mcp_client.py`, `test_mcp_config.py`, `test_mcp_integration.py`; + 1 from §16: `test_tui.py`; + 1 from §18: `test_agents.py`; + 4 from §25: `test_grants.py`, `test_attended.py`, `test_research_authorization.py`, `test_granted_calls_artifact.py`; + 1 from §19: `test_skills.py`; + 1 from §20: `test_review.py`; + 1 from the §19–§20 review follow-up: `test_docs_consistency.py`; + 7 from §21a: `test_schema_migration.py`, `test_storage_reads.py`, `test_memory_compaction.py`, `test_compaction.py`, `test_loop_compaction.py`, `test_pin_tool.py`, `test_shell_compaction.py`; + 1 from the §21a review: `test_storage_e2e.py`; + 4 from §21b: `test_memories.py`, `test_remember_tool.py`, `test_memory_injection.py`, `test_memory_shells.py`).
 
 **What belongs here:** tests that run offline (~24s; first run ~30s for the matplotlib font cache), with zero network access and zero real API keys. Stubs in root `conftest.py` catch import-time module resolution; fixtures in `tests/conftest.py` provide `ModelResponse` construction and storage mocking; individual test files cover production code's behavior.
 
@@ -511,6 +519,29 @@ cancels — never compare a value derived from it against a provider's token cou
 deliberately not routed through `core/reasoning/json_retry.py`: that module takes a
 run trace and names passes, and bending it to serve memory would invert the
 dependency for three lines of shared structure.
+
+### 4.21 `memories/` — durable cross-thread memory (ROADMAP_v2 §21b)
+
+**Belongs here:** which memories a session may see (`scope_path`, `visible` — D25's
+project/global split keyed to M12's `project_path` column), how many reach a prompt
+(`prompt_fragment` and M14's cap), and §16's `/memories` / `/forget` commands.
+Mirrors `skills/` deliberately: a manager over rows the loader does not own, holding
+no session state, plus a single `prompt_fragment()`.
+
+**Does NOT belong here:** persistence (`storage.py`'s `UserMemory` + CRUD), the
+decision to write one (`tools/builtin/remember.py` plus D26's approval gate), and
+WHERE the fragment is appended — `agents/manager.py` for an agent run and each shell
+for a plain chat turn.
+
+**THE FRAGMENT IS APPENDED OUTSIDE `with_catalogs()`** (M13). That function feeds
+`pass_prompt()`, so a memory added inside it would land in all ten research passes,
+from a shell that wrote none of them. §19 recorded this as K6 for skill bodies; §21b
+is its second instance, and the reason the fragment is appended by its callers rather
+than by the assembly point they share.
+
+**A package under the project root, not a module under `core/`** — `core/memory.py`
+already means the in-run conversation state, and two names that close together is a
+trap rather than a convention.
 
 ## 5. Request lifecycle — regular conversation, traced end to end
 

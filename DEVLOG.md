@@ -2152,3 +2152,102 @@ real `ConversationMemory` against real `storage.py` on real SQLite, and it found
 bug on its second assertion.
 
 The manual pass would have found it in one conversation. It is still not done.
+
+
+---
+
+# §21b — Durable memory: `remember`, `use_memory`, `/forget` (2026-08-05)
+
+Built in six commits. `remember(content, scope)` writes a row that outlives its
+thread, and an opted-in run gets those rows injected as a third context tier beside
+`CONTEXT.md`. This is the long-term memory feature deferred at the very start of the
+project; `use_memory` had been parsed by `config_loader` since §14 with **no consumer
+at all**, and §21b is its first.
+
+## What tracing the spec against the code found
+
+**One spec gap.** §21's `UserMemory` schema carries `scope` and no path, but D25 says
+a project-scoped memory is "keyed to the same resolved project path the workspace-trust
+store uses". Without the path, `"project"` cannot tell two projects apart — so AC6 was
+not merely unenforced, it was *unwriteable as a test*. M12 adds `project_path`.
+
+**One security hole, from reading two documents together.** D26's consequence 1 says
+research passes cannot write durable memories, and that is true of the approval gate
+alone. But `remember` has no `approval_check`, so §25's R2 rule makes it *grantable* —
+it would have appeared in the research grant picker, and one `--grant remember` at
+launch would let ten unattended passes, reading fetched web pages, write durable
+cross-session memories. Neither document is wrong by itself. M17 adds `remember` to
+`PIPELINE_UNGRANTABLE`, which is where R4 already put `spawn_subagent` for the same
+reason.
+
+**Three unstated behaviours**: whether plain chat gets memories at all (M13), how many
+are injected (M14), and what happens when one goes stale (M15).
+
+## The decision that mattered most
+
+**M13 — plain chat counts as opted in.** `system_prompt_for()` is the only place
+`CONTEXT.md` is injected, and it is reachable *solely* when running as an agent. So the
+literal reading of §21's "an agent opts in via `use_memory: true`" makes durable
+memories invisible in ordinary conversation — the main case, and the §25 shape: a
+capability a whole shell cannot reach. The frontmatter parser already defaults
+`use_memory` to `True`; treating "no agent at all" the same is consistency rather than
+a new rule.
+
+Its corollary is the trap: the fragment must be appended **outside** `with_catalogs()`,
+which feeds `pass_prompt()`. Inside it, every user memory would land in all ten research
+passes. §19 recorded exactly this as K6 for skill bodies. Two sections later it is the
+same function and the same mistake available, which is why the boundary is asserted two
+ways — against all ten pass prompts, and directly against `with_catalogs` so a future
+caller inherits the guarantee.
+
+## Deviations and additions
+
+- **`/memories` and `/forget` ship now**, where §21 frames `/forget` as the fallback
+  *if* the approval prompt proves too frequent. Staleness is a different problem the
+  gate never touches: a memory approved when it was true survives the thing that made
+  it false. Removal is by id, never by content substring — a substring matching two
+  memories would have to pick one, and picking silently deletes what the user did not
+  name.
+- **An unresolved project means no memories, not global-only.**
+  `get_project_path()` returns `None` exactly when `initialize()` has not run, so that
+  state is "there is no session". It follows the convention `get_agents()` set, and it
+  is also what keeps every prompt-assembly test that never initializes the loader from
+  needing a database.
+- **No `— remembered: "…" —` marker.** §21 names one as part of the *ungated* fallback
+  design. With the gate in place the approval notice already shows the exact content
+  and how far it will reach, *before* the write — strictly better than a confirmation
+  afterwards.
+
+## Two revert checks that missed, and why
+
+Both are the same lesson in different clothes, and both were caught by the revert pass
+rather than by review.
+
+**A helper existing proves nothing if nobody calls it.** The plain-chat injection test
+exercised `with_memories()` directly, so deleting the call site in
+`run_agent_conversation` left it green. Two tests now drive a real turn and assert on
+the system prompt actually sent.
+
+**Two branches producing similar text make an assertion vacuous.** Dropping `/forget`'s
+empty-argument check falls through to the malformed-id branch, whose message also
+mentions `/memories` — so the assertion held against the revert. It now asserts on
+`"Usage:"`, which only the empty branch produces.
+
+## Tests
+
+863 → 927, all offline. Four new files plus the §21b half of `test_storage_e2e.py`
+(renamed from `test_compaction_e2e.py`, since there can be only one fake-`sqlmodel`
+swap and scope filtering is a question worth asking of real SQL). 39 revert checks.
+
+Five existing tests gained the storage fake, because prompt assembly now legitimately
+reads memories and those five initialize the loader.
+
+All ten research-pass prompts verified byte-identical by hashing before and after the
+injection commit.
+
+## Not verified
+
+The manual pass, still — for §21b as well as §21a now. Nothing has watched a real model
+choose to call `remember`, or seen whether the injected block reads well at the top of a
+long conversation. The approval prompt's wording in particular is the sort of thing only
+use will settle.

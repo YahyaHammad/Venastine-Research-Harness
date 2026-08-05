@@ -36,7 +36,7 @@ MCP servers are a *third* config file again — `mcp.json`, user-level or `.vena
 Read these before changing anything non-trivial — they carry design decisions that are locked, not defaults to re-derive.
 
 - **ARCHITECTURE.md** — what's built, file-by-file contracts ("what belongs here / what does NOT"), known gotchas (§11).
-- **ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **ROADMAP_v2.md** (§13–§25; §13–§20, §21a and §25 built) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R12 from §25, K1–K7 from §19, V1–V9 from §20 and M1–M10 from §21a). Section and D-numbers are stable and cross-referenced everywhere.
+- **ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **ROADMAP_v2.md** (§13–§25; §13–§20, §21a, §21b and §25 built) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R12 from §25, K1–K7 from §19, V1–V9 from §20 and M1–M17 from §21a/§21b). Section and D-numbers are stable and cross-referenced everywhere.
 - **DEVLOG.md** — per-section implementation notes: what was followed verbatim, what was deviated from (every deviation was an explicit user decision — do not silently override).
 - **tests/BREAKING_CHANGES.md** — what breaks each test when production code changes, the symptom, and the fix.
 - **QWEN.md** — a sibling agent-context file. Stale (it predates §13–§16 and disagrees with itself on test counts); prefer ARCHITECTURE.md and the code.
@@ -244,9 +244,37 @@ read time. Additive only — it warns rather than raises on a type mismatch, sin
 SQLite's type affinity makes most mismatches harmless and a raise here would brick
 every launch. If it ever grows a `DROP`, the project has outgrown it.
 
-**§21b (durable `remember`) and §21c (`/ref`, session summaries) are not built.**
-§21b's first task is wiring §25's `ApprovalProvider` into CLI chat, or D26's gate
-makes `remember` a TUI-only capability — the §25 mistake again.
+### Durable memory (`memories/`, §21b)
+
+`remember(content, scope)` writes a row that outlives its thread; an opted-in run gets
+those rows injected as a third context tier beside `CONTEXT.md`. `use_memory` had been
+parsed since §14 with no consumer at all — this is its first.
+
+- **Turn counting's sibling trap: the fragment goes OUTSIDE `with_catalogs()`** (M13).
+  That function feeds `pass_prompt()`, so a memory appended inside it lands in all ten
+  research passes — §19's K6, second instance. The fragment is appended by its three
+  callers: `system_prompt_for` for agents, and the no-agent path in each shell.
+- **Plain chat counts as opted in** (M13). `system_prompt_for` is unreachable without
+  an agent, so the literal "an agent opts in" reading would make the whole feature
+  invisible in the default shell.
+- **An unresolved project means NO memories, not global-only.**
+  `config_loader.get_project_path()` is `None` exactly when `initialize()` has not run,
+  and that is "there is no session". Same convention as `get_agents()`.
+- **`UserMemory.project_path` is M12's addition to §21's schema.** D25 keys project
+  memories to the resolved path; with only a `scope` string, AC6 is unwriteable.
+- **Injection is capped and says so** (M14). `MAX_INJECTED_MEMORIES`, newest first,
+  with "showing the 50 most recent of 73" in the fragment the model reads — not only
+  in a log, which reaches nobody mid-conversation.
+- **`remember` is in `PIPELINE_UNGRANTABLE`** (M17). It has no `approval_check`, so
+  §25's R2 would make it grantable and one `--grant remember` would let ten unattended
+  passes write durable memories — exactly what D26's consequence 1 forbids.
+- **Removal is by id, never by substring** (M15). A substring matching two memories
+  would have to pick one, and picking silently deletes what the user did not name.
+- **CLI chat now has an `ApprovalProvider`** (M16), so `shell`, `spawn_subagent` and
+  every MCP tool are advertised and promptable there, not just `remember`. `None` on a
+  non-tty, so piped runs stay headless.
+
+**§21c (`/ref`, session summaries) is not built.**
 
 ### Config loading and workspace trust (ROADMAP_v2 §14)
 

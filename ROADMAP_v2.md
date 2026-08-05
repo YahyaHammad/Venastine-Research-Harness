@@ -1008,7 +1008,7 @@ Implemented; decision record in DEVLOG §20, file contracts in ARCHITECTURE.md. 
 
 ---
 
-## 21. Memory system — compaction, archive, thread-scoped pinning, user/project memory — §21a BUILT
+## 21. Memory system — compaction, archive, thread-scoped pinning, user/project memory — §21a + §21b BUILT
 
 **This section fully replaces Rev. 1's placeholder** (D16 originally called it a thin, deferrable truncation strategy). Discussion surfaced that this is, in substance, the long-term memory feature that was deliberately deferred at the very start of this project's build ("persistence yes, extracted long-term memory not yet") — it's arriving on schedule as the harness grows, not as scope creep.
 
@@ -1128,8 +1128,8 @@ Both of these were asked for as TUI features and are really this section's:
 ### Decisions record (M1–M10), added at build time
 
 §21 was split at build time. **§21a (BUILT)** is compaction, the checkpoint, the
-hyperparameters and `pin`. **§21b** is durable `remember` / `use_memory` / `/forget`;
-**§21c** is `/ref` and session summaries. Each is independently useful and
+hyperparameters and `pin`. **§21b (BUILT)** is durable `remember` / `use_memory` /
+`/memories` / `/forget`. **§21c** is `/ref` and session summaries. Each is independently useful and
 independently testable, and §21a is roughly §20-sized on its own.
 
 Tracing this section against the code before writing any surfaced two holes in its
@@ -1253,6 +1253,86 @@ checkpoint; `save_checkpoint()` refuses a watermark that does not advance, becau
 the caller-side check only covers the one caller that exists today. Same posture as
 D24's declared-permission check: the invariant is cheap to state and its violation is
 silent and durable.
+
+### Decisions record (M12–M17), added at §21b's build
+
+Tracing §21's durable-memory block against the code turned up one spec gap, one
+security hole and three unstated behaviours.
+
+**M12 — `UserMemory` needs a `project_path` column the spec omits.** D25 says a
+project-scoped memory is "keyed to the same resolved project path the workspace-trust
+store uses", but the schema block above carries only `scope`. With no path recorded,
+`"project"` cannot tell two projects apart — so AC6 ("that memory does not surface in
+a thread opened from a different project directory") was not merely unenforced, it was
+unwriteable as a test. `project_path` holds the realpath for `scope="project"` and
+`None` for `"global"`, from a new `config_loader.get_project_path()` over the value
+`initialize()` already resolved.
+
+**M13 — Plain chat counts as opted in, and the fragment goes OUTSIDE
+`with_catalogs()`.** `system_prompt_for()` — the only place `CONTEXT.md` is injected
+— is reachable solely when running as an agent, so the literal reading of "an agent
+opts in via `use_memory: true`" makes memories invisible in ordinary chat, which is
+the main case and the §25 shape: a capability a whole shell cannot reach. The
+frontmatter parser already defaults `use_memory` to `True`, so an agent that says
+nothing gets them; "no agent at all" is treated the same. `use_memory: false` still
+opts out, which is how the compactor and the pipeline reviewer stay out of a user's
+durable facts.
+
+`memories.manager.prompt_fragment()` is the single assembly point, mirroring
+`skills.manager.prompt_fragment`, appended by its three CALLERS — never inside
+`with_catalogs()`, which feeds `pass_prompt()` and would put every memory into all ten
+research passes. §19 recorded that as K6 for skill bodies; this is its second instance.
+
+Consequence, stated rather than discovered: research passes neither read nor write
+memories. They never reach `system_prompt_for`, and D26 already stops them writing.
+
+Also settled here: **an unresolved project means NO memories, not global-only.**
+`get_project_path()` returns `None` exactly when `initialize()` has not run, and
+`main.py` runs it at startup — so that state is "there is no session", and answering
+with rows would mean reading a database on behalf of one that does not exist. Same
+convention `get_agents()`/`get_skills()` already set.
+
+**M14 — Injection is capped by count, and the cap is stated in the text the model
+reads.** Every in-scope memory would otherwise enter every turn forever, which is the
+unbounded context growth §21 exists to fight — reintroduced by the feature meant to
+complement it. `config.MAX_INJECTED_MEMORIES` (50), newest first, because recency is
+the only staleness signal available without asking a model. The truncation appears in
+the fragment as well as in a log: the model is the consumer, and one that can see it
+is looking at a truncated list can say so, while a log line reaches nobody
+mid-conversation. Same "no silent caps" rule as §20's `MAX_REVIEW_FINDINGS`.
+
+**M15 — `/memories` and `/forget` ship with §21b, not as D26's fallback.** §21 frames
+`/forget` as what to build *if* the approval prompt proves too frequent. Staleness is
+a different problem the gate never touches: a memory approved when it was true
+survives the thing that made it false. Without removal one wrong memory is permanent,
+and listing is what makes removal usable, since the model never shows ids. The CLI
+gets `--memories` / `--forget` as flags because it has no slash-command layer — and
+because M16 makes a CLI-only user able to *write* a memory, so they would otherwise
+have no way to remove one. Removal is by id, never by content substring: a substring
+matching two memories would have to pick one or refuse, and picking silently deletes
+something the user did not name.
+
+**M16 — CLI chat gains a general `ApprovalProvider`, and the reach is the point.**
+§13 does not merely DENY an approval-gated tool where nothing can answer; it stops
+advertising it. So CLI chat could not see `shell`, `spawn_subagent`, `remember` or any
+MCP tool at all. A provider makes all of them advertised and promptable, matching what
+the TUI has always done — intended, and larger than the one tool §21b needed it for.
+
+Carried as a `RunAuthorization` with an empty grant set rather than a new
+`approval_provider=` parameter, so it reuses `_authorization_kwargs`; a provider means
+"someone is here to ask", never "these tools are pre-approved". `honour_run_scope=True`
+for chat and `False` for attended research, and the two must not converge — chat wants
+§18's per-run shortcut, attended research exists for per-call supervision. `None` on a
+non-tty, matching `build_review_consent`, so a piped run stays headless.
+
+**M17 — `remember` joins `PIPELINE_UNGRANTABLE`.** It has no `approval_check`, so
+§25's R2 rule makes it grantable and it would have appeared in the research grant
+picker. One `--grant remember` at launch would let ten unattended passes — reading
+attacker-controlled web pages — write durable cross-session memories. That is exactly
+what D26's consequence 1 says must not be possible, and R4's reasoning about one
+launch-time tick compounding into unbounded delegated authority applies word for word.
+Found by tracing D26's stated consequence against §25's actual grant rule; neither
+document is wrong alone.
 
 **Carried to §21b**, decided during §21a's design and not built there: wire §25's
 `ApprovalProvider` into CLI chat, so D26's approval-gated `remember` is reachable in
