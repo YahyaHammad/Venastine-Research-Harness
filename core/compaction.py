@@ -167,11 +167,22 @@ def compactable_span(memory, current_turn_start: Optional[int] = None,
     not a failure: a thread of three enormous turns is over the trigger and
     entirely protected. The caller reports it rather than silently doing
     nothing.
+
+    EVERY FLOOR IS MEASURED IN ARCHIVE SPACE (M11), from one load of the
+    thread's rows. The keep-tokens floor used to slice `memory.messages`
+    and map positions back onto the archive's turn list; M8 puts a
+    `role: "user"` summary at the head of a compacted view, so the two
+    lists disagree by one turn and `current_turn_start` arrived in the
+    wrong space entirely. That was §21a's shipped defect -- the watermark
+    went backwards and the second compaction of a thread un-compacted it.
+    Reading everything from `rows` makes the mismatch unrepresentable
+    rather than merely fixed.
     """
-    from storage import turn_start_ids
+    from storage import _ordered_rows
 
     settings = config_loader.effective_compaction(overrides)
-    starts = turn_start_ids(memory.thread_id)
+    rows = _ordered_rows(memory.thread_id)
+    starts = [i for i, row in enumerate(rows) if row["role"] == "user"]
     if not starts:
         return None
 
@@ -183,55 +194,25 @@ def compactable_span(memory, current_turn_start: Optional[int] = None,
         cutoff = min(cutoff, current_turn_start)
 
     # The token floor: keep whole turns, walking back from the end, until
-    # keep_recent_tokens is covered.
-    #
-    # Counted FROM THE END on both sides. `starts` comes from the archive
-    # and `memory.messages` is the derived view, which may open with a
-    # summary message belonging to no turn -- so the two lists agree by
-    # position only at their tails. The k-th-from-last turn is the same
-    # turn in both, and the k-th is not.
-    turns = _turns_from_end(memory.messages)
+    # keep_recent_tokens is covered. Sized from the persisted content,
+    # which is the same character proxy M10 uses everywhere else.
+    bounds = starts + [len(rows)]
     kept = 0
     token_cutoff = len(starts)
-    for back, turn in enumerate(turns, start=1):
-        kept += _chars(turn) // CHARS_PER_TOKEN
-        token_cutoff = len(starts) - back
-        if kept >= settings["keep_recent_tokens"]:
+    for index in range(len(starts) - 1, -1, -1):
+        kept += sum(len(rows[i]["content"])
+                    for i in range(bounds[index], bounds[index + 1]))
+        token_cutoff = index
+        if kept // CHARS_PER_TOKEN >= settings["keep_recent_tokens"]:
             break
     cutoff = min(cutoff, token_cutoff)
 
     if cutoff < 1:
         return None
     # Fold everything strictly before turn `cutoff`, so the watermark is
-    # the message just before that turn's first message.
-    return _message_before(memory, starts[cutoff])
-
-
-def _turns_from_end(messages) -> list:
-    """The derived view sliced into turns, MOST RECENT FIRST.
-
-    Most-recent-first is the ordering the keep-tokens floor walks, and the
-    only ordering that lines up with the archive's turn list: a compacted
-    view opens with a summary and pinned rows that belong to no turn of
-    their own, so the two agree by position from the end and not from the
-    start.
-    """
-    users = [i for i, m in enumerate(messages) if m.get("role") == "user"]
-    bounds = users + [len(messages)]
-    return [messages[bounds[i]:bounds[i + 1]]
-            for i in range(len(users) - 1, -1, -1)]
-
-
-def _message_before(memory, message_id):
-    """The archive id immediately preceding `message_id`, or None if it is
-    the first row."""
-    from storage import _ordered_rows
-
-    rows = _ordered_rows(memory.thread_id)
-    for index, row in enumerate(rows):
-        if row["id"] == message_id:
-            return rows[index - 1]["id"] if index else None
-    return None
+    # the row just before that turn's first row. cutoff >= 1 guarantees
+    # there is one.
+    return rows[starts[cutoff] - 1]["id"]
 
 
 def _target_chars(original_chars: int, strength: int) -> int:
@@ -285,7 +266,10 @@ def compact(memory, model: str, provider_name: str,
 
     from agents.manager import manager
     from core.loop import RunAgentLoop, DEFAULT_SYSTEM_PROMPT
-    from storage import history_through, latest_checkpoint, save_checkpoint
+    from storage import (
+        advances, history_through, latest_checkpoint, save_checkpoint,
+    )
+    storage_advances = advances
 
     if _compacting:
         return None
@@ -310,6 +294,21 @@ def compact(memory, model: str, provider_name: str,
         return None
 
     previous = latest_checkpoint(memory.thread_id)
+    # NO PROGRESS, NO CALL. A watermark at or before the existing one means
+    # the floors have not moved past what is already summarized -- there is
+    # nothing new to fold. Checked HERE rather than only in save_checkpoint
+    # because the model call happens in between: without it, rederive would
+    # re-summarize a span it has already summarized, and chain would be
+    # handed an empty segment and summarize its own previous summary,
+    # degrading it a little on every attempt. Both spend a real call to
+    # achieve nothing.
+    if previous is not None and not storage_advances(
+            memory.thread_id, previous.covers_up_to_message_id, watermark):
+        logger.debug(
+            "Compaction wanted on thread %s but the fold boundary has not "
+            "moved past the last checkpoint; nothing to do.", memory.thread_id)
+        return None
+
     # M2. Re-derive from the archive by default, so exactly one
     # summarization step always sits between an original message and what
     # the model sees -- that is what makes an early trigger free in

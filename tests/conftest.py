@@ -232,6 +232,16 @@ class FakeMemory:
     def apply_checkpoint(self):
         self.checkpoints_applied += 1
 
+    def completed_turns(self):
+        """Stand-in for the archive-derived count (§21 M11).
+
+        This fake has no archive, so it counts its own message list --
+        which is only equivalent because a fake thread never carries a
+        checkpoint summary. A test that needs the real arithmetic wants
+        tests/test_compaction_e2e.py, which runs against real storage."""
+        return sum(1 for m in self._next_messages
+                   if m.get("role") == "user") - 1
+
     @property
     def messages(self):
         return self._next_messages

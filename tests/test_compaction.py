@@ -184,10 +184,14 @@ def test_the_keep_tokens_floor_can_win_over_the_turn_floor(fake_storage):
     rows = fake_storage._messages_by_thread[memory.thread_id]
 
     lenient = compaction.compactable_span(memory, overrides=OVERRIDES)
-    # ~105 estimated tokens per turn here, so 400 reaches back four turns
-    # while keep_recent_turns=2 reaches back two.
+    # The floor is now measured from PERSISTED content (M11 put every
+    # floor in archive space), which is the JSON-encoded row rather than
+    # the neutral view text -- so the per-turn size differs from the old
+    # estimate and this number moved with it. Large enough to reach back
+    # further than keep_recent_turns=2 does, small enough to leave
+    # something foldable.
     strict = compaction.compactable_span(
-        memory, overrides={**OVERRIDES, "keep_recent_tokens": 400})
+        memory, overrides={**OVERRIDES, "keep_recent_tokens": 250})
 
     ids = [r["id"] for r in rows]
     assert ids.index(strict) < ids.index(lenient)

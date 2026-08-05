@@ -159,6 +159,36 @@ class ConversationMemory:
         if tokens:
             self.set_extra("last_input_tokens", int(tokens))
 
+    def completed_turns(self) -> int:
+        """How many turns of this thread are already finished (§21 M5/M11).
+
+        COUNTED FROM THE ARCHIVE, never from `self._messages`. M8 makes a
+        checkpoint summary a `role: "user"` message, so a compacted view
+        holds one user message that is not a turn -- and this number is
+        compared against archive-space turn indices in
+        compaction.compactable_span(). Counting the view was §21a's shipped
+        defect: the floor came out several turns too low, the computed
+        watermark went BACKWARDS, and the second automatic compaction of a
+        thread un-compacted it. See tests/test_compaction_e2e.py.
+
+        Lives here rather than in core/loop.py because this is the file
+        that owns the thread's persistence -- the loop imports no storage
+        at all, and should not start.
+
+        Called before the first model call of a turn, and every wrapper
+        adds the user message first, so the turn about to run is the last
+        entry and is excluded. That off-by-one IS the structural floor:
+        everything from this index on is the current turn and can never be
+        folded.
+
+        Archive-space also makes the value STABLE for a whole turn. The
+        archive never changes under compaction, so a count taken at the top
+        of a turn stays correct after a mid-turn compaction rebuilds the
+        view; the view-based version silently went stale at exactly that
+        point.
+        """
+        return len(turn_start_ids(self.thread_id)) - 1
+
     # -- pinning (§21) ------------------------------------------------------
 
     def pin_last(self, turns: int = 1) -> int:

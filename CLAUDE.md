@@ -18,7 +18,7 @@ python main.py --mode research --attended "q"     # §25: approve every gated ca
 python main.py --mode research --review "q"       # §20: review the finished run, consent to each correction
 # §21a compaction runs automatically in every shell; /compact triggers it by hand in the TUI
 
-pytest                                            # 849 tests, offline, ~25s (first run ~30s: matplotlib font cache)
+pytest                                            # 858 tests, offline, ~25s (first run ~30s: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure

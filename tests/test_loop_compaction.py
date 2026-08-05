@@ -153,20 +153,20 @@ def test_the_valve_fires_between_steps_of_one_turn(mocker, compacted):
     assert any(e.tool_result for e in events[:notice_index])
 
 
-def test_the_valve_never_folds_the_current_turn(mocker, compacted):
-    """M5's structural floor, asserted through the argument the loop
-    actually passes. A summary that swallowed the messages the model is
-    reasoning about would rewrite the question mid-answer -- and this is
-    what makes a mid-turn trigger safe by construction rather than by
-    hoping the threshold is far enough away."""
+def test_the_valve_asks_the_memory_for_the_current_turn_floor(mocker, compacted):
+    """M5's structural floor, asserted as the CONTRACT rather than the
+    arithmetic: the loop must take the floor from the memory's own
+    archive-derived count and never compute one from the view.
+
+    The earlier version of this test asserted the VALUE passed (== 2)
+    against a FakeMemory with no archive, so it could not tell view space
+    from archive space -- and §21a's shipped defect was exactly that
+    confusion. The arithmetic itself now lives in
+    tests/test_compaction_e2e.py, against real storage across four
+    compactions, which is the only place it can be checked honestly.
+    """
     memory = FakeMemory()
-    memory._next_messages = [
-        {"role": "user", "content": "one"},
-        {"role": "assistant", "text": "a", "tool_calls": []},
-        {"role": "user", "content": "two"},
-        {"role": "assistant", "text": "b", "tool_calls": []},
-        {"role": "user", "content": "the current one"},
-    ]
+    memory.completed_turns = lambda: 41
     tool_call = make_model_response(
         text="", tool_calls=[{"id": "t1", "name": "get_time", "input": {}}],
         usage={"input_tokens": 10_000_000, "output_tokens": 1})
@@ -176,9 +176,7 @@ def test_the_valve_never_folds_the_current_turn(mocker, compacted):
 
     _events(memory, max_steps=3)
 
-    # Three user messages in the view, so two turns were complete when the
-    # turn began -- the third is in progress and off limits.
-    assert compacted.call_args.kwargs["current_turn_start"] == 2
+    assert compacted.call_args.kwargs["current_turn_start"] == 41
 
 
 def test_the_measurement_is_recorded_after_every_call(mocker, compacted):

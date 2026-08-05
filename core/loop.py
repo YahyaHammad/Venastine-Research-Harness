@@ -112,20 +112,7 @@ def _obtain_approval(permission_channel, approval_provider,
     return False
 
 
-def _completed_turns(memory) -> int:
-    """How many turns are already complete in this thread (§21 M5).
-
-    Counted as user messages in the CURRENT VIEW, which is the same index
-    space compaction.compactable_span() measures its turn floors in. Called
-    before the first model call of a turn, so the turn about to run is not
-    among them -- that off-by-one IS the structural floor: everything from
-    this index on is the current turn and can never be folded.
-    """
-    return sum(1 for m in memory.messages if m.get("role") == "user") - 1
-
-
-def _maybe_compact(memory, model, provider_name, notices, mode,
-                   turn_start):
+def _maybe_compact(memory, model, provider_name, notices, mode):
     """Evaluate §21's trigger and act on it. A generator, so the caller
     yields from it and the notice reaches a live UI as it happens.
 
@@ -167,8 +154,15 @@ def _maybe_compact(memory, model, provider_name, notices, mode,
         yield LoopEvent(notice=notice)
         return
     try:
+        # The current-turn floor (M5), computed HERE rather than at the
+        # top of the turn. Archive-space makes it time-invariant within
+        # a turn -- the archive gains assistant and tool rows as the
+        # turn runs but no new USER row, so the answer is the same
+        # whenever it is asked. Asking lazily keeps a storage read off
+        # every turn that is nowhere near the threshold.
         notice = compaction.compact(
-            memory, model, provider_name, current_turn_start=turn_start)
+            memory, model, provider_name,
+            current_turn_start=memory.completed_turns())
     except Exception as e:  # noqa: BLE001 -- contained on purpose, see above
         logger.exception("Compaction failed; continuing uncompacted.")
         notice = {
@@ -295,19 +289,11 @@ class RunAgentLoop:
         # §21, same pattern and the same reason.
         notices: list = []
 
-        # §21 M5's structural floor. The number of messages already in the
-        # thread when this turn began -- everything from here on is the
-        # CURRENT TURN and can never be folded into a summary, whatever
-        # the token floors say. Captured before the first call, because
-        # after it the turn's own assistant message is already in the list.
-        turn_start = _completed_turns(memory)
-
         # Turn boundary (M3). The primary trigger: the thread is settled,
         # nothing is mid-flight, and last_input_tokens is the provider's
         # own measurement of what the previous call was sent.
         yield from _maybe_compact(
-            memory, model, provider_name, notices, compaction_mode,
-            turn_start)
+            memory, model, provider_name, notices, compaction_mode)
 
         response = None
         for _ in range(max_steps):
@@ -477,8 +463,7 @@ class RunAgentLoop:
             # began. That is what made a mid-turn trigger acceptable at
             # all.
             yield from _maybe_compact(
-                memory, model, provider_name, notices, compaction_mode,
-                turn_start)
+                memory, model, provider_name, notices, compaction_mode)
 
         # max_steps exhausted without an earlier return
         response.stop_reason = "max_steps_reached"

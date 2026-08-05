@@ -1,4 +1,5 @@
 import json
+import logging
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 from uuid import UUID, uuid4
@@ -6,6 +7,8 @@ from uuid import UUID, uuid4
 from sqlmodel import Field, SQLModel, JSON, Session, select
 
 from database import engine  # your SQLAlchemy engine, assumed to exist here
+
+logger = logging.getLogger(__name__)
 
 
 class ConversationThread(SQLModel, table=True):
@@ -349,6 +352,28 @@ def set_pinned(message_ids: List[UUID], pinned: bool = True) -> int:
     return changed
 
 
+def _current_watermark(thread_id: UUID) -> Optional[UUID]:
+    """The live checkpoint's watermark, or None if never compacted."""
+    checkpoint = latest_checkpoint(thread_id)
+    return checkpoint.covers_up_to_message_id if checkpoint else None
+
+
+def advances(thread_id: UUID, current: Optional[UUID], proposed: UUID) -> bool:
+    """Is `proposed` strictly later in the thread than `current`?
+
+    The ordering test behind §21's one real monotonic invariant: a
+    compaction watermark only ever moves FORWARD. `current` of None (no
+    checkpoint yet) means any real position advances.
+
+    A `proposed` this thread does not contain returns False -- the safe
+    direction, since a watermark we cannot place is one we must not write.
+    """
+    if current is None:
+        return True
+    rows = _ordered_rows(thread_id)
+    return _split_at(rows, proposed) > _split_at(rows, current) > 0
+
+
 def latest_checkpoint(thread_id: UUID) -> Optional[CompactionCheckpoint]:
     """The most recent compaction of this thread, or None if it has never
     been compacted (which is every thread until the trigger first fires)."""
@@ -366,7 +391,31 @@ def save_checkpoint(
     thread_id: UUID, summary_text: str, covers_up_to_message_id: UUID,
     strategy: str = "rederive",
 ) -> UUID:
-    """Record one compaction. Adds a row; touches nothing else (AC1)."""
+    """Record one compaction. Adds a row; touches nothing else (AC1).
+
+    REFUSES A WATERMARK THAT DOES NOT ADVANCE, returning the existing
+    checkpoint's id instead. `latest_checkpoint` resolves ties by
+    timestamp, so a backwards watermark written here does not merely fail
+    to help -- it becomes the live one, and the thread UN-COMPACTS: the
+    derived view jumps back to showing everything after the earlier
+    boundary. That is what §21a shipped, and the caller-side guard in
+    core/compaction.py is not enough on its own, because it only covers
+    the one caller that exists today.
+
+    Enforced rather than documented, for the same reason D24's declared-
+    permission check is: the invariant is cheap to state and its violation
+    is silent and durable.
+    """
+    if not advances(thread_id, _current_watermark(thread_id),
+                    covers_up_to_message_id):
+        existing = latest_checkpoint(thread_id)
+        logger.warning(
+            "Refused a compaction checkpoint for thread %s whose watermark "
+            "does not advance on the existing one; keeping the existing "
+            "checkpoint. This would have made the thread larger, not "
+            "smaller.", thread_id)
+        return existing.id if existing is not None else None
+
     with Session(engine) as session:
         checkpoint = CompactionCheckpoint(
             thread_id=thread_id,
