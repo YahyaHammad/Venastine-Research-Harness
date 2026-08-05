@@ -182,6 +182,62 @@ def fake_openai_factory():
 
 
 # ---------------------------------------------------------------------------
+# ---- Fake memory for _run() tests ----------------------------------------
+# ---------------------------------------------------------------------------
+
+class FakeMemory:
+    """Stands in for ConversationMemory when driving RunAgentLoop._run().
+
+    Logs which add_* path the loop took so tests can assert on behaviour,
+    and persists nothing. `messages` is whatever `_next_messages` holds --
+    empty by default, because most loop tests never feed history back and
+    the fake client ignores it.
+
+    ONE class, in conftest. It was three near-identical copies in
+    test_loop_stop_conditions, test_loop_tool_dispatch and
+    test_streaming_loop, and §21 gave _run() three new things to call on a
+    memory -- which meant editing the same fake in three files or watching
+    43 tests fail on an AttributeError. Exactly the duplication that made
+    the FakeStorage patch list drift in the same section.
+    """
+
+    def __init__(self):
+        self.user_messages = []
+        self.assistant_messages = []
+        self.tool_results = []  # list of (tool_call_id, result)
+        self._next_messages = []
+        self.thread_id = uuid4()
+        # ROADMAP_v2 §21. Zero means "never measured", so the compaction
+        # trigger falls back to a character estimate of `messages` -- which
+        # is empty here, so compaction never fires and every pre-§21 loop
+        # test is unaffected. A test that WANTS compaction sets this.
+        self.last_input_tokens = 0
+        self.recorded_tokens = []
+        self.checkpoints_applied = 0
+
+    def add_user_message(self, text):
+        self.user_messages.append(text)
+
+    def add_assistant_message(self, response):
+        self.assistant_messages.append(response)
+
+    def add_tool_result(self, tool_call_id, result):
+        self.tool_results.append((tool_call_id, result))
+
+    def record_input_tokens(self, tokens):
+        self.recorded_tokens.append(tokens)
+        if tokens:
+            self.last_input_tokens = tokens
+
+    def apply_checkpoint(self):
+        self.checkpoints_applied += 1
+
+    @property
+    def messages(self):
+        return self._next_messages
+
+
+# ---------------------------------------------------------------------------
 # ---- Fake storage for memory-state tests --------------------------------
 # ---------------------------------------------------------------------------
 

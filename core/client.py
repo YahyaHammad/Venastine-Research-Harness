@@ -85,6 +85,15 @@ class ModelResponse:
     # written into the run artifacts for a pipeline nobody was watching.
     # Empty for every run that granted nothing, which is every run today.
     granted_calls: list = field(default_factory=list)
+    # ROADMAP_v2 §21: compaction notices raised during this run, each a
+    # {"kind", "text"} dict. Set by _run() like stop_reason and
+    # granted_calls, never by call_model().
+    #
+    # Carried here as well as yielded as a LoopEvent because
+    # run_to_completion() discards non-final events: the TUI watches the
+    # generator, but the CLI and the pipeline drain it, so a notice with
+    # only the event route would be invisible in two shells out of three.
+    notices: list = field(default_factory=list)
 
 
 @dataclass

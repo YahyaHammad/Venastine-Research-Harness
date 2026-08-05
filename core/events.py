@@ -31,5 +31,17 @@ class LoopEvent:
     tool_call_start: Optional[dict] = None       # {"id", "name", "input"}
     tool_result: Optional[dict] = None            # {"id", "result"}
     permission_request: Optional[dict] = None     # {"tool_name", "params"}
+    # ROADMAP_v2 §21: {"kind", "text"} -- a compaction that happened, an
+    # early warning that one is coming, or a compaction that could not
+    # help. §21's "no silent compaction, ever": both automatic and manual
+    # compaction show a marker inline.
+    #
+    # ALSO carried on the ModelResponse, because run_to_completion()
+    # discards every non-final event -- so a notice delivered only here
+    # would be invisible to the CLI and the pipeline, which drain the
+    # generator rather than watching it. That is the same defect §20 and
+    # §25 each hit once; the event is for live display, the response field
+    # is for everyone else.
+    notice: Optional[dict] = None
     final_response: Optional[Any] = None          # ModelResponse on terminal event
     stop_reason: Optional[str] = None             # "complete" | "max_steps_reached" | "token_budget_exceeded"

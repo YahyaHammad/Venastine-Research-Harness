@@ -325,8 +325,11 @@ def test_run_validates_effort_against_the_model_it_is_about_to_call(mocker):
         "core.loop.call_model_stream",
         side_effect=make_stream_sequence(make_model_response(text="done")))
 
-    memory = mocker.MagicMock()
-    memory.messages = []
+    # A real stand-in, not a MagicMock: §21 has _run() compare
+    # memory.last_input_tokens against a threshold, and a MagicMock
+    # answers that attribute with something that has no ordering.
+    from tests.conftest import FakeMemory
+    memory = FakeMemory()
     run_to_completion(RunAgentLoop._run(
         memory=memory, system_prompt="s", provider_name="ANTHROPIC",
         model="agent-model", context=None, max_steps=2, effort="xhigh"))
@@ -348,8 +351,11 @@ def test_run_keeps_a_supported_effort(mocker):
         "core.loop.call_model_stream",
         side_effect=make_stream_sequence(make_model_response(text="done")))
 
-    memory = mocker.MagicMock()
-    memory.messages = []
+    # A real stand-in, not a MagicMock: §21 has _run() compare
+    # memory.last_input_tokens against a threshold, and a MagicMock
+    # answers that attribute with something that has no ordering.
+    from tests.conftest import FakeMemory
+    memory = FakeMemory()
     run_to_completion(RunAgentLoop._run(
         memory=memory, system_prompt="s", provider_name="ANTHROPIC",
         model="m", context=None, max_steps=2, effort="high"))

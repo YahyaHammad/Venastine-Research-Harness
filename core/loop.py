@@ -112,6 +112,74 @@ def _obtain_approval(permission_channel, approval_provider,
     return False
 
 
+def _completed_turns(memory) -> int:
+    """How many turns are already complete in this thread (§21 M5).
+
+    Counted as user messages in the CURRENT VIEW, which is the same index
+    space compaction.compactable_span() measures its turn floors in. Called
+    before the first model call of a turn, so the turn about to run is not
+    among them -- that off-by-one IS the structural floor: everything from
+    this index on is the current turn and can never be folded.
+    """
+    return sum(1 for m in memory.messages if m.get("role") == "user") - 1
+
+
+def _maybe_compact(memory, model, provider_name, notices, mode,
+                   turn_start):
+    """Evaluate §21's trigger and act on it. A generator, so the caller
+    yields from it and the notice reaches a live UI as it happens.
+
+    Every notice goes BOTH ways -- appended to `notices`, which _run()
+    attaches to the response, and yielded as a LoopEvent. The event alone
+    would be invisible to the CLI and the pipeline, which drain the
+    generator through run_to_completion() and discard everything that is
+    not final. §20 and §25 each shipped that defect once.
+
+    Failure here is contained. Compaction is a model call, and a provider
+    error during it must not take down a turn that was otherwise fine --
+    the same call §20 made for its review stage. The thread simply stays
+    uncompacted and the next call fails or succeeds on its own merits,
+    which is strictly better than failing this one on its behalf.
+
+    Takes no authorization, deliberately. The compactor declares
+    `allowed_tools: []`, so there is nothing for a grant to apply to --
+    a parameter here would read as security-relevant and could not be.
+    """
+    from core import compaction
+
+    used = memory.last_input_tokens or compaction.estimated_tokens(memory.messages)
+    action = compaction.should_compact(used, model, mode)
+    if not action:
+        return
+    if action == "warn":
+        # Once per run. The condition holds on every step until compaction
+        # actually fires, and the same warning eight times in one turn
+        # trains the reader to skip it -- which is exactly the reader you
+        # need reading it when compaction does happen.
+        if any(n["kind"] == "compaction_warning" for n in notices):
+            return
+        notice = {
+            "kind": "compaction_warning",
+            "text": ("Approaching the compaction threshold — older messages "
+                     "may be summarized soon."),
+        }
+        notices.append(notice)
+        yield LoopEvent(notice=notice)
+        return
+    try:
+        notice = compaction.compact(
+            memory, model, provider_name, current_turn_start=turn_start)
+    except Exception as e:  # noqa: BLE001 -- contained on purpose, see above
+        logger.exception("Compaction failed; continuing uncompacted.")
+        notice = {
+            "kind": "compaction_failed",
+            "text": f"Could not compact this conversation: {e}",
+        }
+    if notice is not None:
+        notices.append(notice)
+        yield LoopEvent(notice=notice)
+
+
 def run_to_completion(gen) -> ModelResponse:
     """Consumes a _run() generator fully, discarding intermediate events,
     and returns the final ModelResponse — this is what keeps
@@ -146,6 +214,7 @@ class RunAgentLoop:
         granted_tools: Optional[set] = None,
         grant_budget=None,
         approval_provider=None,
+        compaction_mode: str = "working_set",
     ):
         """Generator yielding LoopEvent objects as the loop progresses.
 
@@ -176,6 +245,13 @@ class RunAgentLoop:
         calls may skip the prompt (§25 R6), or None for no cap. Shared by
         reference across every pass of a pipeline run. Exhaustion makes
         the grant stop applying, so calls fall back to being asked.
+
+        compaction_mode (§21): "working_set" for a chat turn, "backstop"
+        for a research pass. M6 -- a pass is headless and unattended and
+        already returns a distillation, so it compacts only near the
+        model's actual context window rather than at the working-set
+        threshold. Passed by run_deep_research_mode; every other caller
+        takes the default.
         """
         client = api_initialization(provider_name)
         # Validate the level against the model that will RECEIVE it, here
@@ -216,6 +292,22 @@ class RunAgentLoop:
         # added later cannot forget to carry it -- the list is shared by
         # reference and keeps filling as tools dispatch.
         granted_calls: list = []
+        # §21, same pattern and the same reason.
+        notices: list = []
+
+        # §21 M5's structural floor. The number of messages already in the
+        # thread when this turn began -- everything from here on is the
+        # CURRENT TURN and can never be folded into a summary, whatever
+        # the token floors say. Captured before the first call, because
+        # after it the turn's own assistant message is already in the list.
+        turn_start = _completed_turns(memory)
+
+        # Turn boundary (M3). The primary trigger: the thread is settled,
+        # nothing is mid-flight, and last_input_tokens is the provider's
+        # own measurement of what the previous call was sent.
+        yield from _maybe_compact(
+            memory, model, provider_name, notices, compaction_mode,
+            turn_start)
 
         response = None
         for _ in range(max_steps):
@@ -242,6 +334,12 @@ class RunAgentLoop:
             # D20: persist EVERY assistant turn BEFORE any branching.
             memory.add_assistant_message(response)
             response.granted_calls = granted_calls
+            response.notices = notices
+            # §21: the provider's own count of everything it was just
+            # sent. Recorded here rather than at the trigger so a thread
+            # resumed in a later process starts from a real measurement
+            # instead of a character estimate.
+            memory.record_input_tokens(response.usage.get("input_tokens", 0))
 
             if max_total_tokens is not None and total_tokens_used >= max_total_tokens:
                 response.stop_reason = "token_budget_exceeded"
@@ -365,6 +463,21 @@ class RunAgentLoop:
                 yield LoopEvent(tool_result={"id": call.id, "result": result})
                 memory.add_tool_result(call.id, result)
 
+            # The mid-turn valve (M3). A single turn can add far more than
+            # any buffer covers -- MAX_READ_CHARS alone is ~12.5k tokens
+            # per read call, with up to max_steps of them -- so waiting for
+            # the next turn boundary would let a tool-heavy turn run the
+            # thread into the provider's hard limit.
+            #
+            # Safe by construction rather than by timing: `turn_start`
+            # makes the current turn unfoldable, so this can only ever
+            # summarize exchanges that were already complete when the turn
+            # began. That is what made a mid-turn trigger acceptable at
+            # all.
+            yield from _maybe_compact(
+                memory, model, provider_name, notices, compaction_mode,
+                turn_start)
+
         # max_steps exhausted without an earlier return
         response.stop_reason = "max_steps_reached"
         yield LoopEvent(
@@ -476,6 +589,12 @@ class RunAgentLoop:
         response = run_to_completion(RunAgentLoop._run(
             memory, system_prompt, provider_name, model, context,
             max_steps, max_total_tokens, temperature=temperature, effort=effort,
+            # §21 M6. A pass is headless and unattended and already returns
+            # a distillation, so routine compaction here would spend on a
+            # judgment call nobody is watching. The backstop still fires
+            # near the model's real context window, because the
+            # alternative there is a hard provider error mid-pipeline.
+            compaction_mode="backstop",
             **_authorization_kwargs(authorization),
         ))
         response.thread_id = memory.thread_id

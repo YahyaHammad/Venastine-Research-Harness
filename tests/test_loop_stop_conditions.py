@@ -26,32 +26,10 @@ from tests.conftest import make_model_response, make_stream_from_response
 # ---- Shared helper: a fake ConversationMemory that records calls -------
 # ---------------------------------------------------------------------------
 
-class _FakeMemory:
-    """Memory logs add_user_message, add_assistant_message, and
-    add_tool_result calls so tests can assert on which path _run took.
-    Doesn't do any persistence; purely for asserting on behavior."""
-
-    def __init__(self):
-        self.user_messages = []
-        self.assistant_messages = []
-        self.tool_results = []  # list of (tool_call_id, result)
-
-    def add_user_message(self, text):
-        self.user_messages.append(text)
-
-    def add_assistant_message(self, response):
-        self.assistant_messages.append(response)
-
-    def add_tool_result(self, tool_call_id, result):
-        self.tool_results.append((tool_call_id, result))
-
-    @property
-    def messages(self):
-        # _run() reads self.messages to build the next call, but in these
-        # tests we monkeypatch call_model_stream so it never actually
-        # inspects the content. Returning an empty list keeps _run() happy.
-        return []
-
+# ROADMAP_v2 §21 gave _run() three new things to call on a memory, and
+# this fake existed in three near-identical copies. One class, in
+# conftest -- see FakeMemory there for why.
+from tests.conftest import FakeMemory as _FakeMemory
 
 def _build_run_inputs(memory):
     """Returns the kwargs _run expects: memory + the standard ordered

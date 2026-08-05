@@ -31,26 +31,10 @@ from tests.conftest import make_model_response, make_stream_sequence
 # ---- Fake memory + fake dispatch helpers --------------------------------
 # ---------------------------------------------------------------------------
 
-class _FakeMemory:
-    def __init__(self):
-        self.user_messages = []
-        self.assistant_messages = []
-        self.tool_results = []  # list of (tool_call_id, result)
-        self._next_messages = []  # we don't actually feed anything back
-
-    def add_user_message(self, text):
-        self.user_messages.append(text)
-
-    def add_assistant_message(self, response):
-        self.assistant_messages.append(response)
-
-    def add_tool_result(self, tool_call_id, result):
-        self.tool_results.append((tool_call_id, result))
-
-    @property
-    def messages(self):
-        return self._next_messages
-
+# ROADMAP_v2 §21 gave _run() three new things to call on a memory, and
+# this fake existed in three near-identical copies. One class, in
+# conftest -- see FakeMemory there for why.
+from tests.conftest import FakeMemory as _FakeMemory
 
 def _make_run_kwargs(memory, max_steps=10, context=None):
     return dict(

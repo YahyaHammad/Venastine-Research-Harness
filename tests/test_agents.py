@@ -250,12 +250,7 @@ def test_headless_filter_hides_approval_gated_mcp_tool(_mcp_tool):
 
 def test_headless_filter_warning_names_hidden_tool(_mcp_tool, caplog,
                                                    mocker):
-    class _Mem:
-        messages = []
-
-        def add_user_message(self, t): pass
-        def add_assistant_message(self, r): pass
-        def add_tool_result(self, i, r): pass
+    from tests.conftest import FakeMemory as _Mem
 
     def fake_stream(*args, **kwargs):
         yield StreamToken(final_response=make_model_response(text="hi"))
@@ -599,12 +594,7 @@ def test_s1_grant_means_one_prompt_per_turn_not_per_spawn(mocker):
     registry rather than naming spawn_subagent itself."""
     import queue as _queue
 
-    class _Mem:
-        messages = []
-        extra = {}
-        def add_user_message(self, m): pass
-        def add_assistant_message(self, r): pass
-        def add_tool_result(self, i, r): pass
+    from tests.conftest import FakeMemory as _Mem
 
     two_spawns = make_model_response(text="", tool_calls=[
         {"id": "s1", "name": "spawn_subagent",

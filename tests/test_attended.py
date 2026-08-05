@@ -25,13 +25,9 @@ from tools.registry import registry
 from tests.conftest import make_model_response
 
 
-class _Mem:
-    messages: list = []
-    extra: dict = {}
-
-    def add_user_message(self, m): pass
-    def add_assistant_message(self, r): pass
-    def add_tool_result(self, i, r): pass
+# ROADMAP_v2 §21 gave _run() more to call on a memory. One stand-in, in
+# conftest -- see FakeMemory there.
+from tests.conftest import FakeMemory as _Mem
 
 
 @pytest.fixture
