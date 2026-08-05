@@ -87,6 +87,91 @@ class GoalBanner(Static):
             self.update("")
 
 
+class ResearchProgress(Static):
+    """Live state of a /research run (ROADMAP_v2 §22).
+
+    Fed by PipelineEvents, never polled -- the database checkpoints the
+    pipeline writes are for durability, not for a UI to read back.
+
+    The pass sequence is NOT a fixed ten-row checklist, because the
+    pipeline's shape depends on its own findings: 3a/3b are skipped
+    outright when no claim is factual, and 6a/6c repeat once per retry
+    round. A pre-drawn list would show rows that never run and hide rows
+    that run three times. So passes are appended as they start.
+
+    Hidden until a run begins and left visible afterwards, so the last
+    run's shape stays readable while its report is being read.
+    """
+
+    # Labels, not a slice of the tier name: the sidebar is 22 columns, and
+    # truncating produced "unverifie 1" and would have made
+    # UNVERIFIED_COVERAGE indistinguishable from UNVERIFIED.
+    TIERS = (
+        ("HIGH", "high"),
+        ("MEDIUM", "medium"),
+        ("LOW", "low"),
+        ("UNVERIFIED", "unverified"),
+        ("UNVERIFIED_COVERAGE", "uncovered"),
+    )
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.display = False
+        self.reset()
+
+    def reset(self) -> None:
+        self._passes: list = []          # [[pass_id, done?], ...]
+        self._tiers: dict = {}           # claim_id -> tier
+        self._claims = 0
+        self._retries = 0
+
+    def start_run(self) -> None:
+        self.reset()
+        self.display = True
+        self._redraw()
+
+    def pass_started(self, pass_id: str) -> None:
+        self._passes.append([pass_id, False])
+        self._redraw()
+
+    def pass_completed(self, pass_id: str) -> None:
+        for entry in reversed(self._passes):
+            if entry[0] == pass_id and not entry[1]:
+                entry[1] = True
+                break
+        self._redraw()
+
+    def claim_extracted(self) -> None:
+        self._claims += 1
+        self._redraw()
+
+    def claim_tiered(self, claim_id: str, tier) -> None:
+        # Keyed by claim, not counted: a claim is re-tiered on every 6c
+        # round, so counting would inflate the tally by one per round and
+        # end up reporting more claims than the run has.
+        self._tiers[claim_id] = tier
+        self._redraw()
+
+    def retried(self) -> None:
+        self._retries += 1
+        self._redraw()
+
+    def _redraw(self) -> None:
+        lines = ["research", ""]
+        for pass_id, done in self._passes[-8:]:
+            lines.append(f"{'x' if done else '>'} {pass_id}")
+        if self._claims:
+            lines.append("")
+            lines.append(f"{self._claims} claim(s)")
+        for tier, label in self.TIERS:
+            count = sum(1 for v in self._tiers.values() if v == tier)
+            if count:
+                lines.append(f"  {label} {count}")
+        if self._retries:
+            lines.append(f"{self._retries} revision(s)")
+        self.update(Text("\n".join(lines)))
+
+
 class Transcript(RichLog):
     """The conversation. Code fences render highlighted via Rich's Syntax.
 

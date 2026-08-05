@@ -45,7 +45,7 @@ import pytest
 
 import config
 from core.loop import RunAgentLoop
-from tests.conftest import make_model_response, make_stream_from_response
+from tests.conftest import drain, make_model_response, make_stream_from_response
 
 from uuid import uuid4
 
@@ -103,9 +103,9 @@ def test_clean_response_triggers_no_retry(mocker):
     continue_calls = _stub_continue_returning_sequence(mocker, [])
 
     trace = []
-    result = _run_pass_with_json_retry(
+    result = drain(_run_pass_with_json_retry(
         "Pass 0", "input-text", "claude-test", "ANTHROPIC", trace,
-    )
+    ))
 
     assert result == valid_json
     assert continue_calls == [], (
@@ -140,9 +140,9 @@ def test_malformed_then_valid_recovers_in_one_retry(mocker):
     continue_calls = _stub_continue_returning_sequence(mocker, [retry_response])
 
     trace = []
-    result = _run_pass_with_json_retry(
+    result = drain(_run_pass_with_json_retry(
         "Pass 2", "input", "claude-test", "ANTHROPIC", trace,
-    )
+    ))
 
     assert result == valid_text
     assert len(continue_calls) == 1, (
@@ -183,9 +183,9 @@ def test_all_attempts_fail_raises_value_error(mocker):
 
     trace = []
     with pytest.raises(ValueError, match="did not return valid JSON"):
-        _run_pass_with_json_retry(
+        drain(_run_pass_with_json_retry(
             "Pass 0", "input", "claude-test", "ANTHROPIC", trace,
-        )
+        ))
 
     assert len(continue_calls) == config.MAX_JSON_RETRIES, (
         f"Expected exactly MAX_JSON_RETRIES={config.MAX_JSON_RETRIES} "
@@ -222,9 +222,9 @@ def test_retry_uses_same_thread_id_as_initial_attempt(mocker):
     retry_response = make_model_response(text=valid_text)
     continue_calls = _stub_continue_returning_sequence(mocker, [retry_response])
 
-    _run_pass_with_json_retry(
+    drain(_run_pass_with_json_retry(
         "Pass 3a", "input", "claude-test", "ANTHROPIC", [],
-    )
+    ))
 
     assert len(continue_calls) == 1
     assert continue_calls[0]["thread_id"] == initial_thread_id, (
@@ -318,9 +318,9 @@ def test_resumed_history_contains_failed_assistant_turn(mocker):
     #      reconstructs the neutral shape directly (per msg.role).
     #   3. _run with the resumed history -> call_model -> returns valid JSON.
     #   4. helper returns the valid JSON text.
-    result = _run_pass_with_json_retry(
+    result = drain(_run_pass_with_json_retry(
         "Pass 0", "user-query-text", "claude-test", "ANTHROPIC", [],
-    )
+    ))
 
     assert result == valid_text
 
@@ -404,9 +404,9 @@ def test_trace_line_format_one_per_failed_attempt(mocker):
     _stub_continue_returning_sequence(mocker, [retry_1, retry_2])
 
     trace = []
-    result = _run_pass_with_json_retry(
+    result = drain(_run_pass_with_json_retry(
         "Pass 3b", "input", "claude-test", "ANTHROPIC", trace,
-    )
+    ))
 
     # Two failed attempts -> two trace lines (one per failure).
     assert len(trace) == 2, (
@@ -465,9 +465,9 @@ def test_corrective_message_contains_parse_error_excerpt_and_instruction(mocker)
     retry_response = make_model_response(text=valid_text)
     continue_calls = _stub_continue_returning_sequence(mocker, [retry_response])
 
-    _run_pass_with_json_retry(
+    drain(_run_pass_with_json_retry(
         "Pass 5", "input", "claude-test", "ANTHROPIC", [],
-    )
+    ))
 
     assert len(continue_calls) == 1
     corrective_msg = continue_calls[0]["message"]

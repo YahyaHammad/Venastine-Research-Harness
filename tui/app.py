@@ -58,7 +58,9 @@ from tui.commands import SlashCommand, registry as commands
 from tui.screens import (
     GrantPickerScreen, PermissionScreen, ReviewScreen, ThreadPickerScreen,
 )
-from tui.widgets import EffortRaven, GoalBanner, RavenPanel, Transcript
+from tui.widgets import (
+    EffortRaven, GoalBanner, RavenPanel, ResearchProgress, Transcript,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +70,69 @@ class LoopEventMessage(Message):
 
     post_message is Textual's thread-safe hand-off; the worker never touches
     a widget directly.
+    """
+
+    def __init__(self, event) -> None:
+        self.event = event
+        super().__init__()
+
+
+class LogRecordMessage(Message):
+    """One WARNING+ log record, on its way to the transcript.
+
+    A Message rather than a direct widget write because emit() is called
+    from wherever the logging happened -- a research worker thread, the
+    MCP bridge thread -- and post_message is the thread-safe hand-off,
+    the same rule LoopEventMessage follows.
+    """
+
+    def __init__(self, text: str, is_error: bool) -> None:
+        self.text = text
+        self.is_error = is_error
+        super().__init__()
+
+
+class TranscriptLogHandler(logging.Handler):
+    """Routes WARNING+ into the transcript.
+
+    Exists because the TUI detaches the stderr handler (main.py): Textual
+    owns the terminal, so a log line written there lands on top of the
+    rendered screen, over the input bar and behind the panels, and
+    vanishes at the next repaint. Dropping stderr fixes the corruption
+    but would make every warning invisible until someone reads
+    logs/app.log -- which is nobody, mid-run. This is the other half.
+
+    WARNING and above only. INFO in a chat transcript is noise, and the
+    rotating file already has it at full detail with timestamps.
+
+    emit() must never raise: a logging handler that throws inside a
+    Textual message pump takes the app down over a diagnostic.
+    """
+
+    def __init__(self, app: "VenastineApp") -> None:
+        super().__init__(level=logging.WARNING)
+        self._app = app
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            # getMessage(), not self.format(): the file handler owns
+            # timestamps and logger names, and repeating them eats a
+            # narrow transcript for no gain.
+            self._app.post_message(LogRecordMessage(
+                f"[{record.levelname.lower()}] {record.getMessage()}",
+                record.levelno >= logging.ERROR,
+            ))
+        except Exception:  # noqa: BLE001 -- see the docstring
+            pass
+
+
+class PipelineEventMessage(Message):
+    """One PipelineEvent, forwarded from the research worker to the UI
+    thread (ROADMAP_v2 §22).
+
+    A separate message from LoopEventMessage because they carry separate
+    types (§22 P1) and arrive from separate workers. Same post_message
+    hand-off: the worker never touches a widget directly.
     """
 
     def __init__(self, event) -> None:
@@ -186,13 +251,22 @@ class VenastineApp(App):
             with Vertical(id="sidebar"):
                 yield RavenPanel(animations=self._animations, id="raven")
                 yield EffortRaven(id="effort-raven")
+                yield ResearchProgress(id="research-progress")
         yield Footer()
 
     def on_mount(self) -> None:
+        # Attached before anything else can log. Removed in on_unmount --
+        # the handler holds a reference to this app, so leaving it on the
+        # root logger would keep a dead app alive and, in the test suite,
+        # stack one handler per App instance.
+        self._log_handler = TranscriptLogHandler(self)
+        logging.getLogger().addHandler(self._log_handler)
+
         themes.register_all(self)
         self.theme = self._theme_name
         self.query_one("#effort-raven", EffortRaven).effort = self.effort
         self.refresh_goal_banner()
+        self.refresh_status()
         self._transcript.write_system(
             f"{self.provider_name} | {self.model} | theme {self._theme_name}"
         )
@@ -207,6 +281,33 @@ class VenastineApp(App):
             # so a slow or unreachable Models API delays the check, not
             # the app.
             self.start_effort_lookup(None, validate_only=True)
+
+    def on_unmount(self) -> None:
+        handler = getattr(self, "_log_handler", None)
+        if handler is not None:
+            logging.getLogger().removeHandler(handler)
+            self._log_handler = None
+
+    def on_log_record_message(self, message: LogRecordMessage) -> None:
+        """Render a routed log record.
+
+        Never re-enters the logger: Transcript.write* does no logging, so
+        a handler feeding a widget that logs cannot loop here.
+        """
+        if message.is_error:
+            self._transcript.write_error(message.text)
+        else:
+            self._transcript.write_system(message.text)
+
+    def refresh_status(self) -> None:
+        """Keep the header showing which provider/model turns will use.
+
+        The mount banner scrolls away, so after a /model switch there was
+        nothing on screen saying what the next turn would actually call --
+        and getting that wrong is the difference between a working turn
+        and an auth error.
+        """
+        self.sub_title = f"{self.provider_name} | {self.model}"
 
     def start_effort_lookup(self, requested, validate_only=False) -> None:
         """Fetch this model's accepted effort levels in a worker."""
@@ -311,6 +412,10 @@ class VenastineApp(App):
     @property
     def _raven(self) -> RavenPanel:
         return self.query_one("#raven", RavenPanel)
+
+    @property
+    def _research_progress(self) -> ResearchProgress:
+        return self.query_one("#research-progress", ResearchProgress)
 
     # -- input ---------------------------------------------------------------
 
@@ -667,6 +772,33 @@ class VenastineApp(App):
         if message.error is not None:
             self._transcript.write_error(f"[error: {message.error}]")
 
+    def on_pipeline_event_message(self, message: PipelineEventMessage) -> None:
+        """Render one PipelineEvent (§22 AC2).
+
+        Reads run.trace nowhere and the database nowhere: everything here
+        arrives as an event, which is what makes the view live rather
+        than a summary drawn after the fact.
+        """
+        event = message.event
+        panel = self._research_progress
+
+        if event.kind == "pass_start":
+            self._raven.state = ravens.THINKING
+            self._transcript.write_system(f"→ {event.pass_id}")
+            panel.pass_started(event.pass_id)
+        elif event.kind == "pass_complete":
+            panel.pass_completed(event.pass_id)
+        elif event.kind == "trace_line":
+            # Same format the end-of-run dump used, so a run reads the
+            # same whether you watched it or scrolled back to it.
+            self._transcript.write_system(f"  {event.text}")
+        elif event.kind == "claim_extracted":
+            panel.claim_extracted()
+        elif event.kind == "claim_tiered":
+            panel.claim_tiered(event.claim_id, event.tier)
+        elif event.kind == "retry":
+            panel.retried()
+
     def on_research_finished(self, message: ResearchFinished) -> None:
         self._busy = False
         self._raven.state = ravens.IDLE
@@ -674,8 +806,9 @@ class VenastineApp(App):
             self._transcript.write_error(f"[pipeline failed: {message.error}]")
             return
         run = message.run
-        for line in run.trace:
-            self._transcript.write_system(f"  {line}")
+        # §22: the trace is NOT re-printed here. Every line already
+        # arrived as a trace_line event and was written as it happened;
+        # dumping run.trace again would print the whole run twice.
         self._transcript.flush_stream()
         self._transcript.write(run.final_report)
         if run.subagent_reviews:
@@ -751,6 +884,102 @@ def _cmd_theme(app: VenastineApp, args: str) -> None:
         return
     app.theme = args
     app._transcript.write_system(f"Theme set to {args}.")
+
+
+def _cmd_model(app: VenastineApp, args: str) -> None:
+    """Switch provider and/or model for the rest of the session.
+
+    `/model <name>` keeps the current provider; `/model <PROVIDER> <name>`
+    switches both. Bare `/model` reports where things stand.
+
+    SESSION-SCOPED, and deliberately not written back to settings.json.
+    /theme and /effort read that file at startup and never write to it,
+    and settings.json is the one config file where a trusted project tier
+    beats the user tier (D29) -- a session quietly rewriting it is a
+    decision, not a convenience. The message says how to make a choice
+    stick instead.
+
+    The switch takes effect on the NEXT turn: run_agent_turn and
+    _cmd_research both read app.model / app.provider_name when they
+    start, so a turn already in flight keeps the model it began with.
+    That is also why this refuses while busy -- swapping underneath a
+    running worker would leave the transcript claiming one model and the
+    thread recording another.
+    """
+    from credentials import load_provider_data
+
+    providers = load_provider_data()
+
+    def _configured() -> str:
+        named = sorted(p for p, e in providers.items() if e.get("API_KEY"))
+        return ", ".join(named) if named else "none (add a key to providers.json)"
+
+    if not args:
+        app._transcript.write_system(
+            f"Provider: {app.provider_name} | model: {app.model}")
+        app._transcript.write_system(f"Providers with a key: {_configured()}")
+        app._transcript.write_system(
+            "Usage: /model <name>, or /model <PROVIDER> <name>.")
+        return
+
+    if app._busy:
+        app._transcript.write_error(
+            "Still working — wait for this turn to finish.")
+        return
+
+    parts = args.split()
+    if len(parts) == 1:
+        provider, model = app.provider_name, parts[0]
+    elif len(parts) == 2:
+        provider, model = parts[0].upper(), parts[1]
+    else:
+        app._transcript.write_error(
+            "Usage: /model <name>, or /model <PROVIDER> <name>.")
+        return
+
+    # Unknown provider REFUSES: api_initialization would raise the same
+    # ValueError on the next turn, a long way from the typo that caused it.
+    if provider not in providers:
+        app._transcript.write_error(
+            f"Unknown provider {provider!r}. Configured: "
+            f"{', '.join(sorted(providers)) or 'none'}.")
+        return
+
+    app.provider_name = provider
+    app.model = model
+    app.refresh_status()
+    app._transcript.write_system(f"Now using {provider} | {model}.")
+
+    # WARN, don't refuse, on a missing key. An OpenAI-compatible endpoint
+    # running locally legitimately takes no key, so refusing would block a
+    # real configuration -- but every call to a hosted provider will fail
+    # auth, and finding that out one turn later is the worse trade.
+    if not providers[provider].get("API_KEY"):
+        app._transcript.write_error(
+            f"{provider} has no API_KEY in providers.json — calls will fail "
+            f"unless it is a local endpoint that needs none.")
+
+    # An active agent may name its own model/provider (§18), and those win
+    # in run_agent_turn. Without this the switch is a silent no-op for as
+    # long as that agent is active -- the failure shape this project keeps
+    # producing.
+    agent = app.active_agent
+    if agent is not None and (agent.model or agent.provider):
+        app._transcript.write_system(
+            f"Note: agent {agent.name!r} pins "
+            f"{agent.provider or app.provider_name} | "
+            f"{agent.model or app.model} for chat turns, so this applies to "
+            f"/research and to turns after /agent clear.")
+
+    app._transcript.write_system(
+        "This session only. Use --provider/--model at launch, or "
+        "default_provider/default_model in settings.json, to make it stick.")
+
+    # Effort is per-model: a level the old model accepted may be rejected
+    # outright by the new one, and every turn would then fail with a
+    # provider 400. Same check the mount path runs on a persisted level.
+    if app.effort:
+        app.start_effort_lookup(None, validate_only=True)
 
 
 def _cmd_effort(app: VenastineApp, args: str) -> None:
@@ -941,6 +1170,20 @@ def _review_consent_for(app: VenastineApp):
             app.ask_review_blocking(finding, round_index))
 
 
+def _forwarding(app: VenastineApp, events):
+    """Post every PipelineEvent to the UI thread, then pass it on.
+
+    A pass-through rather than a consumption loop, so the run's terminal
+    event still reaches run_pipeline_to_completion() and the worker keeps
+    receiving a finished PipelineRun. Forwarding and draining in two
+    separate loops would mean either buffering the whole run before
+    rendering any of it, or reimplementing the drainer here.
+    """
+    for event in events:
+        app.post_message(PipelineEventMessage(event))
+        yield event
+
+
 def _start_research(app: VenastineApp, query: str, authorization) -> None:
     """Kick off the worker. Split from _cmd_research because the picker
     path resolves asynchronously and lands here from a callback."""
@@ -948,15 +1191,23 @@ def _start_research(app: VenastineApp, query: str, authorization) -> None:
     app._transcript.write_user(f"/research {query}")
     app._transcript.write_system("Running the ten-pass pipeline. This takes a while.")
     app._raven.state = ravens.THINKING
+    app._research_progress.start_run()
     review_on = bool(getattr(app, "_research_review", False))
     consent = _review_consent_for(app)
 
     def work() -> None:
-        from core.reasoning.orchestrator import run_deep_research_pipeline
+        from core.reasoning.orchestrator import (
+            run_pipeline_to_completion, stream_deep_research_pipeline,
+        )
         from core.reasoning.output_writer import write_run_artifacts
         error = None
         try:
-            run = run_deep_research_pipeline(
+            # §22: ITERATED, not called. run_deep_research_pipeline would
+            # still work and would still return the same run -- it is the
+            # drainer applied to this generator -- but the drainer is
+            # exactly what throws every intermediate event away, which is
+            # what made this view coarse for two sections.
+            events = stream_deep_research_pipeline(
                 user_query=query,
                 model=app.model,
                 provider_name=app.provider_name,
@@ -966,6 +1217,8 @@ def _start_research(app: VenastineApp, query: str, authorization) -> None:
                 review=consent,
                 subagent_review=review_on,
             )
+            run = run_pipeline_to_completion(
+                _forwarding(app, events))
             # §20 V9. write_run_artifacts had ONE production call site
             # (main.py), so a TUI research run produced no /output/<run_id>/
             # at all -- the shipped consequence of leaving a post-pipeline
@@ -1104,6 +1357,8 @@ def register_builtin_commands() -> None:
         SlashCommand("help", "list commands", _cmd_help),
         SlashCommand("theme", "switch colour theme", _cmd_theme, "[name]"),
         SlashCommand("effort", "switch reasoning effort", _cmd_effort, "[level|auto]"),
+        SlashCommand("model", "switch provider and/or model for this session",
+                     _cmd_model, "[[PROVIDER] name]"),
         SlashCommand("research", "run the deep-research pipeline",
                      _cmd_research,
                      "[--attended] [--review|--no-review] "

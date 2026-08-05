@@ -23,7 +23,14 @@ from pydantic import BaseModel, Field, field_validator
 
 logger = logging.getLogger(__name__)
 
-ARXIV_API_URL = "http://export.arxiv.org/api/query"
+# HTTPS, and it is load-bearing. arXiv 301-redirects the http:// form, and
+# three things then combine into a hard failure that looks nothing like a
+# redirect: httpx does NOT follow redirects by default (unlike requests),
+# raise_for_status() only raises on >= 400 so a 301 sails through, and the
+# redirect body is empty -- so ET.fromstring("") raises ParseError, the
+# retry loop runs three identical attempts, and the tool reports "arXiv
+# search failed after 3 attempts". Verified against the live API.
+ARXIV_API_URL = "https://export.arxiv.org/api/query"
 ATOM_NS = {"atom": "http://www.w3.org/2005/Atom"}
 
 _VALID_SORT_BY = {"relevance", "lastUpdatedDate", "submittedDate"}
@@ -82,7 +89,10 @@ TOOL_SCHEMA = {
 
 
 class ArxivSearchError(Exception):
-    """Raised when the arXiv API fails after all retries."""
+    """No longer raised by this module -- exhausted retries return an
+    error dict instead, so a transient network failure cannot fail a
+    ten-pass research run. Kept because it is part of this module's
+    public surface and something outside the repo may catch it."""
 
 
 # ---- Cache helpers ----------------------------------------------------------
@@ -130,6 +140,10 @@ def _call_arxiv_api(search_query: str, max_results: int, sort_by: str) -> str:
         },
         headers={"User-Agent": "agent-harness-arxiv-tool/1.0 (research pipeline)"},
         timeout=REQUEST_TIMEOUT_S,
+        # Belt and braces beside the https:// above. If arXiv moves the
+        # endpoint again, following the redirect keeps this working
+        # instead of failing as an unparseable empty body.
+        follow_redirects=True,
     )
     response.raise_for_status()
     return response.text  # raw Atom XML
@@ -185,7 +199,7 @@ def run(params: dict) -> dict:
 
     results = _cache_get(cache_key)
     if results is not None:
-        logger.info("arxiv_search cache hit", extra={"keywords": parsed.keywords})
+        logger.info("arxiv_search cache hit for %r", parsed.keywords)
     else:
         search_query = _build_search_query(parsed.keywords, parsed.category)
         last_exc: Optional[Exception] = None
@@ -199,13 +213,23 @@ def run(params: dict) -> dict:
             except (httpx.HTTPError, ET.ParseError) as e:
                 last_exc = e
                 logger.warning(
-                    "arxiv_search attempt failed",
-                    extra={"attempt": attempt, "keywords": parsed.keywords, "error": str(e)},
-                )
+                    "arxiv_search attempt %s/%s failed for %r: %s",
+                    attempt + 1, MAX_RETRIES + 1, parsed.keywords, e)
         else:
-            raise ArxivSearchError(
-                f"arXiv search failed after {MAX_RETRIES + 1} attempts"
-            ) from last_exc
+            # RETURNED, not raised. A search tool that cannot reach its
+            # provider is a result the model can work around -- try
+            # web_search, or say the claim could not be grounded. Raising
+            # made one transient network failure, in one pass, fail an
+            # entire ten-pass research run; fetch_url has always returned
+            # an error dict here and arxiv_search was the outlier.
+            #
+            # dispatch() now contains a raise from any tool as well, so
+            # this is the message rather than the mechanism: the model
+            # gets something specific instead of a generic wrapper.
+            return {
+                "error": f"arXiv search failed after {MAX_RETRIES + 1} "
+                         f"attempts: {last_exc}"
+            }
 
     if not results:
         return {"results": [], "result_count": 0, "message": "No papers found."}

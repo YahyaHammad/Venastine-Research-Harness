@@ -34,6 +34,27 @@ run.log() trace line, so even a hard kill (KeyboardInterrupt / SystemExit,
 which bypass the except Exception block) leaves the record populated
 through the last completed pass. load_pipeline_run() in
 pipeline_storage.py provides the read API.
+
+ROADMAP_v2 §22 (pipeline observability): the pipeline is a GENERATOR
+yielding PipelineEvents (core/reasoning/events.py), so a shell can render
+pass boundaries, trace lines, claim tiers and retries as they happen
+rather than waiting for the whole run. Three names, exactly §13's shape:
+
+  stream_deep_research_pipeline()  the generator
+  run_pipeline_to_completion()     the drainer
+  run_deep_research_pipeline()     the unchanged synchronous entry point,
+                                   which is the drainer applied to the
+                                   generator
+
+Decision P3: the public name did NOT become the generator. Every existing
+caller -- main.py, tui/app.py and fifteen test sites -- keeps receiving a
+finished PipelineRun from a call that looks exactly as it did (§22 AC1),
+and only a shell that wants live progress opts into the generator.
+
+Decision P2: a pass's own LoopEvents are NOT forwarded up. Each pass
+still runs through run_deep_research_mode() -> run_to_completion(), so
+core/loop.py, core/client.py, json_retry.py and review.py's internals are
+untouched by this section.
 """
 
 from __future__ import annotations
@@ -46,6 +67,7 @@ import prompts.system_prompts as system_prompts
 from core.loop import RunAgentLoop
 from core.reasoning.base import Claim, PipelineRun
 from core.reasoning.confidence_scoring import run_confidence_tiering
+from core.reasoning.events import PipelineEvent
 from core.reasoning.json_retry import parse_json_response as _parse_json_response
 from core.reasoning.json_retry import retry_until_json
 from core.reasoning.pipeline_storage import create_pipeline_run, update_pipeline_run
@@ -66,15 +88,123 @@ _CLAIM_INPUT_FIELDS = {"id", "text", "type", "entities", "source_span", "asserte
 # ---- Small helpers ----------------------------------------------------------
 # ============================================================================
 
+class _Progress:
+    """The ONE place a trace line becomes durable and becomes an event
+    (§22 AC3).
+
+    Before §22 this file paired every `run.log(...)` with an
+    `update_pipeline_run(...)` at twenty call sites, and `run.trace` had
+    THREE writers: those, review.py's fifteen `run.log()` calls (which
+    checkpointed nowhere), and json_retry.py's bare `trace.append()` per
+    failed parse. So "§5's persistence fires on every trace line" was
+    already untrue, and adding a per-call-site event emission would have
+    made it two independent writers of related data -- the bug shape §22
+    warns about by name.
+
+    So both are DERIVED from `run.trace` itself. `checkpoint()` emits
+    every line appended since it last ran and then persists. Because the
+    watermark reads the list rather than the call site, review.py's and
+    json_retry.py's lines are picked up too, WITHOUT either module being
+    edited or knowing this exists.
+
+    The watermark lives here rather than on PipelineRun because base.py
+    is data only and §5 serializes that object -- a field meaningful
+    only inside a live generator has no business in a persisted row.
+    """
+
+    def __init__(self, run: PipelineRun) -> None:
+        self.run = run
+        self._emitted = 0
+
+    def checkpoint(self, message: str | None = None):
+        """Log (optionally), PERSIST, then emit every un-emitted line.
+
+        Persist BEFORE emitting, not after. A generator only advances
+        while someone iterates it, so a consumer that abandons the run
+        between the yield and the persist would take that checkpoint down
+        with it -- §5's durability would silently start depending on a
+        UI's willingness to keep reading. This way, a line is already in
+        the record by the time anyone is told about it.
+
+        Monotonic: `_emitted` only ever advances, so no line can be
+        yielded twice however many times this is called.
+        """
+        if message is not None:
+            self.run.log(message)
+        update_pipeline_run(self.run.run_id, self.run)
+        while self._emitted < len(self.run.trace):
+            line = self.run.trace[self._emitted]
+            self._emitted += 1
+            yield PipelineEvent(kind="trace_line", text=line)
+
+
+def _check_not_truncated(pass_id: str, response, trace: list[str] | None):
+    """A pass that ended on a stop condition did NOT finish; say so.
+
+    `_run_pass` used to return `response.text` and discard `stop_reason`,
+    so a pass cut off by the token budget looked exactly like one that
+    completed -- and because a budget stop returns the last response AS
+    IT STANDS, a pass that was mid-tool-call returned the EMPTY STRING.
+
+    That is not hypothetical. A Pass 1 making 14 tool calls crossed the
+    old 250k ceiling, returned "", and the orchestrator stored it as
+    raw_response. Pass 2 was then handed "Response to extract claims
+    from:\\n" and correctly answered that there was nothing to extract --
+    in a shape that is not a claim list -- and the run finally died in
+    Claim's constructor, three passes and one confusing TypeError away
+    from the thing that actually went wrong.
+
+    TWO outcomes, because truncation is not uniformly fatal:
+
+      * truncated WITH text -- degraded but usable. The pass produced an
+        answer and was cut off finishing it; downstream passes can work
+        with that. Traced, so the report's own audit log says the answer
+        was incomplete, and the run continues.
+      * truncated with NO text -- unusable. Everything downstream is
+        working from an empty string, and the only question is how many
+        passes it takes to produce an incomprehensible error. Raise here,
+        naming the pass and the stop reason.
+    """
+    stop = getattr(response, "stop_reason", None)
+    if stop in (None, "complete"):
+        return
+    text = (getattr(response, "text", "") or "").strip()
+    if not text:
+        raise ValueError(
+            f"{pass_id} ended on {stop!r} with no text. A stop condition "
+            f"returns the last response as it stands, so a pass cut off "
+            f"mid-tool-call yields an empty string -- and every later "
+            f"pass would be working from nothing. "
+            f"(config.RESEARCH_PASS_TOKEN_BUDGET / config.MAX_ITERATIONS "
+            f"are the two ceilings that produce this.)"
+        )
+    message = (f"{pass_id}: TRUNCATED ({stop}) -- the pass was cut off but "
+               f"produced output; continuing with what it returned.")
+    logger.warning("%s", message)
+    if trace is not None:
+        trace.append(message)
+
+
 def _run_pass(pass_id: str, pass_input: str, model: str, provider_name: str,
-              temperature: float | None = None, authorization=None) -> str:
+              temperature: float | None = None, authorization=None,
+              trace: list[str] | None = None):
     """One LLM-backed pass. Every actual model call in this file goes
-    through this single function."""
+    through this single function.
+
+    §22: a GENERATOR that yields the pass boundary and returns the
+    response text (`text = yield from _run_pass(...)`). The pass id is
+    named once here rather than restated beside twelve call sites. The
+    call itself is unchanged -- run_deep_research_mode still drains its
+    own loop internally (P2), so nothing about how a pass executes moved.
+    """
+    yield PipelineEvent(kind="pass_start", pass_id=pass_id)
     response = RunAgentLoop.run_deep_research_mode(
         pass_input=pass_input, model=model, pass_id=pass_id, provider_name=provider_name,
         temperature=temperature, authorization=authorization,
     )
     _record_granted_calls(pass_id, response, authorization)
+    _check_not_truncated(pass_id, response, trace)
+    yield PipelineEvent(kind="pass_complete", pass_id=pass_id)
     return response.text
 
 
@@ -105,7 +235,7 @@ def _run_pass_with_json_retry(
     trace: list[str] | None = None,
     temperature: float | None = None,
     authorization=None,
-) -> str:
+):
     """Runs one JSON-emitting pass and recovers from malformed JSON.
 
     The recovery itself lives in core/reasoning/json_retry.py, shared with
@@ -119,14 +249,30 @@ def _run_pass_with_json_retry(
     Unrecoverable failure raises ValueError with the final parse error
     attached; the caller's try/except turns that into a durable
     status='failed' record.
+
+    §22: a generator, like _run_pass, and for the same reason. The
+    corrective attempts inside retry_until_json need no event kind of
+    their own -- that function already appends a trace line per failed
+    parse, so _Progress's watermark carries them to the consumer at the
+    next checkpoint with json_retry.py untouched. pass_complete fires
+    after the retries resolve, so a pass is not reported finished while
+    it is still arguing with the model about JSON.
     """
+    yield PipelineEvent(kind="pass_start", pass_id=pass_id)
     response = RunAgentLoop.run_deep_research_mode(
         pass_input=pass_input, model=model, pass_id=pass_id, provider_name=provider_name,
         temperature=temperature, authorization=authorization,
     )
     _record_granted_calls(pass_id, response, authorization)
+    # BEFORE the retry loop. A truncated pass returned no JSON because it
+    # was cut off, not because the model wrote malformed JSON -- sending
+    # a "your last response did not parse" nudge into a thread that has
+    # already exhausted its budget spends more of it to be told the same
+    # thing, and reports a parse failure for something that never parsed
+    # because it was never finished.
+    _check_not_truncated(pass_id, response, trace)
 
-    return retry_until_json(
+    text = retry_until_json(
         response,
         label=pass_id,
         # pass_prompt(), NOT the raw pass file: BOTH the original attempt
@@ -139,7 +285,12 @@ def _run_pass_with_json_retry(
         temperature=temperature,
         authorization=authorization,
         on_response=lambda r: _record_granted_calls(pass_id, r, authorization),
+        # The retry re-enters THIS pass's thread, so it runs on the pass's
+        # budget rather than continue_conversation's chat default.
+        max_total_tokens=config.RESEARCH_PASS_TOKEN_BUDGET,
     )
+    yield PipelineEvent(kind="pass_complete", pass_id=pass_id)
+    return text
 
 
 def _claim_from_json(raw: dict) -> Claim:
@@ -199,10 +350,16 @@ def _synthesis_input(run: PipelineRun, directives: list | None = None) -> str:
     return text
 
 
-def _review_stage(run: PipelineRun, model: str, provider_name: str,
-                  authorization, review, enabled: bool = False) -> None:
+def _review_stage(run: PipelineRun, progress: _Progress, model: str,
+                  provider_name: str, authorization, review,
+                  enabled: bool = False):
     """ROADMAP_v2 §20. Opt-in review of the finished run, with every
     correction consented to individually.
+
+    §22: a generator, because it logs, checkpoints and runs a pass. It
+    takes the run's _Progress rather than making its own, so review.py's
+    trace lines -- which never checkpointed at all before §22 -- land on
+    the same watermark as everything else.
 
     Called from INSIDE the orchestrator (V3) rather than left to each
     shell. The obvious alternative -- a post-pipeline stage the caller
@@ -239,13 +396,13 @@ def _review_stage(run: PipelineRun, model: str, provider_name: str,
         excerpt = str(f.get("proposed") or "")[:80]
         run.log(f"Review: finding -- {f.get('kind')} correction to {target}"
                 + (f": {excerpt}" if excerpt else ""))
-    update_pipeline_run(run.run_id, run)
+    yield from progress.checkpoint()
 
     decisions = review_module.walk_consent(
         findings, review, run, model=model, provider_name=provider_name,
         thread_id=thread_id, authorization=authorization)
     run.subagent_reviews = decisions
-    update_pipeline_run(run.run_id, run)
+    yield from progress.checkpoint()
 
     # Deferred commit (review f4): corrections land on a copy, and the
     # live claims/report change only after the re-synthesis succeeds. A
@@ -256,10 +413,11 @@ def _review_stage(run: PipelineRun, model: str, provider_name: str,
         original_claims = run.claims
         run.claims = corrected
         try:
-            run.final_report = _run_pass(
+            run.final_report = yield from _run_pass(
                 "Final synthesis",
                 _synthesis_input(run, review_module.synthesis_directives(decisions)),
                 model, provider_name, authorization=authorization,
+                trace=run.trace,
             )
         except Exception as e:
             # CONTAINED, not re-raised. A provider error on this one call
@@ -279,7 +437,7 @@ def _review_stage(run: PipelineRun, model: str, provider_name: str,
             review_module.log_outcomes(run, decisions, applied, committed=False)
             run.log(f"Review: re-synthesis failed ({e}); accepted corrections "
                     f"NOT applied -- claims and report left unchanged.")
-            update_pipeline_run(run.run_id, run)
+            yield from progress.checkpoint()
             return
         review_module.log_outcomes(run, decisions, applied, committed=True)
         # NOT re-reviewed. The regress is cut deliberately: a review of the
@@ -290,7 +448,25 @@ def _review_stage(run: PipelineRun, model: str, provider_name: str,
     else:
         review_module.log_outcomes(run, decisions, applied, committed=False)
         run.log("Review: no correction applied; report unchanged.")
-    update_pipeline_run(run.run_id, run)
+    yield from progress.checkpoint()
+
+
+def _tier_events(run: PipelineRun):
+    """One claim_tiered event per claim, after a tiering pass.
+
+    Called after EVERY run_confidence_tiering() -- Pass 4 and each 6c
+    round -- so a consumer sees a claim's tier change rather than only
+    its first value. Repeats are by design: the events are a stream of
+    "this is the tier now", and a panel re-renders from the latest.
+
+    Derived from run.claims after the fact rather than emitted inside
+    confidence_scoring.py, which makes zero LLM calls and knows nothing
+    about events; §22's own warning about two writers of related data
+    applies to the tiering just as it does to the trace.
+    """
+    for claim in run.claims:
+        yield PipelineEvent(kind="claim_tiered", claim_id=claim.id,
+                            tier=claim.confidence_tier)
 
 
 def _apply_fallback(claim: Claim) -> None:
@@ -307,6 +483,26 @@ def _apply_fallback(claim: Claim) -> None:
 # ---- The pipeline ------------------------------------------------------
 # ============================================================================
 
+def run_pipeline_to_completion(gen) -> PipelineRun:
+    """Consumes a stream_deep_research_pipeline() generator fully,
+    discarding intermediate events, and returns the finished PipelineRun.
+
+    The exact counterpart of core.loop.run_to_completion(), including the
+    RuntimeError: a generator that ends without its terminal event has a
+    bug, and returning None instead would push the failure into whichever
+    caller dereferences the run first.
+    """
+    final = None
+    for event in gen:
+        if event.kind == "run_complete":
+            final = event.run
+    if final is None:
+        raise RuntimeError(
+            "Pipeline generator completed without yielding a run_complete event"
+        )
+    return final
+
+
 def run_deep_research_pipeline(
     user_query: str,
     model: str,
@@ -317,7 +513,50 @@ def run_deep_research_pipeline(
     review=None,
     subagent_review: bool | None = None,
 ) -> PipelineRun:
-    """authorization (§25): a core.approval.RunAuthorization built by the
+    """The synchronous entry point: run the pipeline, return the finished
+    PipelineRun. Unchanged in signature and behaviour by §22 (AC1) --
+    every caller that does not want live progress keeps calling this.
+
+    A shell that DOES want progress iterates
+    stream_deep_research_pipeline() directly; this is that generator with
+    the drainer applied, exactly as core/loop.py's three public wrappers
+    relate to _run().
+    """
+    return run_pipeline_to_completion(stream_deep_research_pipeline(
+        user_query=user_query,
+        model=model,
+        provider_name=provider_name,
+        ensemble_mode=ensemble_mode,
+        ensemble_n=ensemble_n,
+        authorization=authorization,
+        review=review,
+        subagent_review=subagent_review,
+    ))
+
+
+def stream_deep_research_pipeline(
+    user_query: str,
+    model: str,
+    provider_name: str = DEFAULT_PROVIDER,
+    ensemble_mode: bool | None = None,
+    ensemble_n: int | None = None,
+    authorization=None,
+    review=None,
+    subagent_review: bool | None = None,
+):
+    """The pipeline, as a generator of PipelineEvents (§22). The terminal
+    `run_complete` event carries the finished PipelineRun.
+
+    ABANDONMENT (§22, recorded rather than fixed). A consumer that stops
+    iterating early -- a TUI quitting mid-run -- raises GeneratorExit
+    inside the try below, which `except Exception` deliberately does not
+    catch. The record therefore stays status='running', populated through
+    the last checkpoint. That is honest: the run was abandoned, not
+    failed, and forcing 'failed' would make an interrupted run
+    indistinguishable from a broken one. Both shipped consumers drain
+    fully.
+
+    authorization (§25): a core.approval.RunAuthorization built by the
     shell that launched this run, or None for the pre-§25 behaviour (no
     grants, nobody to ask, every approval-gated tool hidden from every
     pass). Carried, not interpreted -- the decisions about WHAT may be
@@ -380,46 +619,51 @@ def run_deep_research_pipeline(
     critic_provider = config.CRITIC_MODEL["provider_name"] if config.CRITIC_MODEL else provider_name
     critic_model = config.CRITIC_MODEL["model"] if config.CRITIC_MODEL else model
 
+    progress = _Progress(run)
+
     try:
         # --- Pass 0: preliminary plan ---
-        run.plan = _parse_json_response(_run_pass_with_json_retry("Pass 0", user_query, model, provider_name, run.trace, authorization=authorization))
-        run.log(f"Pass 0: plan produced ({len(run.plan.get('key_entities_or_subjects', []))} key entities anticipated).")
-        update_pipeline_run(run.run_id, run)
+        run.plan = _parse_json_response((yield from _run_pass_with_json_retry("Pass 0", user_query, model, provider_name, run.trace, authorization=authorization)))
+        yield from progress.checkpoint(f"Pass 0: plan produced ({len(run.plan.get('key_entities_or_subjects', []))} key entities anticipated).")
 
         # --- Pass 1: initial generation (ensemble mode: N candidates) ---
         pass1_input = f"Original query:\n{user_query}\n\nPreliminary plan (loose context, may deviate freely):\n{json.dumps(run.plan)}"
         if ensemble_mode:
-            candidates = [
-                _run_pass("Pass 1", pass1_input, model, provider_name,
-                          temperature=config.ENSEMBLE_TEMPERATURE,
-                          authorization=authorization)
-                for _ in range(ensemble_n)
-            ]
+            # A LOOP, not a comprehension: _run_pass is a generator now
+            # (§22), and a comprehension would collect generator objects
+            # without ever running a pass.
+            candidates = []
+            for _ in range(ensemble_n):
+                candidates.append((yield from _run_pass(
+                    "Pass 1", pass1_input, model, provider_name,
+                    temperature=config.ENSEMBLE_TEMPERATURE,
+                    authorization=authorization, trace=run.trace)))
             run.raw_response = candidates[0]
             pass2_input = "\n\n".join(
                 f"Candidate {i + 1}:\n{c}" for i, c in enumerate(candidates)
             )
             run.log(f"Pass 1: ensemble mode — {ensemble_n} candidates generated.")
         else:
-            run.raw_response = _run_pass("Pass 1", pass1_input, model, provider_name, authorization=authorization)
+            run.raw_response = yield from _run_pass("Pass 1", pass1_input, model, provider_name, authorization=authorization, trace=run.trace)
             pass2_input = f"Response to extract claims from:\n{run.raw_response}"
             run.log("Pass 1: initial generation complete.")
-        update_pipeline_run(run.run_id, run)
+        yield from progress.checkpoint()
 
         # --- Pass 2: claim extraction & classification ---
-        claims_json = _parse_json_response(_run_pass_with_json_retry("Pass 2", pass2_input, model, provider_name, run.trace, authorization=authorization))
+        claims_json = _parse_json_response((yield from _run_pass_with_json_retry("Pass 2", pass2_input, model, provider_name, run.trace, authorization=authorization)))
         run.claims = [_claim_from_json(c) for c in claims_json]
-        run.log(f"Pass 2: extracted {len(run.claims)} claim(s).")
-        update_pipeline_run(run.run_id, run)
+        for claim in run.claims:
+            yield PipelineEvent(kind="claim_extracted", claim_id=claim.id,
+                                text=claim.text)
+        yield from progress.checkpoint(f"Pass 2: extracted {len(run.claims)} claim(s).")
 
         # --- D0: route by claim type (pure code) ---
         factual_claims = [c for c in run.claims if c.type == "factual"]
         non_factual_claims = [c for c in run.claims if c.type != "factual"]
-        run.log(
+        yield from progress.checkpoint(
             f"D0: {len(factual_claims)} factual claim(s) routed to 3a/3b, "
             f"{len(non_factual_claims)} synthesis/speculative claim(s) routed directly to Pass 5."
         )
-        update_pipeline_run(run.run_id, run)
 
         # --- Pass 3a + 3b: only for factual claims, batched by deduplicated entity ---
         if factual_claims:
@@ -429,31 +673,27 @@ def run_deep_research_pipeline(
                 f"Deduplicated entities to research (search each ONCE, map results back "
                 f"to every claim referencing it):\n{json.dumps(unique_entities)}"
             )
-            grounding_json = _parse_json_response(_run_pass_with_json_retry("Pass 3a", pass3a_input, critic_model, critic_provider, run.trace, authorization=authorization))
+            grounding_json = _parse_json_response((yield from _run_pass_with_json_retry("Pass 3a", pass3a_input, critic_model, critic_provider, run.trace, authorization=authorization)))
             _apply_grounding(run.claims, grounding_json)
-            run.log(f"Pass 3a: grounded {len(unique_entities)} unique entities across {len(factual_claims)} factual claim(s).")
-            update_pipeline_run(run.run_id, run)
+            yield from progress.checkpoint(f"Pass 3a: grounded {len(unique_entities)} unique entities across {len(factual_claims)} factual claim(s).")
 
             pass3b_input = (
                 f"Raw response:\n{run.raw_response}\n\n"
                 f"Factual claims with grounding:\n{json.dumps([vars(c) for c in factual_claims])}"
             )
-            critic_json = _parse_json_response(_run_pass_with_json_retry("Pass 3b", pass3b_input, critic_model, critic_provider, run.trace, authorization=authorization))
+            critic_json = _parse_json_response((yield from _run_pass_with_json_retry("Pass 3b", pass3b_input, critic_model, critic_provider, run.trace, authorization=authorization)))
             _apply_critic(run.claims, critic_json)
-            run.log("Pass 3b: critique complete for factual claims.")
-            update_pipeline_run(run.run_id, run)
+            yield from progress.checkpoint("Pass 3b: critique complete for factual claims.")
         else:
-            run.log("Pass 3a/3b: skipped -- no factual claims to ground or critique.")
-            update_pipeline_run(run.run_id, run)
+            yield from progress.checkpoint("Pass 3a/3b: skipped -- no factual claims to ground or critique.")
 
         # --- Pass 3c: completeness, independent of Pass 1's raw_response ---
         pass3c_input = f"Original query:\n{user_query}\n\nPreliminary plan:\n{json.dumps(run.plan)}"
-        run.completeness = _parse_json_response(_run_pass_with_json_retry("Pass 3c", pass3c_input, model, provider_name, run.trace, authorization=authorization))
-        run.log(
+        run.completeness = _parse_json_response((yield from _run_pass_with_json_retry("Pass 3c", pass3c_input, model, provider_name, run.trace, authorization=authorization)))
+        yield from progress.checkpoint(
             f"Pass 3c: coverage_score={run.completeness.get('coverage_score')}, "
             f"{len(run.completeness.get('gaps', []))} gap(s) identified."
         )
-        update_pipeline_run(run.run_id, run)
 
         # --- Pass 5: assumption audit -- ALL claims, plus completeness ---
         pass5_input = (
@@ -461,20 +701,18 @@ def run_deep_research_pipeline(
             f"All claims:\n{json.dumps([vars(c) for c in run.claims])}\n\n"
             f"Completeness findings:\n{json.dumps(run.completeness)}"
         )
-        run.assumptions = _parse_json_response(_run_pass_with_json_retry("Pass 5", pass5_input, model, provider_name, run.trace, authorization=authorization))
+        run.assumptions = _parse_json_response((yield from _run_pass_with_json_retry("Pass 5", pass5_input, model, provider_name, run.trace, authorization=authorization)))
         _apply_assumption_flags(run.claims, run.assumptions)
-        run.log(f"Pass 5: assumption audit complete, {len(run.assumptions.get('per_claim_flags', {}))} claim(s) flagged.")
-        update_pipeline_run(run.run_id, run)
+        yield from progress.checkpoint(f"Pass 5: assumption audit complete, {len(run.assumptions.get('per_claim_flags', {}))} claim(s) flagged.")
 
         # --- Pass 4: confidence tiering (0 LLM calls) ---
         run_confidence_tiering(run, ensemble_n=ensemble_n if ensemble_mode else 0)
-        run.log("Pass 4: confidence tiers assigned (pure code, zero LLM calls).")
-        update_pipeline_run(run.run_id, run)
+        yield from _tier_events(run)
+        yield from progress.checkpoint("Pass 4: confidence tiers assigned (pure code, zero LLM calls).")
 
         # --- D1 + the 6a/6c/D2 retry loop ---
         flagged = [c for c in run.claims if c.confidence_tier in FLAGGED_TIERS]
-        run.log(f"D1: {len(flagged)} claim(s) flagged for revision, {len(run.claims) - len(flagged)} already clean.")
-        update_pipeline_run(run.run_id, run)
+        yield from progress.checkpoint(f"D1: {len(flagged)} claim(s) flagged for revision, {len(run.claims) - len(flagged)} already clean.")
 
         while flagged:
             # --- Pass 6a: ONE batched call across every currently-flagged claim ---
@@ -487,32 +725,38 @@ def run_deep_research_pipeline(
                 }
                 for c in flagged
             ])
-            revisions = _parse_json_response(_run_pass_with_json_retry("Pass 6a", pass6a_input, model, provider_name, run.trace, authorization=authorization))
+            revisions = _parse_json_response((yield from _run_pass_with_json_retry("Pass 6a", pass6a_input, model, provider_name, run.trace, authorization=authorization)))
             for rev in revisions:
                 claim = run.claim_by_id(rev["claim_id"])
                 if claim:
                     claim.revision_text = rev["revised_text"]
                     claim.retry_count += 1
-            run.log(f"Pass 6a: revised {len(revisions)} claim(s) in this retry round.")
-            update_pipeline_run(run.run_id, run)
+                    # §22's "which claim, which attempt" -- emitted from the
+                    # claim retry loop, which is the retry the section means.
+                    # A JSON-parse retry is a different thing and reaches the
+                    # consumer as a trace_line, via json_retry.py's own line.
+                    yield PipelineEvent(kind="retry", claim_id=claim.id,
+                                        attempt=claim.retry_count)
+            yield from progress.checkpoint(f"Pass 6a: revised {len(revisions)} claim(s) in this retry round.")
 
             # --- Pass 6c: re-validate the revised subset only (batched, reuses Pass 4's code) ---
             pass6c_input = json.dumps([vars(c) for c in flagged])
-            revalidation = _parse_json_response(_run_pass_with_json_retry("Pass 6c", pass6c_input, critic_model, critic_provider, run.trace, authorization=authorization))
+            revalidation = _parse_json_response((yield from _run_pass_with_json_retry("Pass 6c", pass6c_input, critic_model, critic_provider, run.trace, authorization=authorization)))
             _apply_grounding(run.claims, revalidation.get("grounding", []))
             _apply_critic(run.claims, revalidation.get("critic", []))
             run_confidence_tiering(run, ensemble_n=ensemble_n if ensemble_mode else 0)  # Pass 4's function again -- code, not a call
+            yield from _tier_events(run)
 
             still_flagged = [c for c in flagged if c.confidence_tier in FLAGGED_TIERS]
-            run.log(f"Pass 6c: {len(flagged) - len(still_flagged)} claim(s) now clean, {len(still_flagged)} still flagged.")
-            update_pipeline_run(run.run_id, run)
+            yield from progress.checkpoint(f"Pass 6c: {len(flagged) - len(still_flagged)} claim(s) now clean, {len(still_flagged)} still flagged.")
 
             # --- D2: retry cap check (pure code) ---
             exhausted = [c for c in still_flagged if c.retry_count >= MAX_RETRIES]
             for c in exhausted:
                 _apply_fallback(c)
-                run.log(f"D2: claim {c.id} exhausted retries ({c.retry_count}) -> fallback UNVERIFIED.")
-                update_pipeline_run(run.run_id, run)
+                yield PipelineEvent(kind="claim_tiered", claim_id=c.id,
+                                    tier=c.confidence_tier)
+                yield from progress.checkpoint(f"D2: claim {c.id} exhausted retries ({c.retry_count}) -> fallback UNVERIFIED.")
 
             flagged = [c for c in still_flagged if c.retry_count < MAX_RETRIES]
 
@@ -522,24 +766,23 @@ def run_deep_research_pipeline(
                 claim.final_text = claim.revision_text or claim.text
             if claim.annotation is None:
                 claim.annotation = f"[{claim.confidence_tier}]"
-        run.log("Pass 6b: annotation complete (templated, zero LLM calls).")
-        update_pipeline_run(run.run_id, run)
+        yield from progress.checkpoint("Pass 6b: annotation complete (templated, zero LLM calls).")
 
         # --- Merge (pure code) ---
-        run.log(f"Merge: final claim set assembled -- {len(run.claims)} claim(s), {len(run.coverage_gaps)} coverage gap(s).")
-        update_pipeline_run(run.run_id, run)
+        yield from progress.checkpoint(f"Merge: final claim set assembled -- {len(run.claims)} claim(s), {len(run.coverage_gaps)} coverage gap(s).")
 
         # --- Final synthesis ---
-        run.final_report = _run_pass("Final synthesis", _synthesis_input(run), model, provider_name, authorization=authorization)
-        run.log("Final synthesis complete.")
-        update_pipeline_run(run.run_id, run)
+        run.final_report = yield from _run_pass("Final synthesis", _synthesis_input(run), model, provider_name, authorization=authorization, trace=run.trace)
+        yield from progress.checkpoint("Final synthesis complete.")
 
         # --- §20: review, consent, correct ---
-        _review_stage(run, model, provider_name, authorization, review,
-                      enabled=subagent_review)
+        yield from _review_stage(run, progress, model, provider_name,
+                                 authorization, review,
+                                 enabled=subagent_review)
 
         update_pipeline_run(run.run_id, run, status="complete")
-        return run
+        yield PipelineEvent(kind="run_complete", run=run)
+        return
     except Exception:
         # Persist the partial state before the exception propagates. The
         # update is best-effort: if storage itself is what failed, we must

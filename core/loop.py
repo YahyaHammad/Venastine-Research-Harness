@@ -594,7 +594,13 @@ class RunAgentLoop:
         pass_id: str,
         provider_name: str = DEFAULT_PROVIDER,
         max_steps: int = config.MAX_ITERATIONS,
-        max_total_tokens: int = config.MAX_TOKEN_BUDGET,
+        # A pass gets its OWN, larger ceiling. The meter re-counts the whole
+        # prompt every step, so a pass making a dozen tool calls with large
+        # results hits the chat budget long before its context is anywhere
+        # near a problem -- and a budget stop returns the last response as
+        # it stands, which for a tool-calling step means EMPTY TEXT. See
+        # config.RESEARCH_PASS_TOKEN_BUDGET for the run that found this.
+        max_total_tokens: int = config.RESEARCH_PASS_TOKEN_BUDGET,
         temperature: Optional[float] = None,
         effort: Optional[str] = None,
         context: Optional[ToolContext] = None,

@@ -46,7 +46,7 @@ Venastine Research Harness/
 ├── pytest.ini                      # testpaths=tests, --strict-markers
 ├── DEVLOG.md                       # implementation notes for built ROADMAP sections -- see §0
 │
-├── tests/                          # 927 tests, all offline, ~25s (first run ~7s for matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
+├── tests/                          # 989 tests, all offline, ~25s (first run ~7s for matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
 │   ├── conftest.py                 # fixtures: make_model_response, make_stream_from_response, make_stream_sequence, FakeStorage, ...
 │   ├── BREAKING_CHANGES.md         # what-breaks-it / symptom / fix per area
 │   ├── test_cli.py                 # 20 tests -- ROADMAP §1 thread_id passthrough + UUID validation + §14 parser defaults/resolution/trust flow
@@ -76,7 +76,7 @@ Venastine Research Harness/
 │   ├── test_agents.py              # 31 tests -- ROADMAP_v2 §18 AC1-AC3 (intersection, depth, manager surface), dispatch injection, headless filter + warning, goal mode, catalog, D24, TUI commands
 │   ├── test_client_effort.py       # 26 tests -- ROADMAP_v2 §16 effort levels: queried for Anthropic, table fallback, effort_for validation, cache behaviour
 │   ├── test_ensemble_guard.py      # 3 tests -- §10 revisit: refuse ensemble mode on a model that rejects sampling params
-│   ├── test_tui.py                 # 29 tests -- ROADMAP_v2 §16 AC1-AC3 (thread picker, permission round-trip, worker survives a raising tool) + §25 grant picker / attended modal
+│   ├── test_tui.py                 # 38 tests -- ROADMAP_v2 §16 AC1-AC3 (thread picker, permission round-trip, worker survives a raising tool) + §25 grant picker / attended modal + /model's provider/model switch
 │   ├── test_mcp_config.py          # 26 tests -- ROADMAP_v2 §17 mcp.json discovery, tier precedence D29, unknown-key tolerance, strict flag parsing
 │   ├── test_mcp_client.py          # 30 tests -- ROADMAP_v2 §17 bridge, cancel-scope task affinity, v2 field names, normalization, teardown
 │   ├── test_grants.py              # 19 tests -- ROADMAP_v2 §25 R2/R6: grantability, the loop enforcing it, GrantBudget, the audit list
@@ -97,7 +97,8 @@ Venastine Research Harness/
 │   ├── test_memories.py           # 13 tests -- ROADMAP_v2 §21b scope resolution, the injection cap (M14) and the opt-in rule (M13)
 │   ├── test_remember_tool.py      # 16 tests -- ROADMAP_v2 §21b D24/D26 declarations, the approval notice, M17's exclusion from pipeline grants
 │   ├── test_memory_injection.py   # 12 tests -- ROADMAP_v2 §21b the three placements and the with_catalogs boundary (M13/K6), plus AC5/AC6 end to end
-│   └── test_memory_shells.py      # 16 tests -- ROADMAP_v2 §21b M16's CLI approval provider and M15's /memories, /forget
+│   ├── test_memory_shells.py      # 16 tests -- ROADMAP_v2 §21b M16's CLI approval provider and M15's /memories, /forget
+│   └── test_pipeline_events.py    # 20 tests -- ROADMAP_v2 §22 AC1-AC4: the drainer, the one trace writer (incl. review.py's and json_retry.py's lines), P1's recorded decision, the abandoned-run record, and the live TUI view
 │
 ├── core/
 │   ├── client.py                  # ONE model call, normalized across providers; provider-specific wire formats live ONLY here. §13 adds call_model_stream() (3 streaming impls) + collect_response() + StreamToken
@@ -112,8 +113,9 @@ Venastine Research Harness/
 │   └── reasoning/
 │       ├── base.py                # Claim / PipelineRun data model for the research pipeline (now carries run_id + §25 granted_calls + §20 subagent_reviews)
 │       ├── authorization.py       # ROADMAP_v2 §25: the pipeline's grant POLICY -- candidates(), parse_grant_spec(), PIPELINE_UNGRANTABLE. Shared by both shells so they cannot drift
+│       ├── events.py              # §22: PipelineEvent -- kind-discriminated, SEPARATE from core/events.py's LoopEvent (P1). PIPELINE_EVENT_KINDS names all seven
 │       ├── confidence_scoring.py  # Pass 4 -- deterministic scoring, ZERO LLM calls
-│       ├── orchestrator.py        # sequences all 10 passes + D0/D1/D2 + _run_pass_with_json_retry + §5 per-pass checkpoints + §11 critic-model routing + §25 authorization passthrough + §20's _review_stage
+│       ├── orchestrator.py        # sequences all 10 passes + D0/D1/D2 + _run_pass_with_json_retry + §5 per-pass checkpoints + §11 critic-model routing + §25 authorization passthrough + §20's _review_stage. §22: a GENERATOR (stream_deep_research_pipeline) with run_pipeline_to_completion draining it for the unchanged public entry point
 │       ├── review.py              # ROADMAP_v2 §20: the post-pipeline review -- propose (run_review) / consent (walk_consent) / correct (apply), three functions so the mutating one has no model in it
 │       ├── json_retry.py          # ROADMAP §3's malformed-JSON recovery, shared by the ten passes and §20's reviewer. Takes an ALREADY-OBTAINED response; each caller starts its own first attempt
 │       ├── pipeline_storage.py    # ROADMAP §5: PipelineRunRecord table + create/update/load_pipeline_run
@@ -324,7 +326,7 @@ This section exists specifically because earlier drafts of this project put pers
 
 ### 4.9 `core/reasoning/base.py`, `confidence_scoring.py`, `orchestrator.py` — the research pipeline
 
-Covered in full in §7 below. The short version of the file boundary: `base.py` is data only (`Claim`, `PipelineRun`), `confidence_scoring.py` is Pass 4's pure-Python formula (must remain zero LLM calls), `orchestrator.py` sequences everything and is the only one of the three that calls `RunAgentLoop`.
+Covered in full in §7 below. The short version of the file boundary: `base.py` is data only (`Claim`, `PipelineRun`), `confidence_scoring.py` is Pass 4's pure-Python formula (must remain zero LLM calls), `orchestrator.py` sequences everything and is the only one of the three that calls `RunAgentLoop`. Since §22 (see §4.22) the sequencing is a generator, and `base.py` is still data only — the event watermark deliberately lives on the orchestrator, not on `PipelineRun`.
 
 ### 4.10 `security/permissions.py` vs. `tools/registry.py`
 
@@ -340,6 +342,14 @@ Covered in full in §7 below. The short version of the file boundary: `base.py` 
 **`ToolSpec.approval_check` (ROADMAP §6/§7, semantics changed by §15):** an optional `Callable[[str, dict], bool]` letting tools define path- or command-dependent approval policies (file_ops auto-approves within WORKSPACE_DIR; shell auto-approves when Docker is available) without `security/permissions.py` knowing about tool internals. **§15 changed this from a REPLACEMENT for `requires_approval()` to one term of an OR.** Before, defining an `approval_check` made a tool invisible to config- and context-level approval settings entirely, which would have made agent `approval_overrides` silently inert for `read`/`write`/`edit`/`shell` — the four tools where per-agent tightening matters most.
 
 **`ToolRegistry.approval_needed()` is the single source of truth** for "does this call need approval", and it is where that OR is computed. Both `dispatch()` and `core/loop.py`'s permission bridge call it, so they cannot disagree. Do not inline the composition into `dispatch()` — §15's own spec sketch does, because it predates §13's introduction of `approval_needed()`, and following it literally re-opens the divergence §13 closed (DEVLOG §15.3.1).
+
+**`dispatch()` contains a raising handler; it does not let one kill the run.** A tool exception becomes `{"error": ...}` — logged at ERROR *with the traceback*, so a genuine handler bug stays findable now that it no longer crashes the process, while the model sees only the message. Contained at this boundary rather than in each tool because this is where a handler becomes a tool result, and it therefore covers every built-in, every future tool, and every MCP server (third-party code that can raise anything at all). Before this, one transient network error inside one research pass propagated out of `dispatch()`, out of the pass, and into the orchestrator's `except Exception` — a finished ten-pass run flipped to `status='failed'` over a redirect (see §11's arXiv entry).
+
+Three things about it are load-bearing:
+
+- **`ToolCallDenied` does not reach the handler's `except`.** Every raise of it is above, before the handler runs. A policy denial is the caller's to handle (`core/loop.py` has its own wording) and must stay distinguishable from a tool failure. `ValueError` for an unknown tool likewise.
+- **The error result goes through `check_output_policy` too.** An exception message routinely carries the request that produced it, and for an HTTP client that means a URL with an API key in the query string — redacting only the success path would make a *failing* tool the way secrets escape.
+- **It is a backstop, not the primary route.** `web_search` and `arxiv_search` return their own error dicts after exhausting retries, so the model gets a specific message; `fetch_url` always did. The containment exists for the cases nobody anticipated.
 
 **`ToolSpec.available_check` (§15):** an optional `Callable[[], bool]` meaning "do I have anything to act on right now?", consulted by `schemas()` only. Distinct from permissions — the tool is allowed, it just has nothing to do yet (`load_skill` with an empty skill catalog). `dispatch()` deliberately ignores it: a tool declaring itself unavailable is expected to return a clean error if called anyway.
 
@@ -385,7 +395,7 @@ Covered in full in §7 below. The short version of the file boundary: `base.py` 
   - `provider_factory` / `client_for_provider` — return a mock-`api_initialization`-compatible tuple for translation tests.
   - `clear_client_cache` (autouse) — resets `api_initialization`'s cached clients before each test.
 - **`tests/BREAKING_CHANGES.md`** — per-file tables documenting what breaks each test when production code changes, the symptom, and the fix. Created because `test_orchestrator.py` was identified as the suite's most fragile mock — its mock dict is keyed by pass_id strings that ROADMAP §3 and §10 will modify.
-- **50 test files** (6 per ROADMAP §4 + 2 from §4's own additions: `test_memory_write_through.py`, `test_loop_tool_dispatch.py`; + 2 from §3/§5: `test_json_retry.py`, `test_pipeline_storage.py`; + 2 from §1: `test_cli.py`, `test_e2e.py`; + 1 from §12: `test_output_writer.py`; + 1 from audit: `test_logging_setup.py`; + 1 from §6: `test_file_ops.py`; + 1 from §7: `test_shell.py`; + 1 from §8: `test_policy_enforcement.py`; + 2 from §13: `test_client_streaming.py`, `test_streaming_loop.py`; + 3 from ROADMAP_v2 §14: `test_workspace_trust.py`, `test_config_loader.py`, `test_load_skill.py`; + 1 from §15: `test_permission_context.py`; + 1 from §11: `test_critic_routing.py`; + 1 from §16: `test_client_effort.py`; + 1 from §10's fix: `test_ensemble_guard.py`; + 3 from §17: `test_mcp_client.py`, `test_mcp_config.py`, `test_mcp_integration.py`; + 1 from §16: `test_tui.py`; + 1 from §18: `test_agents.py`; + 4 from §25: `test_grants.py`, `test_attended.py`, `test_research_authorization.py`, `test_granted_calls_artifact.py`; + 1 from §19: `test_skills.py`; + 1 from §20: `test_review.py`; + 1 from the §19–§20 review follow-up: `test_docs_consistency.py`; + 7 from §21a: `test_schema_migration.py`, `test_storage_reads.py`, `test_memory_compaction.py`, `test_compaction.py`, `test_loop_compaction.py`, `test_pin_tool.py`, `test_shell_compaction.py`; + 1 from the §21a review: `test_storage_e2e.py`; + 4 from §21b: `test_memories.py`, `test_remember_tool.py`, `test_memory_injection.py`, `test_memory_shells.py`).
+- **53 test files** (6 per ROADMAP §4 + 2 from §4's own additions: `test_memory_write_through.py`, `test_loop_tool_dispatch.py`; + 2 from §3/§5: `test_json_retry.py`, `test_pipeline_storage.py`; + 2 from §1: `test_cli.py`, `test_e2e.py`; + 1 from §12: `test_output_writer.py`; + 1 from audit: `test_logging_setup.py`; + 1 from §6: `test_file_ops.py`; + 1 from §7: `test_shell.py`; + 1 from §8: `test_policy_enforcement.py`; + 2 from §13: `test_client_streaming.py`, `test_streaming_loop.py`; + 3 from ROADMAP_v2 §14: `test_workspace_trust.py`, `test_config_loader.py`, `test_load_skill.py`; + 1 from §15: `test_permission_context.py`; + 1 from §11: `test_critic_routing.py`; + 1 from §16: `test_client_effort.py`; + 1 from §10's fix: `test_ensemble_guard.py`; + 3 from §17: `test_mcp_client.py`, `test_mcp_config.py`, `test_mcp_integration.py`; + 1 from §16: `test_tui.py`; + 1 from §18: `test_agents.py`; + 4 from §25: `test_grants.py`, `test_attended.py`, `test_research_authorization.py`, `test_granted_calls_artifact.py`; + 1 from §19: `test_skills.py`; + 1 from §20: `test_review.py`; + 1 from the §19–§20 review follow-up: `test_docs_consistency.py`; + 7 from §21a: `test_schema_migration.py`, `test_storage_reads.py`, `test_memory_compaction.py`, `test_compaction.py`, `test_loop_compaction.py`, `test_pin_tool.py`, `test_shell_compaction.py`; + 1 from the §21a review: `test_storage_e2e.py`; + 4 from §21b: `test_memories.py`, `test_remember_tool.py`, `test_memory_injection.py`, `test_memory_shells.py`; + 1 from §22: `test_pipeline_events.py`; + 2 from the 2026-08-05 live-run fixes: `test_tool_failure_containment.py`, `test_truncated_pass.py`).
 
 **What belongs here:** tests that run offline (~24s; first run ~30s for the matplotlib font cache), with zero network access and zero real API keys. Stubs in root `conftest.py` catch import-time module resolution; fixtures in `tests/conftest.py` provide `ModelResponse` construction and storage mocking; individual test files cover production code's behavior.
 
@@ -399,7 +409,7 @@ Covered in full in §7 below. The short version of the file boundary: `base.py` 
 
 **Belongs here:** `PipelineRunRecord` (one SQLModel table row per `run_deep_research_pipeline()` invocation), `create_pipeline_run(user_query) -> UUID` (inserts a `status='running'` row), `update_pipeline_run(run_id, run, status=None)` (re-serializes the live `PipelineRun` into the four data columns, sets `status` and `finished_at` if a status is given), and `load_pipeline_run(run_id) -> dict` (reads a record back as a plain dict with 9 fields: `id`, `user_query`, `status`, `started_at`, `finished_at`, `claims`, `trace`, `coverage_gaps`, `final_report`). These are the ONLY functions the orchestrator should call for pipeline-level persistence.
 
-**Does NOT belong here:** any notion of "what pass we're on" or "what claim is currently being revised" — that's `core/reasoning/orchestrator.py`'s in-memory `PipelineRun` object. The orchestrator owns the per-pass checkpoint *calls* (a data-only `update_pipeline_run(run.run_id, run)` after every `run.log(...)` trace line — 16 sites); this file owns the persistence mechanics those calls go through. `load_pipeline_run` returns claims as raw dicts (the shape `vars(c)` produced at write time), not reconstructed `Claim` instances — if/when programmatic pipeline resume is built, that function reconstructs `Claim` objects itself using `_claim_from_json`'s field-filtering pattern in `orchestrator.py`.
+**Does NOT belong here:** any notion of "what pass we're on" or "what claim is currently being revised" — that's `core/reasoning/orchestrator.py`'s in-memory `PipelineRun` object. The orchestrator owns the per-pass checkpoint *calls*; this file owns the persistence mechanics those calls go through. **Those calls are no longer 16 hand-paired sites** — §22 replaced every `run.log(...)` + `update_pipeline_run(...)` pair with one `_Progress.checkpoint()`, which persists and then emits every trace line appended since it last ran. That change was what made "§5's persistence fires on every trace line" true for the first time: `review.py` writes fifteen trace lines and checkpointed after none of them, and `json_retry.py` appends its own line directly to the list. `load_pipeline_run` returns claims as raw dicts (the shape `vars(c)` produced at write time), not reconstructed `Claim` instances — if/when programmatic pipeline resume is built, that function reconstructs `Claim` objects itself using `_claim_from_json`'s field-filtering pattern in `orchestrator.py`.
 
 **Separate columns, not one blob:** the record stores `claims_json` / `trace_json` / `coverage_gaps_json` (each a `json.dumps`'d string) and `final_report` (plain text) as four separate typed columns, mirroring `storage.py`'s `MessageLog` convention (separate columns for semantically distinct data; JSON-encode only the genuinely variable shapes). This is deliberate: a persistence layer built for crash-resilience shouldn't itself be a single point of failure — a serialization problem in one field must not corrupt the others. `status` ∈ {`running`, `complete`, `failed`} — `complete` matches `ModelResponse.stop_reason`'s literal for a normal non-error finish. `started_at` is set at creation; `finished_at` is `None` while `running` and set only on a terminal (`complete`/`failed`) transition, so a `NULL` `finished_at` meaningfully reads as "still running." Claims serialize via `vars(c)`, matching every other claim-serialization site in `orchestrator.py` (see the migration note on `Claim` in `base.py`).
 
@@ -432,9 +442,17 @@ Covered in full in §7 below. The short version of the file boundary: `base.py` 
 - **Every dismissal path must produce a boolean.** Escape, and any dismissal carrying `None`, resolve to a denial. A dismissal that puts nothing on the queue leaves the worker blocked forever — which presents as a hang, not an error, and is why `test_tui.py` asserts against the *dispatched tool* rather than against the modal appearing.
 - **`run_worker(..., exit_on_error=False)` plus an `on_worker_state_changed` handler are both required.** Textual's default is `exit_on_error=True`, which tears the whole app down on a transient network error.
 
+**`/model` switches provider and model for the session, and writes nothing.** The TUI could previously only be pointed at a provider by relaunching it, so a user with no key for `config.MODEL_NAME`'s provider could not reach the shell at all. Three things are load-bearing and each is test-pinned: it **refuses while `_busy`** (swapping under a running worker leaves the transcript claiming one model while the thread records another — the same guard `/new`, `/research` and the thread picker use); it **re-runs the mount-time effort validation**, because effort is per-MODEL and a level the old model accepted can be rejected outright by the new one; and it **warns rather than refuses** on a provider with an empty `API_KEY`, since an OpenAI-compatible endpoint running locally legitimately needs none. It is session-scoped on purpose — `/theme` and `/effort` read `settings.json` at startup and never write to it, and `settings.json` is the one config file where a trusted project tier beats the user tier (D29), so a session rewriting it is a decision rather than a convenience. `App.sub_title` carries the current pair in the header, because the mount banner scrolls away.
+
+**The TUI detaches the stderr log handler, and routes WARNING+ into the transcript instead.** Textual owns the terminal and repaints it, so a log line written to stderr lands on top of the rendered screen — over the input bar, behind the panels — and vanishes at the next repaint: corrupting and unreadable at once. `main.py` calls `configure_logging(stderr=False)` immediately before `run_tui()` rather than at the top of `main()`, because everything logged up to that point (database creation, the trust prompt, MCP connections) is pre-mount and genuinely wants a terminal. `TranscriptLogHandler` is the other half — without it, dropping stderr would make every warning invisible until someone reads `logs/app.log`, which nobody does mid-run. It is attached in `on_mount` and **removed in `on_unmount`**: the handler holds a reference to the app, so leaving it on the root logger keeps a dead app alive and stacks one handler per instance across the test suite. `emit()` swallows everything, because a logging handler that raises inside a message pump would kill the app over a diagnostic.
+
 **Raven activity states are table-driven** (`ravens.TOOL_STATES`), and unknown tool names map to a generic working state — so §17's runtime-registered MCP tools and §18's subagents animate without the table being edited.
 
-**Research mode is coarse by construction, not by omission.** `run_deep_research_pipeline()` is synchronous and reports nothing while running: every pass is drained through `run_to_completion()` inside the orchestrator, so no `LoopEvent` escapes, and §5's per-pass checkpoints write to the database rather than to a caller. §16 runs the pipeline on a worker and renders the trace and report on completion; live progress is §22.
+**Research mode was coarse by construction, and §22 fixed it at the producer.** Until §22, `run_deep_research_pipeline()` was synchronous and reported nothing while running: every pass was drained through `run_to_completion()` inside the orchestrator, so no event escaped and §5's checkpoints wrote to the database rather than to a caller. The TUI now runs `stream_deep_research_pipeline()` on the worker and forwards each `PipelineEvent` through `PipelineEventMessage`; `ResearchProgress` in the sidebar renders pass boundaries, claim tiers and retry rounds, and the transcript writes each trace line as it arrives.
+
+**A pass's internals are still opaque, and that is P2, not an omission.** `LoopEvent`s from inside a pass are not forwarded up, so `core/loop.py`, `core/client.py`, `json_retry.py` and `review.py`'s internals were untouched by §22. What escapes is what the pipeline itself knows.
+
+**`on_research_finished` must not print `run.trace`.** Every line already arrived as a `trace_line` event and was written as it happened; re-dumping the list at the end prints the whole run twice, with the second copy reading like a different artifact. `test_pipeline_events.py` pins this.
 
 ### 4.17 `mcp_client/` — the MCP client and its async bridge (ROADMAP_v2 §17)
 
@@ -542,6 +560,65 @@ than by the assembly point they share.
 **A package under the project root, not a module under `core/`** — `core/memory.py`
 already means the in-run conversation state, and two names that close together is a
 trap rather than a convention.
+
+### 4.22 `core/reasoning/events.py` + the pipeline generator (ROADMAP_v2 §22)
+
+**Belongs here:** `PipelineEvent` and `PIPELINE_EVENT_KINDS` — the seven kinds
+`stream_deep_research_pipeline()` yields (`pass_start`, `pass_complete`, `trace_line`,
+`claim_extracted`, `claim_tiered`, `retry`, `run_complete`) and nothing else. It is a
+leaf module: a dataclass, a tuple of names, and the recorded reasoning for both.
+
+**Does NOT belong here:** when an event is emitted (`orchestrator.py`), how one is
+rendered (`tui/app.py`, `main.py`), or anything a `LoopEvent` describes.
+
+**A separate, kind-discriminated type — decision P1, and §22 AC4 required it be made
+before any event was added.** `LoopEvent` is a flat dataclass whose "exactly one field
+is populated" convention lives in a docstring rather than in the type. That was right
+for six kinds; §22 adds seven of a different family and §23 adds more, at which point
+~15 optional fields with valid combinations described only in prose stops paying for
+itself. The two families also have different consumers and different lifetimes: a
+`LoopEvent` describes one model call and lives for a turn, a `PipelineEvent` describes
+a ten-pass run and lives for the run. A tagged union for both was rejected as
+disproportionate — it rewrites every `if event.token_delta:` read in `tui/app.py`,
+`core/loop.py` and the streaming tests, a §13-scale breakage inside a §22 change.
+`test_pipeline_events.py` pins the consequence: `LoopEvent` still has exactly six
+fields, so a §23 event landing there turns the decision red rather than making it by
+accretion.
+
+**Three names where there was one, exactly §13's shape.**
+`stream_deep_research_pipeline()` is the generator, `run_pipeline_to_completion()` is
+the drainer (including the same `RuntimeError` when a generator ends without its
+terminal event), and `run_deep_research_pipeline()` is the drainer applied to the
+generator — unchanged in signature and behaviour, which is §22 AC1. The public name
+did **not** become the generator: fifteen test sites, `main.py` and `tui/app.py` all
+call it, and only a shell that wants live progress needs the generator.
+
+**`_Progress` is the one place a trace line is recorded (AC3), and it derives rather
+than duplicates.** Before §22 this file paired `run.log(...)` with
+`update_pipeline_run(...)` at twenty call sites — and `run.trace` had three writers,
+of which two checkpointed nowhere (`review.py`'s fifteen `run.log()` calls,
+`json_retry.py`'s bare `trace.append()` per failed parse). Adding a per-call-site event
+emission would have made two independent writers of related data, which §22 warns
+about by name. So both persistence and events are derived from `run.trace` itself via
+a watermark: `checkpoint()` persists, then yields every line appended since it last
+ran. The other two writers are carried without either module knowing this exists,
+which is also why a JSON-parse retry needs no event kind of its own.
+
+**Persist BEFORE emitting, not after.** A generator only advances while someone
+iterates it, so yielding first would let a consumer that abandons the run between the
+yield and the persist take that checkpoint down with it — §5's durability would
+silently start depending on a UI's willingness to keep reading.
+
+**An abandoned generator leaves `status='running'`, deliberately.** A consumer that
+stops iterating raises `GeneratorExit` inside the pipeline's `try`, which
+`except Exception` does not catch. That is honest — the run was abandoned, not failed
+— and flipping it to `'failed'` would make an interrupted run indistinguishable from
+a broken one. What must hold is that the checkpoints already taken survive, which is
+what the persist-before-emit ordering guarantees. Test-pinned.
+
+**The watermark lives on `_Progress`, not on `PipelineRun`.** `base.py` is data only
+and §5 serializes that object; a field meaningful only inside a live generator has no
+business in a persisted row.
 
 ## 5. Request lifecycle — regular conversation, traced end to end
 
@@ -669,7 +746,11 @@ Returns the full `PipelineRun` (not just the final report) — every intermediat
 
 `database.py` (connection) → `storage.py` (schema + CRUD, provider-neutral JSON-encoded content) → `core/memory.py` (active conversation state, write-through to storage). One SQLite database per local user; no `user_id` anywhere in the schema.
 
-**Pipeline run records are fully durable (ROADMAP §5):** `run_deep_research_pipeline()` creates a `PipelineRunRecord` row (`status='running'`) up front via `core/reasoning/pipeline_storage.py`, checkpoints the run's structured output into separate columns (`claims_json` / `trace_json` / `coverage_gaps_json` / `final_report`) after **every** `run.log(...)` trace line (16 data-only `update_pipeline_run(run.run_id, run)` calls — no status argument), and flips the record to `'complete'` (on clean completion) or `'failed'` (on any `Exception`) at the end. A hard kill (`KeyboardInterrupt` / `SystemExit`) bypasses the `except Exception` block but still leaves the record populated through the last completed pass, because the per-pass checkpoint already wrote it. `load_pipeline_run(run_id)` provides the read API (returns a 9-field dict; claims as raw dicts). The record's `id` is carried on `PipelineRun.run_id`. The underlying per-pass conversation threads still persist independently (each pass is a real `ConversationMemory`).
+**A pass that ends on a stop condition did not finish, and the orchestrator checks.** `_run_pass` used to return `response.text` and discard `stop_reason`. A stop condition returns the last response *as it stands* — so a pass cut off while still making tool calls returns the **empty string**, which was stored as `raw_response` exactly as if the pass had answered with it. `_check_not_truncated()` splits the two cases: truncated **with** text is degraded but usable (traced, run continues, because failing there throws away work the later passes can use), truncated with **no** text raises immediately naming the pass and the stop reason. It runs *before* the JSON-retry loop, because a truncated pass returned no JSON through being cut off rather than through writing malformed JSON — nudging it would spend more of an already-exhausted budget to be told the same thing.
+
+**Research passes have their own token budget** (`config.RESEARCH_PASS_TOKEN_BUDGET`, 1M) and the JSON retry carries it, for the same reason it carries the `ToolContext`: a retry is the same pass continuing. `MAX_TOKEN_BUDGET` (250k) still governs chat. The two are separate because the meter re-counts the entire prompt on every step (TECHNICAL_DEBT.md item 9), so a pass making a dozen tool calls with large results burns the ceiling far faster than its context growth suggests. This is not a fix for item 9 — that entry asks for the billing meter and a per-turn size figure to be separated, in a change of its own.
+
+**Pipeline run records are fully durable (ROADMAP §5):** `run_deep_research_pipeline()` creates a `PipelineRunRecord` row (`status='running'`) up front via `core/reasoning/pipeline_storage.py`, checkpoints the run's structured output into separate columns (`claims_json` / `trace_json` / `coverage_gaps_json` / `final_report`) after **every** trace line — data-only `update_pipeline_run(run.run_id, run)` calls with no status argument, made from §22's single `_Progress.checkpoint()` rather than from hand-paired call sites, and flips the record to `'complete'` (on clean completion) or `'failed'` (on any `Exception`) at the end. A hard kill (`KeyboardInterrupt` / `SystemExit`) bypasses the `except Exception` block but still leaves the record populated through the last completed pass, because the per-pass checkpoint already wrote it. `load_pipeline_run(run_id)` provides the read API (returns a 9-field dict; claims as raw dicts). The record's `id` is carried on `PipelineRun.run_id`. The underlying per-pass conversation threads still persist independently (each pass is a real `ConversationMemory`).
 
 ## 10. Tools reference
 

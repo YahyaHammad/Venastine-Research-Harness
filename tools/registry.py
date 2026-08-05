@@ -316,11 +316,46 @@ class ToolRegistry:
             "memory": memory,
         }
         injected = {p: available[p] for p in self._injectable.get(tool_name, ())}
-        result = spec.handler(params, **injected)
+        try:
+            result = spec.handler(params, **injected)
+        except Exception as e:  # noqa: BLE001 -- contained on purpose
+            # A raising tool used to take the whole run down with it. In
+            # chat that is a lost turn; in the research pipeline it is a
+            # ten-pass run flipped to status='failed' by one transient
+            # network error inside one pass, which is how arxiv_search's
+            # http:// redirect presented.
+            #
+            # Contained HERE, at the boundary that turns a handler into a
+            # tool result, rather than in each tool: this covers the
+            # twelve built-ins, every future one, and every MCP server,
+            # which is third-party code that can raise anything at all.
+            # The two tools that had their own raise-after-retries path
+            # were also changed to return, so the model gets a specific
+            # message rather than this generic wrapper -- this is the
+            # backstop, not the primary route.
+            #
+            # ToolCallDenied does NOT reach here: every raise of it is
+            # above, before the handler runs. That is deliberate -- a
+            # policy denial is the caller's to handle (core/loop.py turns
+            # it into an error result with its own wording), not something
+            # to flatten into a tool failure.
+            #
+            # logger.exception, not warning: the traceback is how a real
+            # bug in a handler stays findable now that it no longer
+            # crashes the process. The MODEL sees only the message.
+            logger.exception("Tool %s raised; returning it as an error "
+                             "result.", tool_name)
+            result = {"error": f"{tool_name} failed: {e}"}
         # ROADMAP §8 secret redaction -- a post-call filter, not a pre-call
         # gate. Load-bearing: §15's own Rev. 2 sketch dropped this line,
         # which would have deleted the redaction layer outright in the
         # section whose subject is tightening permissions.
+        #
+        # The error path above goes through it TOO, and must: an exception
+        # message routinely carries the request that produced it, and for
+        # an HTTP client that means a URL with an API key in the query
+        # string. Redacting only the success path would make a failing
+        # tool the way secrets escape.
         result = check_output_policy(tool_name, result)
         return result
 

@@ -68,6 +68,7 @@ def retry_until_json(
     max_retries: int = MAX_JSON_RETRIES,
     on_response: Optional[Callable] = None,
     context=None,
+    max_total_tokens: Optional[int] = None,
 ) -> str:
     """Returns the first response text that parses as JSON, retrying by
     continuing `response`'s thread.
@@ -87,6 +88,16 @@ def retry_until_json(
                   the same tool restriction -- defaulting to None would
                   re-advertise globally-allowed tools an agent-shaped
                   caller excluded on turn 1 (review §19-20 r2-1).
+    max_total_tokens
+                  the caller's own budget, for exactly the same reason.
+                  A research pass runs on RESEARCH_PASS_TOKEN_BUDGET; its
+                  corrective retry re-enters that pass's ALREADY LARGE
+                  thread, so falling back to continue_conversation's chat
+                  default would cut the retry off almost immediately --
+                  and a budget stop returns the last response as it
+                  stands, which is how an empty pass gets produced in the
+                  first place. None keeps the wrapper's default, which is
+                  right for §20's agent-shaped reviewer.
     """
     from core.loop import RunAgentLoop
 
@@ -128,6 +139,8 @@ def retry_until_json(
                 # be a second malformed answer.
                 authorization=authorization,
                 context=context,
+                **({} if max_total_tokens is None
+                   else {"max_total_tokens": max_total_tokens}),
             )
             if on_response is not None:
                 on_response(retry_response)

@@ -38,7 +38,12 @@ def run(params: dict) -> dict:
         response = httpx.get(parsed.url, timeout=REQUEST_TIMEOUT_S, follow_redirects=True)
         response.raise_for_status()
     except httpx.HTTPError as e:
-        logger.warning("fetch_url failed", extra={"url": parsed.url, "error": str(e)})
+        # Interpolated, NOT extra={}: the default formatter renders only
+        # %(message)s, so every field passed via extra was silently
+        # dropped -- fifteen consecutive "fetch_url failed" lines with
+        # no URL and no reason, which is what made a run of ordinary
+        # 404s indistinguishable from a broken tool.
+        logger.warning("fetch_url failed for %s: %s", parsed.url, e)
         return {"error": f"Could not fetch URL: {e}"}
 
     content = response.text[:MAX_CONTENT_CHARS]

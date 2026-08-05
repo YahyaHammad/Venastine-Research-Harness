@@ -54,7 +54,9 @@ class SearchResult(BaseModel):
 
 
 class WebSearchError(Exception):
-    """Raised when DuckDuckGo search fails after all retries."""
+    """No longer raised by this module -- exhausted retries return an
+    error dict instead, so a transient search outage cannot fail a
+    ten-pass research run. Kept as part of this module's public surface."""
 
 
 # ---- Policy / tuning knobs -------------------------------------------------
@@ -122,7 +124,7 @@ def run(params: dict) -> dict:
 
     results = _cache_get(cache_key)
     if results is not None:
-        logger.info("web_search cache hit", extra={"query": parsed.query})
+        logger.info("web_search cache hit for %r", parsed.query)
     else:
         last_exc: Optional[Exception] = None
         results = []
@@ -135,13 +137,19 @@ def run(params: dict) -> dict:
             except Exception as e: # Simpler to try again then elaborate on every error type
                 last_exc = e
                 logger.warning(
-                    "web_search attempt failed",
-                    extra={"attempt": attempt, "query": parsed.query, "error": str(e)},
-                )
+                    "web_search attempt %s/%s failed for %r: %s",
+                    attempt + 1, MAX_RETRIES + 1, parsed.query, e)
         else:
-            raise WebSearchError(
-                f"search failed after {MAX_RETRIES + 1} attempts"
-            ) from last_exc
+            # RETURNED, not raised -- same change and same reason as
+            # arxiv_search. A search provider being unreachable is a
+            # result the model can work around; raising made one
+            # transient failure in one pass fail a whole ten-pass
+            # research run. fetch_url was already the odd one out for
+            # doing this correctly.
+            return {
+                "error": f"search failed after {MAX_RETRIES + 1} "
+                         f"attempts: {last_exc}"
+            }
 
     if not results:
         return {"results": [], "result_count": 0, "message": "No results found."}

@@ -34,6 +34,17 @@
     content-align: center middle;
 }
 
+/* §22 live research view. Auto height so it takes no sidebar space
+   until a run starts, and scrolls rather than pushing the ravens off
+   screen on a long retry loop. */
+#research-progress {
+    height: auto;
+    max-height: 20;
+    overflow-y: auto;
+    padding-top: 1;
+    color: $text-muted;
+}
+
 PermissionScreen {
     align: center middle;
 }

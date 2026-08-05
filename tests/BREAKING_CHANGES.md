@@ -647,3 +647,106 @@ gained it here. A test that does *not* initialize the loader is unaffected, beca
 **`test_compaction_e2e.py` is now `tests/test_storage_e2e.py`** and is the home for
 every real-`storage.py` test, not just compaction's. The one-swap rule in the §21a
 notes above still applies and is the reason it is one file.
+
+## §22 — pipeline observability (2026-08-05)
+
+| Change | What breaks | Fix / why |
+|---|---|---|
+| Stop advancing `_Progress._emitted` | `test_the_watermark_only_moves_forward` **and every other test in the file hangs** | The `while` loop never terminates, so the generator yields the same line forever. A hang, not a failure — kill the run rather than waiting for the timeout |
+| Persist AFTER emitting in `checkpoint()` | `test_abandoning_the_generator_leaves_the_record_running` | A generator only advances while someone iterates it, so a consumer that abandons the run between the yield and the persist takes that checkpoint down with it. §5's durability must not depend on a UI's willingness to keep reading |
+| Have the orchestrator emit events beside each existing checkpoint instead of deriving them | `test_a_line_written_the_way_review_py_writes_one_is_carried` | AC3. `run.trace` has three writers — `orchestrator.py`, `review.py` (fifteen `run.log()` calls, no checkpoints) and `json_retry.py`'s bare `trace.append()`. Deriving from the list is what carries the other two without editing them |
+| Emit a `trace_line` per call site rather than per un-emitted line | `test_every_trace_line_is_emitted_exactly_once_and_in_order` | A re-emitted line is a duplicate in the transcript; a skipped one reached the database and never reached the user |
+| Return the run any way other than the terminal event | `test_the_generator_and_the_wrapper_produce_the_same_run` | The wrapper would still work and a streaming consumer would silently get nothing |
+| Make `run_deep_research_pipeline` the generator | `test_the_public_function_still_returns_a_finished_run`, and ~15 direct-call sites across `test_orchestrator.py`, `test_critic_routing.py`, `test_ensemble_guard.py`, `test_pipeline_storage.py`, `test_granted_calls_artifact.py` | P3/AC1. The whole point of keeping the name synchronous |
+| Add a seventh field to `LoopEvent` | `test_loop_event_did_not_grow_a_seventh_field` | P1/AC4. §23's events are a decision to make, not a field to add quietly |
+| Drop `on_pipeline_event_message`, or stop forwarding in `_forwarding` | `test_ac2_the_tui_renders_pass_boundaries_and_tiers_as_they_happen` | AC2. The panel and transcript are fed exclusively by events — nothing else could have produced a tier for a claim the canned run never had |
+| Re-add the `run.trace` dump to `on_research_finished` (or the CLI's `--- Trace ---` block) | `test_the_finished_run_does_not_reprint_the_trace` | Every line already arrived as an event; both prints the whole run twice, and the second copy reads like a different artifact |
+| Count `claim_tiered` events instead of keying by claim id | `test_a_re_tiered_claim_is_not_counted_twice` | 6c re-tiers the same claim once per retry round, so the tally would exceed the claim count and keep climbing |
+| Name the widget's redraw helper `_render` | **every `test_tui.py` pilot test**, with `'NoneType' object has no attribute 'get_height'` | It shadows Textual's `Widget._render()`, and the traceback points at the compositor rather than at the widget |
+
+### Standing: two ways a research double stops working
+
+**A patch on `run_deep_research_pipeline` no longer intercepts either shell.** Both
+`main.run_research` and `tui.app._start_research` call
+`stream_deep_research_pipeline`, so the old target is a silent no-op that lets the
+REAL pipeline run. Loud here (the fake SDK has no `.stream`), but it is the
+`fetch_url` class of defect: wired, documented, doing nothing. Every research double
+goes through `_stub_events` (`test_tui.py`, `test_review.py`) or `_events_for`
+(`test_e2e.py`).
+
+**A plain-function double for a generator is NOT an error.** `_run_pass`,
+`_run_pass_with_json_retry` and `_review_stage` are reached through `yield from`, so a
+double returning `"REPORT"` makes it iterate the string one character at a time and
+return `None` — the symptom is a report of `None` several asserts later. Use
+`test_review.py`'s `_as_generator`, and `conftest.drain()` for a direct call that wants
+the return value.
+
+## `/model` — switching provider and model mid-session (2026-08-05)
+
+| Change | What breaks | Fix / why |
+|---|---|---|
+| Drop the `_busy` guard | `test_model_is_refused_mid_turn` | Swapping under a running worker leaves the transcript claiming one model while the thread records another. Same guard `/new`, `/research` and the thread picker use |
+| Stop upper-casing the provider argument | `test_model_switches_both_when_given_a_provider` | `providers.json` keys are upper-case, so `/model openai gpt-4o` would be rejected as unknown |
+| Skip the effort re-validation after a switch | `test_switching_model_revalidates_the_effort_level` | Effort is per-MODEL. A level the old model accepted can be rejected outright by the new one, and every later turn fails with a provider 400 — the exact failure the mount-time check exists to stop, reachable again through a switch |
+| List providers with no `API_KEY` as configured | `test_bare_model_reports_without_changing_anything` | It sends the user at a provider whose every call 401s |
+| Refuse instead of warn on an empty `API_KEY` | `test_a_provider_with_no_key_warns_but_still_switches` | An OpenAI-compatible endpoint running locally legitimately needs no key; refusing blocks a real configuration |
+| Accept an unknown provider name | `test_an_unknown_provider_changes_nothing` | `api_initialization` raises the same `ValueError` on the next turn, a long way from the typo that caused it |
+| Set the attributes without `refresh_status()` | `test_the_header_shows_which_model_the_next_turn_uses` | The mount banner scrolls away, so nothing on screen says what the next turn will call |
+| Read `app.model` anywhere other than at turn start | `test_the_new_model_reaches_the_next_model_call` | Asserted on `call_model_stream`'s arguments — setting the attribute proves only that the attribute was set |
+
+## Tool-failure containment, the arXiv endpoint, and TUI logging (2026-08-05)
+
+Found by running a real research pipeline: `arxiv_search` failed a finished
+ten-pass run, and every warning it logged scribbled over the Textual screen.
+
+| Change | What breaks | Fix / why |
+|---|---|---|
+| Revert `arxiv.ARXIV_API_URL` to `http://` | `test_the_endpoint_is_https` | arXiv 301-redirects it. httpx does NOT follow redirects by default, `raise_for_status()` only raises on >= 400, and the redirect body is empty — so `ET.fromstring("")` raises `ParseError`, three identical retries run, and the tool reports "failed after 3 attempts" for what is actually a scheme change |
+| Drop `follow_redirects=True` from `_call_arxiv_api` | `test_redirects_are_followed` | Belt and braces beside https://. If arXiv moves the endpoint again this keeps working rather than failing as an unparseable empty body |
+| Make `arxiv`/`web_search` raise after retries again | `test_arxiv_returns_an_error_after_exhausting_retries`, `test_web_search_returns_an_error_after_exhausting_retries` | One transient network failure inside one pass flipped a finished ten-pass run to `status='failed'`. `fetch_url` always returned an error dict; these two were the outliers |
+| Remove `dispatch()`'s try/except around `spec.handler` | `test_an_exception_becomes_an_error_result`, `test_a_pipeline_pass_sees_an_error_result_not_an_exception` | The backstop for every future tool and every MCP server — third-party code that can raise anything |
+| Catch `ToolCallDenied` in that block | `test_a_policy_denial_still_raises` | A policy denial is the caller's to handle and must stay distinguishable from a tool crash. Every raise of it is above the handler, so a correct implementation never reaches the except at all |
+| Downgrade `logger.exception` to `warning` there | `test_the_traceback_is_logged_so_a_real_bug_stays_findable` | The traceback is how a genuine handler bug stays findable now that it no longer crashes the process |
+| Route the error result around `check_output_policy` | `test_the_error_result_goes_through_secret_redaction` | An exception message carries the request that produced it — for an HTTP client, a URL with an API key in the query string. Redacting only the success path makes a FAILING tool the way secrets escape |
+| Attach the stderr handler in the TUI | `test_stderr_false_attaches_no_stream_handler`, `test_reconfiguring_without_stderr_removes_the_existing_one` | Textual owns the terminal; stderr paints over the rendered screen, sits over the input bar and behind the panels, and vanishes at the next repaint |
+| Default `configure_logging(stderr=...)` to False | `test_stderr_defaults_to_on` | The CLI is unchanged. A flipped default silences every non-TUI run |
+| Drop `TranscriptLogHandler`, or its `on_unmount` removal | `test_a_warning_reaches_the_transcript`, `test_the_handler_is_detached_when_the_app_unmounts` | Without the handler, dropping stderr makes warnings invisible until someone reads `logs/app.log`. Without the removal it holds a reference to a dead app and stacks one handler per instance across this suite |
+| Let `TranscriptLogHandler.emit` raise | `test_a_handler_failure_cannot_take_the_app_down` | emit() runs on whichever thread logged — a research worker, the MCP bridge. A handler that throws inside a message pump kills the app over a diagnostic |
+| Route INFO to the transcript too | `test_info_is_not_routed_to_the_transcript` | Noise in a chat transcript; the rotating file already has it with timestamps |
+| Warn per call in `context_limit()` | `test_the_unknown_model_warning_is_said_once_per_model` | `thresholds()` is called on every evaluation and `_maybe_compact` runs at the top of every step, so an unknown model warned twice a step across ten passes |
+| Dedupe on a single boolean instead of the model | `test_a_second_unknown_model_is_still_reported` | A run that switches model, or a pipeline whose critic model differs (§11), must still hear about the second one |
+
+### Standing: `compaction._context_window_warned` is module state
+
+`tests/test_compaction.py` clears it in an autouse fixture. Without that, whether
+`test_an_unknown_model_warns_about_its_assumed_window` passes depends on which
+tests ran first — the kind of order dependency that reads as a flake.
+
+
+## The truncated-pass cascade and the research budget (2026-08-05)
+
+From a live run: Pass 1 made 14 tool calls, crossed the 250k chat budget, and
+returned a tool-calling response with empty text. The orchestrator stored `""`
+as `raw_response`; Pass 2 correctly reported it had nothing to extract; the run
+died in `Claim`'s constructor three passes later.
+
+| Change | What breaks | Fix / why |
+|---|---|---|
+| Drop `_check_not_truncated` from `_run_pass` | `test_an_empty_truncated_pass_raises_naming_the_stop_reason`, `test_max_steps_is_treated_the_same_way`, `test_whitespace_only_text_counts_as_empty` | A stop condition returns the last response as it stands, so a pass cut off mid-tool-call yields `""` and every later pass works from nothing |
+| Make truncation always fatal | `test_a_truncated_pass_WITH_text_continues_and_is_traced` | A pass that produced an answer and was cut off finishing it is degraded but usable; failing there throws away work the later passes can use |
+| Make truncation never fatal | `test_an_empty_truncated_pass_raises_naming_the_stop_reason` | The empty case is exactly the cascade this exists to stop |
+| Check `if not response.text` instead of `.strip()` | `test_whitespace_only_text_counts_as_empty` | `"
+  "` gives the next pass nothing |
+| Treat a missing `stop_reason` as truncated | `test_a_response_with_no_stop_reason_is_not_treated_as_truncated` | `stop_reason` is set by `_run()`/the wrappers, never by `call_model()`. Absence is not evidence of truncation |
+| Run the check AFTER `retry_until_json` | `test_a_truncated_json_pass_raises_rather_than_retrying` | A cut-off pass did not write malformed JSON. Nudging it spends more of an exhausted budget to be told the same thing, and reports a parse failure for output that was never finished |
+| Revert `run_deep_research_mode` to `MAX_TOKEN_BUDGET` | `test_a_pass_runs_on_the_research_budget_not_the_chat_one` | The meter re-counts the whole prompt every step (TECHNICAL_DEBT item 9), so a tool-heavy pass burns the chat ceiling quadratically |
+| Drop `max_total_tokens` from the orchestrator's `retry_until_json` call | `test_the_json_retry_carries_the_same_budget` | The retry re-enters the pass's already-large thread; the chat default would cut it off almost immediately. Same argument as the `context` parameter beside it |
+| Raise `MAX_TOKEN_BUDGET` instead of adding a second constant | `test_chat_keeps_the_smaller_budget` | Raising the research ceiling must not raise the chat spend cap with it |
+
+### Standing: `extra={}` in a log call renders as nothing
+
+The default formatter is `%(message)s`, so `logger.warning("fetch_url failed",
+extra={"url": ..., "error": ...})` prints exactly `fetch_url failed`. Every
+diagnostic field is dropped. Interpolate into the message instead. This is why a
+run of ordinary 404s was indistinguishable from a broken tool, and why an arXiv
+scheme change hid behind three identical `arxiv_search attempt failed` lines.

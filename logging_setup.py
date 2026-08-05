@@ -59,6 +59,7 @@ def configure_logging(
     log_file=None,
     max_bytes=_DEFAULT_MAX_BYTES,
     backup_count=_DEFAULT_BACKUP_COUNT,
+    stderr=True,
 ) -> None:
     """Configure the root logger with a stderr handler and a rotating
     file handler.
@@ -79,6 +80,15 @@ def configure_logging(
         created if missing.
     max_bytes, backup_count:
         RotatingFileHandler rotation parameters.
+    stderr:
+        Attach the stderr handler. FALSE FOR THE TUI, and this is not a
+        preference. Textual owns the terminal and repaints it; anything
+        written to stderr lands on top of the rendered screen, sits over
+        the input bar and behind the panels, and disappears at the next
+        repaint -- so the message is both corrupting and unreadable. The
+        rotating file keeps everything at full detail either way, and
+        tui/app.py additionally routes WARNING+ into the transcript so
+        nothing that matters is only in a file.
     """
     resolved_level = _resolve_level(level)
     formatter = logging.Formatter(_DEFAULT_FORMAT, datefmt=_DEFAULT_DATEFMT)
@@ -97,9 +107,10 @@ def configure_logging(
             # weird state we still want to proceed with fresh handlers.
             pass
 
-    stderr_handler = logging.StreamHandler(stream=sys.stderr)
-    stderr_handler.setFormatter(formatter)
-    root.addHandler(stderr_handler)
+    if stderr:
+        stderr_handler = logging.StreamHandler(stream=sys.stderr)
+        stderr_handler.setFormatter(formatter)
+        root.addHandler(stderr_handler)
 
     if log_file is None:
         log_file = os.environ.get("AGENT_LOG_FILE", _DEFAULT_LOG_FILE)

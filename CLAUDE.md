@@ -12,13 +12,14 @@ python main.py --thread <uuid>                    # resume a thread
 python main.py --mode research "some query"       # ten-pass deep-research pipeline
 python main.py --provider OPENAI --model gpt-5.1  # override provider/model
 python main.py --tui                              # Textual TUI (§16); the CLI stays the default (D12)
+python main.py --tui --provider OPENAI --model gpt-4o   # or switch in-session with /model
 python main.py --trust-project                    # grant D17 workspace trust non-interactively
 python main.py --mode research --grant "q"        # §25: pick gated tools to authorise for this run
 python main.py --mode research --attended "q"     # §25: approve every gated call as it happens
 python main.py --mode research --review "q"       # §20: review the finished run, consent to each correction
 # §21a compaction runs automatically in every shell; /compact triggers it by hand in the TUI
 
-pytest                                            # 927 tests, offline, ~25s (first run ~30s: matplotlib font cache)
+pytest                                            # 989 tests, offline, ~25s (first run ~30s: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -92,6 +93,10 @@ A **shell**, not a feature home. D12 makes the CLI a permanent fallback, so anyt
 - **Active bodies are appended outside `with_catalogs()`** (K6) — see the progressive-disclosure note in ARCHITECTURE §4. This is the one cross-shell leak the design can have.
 - **Schemas need no mid-loop refresh** (K7, settling ROADMAP_v2's Rev. 3 verification item). Activation happens between turns, and `_run()` recomputes `registry.schemas()` at the top of every call.
 
+`/model [[PROVIDER] name]` switches provider/model for the session and persists nothing (matching `/theme` and `/effort`, which read `settings.json` and never write to it). It refuses while `_busy`, re-runs the mount-time effort validation because effort is per-model, and warns rather than refuses on an empty `API_KEY` so a local OpenAI-compatible endpoint stays usable.
+
+**Logging and Textual cannot share the terminal.** `main.py` calls `configure_logging(stderr=False)` immediately before `run_tui()` — not at the top of `main()`, because pre-mount messages (db creation, the trust prompt, MCP connections) genuinely want stderr. `TranscriptLogHandler` routes WARNING+ into the transcript so dropping stderr does not just make warnings invisible; it is attached in `on_mount` and **removed in `on_unmount`**, or it keeps a dead app alive and stacks one handler per instance across the test suite. Anything written to stderr while Textual is up paints over the rendered screen and disappears on the next repaint.
+
 Two things in `tui/app.py` are load-bearing and easy to break silently:
 - **`run_worker(..., exit_on_error=False)` + `on_worker_state_changed`.** Textual's default tears the whole app down on a transient worker exception.
 - **Every permission dismissal path must put a boolean on the channel.** The worker blocks inside `_run()` on `permission_channel.get()`; a dismissal carrying `None`, or one that puts nothing, hangs it forever. That is why the AC2 tests assert on the *dispatched tool*, not on the modal rendering.
@@ -146,6 +151,24 @@ Invariants that look like simplification opportunities but are not:
 - **`_synthesis_input` is a function, not a string built once.** §20 re-runs synthesis after an accepted correction; reusing the earlier string regenerates the report from the UNCORRECTED claims, so the report changes for no reason while the correction silently goes nowhere.
 - **`vars(c)` serializes `Claim` at every site** (orchestrator passes 3a/3b/5/6a/6c/final synthesis, `pipeline_storage.update_pipeline_run`, `output_writer.write_run_artifacts`). Adding a nested-dataclass field to `Claim` requires migrating *all* of them to `dataclasses.asdict(c)` in one change.
 - **`update_pipeline_run(status=...)` defaults to `None`, not `"running"`** — so a data-only checkpoint can't reset a `complete`/`failed` row.
+- **The pipeline is a GENERATOR, and the public name is not it** (§22). `stream_deep_research_pipeline()` yields `PipelineEvent`s; `run_pipeline_to_completion()` drains; `run_deep_research_pipeline()` is the drainer applied to the generator and is unchanged for every caller. Same shape as `_run()` / `run_to_completion()`, for the same reason. A shell that wants live progress iterates; everything else keeps calling the wrapper.
+- **`_Progress.checkpoint()` is the only place a trace line is recorded** (§22). It persists, then yields every line appended since it last ran — so §5's per-pass persistence and the events are DERIVED from `run.trace` rather than emitted beside it. This is what finally made "a checkpoint after every trace line" true: `review.py` writes fifteen lines and checkpointed after none, and `json_retry.py` appends straight to the list. Both are now carried without either module changing, which is also why a JSON-parse retry needs no event kind. Persist-before-emit is deliberate: a generator only advances while someone iterates it, so emitting first would make durability depend on a UI continuing to read.
+- **An abandoned pipeline generator leaves `status='running'`** (§22). `GeneratorExit` is not an `Exception`, so a consumer that stops iterating is recorded as abandoned rather than failed — and the persist-before-emit ordering is what keeps the checkpoints it already took.
+- **A pass's `LoopEvent`s do NOT propagate up** (§22 P2), and `PipelineEvent` is a separate, kind-discriminated type from `LoopEvent` (§22 P1) — adding §22's or §23's kinds to that flat six-field bag is the thing the decision rejected, and `test_pipeline_events.py` fails if `LoopEvent` grows a seventh field.
+- **A truncated pass is detected AT the pass.** `_check_not_truncated()` reads
+  `stop_reason`: truncated with text traces and continues, truncated with no text
+  raises naming the pass and the reason. A stop condition returns the last
+  response as it stands, so a pass cut off mid-tool-call returns `""` — which was
+  stored as `raw_response`, made Pass 2 report it had nothing to extract, and
+  surfaced three passes later as `Claim.__init__() missing 3 required positional
+  arguments`. The check runs BEFORE the JSON retry: a cut-off pass did not write
+  malformed JSON, so nudging it spends more of an exhausted budget for nothing.
+- **Research passes run on `config.RESEARCH_PASS_TOKEN_BUDGET` (1M), not
+  `MAX_TOKEN_BUDGET` (250k).** The meter re-counts the whole prompt every step
+  (TECHNICAL_DEBT item 9), so a tool-heavy pass hits the chat ceiling long before
+  its context is a problem. The JSON retry carries the same budget for the same
+  reason it carries the `ToolContext` — a retry is the same pass continuing.
+  Chat's budget is unchanged, and item 9's real fix is still open.
 - **The orchestrator CARRIES a `RunAuthorization`, it does not interpret one** (§25). Which tools may be granted is `core/reasoning/authorization.py`; enforcement is `core/loop.py`; building it from a human's answer is the shell's job. `authorization=None` is the default and means the pre-§25 behaviour: no grants, nobody to ask, every gated tool hidden from every pass.
 - **`run.granted_calls` IS the bundle's list, not a copy.** Sharing one object is what puts the audit trail on the failure path and every §5 checkpoint; copying at the end would lose it on exactly the runs most worth auditing.
 
@@ -224,6 +247,16 @@ what makes an early, frequent trigger safe.
 - **A research pass compacts only at a hard backstop** (M6), near the real context
   window. Routine compaction in an unattended pass would spend on a judgment call
   nobody is watching.
+- **`context_limit()` warns once per MODEL, not once per call.** `thresholds()`
+  calls it on every evaluation and `_maybe_compact` runs at the top of every step
+  of every turn — so an unknown model produced a WARNING twice a step across ten
+  research passes, which on the TUI was also painting over the screen. Keyed on
+  the model rather than a single boolean for the same reason
+  `_headless_notices_shown` keys on the hidden set: a run that switches model, or
+  a pipeline whose critic model differs (§11), must still hear about the second
+  one. `tests/test_compaction.py` clears the set in an autouse fixture — it is
+  module state, and a warmed set makes the fallback test pass or fail depending
+  on which tests ran first.
 - **The ratio is a character proxy and says so** (M10). No tokenizer offline; it is
   self-consistent and never compared against a provider's token count.
 - **Notices travel on the ModelResponse AND as a `LoopEvent`.**
@@ -276,6 +309,31 @@ parsed since §14 with no consumer at all — this is its first.
 
 **§21c (`/ref`, session summaries) is not built.**
 
+### Live research view (§22)
+
+The research pipeline reports as it runs. `tui/app.py` forwards each `PipelineEvent`
+through `PipelineEventMessage` to `ResearchProgress` (sidebar: passes as they start,
+tier tally keyed by claim, retry rounds) and the transcript; `main.run_research`
+prints pass lines and trace lines as they arrive.
+
+- **Neither shell may re-print `run.trace` at the end.** Every line already arrived as
+  a `trace_line` event. The CLI's `--- Trace ---` block and the TUI's
+  `on_research_finished` loop were both removed for this; re-adding either prints the
+  whole run twice.
+- **The panel keys tiers by claim id, not by counting events.** 6c re-tiers the same
+  claim once per retry round, so counting would report more claims than the run has
+  and the number would keep climbing.
+- **A widget method named `_render` shadows Textual's `Widget._render()`** and makes
+  the whole app fail to lay out with `'NoneType' object has no attribute 'get_height'`.
+  `ResearchProgress._redraw` is named that way on purpose.
+- **Repointing the shells broke twelve test doubles, silently.** A patch on
+  `run_deep_research_pipeline` no longer intercepts anything, so the REAL pipeline
+  runs. `test_e2e.py`, `test_review.py` and `test_tui.py` now patch
+  `stream_deep_research_pipeline` with generator fakes routed through one helper each.
+  Same shape for `_run_pass` / `_run_pass_with_json_retry` / `_review_stage`: a
+  plain-function double is not an error under `yield from`, it iterates the string one
+  character at a time and returns `None`.
+
 ### Config loading and workspace trust (ROADMAP_v2 §14)
 
 `core/config_loader.py` discovers `.md` agents/skills across three tiers — harness (`<root>/{agents,skills}/builtin/`) → project (`.venastine/`, trust-gated) → user (`~/.config/venastine/`) — parses line-anchored YAML frontmatter, and merges `settings.json` (unknown keys **raise**). `core/workspace_trust.py` owns only the D17 trust store (resolved path + sorted-walk content hash); `main.py` owns the prompting UX.
@@ -296,7 +354,11 @@ Progressive disclosure: system prompts list skills as name + one-line descriptio
 
 **Registering a tool is four steps**: import the module, `registry.register(ToolSpec(...))`, add a boolean to **both** `config.ToolPermissions` and `config.ToolApprovals`, and `assert_permissions_declared()` at the bottom of `tools/registry.py` enforces the third at import time (D24). Skipping the declaration used to fail silently — `fetch_url` was registered, documented as working, and denied on every call for its entire life, with the schema still advertised so the model kept choosing it. It now raises `RuntimeError` on import instead. `mcp__*` names are exempt (they get `_default_for_unknown_tool`'s named default).
 
+**A raising tool must not kill the run.** `dispatch()` wraps the handler call and turns any exception into `{"error": ...}`, logged at ERROR with the traceback so a real bug stays findable. `ToolCallDenied` and the unknown-tool `ValueError` are raised *above* the handler and deliberately still propagate. The error result goes through `check_output_policy` like any other — an exception message often carries the request that produced it, and for an HTTP client that means a URL with an API key in it. This is a backstop: `web_search` and `arxiv_search` return their own error dicts after exhausting retries (`fetch_url` always did), so the model gets something specific. The bug that forced this: `arxiv_search` requested `http://export.arxiv.org`, arXiv now 301-redirects it, httpx does **not** follow redirects by default, `raise_for_status()` ignores 3xx, and `ET.fromstring("")` on the empty redirect body raised — three retries, then an exception that flipped a finished ten-pass research run to `status='failed'`.
+
 A tool that should not always be *offered* (as opposed to not allowed) supplies a `ToolSpec.available_check` predicate — `load_skill` does this so it disappears from `schemas()` when no skills are catalogued. Don't special-case it inside `schemas()`; the registry owns mechanism, not policy.
+
+**Log detail must be in the message, not in `extra={}`.** The default formatter renders `%(message)s` only, so every field passed via `extra=` was silently dropped — fifteen consecutive `fetch_url failed` lines with no URL and no reason, and an `arxiv_search attempt failed` that hid a scheme change for three retries. Interpolate instead (`logger.warning("fetch_url failed for %s: %s", url, e)`). This matters more since the TUI routes WARNING+ into the transcript.
 
 **Math tools** all share `_math_common.py`'s `safe_parse()` (`__builtins__` blanked, injection-tested). Never use raw `eval`/`sympify` in a new one. Their tests assert **symbolic equivalence** (`sympy.simplify(actual - expected) == 0`), not string equality — SymPy's `str()` drifts across versions.
 

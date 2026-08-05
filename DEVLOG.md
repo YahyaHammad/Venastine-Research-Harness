@@ -2251,3 +2251,231 @@ The manual pass, still — for §21b as well as §21a now. Nothing has watched a
 choose to call `remember`, or seen whether the injected block reads well at the top of a
 long conversation. The approval prompt's wording in particular is the sort of thing only
 use will settle.
+
+
+---
+
+# §22 — Pipeline observability: orchestrator events + the live research view (2026-08-05)
+
+The ten-pass pipeline reported nothing while it ran. `run_deep_research_pipeline()` was
+synchronous, every pass was drained through `run_to_completion()` inside the
+orchestrator, and §5's twenty checkpoints wrote to the database rather than to a caller
+— so the TUI printed "Running the ten-pass pipeline. This takes a while." and then
+dumped the whole trace at the end, and the CLI did the same. ARCHITECTURE.md had
+recorded this as "coarse by construction, not by omission" since §16.
+
+## Decisions taken before building (P1-P4)
+
+The section's own text made AC4 a prerequisite: decide the event type BEFORE adding an
+event. All four were put to the project owner with the alternatives and their costs.
+
+| # | Decision | Why not the alternative |
+|---|---|---|
+| **P1** | Separate, kind-discriminated `PipelineEvent` in `core/reasoning/events.py` | Adding to `LoopEvent` is what §22 warned against: a flat bag whose valid combinations live in a docstring, at ~15 fields once §23 lands. A tagged union for both families rewrites every `if event.token_delta:` read in `tui/app.py`, `core/loop.py` and the streaming tests — §13-scale breakage inside a §22 change. |
+| **P2** | No `LoopEvent` forwarding from inside a pass | The alternative meant converting `json_retry.py` — shared with §20's reviewer — and reaching into review.py's tested failure containment, for visibility AC2 does not ask for. |
+| **P3** | The public name stays synchronous; the generator is new | §22's prose implied `run_deep_research_pipeline()` should *become* the generator. That contradicts its own AC1 unless every caller changes, and §13's actual shape is a private generator with draining wrappers. Fifteen test sites and both shells were left untouched. |
+| **P4** | TUI transcript + a `ResearchProgress` sidebar panel + CLI live progress | AC2 needs one live consumer; the CLI is where a multi-minute unattended run is usually watched, and it had nothing at all. |
+
+## What tracing the spec against the code found
+
+**AC3 was already false, in a way the section did not know.** "§5's per-pass
+persistence still fires on every trace line" describes twenty hand-paired
+`run.log()` + `update_pipeline_run()` sites in `orchestrator.py` — but `run.trace` has
+**three** writers. `review.py` calls `run.log()` from fifteen places and checkpoints
+from none of them, and `json_retry.py` appends its own line to the list directly. So
+the honest reading of AC3 was not "keep this true" but "make it true".
+
+Emitting an event beside each existing checkpoint would have made it worse: two
+independent writers of related data, which §22 warns about by name. Instead both are
+**derived** from `run.trace` via a watermark. `_Progress.checkpoint()` persists, then
+yields every line appended since it last ran. The other two writers are carried without
+either module changing — and a JSON-parse retry became visible with no event kind of
+its own, because `json_retry.py` already writes a trace line per failed attempt.
+
+## Two things the tests found, not the reasoning
+
+**Persist before emit.** The first `_Progress` persisted after yielding. A generator
+only advances while someone iterates it, so a consumer that abandoned the run between
+the yield and the persist took that checkpoint down with it — §5's durability quietly
+becoming conditional on a UI's willingness to keep reading. The abandoned-run test
+caught it on its first execution. Order flipped; the mutation is a red test now.
+
+**`GeneratorExit` is not an `Exception`.** Making the pipeline a generator introduced a
+state it could not previously reach: abandoned. The record stays `status='running'`,
+which is recorded rather than fixed — flipping it to `'failed'` would make an
+interrupted run indistinguishable from a broken one, and 'running' with a populated
+trace is exactly what happened.
+
+## The test-double trap, twice, one layer apart
+
+Repointing both shells from `run_deep_research_pipeline` to
+`stream_deep_research_pipeline` made **twelve** `mocker.patch` sites silently stop
+intercepting, so the REAL pipeline ran behind them. The failures were loud here (the
+fake SDK has no `.stream`), but the shape is the `fetch_url` class again: a thing that
+looks wired and does nothing.
+
+One layer down it is quieter. `_run_pass` and friends are reached through `yield from`,
+and a plain-function double returning `"REPORT"` is **not an error** there — `yield from`
+iterates the string one character at a time and returns `None`. So a double that looks
+right produces a report of `None` several asserts later. Both classes now go through one
+named helper per file (`_as_generator`, `_stub_events`, `conftest.drain`) so a new site
+cannot reintroduce either quietly.
+
+## A Textual name collision
+
+`ResearchProgress._render()` shadowed `Widget._render()`, and the symptom was the entire
+app failing to lay out with `'NoneType' object has no attribute 'get_height'` — nowhere
+near the widget in the traceback. Renamed `_redraw`, and noted in CLAUDE.md because the
+next widget with a private redraw helper will reach for the same name.
+
+## Deviations from the spec
+
+**§22 named `run_pipeline_to_completion()` as the drainer keeping callers synchronous,
+which reads as "callers now wrap".** They do not: the drainer exists under that name and
+`run_deep_research_pipeline()` applies it internally (P3). Both halves of the section's
+sentence are satisfied without the churn its literal reading implies.
+
+**`retry` events come from the claim retry loop, not from JSON retries.** §22 specifies
+"`retry` (which claim, which attempt)", which is the 6a/6c/D2 loop. JSON-parse retries
+surface as `trace_line`s through the watermark instead — better, since it needs no
+coupling to `json_retry.py` at all.
+
+## Tests
+
+927 → 947, all offline. One new file (`tests/test_pipeline_events.py`, 20 tests) plus
+repointed doubles in `test_e2e.py`, `test_review.py`, `test_tui.py`,
+`test_json_retry.py` and `test_research_authorization.py`. Five mutations verified red
+on exactly one test each: watermark removed, persist-after-emit, trace re-dumped in
+`on_research_finished`, tier tally counted instead of keyed, worker stops forwarding,
+and a seventh field on `LoopEvent`.
+
+`tests/test_tui.py::test_ac2_...` and
+`test_quitting_during_an_attended_research_prompt_releases_the_worker` each failed once
+across five full-suite runs and pass in isolation — TECHNICAL_DEBT.md item 8's known
+`_settle` pump-budget flake, unrelated to this section and not touched by it.
+
+## Not verified
+
+The manual pass. Nothing has watched the sidebar panel fill during a real ten-pass run,
+and the panel's line budget (last 8 passes) is a guess that only a long retry loop will
+test. The CLI's live output has not been read against a real run either — in particular
+whether `->` pass lines and `-` trace lines interleave readably once a pass takes
+minutes rather than milliseconds.
+
+
+---
+
+# Live-run fixes: arXiv, tool containment, TUI logging, truncated passes (2026-08-05)
+
+Not a roadmap section. Five defects found by actually running the research
+pipeline against a real provider for the first time since §22 — which is
+precisely the "manual pass" every recent DEVLOG entry lists under "Not
+verified". It found five things in two runs.
+
+## What the manual pass found, in the order it found them
+
+**1. A truncated API key, not a harness bug.** A 401 from Alibaba's token-plan
+endpoint. Worth recording because of how it was settled: a header dump proved
+`Authorization: Bearer <exact key>` byte-for-byte, then a bare `httpx` POST with
+no harness code in the path got the identical 401. Two checks, and the harness
+was out of the picture before any code was touched.
+
+**2. arXiv enforced HTTPS.** `ARXIV_API_URL` was `http://`, and three behaviours
+combined into a failure that looks nothing like a redirect: httpx does not follow
+redirects by default (unlike `requests`), `raise_for_status()` only raises on
+>= 400 so a 301 sails through, and the 301 body is empty so `ET.fromstring("")`
+raises `ParseError`. Three identical retries, then "arXiv search failed after 3
+attempts".
+
+**3. Two of the three network tools could fail a whole run.** Chasing (2): both
+`arxiv_search` and `web_search` raised after exhausting retries, and
+`dispatch()` had no try/except around `spec.handler`. So one transient network
+error inside one pass propagated into the orchestrator's `except Exception` and
+flipped a finished ten-pass run to `status='failed'`. `fetch_url` was the only
+one returning an error dict. Contained at `dispatch()` (owner decision: boundary
+AND per-tool), which also covers every future tool and every MCP server.
+
+**4. Logging and Textual were fighting over the terminal.** `configure_logging()`
+attaches a stderr handler and nothing detached it, so every WARNING painted over
+the rendered screen, sat on top of the input bar, and vanished at the next
+repaint. `main.py` now calls `configure_logging(stderr=False)` immediately before
+`run_tui()` — not at the top of `main()`, because pre-mount messages genuinely
+want a terminal — and `TranscriptLogHandler` routes WARNING+ into the transcript.
+
+**5. The one that actually mattered.** See below.
+
+## The truncated-pass cascade
+
+Symptom: `pipeline failed: Claim.__init__() missing 3 required positional
+arguments: 'id', 'text', and 'type'`.
+
+Reconstructed from the persisted pass threads, because §5's durability meant the
+evidence was all still there:
+
+  1. Pass 1 made 14 tool calls, mostly `fetch_url` against URLs the model had
+     guessed and got 404s for.
+  2. It crossed `MAX_TOKEN_BUDGET` (250k). The meter re-counts the whole prompt
+     every step, so a tool-heavy pass burns it quadratically — TECHNICAL_DEBT
+     item 9, biting exactly as that entry predicted, down to its own line that
+     `token_budget_exceeded` "is what a user actually sees when a long thread
+     stops working".
+  3. A budget stop returns the last response AS IT STANDS. That response was
+     mid-tool-call, so `text` was `""`.
+  4. `_run_pass` returned `response.text` and **discarded `stop_reason`**, so a
+     cut-off pass was indistinguishable from one that answered with an empty
+     string. `run.raw_response = ""`.
+  5. Pass 2 received "Response to extract claims from:\n", correctly reported it
+     had been given nothing, and returned `[{"note": "..."}]`.
+  6. `Claim(**filtered)` raised.
+
+Six steps, three passes, and one error message naming none of it.
+
+**The fix is at step 4, not step 6.** Making `_claim_from_json` defensive would
+have produced a clearer message about the same broken run; checking `stop_reason`
+stops the run at the pass that actually failed. Owner decision: truncated WITH
+text traces and continues (degraded but usable — failing there discards work the
+later passes can use), truncated with NO text raises naming the pass and the stop
+reason. The check runs BEFORE the JSON-retry loop, because a cut-off pass did not
+write malformed JSON and nudging it spends more of an exhausted budget to be told
+the same thing.
+
+`RESEARCH_PASS_TOKEN_BUDGET` (1M) is the second half, and the JSON retry carries
+it for the same reason it already carried the `ToolContext`: a retry is the same
+pass continuing, and falling back to the chat default would cut it off inside an
+already-large thread. **Not a fix for item 9** — that entry asks for the billing
+meter and a per-turn size figure to be separated, in a change with its own revert
+checks, and this only stops a legitimate pass being bounded by a number that was
+never meant to bound it.
+
+## The observability defect underneath all of it
+
+Every one of these was harder to diagnose than it needed to be, for one reason:
+`logger.warning("fetch_url failed", extra={"url": ..., "error": ...})`. The
+default formatter renders `%(message)s`, so **every field passed via `extra=` was
+dropped**. Fifteen identical content-free lines for fifteen different URLs, and
+an arXiv scheme change hiding behind three identical `arxiv_search attempt
+failed` lines. Five call sites, now interpolated into the message.
+
+This is the same shape as `fetch_url` being registered-but-denied and ensemble
+mode being built-but-unrunnable: something that looks like it works, has never
+been read, and is silent in exactly the situation it exists for.
+
+## Tests
+
+979 -> 989. Two new files (`test_tool_failure_containment.py`,
+`test_truncated_pass.py`). Eight mutations verified red on the right test each:
+dispatch containment, handler detach, warning dedupe, arXiv URL, arXiv redirects,
+truncation check, pass budget, retry budget.
+
+Two of my own test bugs, both worth recording because both would have passed
+vacuously in a different arrangement: `httpx.ConnectError` does not exist on the
+suite's fake httpx (the stub has `HTTPError` only, which is also what the retry
+loop actually catches), and `TemporaryDirectory` cannot delete a log file
+Windows still has open through a live `RotatingFileHandler` — `tmp_path` does not
+try.
+
+## Not verified
+
+The pipeline still has not completed a full ten-pass run end to end. Everything
+above is a fix for something that stopped one; whether it now finishes is the
+next manual pass.

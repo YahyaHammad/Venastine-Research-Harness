@@ -73,6 +73,15 @@ def estimated_tokens(messages) -> int:
     return _chars(messages) // CHARS_PER_TOKEN
 
 
+# Models already warned about, so the fallback notice is said once per
+# model rather than once per evaluation. Deduplicated on the MODEL, not
+# with a single boolean, for the same reason core/loop.py's
+# _headless_notices_shown keys on the hidden SET: a run that switches
+# model (or a pipeline whose critic model differs, §11) must still hear
+# about the second one.
+_context_window_warned: set = set()
+
+
 def context_limit(model: str) -> int:
     """The model's context window, for the pipeline backstop (M6).
 
@@ -82,13 +91,23 @@ def context_limit(model: str) -> int:
     less load-bearing than §21 assumed, though -- M1 moved the ordinary
     trigger off this table entirely, so a missing entry costs a mistimed
     backstop rather than mistimed compaction.
+
+    ONCE PER MODEL. This is called from thresholds(), which
+    should_compact() calls on EVERY evaluation -- and _maybe_compact runs
+    at the top of every step of every turn, so in a research run that is
+    twice a step across ten passes. Unbounded repetition of a line the
+    user can do nothing more about after reading it once is how a warning
+    that matters gets trained past, and on the TUI it was also painting
+    over the screen.
     """
     window = config.MODEL_CONTEXT_WINDOWS.get(model)
     if window is None:
-        logger.warning(
-            "No context window known for model %r; assuming %s. Add it to "
-            "config.MODEL_CONTEXT_WINDOWS -- the compaction backstop fires "
-            "against this number.", model, config.DEFAULT_CONTEXT_WINDOW)
+        if model not in _context_window_warned:
+            _context_window_warned.add(model)
+            logger.warning(
+                "No context window known for model %r; assuming %s. Add it to "
+                "config.MODEL_CONTEXT_WINDOWS -- the compaction backstop fires "
+                "against this number.", model, config.DEFAULT_CONTEXT_WINDOW)
         return config.DEFAULT_CONTEXT_WINDOW
     return window
 

@@ -52,6 +52,17 @@ def _guard_released():
     compaction._compacting = False
 
 
+@pytest.fixture(autouse=True)
+def _forget_context_window_warnings():
+    """Same reasoning as the guard above, for the once-per-model warning
+    set. It is module state, and a test that warms it makes the
+    fallback-warning test below pass or fail depending on WHICH TESTS RAN
+    FIRST -- the kind of order dependency that reads as a flake."""
+    compaction._context_window_warned.clear()
+    yield
+    compaction._context_window_warned.clear()
+
+
 def _thread(memory, turns=6, body="x" * 200):
     for index in range(turns):
         memory.add_user_message(f"question {index} {body}")
@@ -113,6 +124,38 @@ def test_an_unknown_model_warns_about_its_assumed_window(caplog):
         assert compaction.context_limit("some-new-model") == config.DEFAULT_CONTEXT_WINDOW
 
     assert "MODEL_CONTEXT_WINDOWS" in caplog.text
+
+
+def test_the_unknown_model_warning_is_said_once_per_model(caplog):
+    """thresholds() calls this on EVERY evaluation, and _maybe_compact
+    runs at the top of every step of every turn -- so in a research run
+    that is twice a step across ten passes. Unbounded repetition of a
+    line the user can do nothing more about is how a warning that matters
+    gets trained past, and on the TUI it was painting over the screen."""
+    with caplog.at_level("WARNING", logger="core.compaction"):
+        for _ in range(5):
+            compaction.context_limit("some-new-model")
+
+    assert caplog.text.count("MODEL_CONTEXT_WINDOWS") == 1
+
+
+def test_a_second_unknown_model_is_still_reported(caplog):
+    """The control, and why this dedupes on the MODEL rather than on a
+    single boolean: a run that switches model, or a pipeline whose critic
+    model differs (§11), must still hear about the second one."""
+    with caplog.at_level("WARNING", logger="core.compaction"):
+        compaction.context_limit("some-new-model")
+        compaction.context_limit("another-new-model")
+
+    assert caplog.text.count("MODEL_CONTEXT_WINDOWS") == 2
+
+
+def test_the_qwen_entry_stops_the_fallback_entirely(caplog):
+    """A known model must take the table path, not the warned one."""
+    with caplog.at_level("WARNING", logger="core.compaction"):
+        assert compaction.context_limit("qwen3.8-max-preview") == 983_616
+
+    assert "MODEL_CONTEXT_WINDOWS" not in caplog.text
 
 
 def test_the_reentrancy_guard_stops_the_compactor_compacting():

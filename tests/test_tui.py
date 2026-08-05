@@ -50,8 +50,8 @@ async def test_research_grant_picker_authorises_the_run(mocker):
                                ("mcp__lib__write", "Write.")])
     captured = {}
     mocker.patch(
-        "core.reasoning.orchestrator.run_deep_research_pipeline",
-        side_effect=lambda **kw: (captured.update(kw), _stub_run())[1])
+        "core.reasoning.orchestrator.stream_deep_research_pipeline",
+        side_effect=lambda **kw: (captured.update(kw), _stub_events())[1])
 
     app = VenastineApp("ANTHROPIC", "test-model", {})
     async with app.run_test() as pilot:
@@ -87,8 +87,8 @@ async def test_research_attended_flag_gives_the_pipeline_a_provider(mocker):
     mocker.patch("core.reasoning.authorization.candidates", return_value=[])
     captured = {}
     mocker.patch(
-        "core.reasoning.orchestrator.run_deep_research_pipeline",
-        side_effect=lambda **kw: (captured.update(kw), _stub_run())[1])
+        "core.reasoning.orchestrator.stream_deep_research_pipeline",
+        side_effect=lambda **kw: (captured.update(kw), _stub_events())[1])
 
     app = VenastineApp("ANTHROPIC", "test-model", {})
     async with app.run_test() as pilot:
@@ -112,8 +112,8 @@ async def test_research_attended_can_be_persisted_in_settings(mocker):
     mocker.patch("core.reasoning.authorization.candidates", return_value=[])
     captured = {}
     mocker.patch(
-        "core.reasoning.orchestrator.run_deep_research_pipeline",
-        side_effect=lambda **kw: (captured.update(kw), _stub_run())[1])
+        "core.reasoning.orchestrator.stream_deep_research_pipeline",
+        side_effect=lambda **kw: (captured.update(kw), _stub_events())[1])
 
     app = VenastineApp("ANTHROPIC", "test-model",
                        {"research": {"approval_mode": "attended"}})
@@ -136,8 +136,8 @@ async def test_cancelling_the_grant_picker_cancels_the_run(mocker):
     mocker.patch("core.reasoning.authorization.candidates",
                  return_value=[("mcp__lib__search", "Search.")])
     started = []
-    mocker.patch("core.reasoning.orchestrator.run_deep_research_pipeline",
-                 side_effect=lambda **kw: (started.append(kw), _stub_run())[1])
+    mocker.patch("core.reasoning.orchestrator.stream_deep_research_pipeline",
+                 side_effect=lambda **kw: (started.append(kw), _stub_events())[1])
 
     app = VenastineApp("ANTHROPIC", "test-model", {})
     async with app.run_test() as pilot:
@@ -235,6 +235,21 @@ def _stub_run():
     run = PipelineRun(user_query="q")
     run.final_report = "report"
     return run
+
+
+def _stub_events(run=None, extra=()):
+    """A canned PipelineEvent stream, ending in run_complete.
+
+    §22 repointed both shells from run_deep_research_pipeline (which
+    drains) to stream_deep_research_pipeline (which yields), so a double
+    patched at the old name silently stops intercepting and the REAL
+    pipeline runs. Every research double in this file goes through here
+    so that cannot happen quietly.
+    """
+    from core.reasoning.events import PipelineEvent
+    return iter(list(extra) + [
+        PipelineEvent(kind="run_complete", run=run or _stub_run()),
+    ])
 
 
 async def _settle(pilot, predicate, tries: int = 120):
@@ -631,6 +646,296 @@ async def test_effort_lookup_does_not_block_the_ui_thread(mocker):
         release.set()
         assert await _settle(pilot, lambda: app.effort == "high"), \
             "the effort change never landed"
+
+
+# ---------------------------------------------------------------------------
+# ---- Logging must not scribble on the rendered screen ---------------------
+# ---------------------------------------------------------------------------
+#
+# main.py attaches a stderr handler at startup and nothing detached it, so
+# every WARNING painted directly over Textual's screen -- on top of the
+# input bar, behind the panels, gone at the next repaint. Dropping stderr
+# for the TUI fixes the corruption; routing WARNING+ into the transcript
+# is the other half, or the warnings would simply become invisible.
+
+@pytest.mark.asyncio
+async def test_a_warning_reaches_the_transcript():
+    import logging
+
+    written = []
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        app._transcript.write_system = lambda text: written.append(text)
+        logging.getLogger("core.compaction").warning(
+            "No context window known for model 'x'")
+        assert await _settle(
+            pilot, lambda: any("context window" in t for t in written)), \
+            "a WARNING never reached the transcript"
+
+    assert any(t.startswith("[warning]") for t in written), \
+        "the level must be visible -- an unlabelled line reads as narration"
+
+
+@pytest.mark.asyncio
+async def test_info_is_not_routed_to_the_transcript():
+    """The control. INFO in a chat transcript is noise, and the rotating
+    file already has it at full detail with timestamps."""
+    import logging
+
+    written = []
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        app._transcript.write_system = lambda text: written.append(text)
+        logging.getLogger("core.compaction").info("cache hit")
+        for _ in range(10):
+            await pilot.pause()
+
+    assert not any("cache hit" in t for t in written)
+
+
+@pytest.mark.asyncio
+async def test_an_error_renders_as_an_error():
+    import logging
+
+    errors = []
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        app._transcript.write_error = lambda text: errors.append(text)
+        logging.getLogger("tools.registry").error("tool exploded")
+        assert await _settle(
+            pilot, lambda: any("tool exploded" in t for t in errors))
+
+
+@pytest.mark.asyncio
+async def test_the_handler_is_detached_when_the_app_unmounts():
+    """The handler holds a reference to the app. Leaving it on the root
+    logger keeps a dead app alive and, across this suite, stacks one
+    handler per App instance -- so the last test in the file would post
+    to thirty dead apps."""
+    import logging
+
+    from tui.app import TranscriptLogHandler
+
+    before = [h for h in logging.getLogger().handlers
+              if isinstance(h, TranscriptLogHandler)]
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        during = [h for h in logging.getLogger().handlers
+                  if isinstance(h, TranscriptLogHandler)]
+        assert len(during) == len(before) + 1, "the handler was never attached"
+
+    after = [h for h in logging.getLogger().handlers
+             if isinstance(h, TranscriptLogHandler)]
+    assert len(after) == len(before), "the handler outlived its app"
+
+
+@pytest.mark.asyncio
+async def test_a_handler_failure_cannot_take_the_app_down():
+    """emit() runs wherever the logging happened -- a research worker
+    thread, the MCP bridge thread. A logging handler that raises inside a
+    message pump would kill the app over a diagnostic."""
+    import logging
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        app._log_handler._app = None          # force emit() to blow up
+        logging.getLogger("core.compaction").warning("boom")
+        for _ in range(5):
+            await pilot.pause()
+        # Still live and still handling input.
+        app.query_one("#prompt").value = "alive"
+        await pilot.pause()
+        assert app.query_one("#prompt").value == "alive"
+
+
+# ---------------------------------------------------------------------------
+# ---- /model: switching provider and model mid-session ---------------------
+# ---------------------------------------------------------------------------
+#
+# The TUI could only be pointed at a provider by relaunching it, so a user
+# with no key for config.MODEL_NAME's provider could not reach the shell at
+# all without editing a file. Driven through the pilot like /theme and
+# /effort: a handler called by hand proves the function works, not that the
+# app dispatches to it.
+
+_TWO_PROVIDERS = {
+    "ANTHROPIC": {"API_KEY": "k", "is_v1_compatible": False},
+    "OPENAI": {"API_KEY": "k", "is_v1_compatible": True},
+    "LOCAL": {"API_KEY": "", "is_v1_compatible": True},   # no key on purpose
+}
+
+
+@pytest.mark.asyncio
+async def test_model_switches_the_model_and_keeps_the_provider(mocker):
+    mocker.patch("credentials.load_provider_data", return_value=_TWO_PROVIDERS)
+
+    app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
+    async with app.run_test() as pilot:
+        app.query_one("#prompt").value = "/model claude-opus-4"
+        await pilot.press("enter")
+        await pilot.pause()
+
+    assert app.model == "claude-opus-4"
+    assert app.provider_name == "ANTHROPIC", "one argument must not move provider"
+
+
+@pytest.mark.asyncio
+async def test_model_switches_both_when_given_a_provider(mocker):
+    """The case the command exists for: the default provider has no key."""
+    mocker.patch("credentials.load_provider_data", return_value=_TWO_PROVIDERS)
+
+    app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
+    async with app.run_test() as pilot:
+        app.query_one("#prompt").value = "/model openai gpt-4o"
+        await pilot.press("enter")
+        await pilot.pause()
+
+    assert (app.provider_name, app.model) == ("OPENAI", "gpt-4o"), \
+        "the provider name must be upper-cased to match providers.json"
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_provider_changes_nothing(mocker):
+    """api_initialization raises the same ValueError on the next turn, a
+    long way from the typo that caused it."""
+    mocker.patch("credentials.load_provider_data", return_value=_TWO_PROVIDERS)
+
+    app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
+    async with app.run_test() as pilot:
+        app.query_one("#prompt").value = "/model OPENAOI gpt-4o"
+        await pilot.press("enter")
+        await pilot.pause()
+
+    assert (app.provider_name, app.model) == ("ANTHROPIC", "claude-sonnet-5")
+
+
+@pytest.mark.asyncio
+async def test_a_provider_with_no_key_warns_but_still_switches(mocker):
+    """WARN, not refuse. An OpenAI-compatible endpoint running locally
+    legitimately needs no key, so refusing would block a real
+    configuration — but a hosted provider will fail auth on every call,
+    and finding that out one turn later is the worse trade."""
+    mocker.patch("credentials.load_provider_data", return_value=_TWO_PROVIDERS)
+    written = []
+
+    app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
+    async with app.run_test() as pilot:
+        mocker.patch.object(type(app._transcript), "write_error",
+                            side_effect=lambda self, t: written.append(t),
+                            autospec=True)
+        app.query_one("#prompt").value = "/model LOCAL my-local-model"
+        await pilot.press("enter")
+        await pilot.pause()
+
+    assert (app.provider_name, app.model) == ("LOCAL", "my-local-model")
+    assert any("no API_KEY" in line for line in written), \
+        "switching to a keyless provider said nothing about it"
+
+
+@pytest.mark.asyncio
+async def test_model_is_refused_mid_turn(_mocked_loop, mocker):
+    """Swapping under a running worker leaves the transcript claiming one
+    model while the thread records another — the same guard /new,
+    /research and the thread picker use."""
+    mocker.patch("credentials.load_provider_data", return_value=_TWO_PROVIDERS)
+    from tui.app import _cmd_model
+
+    app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
+    async with app.run_test() as pilot:
+        app._busy = True
+        _cmd_model(app, "OPENAI gpt-4o")
+        await pilot.pause()
+
+    assert (app.provider_name, app.model) == ("ANTHROPIC", "claude-sonnet-5")
+
+
+@pytest.mark.asyncio
+async def test_switching_model_revalidates_the_effort_level(mocker):
+    """Effort is per-MODEL. A level the old model accepted can be rejected
+    outright by the new one, and every later turn would fail with a
+    provider 400 — the exact failure the mount-time check exists to stop,
+    reachable again through a switch."""
+    mocker.patch("credentials.load_provider_data", return_value=_TWO_PROVIDERS)
+    mocker.patch("tui.app.api_initialization", return_value=object())
+    # The NEW model exposes no effort control at all.
+    mocker.patch("tui.app.effort_levels_for_model", return_value=[])
+
+    app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {"tui": {"effort": "high"}})
+    async with app.run_test() as pilot:
+        app.effort = "high"          # survived mount validation in this fake
+        app.query_one("#prompt").value = "/model OPENAI gpt-4o"
+        await pilot.press("enter")
+        assert await _settle(pilot, lambda: app.effort is None), \
+            "a stale effort level survived the model switch"
+
+
+@pytest.mark.asyncio
+async def test_the_header_shows_which_model_the_next_turn_uses(mocker):
+    """The mount banner scrolls away, so after a switch nothing on screen
+    said what the next turn would actually call."""
+    mocker.patch("credentials.load_provider_data", return_value=_TWO_PROVIDERS)
+
+    app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert app.sub_title == "ANTHROPIC | claude-sonnet-5"
+
+        app.query_one("#prompt").value = "/model OPENAI gpt-4o"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.sub_title == "OPENAI | gpt-4o"
+
+
+@pytest.mark.asyncio
+async def test_bare_model_reports_without_changing_anything(mocker):
+    mocker.patch("credentials.load_provider_data", return_value=_TWO_PROVIDERS)
+    written = []
+
+    app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
+    async with app.run_test() as pilot:
+        mocker.patch.object(type(app._transcript), "write_system",
+                            side_effect=lambda self, t: written.append(t),
+                            autospec=True)
+        app.query_one("#prompt").value = "/model"
+        await pilot.press("enter")
+        await pilot.pause()
+
+    assert (app.provider_name, app.model) == ("ANTHROPIC", "claude-sonnet-5")
+    joined = " ".join(written)
+    assert "ANTHROPIC" in joined and "claude-sonnet-5" in joined
+    # Only providers that actually have a key -- listing LOCAL as ready
+    # would send the user at a provider whose every call 401s.
+    assert "LOCAL" not in joined.split("Providers with a key:")[1]
+
+
+@pytest.mark.asyncio
+async def test_the_new_model_reaches_the_next_model_call(_mocked_loop):
+    """The switch has to TRAVEL: app -> _run -> call_model_stream. Asserted
+    on the call arguments, because setting the attribute proves only that
+    the attribute was set."""
+    _mocked_loop.patch("credentials.load_provider_data",
+                       return_value=_TWO_PROVIDERS)
+    _mocked_loop.patch("core.loop.registry.approval_needed", return_value=False)
+    stream = _mocked_loop.patch(
+        "core.loop.call_model_stream",
+        side_effect=make_stream_sequence(make_model_response(text="hi")),
+    )
+
+    app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
+    async with app.run_test() as pilot:
+        app.query_one("#prompt").value = "/model OPENAI gpt-4o"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        app.query_one("#prompt").value = "hello"
+        await pilot.press("enter")
+        assert await _settle(pilot, lambda: stream.called)
+
+    # call_model_stream(client, provider, model, messages, system, tools, ...)
+    assert stream.call_args[0][1] == "OPENAI"
+    assert stream.call_args[0][2] == "gpt-4o"
 
 
 # ---------------------------------------------------------------------------

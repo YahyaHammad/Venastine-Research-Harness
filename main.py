@@ -425,20 +425,39 @@ def run_research(
     review (§20) comes from build_review_consent(); None means the review
     may still run but applies nothing (V6). subagent_review is whether it
     runs at all -- separate, because --review on a piped run has no
-    consent object and must still report."""
-    from core.reasoning.orchestrator import run_deep_research_pipeline
+    consent object and must still report.
+
+    §22: the pipeline is ITERATED, not called, so a run that takes many
+    minutes says what it is doing while it does it. The CLI is where that
+    matters most -- it is the shell an unattended run is usually launched
+    from, and it had nothing at all to show until the run ended."""
+    from core.reasoning.orchestrator import stream_deep_research_pipeline
     from core.reasoning.output_writer import write_run_artifacts
 
     print(f"Running deep-research pipeline on: {query!r}")
     print(f"Provider: {provider_name} | Model: {model}\n")
 
+    run = None
     try:
-        run = run_deep_research_pipeline(
+        for event in stream_deep_research_pipeline(
             user_query=query, model=model, provider_name=provider_name,
             ensemble_mode=ensemble_mode, ensemble_n=ensemble_n,
             authorization=authorization, review=review,
             subagent_review=subagent_review,
-        )
+        ):
+            if event.kind == "pass_start":
+                print(f"-> {event.pass_id}", flush=True)
+            elif event.kind == "trace_line":
+                print(f"- {event.text}", flush=True)
+            elif event.kind == "run_complete":
+                run = event.run
+        if run is None:
+            # Same contract as run_pipeline_to_completion's RuntimeError:
+            # a generator that ended without its terminal event has a bug,
+            # and carrying on would fail later on a None run instead.
+            raise RuntimeError(
+                "Pipeline generator completed without yielding a "
+                "run_complete event")
     except Exception as e:
         logger.exception("Research pipeline failed")
         print(f"\nPipeline failed: {e}")
@@ -453,11 +472,11 @@ def run_research(
         logger.exception("Could not write artifacts")
         print(f"\n[Warning: could not write artifacts: {e}]")
 
+    # §22: no "--- Trace ---" block here any more. Every line was printed
+    # as it happened, above; reprinting them would show the whole run
+    # twice, with the second copy looking like a different artifact.
+    print("\n--- Report ---")
     print(run.final_report)
-
-    print("\n--- Trace ---")
-    for line in run.trace:
-        print(f"- {line}")
 
     if run.run_id:
         print(f"\n[run id: {run.run_id}]")
@@ -920,6 +939,19 @@ if __name__ == "__main__":
     mcp = setup_mcp(project_path)
     try:
         if args.tui:
+            # Detach the stderr handler before Textual takes the screen.
+            # Everything logged up to this point -- database creation, the
+            # trust prompt, MCP server connections -- is pre-mount and
+            # belongs on stderr, which is why this re-configures HERE
+            # rather than at the top of main(): the flag isn't parsed yet
+            # up there, and those messages genuinely want a terminal.
+            #
+            # From here on stderr would paint over the rendered UI, so the
+            # rotating file keeps everything and tui/app.py routes
+            # WARNING+ into the transcript. configure_logging is
+            # documented idempotent and clears handlers first, so this is
+            # a re-attach rather than a second stack.
+            configure_logging(stderr=False)
             from tui.app import run as run_tui
             run_tui(provider, model, settings)
         elif args.mode == "research":

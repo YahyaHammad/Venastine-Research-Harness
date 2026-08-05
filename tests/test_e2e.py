@@ -159,8 +159,23 @@ def test_chat_mode_e2e_multi_turn_with_tool_use(mocker, capsys, fake_storage):
 # ---- Research mode: prints report + trace ---------------------------------
 # ===========================================================================
 
+def _events_for(run):
+    """The PipelineEvent stream a canned run would have produced (§22).
+
+    run_research ITERATES stream_deep_research_pipeline now, and prints
+    each trace line as its event arrives -- the end-of-run trace dump is
+    exactly what §22 removed. So a double that only hands back the run
+    would leave stdout with no trace at all, and the assertions below
+    would fail for the right reason rather than passing vacuously.
+    """
+    from core.reasoning.events import PipelineEvent
+    for line in run.trace:
+        yield PipelineEvent(kind="trace_line", text=line)
+    yield PipelineEvent(kind="run_complete", run=run)
+
+
 def test_research_mode_e2e_prints_report_and_trace(mocker, capsys):
-    """Full research-mode wiring: run_research -> run_deep_research_pipeline
+    """Full research-mode wiring: run_research -> stream_deep_research_pipeline
     (mocked at the pipeline level -- the pipeline's internals are covered
     by test_orchestrator.py) -> write_run_artifacts (mocked -- the writer
     is covered by test_output_writer.py) -> prints final report, trace
@@ -183,8 +198,8 @@ def test_research_mode_e2e_prints_report_and_trace(mocker, capsys):
     canned_run.log("Final synthesis complete.")
 
     mock_pipeline = mocker.patch(
-        "core.reasoning.orchestrator.run_deep_research_pipeline",
-        return_value=canned_run,
+        "core.reasoning.orchestrator.stream_deep_research_pipeline",
+        side_effect=lambda **kw: _events_for(canned_run),
     )
 
     fake_output_dir = f"./output/{known_run_id}"
@@ -289,8 +304,8 @@ def test_research_mode_prints_report_when_artifacts_fail(mocker, capsys):
     canned_run.log("Pass 0: plan produced.")
 
     mocker.patch(
-        "core.reasoning.orchestrator.run_deep_research_pipeline",
-        return_value=canned_run,
+        "core.reasoning.orchestrator.stream_deep_research_pipeline",
+        side_effect=lambda **kw: _events_for(canned_run),
     )
     mocker.patch(
         "core.reasoning.output_writer.write_run_artifacts",
@@ -313,11 +328,11 @@ def test_research_mode_prints_report_when_artifacts_fail(mocker, capsys):
 
 
 def test_research_mode_survives_pipeline_failure(mocker, capsys):
-    """If run_deep_research_pipeline raises, run_research must print the
+    """If stream_deep_research_pipeline raises, run_research must print the
     error, log the traceback, and exit non-zero -- not crash with an
     unhandled traceback."""
     mocker.patch(
-        "core.reasoning.orchestrator.run_deep_research_pipeline",
+        "core.reasoning.orchestrator.stream_deep_research_pipeline",
         side_effect=RuntimeError("provider unreachable"),
     )
 

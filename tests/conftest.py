@@ -20,6 +20,28 @@ from core.client import ModelResponse, ToolCallRequest, StreamToken
 
 
 # ---------------------------------------------------------------------------
+# ---- Generator draining (ROADMAP_v2 §22) ---------------------------------
+# ---------------------------------------------------------------------------
+
+def drain(gen):
+    """Run a generator to exhaustion and return its RETURN value.
+
+    §22 made the orchestrator's `_run_pass`, `_run_pass_with_json_retry`
+    and `_review_stage` generators that yield PipelineEvents and return
+    their result. `list(gen)` collects the events and throws the return
+    value away; production code reaches them through `yield from`, which
+    keeps it. This is `yield from` for a test that is not itself a
+    generator, so a direct-call test asserts on what the pipeline
+    actually receives.
+    """
+    try:
+        while True:
+            next(gen)
+    except StopIteration as stop:
+        return stop.value
+
+
+# ---------------------------------------------------------------------------
 # ---- ModelResponse builder (no SDK mocking needed) ----------------------
 # ---------------------------------------------------------------------------
 

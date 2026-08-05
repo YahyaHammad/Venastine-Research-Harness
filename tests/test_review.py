@@ -275,6 +275,41 @@ def _consent(*answers):
     return consent
 
 
+def _as_generator(fn):
+    """Wrap a test double so it is a GENERATOR returning fn's value.
+
+    §22 made `_run_pass`, `_run_pass_with_json_retry` and `_review_stage`
+    generators, and the pipeline reaches all three through `yield from`.
+    A plain-function double is not an error there -- `yield from "REPORT"`
+    iterates the string one character at a time and returns None -- so
+    the symptom is a report that silently becomes None several asserts
+    later. Every double for those three goes through here.
+    """
+    def double(*args, **kwargs):
+        result = fn(*args, **kwargs)
+        yield from ()
+        return result
+    return double
+
+
+def _stub_events(run):
+    """The PipelineEvent stream a canned run would have produced.
+
+    §22 repointed both shells from run_deep_research_pipeline (which
+    drains) to stream_deep_research_pipeline (which yields), so a double
+    patched at the old name silently stops intercepting and the REAL
+    pipeline runs. Every shell-level double below goes through here.
+    """
+    from core.reasoning.events import PipelineEvent
+    return iter([PipelineEvent(kind="run_complete", run=run)])
+
+
+def _explode(*args, **kwargs):
+    """A stage failure that is a BUG, not a transient provider error --
+    the half of f1's policy that still reaches status='failed'."""
+    raise RuntimeError("reviewer exploded")
+
+
 def _stage(run, mocker, consent=None, authorization=None, enabled=False):
     from core import config_loader
     from core.reasoning import orchestrator
@@ -286,8 +321,14 @@ def _stage(run, mocker, consent=None, authorization=None, enabled=False):
     # actually loads, which is half of what these tests are for.
     config_loader.initialize(".")
     mocker.patch.object(orchestrator, "update_pipeline_run")
-    orchestrator._review_stage(run, "m", "ANTHROPIC", authorization, consent,
-                               enabled=enabled)
+    # §22: the stage is a generator now, and it takes the run's _Progress
+    # so review.py's trace lines land on the same watermark as the
+    # pipeline's own. DRAINED here -- an undrained generator runs nothing
+    # at all, which would make every assertion below pass vacuously.
+    events = list(orchestrator._review_stage(
+        run, orchestrator._Progress(run), "m", "ANTHROPIC", authorization,
+        consent, enabled=enabled))
+    return events
 
 
 TEXT_FINDING = {"kind": "text", "claim_id": "c1",
@@ -947,7 +988,7 @@ class TestTheStageIsWiredIntoThePipeline:
                                    "type": "synthesis"}])})
         mocker.patch.object(
             orchestrator, "_run_pass_with_json_retry",
-            side_effect=lambda pass_id, *a, **k: canned[pass_id])
+            side_effect=_as_generator(lambda pass_id, *a, **k: canned[pass_id]))
         update = mocker.patch.object(orchestrator, "update_pipeline_run")
 
         # The FIRST final synthesis succeeds; the review's re-run raises.
@@ -961,7 +1002,8 @@ class TestTheStageIsWiredIntoThePipeline:
                 raise RuntimeError("provider down")
             return "REPORT v1"
 
-        mocker.patch.object(orchestrator, "_run_pass", side_effect=_synth)
+        mocker.patch.object(orchestrator, "_run_pass",
+                            side_effect=_as_generator(_synth))
         mocker.patch.object(
             review_module, "run_review",
             side_effect=lambda run, *a, **k: ([TEXT_FINDING], uuid4()))
@@ -990,13 +1032,15 @@ class TestTheStageIsWiredIntoThePipeline:
         mocker.patch.object(orchestrator, "create_pipeline_run",
                             return_value=uuid4())
         mocker.patch.object(orchestrator, "run_confidence_tiering")
-        mocker.patch.object(orchestrator, "_run_pass", return_value="REPORT")
+        mocker.patch.object(orchestrator, "_run_pass",
+                            side_effect=_as_generator(lambda *a, **k: "REPORT"))
         mocker.patch.object(
             orchestrator, "_run_pass_with_json_retry",
-            side_effect=lambda pass_id, *a, **k: _canned_for(pass_id))
+            side_effect=_as_generator(lambda pass_id, *a, **k: _canned_for(pass_id)))
         update = mocker.patch.object(orchestrator, "update_pipeline_run")
-        mocker.patch.object(orchestrator, "_review_stage",
-                            side_effect=RuntimeError("reviewer exploded"))
+        mocker.patch.object(
+            orchestrator, "_review_stage",
+            side_effect=_as_generator(_explode))
 
         with pytest.raises(RuntimeError, match="reviewer exploded"):
             orchestrator.run_deep_research_pipeline(
@@ -1019,15 +1063,15 @@ class TestTheStageIsWiredIntoThePipeline:
         mocker.patch.object(orchestrator, "run_confidence_tiering")
         mocker.patch.object(
             orchestrator, "_run_pass",
-            side_effect=lambda pass_id, *a, **k: (
-                order.append(pass_id) or "REPORT"))
+            side_effect=_as_generator(lambda pass_id, *a, **k: (
+                order.append(pass_id) or "REPORT")))
         mocker.patch.object(
             orchestrator, "_run_pass_with_json_retry",
-            side_effect=lambda pass_id, *a, **k: (
-                order.append(pass_id) or _canned_for(pass_id)))
+            side_effect=_as_generator(lambda pass_id, *a, **k: (
+                order.append(pass_id) or _canned_for(pass_id))))
         mocker.patch.object(
             orchestrator, "_review_stage",
-            side_effect=lambda *a, **k: order.append("review"))
+            side_effect=_as_generator(lambda *a, **k: order.append("review")))
 
         orchestrator.run_deep_research_pipeline(
             user_query="q", model="m", provider_name="ANTHROPIC")
@@ -1061,7 +1105,8 @@ def test_a_missing_reviewer_agent_skips_rather_than_failing(mocker):
     mocker.patch("agents.manager.manager.get", return_value=None)
     called = mocker.patch.object(RunAgentLoop, "run_agent_conversation")
 
-    orchestrator._review_stage(run, "m", "ANTHROPIC", None, _consent())
+    list(orchestrator._review_stage(run, orchestrator._Progress(run), "m",
+                                    "ANTHROPIC", None, _consent()))
 
     called.assert_not_called()
     assert run.final_report == "REPORT v1"
@@ -1099,13 +1144,14 @@ class TestRequestedIsSeparateFromCanBeAsked:
         mocker.patch.object(orchestrator, "create_pipeline_run",
                             return_value=uuid4())
         mocker.patch.object(orchestrator, "run_confidence_tiering")
-        mocker.patch.object(orchestrator, "_run_pass", return_value="REPORT")
+        mocker.patch.object(orchestrator, "_run_pass",
+                            side_effect=_as_generator(lambda *a, **k: "REPORT"))
         mocker.patch.object(
             orchestrator, "_run_pass_with_json_retry",
-            side_effect=lambda pass_id, *a, **k: _canned_for(pass_id))
+            side_effect=_as_generator(lambda pass_id, *a, **k: _canned_for(pass_id)))
         mocker.patch.object(
             orchestrator, "_review_stage",
-            side_effect=lambda *a, **k: captured.update(k))
+            side_effect=_as_generator(lambda *a, **k: captured.update(k)))
         mocker.patch.object(config, "SUBAGENT_REVIEW", True)
 
         orchestrator.run_deep_research_pipeline(
@@ -1200,8 +1246,8 @@ class TestTheCliShell:
         import main
 
         pipeline = mocker.patch(
-            "core.reasoning.orchestrator.run_deep_research_pipeline",
-            return_value=_reviewed_run())
+            "core.reasoning.orchestrator.stream_deep_research_pipeline",
+            side_effect=lambda **kw: _stub_events(_reviewed_run()))
         mocker.patch("core.reasoning.output_writer.write_run_artifacts",
                      return_value="/out")
         sentinel = ReviewConsent(decide=lambda f, r: ("reject", ""))
@@ -1305,8 +1351,8 @@ class TestBothShellsWriteArtifacts:
     def test_the_cli_writes_them(self, mocker):
         import main
 
-        mocker.patch("core.reasoning.orchestrator.run_deep_research_pipeline",
-                     return_value=_reviewed_run())
+        mocker.patch("core.reasoning.orchestrator.stream_deep_research_pipeline",
+                     side_effect=lambda **kw: _stub_events(_reviewed_run()))
         writer = mocker.patch(
             "core.reasoning.output_writer.write_run_artifacts",
             return_value="/out")
@@ -1319,8 +1365,8 @@ class TestBothShellsWriteArtifacts:
         from tui import app as tui_app
 
         run = _reviewed_run()
-        mocker.patch("core.reasoning.orchestrator.run_deep_research_pipeline",
-                     return_value=run)
+        mocker.patch("core.reasoning.orchestrator.stream_deep_research_pipeline",
+                     side_effect=lambda **kw: _stub_events(run))
         writer = mocker.patch(
             "core.reasoning.output_writer.write_run_artifacts",
             return_value="/out")
@@ -1337,8 +1383,8 @@ class TestBothShellsWriteArtifacts:
         from tui import app as tui_app
 
         run = _reviewed_run()
-        mocker.patch("core.reasoning.orchestrator.run_deep_research_pipeline",
-                     return_value=run)
+        mocker.patch("core.reasoning.orchestrator.stream_deep_research_pipeline",
+                     side_effect=lambda **kw: _stub_events(run))
         mocker.patch("core.reasoning.output_writer.write_run_artifacts",
                      side_effect=OSError("disk full"))
 
@@ -1352,7 +1398,8 @@ class TestBothShellsWriteArtifacts:
 
 class _FakeTuiApp:
     """Minimal stand-in for VenastineApp: _start_research only touches the
-    transcript, the raven, _busy, the settings and run_worker."""
+    transcript, the raven, the §22 progress panel, _busy, the settings and
+    run_worker."""
 
     def __init__(self, review=False):
         self.model = "m"
@@ -1362,6 +1409,7 @@ class _FakeTuiApp:
         self._research_review = review
         self._transcript = _NullTranscript()
         self._raven = _NullRaven()
+        self._research_progress = _NullProgress()
         self.messages = []
         self._work = None
 
@@ -1387,6 +1435,12 @@ class _NullRaven:
     state = None
 
 
+class _NullProgress:
+    """§22's sidebar panel, stubbed -- these tests are about the worker's
+    handoff, not about rendering."""
+    def start_run(self, *a, **k): pass
+
+
 class TestTuiReviewLifecycle:
     """The TUI consent path's shutdown and summary behaviour (review
     §19-20 f17, r1-1, f15, r4-3)."""
@@ -1402,10 +1456,10 @@ class TestTuiReviewLifecycle:
 
         def fake_pipeline(**kwargs):
             captured.update(kwargs)
-            return run
+            return _stub_events(run)
 
         mocker.patch(
-            "core.reasoning.orchestrator.run_deep_research_pipeline",
+            "core.reasoning.orchestrator.stream_deep_research_pipeline",
             side_effect=fake_pipeline)
         mocker.patch("core.reasoning.output_writer.write_run_artifacts",
                      return_value="/out")

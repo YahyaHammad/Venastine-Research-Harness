@@ -25,6 +25,7 @@ from core.reasoning.authorization import (
     GRANT_PICKER, GrantSpecError, PIPELINE_UNGRANTABLE, candidates,
     parse_grant_spec,
 )
+from tests.conftest import drain
 from tools.base import ToolSpec
 from tools.registry import registry
 
@@ -353,7 +354,8 @@ class TestAuthorizationReachesThePasses:
                 _canned(kw["pass_id"]))[1])
 
         auth = RunAuthorization(granted_tools={"x"})
-        orchestrator._run_pass("Pass 1", "in", "m", "p", authorization=auth)
+        drain(orchestrator._run_pass("Pass 1", "in", "m", "p",
+                                     authorization=auth))
         assert seen == [auth]
 
     def test_the_json_retry_carries_it_into_the_same_thread(self, mocker):
@@ -374,8 +376,8 @@ class TestAuthorizationReachesThePasses:
                 _canned("Pass 2", text='{"ok": true}'))[1])
 
         auth = RunAuthorization(granted_tools={"x"})
-        orchestrator._run_pass_with_json_retry(
-            "Pass 2", "in", "m", "p", authorization=auth)
+        drain(orchestrator._run_pass_with_json_retry(
+            "Pass 2", "in", "m", "p", authorization=auth))
         assert seen and seen[0] is auth
 
     def test_granted_calls_accumulate_on_the_bundle_across_passes(self, mocker):
@@ -390,8 +392,10 @@ class TestAuthorizationReachesThePasses:
                                          "params": {}}]))
 
         auth = RunAuthorization(granted_tools={"mcp__lib__search"})
-        orchestrator._run_pass("Pass 1", "in", "m", "p", authorization=auth)
-        orchestrator._run_pass("Pass 2", "in", "m", "p", authorization=auth)
+        drain(orchestrator._run_pass("Pass 1", "in", "m", "p",
+                                     authorization=auth))
+        drain(orchestrator._run_pass("Pass 2", "in", "m", "p",
+                                     authorization=auth))
 
         assert [c["pass"] for c in auth.granted_calls] == ["Pass 1", "Pass 2"]
 
@@ -432,7 +436,7 @@ class TestAuthorizationReachesThePasses:
         mocker.patch.object(
             orchestrator.RunAgentLoop, "run_deep_research_mode",
             return_value=_canned("Pass 1", granted=[{"tool": "x", "params": {}}]))
-        assert orchestrator._run_pass("Pass 1", "in", "m", "p") == "text"
+        assert drain(orchestrator._run_pass("Pass 1", "in", "m", "p")) == "text"
 
 
 def _final_event():

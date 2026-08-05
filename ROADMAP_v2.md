@@ -74,7 +74,7 @@ Every decision below was made through a structured clarification cycle with the 
 - 19. Skill system — skill `.md` format + manager + activation + default skills **(BUILT)**
 - 20. Subagent reviewing — opt-in post-pipeline review with consented correction **(BUILT)**
 - 21. Memory system — compaction, archive, thread-scoped pinning, user/project memory
-- 22. Pipeline observability — orchestrator events + the live research view **(added during §16)**
+- 22. Pipeline observability — orchestrator events + the live research view **(added during §16; BUILT)**
 - 23. Interactive tools — question tool, todo list, and the response channel they share **(added during §16)**
 - 24. `/init` — generate `CONTEXT.md` from the project **(added during §16)**
 - **Open Questions — None Remaining** (Rev. 3 — all decisions locked; verification items only)
@@ -1353,7 +1353,7 @@ approval (D26), so §21a does not depend on it.
 
 ---
 
-## 22. Pipeline observability — orchestrator events + the live research view
+## 22. Pipeline observability — orchestrator events + the live research view — BUILT
 
 **Added during §16.** The deep-research pipeline currently reports nothing while it runs. `run_deep_research_pipeline()` is synchronous; each pass is drained through `run_to_completion()` inside `orchestrator.py`, so no `LoopEvent` escapes, and the 16 per-pass `update_pipeline_run()` checkpoints write to the database rather than to a caller. §16's research view is coarse for exactly this reason — it can show that the pipeline is running and render the trace and report when it returns, and nothing in between.
 
@@ -1375,12 +1375,50 @@ Event kinds, at minimum: `pass_start` / `pass_complete` (with the pass id), `tra
 
 The orchestrator already calls `update_pipeline_run()` after every `run.log()`. Those calls and the new events carry overlapping information, and **two independent writers of related data is the exact bug shape this project already found and fixed once** (ARCHITECTURE/DEVLOG §3.8, cited by §21's own design principle). Derive one from the other — emit the event at the checkpoint site rather than adding a parallel emission path.
 
+### Decisions record (P1-P4)
+
+| # | Decision |
+|---|---|
+| **P1** | `PipelineEvent` is a **separate type from `LoopEvent`**, **kind-discriminated** (`kind: str` plus optional payload fields), living in `core/reasoning/events.py`. Not a second flat "exactly one field is populated" bag, and not a tagged union for both families — that would rewrite every `if event.token_delta:` read in `tui/app.py`, `core/loop.py` and the streaming tests, a §13-scale breakage inside a §22 change. This discharges AC4. |
+| **P2** | **No `LoopEvent` forwarding from inside a pass.** The orchestrator yields only its own kinds; each pass still runs through `run_deep_research_mode()` -> `run_to_completion()`. `core/loop.py`, `core/client.py`, `json_retry.py` and `review.py`'s internals were untouched by this section. |
+| **P3** | **`run_deep_research_pipeline()` keeps its name, signature and synchronous behaviour**, becoming the drainer applied to the new `stream_deep_research_pipeline()` generator. The section's own text implied the public name should become the generator; that would have churned fifteen test sites and both shells for nothing AC1 asks for, and §13's *actual* shape is a private generator with draining wrappers. |
+| **P4** | Consumers built: TUI transcript lines, a TUI `ResearchProgress` sidebar panel, and CLI live progress. Both shells stopped re-printing `run.trace` at the end, since every line now arrives as an event. |
+
+### What the build found
+
+**`run.trace` had three writers and only one of them checkpointed.** `orchestrator.py`
+paired `run.log()` with `update_pipeline_run()` at twenty sites; `review.py` called
+`run.log()` from fifteen places and checkpointed from none; `json_retry.py` appended
+straight to the list. So AC3's "§5's per-pass persistence still fires on every trace
+line" was not true when it was written. Deriving both the persistence and the events
+from `run.trace` via a watermark (`_Progress`) made it true and picked the other two
+writers up without editing either module — and made a JSON-parse retry visible with no
+event kind of its own.
+
+**Persist before emit.** A generator only advances while someone iterates it, so
+yielding first would let a consumer that abandons the run take that checkpoint down
+with it. Found by the abandoned-run test, not by reasoning.
+
+**`GeneratorExit` is not an `Exception`.** An abandoned run therefore leaves
+`status='running'`, which is honest and is recorded rather than fixed: flipping it to
+`'failed'` would make an interrupted run indistinguishable from a broken one.
+
+**Twelve test doubles stopped intercepting, silently.** Repointing the shells to the
+generator made every `mocker.patch(...run_deep_research_pipeline)` a no-op that ran the
+REAL pipeline. Same class of trap one layer down: a plain-function double for
+`_run_pass` is not an error under `yield from` — it iterates the returned string one
+character at a time and returns `None`.
+
+**A widget method named `_render` shadows Textual's `Widget._render()`**, and the
+symptom is the whole app failing to lay out with `'NoneType' object has no attribute
+'get_height'`.
+
 ### Acceptance criteria
 
-1. Every existing caller of `run_deep_research_pipeline()` still receives a finished `PipelineRun`, unchanged, via the drainer.
-2. A TUI consumer renders pass boundaries and claim tiers as they happen, without polling the database.
-3. §5's per-pass persistence still fires on every trace line, and there is exactly one place a trace line is recorded.
-4. The event-type decision above is made explicitly and recorded, before any event is added to `LoopEvent`.
+1. Every existing caller of `run_deep_research_pipeline()` still receives a finished `PipelineRun`, unchanged, via the drainer. ✓
+2. A TUI consumer renders pass boundaries and claim tiers as they happen, without polling the database. ✓
+3. §5's per-pass persistence still fires on every trace line, and there is exactly one place a trace line is recorded. ✓
+4. The event-type decision above is made explicitly and recorded, before any event is added to `LoopEvent`. ✓ (P1, pinned by a test that fails if `LoopEvent` grows a seventh field)
 
 ---
 
@@ -1404,7 +1442,7 @@ Per D24 the tool needs declared fields in both `ToolPermissions` and `ToolApprov
 
 ### Todo list tool
 
-A model-maintained checklist, persisted per thread, rendered in a TUI panel whose placement (top / bottom / side) is a `tui.todo_position` preference. Needs an event so the panel re-renders on change — see §22's note about deciding the event shape first.
+A model-maintained checklist, persisted per thread, rendered in a TUI panel whose placement (top / bottom / side) is a `tui.todo_position` preference. Needs an event so the panel re-renders on change. **§22 settled the event-shape question as P1** and left `LoopEvent` at six fields deliberately, with a test that fails if a seventh appears — so a todo event is a decision to make here, not a field to add quietly. `PipelineEvent`'s kind-discriminated shape is the precedent if this family grows the same way.
 
 Open question to settle at build time: whether the list is thread-scoped state in `ConversationThread.extra_data` or its own table. `extra_data` is the cheaper answer and the field was put there for this kind of thing -- note it is NO LONGER unused, since §18 shipped goal mode into it via key-scoped `set_extra()`, so a todo list would share the column under its own key.
 

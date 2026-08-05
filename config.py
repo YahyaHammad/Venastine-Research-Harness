@@ -51,6 +51,28 @@ MAX_JSON_RETRIES = 2  # max corrective follow-up attempts when a pass returns ma
 # rather than left in a comment.
 MAX_TOKEN_BUDGET = 250_000
 
+# The same meter, for ONE research pass. Separate from the chat budget
+# because the two are used differently and the meter is quadratic: it
+# re-counts the entire prompt on every step (TECHNICAL_DEBT.md item 9),
+# so a pass that makes a dozen tool calls with large results burns the
+# ceiling far faster than its actual context growth suggests.
+#
+# This was found the hard way. A Pass 1 that made 14 tool calls -- mostly
+# fetch_url against URLs the model guessed and got 404s for -- crossed
+# 250k and returned a TOOL-CALLING response with empty text, because a
+# budget stop returns whatever the last response held. The orchestrator
+# stored "" as raw_response, Pass 2 correctly reported that it had been
+# given nothing to extract claims from, and the run died three passes
+# later with a TypeError about Claim's constructor. Raising the ceiling
+# is the immediate fix; _run_pass now also refuses to carry an empty
+# truncated pass forward, which is the durable one.
+#
+# NOT a fix for item 9 itself. That entry asks for the billing meter and
+# a per-turn size figure to be separated, in a change of its own with its
+# own revert checks; this only stops a legitimate pass being cut off by a
+# number that was never meant to bound it.
+RESEARCH_PASS_TOKEN_BUDGET = 1_000_000
+
 # Deferred for now (core sequential pipeline only, per current scope):
 #   (none remaining -- ensemble_mode/ensemble_n built in ROADMAP §10,
 #    critic_model built in ROADMAP §11)
@@ -327,6 +349,13 @@ MODEL_CONTEXT_WINDOWS: dict[str, int] = {
     "claude-haiku-4-5-20251001": 200_000,
     "gpt-5.1": 400_000,
     "gemini-2.5-pro": 1_000_000,
+    # Alibaba markets "1M"; the documented input limit is 983,616, and
+    # drops to that figure specifically when thinking is enabled. The
+    # SMALLER number is the right one to record: this feeds the pipeline
+    # compaction backstop (context_limit - COMPACTION_PIPELINE_BACKSTOP_
+    # TOKENS), where erring low compacts slightly early and erring high
+    # means a hard context-limit error from the provider mid-run.
+    "qwen3.8-max-preview": 983_616,
 }
 # Logged at WARNING when used, per §21 -- a wrong-by-default window means
 # the backstop fires at the wrong time in whichever direction the guess is
