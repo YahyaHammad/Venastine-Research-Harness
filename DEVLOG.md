@@ -2058,3 +2058,97 @@ summary that reads well, `/compact --strength 4` end to end in the TUI, and the 
 marker on a real run. Everything here is asserted against canned summaries and
 stubbed model calls; nothing has watched the compactor actually summarize a
 conversation. The §19, §20 and §25 manual passes are also still outstanding.
+
+
+## §21a review pass (2026-08-05, same day)
+
+§21a shipped in six commits with 849 green tests and 75 revert checks, and it was
+broken. The owner asked whether a second pass was worth doing before §21b; the
+answer turned out to be yes on evidence rather than on principle.
+
+### What shipped broken
+
+**M8's summary is a `role: "user"` message — and every turn counter over the derived
+view counted it as a turn.** Two counters did: `_completed_turns` in `core/loop.py`,
+whose result was `min()`'d against an *archive* turn index, and the keep-tokens floor
+in `compactable_span`, which sliced the view and mapped positions back onto the
+archive's turn list.
+
+On an uncompacted thread the two spaces coincide exactly. That is the whole reason
+849 tests passed. On a compacted thread the floor came out several turns too low, the
+computed watermark went backwards, and because `latest_checkpoint` resolves by
+timestamp the backwards checkpoint became the live one — so the **second automatic
+compaction of a thread un-compacted it**, jumping the view from five messages back to
+seventeen. Under `strategy: "chain"` it was worse: `history_through` got
+`start > end`, returned empty, and the compactor summarized its own previous summary.
+
+Measured on real storage, the watermark oscillated `[7, 5, 9, 7]` across four rounds.
+
+### Why nothing caught it
+
+Three separate near-misses, and all three are instructive:
+
+- **No test drove real memory against real storage across more than one compaction.**
+  `test_memory_compaction.py` compacts once or writes the checkpoint by hand.
+- **The repeat test used the wrong door.**
+  `test_the_archive_is_untouched_by_repeated_compaction` compacts twice, but through
+  `/compact`, where `current_turn_start` is `None` — the exact argument that was
+  wrong.
+- **The test that should have caught it asserted the wrong thing.**
+  `test_the_valve_never_folds_the_current_turn` asserted the *value passed* (`== 2`)
+  against a `FakeMemory` with no archive at all, so it could not distinguish the two
+  spaces. That is the test-vacuity category the §19–§20 review flagged, reproduced one
+  section later by the person who wrote up the finding.
+
+A fourth near-miss is worth recording because it happened *during* this pass: the
+first draft of the new e2e test added **three** turns between compaction rounds and
+passed against the broken code. The archive then grows faster than the view-space
+floor shrinks, so the watermark limps forward anyway. Only the production pattern —
+compaction fires, and the *next* turn is still over the threshold, so one turn is
+added — exposes it. A regression test can reproduce the right code path and still
+miss the bug by choosing benign inputs.
+
+### The fix
+
+Turn counting is archive-space, never view-space (M11). `compactable_span` derives
+every floor from one load of the archive rows, so the mismatch is *unrepresentable*
+rather than corrected. `completed_turns()` moved onto `ConversationMemory` — the file
+that owns the thread's persistence; `core/loop.py` imports no storage and should not
+start — and is computed lazily on the compact path, which archive-space makes safe
+because the value is time-invariant within a turn. That closes a second, quieter bug
+in passing: the view-based value went stale the moment a mid-turn compaction rebuilt
+the view.
+
+The watermark-advances invariant is now enforced twice, deliberately: `compact()`
+skips before spending a model call, and `save_checkpoint()` refuses the write, because
+the caller-side check only covers the one caller that exists today.
+
+### Four more findings from the sweep
+
+- **The headroom advisory fired once per step.** `effective_compaction()` is on
+  `should_compact()`'s path, so a misconfigured trigger logged its warning dozens of
+  times per conversation. Gated to `warn=True`, which only `initialize()` passes. The
+  *validation* still raises on every call — only the advisory moved.
+- **`compaction_blocked` and `compaction_failed` repeated per step**, and those are
+  standing conditions rather than events: still true on the next step, and the next.
+  Deduplicated by kind, with a control test asserting that a real compaction still
+  reports every time.
+- **The guards had no test that made them fire.** Once the root cause is fixed the
+  watermark never goes backwards, so `save_checkpoint`'s refusal and `compact()`'s
+  skip are unreachable through the normal path — and a guard with no test making it
+  fire is indistinguishable from one that does not work. Both get direct tests.
+- **`config_loader.initialize(".")` in tests is CWD-dependent.** Twelve sites across
+  five files, three of them §19's and §20's. Pre-existing convention, latent risk, not
+  a §21a defect — recorded in `TECHNICAL_DEBT.md` rather than fixed by scope-creeping
+  into other sections' tests.
+
+### The lesson worth carrying
+
+The e2e gap is the real finding. Everything in §21a was tested at the unit level
+against fakes, and the defect lived exactly in the relationship between two real
+components — the derived view and the archive — which no fake represented and no unit
+test spanned. `tests/test_compaction_e2e.py` is the first test in this project to run
+real `ConversationMemory` against real `storage.py` on real SQLite, and it found the
+bug on its second assertion.
+
+The manual pass would have found it in one conversation. It is still not done.

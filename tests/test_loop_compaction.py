@@ -248,3 +248,48 @@ def test_an_ordinary_turn_asks_in_working_set_mode(mocker):
     _events(FakeMemory())
 
     assert seen == ["working_set"]
+
+
+# ---------------------------------------------------------------------------
+# ---- Standing conditions say themselves once -------------------------------
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("kind", ["compaction_blocked", "compaction_failed"])
+def test_a_standing_condition_is_reported_once_per_run(mocker, kind):
+    """A blocked compaction and a failed one are both STANDING CONDITIONS:
+    still true on the next step, and the next. Emitted per step they fill
+    the transcript with one repeated line, which trains the reader past the
+    notice that matters. A compaction that actually happened is an event
+    and repeats legitimately."""
+    if kind == "compaction_failed":
+        mocker.patch("core.compaction.compact",
+                     side_effect=RuntimeError("provider down"))
+    else:
+        mocker.patch("core.compaction.compact",
+                     return_value={"kind": kind, "text": "nothing to fold"})
+    tool_call = make_model_response(
+        text="", tool_calls=[{"id": "t1", "name": "get_time", "input": {}}],
+        usage={"input_tokens": 10_000_000, "output_tokens": 1})
+    mocker.patch("core.loop.call_model_stream",
+                 side_effect=make_stream_sequence(
+                     tool_call, tool_call, make_model_response(text="done")))
+
+    events = _events(_over_threshold(FakeMemory()), max_steps=3)
+
+    assert [e.notice["kind"] for e in events if e.notice] == [kind]
+
+
+def test_a_real_compaction_still_reports_every_time(mocker, compacted):
+    """The control for the rule above. Each compaction is a distinct event
+    -- messages really were folded -- so suppressing repeats here would
+    hide the second one entirely."""
+    tool_call = make_model_response(
+        text="", tool_calls=[{"id": "t1", "name": "get_time", "input": {}}],
+        usage={"input_tokens": 10_000_000, "output_tokens": 1})
+    mocker.patch("core.loop.call_model_stream",
+                 side_effect=make_stream_sequence(
+                     tool_call, tool_call, make_model_response(text="done")))
+
+    events = _events(_over_threshold(FakeMemory()), max_steps=3)
+
+    assert [e.notice["kind"] for e in events if e.notice].count("compaction") > 1

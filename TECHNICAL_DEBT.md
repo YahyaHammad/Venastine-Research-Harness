@@ -180,6 +180,30 @@ why it was left here. Whoever takes it should decide first whether
 too big", because the current code answers the first while every caller reads it as
 the second.
 
+## 10. `config_loader.initialize(".")` in tests is CWD-dependent (open, latent)
+
+Found by the §21a review sweep, **not fixed**, and the reason is scope rather than
+difficulty.
+
+Twelve test sites across five files call `config_loader.initialize(".")` to load the
+real harness-tier agents and skills — which is the right instinct: it keeps those
+suites honest about the `.md` files existing and parsing, rather than stubbing
+`manager.get`. But `"."` is the working directory, so the call also discovers any
+project-tier `.venastine/` sitting there. This repository has none, and a project
+tier only loads once trust has been granted (D17), so the risk is latent rather than
+live.
+
+It would stop being latent the moment someone adds a `.venastine/settings.json` with
+a `compaction` block and trusts the repo for a manual test — at which point several
+suites would start reading configuration nobody wrote for them, and the failure would
+present as unrelated tests changing behaviour together.
+
+Not fixed here because nine of the twelve sites belong to §19 and §20, and rewriting
+another section's fixtures inside a §21a review is the kind of scope creep that makes
+a focused pass unreviewable. The fix is a shared fixture that initializes against a
+tmp_path project with the harness root pointed at the real one —
+`tests/test_config_loader.py`'s `_redirect_roots` is most of it already.
+
 ## Accepted risks noted in the review, deliberately not "fixed"
 
 - `07_review.json` absent on zero-finding reviewed runs — presence-implies-

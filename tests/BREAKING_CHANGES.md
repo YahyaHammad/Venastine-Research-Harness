@@ -574,3 +574,38 @@ on a memory means adding it to `FakeMemory`. Do not re-copy either.
 `test_tui.py`'s version is TECHNICAL_DEBT theme 8 — it budgets event-loop pumps
 rather than time. Importing it would make a fix there silently change this file's
 timing too. Whoever fixes theme 8 should fix both.
+
+### §21a review pass (2026-08-05)
+
+| Change | What breaks | Fix / why |
+|---|---|---|
+| Count turns from `memory.messages` again | `test_compaction_makes_progress_every_time_it_runs` | M11. M8's summary is a `user` message that is not a turn, so a view-derived count is off by one AND in a different space from the archive indices `compactable_span` compares it against. This shipped: the watermark went backwards and the second compaction of a thread un-compacted it |
+| Measure the keep-tokens floor over the view | `test_the_token_floor_measures_the_archive_not_the_view` | Same root cause, second counter. The walk runs out of view turns before it runs out of budget, so the floor under-protects on exactly the threads that have been compacted before |
+| Have the loop compute the floor itself | `test_the_valve_asks_the_memory_for_the_current_turn_floor` | `ConversationMemory.completed_turns()` is the only source. `core/loop.py` imports no storage and should not start |
+| Drop `compact()`'s no-progress check | `test_no_new_turns_means_no_model_call` | `save_checkpoint` refuses the write anyway, but the model call happens BEFORE that — a thread over the threshold would pay for a summary on every step that produces nothing |
+| Drop `save_checkpoint`'s refusal | `test_a_backwards_watermark_is_refused` | The caller-side check covers only the one caller that exists today. `latest_checkpoint` resolves by timestamp, so a backwards watermark does not merely fail to help — it becomes the live one |
+| Make `advances()` accept an equal watermark | `test_an_unchanged_watermark_is_refused` | Equal is not progress; accepting it lets a thread rewrite the same checkpoint forever, one model call each time |
+| Un-gate the headroom advisory | `test_the_headroom_advisory_is_silent_off_the_startup_path` | `effective_compaction()` is on `should_compact()`'s path — once per step of every turn. Only the ADVISORY is gated; validation still raises everywhere (`test_validation_still_raises_off_the_startup_path`) |
+| Report a standing condition every step | `test_a_standing_condition_is_reported_once_per_run` | `compaction_blocked` / `compaction_failed` stay true until something changes. The control is `test_a_real_compaction_still_reports_every_time` — a compaction that happened is an event and must repeat |
+
+### Three standing notes from this pass
+
+**`tests/test_compaction_e2e.py` is the only test running real `ConversationMemory`
+against real `storage.py` on real SQLite.** Its fixture is module-scoped and that is
+not a performance choice: declaring a SQLModel table registers it on
+`SQLModel.metadata`, so importing `storage` twice against real sqlmodel raises "Table
+'conversationthread' is already defined". Modules are popped and re-imported, never
+reloaded, for the same reason. If you add a test there, do not give it its own swap.
+
+**That file's regression test adds exactly ONE turn between compaction rounds.** Three
+turns makes it pass against the broken code — the archive then grows faster than the
+view-space floor shrinks and the watermark limps forward anyway. One turn is also the
+production pattern: after a compaction the thread is still near the threshold, so the
+next turn compacts again. Do not "tidy" that number.
+
+**A guard that cannot fire through the normal path needs a direct test.** Once M11's
+root fix is in, the watermark never goes backwards, so `save_checkpoint`'s refusal and
+`compact()`'s no-progress skip are unreachable from `compact()`. They are tested by
+calling them directly. A guard with no test making it fire is indistinguishable from a
+guard that does not work — the first revert-check pass of this fix reported four
+MISSes for exactly that reason.

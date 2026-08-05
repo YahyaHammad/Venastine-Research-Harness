@@ -1222,6 +1222,38 @@ and `usage["input_tokens"]` measures a whole prompt rather than a segment of one
 Chars/4 applied to both sides is self-consistent, which is all a ratio check needs —
 it is never compared against a provider's count.
 
+**M11 — Turn counting is ARCHIVE-space, never view-space.** Added by the §21a
+review pass, which found the section had shipped broken without it.
+
+M8 makes the checkpoint summary a `role: "user"` message, and that is right — the
+neutral shape has no system role, so it is the only form all three providers accept.
+The consequence was not traced: **the derived view therefore contains a user message
+that is not a turn**, so every turn counter over the view is off by one, and any
+value derived that way is in a different space from the archive turn indices
+`compactable_span()` compares it against.
+
+Both counters were wrong. `_completed_turns` counted view user-messages and was
+`min()`'d against an archive index; the keep-tokens floor sliced the view and mapped
+positions back onto the archive's turn list. On an *uncompacted* thread the two
+spaces coincide exactly, which is why 849 tests passed. On a compacted one the floor
+came out several turns too low, the computed watermark went BACKWARDS, and since
+`latest_checkpoint` resolves by timestamp the backwards checkpoint became live: the
+second automatic compaction of a thread **un-compacted it**.
+
+So: `compactable_span()` derives every floor from one load of the archive rows, which
+makes the mismatch unrepresentable rather than merely corrected, and
+`completed_turns()` lives on `ConversationMemory` (the file that owns the thread's
+persistence — `core/loop.py` imports no storage and should not start). Archive-space
+also makes the value time-invariant within a turn, so it is computed lazily on the
+compact path and cannot go stale when a mid-turn compaction rebuilds the view.
+
+**The watermark-advances invariant is enforced, not assumed.** `compact()` skips
+before spending a model call when the boundary has not moved past the last
+checkpoint; `save_checkpoint()` refuses a watermark that does not advance, because
+the caller-side check only covers the one caller that exists today. Same posture as
+D24's declared-permission check: the invariant is cheap to state and its violation is
+silent and durable.
+
 **Carried to §21b**, decided during §21a's design and not built there: wire §25's
 `ApprovalProvider` into CLI chat, so D26's approval-gated `remember` is reachable in
 the default shell. Without it §13's headless rule makes `remember` invisible

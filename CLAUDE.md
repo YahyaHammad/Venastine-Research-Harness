@@ -18,7 +18,7 @@ python main.py --mode research --attended "q"     # §25: approve every gated ca
 python main.py --mode research --review "q"       # §20: review the finished run, consent to each correction
 # §21a compaction runs automatically in every shell; /compact triggers it by hand in the TUI
 
-pytest                                            # 858 tests, offline, ~25s (first run ~30s: matplotlib font cache)
+pytest                                            # 863 tests, offline, ~25s (first run ~30s: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -206,6 +206,18 @@ what makes an early, frequent trigger safe.
 - **The summary is a synthesized leading `user` message and is NEVER persisted**
   (M8). Persisting it would put derived content in the archive, and the next
   compaction would fold a summary into a summary on the path that means to re-derive.
+- **Turn counting is ARCHIVE-space, never view-space** (M11), and this is M8's
+  other half. Because the summary is a `user` message, the derived view holds a
+  user message that is not a turn — so any turn count taken from
+  `memory.messages` is off by one AND in a different space from the archive
+  indices `compactable_span()` compares it against. §21a shipped that way: the
+  watermark went backwards and the second automatic compaction of a thread
+  UN-COMPACTED it, invisibly to 849 tests, because the two spaces coincide until
+  a checkpoint exists. `ConversationMemory.completed_turns()` is the only source.
+- **The watermark only ever moves forward, and that is enforced twice** —
+  `compact()` skips before spending a model call, `save_checkpoint()` refuses the
+  write. `latest_checkpoint` resolves by timestamp, so a backwards watermark does
+  not merely fail to help: it becomes the live one.
 - **Pinned rows inside the covered span are re-added verbatim** (M9). One watermark
   cannot say "everything through K except these", so without this the message a user
   explicitly asked to keep is the one that disappears.

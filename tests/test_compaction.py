@@ -468,7 +468,8 @@ def test_a_trigger_too_close_to_the_budget_warns(caplog):
     the turn after one response -- compaction would then only ever fire on
     the turn AFTER the one it should have saved."""
     with caplog.at_level("WARNING", logger="core.config_loader"):
-        config_loader.effective_compaction({"trigger_tokens": 200_000})
+        config_loader.effective_compaction(
+            {"trigger_tokens": 200_000}, warn=True)
 
     assert "token_budget_exceeded" in caplog.text
 
@@ -477,6 +478,26 @@ def test_the_shipped_defaults_leave_room_for_a_multi_step_turn(caplog):
     """The control for the test above: the values this harness actually
     ships with must not themselves trip the warning."""
     with caplog.at_level("WARNING", logger="core.config_loader"):
-        config_loader.effective_compaction()
+        config_loader.effective_compaction(warn=True)
 
     assert "token_budget_exceeded" not in caplog.text
+
+
+def test_the_headroom_advisory_is_silent_off_the_startup_path(caplog):
+    """effective_compaction() sits on should_compact()'s path, so it runs
+    once per step of every turn. An unconditional advisory there repeats a
+    configuration complaint dozens of times per conversation, which is how
+    a real warning becomes one nobody reads. initialize() passes
+    warn=True; nothing else does."""
+    with caplog.at_level("WARNING", logger="core.config_loader"):
+        config_loader.effective_compaction({"trigger_tokens": 200_000})
+
+    assert "token_budget_exceeded" not in caplog.text
+
+
+def test_validation_still_raises_off_the_startup_path():
+    """Only the ADVISORY is gated. An incoherent value must still be
+    refused wherever it is resolved -- /compact --strength 9 reaches this
+    without warn=True."""
+    with pytest.raises(ValueError, match="strength"):
+        config_loader.effective_compaction({"strength": 9})

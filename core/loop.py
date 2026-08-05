@@ -112,6 +112,24 @@ def _obtain_approval(permission_channel, approval_provider,
     return False
 
 
+# ROADMAP_v2 §21. Notice kinds that describe a STANDING CONDITION rather
+# than an event: they stay true on every step until something changes, so
+# emitting them per step fills a transcript with the same line and trains
+# the reader past it -- which is exactly the reader you need when the one
+# that matters arrives. A compaction that actually happened is an event and
+# repeats legitimately, once per compaction.
+_ONCE_PER_RUN_NOTICES = (
+    "compaction_warning",    # still approaching the threshold
+    "compaction_blocked",    # the keep floors still protect everything
+    "compaction_failed",     # the provider is still down
+)
+
+
+def _already_said(notices, kind: str) -> bool:
+    return kind in _ONCE_PER_RUN_NOTICES and any(
+        n["kind"] == kind for n in notices)
+
+
 def _maybe_compact(memory, model, provider_name, notices, mode):
     """Evaluate §21's trigger and act on it. A generator, so the caller
     yields from it and the notice reaches a live UI as it happens.
@@ -139,11 +157,7 @@ def _maybe_compact(memory, model, provider_name, notices, mode):
     if not action:
         return
     if action == "warn":
-        # Once per run. The condition holds on every step until compaction
-        # actually fires, and the same warning eight times in one turn
-        # trains the reader to skip it -- which is exactly the reader you
-        # need reading it when compaction does happen.
-        if any(n["kind"] == "compaction_warning" for n in notices):
+        if _already_said(notices, "compaction_warning"):
             return
         notice = {
             "kind": "compaction_warning",
@@ -169,7 +183,7 @@ def _maybe_compact(memory, model, provider_name, notices, mode):
             "kind": "compaction_failed",
             "text": f"Could not compact this conversation: {e}",
         }
-    if notice is not None:
+    if notice is not None and not _already_said(notices, notice["kind"]):
         notices.append(notice)
         yield LoopEvent(notice=notice)
 

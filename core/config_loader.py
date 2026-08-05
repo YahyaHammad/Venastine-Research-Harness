@@ -450,7 +450,8 @@ _COMPACTION_DEFAULTS = {
 }
 
 
-def effective_compaction(overrides: Optional[dict] = None) -> dict:
+def effective_compaction(overrides: Optional[dict] = None,
+                         warn: bool = False) -> dict:
     """The compaction values actually in force, and where they came from.
 
     config.py default -> user settings.json -> trusted project
@@ -518,8 +519,14 @@ def effective_compaction(overrides: Optional[dict] = None) -> dict:
     # reach a size where the budget stop ends the turn after one response
     # -- compaction would then only ever fire on the turn AFTER the one it
     # should have saved.
+    # WARN ONLY WHEN ASKED, which is once at startup. This function is
+    # on should_compact()'s path, so it runs once per step of every
+    # turn -- an unconditional warning here would repeat a
+    # configuration complaint dozens of times per conversation, which
+    # is how a real warning becomes one nobody reads. The VALIDATION
+    # above still raises on every call; only the advisory is gated.
     headroom = config.MAX_TOKEN_BUDGET / max(values["trigger_tokens"], 1)
-    if headroom < 3:
+    if warn and headroom < 3:
         logger.warning(
             "compaction.trigger_tokens (%s) leaves room for only ~%.1f model "
             "calls within MAX_TOKEN_BUDGET (%s), because a tool-using turn "
@@ -617,7 +624,7 @@ def initialize(project_path: str) -> None:
     # a compaction three hours into a long thread -- which is the one
     # moment the user least wants to find out. §21's "reject at load time,
     # not incoherent trigger math later".
-    effective_compaction()
+    effective_compaction(warn=True)
 
 
 def reset() -> None:
