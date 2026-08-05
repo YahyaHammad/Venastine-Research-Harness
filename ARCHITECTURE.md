@@ -46,7 +46,7 @@ Venastine Research Harness/
 ├── pytest.ini                      # testpaths=tests, --strict-markers
 ├── DEVLOG.md                       # implementation notes for built ROADMAP sections -- see §0
 │
-├── tests/                          # 989 tests, all offline, ~25s (first run ~7s for matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
+├── tests/                          # 1028 tests, all offline, ~25s (first run ~7s for matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
 │   ├── conftest.py                 # fixtures: make_model_response, make_stream_from_response, make_stream_sequence, FakeStorage, ...
 │   ├── BREAKING_CHANGES.md         # what-breaks-it / symptom / fix per area
 │   ├── test_cli.py                 # 20 tests -- ROADMAP §1 thread_id passthrough + UUID validation + §14 parser defaults/resolution/trust flow
@@ -98,11 +98,12 @@ Venastine Research Harness/
 │   ├── test_remember_tool.py      # 16 tests -- ROADMAP_v2 §21b D24/D26 declarations, the approval notice, M17's exclusion from pipeline grants
 │   ├── test_memory_injection.py   # 12 tests -- ROADMAP_v2 §21b the three placements and the with_catalogs boundary (M13/K6), plus AC5/AC6 end to end
 │   ├── test_memory_shells.py      # 16 tests -- ROADMAP_v2 §21b M16's CLI approval provider and M15's /memories, /forget
-│   └── test_pipeline_events.py    # 20 tests -- ROADMAP_v2 §22 AC1-AC4: the drainer, the one trace writer (incl. review.py's and json_retry.py's lines), P1's recorded decision, the abandoned-run record, and the live TUI view
+│   ├── test_pipeline_events.py    # 20 tests -- ROADMAP_v2 §22 AC1-AC4: the drainer, the one trace writer (incl. review.py's and json_retry.py's lines), P1's recorded decision, the abandoned-run record, and the live TUI view
+│   └── test_research_legibility.py # 39 tests -- ROADMAP_v2 §26: a pass's tool calls escaping (P2 amended), the redacted param digest, one stage event per code stage (D2 per ROUND), the role palette, /copy, and ctrl+l vs the Input's ctrl+k
 │
 ├── core/
 │   ├── client.py                  # ONE model call, normalized across providers; provider-specific wire formats live ONLY here. §13 adds call_model_stream() (3 streaming impls) + collect_response() + StreamToken
-│   ├── loop.py                    # RunAgentLoop -- §13: _run() is a GENERATOR yielding LoopEvent; run_to_completion() drains it for the 3 public wrappers; permission_channel approval bridge
+│   ├── loop.py                    # RunAgentLoop -- §13: _run() is a GENERATOR yielding LoopEvent; run_to_completion() drains it for the 3 public wrappers; permission_channel approval bridge. §26: stream_deep_research_mode() is a second generator/drainer pair, so a pass's tool calls can escape
 │   ├── events.py                  # §13: LoopEvent dataclass -- the single event type _run() yields (token_delta / tool_call_start / tool_result / permission_request / notice / final_response / stop_reason)
 │   ├── workspace_trust.py         # ROADMAP_v2 §14 (D17): trust store keyed by resolved path + content hash; is_trusted/grant_trust; sorted-walk deterministic hash with path-in-hash
 │   ├── config_loader.py           # ROADMAP_v2 §14: three-tier .md discovery (harness/project/user), line-anchored frontmatter parse, settings.json merge with loud unknown-key rejection, CONTEXT.md opt-in, frontmatter-only skill catalog
@@ -113,7 +114,7 @@ Venastine Research Harness/
 │   └── reasoning/
 │       ├── base.py                # Claim / PipelineRun data model for the research pipeline (now carries run_id + §25 granted_calls + §20 subagent_reviews)
 │       ├── authorization.py       # ROADMAP_v2 §25: the pipeline's grant POLICY -- candidates(), parse_grant_spec(), PIPELINE_UNGRANTABLE. Shared by both shells so they cannot drift
-│       ├── events.py              # §22: PipelineEvent -- kind-discriminated, SEPARATE from core/events.py's LoopEvent (P1). PIPELINE_EVENT_KINDS names all seven
+│       ├── events.py              # §22: PipelineEvent -- kind-discriminated, SEPARATE from core/events.py's LoopEvent (P1). PIPELINE_EVENT_KINDS names all eleven kinds (§26 added stage / tool_call / tool_result / pass_activity)
 │       ├── confidence_scoring.py  # Pass 4 -- deterministic scoring, ZERO LLM calls
 │       ├── orchestrator.py        # sequences all 10 passes + D0/D1/D2 + _run_pass_with_json_retry + §5 per-pass checkpoints + §11 critic-model routing + §25 authorization passthrough + §20's _review_stage. §22: a GENERATOR (stream_deep_research_pipeline) with run_pipeline_to_completion draining it for the unchanged public entry point
 │       ├── review.py              # ROADMAP_v2 §20: the post-pipeline review -- propose (run_review) / consent (walk_consent) / correct (apply), three functions so the mutating one has no model in it
@@ -395,7 +396,7 @@ Three things about it are load-bearing:
   - `provider_factory` / `client_for_provider` — return a mock-`api_initialization`-compatible tuple for translation tests.
   - `clear_client_cache` (autouse) — resets `api_initialization`'s cached clients before each test.
 - **`tests/BREAKING_CHANGES.md`** — per-file tables documenting what breaks each test when production code changes, the symptom, and the fix. Created because `test_orchestrator.py` was identified as the suite's most fragile mock — its mock dict is keyed by pass_id strings that ROADMAP §3 and §10 will modify.
-- **53 test files** (6 per ROADMAP §4 + 2 from §4's own additions: `test_memory_write_through.py`, `test_loop_tool_dispatch.py`; + 2 from §3/§5: `test_json_retry.py`, `test_pipeline_storage.py`; + 2 from §1: `test_cli.py`, `test_e2e.py`; + 1 from §12: `test_output_writer.py`; + 1 from audit: `test_logging_setup.py`; + 1 from §6: `test_file_ops.py`; + 1 from §7: `test_shell.py`; + 1 from §8: `test_policy_enforcement.py`; + 2 from §13: `test_client_streaming.py`, `test_streaming_loop.py`; + 3 from ROADMAP_v2 §14: `test_workspace_trust.py`, `test_config_loader.py`, `test_load_skill.py`; + 1 from §15: `test_permission_context.py`; + 1 from §11: `test_critic_routing.py`; + 1 from §16: `test_client_effort.py`; + 1 from §10's fix: `test_ensemble_guard.py`; + 3 from §17: `test_mcp_client.py`, `test_mcp_config.py`, `test_mcp_integration.py`; + 1 from §16: `test_tui.py`; + 1 from §18: `test_agents.py`; + 4 from §25: `test_grants.py`, `test_attended.py`, `test_research_authorization.py`, `test_granted_calls_artifact.py`; + 1 from §19: `test_skills.py`; + 1 from §20: `test_review.py`; + 1 from the §19–§20 review follow-up: `test_docs_consistency.py`; + 7 from §21a: `test_schema_migration.py`, `test_storage_reads.py`, `test_memory_compaction.py`, `test_compaction.py`, `test_loop_compaction.py`, `test_pin_tool.py`, `test_shell_compaction.py`; + 1 from the §21a review: `test_storage_e2e.py`; + 4 from §21b: `test_memories.py`, `test_remember_tool.py`, `test_memory_injection.py`, `test_memory_shells.py`; + 1 from §22: `test_pipeline_events.py`; + 2 from the 2026-08-05 live-run fixes: `test_tool_failure_containment.py`, `test_truncated_pass.py`).
+- **54 test files** (6 per ROADMAP §4 + 2 from §4's own additions: `test_memory_write_through.py`, `test_loop_tool_dispatch.py`; + 2 from §3/§5: `test_json_retry.py`, `test_pipeline_storage.py`; + 2 from §1: `test_cli.py`, `test_e2e.py`; + 1 from §12: `test_output_writer.py`; + 1 from audit: `test_logging_setup.py`; + 1 from §6: `test_file_ops.py`; + 1 from §7: `test_shell.py`; + 1 from §8: `test_policy_enforcement.py`; + 2 from §13: `test_client_streaming.py`, `test_streaming_loop.py`; + 3 from ROADMAP_v2 §14: `test_workspace_trust.py`, `test_config_loader.py`, `test_load_skill.py`; + 1 from §15: `test_permission_context.py`; + 1 from §11: `test_critic_routing.py`; + 1 from §16: `test_client_effort.py`; + 1 from §10's fix: `test_ensemble_guard.py`; + 3 from §17: `test_mcp_client.py`, `test_mcp_config.py`, `test_mcp_integration.py`; + 1 from §16: `test_tui.py`; + 1 from §18: `test_agents.py`; + 4 from §25: `test_grants.py`, `test_attended.py`, `test_research_authorization.py`, `test_granted_calls_artifact.py`; + 1 from §19: `test_skills.py`; + 1 from §20: `test_review.py`; + 1 from the §19–§20 review follow-up: `test_docs_consistency.py`; + 7 from §21a: `test_schema_migration.py`, `test_storage_reads.py`, `test_memory_compaction.py`, `test_compaction.py`, `test_loop_compaction.py`, `test_pin_tool.py`, `test_shell_compaction.py`; + 1 from the §21a review: `test_storage_e2e.py`; + 4 from §21b: `test_memories.py`, `test_remember_tool.py`, `test_memory_injection.py`, `test_memory_shells.py`; + 1 from §22: `test_pipeline_events.py`; + 2 from the 2026-08-05 live-run fixes: `test_tool_failure_containment.py`, `test_truncated_pass.py`; + 1 from §26: `test_research_legibility.py`).
 
 **What belongs here:** tests that run offline (~24s; first run ~30s for the matplotlib font cache), with zero network access and zero real API keys. Stubs in root `conftest.py` catch import-time module resolution; fixtures in `tests/conftest.py` provide `ModelResponse` construction and storage mocking; individual test files cover production code's behavior.
 
@@ -450,7 +451,7 @@ Three things about it are load-bearing:
 
 **Research mode was coarse by construction, and §22 fixed it at the producer.** Until §22, `run_deep_research_pipeline()` was synchronous and reported nothing while running: every pass was drained through `run_to_completion()` inside the orchestrator, so no event escaped and §5's checkpoints wrote to the database rather than to a caller. The TUI now runs `stream_deep_research_pipeline()` on the worker and forwards each `PipelineEvent` through `PipelineEventMessage`; `ResearchProgress` in the sidebar renders pass boundaries, claim tiers and retry rounds, and the transcript writes each trace line as it arrives.
 
-**A pass's internals are still opaque, and that is P2, not an omission.** `LoopEvent`s from inside a pass are not forwarded up, so `core/loop.py`, `core/client.py`, `json_retry.py` and `review.py`'s internals were untouched by §22. What escapes is what the pipeline itself knows.
+**A pass's internals were opaque, and §26 amended P2 to change that.** §22 did not forward a pass's `LoopEvent`s up, on the premise that a pass's internals were not worth seeing. A real ten-pass run disproved the premise: a Pass 1 making fourteen `fetch_url` calls over several minutes was indistinguishable from one that had hung. §26 has `_run_pass` iterate `RunAgentLoop.stream_deep_research_mode()` and **translate** a chosen subset into pipeline kinds — so a consumer still receives exactly one event type (which is what P1 and P2 were jointly protecting) while tool calls, failed results and streamed-output volume now escape. `client.py`, `json_retry.py` and `review.py` are still untouched. See §4.26.
 
 **`on_research_finished` must not print `run.trace`.** Every line already arrived as a `trace_line` event and was written as it happened; re-dumping the list at the end prints the whole run twice, with the second copy reading like a different artifact. `test_pipeline_events.py` pins this.
 
@@ -563,10 +564,18 @@ trap rather than a convention.
 
 ### 4.22 `core/reasoning/events.py` + the pipeline generator (ROADMAP_v2 §22)
 
-**Belongs here:** `PipelineEvent` and `PIPELINE_EVENT_KINDS` — the seven kinds
-`stream_deep_research_pipeline()` yields (`pass_start`, `pass_complete`, `trace_line`,
-`claim_extracted`, `claim_tiered`, `retry`, `run_complete`) and nothing else. It is a
-leaf module: a dataclass, a tuple of names, and the recorded reasoning for both.
+**Belongs here:** `PipelineEvent` and `PIPELINE_EVENT_KINDS` — the kinds
+`stream_deep_research_pipeline()` yields and nothing else. §22's seven were
+`pass_start`, `pass_complete`, `trace_line`, `claim_extracted`, `claim_tiered`,
+`retry`, `run_complete`; §26 added `stage`, `tool_call`, `tool_result` and
+`pass_activity`. It is a leaf module: a dataclass, a tuple of names, and the recorded
+reasoning for both.
+
+**Growing this type is what P1 chose it for**, and is the opposite of growing
+`LoopEvent`. The discriminator here is in the data, so a reader of `kind` cannot be
+wrong about which fields to trust; `LoopEvent`'s rule lives in a docstring, so a
+seventh field there widens a convention nothing checks — which is why that one is
+test-pinned at six and this one is not pinned at all.
 
 **Does NOT belong here:** when an event is emitted (`orchestrator.py`), how one is
 rendered (`tui/app.py`, `main.py`), or anything a `LoopEvent` describes.
@@ -619,6 +628,83 @@ what the persist-before-emit ordering guarantees. Test-pinned.
 **The watermark lives on `_Progress`, not on `PipelineRun`.** `base.py` is data only
 and §5 serializes that object; a field meaningful only inside a live generator has no
 business in a persisted row.
+
+### 4.26 Research legibility — pass internals, code stages, the claims view (ROADMAP_v2 §26)
+
+§22 made the pipeline report *that* it was working. §26 makes a run readable: what a
+pass is doing, which stages ran, what the claims actually say, and how to get any of it
+out of the terminal.
+
+**`stream_deep_research_mode()` is a second generator/drainer pair in `core/loop.py`,
+and `run_deep_research_mode()` is its drainer** — unchanged in signature and return
+type, which is what every pre-§26 caller depends on. This is the project's own shape
+for the third time (`_run`/`run_to_completion`,
+`stream_deep_research_pipeline`/`run_deep_research_pipeline`). A callback or observer
+parameter on the existing function was rejected: §23 AC1 exists to stop a third bespoke
+request/response channel appearing beside `permission_channel` and `ApprovalProvider`.
+
+**The response is RETURNED, not read off the terminal event.** `thread_id` is attached
+after the loop finishes, so `return_value_of()` exists beside `run_to_completion()`
+rather than as a branch inside it — and `_translate` uses `next()` rather than a `for`
+loop for the same reason, since a `for` loop swallows a generator's return value. Get
+this wrong and every pass gets a response with no `thread_id`, whose only symptom is
+§3's JSON retry silently opening a new thread instead of correcting the failed one.
+
+**Translation happens in ONE place**, `orchestrator._translate()`, consumed by both
+`_run_pass` and `_run_pass_with_json_retry`. Two emission sites for one translation is
+how they drift; this file already has the twenty-checkpoint version of that mistake in
+its history.
+
+**The param digest is redacted at the boundary, before truncation.** Tool *arguments*
+are the genuinely unscanned path: §25 R5 added `check_input_policy()`, but that
+**refuses** a call rather than redacting one, and `dispatch()`'s `check_output_policy`
+only ever saw results. Redacting after truncating would cut a credential below the
+20-character minimum its pattern needs and leave the fragment matching nothing.
+
+**Zero-LLM stages get their own kind, not a `pass_start`/`pass_complete` pair.** A code
+stage completes in the time it takes to yield, so a consumer showing it as "running"
+would be showing a state that never exists. `D2` emits **once per retry round**, outside
+the per-claim loop — inside it, a round that exhausted six claims would read as six
+separate stages.
+
+**There is deliberately no step event.** §26 set out to report which model call a pass
+was on, and `_run()` has no step marker to read: within a step it yields
+`tool_call_start`/`tool_result` in pairs, and between steps it yields nothing unless the
+model happened to stream text. Inferring a boundary from that interleaving would be a
+guess presented as a fact, and a real marker would mean growing `LoopEvent`. So a
+consumer counts `tool_call` events itself — derivation, not a second writer — and
+`pass_activity` (a throttled running character total, never the content) covers the
+passes that call no tools at all.
+
+**Colour is resolved from the `Theme` object, not from literals.** Everything else in
+the TUI styles itself through `app.tcss`'s theme variables; a `RichLog` cannot, because
+it renders Rich `Text` and a Rich style needs a concrete colour. `themes.role_styles()`
+holds the mapping so the same property survives: no literal, and a new theme needs no
+edit. Only `warning`/`error`/`success` are shared by every theme, so severity uses those
+three and identity uses the per-variant hues.
+
+**`Transcript._entries` is the source of truth for replay and for `/copy`.** A `RichLog`
+stores rendered segments, so a `/theme` switch cannot restyle what is on screen —
+`rerender()` replays from the entry log. Every write path must go through `_emit()`, or
+a line appears on screen and is absent from both the replay and the copy.
+
+**`/copy` exists because the pinned textual has no text selection at all** —
+`App.ALLOW_SELECT` and `RichLog.allow_select` arrived in 3.x. `App.copy_to_clipboard`
+writes OSC 52, which **cannot be confirmed**: the terminal either honours the escape or
+ignores it and nothing comes back. So the message says what was sent rather than
+claiming it arrived, and `--file` is the route that provably worked.
+
+**The claims view is bound to `ctrl+l`, not `ctrl+k`.** Textual's `Input` binds `ctrl+k`
+to `delete_right_all` and holds focus almost always, so a `ctrl+k` binding here would be
+shadowed — pressing it would silently delete the rest of the typed line. Verified
+against the installed version per D22, and test-pinned by pressing the key with text in
+the input.
+
+**`ClaimsScreen` takes plain dicts, never `Claim` objects.** Its three sources are
+`vars(c)` for a finished in-session run, `load_pipeline_run()` for an earlier one (which
+already returns the dicts `vars(c)` wrote), and the partial picture assembled from
+events mid-run. One shape means no branch inside the renderer, and it is the shape §5
+already persists.
 
 ## 5. Request lifecycle — regular conversation, traced end to end
 

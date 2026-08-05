@@ -69,7 +69,7 @@ import config
 from core.loop import RunAgentLoop
 from core.reasoning.orchestrator import run_deep_research_pipeline
 from core.reasoning.pipeline_storage import load_pipeline_run
-from tests.conftest import make_model_response
+from tests.conftest import make_model_response, pass_stream
 
 
 # ---------------------------------------------------------------------------
@@ -241,8 +241,8 @@ def test_pipeline_runs_all_passes_in_expected_order(mocker):
     payloads = _clean_pipeline_payloads()
     call_log = []
     mocker.patch.object(
-        RunAgentLoop, "run_deep_research_mode",
-        side_effect=_build_pass_mock(call_log, payloads),
+        RunAgentLoop, "stream_deep_research_mode",
+        side_effect=pass_stream(_build_pass_mock(call_log, payloads)),
     )
 
     run = run_deep_research_pipeline(
@@ -290,8 +290,8 @@ def test_pipeline_6a6c_retry_loop_continues_until_max_retries_then_fallback(mock
     payloads = _one_claim_stuck_through_retry_payloads()
     call_log = []
     mocker.patch.object(
-        RunAgentLoop, "run_deep_research_mode",
-        side_effect=_build_pass_mock(call_log, payloads),
+        RunAgentLoop, "stream_deep_research_mode",
+        side_effect=pass_stream(_build_pass_mock(call_log, payloads)),
     )
 
     run = run_deep_research_pipeline(
@@ -356,8 +356,8 @@ def test_pipeline_trace_contains_expected_lines_in_order(mocker):
     payloads = _clean_pipeline_payloads()
     call_log = []
     mocker.patch.object(
-        RunAgentLoop, "run_deep_research_mode",
-        side_effect=_build_pass_mock(call_log, payloads),
+        RunAgentLoop, "stream_deep_research_mode",
+        side_effect=pass_stream(_build_pass_mock(call_log, payloads)),
     )
 
     run = run_deep_research_pipeline(
@@ -422,8 +422,8 @@ def test_pipeline_failure_marks_run_failed_and_persists_partial_snapshot(mocker)
         return _response_with_text(entry)
 
     mocker.patch.object(
-        RunAgentLoop, "run_deep_research_mode",
-        side_effect=side_effect,
+        RunAgentLoop, "stream_deep_research_mode",
+        side_effect=pass_stream(side_effect),
     )
 
     # Spy on update_pipeline_run -- capture (run_id, run, status) tuples.
@@ -494,8 +494,8 @@ def test_pipeline_success_marks_run_complete(mocker):
     payloads = _clean_pipeline_payloads()
     call_log = []
     mocker.patch.object(
-        RunAgentLoop, "run_deep_research_mode",
-        side_effect=_build_pass_mock(call_log, payloads),
+        RunAgentLoop, "stream_deep_research_mode",
+        side_effect=pass_stream(_build_pass_mock(call_log, payloads)),
     )
 
     # Spy on update_pipeline_run via the same path-exact-name the
@@ -571,7 +571,8 @@ def test_crash_after_pass_3b_leaves_claims_populated_via_load(mocker):
             )
         return _response_with_text(entry)
 
-    mocker.patch.object(RunAgentLoop, "run_deep_research_mode", side_effect=side_effect)
+    mocker.patch.object(RunAgentLoop, "stream_deep_research_mode",
+                        side_effect=pass_stream(side_effect))
 
     # Capture the run_id so we can call load_pipeline_run after the crash.
     from core.reasoning import orchestrator as orch_mod
@@ -650,7 +651,8 @@ def test_hard_kill_bypasses_except_block_checkpoint_survives(mocker):
             )
         return _response_with_text(entry)
 
-    mocker.patch.object(RunAgentLoop, "run_deep_research_mode", side_effect=side_effect)
+    mocker.patch.object(RunAgentLoop, "stream_deep_research_mode",
+                        side_effect=pass_stream(side_effect))
 
     # Spy on create_pipeline_run -- call through to the real
     # implementation so the record exists in the fake sqlmodel, and
@@ -741,7 +743,8 @@ def test_json_retry_path_calls_continue_conversation_on_malformed_json(mocker):
         resp.thread_id = thread_id
         return resp
 
-    mocker.patch.object(RunAgentLoop, "run_deep_research_mode", side_effect=fake_run_dr_mode)
+    mocker.patch.object(RunAgentLoop, "stream_deep_research_mode",
+                        side_effect=pass_stream(fake_run_dr_mode))
     mocker.patch.object(RunAgentLoop, "continue_conversation", side_effect=fake_continue)
 
     with pytest.raises(ValueError, match="did not return valid JSON"):
@@ -811,8 +814,8 @@ def test_pipeline_ensemble_mode_passes_1_runs_n_times(mocker):
     }
     call_log: list[str] = []
     mocker.patch.object(
-        RunAgentLoop, "run_deep_research_mode",
-        side_effect=_build_pass_mock(call_log, payloads),
+        RunAgentLoop, "stream_deep_research_mode",
+        side_effect=pass_stream(_build_pass_mock(call_log, payloads)),
     )
 
     run = run_deep_research_pipeline(
@@ -844,8 +847,8 @@ def test_pipeline_non_ensemble_mode_single_pass_1(mocker):
     payloads = _clean_pipeline_payloads()
     call_log: list[str] = []
     mocker.patch.object(
-        RunAgentLoop, "run_deep_research_mode",
-        side_effect=_build_pass_mock(call_log, payloads),
+        RunAgentLoop, "stream_deep_research_mode",
+        side_effect=pass_stream(_build_pass_mock(call_log, payloads)),
     )
 
     run = run_deep_research_pipeline(

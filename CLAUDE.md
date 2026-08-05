@@ -18,8 +18,9 @@ python main.py --mode research --grant "q"        # §25: pick gated tools to au
 python main.py --mode research --attended "q"     # §25: approve every gated call as it happens
 python main.py --mode research --review "q"       # §20: review the finished run, consent to each correction
 # §21a compaction runs automatically in every shell; /compact triggers it by hand in the TUI
+# §26: /claims [run id] or ctrl+l opens a run's claims; /copy [last|report|claims|all] [--file path]
 
-pytest                                            # 989 tests, offline, ~25s (first run ~30s: matplotlib font cache)
+pytest                                            # 1028 tests, offline, ~25s (first run ~30s: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -37,7 +38,7 @@ MCP servers are a *third* config file again — `mcp.json`, user-level or `.vena
 Read these before changing anything non-trivial — they carry design decisions that are locked, not defaults to re-derive.
 
 - **ARCHITECTURE.md** — what's built, file-by-file contracts ("what belongs here / what does NOT"), known gotchas (§11).
-- **ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **ROADMAP_v2.md** (§13–§25; §13–§20, §21a, §21b and §25 built) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R12 from §25, K1–K7 from §19, V1–V9 from §20 and M1–M17 from §21a/§21b). Section and D-numbers are stable and cross-referenced everywhere.
+- **ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **ROADMAP_v2.md** (§13–§26; §13–§20, §21a, §21b, §22, §25 and §26 built) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R12 from §25, K1–K7 from §19, V1–V9 from §20, M1–M17 from §21a/§21b, P1–P4 from §22 and L1–L6 from §26). Section and D-numbers are stable and cross-referenced everywhere.
 - **DEVLOG.md** — per-section implementation notes: what was followed verbatim, what was deviated from (every deviation was an explicit user decision — do not silently override).
 - **tests/BREAKING_CHANGES.md** — what breaks each test when production code changes, the symptom, and the fix.
 - **QWEN.md** — a sibling agent-context file. Stale (it predates §13–§16 and disagrees with itself on test counts); prefer ARCHITECTURE.md and the code.
@@ -67,7 +68,9 @@ A from-scratch agentic harness (no LangChain). Two modes — regular tool-using 
 
 ### The loop (`core/loop.py`)
 
-`RunAgentLoop._run()` is a **generator** yielding `LoopEvent`s (`core/events.py`). Three public entry points — `run_agent_conversation`, `run_deep_research_mode`, `continue_conversation` — all drain it via `run_to_completion()` and return a `ModelResponse`. Never reimplement the loop elsewhere.
+`RunAgentLoop._run()` is a **generator** yielding `LoopEvent`s (`core/events.py`). Three public entry points — `run_agent_conversation`, `run_deep_research_mode`, `continue_conversation` — all return a `ModelResponse`. Never reimplement the loop elsewhere.
+
+`run_agent_conversation` and `continue_conversation` drain `_run()` directly via `run_to_completion()`. `run_deep_research_mode` is one step further out since §26: it drains `stream_deep_research_mode()` — a generator that forwards `_run()`'s events and *returns* the response — via `return_value_of()`. Two drainers because they answer different questions: `run_to_completion` reads the response off the terminal event, and `return_value_of` reads a generator's return value, which is the only place `thread_id` has been attached.
 
 Three stop conditions, all in `_run()`: no tool calls (`complete`), `max_steps` exhausted (`max_steps_reached`), cumulative input+output tokens ≥ `max_total_tokens` (`token_budget_exceeded`). `stop_reason` and `thread_id` are set by `_run()`/the wrappers, never by `call_model()`.
 
@@ -154,7 +157,7 @@ Invariants that look like simplification opportunities but are not:
 - **The pipeline is a GENERATOR, and the public name is not it** (§22). `stream_deep_research_pipeline()` yields `PipelineEvent`s; `run_pipeline_to_completion()` drains; `run_deep_research_pipeline()` is the drainer applied to the generator and is unchanged for every caller. Same shape as `_run()` / `run_to_completion()`, for the same reason. A shell that wants live progress iterates; everything else keeps calling the wrapper.
 - **`_Progress.checkpoint()` is the only place a trace line is recorded** (§22). It persists, then yields every line appended since it last ran — so §5's per-pass persistence and the events are DERIVED from `run.trace` rather than emitted beside it. This is what finally made "a checkpoint after every trace line" true: `review.py` writes fifteen lines and checkpointed after none, and `json_retry.py` appends straight to the list. Both are now carried without either module changing, which is also why a JSON-parse retry needs no event kind. Persist-before-emit is deliberate: a generator only advances while someone iterates it, so emitting first would make durability depend on a UI continuing to read.
 - **An abandoned pipeline generator leaves `status='running'`** (§22). `GeneratorExit` is not an `Exception`, so a consumer that stops iterating is recorded as abandoned rather than failed — and the persist-before-emit ordering is what keeps the checkpoints it already took.
-- **A pass's `LoopEvent`s do NOT propagate up** (§22 P2), and `PipelineEvent` is a separate, kind-discriminated type from `LoopEvent` (§22 P1) — adding §22's or §23's kinds to that flat six-field bag is the thing the decision rejected, and `test_pipeline_events.py` fails if `LoopEvent` grows a seventh field.
+- **A pass's `LoopEvent`s are TRANSLATED, not propagated** (§22 P2 as amended by §26), and `PipelineEvent` is a separate, kind-discriminated type from `LoopEvent` (§22 P1) — adding §22's or §26's kinds to that flat six-field bag is the thing the decision rejected, and `test_pipeline_events.py` fails if `LoopEvent` grows a seventh field. §22 kept a pass opaque on the premise that its internals were not worth seeing; the first real ten-pass run disproved that, so `_run_pass` now iterates `RunAgentLoop.stream_deep_research_mode()` and converts a chosen subset into pipeline kinds. A consumer still sees exactly one event type — that is what P1/P2 were protecting, and it still holds.
 - **A truncated pass is detected AT the pass.** `_check_not_truncated()` reads
   `stop_reason`: truncated with text traces and continues, truncated with no text
   raises naming the pass and the reason. A stop condition returns the last
@@ -333,6 +336,49 @@ prints pass lines and trace lines as they arrive.
   Same shape for `_run_pass` / `_run_pass_with_json_retry` / `_review_stage`: a
   plain-function double is not an error under `yield from`, it iterates the string one
   character at a time and returns `None`.
+
+### Research legibility (§26)
+
+A run is now readable while it happens. Five gaps, all found by watching a real ten-pass
+run rather than by reading the code.
+
+- **`stream_deep_research_mode()` is the third generator/drainer pair**, and
+  `run_deep_research_mode()` is its drainer — unchanged signature and return type. A
+  callback parameter was rejected: §23 AC1 exists to stop a third bespoke channel.
+- **The response is RETURNED, never read off the terminal event.** `thread_id` is
+  attached after the loop finishes, so `return_value_of()` sits beside
+  `run_to_completion()` and `_translate` uses `next()` rather than `for` — a `for` loop
+  swallows a generator's return value, and the only symptom would be §3's JSON retry
+  opening a new thread instead of correcting the failed one.
+- **One translation site** (`_translate`), consumed by both pass entry points. Two sites
+  for one translation is how they drift; this file has the twenty-checkpoint version of
+  that mistake in its own history.
+- **The param digest is redacted BEFORE truncation.** Tool arguments were the one
+  unscanned path — `check_input_policy()` refuses a call rather than redacting one, and
+  `check_output_policy` only ever saw results. Truncating first cuts a credential below
+  the 20 characters its pattern needs.
+- **Streamed pass text never escapes, only its volume.** Seven of the ten passes emit raw
+  JSON; `pass_activity` carries a throttled running character total instead.
+- **There is no step event, deliberately.** `_run()` has no step marker to read, so a
+  consumer counts `tool_call` events itself. Inferring one from the start/result
+  interleaving would be a guess presented as a fact.
+- **`D2` emits once per retry ROUND**, outside the per-claim loop — inside it, a round
+  exhausting six claims reads as six separate stages.
+- **Colour resolves from the `Theme` object** (`themes.role_styles`), because a `RichLog`
+  renders Rich `Text` and cannot use `app.tcss`'s variables. Only
+  `warning`/`error`/`success` are shared across all eight themes, so severity uses those
+  and identity uses the per-variant hues. A widget with no running app renders
+  **unstyled rather than raising** — `self.app` raises `NoActiveAppError`, and widgets are
+  built bare throughout the suite.
+- **`Transcript._entries` serves the replay and `/copy`.** `RichLog` stores rendered
+  segments, so `/theme` needs `rerender()`. Every write path must go through `_emit()`,
+  or a line reaches the screen and neither the replay nor the copy.
+- **`/copy`'s clipboard route cannot be confirmed.** OSC 52 is fire-and-forget, so the
+  message says what was sent, and `--file` is the route that provably worked.
+- **The claims view is `ctrl+l`.** `Input` binds `ctrl+k` to `delete_right_all` and holds
+  focus, so that key would silently eat the typed line. `ClaimsScreen` takes plain dicts
+  — the shape §5 already persists — so the finished-run, stored-run and mid-run sources
+  need no branch in the renderer.
 
 ### Config loading and workspace trust (ROADMAP_v2 §14)
 

@@ -45,7 +45,9 @@ import pytest
 
 import config
 from core.loop import RunAgentLoop
-from tests.conftest import drain, make_model_response, make_stream_from_response
+from tests.conftest import (
+    drain, make_model_response, make_stream_from_response, pass_stream,
+)
 
 from uuid import uuid4
 
@@ -62,7 +64,8 @@ def _stub_run_dr_mode_returning(mocker, response, thread_id):
 
     def side_effect(*, pass_input, model, pass_id, provider_name="ANTHROPIC", **kwargs):
         return response
-    mocker.patch.object(RunAgentLoop, "run_deep_research_mode", side_effect=side_effect)
+    mocker.patch.object(RunAgentLoop, "stream_deep_research_mode",
+                        side_effect=pass_stream(side_effect))
 
 
 def _stub_continue_returning_sequence(mocker, responses):
@@ -133,7 +136,8 @@ def test_malformed_then_valid_recovers_in_one_retry(mocker):
     def fake_run_dr_mode(*, pass_input, model, pass_id, provider_name="ANTHROPIC", **kwargs):
         return bad_response
 
-    mocker.patch.object(RunAgentLoop, "run_deep_research_mode", side_effect=fake_run_dr_mode)
+    mocker.patch.object(RunAgentLoop, "stream_deep_research_mode",
+                        side_effect=pass_stream(fake_run_dr_mode))
 
     valid_text = json.dumps({"x": 1})
     retry_response = make_model_response(text=valid_text)
@@ -171,7 +175,8 @@ def test_all_attempts_fail_raises_value_error(mocker):
     def fake_run_dr_mode(*, pass_input, model, pass_id, provider_name="ANTHROPIC", **kwargs):
         return bad_response
 
-    mocker.patch.object(RunAgentLoop, "run_deep_research_mode", side_effect=fake_run_dr_mode)
+    mocker.patch.object(RunAgentLoop, "stream_deep_research_mode",
+                        side_effect=pass_stream(fake_run_dr_mode))
 
     # All retries also return malformed JSON. There should be
     # MAX_JSON_RETRIES worth of retry responses queued.
@@ -216,7 +221,8 @@ def test_retry_uses_same_thread_id_as_initial_attempt(mocker):
     def fake_run_dr_mode(*, pass_input, model, pass_id, provider_name="ANTHROPIC", **kwargs):
         return bad_response
 
-    mocker.patch.object(RunAgentLoop, "run_deep_research_mode", side_effect=fake_run_dr_mode)
+    mocker.patch.object(RunAgentLoop, "stream_deep_research_mode",
+                        side_effect=pass_stream(fake_run_dr_mode))
 
     valid_text = json.dumps({"ok": True})
     retry_response = make_model_response(text=valid_text)
@@ -393,7 +399,8 @@ def test_trace_line_format_one_per_failed_attempt(mocker):
     def fake_run_dr_mode(*, pass_input, model, pass_id, provider_name="ANTHROPIC", **kwargs):
         return bad_response
 
-    mocker.patch.object(RunAgentLoop, "run_deep_research_mode", side_effect=fake_run_dr_mode)
+    mocker.patch.object(RunAgentLoop, "stream_deep_research_mode",
+                        side_effect=pass_stream(fake_run_dr_mode))
 
     # Two retries (return valid JSON on the second retry, so the test
     # doesn't raise -- it just returns from the helper). The returned
@@ -459,7 +466,8 @@ def test_corrective_message_contains_parse_error_excerpt_and_instruction(mocker)
     def fake_run_dr_mode(*, pass_input, model, pass_id, provider_name="ANTHROPIC", **kwargs):
         return initial_response
 
-    mocker.patch.object(RunAgentLoop, "run_deep_research_mode", side_effect=fake_run_dr_mode)
+    mocker.patch.object(RunAgentLoop, "stream_deep_research_mode",
+                        side_effect=pass_stream(fake_run_dr_mode))
 
     valid_text = json.dumps({"recovered": True})
     retry_response = make_model_response(text=valid_text)

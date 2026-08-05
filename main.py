@@ -445,8 +445,33 @@ def run_research(
             authorization=authorization, review=review,
             subagent_review=subagent_review,
         ):
+            # §26: tool calls and code stages print here too. The CLI is
+            # the shell an unattended run is launched from, so a
+            # capability visible only in the TUI is the split this
+            # project keeps warning about -- and it is the CLI that goes
+            # silent for minutes inside a tool-heavy pass.
             if event.kind == "pass_start":
                 print(f"-> {event.pass_id}", flush=True)
+            elif event.kind == "stage":
+                # Same column as a pass, different marker: a stage that
+                # made no model call is done the moment it is announced,
+                # so an arrow promising something is starting would be
+                # wrong.
+                print(f".. {event.pass_id}", flush=True)
+            elif event.kind == "tool_call":
+                detail = f"  {event.text}" if event.text else ""
+                print(f"     > {event.tool}{detail}", flush=True)
+            elif event.kind == "tool_result" and not event.ok:
+                # Successful results print nothing: one line per call is
+                # already the volume, and "it worked" is what the absence
+                # of a failure line says.
+                print(f"     x {event.tool}  {event.text}", flush=True)
+            elif event.kind == "pass_activity":
+                # For the passes that call no tools at all -- Pass 1 and
+                # final synthesis -- this is the only sign of life
+                # between the start line and the end line, and those are
+                # the two longest passes in the run.
+                print(f"     .. {event.chars // 1000}k chars", flush=True)
             elif event.kind == "trace_line":
                 print(f"- {event.text}", flush=True)
             elif event.kind == "run_complete":

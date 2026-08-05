@@ -177,6 +177,103 @@ class ReviewScreen(ModalScreen[object]):
         self.dismiss(("reject", ""))
 
 
+class ClaimsScreen(ModalScreen[None]):
+    """Every claim a research run produced, with the metadata that decided
+    its tier (ROADMAP_v2 §26).
+
+    The report a run ends with is a synthesis. What it was synthesised
+    FROM -- which assertions were extracted, which were grounded and by
+    how many sources, which carried unexamined assumptions, which were
+    revised and how often, and what arithmetic produced each tier -- all
+    exists on every Claim and reaches /output/<run_id>/, and none of it was
+    reachable from either shell. So a run could be read only as prose,
+    with the confidence machinery that is the point of the pipeline
+    visible nowhere.
+
+    A MODAL rather than transcript rows: a dozen claims at this detail is
+    longer than the report, and dumping it inline would push the answer
+    off screen at the moment it arrives. Scrollable, escape closes.
+
+    Takes plain DICTS, not Claim objects, and that is deliberate -- the
+    three sources are `vars(c)` for a finished in-session run,
+    pipeline_storage.load_pipeline_run() for an earlier one (which already
+    returns the dicts vars(c) wrote), and the partial picture assembled
+    from PipelineEvents while a run is still going. One shape here means
+    no branch inside the renderer, and it is the shape §5 already
+    persists.
+    """
+
+    BINDINGS = [("escape", "close", "Close")]
+
+    def __init__(self, claims: list, title: str = "Claims",
+                 partial: bool = False):
+        super().__init__()
+        self._claims = list(claims or [])
+        self._title = title
+        self._partial = partial
+
+    def compose(self) -> ComposeResult:
+        header = f"{self._title}  ({len(self._claims)})"
+        if self._partial:
+            # Say so, rather than showing thin rows and letting the reader
+            # conclude the pipeline recorded nothing: mid-run, only id,
+            # text and tier have been broadcast as events.
+            header += "  — run in progress, metadata incomplete"
+        yield Vertical(
+            Label(header, id="claims-title"),
+            Static(_render_claims(self._claims), id="claims-body"),
+            id="claims-dialog",
+        )
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+
+# Tier order for the claims view: worst first. A reader opening this is
+# looking for what NOT to trust, and burying the unverified claims under
+# the confident ones makes them the hardest thing to find.
+_TIER_ORDER = ("UNVERIFIED", "UNVERIFIED_COVERAGE", "LOW", "MEDIUM", "HIGH")
+
+
+def _render_claims(claims: list) -> str:
+    if not claims:
+        return "No claims recorded for this run."
+
+    def _rank(claim):
+        tier = claim.get("confidence_tier")
+        return _TIER_ORDER.index(tier) if tier in _TIER_ORDER else len(_TIER_ORDER)
+
+    out = []
+    for claim in sorted(claims, key=_rank):
+        tier = claim.get("confidence_tier") or "—"
+        head = f"{tier:<20} {claim.get('id', '?')}  {claim.get('type') or ''}"
+        if claim.get("retry_count"):
+            head += f"   revised x{claim['retry_count']}"
+        out.append(head.rstrip())
+        # final_text is what the claim carries into the report; text is
+        # what Pass 2 extracted. Showing final_text when they differ means
+        # the view matches the report rather than the draft behind it.
+        out.append(f"  {claim.get('final_text') or claim.get('text') or ''}")
+        if claim.get("entities"):
+            out.append(f"  entities: {', '.join(map(str, claim['entities']))}")
+        if claim.get("grounding_status") or claim.get("grounding_sources"):
+            sources = len(claim.get("grounding_sources") or ())
+            out.append(f"  grounding: {claim.get('grounding_status') or 'none'}"
+                       f" ({sources} source{'s' if sources != 1 else ''})")
+        for field, label in (("fallacies", "fallacies"),
+                             ("contradictions", "contradictions"),
+                             ("assumption_flags", "assumptions")):
+            if claim.get(field):
+                out.append(f"  {label}: {'; '.join(map(str, claim[field]))}")
+        if claim.get("score_breakdown"):
+            out.append("  score: " + ", ".join(
+                f"{k}={v}" for k, v in claim["score_breakdown"].items()))
+        if claim.get("annotation"):
+            out.append(f"  {claim['annotation']}")
+        out.append("")
+    return "\n".join(out).rstrip()
+
+
 class ThreadPickerScreen(ModalScreen[object]):
     """Pick a thread to resume. Dismisses with a UUID, or None to cancel.
 

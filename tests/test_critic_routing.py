@@ -13,7 +13,7 @@ import json
 import config
 from core.loop import RunAgentLoop
 from core.reasoning.orchestrator import run_deep_research_pipeline
-from tests.conftest import make_model_response
+from tests.conftest import make_model_response, pass_stream
 
 
 # ---------------------------------------------------------------------------
@@ -99,8 +99,8 @@ def test_critic_routing_sends_3a_3b_6c_to_critic_model(mocker):
     payloads = _payloads_with_retry_loop()
     call_log: list[tuple[str, str, str]] = []
     mocker.patch.object(
-        RunAgentLoop, "run_deep_research_mode",
-        side_effect=_build_routing_mock(call_log, payloads),
+        RunAgentLoop, "stream_deep_research_mode",
+        side_effect=pass_stream(_build_routing_mock(call_log, payloads)),
     )
 
     run_deep_research_pipeline(
@@ -141,8 +141,8 @@ def test_no_critic_model_means_uniform_routing(mocker):
     payloads = _payloads_with_retry_loop()
     call_log: list[tuple[str, str, str]] = []
     mocker.patch.object(
-        RunAgentLoop, "run_deep_research_mode",
-        side_effect=_build_routing_mock(call_log, payloads),
+        RunAgentLoop, "stream_deep_research_mode",
+        side_effect=pass_stream(_build_routing_mock(call_log, payloads)),
     )
 
     run_deep_research_pipeline(

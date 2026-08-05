@@ -750,3 +750,49 @@ extra={"url": ..., "error": ...})` prints exactly `fetch_url failed`. Every
 diagnostic field is dropped. Interpolate into the message instead. This is why a
 run of ordinary 404s was indistinguishable from a broken tool, and why an arXiv
 scheme change hid behind three identical `arxiv_search attempt failed` lines.
+
+
+## §26 — research legibility (2026-08-05)
+
+### The one that fails by passing: doubles on `run_deep_research_mode`
+
+`_run_pass` now iterates `RunAgentLoop.stream_deep_research_mode()`. Anything
+still patched on `run_deep_research_mode` **stops intercepting and runs the real
+loop** — 46 failures across 8 files, none of them at the patch site. This is
+§22's twelve-doubles trap one layer down, and it is now the second recorded
+instance, so treat any repoint of a call site as a repoint of its doubles.
+
+Repointing goes through `tests/conftest.py`'s `pass_stream(source, events=())`,
+which turns a double written against the old name into a generator side_effect.
+Do not open-code it — fifteen bespoke wrappers is how they drift.
+
+| Change | What breaks | Fix / why |
+|---|---|---|
+| `_translate` uses `for event in stream` instead of `next()` | `test_the_response_still_carries_its_thread_id` | A `for` loop SWALLOWS a generator's return value, and `thread_id` is attached after the pass's loop finishes. Every test about tool events still passes; §3's JSON retry silently opens a new thread instead of correcting the failed one |
+| `run_deep_research_mode` returns the generator instead of draining it | `TestTheDrainerIsUnchanged` (both) | Its signature and return type are what every pre-§26 caller and every double depend on |
+| `run_to_completion` reused as the pass drainer | `test_run_deep_research_mode_still_returns_a_model_response` | It reads the response off the terminal event, which is the copy without `thread_id`. `return_value_of` exists for the other question |
+| Drop `redact_secrets` from `_param_digest` | `TestTheParamDigestIsRedacted` (2 tests) | Tool ARGUMENTS were never redacted: `check_input_policy` refuses a call, it does not redact one, and `check_output_policy` only saw results |
+| Redact after truncating instead of before | `test_redaction_runs_before_truncation` | Truncation can cut a credential below the 20 characters its pattern needs, leaving the fragment unmatched. The test fixture puts the cut inside the key on purpose — with a longer surviving fragment it passes either way |
+| Emit `_stage("D2")` inside the per-claim loop | `test_d2_is_announced_once_per_round_not_once_per_claim` | D2 is one decision applied to every exhausted claim; per-claim emission makes a round that exhausted six claims read as six stages. The fixture exhausts TWO claims — with one, the two behaviours are indistinguishable |
+| Add a `step` kind and infer it from the event stream | — (no test; it is an absence) | `_run()` has no step marker. Within a step it yields start/result in pairs; between steps it yields nothing unless the model streamed text. See the note in `core/reasoning/events.py` |
+| Forward `token_delta` text into `PipelineEvent.text` | `test_streamed_text_becomes_volume_never_content` | Seven of the ten passes emit raw JSON; only the volume escapes |
+| Give `LoopEvent` a seventh field for any of this | `test_pipeline_events.py`'s P1 pin | `PipelineEvent` is the type that grows. That is what its `kind` discriminator is for |
+
+### The TUI half
+
+| Change | What breaks | Fix / why |
+|---|---|---|
+| `Transcript._styles` calls `self.app` unguarded | `test_a_widget_renders_without_a_running_app` | `self.app` raises `NoActiveAppError` rather than returning None, and widgets are constructed bare throughout the suite. Presentation degrades; it does not raise |
+| Bind the claims view to `ctrl+k` | `test_ctrl_l_opens_the_claims_view_while_the_input_has_focus` | Textual's `Input` binds `ctrl+k` to `delete_right_all` and holds focus, so the binding is shadowed and pressing it deletes the typed line |
+| `/theme` stops calling `rerender()` | `test_switching_theme_replays_the_transcript` | `RichLog` stores rendered segments, so everything already on screen keeps the old palette. Note the test spies on the RENDER: `_entries` survive either way, so an assertion about them alone passes with the replay removed |
+| A new write path that skips `Transcript._emit` | — (silent) | The line reaches the screen and neither the `/theme` replay nor `/copy all`. Same two-writers shape §22 removed from the trace |
+| `--file` also fires `copy_to_clipboard` | `test_copy_to_a_file_writes_what_it_says_it_wrote` | `--file` exists because OSC 52 cannot be confirmed; doing both makes the provable route indistinguishable from the unprovable one |
+
+### Standing: a transcript stub must track `Transcript`'s write methods
+
+`_StubTranscript` (`test_agents.py`), `_NullTranscript` (`test_review.py`) and
+`_T` (`test_skills.py`) each stand in for the real widget. When `tui/app.py`
+starts calling a new one, all three need it — the failure is an `AttributeError`
+raised from inside `app.py`, nowhere near the widget that grew the method. §26
+added `write_answer`, `write_role`, `rerender` and `as_text`, and made
+`flush_stream` return the flushed text rather than None.

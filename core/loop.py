@@ -227,6 +227,28 @@ def run_to_completion(gen) -> ModelResponse:
     return final
 
 
+def return_value_of(gen):
+    """Drains a generator and returns what it RETURNED, not what it yielded.
+
+    ROADMAP_v2 §26. `run_to_completion()` above reads the ModelResponse off
+    the terminal LoopEvent, which is right for a bare `_run()` -- that
+    generator returns nothing. `stream_deep_research_mode()` does return a
+    value (the response, with `thread_id` attached after the loop finished),
+    and reading its terminal event instead would silently hand back a
+    response missing that assignment.
+
+    A SEPARATE helper rather than a branch inside run_to_completion(): the
+    two answer different questions, and one function that sometimes reads
+    the event and sometimes the return value is the kind of "exactly one
+    field is populated" convention §22 P1 declined to add more of.
+    """
+    try:
+        while True:
+            next(gen)
+    except StopIteration as stop:
+        return stop.value
+
+
 class RunAgentLoop:
 
     @staticmethod
@@ -617,11 +639,65 @@ class RunAgentLoop:
         the pre-§25 behaviour -- no grants, nobody to ask, every gated tool
         hidden. Built by the SHELL that launched the pipeline and passed
         down unchanged; this function takes no view on what it contains.
+
+        §26: this is now the DRAINER applied to stream_deep_research_mode(),
+        the same relationship run_deep_research_pipeline() has to
+        stream_deep_research_pipeline() and the three public wrappers have
+        to _run(). Signature and return type are unchanged, so every caller
+        that does not want a pass's internals keeps calling this.
+        """
+        return return_value_of(RunAgentLoop.stream_deep_research_mode(
+            pass_input=pass_input, model=model, pass_id=pass_id,
+            provider_name=provider_name, max_steps=max_steps,
+            max_total_tokens=max_total_tokens, temperature=temperature,
+            effort=effort, context=context, authorization=authorization,
+        ))
+
+    @staticmethod
+    def stream_deep_research_mode(
+        pass_input: str,
+        model: str,
+        pass_id: str,
+        provider_name: str = DEFAULT_PROVIDER,
+        max_steps: int = config.MAX_ITERATIONS,
+        max_total_tokens: int = config.RESEARCH_PASS_TOKEN_BUDGET,
+        temperature: Optional[float] = None,
+        effort: Optional[str] = None,
+        context: Optional[ToolContext] = None,
+        authorization=None,
+    ):
+        """One research pass, as a generator of LoopEvents, RETURNING the
+        ModelResponse (ROADMAP_v2 §26).
+
+        Exists because §22's P2 -- "a pass's LoopEvents do not propagate
+        up" -- made a pass opaque while it ran. The pipeline could say
+        which pass had started and nothing about what it was doing, so a
+        pass making fourteen tool calls over several minutes looked
+        identical to one that had hung.
+
+        P2 is AMENDED here, not repealed. What escapes this generator is
+        still consumed inside core/reasoning/orchestrator.py, which
+        translates a chosen subset into PipelineEvents at the pass
+        boundary -- so a pipeline consumer still only ever sees one event
+        type, which is what P1 and P2 were jointly protecting. What
+        changed is the premise that a pass's internals are not worth
+        seeing.
+
+        A GENERATOR SIBLING, not an observer callback on the existing
+        function. That shape is the project's own, used three times
+        already, and §23 AC1 exists specifically to stop a third bespoke
+        request/response channel appearing beside permission_channel and
+        ApprovalProvider.
+
+        The response is RETURNED rather than read off the terminal event
+        because `thread_id` is attached after the loop finishes -- see
+        return_value_of().
         """
         memory = ConversationMemory()
         memory.add_user_message(pass_input)
         system_prompt = system_prompts.pass_prompt(pass_id)
-        response = run_to_completion(RunAgentLoop._run(
+        response = None
+        for event in RunAgentLoop._run(
             memory, system_prompt, provider_name, model, context,
             max_steps, max_total_tokens, temperature=temperature, effort=effort,
             # §21 M6. A pass is headless and unattended and already returns
@@ -631,7 +707,18 @@ class RunAgentLoop:
             # alternative there is a hard provider error mid-pipeline.
             compaction_mode="backstop",
             **_authorization_kwargs(authorization),
-        ))
+        ):
+            if event.final_response is not None:
+                response = event.final_response
+            yield event
+        if response is None:
+            # Same contract as run_to_completion's RuntimeError, and for
+            # the same reason: a loop that ended without a final response
+            # has a bug, and returning None would push the failure into
+            # whichever pass dereferences .text first.
+            raise RuntimeError(
+                "Generator completed without yielding a final_response"
+            )
         response.thread_id = memory.thread_id
         return response
 

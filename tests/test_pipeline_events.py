@@ -39,14 +39,15 @@ from core.reasoning import orchestrator
 from core.reasoning.base import PipelineRun
 from core.reasoning.events import PIPELINE_EVENT_KINDS, PipelineEvent
 from core.reasoning.pipeline_storage import load_pipeline_run
+from tests.conftest import pass_stream
 from tests.test_orchestrator import _build_pass_mock, _clean_pipeline_payloads
 
 
 def _canned(mocker):
     """Wire the clean-pipeline payloads onto the real pass entry point."""
     mocker.patch.object(
-        RunAgentLoop, "run_deep_research_mode",
-        side_effect=_build_pass_mock([], _clean_pipeline_payloads()),
+        RunAgentLoop, "stream_deep_research_mode",
+        side_effect=pass_stream(_build_pass_mock([], _clean_pipeline_payloads())),
     )
 
 
@@ -393,12 +394,12 @@ def test_granted_calls_still_reach_the_run_through_the_generator(mocker):
     generator whose body never ran would record nothing and look fine.
     """
     from core.approval import RunAuthorization
-    from tests.conftest import make_model_response
+    from tests.conftest import make_model_response, pass_stream
 
     response = make_model_response(text="x")
     response.granted_calls = [{"tool": "mcp__lib__search", "params": {}}]
-    mocker.patch.object(RunAgentLoop, "run_deep_research_mode",
-                        return_value=response)
+    mocker.patch.object(RunAgentLoop, "stream_deep_research_mode",
+                        side_effect=pass_stream(response))
 
     auth = RunAuthorization(granted_tools={"mcp__lib__search"})
     from tests.conftest import drain
@@ -412,15 +413,15 @@ def test_json_retry_lines_reach_a_consumer_without_json_retry_changing(mocker):
     needs no event kind of its own. json_retry.py appends its own trace
     line and knows nothing about §22; the line still arrives.
     """
-    from tests.conftest import make_model_response
+    from tests.conftest import make_model_response, pass_stream
 
     payloads = _clean_pipeline_payloads()
     responses = iter([
         make_model_response(text="not json at all"),
         make_model_response(text=payloads["Pass 0"]),
     ])
-    mocker.patch.object(RunAgentLoop, "run_deep_research_mode",
-                        side_effect=lambda **kw: next(responses))
+    mocker.patch.object(RunAgentLoop, "stream_deep_research_mode",
+                        side_effect=pass_stream(lambda **kw: next(responses)))
     mocker.patch.object(RunAgentLoop, "continue_conversation",
                         side_effect=lambda **kw: next(responses))
 

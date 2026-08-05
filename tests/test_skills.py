@@ -465,7 +465,11 @@ class TestPromptAssembly:
             def write_user(self, t): pass
             def write_system(self, t): pass
             def write_error(self, t): pass
-            def flush_stream(self): pass
+            def write_answer(self, t): pass
+            def write_role(self, role, t): pass
+            def flush_stream(self): return ""
+            def rerender(self): pass
+            def as_text(self): return ""
 
         class _Bare(VenastineApp):
             # _transcript is a read-only property on the real app; the

@@ -359,6 +359,11 @@ class _StubTranscript:
     def write_system(self, t): self.lines.append(("sys", t))
     def write_error(self, t): self.lines.append(("err", t))
     def write_user(self, t): self.lines.append(("user", t))
+    def write_answer(self, t): self.lines.append(("answer", t))
+    def write_role(self, role, t): self.lines.append((role, t))
+    def flush_stream(self): return ""
+    def rerender(self): pass
+    def as_text(self): return ""
 
 
 class _StubApp:

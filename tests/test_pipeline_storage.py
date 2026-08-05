@@ -190,7 +190,7 @@ def test_inner_storage_failure_propagates_original_exception_and_logs_run_id(moc
     """
     import core.reasoning.orchestrator as orch_mod
     from core.loop import RunAgentLoop
-    from tests.conftest import make_model_response
+    from tests.conftest import make_model_response, pass_stream
 
     # A known run_id so we can assert it appears verbatim in the log line.
     known_run_id = uuid4()
@@ -202,7 +202,8 @@ def test_inner_storage_failure_propagates_original_exception_and_logs_run_id(moc
         resp = make_model_response(text="not valid json {{{")
         resp.thread_id = uuid4()
         return resp
-    mocker.patch.object(RunAgentLoop, "run_deep_research_mode", side_effect=fake_run_dr_mode)
+    mocker.patch.object(RunAgentLoop, "stream_deep_research_mode",
+        side_effect=pass_stream(fake_run_dr_mode))
     mocker.patch.object(
         RunAgentLoop, "continue_conversation",
         side_effect=lambda **kwargs: make_model_response(text="still not json"),

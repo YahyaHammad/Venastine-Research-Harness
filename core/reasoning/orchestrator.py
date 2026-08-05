@@ -71,6 +71,7 @@ from core.reasoning.events import PipelineEvent
 from core.reasoning.json_retry import parse_json_response as _parse_json_response
 from core.reasoning.json_retry import retry_until_json
 from core.reasoning.pipeline_storage import create_pipeline_run, update_pipeline_run
+from safety.policy_enforcement import redact_secrets
 
 logger = logging.getLogger(__name__)
 
@@ -138,6 +139,129 @@ class _Progress:
             yield PipelineEvent(kind="trace_line", text=line)
 
 
+# How much of one tool parameter reaches the digest, and how much of the
+# whole digest reaches a consumer. A sidebar is 22 columns and a transcript
+# line wraps; the point is to say WHICH url or WHICH query, not to reproduce
+# the call.
+_DIGEST_VALUE_CHARS = 60
+_DIGEST_CHARS = 140
+# One pass_activity event per this many characters streamed. A per-token
+# event would be thousands of post_message hand-offs per pass, which is the
+# cost Transcript.stream_delta already exists to avoid on the chat path.
+_ACTIVITY_CHARS = 2000
+
+
+def _param_digest(params) -> str:
+    """A short, REDACTED description of what a tool was called with.
+
+    Redacted BEFORE truncation, not after. Truncating first can cut a
+    credential in half and leave the surviving half unmatched by the
+    pattern that would have caught it -- the redactor works on whole
+    strings, so it has to see one.
+
+    Tool arguments are the path that genuinely was not scanned: §25 R5
+    added check_input_policy(), but that REFUSES a call, it does not
+    redact one, and dispatch()'s check_output_policy only ever saw
+    results. A fetch_url whose url carries an API key would otherwise be
+    printed verbatim in two shells.
+
+    Values only, no keys: for the tools a pass actually reaches for -- one
+    url, one query, one command -- the key is noise, and per-value
+    truncation is what keeps a `write` call from pasting a file into the
+    transcript.
+    """
+    if not isinstance(params, dict) or not params:
+        return ""
+    parts = []
+    for value in params.values():
+        text = value if isinstance(value, str) else json.dumps(value, default=str)
+        text = redact_secrets(text)
+        if len(text) > _DIGEST_VALUE_CHARS:
+            text = text[:_DIGEST_VALUE_CHARS - 1] + "…"
+        parts.append(text)
+    digest = "  ".join(p for p in parts if p)
+    if len(digest) > _DIGEST_CHARS:
+        digest = digest[:_DIGEST_CHARS - 1] + "…"
+    return digest
+
+
+def _translate(pass_id: str, stream):
+    """Turn one pass's LoopEvents into PipelineEvents, and return the
+    ModelResponse the pass produced (ROADMAP_v2 §26).
+
+    THE one place a LoopEvent becomes a PipelineEvent. Both _run_pass and
+    _run_pass_with_json_retry consume this rather than each iterating the
+    stream themselves -- two emission sites for the same translation is how
+    they drift, and this file has the twenty-checkpoint version of that
+    mistake in its own history (see _Progress).
+
+    What is translated is a SUBSET, chosen for what a person watching a
+    ten-pass run needs:
+
+      tool_call / tool_result   the thing §22 P2 made invisible. A pass
+                                making fourteen fetch_url calls over
+                                several minutes looked exactly like one
+                                that had hung.
+      pass_activity             for the passes that call no tools at all.
+                                Throttled: a total, every _ACTIVITY_CHARS.
+
+    What is NOT translated, and why:
+
+      token_delta text          seven of the ten passes emit raw JSON, so
+                                streaming pass output into a transcript
+                                buries the report under it. Only the volume
+                                escapes, never the content.
+      permission_request        §25's ApprovalProvider already carries this
+                                to the shell and blocks on the answer. A
+                                second rendering of a question already on
+                                screen is not observability.
+      notice                    compaction notices from a pass. M6 makes
+                                these backstop-only, and they already reach
+                                the shell as WARNING log records.
+    """
+    names: dict = {}          # tool_call id -> name, since tool_result has none
+    streamed = 0
+    announced = 0
+    while True:
+        # next() rather than `for event in stream`, because a for loop
+        # SWALLOWS the generator's return value -- and the response is
+        # returned rather than read off the terminal event precisely
+        # because thread_id is attached after the loop finishes. A for
+        # loop here would hand every pass a response with no thread_id,
+        # and the only symptom would be §3's JSON retry silently starting
+        # a new thread instead of correcting the failed one.
+        try:
+            event = next(stream)
+        except StopIteration as stop:
+            return stop.value
+
+        if event.token_delta:
+            streamed += len(event.token_delta)
+            if streamed - announced >= _ACTIVITY_CHARS:
+                announced = streamed
+                yield PipelineEvent(kind="pass_activity", pass_id=pass_id,
+                                    chars=streamed)
+        if event.tool_call_start:
+            name = event.tool_call_start.get("name")
+            names[event.tool_call_start.get("id")] = name
+            yield PipelineEvent(
+                kind="tool_call", pass_id=pass_id, tool=name,
+                text=_param_digest(event.tool_call_start.get("input")))
+        if event.tool_result:
+            result = event.tool_result.get("result")
+            failed = isinstance(result, dict) and "error" in result
+            yield PipelineEvent(
+                kind="tool_result", pass_id=pass_id,
+                tool=names.get(event.tool_result.get("id")),
+                ok=not failed,
+                # Redacted here too, though dispatch() already ran the
+                # result through check_output_policy. One rule owned at one
+                # boundary -- "nothing leaves this function unredacted" --
+                # beats depending on a guarantee made two layers away that
+                # a later refactor could quietly drop.
+                text=redact_secrets(str(result.get("error"))) if failed else None)
+
+
 def _check_not_truncated(pass_id: str, response, trace: list[str] | None):
     """A pass that ended on a stop condition did NOT finish; say so.
 
@@ -193,15 +317,18 @@ def _run_pass(pass_id: str, pass_input: str, model: str, provider_name: str,
 
     §22: a GENERATOR that yields the pass boundary and returns the
     response text (`text = yield from _run_pass(...)`). The pass id is
-    named once here rather than restated beside twelve call sites. The
-    call itself is unchanged -- run_deep_research_mode still drains its
-    own loop internally (P2), so nothing about how a pass executes moved.
+    named once here rather than restated beside twelve call sites.
+
+    §26: the pass is now ITERATED rather than called, through _translate,
+    so what it does between its start and its end is visible. Same shape
+    as §22's own change to the shells -- the drainer still exists and is
+    still what every other caller uses.
     """
     yield PipelineEvent(kind="pass_start", pass_id=pass_id)
-    response = RunAgentLoop.run_deep_research_mode(
+    response = yield from _translate(pass_id, RunAgentLoop.stream_deep_research_mode(
         pass_input=pass_input, model=model, pass_id=pass_id, provider_name=provider_name,
         temperature=temperature, authorization=authorization,
-    )
+    ))
     _record_granted_calls(pass_id, response, authorization)
     _check_not_truncated(pass_id, response, trace)
     yield PipelineEvent(kind="pass_complete", pass_id=pass_id)
@@ -257,12 +384,20 @@ def _run_pass_with_json_retry(
     next checkpoint with json_retry.py untouched. pass_complete fires
     after the retries resolve, so a pass is not reported finished while
     it is still arguing with the model about JSON.
+
+    §26 limit, stated rather than fixed: the FIRST attempt is translated,
+    the retries are not. retry_until_json reaches the model through
+    continue_conversation(), which drains its own loop internally, so a
+    tool call made while correcting malformed JSON produces no tool_call
+    event. Making it visible means a streaming sibling for
+    continue_conversation too, which is chat's entry point as well -- a
+    larger change than the thing it would show.
     """
     yield PipelineEvent(kind="pass_start", pass_id=pass_id)
-    response = RunAgentLoop.run_deep_research_mode(
+    response = yield from _translate(pass_id, RunAgentLoop.stream_deep_research_mode(
         pass_input=pass_input, model=model, pass_id=pass_id, provider_name=provider_name,
         temperature=temperature, authorization=authorization,
-    )
+    ))
     _record_granted_calls(pass_id, response, authorization)
     # BEFORE the retry loop. A truncated pass returned no JSON because it
     # was cut off, not because the model wrote malformed JSON -- sending
@@ -449,6 +584,25 @@ def _review_stage(run: PipelineRun, progress: _Progress, model: str,
         review_module.log_outcomes(run, decisions, applied, committed=False)
         run.log("Review: no correction applied; report unchanged.")
     yield from progress.checkpoint()
+
+
+def _stage(pass_id: str):
+    """One event for a stage that made ZERO model calls (§26).
+
+    A separate kind from pass_start/pass_complete rather than a pair of
+    those, because a code stage cannot meaningfully be "running": it
+    completes in the time it takes to yield, and a consumer that showed it
+    as in-progress would be showing a state that never exists. Pass 4 and
+    Pass 6b are passes by the pipeline's numbering and stages by their
+    cost, and this is the field that says which.
+
+    Before this, every zero-LLM stage was invisible to both shells -- not
+    by decision but because _run_pass was the only thing that emitted a
+    boundary, and it wraps a model call. So a sidebar showed Pass 5
+    followed by Pass 6a with the tiering that decided which claims were
+    flagged in between, unmentioned.
+    """
+    yield PipelineEvent(kind="stage", pass_id=pass_id)
 
 
 def _tier_events(run: PipelineRun):
@@ -660,6 +814,7 @@ def stream_deep_research_pipeline(
         # --- D0: route by claim type (pure code) ---
         factual_claims = [c for c in run.claims if c.type == "factual"]
         non_factual_claims = [c for c in run.claims if c.type != "factual"]
+        yield from _stage("D0")
         yield from progress.checkpoint(
             f"D0: {len(factual_claims)} factual claim(s) routed to 3a/3b, "
             f"{len(non_factual_claims)} synthesis/speculative claim(s) routed directly to Pass 5."
@@ -685,6 +840,11 @@ def stream_deep_research_pipeline(
             _apply_critic(run.claims, critic_json)
             yield from progress.checkpoint("Pass 3b: critique complete for factual claims.")
         else:
+            # A stage, not a silence. "3a/3b did not run" is a fact about
+            # the run's shape -- it means nothing was factual -- and a
+            # panel that simply skipped from Pass 2 to Pass 3c would leave
+            # the reader to infer it from an absence.
+            yield from _stage("Pass 3a/3b")
             yield from progress.checkpoint("Pass 3a/3b: skipped -- no factual claims to ground or critique.")
 
         # --- Pass 3c: completeness, independent of Pass 1's raw_response ---
@@ -707,11 +867,13 @@ def stream_deep_research_pipeline(
 
         # --- Pass 4: confidence tiering (0 LLM calls) ---
         run_confidence_tiering(run, ensemble_n=ensemble_n if ensemble_mode else 0)
+        yield from _stage("Pass 4")
         yield from _tier_events(run)
         yield from progress.checkpoint("Pass 4: confidence tiers assigned (pure code, zero LLM calls).")
 
         # --- D1 + the 6a/6c/D2 retry loop ---
         flagged = [c for c in run.claims if c.confidence_tier in FLAGGED_TIERS]
+        yield from _stage("D1")
         yield from progress.checkpoint(f"D1: {len(flagged)} claim(s) flagged for revision, {len(run.claims) - len(flagged)} already clean.")
 
         while flagged:
@@ -752,6 +914,13 @@ def stream_deep_research_pipeline(
 
             # --- D2: retry cap check (pure code) ---
             exhausted = [c for c in still_flagged if c.retry_count >= MAX_RETRIES]
+            if exhausted:
+                # ONCE per round, outside the per-claim loop. D2 is one
+                # decision applied to every claim that ran out of retries;
+                # emitting inside the loop would put a D2 row in the panel
+                # per claim, so a round that exhausted six claims would
+                # read as six separate stages.
+                yield from _stage("D2")
             for c in exhausted:
                 _apply_fallback(c)
                 yield PipelineEvent(kind="claim_tiered", claim_id=c.id,
@@ -766,9 +935,11 @@ def stream_deep_research_pipeline(
                 claim.final_text = claim.revision_text or claim.text
             if claim.annotation is None:
                 claim.annotation = f"[{claim.confidence_tier}]"
+        yield from _stage("Pass 6b")
         yield from progress.checkpoint("Pass 6b: annotation complete (templated, zero LLM calls).")
 
         # --- Merge (pure code) ---
+        yield from _stage("Merge")
         yield from progress.checkpoint(f"Merge: final claim set assembled -- {len(run.claims)} claim(s), {len(run.coverage_gaps)} coverage gap(s).")
 
         # --- Final synthesis ---

@@ -36,12 +36,12 @@ import pytest
 import config
 from core.loop import RunAgentLoop
 from core.reasoning import orchestrator
-from tests.conftest import drain, make_model_response
+from tests.conftest import drain, make_model_response, pass_stream
 
 
 def _pass_returning(mocker, response):
-    mocker.patch.object(RunAgentLoop, "run_deep_research_mode",
-                        return_value=response)
+    mocker.patch.object(RunAgentLoop, "stream_deep_research_mode",
+                        side_effect=pass_stream(response))
 
 
 class TestATruncatedPassIsDetected:

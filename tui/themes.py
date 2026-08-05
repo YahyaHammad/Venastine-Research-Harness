@@ -87,6 +87,84 @@ def register_all(app) -> None:
         app.register_theme(theme)
 
 
+# ---------------------------------------------------------------------------
+# ---- Role palette (ROADMAP_v2 §26) ----------------------------------------
+# ---------------------------------------------------------------------------
+#
+# The transcript was uniformly white: a user message, the model's answer, a
+# pipeline trace line and a tool call were the same colour, and the "you"
+# label read as the first word of the message it introduced.
+#
+# WHY THIS IS A FUNCTION OF A THEME rather than a table of colour names.
+# Everything else in the TUI styles itself through app.tcss, which uses
+# theme variables ($panel, $primary) and so restyles across all eight themes
+# without edits. A RichLog cannot do that -- it renders Rich Text objects,
+# and a Rich style needs a concrete colour, not a variable to resolve later.
+# So the resolution happens here, against the Theme object, and the same
+# property holds: no literal appears below, and a new theme needs no change
+# in this section.
+#
+# Only THREE colours are guaranteed to mean the same thing in every theme --
+# warning, error and success are shared by _DARK_BASE and _LIGHT_BASE, while
+# primary/secondary/accent are the per-variant hues. So severity roles use
+# the shared three and identity roles use the hues, rather than the reverse.
+
+def role_styles(theme: Theme) -> dict[str, str]:
+    """Rich style strings keyed by transcript role, for one theme.
+
+    Roles are what a line MEANS, not where it came from: `pass` covers a
+    research pass boundary whether the CLI or the TUI produced it, and
+    `tool_error` is a failed tool call rather than "amber".
+    """
+    return {
+        # Who is speaking. The hues, because these distinguish identity.
+        "user": f"bold {theme.primary}",
+        "user_label": f"bold {theme.primary}",
+        "assistant_label": f"bold {theme.accent}",
+        # The answer itself stays plain foreground DELIBERATELY. It is the
+        # longest text on screen and the thing most often actually read;
+        # tinting it costs contrast to say something the label already said.
+        "assistant": "",
+        # The harness talking about itself.
+        "system": "dim italic",
+        "pass": f"bold {theme.secondary}",
+        "pass_done": theme.secondary,
+        "tool": f"dim {theme.accent}",
+        # How bad it is. The three shared colours.
+        "tool_error": theme.warning,
+        "warning": theme.warning,
+        "error": f"bold {theme.error}",
+        "success": theme.success,
+        # Confidence tiers, ordered worst-to-best in meaning rather than in
+        # this dict. UNVERIFIED_COVERAGE is a gap in what was asked, not a
+        # claim that failed, so it reads as absent rather than as wrong.
+        "HIGH": theme.success,
+        "MEDIUM": theme.foreground,
+        "LOW": theme.warning,
+        "UNVERIFIED": theme.error,
+        "UNVERIFIED_COVERAGE": f"dim {theme.error}",
+    }
+
+
+def styles_for(app) -> dict[str, str]:
+    """The active theme's role styles, or unstyled when there is no app.
+
+    A widget is constructed before it is mounted and tests build them bare
+    (`ResearchProgress()` in test_pipeline_events.py), where `self.app`
+    RAISES rather than returning None. Falling back to empty strings keeps
+    a widget renderable in both cases -- Rich treats "" as no style -- so
+    presentation degrades instead of a NoActiveAppError reaching a test
+    that is not about theming at all.
+    """
+    try:
+        theme = app.get_theme(app.theme)
+    except Exception:  # noqa: BLE001 -- no app, or a theme name we lost
+        theme = None
+    if theme is None:
+        return {}
+    return role_styles(theme)
+
+
 def resolve(name: str | None) -> str:
     """Theme name to apply, falling back to the default.
 

@@ -25,7 +25,7 @@ from core.reasoning.authorization import (
     GRANT_PICKER, GrantSpecError, PIPELINE_UNGRANTABLE, candidates,
     parse_grant_spec,
 )
-from tests.conftest import drain
+from tests.conftest import drain, pass_stream
 from tools.base import ToolSpec
 from tools.registry import registry
 
@@ -348,10 +348,10 @@ class TestAuthorizationReachesThePasses:
 
         seen = []
         mocker.patch.object(
-            orchestrator.RunAgentLoop, "run_deep_research_mode",
-            side_effect=lambda **kw: (
+            orchestrator.RunAgentLoop, "stream_deep_research_mode",
+            side_effect=pass_stream(lambda **kw: (
                 seen.append(kw.get("authorization")),
-                _canned(kw["pass_id"]))[1])
+                _canned(kw["pass_id"]))[1]))
 
         auth = RunAuthorization(granted_tools={"x"})
         drain(orchestrator._run_pass("Pass 1", "in", "m", "p",
@@ -366,8 +366,8 @@ class TestAuthorizationReachesThePasses:
         from core.reasoning import orchestrator
 
         mocker.patch.object(
-            orchestrator.RunAgentLoop, "run_deep_research_mode",
-            return_value=_canned("Pass 2", text="not json"))
+            orchestrator.RunAgentLoop, "stream_deep_research_mode",
+            side_effect=pass_stream(_canned("Pass 2", text="not json")))
         seen = []
         mocker.patch.object(
             orchestrator.RunAgentLoop, "continue_conversation",
@@ -386,10 +386,10 @@ class TestAuthorizationReachesThePasses:
         from core.reasoning import orchestrator
 
         mocker.patch.object(
-            orchestrator.RunAgentLoop, "run_deep_research_mode",
-            side_effect=lambda **kw: _canned(
+            orchestrator.RunAgentLoop, "stream_deep_research_mode",
+            side_effect=pass_stream(lambda **kw: _canned(
                 kw["pass_id"], granted=[{"tool": "mcp__lib__search",
-                                         "params": {}}]))
+                                         "params": {}}])))
 
         auth = RunAuthorization(granted_tools={"mcp__lib__search"})
         drain(orchestrator._run_pass("Pass 1", "in", "m", "p",
@@ -434,8 +434,9 @@ class TestAuthorizationReachesThePasses:
         from core.reasoning import orchestrator
 
         mocker.patch.object(
-            orchestrator.RunAgentLoop, "run_deep_research_mode",
-            return_value=_canned("Pass 1", granted=[{"tool": "x", "params": {}}]))
+            orchestrator.RunAgentLoop, "stream_deep_research_mode",
+            side_effect=pass_stream(
+                _canned("Pass 1", granted=[{"tool": "x", "params": {}}])))
         assert drain(orchestrator._run_pass("Pass 1", "in", "m", "p")) == "text"
 
 

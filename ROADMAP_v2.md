@@ -77,6 +77,8 @@ Every decision below was made through a structured clarification cycle with the 
 - 22. Pipeline observability — orchestrator events + the live research view **(added during §16; BUILT)**
 - 23. Interactive tools — question tool, todo list, and the response channel they share **(added during §16)**
 - 24. `/init` — generate `CONTEXT.md` from the project **(added during §16)**
+- 25. Authorized tool use in the research pipeline **(BUILT)**
+- 26. Research legibility — pass internals, code stages, the claims view, colour, copy **(added after §22's first live run; BUILT)**
 - **Open Questions — None Remaining** (Rev. 3 — all decisions locked; verification items only)
 - **Why these calls, not just what they are** (Rev. 3 — the reasoning patterns behind several decisions above)
 
@@ -1380,7 +1382,18 @@ The orchestrator already calls `update_pipeline_run()` after every `run.log()`. 
 | # | Decision |
 |---|---|
 | **P1** | `PipelineEvent` is a **separate type from `LoopEvent`**, **kind-discriminated** (`kind: str` plus optional payload fields), living in `core/reasoning/events.py`. Not a second flat "exactly one field is populated" bag, and not a tagged union for both families — that would rewrite every `if event.token_delta:` read in `tui/app.py`, `core/loop.py` and the streaming tests, a §13-scale breakage inside a §22 change. This discharges AC4. |
-| **P2** | **No `LoopEvent` forwarding from inside a pass.** The orchestrator yields only its own kinds; each pass still runs through `run_deep_research_mode()` -> `run_to_completion()`. `core/loop.py`, `core/client.py`, `json_retry.py` and `review.py`'s internals were untouched by this section. |
+| **P2** | **No `LoopEvent` forwarding from inside a pass.** The orchestrator yields only its own kinds; each pass still runs through `run_deep_research_mode()` -> `run_to_completion()`. `core/loop.py`, `core/client.py`, `json_retry.py` and `review.py`'s internals were untouched by this section. **AMENDED BY §26** — see below. |
+
+**P2, amended by §26.** P2 rested on a premise — that a pass's internals are not worth
+seeing — and the first real ten-pass run disproved it: a Pass 1 making fourteen
+`fetch_url` calls over several minutes was indistinguishable from a hang. §26 has
+`_run_pass` iterate a new `RunAgentLoop.stream_deep_research_mode()` and **translate** a
+chosen subset of its `LoopEvent`s into pipeline kinds.
+
+What P2 was *protecting* still holds and is the reason the amendment is narrow: a
+consumer of `stream_deep_research_pipeline()` still receives exactly one event type, so
+no `if event.token_delta:` read exists outside `core/loop.py` and the streaming tests.
+`client.py`, `json_retry.py` and `review.py` remain untouched. Translated, not forwarded.
 | **P3** | **`run_deep_research_pipeline()` keeps its name, signature and synchronous behaviour**, becoming the drainer applied to the new `stream_deep_research_pipeline()` generator. The section's own text implied the public name should become the generator; that would have churned fifteen test sites and both shells for nothing AC1 asks for, and §13's *actual* shape is a private generator with draining wrappers. |
 | **P4** | Consumers built: TUI transcript lines, a TUI `ResearchProgress` sidebar panel, and CLI live progress. Both shells stopped re-printing `run.trace` at the end, since every line now arrives as an event. |
 
@@ -1516,6 +1529,76 @@ It is the harness's highest prompt-injection surface by construction: it fetches
 5. Attended mode raises a prompt per call, ignores run-scope, and a timeout denies one call without killing the run. ✓
 6. `research.granted_tools` in `settings.json` is rejected with a message explaining why it is absent. ✓
 7. A credential-shaped argument, or a blocked-domain URL, is refused at `dispatch()` for a tool that imports nothing from `safety/`. ✓
+
+---
+
+## 26. Research legibility — pass internals, code stages, the claims view, colour, copy — BUILT
+
+**Added after §22's first real ten-pass run**, which completed end to end and made five
+things obvious that reading the code had not. All five are about *reading* a run rather
+than running one, and they split cleanly: two are pipeline-level and reach both shells,
+three are TUI presentation.
+
+| # | What the run showed | Where it lives |
+|---|---|---|
+| 1 | Passes 4 and 6b appeared nowhere — and neither did D0, D1, D2 or Merge | `orchestrator.py` |
+| 2 | A pass was opaque while it ran: fourteen tool calls over minutes looked like a hang | `core/loop.py` + `orchestrator.py` |
+| 3 | Claims were readable only as prose; tier, grounding and assumption flags reached no shell | `tui/screens.py` |
+| 4 | Everything was flat white, including the `you` label, which read as the first word of the message | `tui/themes.py` + `tui/widgets.py` |
+| 5 | Text could not be selected at all | `tui/app.py` |
+
+### Decisions record (L1–L6)
+
+| # | Decision |
+|---|---|
+| **L1** | Tool calls and failed results reach the transcript; **streamed pass text does not**. Seven of the ten passes emit raw JSON, so streaming pass output buries the report under it. Only the volume escapes, as a throttled `pass_activity` total. This **amends §22 P2** — see the note in §22. |
+| **L2** | **Every** zero-LLM stage is announced, not just the two that were noticed. D0/D1/D2/Merge were invisible for exactly the same reason, and fixing only the reported symptom leaves the panel with different gaps rather than none. `D2` emits once per **round**, not once per exhausted claim. |
+| **L3** | Claims render in a scrollable modal (`/claims`, `ctrl+l`), taking plain dicts so the finished-run, stored-run and mid-run sources share one shape. |
+| **L4** | Role-based palette resolved from the `Theme` object. Assistant label is `venastine ›`. |
+| **L5** | `/copy [last\|report\|claims\|all] [--file <path>]`. OSC 52 cannot be confirmed, so `--file` is the route that provably worked. |
+| **L6** | The CLI prints the new kinds too — a capability visible in one shell and not the other is the split this project keeps warning about. |
+
+### What the build found
+
+**There is no truthful step signal, so the feature became a different one.** §26 set out
+to show "step N of a pass". `_run()` has no step marker to read: within a step it yields
+`tool_call_start`/`tool_result` in pairs, and between steps it yields nothing at all
+unless the model happened to stream text. Inferring a boundary from that interleaving
+would be a guess presented as a fact, and a real marker means growing `LoopEvent`, which
+P1's test forbids. So the panel counts `tool_call` events itself — derivation, not a
+second writer — and `pass_activity` covers the passes that call no tools.
+
+**Tool arguments were the one unredacted path.** §25 R5 added `check_input_policy()`,
+but that **refuses** a call rather than redacting one, and `dispatch()`'s
+`check_output_policy` only ever saw results — so a `fetch_url` whose url carried an API
+key would have been printed verbatim in both shells the moment tool calls became
+visible. Redaction runs before truncation, because truncating first can cut a credential
+below the 20 characters its pattern needs.
+
+**A `for` loop over a generator silently discards its return value**, and `thread_id` is
+attached after the pass's loop finishes. `_translate` uses `next()` for that reason; the
+`for`-loop version passes every test about tool events and breaks §3's JSON retry
+invisibly.
+
+**Twenty-two test doubles stopped intercepting, silently — again.** §22 recorded this
+with twelve; §26 hit it with fifteen `run_deep_research_mode` patches plus seven more in
+shared fixtures using a different spelling. Repointed through one `conftest.pass_stream`
+helper rather than open-coded at each site, and the three transcript stubs needed the
+new write methods for the same class of reason.
+
+**`ctrl+k` would have been shadowed.** Textual's `Input` binds it to `delete_right_all`
+and holds focus almost always, so the obvious key for a claims view would have silently
+deleted the rest of the typed line. `ctrl+l` verified free against the installed version
+per D22, and pinned by a test that presses the key with text in the input.
+
+### Acceptance criteria
+
+1. A pass's tool calls, and its failed results, reach a consumer as `PipelineEvent`s while the pass is still running — with parameters redacted. ✓
+2. Every zero-LLM stage emits exactly one `stage` event; `D2` emits once per retry round however many claims it disposes of. ✓
+3. `run_deep_research_mode()` is unchanged in signature and return type, and remains what every non-observing caller uses. ✓
+4. Colour comes from theme variables only, so all eight themes restyle without edits, and a widget renders unstyled rather than raising when there is no running app. ✓
+5. Text is retrievable from the session without terminal selection, by a route whose success is not overclaimed. ✓
+6. Both shells render the new kinds. ✓
 
 ---
 

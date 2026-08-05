@@ -10,7 +10,7 @@ from rich.text import Text
 from textual.reactive import reactive
 from textual.widgets import RichLog, Static
 
-from tui import ravens
+from tui import ravens, themes
 
 # Animation cadence. Slow enough to read, and paused outright while tokens
 # are streaming -- a redraw loop competing with token deltas is the one
@@ -114,13 +114,22 @@ class ResearchProgress(Static):
         ("UNVERIFIED_COVERAGE", "uncovered"),
     )
 
+    # §26. Code stages roughly double the row count, so the §22 window of 8
+    # would push Pass 0 off before the run reached its own claims. Still a
+    # WINDOW rather than the whole list: #research-progress scrolls, but a
+    # Static does not scroll itself to the bottom, so an unbounded list
+    # would leave the newest row out of view -- the opposite of the
+    # problem being fixed.
+    ROWS = 16
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.display = False
         self.reset()
 
     def reset(self) -> None:
-        self._passes: list = []          # [[pass_id, done?], ...]
+        # [pass_id, done?, code_stage?, tool_calls, chars]
+        self._passes: list = []
         self._tiers: dict = {}           # claim_id -> tier
         self._claims = 0
         self._retries = 0
@@ -131,7 +140,7 @@ class ResearchProgress(Static):
         self._redraw()
 
     def pass_started(self, pass_id: str) -> None:
-        self._passes.append([pass_id, False])
+        self._passes.append([pass_id, False, False, 0, 0])
         self._redraw()
 
     def pass_completed(self, pass_id: str) -> None:
@@ -140,6 +149,34 @@ class ResearchProgress(Static):
                 entry[1] = True
                 break
         self._redraw()
+
+    def stage_completed(self, pass_id: str) -> None:
+        """A zero-LLM stage (§26). Recorded as already done, because it
+        was: it made no model call, so it has no observable running
+        state."""
+        self._passes.append([pass_id, True, True, 0, 0])
+        self._redraw()
+
+    def tool_called(self, pass_id: str) -> None:
+        """Counted here rather than carried on an event of its own -- see
+        the note in core/reasoning/events.py about why there is no step
+        kind. The count is what proves a quiet pass is working."""
+        entry = self._current(pass_id)
+        if entry is not None:
+            entry[3] += 1
+            self._redraw()
+
+    def activity(self, pass_id: str, chars: int) -> None:
+        entry = self._current(pass_id)
+        if entry is not None:
+            entry[4] = chars or 0
+            self._redraw()
+
+    def _current(self, pass_id: str):
+        for entry in reversed(self._passes):
+            if entry[0] == pass_id and not entry[1]:
+                return entry
+        return None
 
     def claim_extracted(self) -> None:
         self._claims += 1
@@ -156,20 +193,41 @@ class ResearchProgress(Static):
         self._retries += 1
         self._redraw()
 
+    def _styles(self) -> dict:
+        try:
+            app = self.app
+        except Exception:  # noqa: BLE001 -- see Transcript._styles
+            return {}
+        return themes.styles_for(app)
+
     def _redraw(self) -> None:
-        lines = ["research", ""]
-        for pass_id, done in self._passes[-8:]:
-            lines.append(f"{'x' if done else '>'} {pass_id}")
+        styles = self._styles()
+        body = Text()
+        body.append("research\n\n")
+        for pass_id, done, is_stage, tools, chars in self._passes[-self.ROWS:]:
+            if is_stage:
+                marker, role = "·", "pass_done"
+            else:
+                marker, role = ("x", "pass_done") if done else (">", "pass")
+            body.append(f"{marker} {pass_id}\n", styles.get(role, ""))
+            if not done:
+                detail = []
+                if tools:
+                    detail.append(f"{tools} tool{'s' if tools > 1 else ''}")
+                if chars:
+                    detail.append(f"{chars // 1000}k")
+                if detail:
+                    body.append(f"    {' · '.join(detail)}\n",
+                                styles.get("tool", ""))
         if self._claims:
-            lines.append("")
-            lines.append(f"{self._claims} claim(s)")
+            body.append(f"\n{self._claims} claim(s)\n")
         for tier, label in self.TIERS:
             count = sum(1 for v in self._tiers.values() if v == tier)
             if count:
-                lines.append(f"  {label} {count}")
+                body.append(f"  {label} {count}\n", styles.get(tier, ""))
         if self._retries:
-            lines.append(f"{self._retries} revision(s)")
-        self.update(Text("\n".join(lines)))
+            body.append(f"{self._retries} revision(s)\n")
+        self.update(body)
 
 
 class Transcript(RichLog):
@@ -188,41 +246,145 @@ class Transcript(RichLog):
     but this is not progressive rendering, and anyone chasing streaming
     latency should look here first rather than for a render path that
     does not exist.
+
+    §26 adds two things and one obligation.
+
+    COLOUR, by role rather than by call site. tui/themes.role_styles()
+    resolves them against the active theme; see the note there about why a
+    RichLog cannot use app.tcss's variables.
+
+    AN ENTRY LOG. `_entries` keeps (role, raw_text) for everything written,
+    and it earns its place twice: RichLog cannot restyle what it has
+    already rendered, so a /theme switch mid-session needs rerender() to
+    replay; and /copy needs the session's text, which RichLog stores only
+    as rendered segments. One list rather than two mechanisms.
+
+    The obligation: every write path must go through _emit(), or a line
+    lands on screen and is absent from both the replay and the copy. That
+    is the same "two writers of related data" shape §22 spent a section
+    removing from the trace.
     """
 
     def __init__(self, **kwargs):
         super().__init__(wrap=True, markup=False, **kwargs)
         self._pending = ""
+        self._entries: list[tuple[str, str]] = []
+
+    # -- styling -----------------------------------------------------------
+
+    def _styles(self) -> dict:
+        # Resolved per write rather than cached at mount: /theme switches
+        # the palette under a live widget, and a cache would leave every
+        # subsequent line in the old theme's colours.
+        #
+        # self.app RAISES (NoActiveAppError) rather than returning None
+        # outside a running app, and widgets are built bare in tests, so
+        # the guard is around the attribute access itself.
+        try:
+            app = self.app
+        except Exception:  # noqa: BLE001 -- no running app; render unstyled
+            return {}
+        return themes.styles_for(app)
+
+    def _style(self, role: str) -> str:
+        return self._styles().get(role, "")
+
+    # -- writing -----------------------------------------------------------
+
+    def _emit(self, role: str, text: str, record: bool = True) -> None:
+        """Render one entry and remember it. THE single write path."""
+        if record:
+            self._entries.append((role, text))
+        self._render_entry(role, text)
+
+    def _render_entry(self, role: str, text: str) -> None:
+        if role == "user":
+            self.write(Text.assemble(
+                ("\nyou ›  ", self._style("user_label")),
+                (text, self._style("user"))))
+        elif role == "assistant":
+            self.write(Text("\nvenastine ›", self._style("assistant_label")))
+            for block in _split_fences(text):
+                if isinstance(block, tuple):
+                    language, code = block
+                    self.write(Syntax(code, language or "text",
+                                      theme="ansi_dark", word_wrap=True,
+                                      indent_guides=False))
+                else:
+                    self.write(Text(block, self._style("assistant")))
+        else:
+            self.write(Text(f"     {text}", self._style(role)))
 
     def write_user(self, text: str) -> None:
         self.flush_stream()
-        self.write(Text(f"\nyou  {text}", style="bold"))
+        self._emit("user", text)
 
     def write_system(self, text: str) -> None:
         self.flush_stream()
-        self.write(Text(f"     {text}", style="dim italic"))
+        self._emit("system", text)
 
     def write_error(self, text: str) -> None:
         self.flush_stream()
-        self.write(Text(f"     {text}", style="bold red"))
+        self._emit("error", text)
+
+    def write_role(self, role: str, text: str) -> None:
+        """Write a line in an arbitrary palette role (§26).
+
+        Exists so the research view can style a pass boundary, a tool call
+        and a failed tool differently without Transcript growing a method
+        per event kind -- the roles already live in one table, and this is
+        the accessor for it.
+        """
+        self.flush_stream()
+        self._emit(role, text)
+
+    def write_answer(self, text: str) -> None:
+        """A model answer that did not arrive as a stream (a one-shot turn,
+        a research report). Same rendering as a flushed stream, so the two
+        do not diverge in label, colour or fence handling."""
+        self.flush_stream()
+        self._emit("assistant", text)
 
     def stream_delta(self, delta: str) -> None:
         self._pending += delta
 
-    def flush_stream(self) -> None:
+    def flush_stream(self) -> str:
         """Commit the buffered stream, rendering fenced code blocks with
-        syntax highlighting and everything else as plain text."""
+        syntax highlighting and everything else as plain text.
+
+        Returns what was flushed (empty when there was nothing), so the app
+        can track the last response for /copy without keeping a second
+        buffer beside this one.
+        """
         if not self._pending:
-            return
+            return ""
         text, self._pending = self._pending, ""
-        self.write(Text("\nraven", style="bold"))
-        for block in _split_fences(text):
-            if isinstance(block, tuple):
-                language, code = block
-                self.write(Syntax(code, language or "text", theme="ansi_dark",
-                                  word_wrap=True, indent_guides=False))
-            else:
-                self.write(Text(block))
+        self._emit("assistant", text)
+        return text
+
+    # -- replay ------------------------------------------------------------
+
+    def rerender(self) -> None:
+        """Redraw every entry under the current theme.
+
+        RichLog stores rendered segments, not source, so a theme switch
+        cannot restyle what is already on screen -- without this, /theme
+        would leave the session split between two palettes at the exact
+        line the command was typed.
+        """
+        self.flush_stream()
+        self.clear()
+        for role, text in self._entries:
+            self._render_entry(role, text)
+
+    def as_text(self) -> str:
+        """The session as plain text, for /copy all."""
+        labels = {"user": "you", "assistant": "venastine"}
+        out = []
+        for role, text in self._entries:
+            label = labels.get(role)
+            out.append(f"{label}: {text}" if label else text)
+        return "\n\n".join(out)
 
 
 def _split_fences(text: str):

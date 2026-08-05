@@ -78,6 +78,33 @@ ThreadPickerScreen {
     align: center middle;
 }
 
+/* §26 claims view. Wider than the other dialogs because claim text is
+   prose rather than a label, and primary-bordered rather than
+   warning-bordered: this one only reads, it authorises nothing. */
+ClaimsScreen {
+    align: center middle;
+}
+
+#claims-dialog {
+    width: 96;
+    height: auto;
+    max-height: 32;
+    padding: 1 2;
+    border: thick $primary;
+    background: $surface;
+}
+
+#claims-title {
+    text-style: bold;
+    padding-bottom: 1;
+}
+
+#claims-body {
+    height: auto;
+    max-height: 26;
+    overflow-y: auto;
+}
+
 /* §25 research grant picker. Warning-bordered like the permission modal
    rather than primary-bordered like the thread picker: both are
    authorization decisions, and looking like the neutral list-of-threads

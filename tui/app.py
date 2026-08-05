@@ -24,8 +24,10 @@ Two hard acceptance criteria live in this file:
        against textual 1.0.0's actual signature, not assumed.
 """
 
+import json
 import logging
 import queue
+from pathlib import Path
 from uuid import UUID
 
 from textual.app import App, ComposeResult
@@ -56,7 +58,8 @@ from prompts import system_prompts
 from tui import ravens, themes
 from tui.commands import SlashCommand, registry as commands
 from tui.screens import (
-    GrantPickerScreen, PermissionScreen, ReviewScreen, ThreadPickerScreen,
+    ClaimsScreen, GrantPickerScreen, PermissionScreen, ReviewScreen,
+    ThreadPickerScreen,
 )
 from tui.widgets import (
     EffortRaven, GoalBanner, RavenPanel, ResearchProgress, Transcript,
@@ -208,6 +211,13 @@ class VenastineApp(App):
     BINDINGS = [
         ("ctrl+c", "quit", "Quit"),
         ("ctrl+t", "pick_thread", "Threads"),
+        # §26. ctrl+l, NOT ctrl+k: Textual's Input binds ctrl+k to
+        # delete_right_all and the input holds focus almost always, so a
+        # ctrl+k binding here would be shadowed -- pressing it would
+        # silently delete the rest of the typed line instead. ctrl+l is
+        # bound by neither Input, App nor Footer on the pinned textual
+        # (D22: verified against the installed version, not assumed).
+        ("ctrl+l", "show_claims", "Claims"),
     ]
 
     def __init__(self, provider_name: str = DEFAULT_PROVIDER,
@@ -233,6 +243,15 @@ class VenastineApp(App):
         # new session starts clean. A LIST, not a set: activation order is
         # the order the bodies are pinned in.
         self.active_skills: list = []
+        # §26. What /copy and /claims read. `_last_response` is the most
+        # recent model answer by any route (streamed turn, one-shot,
+        # research report); `_last_run` is the finished PipelineRun, which
+        # carries the claims with their full metadata; `_live_claims` is
+        # the partial picture assembled from events while a run is still
+        # going, so /claims answers during a run rather than only after.
+        self._last_response: str = ""
+        self._last_run = None
+        self._live_claims: dict = {}
         # Set by exit(); the blocking ask paths consult it so a walk that
         # re-arms AFTER the one-shot channel release cannot park a
         # non-daemon worker on a queue nobody will ever answer (review
@@ -573,8 +592,11 @@ class VenastineApp(App):
         # Reload so the grill exchange is in the live history for the
         # next streaming turn.
         self.memory = ConversationMemory(thread_id=self.memory.thread_id)
-        self._transcript.flush_stream()
-        self._transcript.write(message.text)
+        # write_answer, not write(): a one-shot answer is a model answer,
+        # and rendering it as a bare row left it unlabelled, uncoloured,
+        # outside the entry log and therefore invisible to /copy.
+        self._transcript.write_answer(message.text or "")
+        self._last_response = message.text or ""
 
     def on_loop_event_message(self, message: LoopEventMessage) -> None:
         event = message.event
@@ -766,7 +788,11 @@ class VenastineApp(App):
     def on_turn_finished(self, message: TurnFinished) -> None:
         self._busy = False
         self._permission_channel = None
-        self._transcript.flush_stream()
+        # flush_stream returns what it committed (§26), so /copy tracks the
+        # last answer without a second buffer shadowing the transcript's.
+        flushed = self._transcript.flush_stream()
+        if flushed:
+            self._last_response = flushed
         self._raven.resume_animation()
         self._raven.state = ravens.IDLE
         if message.error is not None:
@@ -784,19 +810,51 @@ class VenastineApp(App):
 
         if event.kind == "pass_start":
             self._raven.state = ravens.THINKING
-            self._transcript.write_system(f"→ {event.pass_id}")
+            self._transcript.write_role("pass", f"→ {event.pass_id}")
             panel.pass_started(event.pass_id)
         elif event.kind == "pass_complete":
+            self._transcript.write_role("pass_done", f"← {event.pass_id}")
             panel.pass_completed(event.pass_id)
+        elif event.kind == "stage":
+            # §26. No arrow: a zero-LLM stage is over by the time it is
+            # announced, and an arrow would promise something starting.
+            self._transcript.write_role("pass_done", f"· {event.pass_id}")
+            panel.stage_completed(event.pass_id)
+        elif event.kind == "tool_call":
+            # §26, the thing §22 P2 made invisible. Indented under its
+            # pass, so a run reads as a tree rather than a flat log.
+            detail = f"  {event.text}" if event.text else ""
+            self._transcript.write_role("tool", f"  ▸ {event.tool}{detail}")
+            panel.tool_called(event.pass_id)
+        elif event.kind == "tool_result":
+            # Only failures. A line per successful call doubles the volume
+            # to say what the absence of an error line already says.
+            if not event.ok:
+                self._transcript.write_role(
+                    "tool_error", f"  ✗ {event.tool}  {event.text}")
+        elif event.kind == "pass_activity":
+            # Panel only. This is a running total that changes constantly;
+            # in an append-only transcript it would be a column of
+            # near-identical lines.
+            panel.activity(event.pass_id, event.chars)
         elif event.kind == "trace_line":
             # Same format the end-of-run dump used, so a run reads the
             # same whether you watched it or scrolled back to it.
             self._transcript.write_system(f"  {event.text}")
         elif event.kind == "claim_extracted":
+            # §26: kept for the claims view, so /claims says something
+            # useful while the run is still going rather than only after.
+            self._live_claims.setdefault(
+                event.claim_id, {"id": event.claim_id, "text": event.text})
             panel.claim_extracted()
         elif event.kind == "claim_tiered":
+            self._live_claims.setdefault(
+                event.claim_id, {"id": event.claim_id})["confidence_tier"] = event.tier
             panel.claim_tiered(event.claim_id, event.tier)
         elif event.kind == "retry":
+            claim = self._live_claims.setdefault(
+                event.claim_id, {"id": event.claim_id})
+            claim["retry_count"] = event.attempt
             panel.retried()
 
     def on_research_finished(self, message: ResearchFinished) -> None:
@@ -806,11 +864,20 @@ class VenastineApp(App):
             self._transcript.write_error(f"[pipeline failed: {message.error}]")
             return
         run = message.run
+        self._last_run = run
+        self._last_response = run.final_report or ""
         # §22: the trace is NOT re-printed here. Every line already
         # arrived as a trace_line event and was written as it happened;
         # dumping run.trace again would print the whole run twice.
-        self._transcript.flush_stream()
-        self._transcript.write(run.final_report)
+        self._transcript.write_answer(run.final_report or "")
+        if run.claims:
+            # §26. The report is a synthesis; the claims are what it was
+            # synthesised from, with the tiers and grounding that decided
+            # how much of it to believe. Advertised rather than dumped --
+            # a dozen claims with full metadata would bury the report
+            # directly beneath it.
+            self._transcript.write_system(
+                f"{len(run.claims)} claim(s) — /claims or ctrl+l to expand")
         if run.subagent_reviews:
             accepted = sum(1 for d in run.subagent_reviews
                            if d.get("decision") == "accept")
@@ -857,6 +924,52 @@ class VenastineApp(App):
 
         self.push_screen(ThreadPickerScreen(threads), chosen)
 
+    def action_show_claims(self) -> None:
+        self.show_claims("")
+
+    def show_claims(self, run_id: str = "") -> None:
+        """Open the claims view (§26), for this session's run or a stored
+        one. Shared by /claims and the ctrl+l binding so the two cannot
+        drift into showing different things."""
+        if run_id:
+            claims, title, partial = self._stored_claims(run_id)
+            if claims is None:
+                return
+        elif self._last_run is not None:
+            claims = [vars(c) for c in self._last_run.claims]
+            title = f"Claims — run {self._last_run.run_id}"
+            partial = False
+        elif self._live_claims:
+            # Mid-run. Only id, text and tier have been broadcast so far,
+            # which is thin but is genuinely more than nothing when the
+            # question is "what has it found so far".
+            claims = list(self._live_claims.values())
+            title = "Claims — run in progress"
+            partial = True
+        else:
+            self._transcript.write_system(
+                "No research run in this session yet. /research <query> "
+                "starts one, or /claims <run id> opens a stored run.")
+            return
+        self.push_screen(ClaimsScreen(claims, title, partial))
+
+    def _stored_claims(self, run_id: str):
+        """(claims, title, partial) for a persisted run, or (None, ...)
+        after reporting why not."""
+        from core.reasoning.pipeline_storage import load_pipeline_run
+
+        try:
+            record = load_pipeline_run(UUID(str(run_id)))
+        except ValueError as e:
+            # Covers both a malformed UUID and a run id that is not in the
+            # database; load_pipeline_run raises ValueError for the latter
+            # by its own documented convention.
+            self._transcript.write_error(f"/claims: {e}")
+            return None, "", False
+        return (record["claims"],
+                f"Claims — run {run_id} ({record['status']})",
+                record["status"] == "running")
+
 
 # ---------------------------------------------------------------------------
 # ---- Built-in slash commands ----------------------------------------------
@@ -869,6 +982,14 @@ def _cmd_help(app: VenastineApp, args: str) -> None:
     for command in commands.all():
         usage = f" {command.usage}" if command.usage else ""
         app._transcript.write_system(f"  /{command.name}{usage} — {command.summary}")
+    # §26. Worth saying plainly: the pinned textual has no text selection,
+    # so someone trying to select with the mouse gets nothing and has no
+    # way to know why. Most terminals let shift+drag bypass the app's
+    # mouse capture and select natively.
+    app._transcript.write_system(
+        "Text selection is not supported by this Textual version — hold "
+        "shift while dragging to select with the terminal itself, or use "
+        "/copy.")
 
 
 def _cmd_theme(app: VenastineApp, args: str) -> None:
@@ -883,6 +1004,11 @@ def _cmd_theme(app: VenastineApp, args: str) -> None:
         )
         return
     app.theme = args
+    # §26. RichLog stores rendered segments, not source, so everything
+    # already on screen keeps the OLD palette unless it is replayed --
+    # which would leave the session split between two colour schemes at
+    # the exact line this command was typed.
+    app._transcript.rerender()
     app._transcript.write_system(f"Theme set to {args}.")
 
 
@@ -1346,6 +1472,115 @@ def _cmd_compact(app: VenastineApp, args: str) -> None:
     app.run_worker(_work, thread=True, exit_on_error=False, name="compact")
 
 
+def _cmd_claims(app: VenastineApp, args: str) -> None:
+    """Open the claims view for this session's run, or a stored one."""
+    app.show_claims(args.strip())
+
+
+_COPY_TARGETS = ("last", "report", "claims", "all")
+
+
+def _cmd_copy(app: VenastineApp, args: str) -> None:
+    """Copy something out of the session (§26).
+
+    Exists because the pinned textual (1.0.0) has NO text selection --
+    App.ALLOW_SELECT and RichLog.allow_select arrived in 3.x -- so there
+    is no way to get text out of the transcript at all. That is a
+    dependency ceiling rather than a styling problem, which is why the
+    answer is a command rather than a widget setting.
+
+    App.copy_to_clipboard writes OSC 52, and OSC 52 CANNOT BE CONFIRMED:
+    the terminal either honours the escape sequence or silently ignores
+    it, and nothing comes back either way. Windows Terminal supports it;
+    some multiplexers strip it. So the message below says what was sent
+    rather than claiming it arrived, and --file is the route that provably
+    worked -- reporting a false success with no recourse is the worse
+    failure, since the user only finds out when they paste.
+    """
+    target, path, error = _parse_copy_args(args)
+    if error:
+        app._transcript.write_error(error)
+        return
+
+    text, described = _copy_payload(app, target)
+    if text is None:
+        app._transcript.write_error(f"Nothing to copy: {described}.")
+        return
+
+    if path is not None:
+        try:
+            written = Path(path).expanduser()
+            written.write_text(text, encoding="utf-8")
+        except OSError as e:
+            app._transcript.write_error(f"Could not write {path}: {e}")
+            return
+        app._transcript.write_system(
+            f"Wrote {described} ({len(text)} chars) to {written}.")
+        return
+
+    app.copy_to_clipboard(text)
+    app._transcript.write_system(
+        f"Sent {described} ({len(text)} chars) to the clipboard. If nothing "
+        f"pastes, this terminal is dropping OSC 52 — use "
+        f"/copy {target} --file <path>.")
+
+
+_COPY_USAGE = (f"Usage: /copy [{'|'.join(_COPY_TARGETS)}] [--file <path>]")
+
+
+def _parse_copy_args(args: str):
+    """(target, path, error). `path` is None when --file was not given.
+
+    Same shape as _parse_compact_args above, including that an
+    unrecognised option is an ERROR rather than something to ignore --
+    silently dropping `--fiel out.txt` would send the text to a clipboard
+    the user has just said they cannot use, and report success.
+    """
+    tokens = args.split()
+    target = "last"
+    index = 0
+    if tokens and not tokens[0].startswith("--"):
+        target = tokens[0].lower()
+        index = 1
+    path = None
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--file":
+            index += 1
+            if index >= len(tokens):
+                return None, None, f"--file needs a path. {_COPY_USAGE}"
+            path = tokens[index]
+        elif token.startswith("--file="):
+            path = token.split("=", 1)[1]
+            if not path:
+                return None, None, f"--file needs a path. {_COPY_USAGE}"
+        else:
+            return None, None, f"Unknown option {token!r}. {_COPY_USAGE}"
+        index += 1
+    if target not in _COPY_TARGETS:
+        return None, None, f"Unknown copy target {target!r}. {_COPY_USAGE}"
+    return target, path, None
+
+
+def _copy_payload(app: VenastineApp, target: str):
+    """(text, description), with text None when there is nothing."""
+    if target == "last":
+        return (app._last_response or None), "the last response"
+    if target == "report":
+        run = app._last_run
+        return ((run.final_report if run and run.final_report else None),
+                "the research report")
+    if target == "claims":
+        run = app._last_run
+        claims = ([vars(c) for c in run.claims] if run and run.claims
+                  else list(app._live_claims.values()))
+        if not claims:
+            return None, "the claim list"
+        return json.dumps(claims, indent=2, default=str), "the claim list"
+    # all
+    return (app._transcript.as_text() or None), "this session"
+
+
 def _cmd_quit(app: VenastineApp, args: str) -> None:
     app.exit()
 
@@ -1365,6 +1600,10 @@ def register_builtin_commands() -> None:
                      "[--grant[=a,b]] <query>"),
         SlashCommand("compact", "summarize this conversation's older turns now",
                      _cmd_compact, "[--strength 1-5]"),
+        SlashCommand("claims", "show a research run's claims and their tiers",
+                     _cmd_claims, "[run id]"),
+        SlashCommand("copy", "copy text out of the session", _cmd_copy,
+                     f"[{'|'.join(_COPY_TARGETS)}] [--file <path>]"),
         SlashCommand("threads", "resume a saved thread", _cmd_threads),
         SlashCommand("new", "start a new thread", _cmd_new),
         SlashCommand("quit", "exit", _cmd_quit),

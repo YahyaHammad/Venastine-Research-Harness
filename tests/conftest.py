@@ -41,6 +41,40 @@ def drain(gen):
         return stop.value
 
 
+def _no_events(response):
+    """A generator that yields no LoopEvent and returns `response`."""
+    return response
+    yield  # never reached -- its presence is what makes this a generator
+
+
+def pass_stream(source, events=()):
+    """side_effect for RunAgentLoop.stream_deep_research_mode.
+
+    ROADMAP_v2 §26 made `_run_pass` iterate the streaming sibling instead
+    of calling `run_deep_research_mode`, and a double patched on the old
+    name STOPS INTERCEPTING SILENTLY -- the real loop runs, reaches a
+    provider, and the test fails somewhere unrelated. That is verbatim
+    §22's twelve-doubles trap one layer down, so the repointing goes
+    through one helper rather than being open-coded at fifteen sites.
+
+    `source` is whatever the old double returned: a ModelResponse, or a
+    callable taking the same kwargs. `events` are LoopEvents to yield
+    first, for the tests that assert on what a pass makes visible.
+    """
+    def _side_effect(*args, **kwargs):
+        response = source(*args, **kwargs) if callable(source) else source
+        if not events:
+            return _no_events(response)
+        return _with_events(response, events)
+    return _side_effect
+
+
+def _with_events(response, events):
+    for event in events:
+        yield event
+    return response
+
+
 # ---------------------------------------------------------------------------
 # ---- ModelResponse builder (no SDK mocking needed) ----------------------
 # ---------------------------------------------------------------------------

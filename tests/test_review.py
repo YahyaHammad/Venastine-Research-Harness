@@ -30,7 +30,7 @@ from core.approval import (
 )
 from core.events import LoopEvent
 from core.loop import RunAgentLoop
-from tests.conftest import make_model_response
+from tests.conftest import make_model_response, pass_stream
 
 
 def _capturing_run(captured):
@@ -250,8 +250,8 @@ def _stub_resynthesis(mocker, text="REPORT v2"):
         calls.append({"pass_id": pass_id, "input": pass_input})
         return make_model_response(text=text)
 
-    mocker.patch.object(RunAgentLoop, "run_deep_research_mode",
-                        side_effect=side_effect)
+    mocker.patch.object(RunAgentLoop, "stream_deep_research_mode",
+                        side_effect=pass_stream(side_effect))
     return calls
 
 
@@ -828,7 +828,7 @@ class TestReviewHardening:
         """
         run = _reviewed_run()
         _stub_reviewer(mocker, [TEXT_FINDING])
-        mocker.patch.object(RunAgentLoop, "run_deep_research_mode",
+        mocker.patch.object(RunAgentLoop, "stream_deep_research_mode",
                             side_effect=RuntimeError("provider down"))
 
         # No pytest.raises: the stage returns normally, so the pipeline's
@@ -1424,11 +1424,19 @@ class _FakeTuiApp:
 
 
 class _NullTranscript:
+    # Every write path the real Transcript exposes. A stub that lags
+    # behind it fails as an AttributeError from inside app.py, a long way
+    # from the widget that grew the method (§26 added write_answer,
+    # write_role, rerender and as_text).
     def write(self, *a, **k): pass
     def write_user(self, *a, **k): pass
     def write_system(self, *a, **k): pass
     def write_error(self, *a, **k): pass
-    def flush_stream(self, *a, **k): pass
+    def write_answer(self, *a, **k): pass
+    def write_role(self, *a, **k): pass
+    def flush_stream(self, *a, **k): return ""
+    def rerender(self, *a, **k): pass
+    def as_text(self, *a, **k): return ""
 
 
 class _NullRaven:

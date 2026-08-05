@@ -2479,3 +2479,124 @@ try.
 The pipeline still has not completed a full ten-pass run end to end. Everything
 above is a fix for something that stopped one; whether it now finishes is the
 next manual pass.
+
+---
+
+# §26 — Research legibility (2026-08-05)
+
+The pipeline completed a full ten-pass run end to end for the first time, which
+closes the open item the previous entry left. What the run showed is this
+section: five gaps, none of them correctness, all of them about *reading* a run.
+
+Same cycle as every built section — read the referenced files, verify the claims
+against the code, surface the ambiguities as explicit questions with options and
+a recommendation, lock the answers, then implement. Two rounds of questions, six
+decisions (L1–L6).
+
+## What was reported, and what it turned out to be
+
+| Reported | Actual cause |
+|---|---|
+| "the side panel doesn't display passes 4 and 6b" | `_run_pass` is the only thing that emits a boundary, and it wraps a model call. D0, D1, D2 and Merge were invisible for the same reason — the report named the two that were noticed, not the extent |
+| "nothing like successful tool calls or thinking tokens gets displayed" | §22 decision **P2**, working as designed |
+| "displaying the list of claims would be pretty cool" | The data existed on every `Claim` and reached `/output/<run_id>/`; no shell could show it |
+| "all the user inputs are a flat white" | `write_user` wrote `\nyou  {text}` with one `bold` style over label and message together |
+| "i can't highlight and copy text" | textual 1.0.0 has no text selection at all. A dependency ceiling, not a styling problem |
+
+## The decision that needed the user, not me
+
+**Tool calls inside a pass reverse §22's P2**, which is a locked decision in a
+document that says locked decisions are not to be silently overridden. So it was
+asked rather than assumed, with the cost stated (a new generator/drainer pair in
+`core/loop.py`, and ~15 test doubles to repoint).
+
+P2 was **amended, not repealed**, and the distinction is the whole design.
+`_run_pass` iterates `stream_deep_research_mode()` and *translates* a chosen
+subset of `LoopEvent`s into pipeline kinds — so a consumer still receives exactly
+one event type, which is what P1 and P2 were jointly protecting. What changed is
+only P2's premise: that a pass's internals were not worth seeing. A Pass 1 making
+fourteen `fetch_url` calls over several minutes was indistinguishable from a hang.
+
+## Deviation from the approved plan, and why
+
+The plan (and the option the user picked) said the sidebar would show **"step N"**
+for the running pass. It shows **"N tools"** instead, plus a character total.
+
+There is no truthful step signal to report. `_run()` has no step marker: within a
+step it yields `tool_call_start`/`tool_result` in pairs, and between steps it
+yields nothing at all unless the model happened to stream text. Inferring a
+boundary from that interleaving would be a guess presented as a fact, and adding
+a real marker means growing `LoopEvent`, which P1's test forbids.
+
+So the counter became what is actually countable. The panel counts `tool_call`
+events itself — derivation, not a second writer of related data — and
+`pass_activity` carries a throttled running character total for the passes that
+call no tools at all (Pass 1 and final synthesis, which are also the two longest).
+The user was told before implementation continued.
+
+## What the build found
+
+**Tool arguments were the one unredacted path.** Making tool calls visible would
+have printed them. §25's R5 added `check_input_policy()`, but that **refuses** a
+call rather than redacting one, and `dispatch()`'s `check_output_policy` only ever
+saw results — so a `fetch_url` whose url carried an API key would have gone
+verbatim into two shells and the persisted transcript. `_param_digest` redacts
+**before** truncating, because truncating first cuts a credential below the 20
+characters its pattern needs and leaves the fragment matching nothing. The first
+version of that test was vacuous for exactly this reason — a 60-character key
+still matched after truncation — and only became discriminating once the fixture
+put the cut inside the key.
+
+**A `for` loop over a generator silently discards its return value.** `_translate`
+uses `next()` because `thread_id` is attached after the pass's loop finishes. The
+`for`-loop version passes every test about tool events and breaks §3's JSON retry
+invisibly — it would open a new thread instead of correcting the failed one.
+
+**Twenty-two test doubles stopped intercepting, silently — again.** §22 recorded
+this with twelve. §26 hit 46 failures across 8 files: fifteen
+`mocker.patch(... "run_deep_research_mode")` sites plus seven more in shared
+fixtures using a spelling the first grep missed. They fail by running the REAL
+loop, not by erroring. Repointed through one `conftest.pass_stream` helper rather
+than open-coded at each site. The three transcript stubs
+(`_StubTranscript`, `_NullTranscript`, `_T`) needed the new write methods for the
+same class of reason, and that one surfaced as an `AttributeError` from inside
+`app.py`, a long way from the widget that grew the method.
+
+**`ctrl+k` would have been shadowed.** Textual's `Input` binds it to
+`delete_right_all` and holds focus almost always, so the obvious key for a claims
+view would have silently deleted the rest of the typed line instead of opening
+anything. `ctrl+l` verified free against the installed version per D22 — and the
+claim is test-pinned by pressing the key with text in the input, which is the
+mutation that proved it (binding it to `ctrl+k` turns that test red).
+
+**A `RichLog` cannot use theme variables.** Every other widget styles itself
+through `app.tcss`, which resolves `$primary` per theme. A `RichLog` renders Rich
+`Text`, and a Rich style needs a concrete colour — so `themes.role_styles()`
+resolves against the `Theme` object instead, keeping the property that no literal
+appears and a new theme needs no edit. It also cannot restyle what it has already
+rendered, which is why `/theme` replays from `Transcript._entries`; that list then
+paid for itself twice by being what `/copy all` reads.
+
+## Tests
+
+989 -> 1028. One new file (`test_research_legibility.py`, 39 tests). Seven
+mutations verified red on the right test each (nine counting the two CLI
+renderers): dropping `redact_secrets` from the
+digest, `_translate` losing the generator's return value, `D2` emitting per claim
+instead of per round, `Transcript` losing its no-app fallback, the claims binding
+moved to `ctrl+k`, `/theme` not replaying, and `run_deep_research_mode` not
+draining.
+
+Two of my own tests were vacuous when first written and are recorded because both
+looked fine: the redaction-order test passed whichever order the code used until
+the fixture put the truncation cut inside the key, and the theme-replay test
+asserted on `_entries` (which survive either way) until it spied on the render
+instead.
+
+## Not verified
+
+Nothing offline can judge whether the sidebar stays legible once code stages and
+a retry loop are both in it, whether the tool lines read as belonging to their
+pass at real pass durations, or whether `/copy`'s OSC 52 reaches this terminal's
+clipboard — that last one is unconfirmable by construction, which is why `--file`
+exists.
