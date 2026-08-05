@@ -36,7 +36,18 @@ logger = logging.getLogger(__name__)
 # Nothing is lost by excluding it: research passes have never been able to
 # delegate. The TUI chat path, where a human is watching and answers per
 # turn, is unaffected.
-PIPELINE_UNGRANTABLE = frozenset({"spawn_subagent"})
+PIPELINE_UNGRANTABLE = frozenset({
+    "spawn_subagent",
+    # ROADMAP_v2 §21b (M17). `remember` has no approval_check, so it is
+    # grantable by R2's rule and would appear in the picker -- and one
+    # --grant remember at launch would let ten unattended passes,
+    # reading attacker-controlled web pages, write durable
+    # cross-session memories. §21's D26 consequence 1 says research
+    # passes must not be able to do that, and R4's reasoning about one
+    # launch-time tick compounding into unbounded authority applies
+    # word for word.
+    "remember",
+})
 
 
 # "The flag was given with no value -- ask me which." A distinct object

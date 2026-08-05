@@ -372,6 +372,9 @@ class ToolPermissions:
     # conversation the user is watching -- a wrong pin costs some context
     # budget and nothing else.
     pin: bool = True
+    # §21b. Allowed everywhere; whether it can actually RUN is decided
+    # by the approval gate below plus §13's headless rule.
+    remember: bool = True
 
 @dataclass
 class ToolApprovals:
@@ -422,3 +425,13 @@ class ToolApprovals:
     # on the CLI and inside a research pass, where an approval-gated tool
     # is not merely denied but not advertised at all (§13).
     pin: bool = False
+    # §21b/D26, and the asymmetry with pin above IS the decision. A
+    # memory outlives its thread and silently shapes conversations the
+    # user has not started yet, so it is persistent and invisible at the
+    # moment it matters -- the same axis that separates write from read.
+    #
+    # Consequence: unreachable on any headless path, which includes every
+    # research pass. That is deliberate (§21's consequence 1) and is
+    # reinforced by PIPELINE_UNGRANTABLE, because a grant would otherwise
+    # route around it.
+    remember: bool = True
