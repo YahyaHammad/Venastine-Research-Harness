@@ -324,6 +324,29 @@ MAX_INJECTED_MEMORIES = 50
 # WHAT to preserve. Mechanical truncation cannot exercise judgment at all.
 COMPACTOR_AGENT = "compactor"
 
+# ROADMAP_v2 §21c. How long a whole-thread summary may be, in characters.
+#
+# ABSOLUTE, not a COMPACTION_TARGET_RATIOS entry, and the difference is the
+# consumer rather than the summarizer. A fold's summary REPLACES the span it
+# came from, so scaling with that span is right: a bigger fold earns a bigger
+# summary and the thread still shrinks. §21c's summary is injected as a prompt
+# tier present on every turn of the REFERENCING thread, where nothing it
+# replaces bounds it -- a 500KB thread at strength 3 would put 75KB into every
+# call indefinitely.
+#
+# A thread whose rendered text already fits this is stored verbatim and costs
+# no model call at all.
+SUMMARY_TARGET_CHARS = 2_000
+
+# §21c. How many referenced threads may be attached to one thread at once.
+#
+# Small on purpose, and the cap REFUSES rather than dropping the oldest: a
+# reference is something a person chose by name, and silently discarding one
+# to make room for another is exactly what §21b's "removal is by id, never by
+# substring" rule exists to prevent. The count and the cap are stated in the
+# fragment the model reads, per M14's no-silent-caps rule.
+MAX_INJECTED_REFS = 3
+
 # M6. A research pass is headless and unattended, and each one already
 # returns a distillation, so routine compaction there would spend on a
 # judgment call nobody is watching. Passes compact only when approaching

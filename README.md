@@ -274,7 +274,7 @@ Precedence for provider and model is CLI flag > `settings.json` > `config.py`.
 
 **Remaining:** §21c (cross-thread referencing, session summaries) and §23–§24 (interactive tools, `/init`).
 
-Run the test suite with `pytest` — 1060 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
+Run the test suite with `pytest` — 1069 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
 
 ## Documentation
 
