@@ -274,12 +274,34 @@ def _render_claims(claims: list) -> str:
     return "\n".join(out).rstrip()
 
 
+def _thread_row(thread: dict) -> str:
+    """One picker row: timestamp, first message, id (§27).
+
+    `.get` for preview rather than indexing: the row shape gained fields in
+    §27 and this screen is constructed directly in tests with hand-built
+    dicts, where a KeyError would be a test-only failure in a renderer whose
+    job is to survive a thin row.
+    """
+    created = thread["created_at"]
+    stamp = (f"{created:%Y-%m-%d %H:%M}"
+             if hasattr(created, "strftime") else str(created))
+    preview = (thread.get("preview") or "").strip()
+    return f"{stamp}  {preview}  ({thread['id']})" if preview \
+        else f"{stamp}  {thread['id']}"
+
+
 class ThreadPickerScreen(ModalScreen[object]):
     """Pick a thread to resume. Dismisses with a UUID, or None to cancel.
 
-    Reads storage.list_threads(), which already exists and already returns
-    threads newest-first -- §16 AC1 confirmed no storage.py change is needed
-    for thread switching.
+    Reads storage.list_threads(), which since §27 returns CONVERSATIONS only
+    -- a research run creates ~15 threads of machinery and every automatic
+    compaction one more, and all of them used to be offered here as things
+    to resume.
+
+    A row leads with the thread's first user message (§27), because a list
+    of uuids and timestamps was still unusable once it was short: filtering
+    made the picker correct, and the preview is what makes it answerable.
+    The id stays, since it is what --thread takes.
     """
 
     BINDINGS = [("escape", "cancel", "Cancel")]
@@ -289,14 +311,7 @@ class ThreadPickerScreen(ModalScreen[object]):
         self._threads = threads
 
     def compose(self) -> ComposeResult:
-        items = [
-            ListItem(Label(
-                f"{t['created_at']:%Y-%m-%d %H:%M}  {t['id']}"
-                if hasattr(t["created_at"], "strftime")
-                else f"{t['created_at']}  {t['id']}"
-            ))
-            for t in self._threads
-        ]
+        items = [ListItem(Label(_thread_row(t))) for t in self._threads]
         yield Vertical(
             Label("Resume which thread?", id="thread-title"),
             ListView(*items, id="thread-list") if items

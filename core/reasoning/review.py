@@ -44,6 +44,7 @@ import logging
 
 import config
 from core.reasoning.json_retry import parse_json_response, retry_until_json
+from storage import THREAD_KIND_SUBAGENT
 
 logger = logging.getLogger(__name__)
 
@@ -136,6 +137,10 @@ def run_review(run, model: str, provider_name: str, authorization=None):
             context=context,
             system_prompt=prompt,
             authorization=authorization,
+            # §27 AC1. The reviewer IS a subagent -- §20 calls it one and it
+            # runs through the same entry point -- so its thread is labelled
+            # like one rather than getting a fourth kind of its own.
+            thread_kind=THREAD_KIND_SUBAGENT,
         )
         _record_granted_calls(run, response, authorization)
 

@@ -232,10 +232,16 @@ def test_add_tool_result_appends_one_entry_per_result(fake_storage):
 # ---------------------------------------------------------------------------
 
 def test_list_threads_returns_all_threads_most_recent_first(fake_storage):
-    """list_threads() must return every created thread as
-    {"id": UUID, "created_at": datetime}, ordered most-recent-first.
+    """list_threads() must return every CHAT thread as
+    {"id", "created_at", "kind", "preview"}, ordered most-recent-first.
     This is the backend function the CLI / TUI thread picker will call;
-    core/memory.py does NOT use it."""
+    core/memory.py does NOT use it.
+
+    §27 added `kind` and `preview` to the row and made the default filter
+    conversations-only, so "every created thread" now means every thread
+    created with the default kind. The kind filter itself is asserted
+    against REAL storage in test_storage_e2e.py -- what a SQL WHERE clause
+    returns is not a question the fake can answer (this file's own rule)."""
     import time
     from uuid import UUID
     from datetime import datetime
@@ -257,7 +263,8 @@ def test_list_threads_returns_all_threads_most_recent_first(fake_storage):
     for entry in result:
         assert isinstance(entry["id"], UUID)
         assert isinstance(entry["created_at"], datetime)
-        assert set(entry.keys()) == {"id", "created_at"}
+        assert set(entry.keys()) == {"id", "created_at", "kind", "preview"}
+        assert entry["kind"] == "chat"
 
 
 def test_list_threads_empty_when_no_threads(fake_storage):

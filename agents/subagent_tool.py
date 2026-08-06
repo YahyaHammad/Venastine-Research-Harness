@@ -19,6 +19,7 @@ imports this module to register it, and core.loop imports tools.registry
 """
 
 import config
+from storage import THREAD_KIND_SUBAGENT
 from tools.context import ToolContext
 
 TOOL_SCHEMA = {
@@ -130,6 +131,9 @@ def run(params: dict, parent_context=None, parent_run=None,
             agent, DEFAULT_SYSTEM_PROMPT, context=child),
         permission_channel=permission_channel,
         granted_tools=granted if permission_channel is not None else None,
+        # §27 AC1. A spawned agent's thread is not a conversation anyone
+        # will resume, and one goal-mode turn can spawn several.
+        thread_kind=THREAD_KIND_SUBAGENT,
     )
     return {
         "result": response.text,

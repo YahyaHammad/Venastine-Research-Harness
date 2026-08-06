@@ -37,6 +37,11 @@ import pytest
 from core.events import LoopEvent
 from core.loop import RunAgentLoop
 from core.reasoning import orchestrator
+# §27 moved the param digest here from orchestrator.py, because the replay
+# renderer became its second caller and redact-before-truncate must not
+# exist in two copies. These tests moved with it rather than being
+# duplicated, so there is still exactly one place that ordering is pinned.
+from safety import policy_enforcement
 from tests.conftest import drain, make_model_response, pass_stream
 from tests.test_orchestrator import _build_pass_mock, _clean_pipeline_payloads
 
@@ -223,7 +228,7 @@ class TestTheParamDigestIsRedacted:
         A fetch_url whose url carries a key would otherwise be printed
         verbatim in two shells."""
         key = "sk-" + "a" * 40
-        digest = orchestrator._param_digest(
+        digest = policy_enforcement.param_digest(
             {"url": f"https://api.test/v1?key={key}"})
 
         assert key not in digest
@@ -247,9 +252,9 @@ class TestTheParamDigestIsRedacted:
         # budget once substitution has shortened the string, and long
         # enough that truncate-first would leave only ~10 characters of
         # the key -- under the 20 the pattern needs.
-        prefix = "x" * (orchestrator._DIGEST_VALUE_CHARS - 15)
+        prefix = "x" * (policy_enforcement._DIGEST_VALUE_CHARS - 15)
         key = "sk-" + "b" * 40
-        digest = orchestrator._param_digest({"command": f"{prefix} {key}"})
+        digest = policy_enforcement.param_digest({"command": f"{prefix} {key}"})
 
         assert "sk-bbb" not in digest
         assert "[REDACTED]" in digest
@@ -257,9 +262,9 @@ class TestTheParamDigestIsRedacted:
     def test_a_long_value_is_truncated(self):
         """A write call would otherwise paste a whole file into the
         transcript."""
-        digest = orchestrator._param_digest({"content": "z" * 5000})
+        digest = policy_enforcement.param_digest({"content": "z" * 5000})
 
-        assert len(digest) <= orchestrator._DIGEST_CHARS
+        assert len(digest) <= policy_enforcement._DIGEST_CHARS
         assert digest.endswith("…")
 
     def test_a_failed_result_is_redacted_too(self, mocker):
@@ -290,9 +295,9 @@ class TestTheParamDigestIsRedacted:
         """A tool with no arguments, and one whose arguments are not a
         dict at all. A digest that raised would take down a pass over a
         cosmetic line."""
-        assert orchestrator._param_digest({}) == ""
-        assert orchestrator._param_digest(None) == ""
-        assert "1" in orchestrator._param_digest({"n": [1, 2]})
+        assert policy_enforcement.param_digest({}) == ""
+        assert policy_enforcement.param_digest(None) == ""
+        assert "1" in policy_enforcement.param_digest({"n": [1, 2]})
 
 
 # ===========================================================================

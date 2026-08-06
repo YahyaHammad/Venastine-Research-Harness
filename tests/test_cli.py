@@ -47,8 +47,10 @@ def test_run_agent_conversation_passes_thread_id_to_memory(mocker):
     from core.memory import ConversationMemory
 
     class SpyMemory:
-        def __init__(self, thread_id=None):
+        def __init__(self, thread_id=None, kind="chat"):
             captured_kwargs["thread_id"] = thread_id
+            # §27: recorded so this file can assert what the CLI creates.
+            captured_kwargs["kind"] = kind
             self.thread_id = thread_id or uuid4()
             self.messages = []
             self.extra = {}  # §18: run_agent_conversation reads the goal
@@ -82,8 +84,10 @@ def test_run_agent_conversation_without_thread_id_starts_fresh(mocker):
     captured_kwargs = {}
 
     class SpyMemory:
-        def __init__(self, thread_id=None):
+        def __init__(self, thread_id=None, kind="chat"):
             captured_kwargs["thread_id"] = thread_id
+            # §27: recorded so this file can assert what the CLI creates.
+            captured_kwargs["kind"] = kind
             self.thread_id = uuid4()
             self.messages = []
             self.extra = {}  # §18: run_agent_conversation reads the goal

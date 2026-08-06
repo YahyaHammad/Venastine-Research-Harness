@@ -15,6 +15,23 @@ class ConversationThread(SQLModel, table=True):
     id: UUID = Field(default_factory=uuid4, primary_key=True)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     extra_data: Dict[str, Any] = Field(default_factory=dict, sa_type=JSON)
+    # ROADMAP_v2 §27 (T1). What this thread IS: "chat" (a conversation a
+    # human had), "research_pass" (one pass of the ten-pass pipeline) or
+    # "subagent" (a spawned agent, the §20 reviewer, or the compactor).
+    #
+    # A COLUMN, not an extra_data key. That field exists and would need no
+    # migration, but it is an opaque JSON blob -- filtering on it means
+    # loading every row and testing in Python, and list_threads() is the
+    # one query that must stay cheap on a database gaining ~10 rows per
+    # research run.
+    #
+    # NOT indexed, deliberately. ensure_columns() ALTERs in a column and
+    # does not build indexes, and create_all() will not add one to a table
+    # that already exists -- so index=True here would produce an index on
+    # fresh databases and none on migrated ones. A divergence that shows
+    # up only as a performance difference is worse than no index at all;
+    # the WHERE clause is what T1 was buying, not the index.
+    kind: str = Field(default="chat")
 
 
 class MessageLog(SQLModel, table=True):
@@ -105,10 +122,25 @@ class UserMemory(SQLModel, table=True):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
-def create_thread() -> UUID:
-    """Starts a brand-new conversation thread and returns its id."""
+#: ROADMAP_v2 §27 (T1). The three things a thread can be. Not an Enum:
+#: the column is a plain string so an unmigrated row reads back as data
+#: rather than raising, and config.py's "plain values only" rule means a
+#: vocabulary shared by storage and its callers belongs beside the table
+#: that stores it.
+THREAD_KIND_CHAT = "chat"
+THREAD_KIND_RESEARCH_PASS = "research_pass"
+THREAD_KIND_SUBAGENT = "subagent"
+
+
+def create_thread(kind: str = THREAD_KIND_CHAT) -> UUID:
+    """Starts a brand-new conversation thread and returns its id.
+
+    `kind` defaults to "chat" (§27 AC1), so every existing caller keeps
+    creating conversations and only the paths that know they are creating
+    something else pass anything here.
+    """
     with Session(engine) as session:
-        thread = ConversationThread()
+        thread = ConversationThread(kind=kind)
         session.add(thread)
         session.commit()
         session.refresh(thread)
@@ -169,20 +201,83 @@ def save_message(
         session.commit()
 
 
-def list_threads() -> List[dict]:
-    """Returns all conversation threads, most recent first.
+def list_threads(kind: Optional[str] = THREAD_KIND_CHAT) -> List[dict]:
+    """Conversation threads, most recent first.
 
-    Each entry: ``{"id": UUID, "created_at": datetime}``.
-    Used by the CLI / TUI layer for thread browsing — core/memory.py
-    does NOT call this.
+    Each entry: ``{"id": UUID, "created_at": datetime, "kind": str,
+    "preview": str}``. Used by the CLI / TUI layer for thread browsing —
+    core/memory.py does NOT call this.
+
+    ROADMAP_v2 §27 AC2: CONVERSATIONS ONLY by default. One research run
+    creates ~10 pass threads plus up to 4 retry-round threads plus the
+    reviewer's, and every automatic compaction creates one more — so the
+    unfiltered list was mostly machinery, which is what made the picker
+    unusable. `kind=None` returns everything, for a caller that genuinely
+    wants the machinery (see §27's note on reaching a run's pass threads).
+
+    `preview` is the thread's first user message, truncated (§27's picker
+    decision). A row of bare uuid + timestamp is filterable but still not
+    recognisable, and identifying a conversation was the actual complaint.
+    It costs ONE extra query for the whole list rather than one per row.
     """
     with Session(engine) as session:
-        statement = (
-            select(ConversationThread)
-            .order_by(ConversationThread.created_at.desc())
+        statement = select(ConversationThread)
+        if kind is not None:
+            statement = statement.where(ConversationThread.kind == kind)
+        threads = session.exec(
+            statement.order_by(ConversationThread.created_at.desc())
+        ).all()
+        previews = _first_user_messages(session, [t.id for t in threads])
+        return [
+            {
+                "id": t.id,
+                "created_at": t.created_at,
+                # getattr, not t.kind: a row read back from a database
+                # whose ALTER has not run yet has no attribute at all, and
+                # a picker that raises is worse than one showing "chat".
+                "kind": getattr(t, "kind", None) or THREAD_KIND_CHAT,
+                "preview": previews.get(t.id, ""),
+            }
+            for t in threads
+        ]
+
+
+#: How much of a thread's first user message list_threads() carries. Long
+#: enough to tell two conversations apart, short enough for one row.
+_PREVIEW_CHARS = 70
+
+
+def _first_user_messages(session, thread_ids: List[UUID]) -> Dict[UUID, str]:
+    """thread id -> truncated first user message, for the given threads.
+
+    ONE query for the whole list, walked oldest-first so the first row seen
+    per thread is the earliest one. Reads the ARCHIVE (every MessageLog row
+    of the thread) rather than the derived view, for the same reason §27's
+    T3 makes replay do it: on a compacted thread the view begins with the
+    synthesized summary, and previewing THAT would label harness-generated
+    text as something the user said.
+    """
+    if not thread_ids:
+        return {}
+    rows = session.exec(
+        select(MessageLog)
+        .where(MessageLog.thread_id.in_(thread_ids))
+        .where(MessageLog.role == "user")
+        .order_by(MessageLog.created_at.asc(), MessageLog.id.asc())
+    ).all()
+    out: Dict[UUID, str] = {}
+    for row in rows:
+        if row.thread_id in out:
+            continue
+        try:
+            text = json.loads(row.content)
+        except (TypeError, ValueError):
+            text = row.content
+        text = " ".join(str(text).split())
+        out[row.thread_id] = (
+            text[:_PREVIEW_CHARS] + "…" if len(text) > _PREVIEW_CHARS else text
         )
-        threads = session.exec(statement).all()
-        return [{"id": t.id, "created_at": t.created_at} for t in threads]
+    return out
 
 
 def _to_neutral(msg: dict) -> dict:

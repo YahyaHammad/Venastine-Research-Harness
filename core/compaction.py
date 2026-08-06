@@ -35,6 +35,7 @@ from typing import Optional
 
 import config
 from core import config_loader
+from storage import THREAD_KIND_SUBAGENT
 
 logger = logging.getLogger(__name__)
 
@@ -405,6 +406,13 @@ def _summarize(loop_cls, manager, agent, base_prompt, segment_text, target,
         context=context,
         system_prompt=system_prompt,
         authorization=authorization,
+        # §27, and NOT in that section's spec: the compactor is a fifth
+        # thread source nobody had counted. Every automatic compaction of a
+        # long chat creates one of these, so on exactly the threads §21a
+        # exists to serve, the picker filled up with the machinery that
+        # served them. The compactor is an agent, so it is labelled like the
+        # other agent-shaped runs.
+        thread_kind=THREAD_KIND_SUBAGENT,
     )
     summary = (response.text or "").strip()
 

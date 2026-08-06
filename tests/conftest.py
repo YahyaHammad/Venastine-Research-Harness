@@ -257,12 +257,18 @@ class FakeMemory:
     the FakeStorage patch list drift in the same section.
     """
 
-    def __init__(self):
+    def __init__(self, thread_id=None, kind="chat"):
+        # §27: accepts ConversationMemory's real signature, because
+        # stream_deep_research_mode() now constructs one WITH a kind and a
+        # doubled class that refuses the kwarg fails inside the loop rather
+        # than in the test that installed it. Recorded rather than ignored
+        # so a test can assert what a code path created.
         self.user_messages = []
         self.assistant_messages = []
         self.tool_results = []  # list of (tool_call_id, result)
         self._next_messages = []
-        self.thread_id = uuid4()
+        self.thread_id = thread_id or uuid4()
+        self.kind = kind
         # ROADMAP_v2 §21. Zero means "never measured", so the compaction
         # trigger falls back to a character estimate of `messages` -- which
         # is empty here, so compaction never fires and every pre-§21 loop
@@ -323,21 +329,31 @@ class FakeStorage:
         self.saved_messages = []  # list of (thread_id, role, content, name, tool_call_id)
         self._threads = {}        # thread_id -> True (existence tracker)
         self._thread_created_at = {}  # thread_id -> datetime
+        self._thread_kind = {}    # thread_id -> "chat" / "research_pass" / "subagent" (§27)
         self._messages_by_thread = {}  # thread_id -> list of neutral-shape dicts
         self._thread_extra = {}   # thread_id -> dict (extra_data mirror)
         self._checkpoints = {}    # thread_id -> the latest CompactionCheckpoint (§21)
         self._memories = []       # UserMemory rows, oldest first (§21b)
 
-    def create_thread(self):
+    def create_thread(self, kind="chat"):
         from datetime import datetime, timezone
         from uuid import uuid4
         thread_id = uuid4()
         self.created_threads.append(thread_id)
         self._threads[thread_id] = True
         self._thread_created_at[thread_id] = datetime.now(timezone.utc)
+        # §27: recorded, so a test can assert WHAT a code path created
+        # without a real database. Mirrors production's column default.
+        self._thread_kind[thread_id] = kind
         self._messages_by_thread[thread_id] = []
         self._thread_extra[thread_id] = {}
         return thread_id
+
+    def thread_kind(self, thread_id):
+        """Not a production method -- the assertion hook for §27 AC1.
+        storage.py has no kind reader (list_threads carries it, and nothing
+        else needs one), so this is deliberately named differently."""
+        return self._thread_kind.get(thread_id)
 
     def get_thread(self, thread_id):
         # Mirrors production: a row object (truthy, carries extra_data) or
@@ -364,14 +380,24 @@ class FakeStorage:
         else:
             extra[key] = value
 
-    def list_threads(self):
-        """Mirrors storage.list_threads(): most recent first."""
-        return sorted(
-            [{"id": tid, "created_at": ts}
-             for tid, ts in self._thread_created_at.items()],
-            key=lambda t: t["created_at"],
-            reverse=True,
-        )
+    def list_threads(self, kind="chat"):
+        """Mirrors storage.list_threads(): most recent first, conversations
+        only unless kind=None (§27 AC2), each row carrying `kind` and a
+        `preview` of the first user message."""
+        rows = [
+            {"id": tid, "created_at": ts,
+             "kind": self._thread_kind.get(tid, "chat"),
+             "preview": self._first_user_message(tid)}
+            for tid, ts in self._thread_created_at.items()
+            if kind is None or self._thread_kind.get(tid, "chat") == kind
+        ]
+        return sorted(rows, key=lambda t: t["created_at"], reverse=True)
+
+    def _first_user_message(self, thread_id):
+        for msg in self._messages_by_thread.get(thread_id, []):
+            if msg.get("role") == "user":
+                return str(msg.get("content", ""))
+        return ""
 
     def save_message(self, thread_id, role, content, name=None, tool_call_id=None):
         # Stores content exactly as given -- production's save_message

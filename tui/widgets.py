@@ -364,6 +364,23 @@ class Transcript(RichLog):
 
     # -- replay ------------------------------------------------------------
 
+    def reset(self) -> None:
+        """Empty the transcript — screen AND entry log (§27).
+
+        NOT rerender()'s clear(): that one deliberately keeps `_entries` so
+        it can redraw them under a new theme. Resuming a thread has to drop
+        them, or the previous conversation stays on screen (bug 1) and,
+        less visibly, `/copy all` and the next `/theme` replay both keep
+        handing back a thread the session has left.
+
+        The pending stream buffer goes too. A resume cannot happen mid-turn
+        (`_busy` refuses), so anything buffered here belongs to the thread
+        being left.
+        """
+        self._pending = ""
+        self._entries.clear()
+        self.clear()
+
     def rerender(self) -> None:
         """Redraw every entry under the current theme.
 

@@ -47,7 +47,7 @@ from uuid import UUID
 from storage import (
     create_thread, get_thread, save_message, get_session_history,
     update_thread_extra, latest_checkpoint, pinned_through,
-    message_ids_from, set_pinned, turn_start_ids,
+    message_ids_from, set_pinned, turn_start_ids, THREAD_KIND_CHAT,
 )
 
 # ROADMAP_v2 §21 (M8). How a compaction summary is introduced to the model.
@@ -71,9 +71,19 @@ SUMMARY_PREFIX = (
 
 
 class ConversationMemory:
-    def __init__(self, thread_id: Optional[UUID] = None) -> None:
+    def __init__(self, thread_id: Optional[UUID] = None,
+                 kind: str = THREAD_KIND_CHAT) -> None:
+        """`kind` (§27 T1) says what a NEW thread is, and is forwarded to
+        storage.create_thread and nowhere else.
+
+        This class does not learn what a kind means, store it, or read it
+        back. It owns active in-run state and must stay unaware of what
+        data exists -- that boundary is storage.py's. Ignored when
+        `thread_id` is given, because resuming does not reclassify: a
+        thread's kind was decided when it was created.
+        """
         if thread_id is None:
-            self.thread_id = create_thread()
+            self.thread_id = create_thread(kind=kind)
             self._messages: list[dict] = []
             self._extra: dict = {}
         else:
