@@ -119,6 +119,16 @@ class PipelineRun:
     # the reviewer's tier overrides are marked inside the existing
     # score_breakdown dict rather than in a new Claim field.
     subagent_reviews: list[dict] = field(default_factory=list)
+    # §27 (T2): one entry per pass thread, {"pass": pass_id,
+    # "thread_id": str}. Each pass runs in its own fresh thread -- a locked
+    # invariant, since passes share distilled JSON and never raw history --
+    # so §27 hides those threads from the picker. This is what keeps them
+    # REACHABLE anyway: hiding a thread must not orphan it.
+    #
+    # A list[dict] for the same reason granted_calls and subagent_reviews
+    # are: a nested dataclass here forces every vars(run)/vars(c) site to
+    # asdict() in one change.
+    pass_threads: list[dict] = field(default_factory=list)
     final_report: str = ""
 
     def log(self, message: str) -> None:

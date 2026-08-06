@@ -50,6 +50,7 @@ from core.loop import (
     with_memories,
 )
 from core.memory import ConversationMemory
+from core.replay import last_assistant_text, replay_entries
 # Module scope, not inside _cmd_research: _split_research_flags needs the
 # sentinel too, and two shells comparing against two different object()
 # instances would look identical and behave differently.
@@ -913,14 +914,42 @@ class VenastineApp(App):
         def chosen(thread_id) -> None:
             if thread_id is None:
                 return
-            self.memory = ConversationMemory(
-                thread_id=thread_id if isinstance(thread_id, UUID) else UUID(str(thread_id))
-            )
+            resolved = thread_id if isinstance(thread_id, UUID) else UUID(str(thread_id))
+            self.memory = ConversationMemory(thread_id=resolved)
             # The banner is per-thread state; without this it kept showing
             # the PREVIOUS thread's objective, misrepresenting what
             # governs the session. /goal was the only path that refreshed.
             self.refresh_goal_banner()
-            self._transcript.write_system(f"Resumed thread {thread_id}.")
+            # §27 AC4, and the same class of bug the banner above already
+            # fixed in this same callback: `_last_run` and `_live_claims`
+            # survived a thread switch, so /claims or ctrl+l after a resume
+            # showed the PREVIOUS thread's research run under the new
+            # thread's id. Cleared before the replay, so a failure below
+            # cannot leave stale state pointing at the wrong thread.
+            self._last_run = None
+            self._live_claims = {}
+            self._last_response = ""
+            # CLEAR, then replay. Swapping memory without clearing left the
+            # previous conversation on screen beneath the new thread's id --
+            # bug 1's worst half, since a blank panel is merely unhelpful
+            # while a stale one is wrong.
+            self._transcript.reset()
+            self._transcript.write_system(f"Resumed thread {resolved}.")
+            entries = replay_entries(resolved)
+            for role, text in entries:
+                if role == "user":
+                    self._transcript.write_user(text)
+                elif role == "assistant":
+                    self._transcript.write_answer(text)
+                else:
+                    self._transcript.write_role(role, text)
+            if entries:
+                self._last_response = last_assistant_text(entries)
+                noun = "entry" if len(entries) == 1 else "entries"
+                self._transcript.write_system(
+                    f"— end of {len(entries)} replayed {noun} —")
+            else:
+                self._transcript.write_system("This thread has no messages yet.")
 
         self.push_screen(ThreadPickerScreen(threads), chosen)
 

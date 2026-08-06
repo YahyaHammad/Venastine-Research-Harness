@@ -498,3 +498,87 @@ def test_forgetting_an_unknown_id_reports_rather_than_raises(real_storage):
     from uuid import uuid4
 
     assert real_storage.forget_memory(uuid4()) is False
+
+
+# ---------------------------------------------------------------------------
+# ---- ROADMAP_v2 §27: what the picker query returns, and what replay reads ---
+# ---------------------------------------------------------------------------
+#
+# HERE rather than in test_thread_legibility.py because both questions are
+# about what SQL actually returns and what a REAL compacted thread looks
+# like. This project's own rule: a passing test against the fake proves the
+# fake and the code agree, not that either is right -- and §27's whole point
+# is a WHERE clause that must not have to load every row to filter.
+
+def test_list_threads_filters_by_kind_in_sql(real_storage):
+    """AC2 against the real query. The fake mirrors this filter, but T1
+    chose a column over an extra_data key precisely so the database does the
+    work, and only real SQL can show that it does."""
+    chat = real_storage.create_thread()
+    pass_thread = real_storage.create_thread(kind="research_pass")
+    subagent = real_storage.create_thread(kind="subagent")
+
+    listed = {row["id"] for row in real_storage.list_threads()}
+    everything = {row["id"] for row in real_storage.list_threads(kind=None)}
+
+    assert chat in listed
+    assert pass_thread not in listed
+    assert subagent not in listed
+    assert {chat, pass_thread, subagent} <= everything
+
+
+def test_a_row_carries_the_first_user_message(real_storage):
+    """The preview is one extra query for the whole list, and it must pick
+    the EARLIEST user row -- previewing the latest would label every long
+    conversation with whatever was asked last."""
+    thread = real_storage.create_thread()
+    real_storage.save_message(thread, "user", "first question about quorum")
+    real_storage.save_message(thread, "assistant",
+                              {"text": "an answer", "tool_calls": []})
+    real_storage.save_message(thread, "user", "second question")
+
+    row = next(r for r in real_storage.list_threads() if r["id"] == thread)
+
+    assert row["preview"] == "first question about quorum"
+
+
+def test_replaying_a_compacted_thread_shows_the_original_first_message(
+        real_storage, compactor):
+    """AC5, and T3's reason for existing.
+
+    `memory.messages` on a compacted thread BEGINS with the synthesized
+    summary M8 says must never be taken for something a person said --
+    replaying the derived view would render harness-generated text under a
+    `you ›` label. Replaying the ARCHIVE shows what was actually asked.
+
+    Asserted against a REAL compaction rather than a hand-written
+    checkpoint: the two spaces (archive and view) coincide until a
+    checkpoint exists, which is exactly how §21a's watermark defect survived
+    849 tests.
+    """
+    import importlib
+
+    from core import compaction
+    from core.memory import ConversationMemory, SUMMARY_PREFIX
+    import core.replay as replay_module
+
+    # core/replay.py bound archive_history at import, against the fake
+    # storage every other module was rebound away from.
+    importlib.reload(replay_module)
+
+    memory = ConversationMemory()
+    memory.add_user_message("THE ORIGINAL FIRST QUESTION " + "x" * 200)
+    memory.add_assistant_message(_Resp("an answer " + "x" * 200))
+    _add_turns(memory, 4, "later")
+    compaction.compact(memory, "claude-sonnet-5", "ANTHROPIC",
+                       overrides=OVERRIDES)
+
+    # The premise: the derived view now leads with the summary.
+    assert memory.messages[0]["content"].startswith(SUMMARY_PREFIX)
+
+    entries = replay_module.replay_entries(memory.thread_id)
+
+    assert entries[0][0] == "user"
+    assert "THE ORIGINAL FIRST QUESTION" in entries[0][1]
+    assert not any(SUMMARY_PREFIX in text for _, text in entries), \
+        "a replay must never render the summary as something the user said"

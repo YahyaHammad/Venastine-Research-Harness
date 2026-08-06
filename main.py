@@ -29,7 +29,8 @@ import config
 from core import config_loader, workspace_trust
 from core.loop import RunAgentLoop, DEFAULT_PROVIDER
 from core.reasoning.authorization import GRANT_PICKER
-from database import create_db_and_tables
+from core.replay import replay_entries
+from database import create_db_and_tables, engine
 from logging_setup import configure_logging
 
 # Importing these for their SIDE EFFECT, and the side effect is load-bearing:
@@ -61,6 +62,36 @@ def _uuid_type(value: str) -> UUID:
         )
 
 
+def _print_replay(thread_id: UUID) -> None:
+    """Print a resumed thread's history (§27 T5).
+
+    Labels match the live chat loop's own -- "You:" / "Agent:" -- so a
+    replayed turn and a fresh one are not two different-looking things in
+    the same scrollback. What may be shown is core/replay.py's decision,
+    not this function's; the shells must not disagree about that.
+    """
+    try:
+        entries = replay_entries(thread_id)
+    except Exception as e:  # noqa: BLE001 -- a display failure must not
+        # stop the session: the thread is loaded and usable either way.
+        logger.warning("Could not replay thread %s: %s", thread_id, e)
+        print(f"[could not replay this thread's history: {e}]")
+        return
+    if not entries:
+        print("(this thread has no messages yet)")
+        return
+    print()
+    for role, text in entries:
+        if role == "user":
+            print(f"You: {text}")
+        elif role == "assistant":
+            print(f"\nAgent: {text}\n")
+        else:
+            print(f"     {text}")
+    noun = "entry" if len(entries) == 1 else "entries"
+    print(f"--- end of {len(entries)} replayed {noun} ---")
+
+
 def run_chat(
     thread_id: UUID | None,
     provider_name: str,
@@ -82,6 +113,13 @@ def run_chat(
     print(f"Provider: {provider_name} | Model: {model}")
     if current_thread_id:
         print(f"Resuming thread: {current_thread_id}")
+        # §27 AC4/T5. --thread had the same gap as the TUI picker: the
+        # history loaded and nothing showed it, so a resumed conversation
+        # was indistinguishable from a new one until the model answered
+        # with context the user could not see. D12 makes the CLI a
+        # permanent fallback, so it replays too rather than this being a
+        # TUI feature.
+        _print_replay(current_thread_id)
     else:
         print("Starting a new conversation thread.")
     print("Ctrl+C or Ctrl+D to exit.\n")
@@ -916,9 +954,37 @@ def teardown_mcp(client) -> None:
         logger.debug("MCP teardown failed", exc_info=True)
 
 
+def _classify_legacy_threads() -> None:
+    """Label pre-§27 pass threads, once per launch (§27 AC3).
+
+    SEPARATE from create_db_and_tables' migration, deliberately.
+    ensure_columns() is additive only and never backfills (§21 M7), so the
+    `kind` column arrives with every existing row defaulted to 'chat' --
+    including the hundreds of pass threads that made the picker unusable in
+    the first place. Backfilling inside a schema migrator would put data
+    policy in the one function every launch depends on.
+
+    Idempotent by construction rather than by a marker, so a database last
+    opened by an older build is still classified. Non-fatal: an unreadable
+    or locked database here means a cluttered picker, which is not worth
+    refusing to start over.
+    """
+    from core.reasoning.pipeline_storage import classify_legacy_pass_threads
+    connection = engine.raw_connection()
+    try:
+        classify_legacy_pass_threads(connection)
+    except Exception:  # noqa: BLE001
+        logger.warning("Could not classify legacy threads", exc_info=True)
+    finally:
+        connection.close()
+
+
 if __name__ == "__main__":
     configure_logging()
     create_db_and_tables()
+    # AFTER the schema exists: this reads the column create_db_and_tables
+    # has just ensured.
+    _classify_legacy_threads()
 
     parser = build_parser()
     args = parser.parse_args()

@@ -38,6 +38,10 @@ from core.client import (
 )
 from core.events import LoopEvent
 from core.memory import ConversationMemory
+# §27 (T1). The loop is where a thread's kind is DECIDED -- it knows which
+# of its three entry points is running -- and storage.create_thread is
+# where it is stored. Nothing in between learns what a kind means.
+from storage import THREAD_KIND_CHAT, THREAD_KIND_RESEARCH_PASS
 from tools.context import ToolContext, RunInfo
 from tools.registry import registry, ToolCallDenied
 
@@ -544,6 +548,7 @@ class RunAgentLoop:
         permission_channel: Optional[queue.Queue] = None,
         granted_tools: Optional[set] = None,
         authorization=None,
+        thread_kind: str = THREAD_KIND_CHAT,
     ) -> ModelResponse:
         """Regular conversation — full tool set, default system prompt,
         one continuous thread. Pass thread_id to resume an existing
@@ -575,14 +580,22 @@ class RunAgentLoop:
         Mutually exclusive with granted_tools, and checked rather than
         silently resolved. The two spell the same underlying argument, so
         one would quietly win -- and if the bundle lost, a reviewer would
-        run with no budget and no provider while looking authorised."""
+        run with no budget and no provider while looking authorised.
+
+        thread_kind (§27 T1) is what this entry point creates when it
+        creates a thread. It defaults to "chat" because this is ALSO the
+        plain-conversation entry point for both shells; the three callers
+        that are not a human conversation -- spawn_subagent, §20's reviewer
+        and §21a's compactor -- pass THREAD_KIND_SUBAGENT, which is what
+        keeps their threads out of the picker. Ignored when thread_id is
+        given: resuming does not reclassify."""
         if authorization is not None and granted_tools is not None:
             raise ValueError(
                 "run_agent_conversation: pass authorization= or "
                 "granted_tools=, not both -- they set the same underlying "
                 "argument, so one would silently win."
             )
-        memory = ConversationMemory(thread_id=thread_id)
+        memory = ConversationMemory(thread_id=thread_id, kind=thread_kind)
         memory.add_user_message(user_goal)
         prompt = with_goal(
             system_prompt
@@ -692,8 +705,14 @@ class RunAgentLoop:
         The response is RETURNED rather than read off the terminal event
         because `thread_id` is attached after the loop finishes -- see
         return_value_of().
+
+        §27: the fresh thread per pass is a LOCKED INVARIANT, not the
+        defect §27's second bug looked like -- passes share distilled JSON
+        and never raw history, which is what stops a later pass reading how
+        an earlier one argued. What was missing is the thread saying so, so
+        that ~15 threads per run stop being offered as conversations.
         """
-        memory = ConversationMemory()
+        memory = ConversationMemory(kind=THREAD_KIND_RESEARCH_PASS)
         memory.add_user_message(pass_input)
         system_prompt = system_prompts.pass_prompt(pass_id)
         response = None

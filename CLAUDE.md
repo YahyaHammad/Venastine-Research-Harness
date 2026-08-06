@@ -20,7 +20,7 @@ python main.py --mode research --review "q"       # §20: review the finished ru
 # §21a compaction runs automatically in every shell; /compact triggers it by hand in the TUI
 # §26: /claims [run id] or ctrl+l opens a run's claims; /copy [last|report|claims|all] [--file path]
 
-pytest                                            # 1028 tests, offline, ~25s (first run ~30s: matplotlib font cache)
+pytest                                            # 1060 tests, offline, ~25s (first run ~30s: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -28,6 +28,8 @@ pytest -m integration                             # opt-in; spawns a real stdio 
 ```
 
 Test dependencies (`pytest`, `pytest-mock`, `pytest-asyncio`) are now listed in `requirements.txt` — they had been missing since §14, which is why older docs warn about it.
+
+**A fresh clone needs `cp providers.json.example providers.json` before `pytest`.** The file is gitignored, and 11 tests (`test_loop_stop_conditions`, `test_loop_tool_dispatch`, one in `test_agents`) fail with `ValueError: Unknown provider: ANTHROPIC` without it — `api_initialization()` needs the provider ENTRY to exist, even though the key inside it stays empty. "Offline, no API keys" is true; "no config file" is not. Also note `python3 -m pytest`: a `pytest` on PATH from a separate tool install runs in its own environment and sees none of the project's dependencies.
 
 MCP servers are a *third* config file again — `mcp.json`, user-level or `.venastine/`-level. Not `.env`, not `providers.json`, not `settings.json`.
 
@@ -38,7 +40,7 @@ MCP servers are a *third* config file again — `mcp.json`, user-level or `.vena
 Read these before changing anything non-trivial — they carry design decisions that are locked, not defaults to re-derive.
 
 - **ARCHITECTURE.md** — what's built, file-by-file contracts ("what belongs here / what does NOT"), known gotchas (§11).
-- **ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **ROADMAP_v2.md** (§13–§26; §13–§20, §21a, §21b, §22, §25 and §26 built) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R12 from §25, K1–K7 from §19, V1–V9 from §20, M1–M17 from §21a/§21b, P1–P4 from §22 and L1–L6 from §26). Section and D-numbers are stable and cross-referenced everywhere.
+- **ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **ROADMAP_v2.md** (§13–§27; §13–§20, §21a, §21b, §22, §25, §26 and §27 built) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R12 from §25, K1–K7 from §19, V1–V9 from §20, M1–M17 from §21a/§21b, P1–P4 from §22, L1–L6 from §26 and T1–T9 from §27). Section and D-numbers are stable and cross-referenced everywhere.
 - **DEVLOG.md** — per-section implementation notes: what was followed verbatim, what was deviated from (every deviation was an explicit user decision — do not silently override).
 - **tests/BREAKING_CHANGES.md** — what breaks each test when production code changes, the symptom, and the fix.
 - **QWEN.md** — a sibling agent-context file. Stale (it predates §13–§16 and disagrees with itself on test counts); prefer ARCHITECTURE.md and the code.
@@ -379,6 +381,58 @@ run rather than by reading the code.
   focus, so that key would silently eat the typed line. `ClaimsScreen` takes plain dicts
   — the shape §5 already persists — so the finished-run, stored-run and mid-run sources
   need no branch in the renderer.
+
+### Thread legibility (§27)
+
+Resuming a thread now shows the thread, and a thread records what it is. Two
+independent bugs, both found by using the app.
+
+- **`core/replay.py` is the only place that decides what a stored thread looks
+  like**, and both shells replay through it (T5, §26's L6 again). A per-shell
+  renderer would let the CLI and the TUI disagree about whether tool results are
+  shown — which is a policy question, not a painting one.
+- **Replay reads the ARCHIVE, never the derived view** (T3). `memory.messages` on a
+  compacted thread BEGINS with the synthesized summary, so replaying it renders
+  harness-generated text under a `you ›` label — precisely what M8 says that message
+  must never be mistaken for. The same reasoning makes `list_threads`' preview read
+  the archive.
+- **Tool calls replay as one redacted line; tool RESULTS are skipped** (T4). A
+  grounding-heavy thread carries hundreds of kilobytes of fetched page text in those
+  rows.
+- **`ConversationThread.kind` is a column, not an `extra_data` key** (T1), because
+  `list_threads()` is the one query that must stay cheap on a database gaining ten
+  rows per research run. It is deliberately **not indexed**: `ensure_columns()` ALTERs
+  in a column and builds no index, and `create_all()` adds none to an existing table,
+  so `index=True` would mean an index on fresh databases and none on migrated ones.
+- **The fresh thread per pass is the INVARIANT; the missing label was the bug.** Passes
+  share distilled JSON and never raw history. §27 hides those threads and records them
+  on the run (`PipelineRun.pass_threads`, T2) so hiding one does not orphan it — the
+  list is the run's own object, shared by reference like §25's `granted_calls`, which
+  is what puts it on the failure path.
+- **The compactor is a FIFTH thread source, and §27's spec missed it.** Every automatic
+  compaction creates one, so the picker filled up fastest on exactly the long threads
+  §21a exists to serve. It is labelled `subagent` with `spawn_subagent` and §20's
+  reviewer; the reviewer gets no kind of its own, since §20 already calls it a subagent.
+- **Classification is separate from `ensure_columns()`, and idempotent by construction**
+  (AC3). M7's migration is additive and never backfills, so the column arrives with
+  every existing row defaulted to `chat`.
+  `pipeline_storage.classify_legacy_pass_threads()` runs at every launch over a DBAPI
+  connection (the `ensure_columns` seam) and moves only `chat` rows that fall inside a
+  **finished** run's window. A run with `finished_at IS NULL` (§22's abandoned
+  generator) is skipped: under-classifying leaves a straggler in the picker,
+  over-classifying hides a real conversation, and only one of those is recoverable by
+  the user. Both the `IS NOT NULL` guard and the upper bound must be removed for that
+  to break — SQL's `x <= NULL` is already not true — so do not "simplify" either half.
+- **`param_digest` lives in `safety/policy_enforcement.py`**, beside `redact_secrets`,
+  since §27's replay renderer is its second caller. It redacts BEFORE truncating, and
+  a second copy is how that ordering regresses in one place and not the other.
+- **Resuming resets per-thread state.** `_last_run`, `_live_claims` and
+  `_last_response` survived a thread switch, so `/claims` after a resume showed the
+  previous thread's run — the same class of bug the goal banner already fixed in that
+  callback. `Transcript.reset()` (not `rerender()`'s `clear()`) drops `_entries` too,
+  or `/copy all` keeps handing back a thread the session has left.
+- **In a pilot test, `app._transcript` queries the ACTIVE screen.** Reading it while a
+  modal is up raises `NoMatches`; hold the widget before opening one.
 
 ### Config loading and workspace trust (ROADMAP_v2 §14)
 

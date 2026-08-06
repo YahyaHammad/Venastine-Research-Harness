@@ -62,6 +62,7 @@ def write_run_artifacts(run: PipelineRun) -> str:
       06_revisions.json       6a/6c revisions (only if any claim was revised)
       07_review.json          §20 review findings + decisions (only if reviewed)
       granted_calls.json      §25 audit trail (only if a grant was spent)
+      pass_threads.json       §27 one entry per pass, {"pass", "thread_id"}
       confidence_chart.png    Tier distribution bar chart (matplotlib)
       trace.md                Full trace log
       report.md               Final synthesis report
@@ -129,6 +130,13 @@ def write_run_artifacts(run: PipelineRun) -> str:
     # found, since nothing was applied for the claims file to show.
     if run.subagent_reviews:
         write("07_review.json", json.dumps(run.subagent_reviews, indent=2))
+
+    # §27 AC6: which thread each pass ran in. Written unconditionally
+    # (unlike the two above), because it is not a signal about how the run
+    # was configured -- every run has pass threads, and an empty file here
+    # would itself be the anomaly worth noticing.
+    write("pass_threads.json",
+          json.dumps(getattr(run, "pass_threads", []) or [], indent=2))
 
     # Essential human-readable artifacts first -- a supplementary-file
     # failure (chart, PDF) must not prevent these from being written.

@@ -25,6 +25,7 @@ interpret. Neither makes the other redundant.
 
 from __future__ import annotations
 
+import json
 import re
 from urllib.parse import urlparse
 
@@ -94,6 +95,56 @@ def redact_secrets(text: str) -> str:
     for pattern in _SECRET_PATTERNS:
         text = pattern.sub("[REDACTED]", text)
     return text
+
+
+# How much of one tool parameter reaches a digest, and how much of the whole
+# digest reaches a consumer. A sidebar is 22 columns and a transcript line
+# wraps; the point is to say WHICH url or WHICH query, not to reproduce the
+# call.
+_DIGEST_VALUE_CHARS = 60
+_DIGEST_CHARS = 140
+
+
+def param_digest(params) -> str:
+    """A short, REDACTED description of what a tool was called with.
+
+    REDACTED BEFORE TRUNCATION, not after. Truncating first can cut a
+    credential in half and leave the surviving half unmatched by the pattern
+    that would have caught it -- the redactor works on whole strings, so it
+    has to see one. That ordering is the whole reason this function is
+    shared rather than copied: §26 established it for the research view, and
+    §27's replay renderer is its second caller. A second copy is how the
+    ordering silently regresses in one of them, which is this project's
+    canonical bug shape (fix at the producer, not the consumer).
+
+    It lives HERE, beside redact_secrets, rather than in the orchestrator
+    that first needed it: the rule it enforces is a content-policy rule,
+    and this module is where post-call content policy lives.
+
+    Tool arguments are the path that genuinely was not scanned: §25 R5 added
+    check_input_policy(), but that REFUSES a call, it does not redact one,
+    and dispatch()'s check_output_policy only ever saw results. A fetch_url
+    whose url carries an API key would otherwise be printed verbatim in two
+    shells and, since §27, replayed out of the archive into a third place.
+
+    Values only, no keys: for the tools a pass actually reaches for -- one
+    url, one query, one command -- the key is noise, and per-value
+    truncation is what keeps a `write` call from pasting a file into the
+    transcript.
+    """
+    if not isinstance(params, dict) or not params:
+        return ""
+    parts = []
+    for value in params.values():
+        text = value if isinstance(value, str) else json.dumps(value, default=str)
+        text = redact_secrets(text)
+        if len(text) > _DIGEST_VALUE_CHARS:
+            text = text[:_DIGEST_VALUE_CHARS - 1] + "…"
+        parts.append(text)
+    digest = "  ".join(p for p in parts if p)
+    if len(digest) > _DIGEST_CHARS:
+        digest = digest[:_DIGEST_CHARS - 1] + "…"
+    return digest
 
 
 # ---------------------------------------------------------------------------

@@ -71,7 +71,7 @@ from core.reasoning.events import PipelineEvent
 from core.reasoning.json_retry import parse_json_response as _parse_json_response
 from core.reasoning.json_retry import retry_until_json
 from core.reasoning.pipeline_storage import create_pipeline_run, update_pipeline_run
-from safety.policy_enforcement import redact_secrets
+from safety.policy_enforcement import param_digest, redact_secrets
 
 logger = logging.getLogger(__name__)
 
@@ -139,50 +139,18 @@ class _Progress:
             yield PipelineEvent(kind="trace_line", text=line)
 
 
-# How much of one tool parameter reaches the digest, and how much of the
-# whole digest reaches a consumer. A sidebar is 22 columns and a transcript
-# line wraps; the point is to say WHICH url or WHICH query, not to reproduce
-# the call.
-_DIGEST_VALUE_CHARS = 60
-_DIGEST_CHARS = 140
 # One pass_activity event per this many characters streamed. A per-token
 # event would be thousands of post_message hand-offs per pass, which is the
 # cost Transcript.stream_delta already exists to avoid on the chat path.
 _ACTIVITY_CHARS = 2000
 
-
-def _param_digest(params) -> str:
-    """A short, REDACTED description of what a tool was called with.
-
-    Redacted BEFORE truncation, not after. Truncating first can cut a
-    credential in half and leave the surviving half unmatched by the
-    pattern that would have caught it -- the redactor works on whole
-    strings, so it has to see one.
-
-    Tool arguments are the path that genuinely was not scanned: §25 R5
-    added check_input_policy(), but that REFUSES a call, it does not
-    redact one, and dispatch()'s check_output_policy only ever saw
-    results. A fetch_url whose url carries an API key would otherwise be
-    printed verbatim in two shells.
-
-    Values only, no keys: for the tools a pass actually reaches for -- one
-    url, one query, one command -- the key is noise, and per-value
-    truncation is what keeps a `write` call from pasting a file into the
-    transcript.
-    """
-    if not isinstance(params, dict) or not params:
-        return ""
-    parts = []
-    for value in params.values():
-        text = value if isinstance(value, str) else json.dumps(value, default=str)
-        text = redact_secrets(text)
-        if len(text) > _DIGEST_VALUE_CHARS:
-            text = text[:_DIGEST_VALUE_CHARS - 1] + "…"
-        parts.append(text)
-    digest = "  ".join(p for p in parts if p)
-    if len(digest) > _DIGEST_CHARS:
-        digest = digest[:_DIGEST_CHARS - 1] + "…"
-    return digest
+# §26's _param_digest, and its two truncation constants, MOVED to
+# safety/policy_enforcement.py in §27 -- beside redact_secrets, because
+# §27's replay renderer is its second caller and the redact-before-truncate
+# ordering must not exist twice. Imported under its own name rather than
+# aliased back to the old private one: an alias would leave two spellings
+# for one function, and a reader who greps the old name here should be sent
+# to where it now lives, not handed a local rebinding.
 
 
 def _translate(pass_id: str, stream):
@@ -246,7 +214,7 @@ def _translate(pass_id: str, stream):
             names[event.tool_call_start.get("id")] = name
             yield PipelineEvent(
                 kind="tool_call", pass_id=pass_id, tool=name,
-                text=_param_digest(event.tool_call_start.get("input")))
+                text=param_digest(event.tool_call_start.get("input")))
         if event.tool_result:
             result = event.tool_result.get("result")
             failed = isinstance(result, dict) and "error" in result
@@ -311,7 +279,7 @@ def _check_not_truncated(pass_id: str, response, trace: list[str] | None):
 
 def _run_pass(pass_id: str, pass_input: str, model: str, provider_name: str,
               temperature: float | None = None, authorization=None,
-              trace: list[str] | None = None):
+              trace: list[str] | None = None, pass_threads: list | None = None):
     """One LLM-backed pass. Every actual model call in this file goes
     through this single function.
 
@@ -330,9 +298,36 @@ def _run_pass(pass_id: str, pass_input: str, model: str, provider_name: str,
         temperature=temperature, authorization=authorization,
     ))
     _record_granted_calls(pass_id, response, authorization)
+    _record_pass_thread(pass_id, response, pass_threads)
     _check_not_truncated(pass_id, response, trace)
     yield PipelineEvent(kind="pass_complete", pass_id=pass_id)
     return response.text
+
+
+def _record_pass_thread(pass_id: str, response, pass_threads) -> None:
+    """Note which thread this pass ran in (§27 T2 / AC6).
+
+    BEFORE _check_not_truncated, which can raise: the thread of a pass that
+    died mid-tool-call is the single most useful one to be able to open, and
+    recording after the check would lose exactly that one.
+
+    `pass_threads` IS `run.pass_threads`, shared by reference for the same
+    reason §25's granted_calls is: one object means the record is already on
+    the run at every §5 checkpoint and on the failure path, rather than
+    being assembled at the end by a run that reached the end.
+
+    A separate optional argument rather than a `run` parameter, because
+    `trace` beside it is a list too and _run_pass_with_json_retry takes it
+    positionally in twelve call sites -- swapping both for the run object is
+    a bigger change than §27 asked for. Default None keeps every test double
+    that calls these two functions working.
+    """
+    if pass_threads is None:
+        return
+    thread_id = getattr(response, "thread_id", None)
+    if thread_id is None:
+        return
+    pass_threads.append({"pass": pass_id, "thread_id": str(thread_id)})
 
 
 def _record_granted_calls(pass_id: str, response, authorization) -> None:
@@ -362,6 +357,7 @@ def _run_pass_with_json_retry(
     trace: list[str] | None = None,
     temperature: float | None = None,
     authorization=None,
+    pass_threads: list | None = None,
 ):
     """Runs one JSON-emitting pass and recovers from malformed JSON.
 
@@ -399,6 +395,9 @@ def _run_pass_with_json_retry(
         temperature=temperature, authorization=authorization,
     ))
     _record_granted_calls(pass_id, response, authorization)
+    # §27: the retries re-enter THIS thread (continue_conversation), so one
+    # entry per pass is the whole truth however many corrections it took.
+    _record_pass_thread(pass_id, response, pass_threads)
     # BEFORE the retry loop. A truncated pass returned no JSON because it
     # was cut off, not because the model wrote malformed JSON -- sending
     # a "your last response did not parse" nudge into a thread that has
@@ -553,6 +552,7 @@ def _review_stage(run: PipelineRun, progress: _Progress, model: str,
                 _synthesis_input(run, review_module.synthesis_directives(decisions)),
                 model, provider_name, authorization=authorization,
                 trace=run.trace,
+                pass_threads=run.pass_threads,
             )
         except Exception as e:
             # CONTAINED, not re-raised. A provider error on this one call
@@ -777,7 +777,7 @@ def stream_deep_research_pipeline(
 
     try:
         # --- Pass 0: preliminary plan ---
-        run.plan = _parse_json_response((yield from _run_pass_with_json_retry("Pass 0", user_query, model, provider_name, run.trace, authorization=authorization)))
+        run.plan = _parse_json_response((yield from _run_pass_with_json_retry("Pass 0", user_query, model, provider_name, run.trace, authorization=authorization, pass_threads=run.pass_threads)))
         yield from progress.checkpoint(f"Pass 0: plan produced ({len(run.plan.get('key_entities_or_subjects', []))} key entities anticipated).")
 
         # --- Pass 1: initial generation (ensemble mode: N candidates) ---
@@ -791,20 +791,20 @@ def stream_deep_research_pipeline(
                 candidates.append((yield from _run_pass(
                     "Pass 1", pass1_input, model, provider_name,
                     temperature=config.ENSEMBLE_TEMPERATURE,
-                    authorization=authorization, trace=run.trace)))
+                    authorization=authorization, trace=run.trace, pass_threads=run.pass_threads)))
             run.raw_response = candidates[0]
             pass2_input = "\n\n".join(
                 f"Candidate {i + 1}:\n{c}" for i, c in enumerate(candidates)
             )
             run.log(f"Pass 1: ensemble mode — {ensemble_n} candidates generated.")
         else:
-            run.raw_response = yield from _run_pass("Pass 1", pass1_input, model, provider_name, authorization=authorization, trace=run.trace)
+            run.raw_response = yield from _run_pass("Pass 1", pass1_input, model, provider_name, authorization=authorization, trace=run.trace, pass_threads=run.pass_threads)
             pass2_input = f"Response to extract claims from:\n{run.raw_response}"
             run.log("Pass 1: initial generation complete.")
         yield from progress.checkpoint()
 
         # --- Pass 2: claim extraction & classification ---
-        claims_json = _parse_json_response((yield from _run_pass_with_json_retry("Pass 2", pass2_input, model, provider_name, run.trace, authorization=authorization)))
+        claims_json = _parse_json_response((yield from _run_pass_with_json_retry("Pass 2", pass2_input, model, provider_name, run.trace, authorization=authorization, pass_threads=run.pass_threads)))
         run.claims = [_claim_from_json(c) for c in claims_json]
         for claim in run.claims:
             yield PipelineEvent(kind="claim_extracted", claim_id=claim.id,
@@ -828,7 +828,7 @@ def stream_deep_research_pipeline(
                 f"Deduplicated entities to research (search each ONCE, map results back "
                 f"to every claim referencing it):\n{json.dumps(unique_entities)}"
             )
-            grounding_json = _parse_json_response((yield from _run_pass_with_json_retry("Pass 3a", pass3a_input, critic_model, critic_provider, run.trace, authorization=authorization)))
+            grounding_json = _parse_json_response((yield from _run_pass_with_json_retry("Pass 3a", pass3a_input, critic_model, critic_provider, run.trace, authorization=authorization, pass_threads=run.pass_threads)))
             _apply_grounding(run.claims, grounding_json)
             yield from progress.checkpoint(f"Pass 3a: grounded {len(unique_entities)} unique entities across {len(factual_claims)} factual claim(s).")
 
@@ -836,7 +836,7 @@ def stream_deep_research_pipeline(
                 f"Raw response:\n{run.raw_response}\n\n"
                 f"Factual claims with grounding:\n{json.dumps([vars(c) for c in factual_claims])}"
             )
-            critic_json = _parse_json_response((yield from _run_pass_with_json_retry("Pass 3b", pass3b_input, critic_model, critic_provider, run.trace, authorization=authorization)))
+            critic_json = _parse_json_response((yield from _run_pass_with_json_retry("Pass 3b", pass3b_input, critic_model, critic_provider, run.trace, authorization=authorization, pass_threads=run.pass_threads)))
             _apply_critic(run.claims, critic_json)
             yield from progress.checkpoint("Pass 3b: critique complete for factual claims.")
         else:
@@ -849,7 +849,7 @@ def stream_deep_research_pipeline(
 
         # --- Pass 3c: completeness, independent of Pass 1's raw_response ---
         pass3c_input = f"Original query:\n{user_query}\n\nPreliminary plan:\n{json.dumps(run.plan)}"
-        run.completeness = _parse_json_response((yield from _run_pass_with_json_retry("Pass 3c", pass3c_input, model, provider_name, run.trace, authorization=authorization)))
+        run.completeness = _parse_json_response((yield from _run_pass_with_json_retry("Pass 3c", pass3c_input, model, provider_name, run.trace, authorization=authorization, pass_threads=run.pass_threads)))
         yield from progress.checkpoint(
             f"Pass 3c: coverage_score={run.completeness.get('coverage_score')}, "
             f"{len(run.completeness.get('gaps', []))} gap(s) identified."
@@ -861,7 +861,7 @@ def stream_deep_research_pipeline(
             f"All claims:\n{json.dumps([vars(c) for c in run.claims])}\n\n"
             f"Completeness findings:\n{json.dumps(run.completeness)}"
         )
-        run.assumptions = _parse_json_response((yield from _run_pass_with_json_retry("Pass 5", pass5_input, model, provider_name, run.trace, authorization=authorization)))
+        run.assumptions = _parse_json_response((yield from _run_pass_with_json_retry("Pass 5", pass5_input, model, provider_name, run.trace, authorization=authorization, pass_threads=run.pass_threads)))
         _apply_assumption_flags(run.claims, run.assumptions)
         yield from progress.checkpoint(f"Pass 5: assumption audit complete, {len(run.assumptions.get('per_claim_flags', {}))} claim(s) flagged.")
 
@@ -887,7 +887,7 @@ def stream_deep_research_pipeline(
                 }
                 for c in flagged
             ])
-            revisions = _parse_json_response((yield from _run_pass_with_json_retry("Pass 6a", pass6a_input, model, provider_name, run.trace, authorization=authorization)))
+            revisions = _parse_json_response((yield from _run_pass_with_json_retry("Pass 6a", pass6a_input, model, provider_name, run.trace, authorization=authorization, pass_threads=run.pass_threads)))
             for rev in revisions:
                 claim = run.claim_by_id(rev["claim_id"])
                 if claim:
@@ -903,7 +903,7 @@ def stream_deep_research_pipeline(
 
             # --- Pass 6c: re-validate the revised subset only (batched, reuses Pass 4's code) ---
             pass6c_input = json.dumps([vars(c) for c in flagged])
-            revalidation = _parse_json_response((yield from _run_pass_with_json_retry("Pass 6c", pass6c_input, critic_model, critic_provider, run.trace, authorization=authorization)))
+            revalidation = _parse_json_response((yield from _run_pass_with_json_retry("Pass 6c", pass6c_input, critic_model, critic_provider, run.trace, authorization=authorization, pass_threads=run.pass_threads)))
             _apply_grounding(run.claims, revalidation.get("grounding", []))
             _apply_critic(run.claims, revalidation.get("critic", []))
             run_confidence_tiering(run, ensemble_n=ensemble_n if ensemble_mode else 0)  # Pass 4's function again -- code, not a call
@@ -943,7 +943,7 @@ def stream_deep_research_pipeline(
         yield from progress.checkpoint(f"Merge: final claim set assembled -- {len(run.claims)} claim(s), {len(run.coverage_gaps)} coverage gap(s).")
 
         # --- Final synthesis ---
-        run.final_report = yield from _run_pass("Final synthesis", _synthesis_input(run), model, provider_name, authorization=authorization, trace=run.trace)
+        run.final_report = yield from _run_pass("Final synthesis", _synthesis_input(run), model, provider_name, authorization=authorization, trace=run.trace, pass_threads=run.pass_threads)
         yield from progress.checkpoint("Final synthesis complete.")
 
         # --- §20: review, consent, correct ---

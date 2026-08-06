@@ -26,6 +26,7 @@ ConversationThread / MessageLog.
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timezone
 from typing import Optional
 from uuid import UUID, uuid4
@@ -33,6 +34,13 @@ from uuid import UUID, uuid4
 from sqlmodel import Field, Session, SQLModel
 
 from database import engine
+# §27: the thread-kind vocabulary lives beside the table that stores it.
+# This import direction is the only one that exists -- storage.py knows
+# nothing about pipeline runs, and classify_legacy_pass_threads() below is
+# where the two meet.
+from storage import THREAD_KIND_CHAT, THREAD_KIND_RESEARCH_PASS
+
+logger = logging.getLogger(__name__)
 
 
 class PipelineRunRecord(SQLModel, table=True):
@@ -49,6 +57,14 @@ class PipelineRunRecord(SQLModel, table=True):
     claims_json: str = "[]"
     trace_json: str = "[]"
     coverage_gaps_json: str = "[]"
+    # §27 (T2): [{"pass": ..., "thread_id": ...}] for this run's pass
+    # threads. Persisted rather than left to the output directory alone
+    # (where granted_calls and subagent_reviews live) because those are
+    # written once, at the end, by a run that finished -- and a run whose
+    # passes are worth chasing through their threads is frequently one
+    # that did not. Checkpointed like the other data columns, so an
+    # abandoned run keeps the ids it had reached.
+    pass_threads_json: str = "[]"
     final_report: str = ""
     started_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     finished_at: Optional[datetime] = None
@@ -107,6 +123,11 @@ def update_pipeline_run(
         record.claims_json = json.dumps([vars(c) for c in run.claims])
         record.trace_json = json.dumps(run.trace)
         record.coverage_gaps_json = json.dumps(run.coverage_gaps)
+        # getattr, not run.pass_threads: this function is called with test
+        # doubles and with runs reconstructed elsewhere, and a checkpoint
+        # that raises on a missing optional field would take down the pass
+        # that was only trying to record its progress.
+        record.pass_threads_json = json.dumps(getattr(run, "pass_threads", []) or [])
         record.final_report = run.final_report
         session.add(record)
         session.commit()
@@ -141,5 +162,99 @@ def load_pipeline_run(run_id: UUID) -> dict:
             "claims": json.loads(record.claims_json),
             "trace": json.loads(record.trace_json),
             "coverage_gaps": json.loads(record.coverage_gaps_json),
+            # §27 AC6. Defaulted rather than read straight off the record:
+            # a row written before this column existed has it as NULL after
+            # ensure_columns' ALTER (the migration is additive and never
+            # backfills), and json.loads(None) raises.
+            "pass_threads": json.loads(record.pass_threads_json or "[]"),
             "final_report": record.final_report,
         }
+
+
+# ---------------------------------------------------------------------------
+# ---- One-time classification of pre-§27 threads ---------------------------
+# ---------------------------------------------------------------------------
+
+def classify_legacy_pass_threads(connection) -> int:
+    """Label pass threads that predate ConversationThread.kind. Returns the
+    number of rows relabelled.
+
+    WHY THIS IS NOT PART OF ensure_columns(). That function is additive
+    only and explicitly never backfills (§21 M7) -- so every row already on
+    disk takes `kind='chat'` from the column default, and the hundreds of
+    pass threads in an existing database would still fill the picker §27
+    exists to clear. Widening ensure_columns' contract to backfill would
+    put data policy inside a schema migrator; if that function ever grows a
+    DROP or an UPDATE, the project has outgrown it.
+
+    WHY IT LIVES HERE rather than in storage.py. The signal is a pipeline
+    fact -- "a thread created between a run's started_at and finished_at is
+    a pass thread of that run" -- and storage.py owns schema and CRUD
+    without knowing what a run is. The dependency runs this way round only;
+    storage.py does not import this module.
+
+    THE SIGNAL IS STRUCTURAL, NOT HEURISTIC. A chat thread cannot be born
+    inside that window: the CLI is blocked inside the synchronous pipeline
+    call, and the TUI's `_busy` guard already refuses /new and thread
+    switching mid-run. Nothing here inspects content or counts messages.
+
+    A RUN WITH finished_at IS NULL IS SKIPPED. §22's abandoned-generator
+    case deliberately leaves status='running' with no closing bound, so an
+    open window would swallow every thread created since -- including real
+    conversations. Under-classifying leaves a straggler in the picker;
+    over-classifying HIDES A REAL CONVERSATION, and only one of those is
+    recoverable by the user.
+
+    IDEMPOTENT BY CONSTRUCTION, not by a marker. It only ever moves rows
+    that are still 'chat' into 'research_pass', so running it at every
+    launch is a no-op after the first -- and a database last opened by an
+    older build still gets classified, which a one-shot flag would miss.
+
+    Raw SQL over a DBAPI connection (`engine.raw_connection()` in
+    production, stdlib `sqlite3.connect(...)` in tests), the same seam
+    database.ensure_columns() uses and for the same reason: the suite's
+    fake `sqlmodel` cannot execute DDL or a correlated subquery, and a seam
+    that only works in production is not a seam. Does NOT close the
+    connection -- the caller owns its lifetime.
+
+    Threads a legacy compactor or subagent created are relabelled
+    'research_pass' here if they happen to fall inside a run's window, and
+    left as 'chat' otherwise. Both are acceptable: the first is hidden
+    either way, and the second is the under-classification this docstring
+    already prefers.
+    """
+    cursor = connection.cursor()
+    cursor.execute("PRAGMA table_info(conversationthread)")
+    if not any(row[1] == "kind" for row in cursor.fetchall()):
+        # No column yet, so nothing to classify. create_all/ensure_columns
+        # run before this in production; a caller that skipped them gets a
+        # no-op rather than "no such column".
+        return 0
+    cursor.execute("PRAGMA table_info(pipelinerunrecord)")
+    if not cursor.fetchall():
+        # A database that has never run research. Nothing to classify, and
+        # the subquery below would raise on the missing table.
+        return 0
+    # `finished_at IS NOT NULL` is belt-and-braces: SQL's `x <= NULL` is
+    # NULL rather than true, so an open window already matches nothing. It
+    # stays because the guard is the INTENT -- a later edit that made the
+    # upper bound lenient (`finished_at IS NULL OR ...`) would otherwise
+    # relabel every conversation since an abandoned run, and that edit reads
+    # as a kindness. Verified by mutation: dropping BOTH turns three tests
+    # red, dropping either alone turns none.
+    cursor.execute(
+        "UPDATE conversationthread SET kind = ? "
+        " WHERE kind = ? AND EXISTS ("
+        "  SELECT 1 FROM pipelinerunrecord AS r"
+        "   WHERE r.finished_at IS NOT NULL"
+        "     AND conversationthread.created_at >= r.started_at"
+        "     AND conversationthread.created_at <= r.finished_at)",
+        (THREAD_KIND_RESEARCH_PASS, THREAD_KIND_CHAT),
+    )
+    connection.commit()
+    relabelled = cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0
+    if relabelled:
+        logger.info(
+            "Classified %d pre-§27 thread(s) as research passes; they no "
+            "longer appear in the thread picker.", relabelled)
+    return relabelled
