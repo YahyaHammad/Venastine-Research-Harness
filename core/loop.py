@@ -93,6 +93,119 @@ def with_memories(system_prompt: str, agent=None) -> str:
     return f"{system_prompt}\n\n{fragment}"
 
 
+def with_refs(system_prompt: str, memory: ConversationMemory) -> str:
+    """Append §21c's referenced-conversation tier to a prompt. No-op when the
+    thread has no references attached.
+
+    Beside with_goal and taking the same argument, because a reference is a
+    property of the THREAD rather than of the agent or the session: it was
+    attached to this conversation by a person, it persists across a resume,
+    and it applies whichever agent happens to be active. That is also why it
+    is not routed through agents.manager.system_prompt_for() the way §21b's
+    memories are -- that function has no memory object, and refs are not an
+    agent's opt-in.
+
+    MUST NOT move inside prompts.system_prompts.with_catalogs(). That function
+    feeds pass_prompt(), so a reference attached in a chat session would land
+    in all ten passes of a research run the user started separately. §19's K6,
+    THIRD instance -- after §21b's memories, which is recorded as M13.
+
+    THE SUMMARIES ARE ANNOUNCED AS SUMMARIES OF SOMETHING ELSE. A referenced
+    thread is not this conversation's history, and a model that cannot tell
+    the difference will answer as though the user said things they said
+    elsewhere. Same reason §21a's compaction summary carries SUMMARY_PREFIX.
+    """
+    refs = memory.extra.get("refs") or []
+    if not refs:
+        return system_prompt
+
+    # CAPPED, AND THE CAP IS STATED IN THE TEXT (M14). The attach path already
+    # refuses to exceed it, so this is the second line of defence rather than
+    # the first -- but MAX_INJECTED_REFS can be lowered between sessions, and a
+    # thread carrying four refs under a cap of three must drop one visibly
+    # rather than silently.
+    cap = config.MAX_INJECTED_REFS
+    shown, total = refs[:cap], len(refs)
+    header = ("## Referenced conversations\n\n"
+              "Distilled summaries of OTHER conversations, attached by the "
+              "user for context. They are NOT part of this conversation's "
+              "history -- nothing here was said to you in this thread.")
+    if total > cap:
+        logger.warning(
+            "Injecting %s of %s attached references; the rest are not in this "
+            "prompt. Raise config.MAX_INJECTED_REFS or drop one with "
+            "/ref --clear.", cap, total)
+        header = (f"{header}\n\nShowing {cap} of {total} attached references. "
+                  f"The others exist and are not included here.")
+
+    lines = [header]
+    for ref in shown:
+        label = ref.get("label") or "(no preview)"
+        lines.append(f"\n### {label}\n(thread {ref.get('thread_id')})\n"
+                     f"{ref.get('summary', '')}")
+    return f"{system_prompt}\n\n" + "\n".join(lines)
+
+
+def attach_ref(memory: ConversationMemory, thread_id, summary: str,
+               label: str = "") -> tuple:
+    """Attach one thread's summary to `memory`'s thread. Returns (ok, message).
+
+    ONE writer for both shells, like with_refs is one reader: the CLI's --ref
+    and the TUI's /ref must agree about the cap, about re-attaching the same
+    thread, and about the stored shape, or the two disagree about what a
+    reference IS.
+
+    REFUSES AT THE CAP rather than dropping the oldest. A reference is
+    something a person chose by name; making room by discarding one silently
+    is what §21b's "removal is by id, never by substring" rule exists to
+    prevent. The message names the command that makes room.
+
+    Re-attaching a thread already attached REPLACES its summary rather than
+    adding a second entry -- the newer summary is strictly better information
+    about the same source, and two entries for one thread would spend the cap
+    on a duplicate.
+    """
+    from datetime import datetime, timezone
+
+    refs = [dict(r) for r in (memory.extra.get("refs") or [])]
+    key = str(thread_id)
+    existing = next((r for r in refs if r.get("thread_id") == key), None)
+    if existing is None and len(refs) >= config.MAX_INJECTED_REFS:
+        return False, (
+            f"Already referencing {len(refs)} conversations, which is the "
+            f"limit (config.MAX_INJECTED_REFS). Drop one with /ref --clear "
+            f"first -- none is removed automatically.")
+
+    entry = {
+        "thread_id": key,
+        "summary": summary,
+        "label": label,
+        "attached_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if existing is not None:
+        refs[refs.index(existing)] = entry
+        verb = "Updated the reference to"
+    else:
+        refs.append(entry)
+        verb = "Now referencing"
+    memory.set_extra("refs", refs)
+    return True, f"{verb} thread {key}."
+
+
+def clear_refs(memory: ConversationMemory) -> int:
+    """Drop every attached reference. Returns how many were dropped.
+
+    All or nothing, deliberately: a per-reference removal needs a stable way
+    for a person to name one, and the only handle a ref has is a thread uuid
+    the user would have to retype. `/ref --list` then `/ref` to re-attach the
+    ones still wanted is two steps with nothing to mistype.
+    """
+    refs = memory.extra.get("refs") or []
+    if refs:
+        memory.set_extra("refs", None)
+    return len(refs)
+
+
 def _authorization_kwargs(authorization) -> dict:
     """Unpack a RunAuthorization into _run()'s primitives.
 
@@ -609,6 +722,10 @@ class RunAgentLoop:
         # plain chat turn count as opted in -- see memories.manager.
         if system_prompt is None:
             prompt = with_memories(prompt)
+        # §21c. UNCONDITIONAL, unlike memories above: a reference belongs to
+        # the thread, not to an agent, so an agent-built prompt needs it too --
+        # and system_prompt_for() has no memory to read it from.
+        prompt = with_refs(prompt, memory)
         auth_kwargs = (
             _authorization_kwargs(authorization) if authorization is not None
             else {"granted_tools": granted_tools}

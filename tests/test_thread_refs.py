@@ -262,3 +262,244 @@ class TestASummaryIsNotACompaction:
         sent = summarizer[0]["user_goal"]
         assert "THE ORIGINAL QUESTION" in sent
         assert "A COMPACTION SUMMARY" not in sent
+
+
+# ===========================================================================
+# ---- The ref tier: where it appears, and where it must never -------------
+# ===========================================================================
+
+class TestTheRefTier:
+
+    def test_no_ref_reaches_a_research_pass_prompt(self, fake_storage):
+        """K6 / M13, THIRD instance, and the one that matters. `with_catalogs()`
+        feeds `pass_prompt()`, so a fragment appended inside it would put a
+        conversation the user referenced in a chat session into all ten passes
+        of a research run they started separately.
+
+        Asserted through the ten passes AND on with_catalogs directly, the way
+        §21b's equivalent is, so a future caller inherits the guarantee.
+        """
+        import prompts.system_prompts as system_prompts
+        from core.loop import with_refs
+
+        memory = _memory_with_refs(fake_storage, "SECRET-REFERENCED-TEXT")
+
+        # The fragment exists and carries the text...
+        assert "SECRET-REFERENCED-TEXT" in with_refs("base", memory)
+        # ...and reaches no pass prompt.
+        for pass_id in system_prompts.passes_source_files:
+            rendered = system_prompts.pass_prompt(pass_id)
+            assert "SECRET-REFERENCED-TEXT" not in rendered
+            assert "## Referenced conversations" not in rendered
+        assert "## Referenced conversations" not in system_prompts.with_catalogs("base")
+
+    def test_a_thread_with_no_refs_changes_nothing(self, fake_storage):
+        from core.loop import with_refs
+        from core.memory import ConversationMemory
+
+        memory = ConversationMemory()
+
+        assert with_refs("base prompt", memory) == "base prompt"
+
+    def test_the_fragment_says_the_summaries_are_not_this_conversation(
+            self, fake_storage):
+        """A referenced thread is not this thread's history. A model that
+        cannot tell the difference answers as though the user said things they
+        said somewhere else -- the same risk SUMMARY_PREFIX addresses for
+        §21a's compaction summary."""
+        from core.loop import with_refs
+
+        memory = _memory_with_refs(fake_storage, "summary text")
+        fragment = with_refs("base", memory)
+
+        assert "NOT part of this conversation's history" in fragment
+
+    def test_the_cap_is_applied_and_stated(self, fake_storage, mocker):
+        """M14's no-silent-caps rule. The attach path refuses past the cap, so
+        this is the second line of defence -- MAX_INJECTED_REFS can be lowered
+        between sessions, and a thread carrying more than the cap must drop
+        visibly rather than silently."""
+        from core.loop import with_refs
+        from core.memory import ConversationMemory
+
+        memory = ConversationMemory()
+        memory.set_extra("refs", [
+            {"thread_id": f"t{n}", "summary": f"SUMMARY-{n}", "label": f"l{n}"}
+            for n in range(4)
+        ])
+        mocker.patch.object(config, "MAX_INJECTED_REFS", 2)
+
+        fragment = with_refs("base", memory)
+
+        assert "SUMMARY-0" in fragment and "SUMMARY-1" in fragment
+        assert "SUMMARY-2" not in fragment
+        assert "Showing 2 of 4" in fragment, \
+            "a truncated list must say so in the text the MODEL reads"
+
+    def test_a_ref_survives_a_resume(self, fake_storage):
+        """It is thread state, so it has to outlive the session that attached
+        it -- that is the whole difference from an active skill."""
+        from core.loop import with_refs
+        from core.memory import ConversationMemory
+
+        memory = _memory_with_refs(fake_storage, "PERSISTED-SUMMARY")
+
+        resumed = ConversationMemory(thread_id=memory.thread_id)
+
+        assert "PERSISTED-SUMMARY" in with_refs("base", resumed)
+
+
+class TestAttachingAndClearing:
+
+    def test_attaching_stores_the_summary_on_the_thread(self, fake_storage):
+        from core.loop import attach_ref
+        from core.memory import ConversationMemory
+
+        memory = ConversationMemory()
+        source = fake_storage.create_thread()
+
+        ok, message = attach_ref(memory, source, "the summary", label="a label")
+
+        assert ok is True
+        assert str(source) in message
+        stored = memory.extra["refs"]
+        assert len(stored) == 1
+        assert stored[0]["summary"] == "the summary"
+        assert stored[0]["label"] == "a label"
+        assert stored[0]["attached_at"]
+
+    def test_the_cap_refuses_rather_than_dropping_the_oldest(self, fake_storage):
+        """A reference is something a person chose by name. Making room by
+        discarding one silently is what §21b's 'removal is by id, never by
+        substring' rule exists to prevent."""
+        from core.loop import attach_ref
+        from core.memory import ConversationMemory
+
+        memory = ConversationMemory()
+        for index in range(config.MAX_INJECTED_REFS):
+            assert attach_ref(memory, fake_storage.create_thread(),
+                              f"summary {index}")[0] is True
+
+        ok, message = attach_ref(memory, fake_storage.create_thread(), "one more")
+
+        assert ok is False
+        assert "/ref --clear" in message, "the refusal must name the way out"
+        assert len(memory.extra["refs"]) == config.MAX_INJECTED_REFS
+        assert memory.extra["refs"][0]["summary"] == "summary 0", \
+            "the oldest reference must still be there"
+
+    def test_re_attaching_the_same_thread_replaces_its_summary(self, fake_storage):
+        """Two entries for one source would spend the cap on a duplicate, and
+        the newer summary is strictly better information about the same thread."""
+        from core.loop import attach_ref
+        from core.memory import ConversationMemory
+
+        memory = ConversationMemory()
+        source = fake_storage.create_thread()
+        attach_ref(memory, source, "the old summary")
+
+        ok, message = attach_ref(memory, source, "the newer summary")
+
+        assert ok is True
+        assert "Updated" in message
+        assert len(memory.extra["refs"]) == 1
+        assert memory.extra["refs"][0]["summary"] == "the newer summary"
+
+    def test_clearing_drops_every_reference(self, fake_storage):
+        from core.loop import attach_ref, clear_refs, with_refs
+        from core.memory import ConversationMemory
+
+        memory = ConversationMemory()
+        attach_ref(memory, fake_storage.create_thread(), "a summary")
+
+        assert clear_refs(memory) == 1
+        assert clear_refs(memory) == 0, "clearing twice is not an error"
+        assert with_refs("base", memory) == "base"
+
+
+def _memory_with_refs(fake_storage, summary_text):
+    """A memory whose thread carries one attached reference."""
+    from core.loop import attach_ref
+    from core.memory import ConversationMemory
+
+    memory = ConversationMemory()
+    attach_ref(memory, fake_storage.create_thread(), summary_text,
+               label="the source thread")
+    return memory
+
+
+# ===========================================================================
+# ---- The call sites, not the helper ---------------------------------------
+# ===========================================================================
+#
+# `with_refs` existing proves nothing if the shells never call it. §21b
+# recorded this exactly: the first version of its injection tests exercised
+# only the helper, so deleting the call site left every assertion green. Refs
+# have TWO sites (both places `with_goal` is applied), and a missed one is a
+# reference that silently does nothing on that path.
+
+def _prompt_sent(mocker, thread_id=None, **kwargs) -> str:
+    """The system prompt a real chat turn actually sends."""
+    from tests.conftest import make_model_response, make_stream_from_response
+    from core.loop import RunAgentLoop
+
+    mocker.patch("core.loop.api_initialization", return_value=object())
+    mocker.patch("tools.registry.registry.schemas", return_value=[])
+    stream = mocker.patch(
+        "core.loop.call_model_stream",
+        side_effect=make_stream_from_response(make_model_response(text="ok")))
+
+    RunAgentLoop.run_agent_conversation(
+        user_goal="hi", model="m", provider_name="ANTHROPIC",
+        thread_id=thread_id, **kwargs)
+
+    # call_model_stream(client, provider, model, messages, system_prompt, ...)
+    return stream.call_args[0][4]
+
+
+def test_a_real_chat_turn_sends_the_refs(mocker, fake_storage):
+    memory = _memory_with_refs(fake_storage, "REFERENCED-SUMMARY")
+
+    assert "REFERENCED-SUMMARY" in _prompt_sent(mocker, memory.thread_id)
+
+
+def test_an_agent_built_prompt_still_gets_them(mocker, fake_storage):
+    """UNLIKE memories, refs are appended unconditionally. A reference belongs
+    to the thread rather than to an agent, and `system_prompt_for()` has no
+    memory object to read one from -- so if the wrapper skipped an agent-built
+    prompt the way it does for memories, an active agent would lose every
+    reference the user attached."""
+    memory = _memory_with_refs(fake_storage, "REFERENCED-SUMMARY")
+
+    sent = _prompt_sent(mocker, memory.thread_id,
+                        system_prompt="an agent's own prompt")
+
+    assert sent.count("REFERENCED-SUMMARY") == 1
+
+
+@pytest.mark.asyncio
+async def test_the_tui_turn_sends_them_too(mocker, fake_storage):
+    """The second call site. D12 makes the CLI permanent, so both shells
+    assemble their own plain-chat prompt -- which is the same reason with_goal
+    and with_memories are named functions rather than inline strings."""
+    from tests.conftest import make_model_response, make_stream_from_response
+    from tui.app import VenastineApp
+
+    mocker.patch("core.loop.api_initialization", return_value=object())
+    mocker.patch("tools.registry.registry.schemas", return_value=[])
+    stream = mocker.patch(
+        "core.loop.call_model_stream",
+        side_effect=make_stream_from_response(make_model_response(text="ok")))
+
+    memory = _memory_with_refs(fake_storage, "REFERENCED-SUMMARY")
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        app.memory = memory
+        app.run_agent_turn("hello")
+        for _ in range(60):
+            await pilot.pause()
+            if stream.call_args is not None:
+                break
+
+    assert stream.call_args is not None, "the turn never reached the model"
+    assert "REFERENCED-SUMMARY" in stream.call_args[0][4]

@@ -46,7 +46,7 @@ from skills.tui_commands import register_skill_commands
 from core import config_loader
 from core.client import api_initialization, effort_levels_for_model
 from core.loop import (
-    DEFAULT_PROVIDER, DEFAULT_SYSTEM_PROMPT, RunAgentLoop, with_goal,
+    DEFAULT_PROVIDER, DEFAULT_SYSTEM_PROMPT, RunAgentLoop, with_goal, with_refs,
     with_memories,
 )
 from core.memory import ConversationMemory
@@ -492,6 +492,9 @@ class VenastineApp(App):
         # would duplicate them.
         if self.active_agent is None:
             prompt = with_memories(prompt)
+        # §21c. Unconditional, for the reason the loop's copy of this line
+        # gives: a reference is thread state, not an agent's opt-in.
+        prompt = with_refs(prompt, self.memory)
         # §19 K1/K6: active skill bodies are pinned HERE, beside with_goal,
         # and deliberately NOT inside with_catalogs -- that function feeds
         # pass_prompt(), so pinning there would inject a skill activated in
