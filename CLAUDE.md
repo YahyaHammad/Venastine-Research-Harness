@@ -20,7 +20,7 @@ python main.py --mode research --review "q"       # §20: review the finished ru
 # §21a compaction runs automatically in every shell; /compact triggers it by hand in the TUI
 # §26: /claims [run id] or ctrl+l opens a run's claims; /copy [last|report|claims|all] [--file path]
 
-pytest                                            # 1081 tests, offline, ~25s (first run ~30s: matplotlib font cache)
+pytest                                            # 1095 tests, offline, ~25s (first run ~30s: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure

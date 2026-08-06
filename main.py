@@ -391,6 +391,77 @@ def run_memory_command(args) -> int:
     return 0
 
 
+def run_summary_command(args, provider_name: str, model: str) -> int:
+    """`--summary [thread]`, ROADMAP_v2 §21c (M21).
+
+    Prints one thread's distilled summary and exits. DESCRIBES, DOES NOT FOLD
+    (M20): the thread is left exactly as it is, unlike the automatic
+    compaction a chat session performs on itself.
+
+    Falls back to `--thread` when no id is given, so `--thread <id> --summary`
+    reads the way it sounds.
+    """
+    from core import compaction
+
+    raw = (args.summary or "").strip() or (str(args.thread) if args.thread else "")
+    if not raw:
+        print("--summary needs a thread id, or a --thread to take one from.")
+        return 1
+    try:
+        thread_id = UUID(raw)
+    except ValueError:
+        print(f"Not a thread id: {raw!r}.")
+        return 1
+
+    notice = compaction.summarize_thread(thread_id, model, provider_name)
+    if notice is None:
+        print(f"Nothing to summarise in thread {thread_id}.")
+        return 1
+    if not notice.get("fresh"):
+        print(f"[stored summary of {thread_id}; the thread has not changed "
+              f"since]")
+    print(notice["text"])
+    return 0
+
+
+def attach_cli_refs(thread_id, specs, provider_name: str, model: str) -> None:
+    """Attach each `--ref <thread>` to `thread_id` (§21c, M21).
+
+    Reports every outcome and refuses none of the session: a mistyped id or a
+    reference past the cap is worth saying out loud, and is not a reason to
+    decline to start the conversation the user asked for.
+
+    Goes through core.loop.attach_ref, the same writer the TUI's /ref uses, so
+    the two shells cannot disagree about the cap or the stored shape.
+    """
+    from core import compaction
+    from core.loop import attach_ref
+    from core.memory import ConversationMemory
+
+    memory = ConversationMemory(thread_id=thread_id)
+    for spec in specs:
+        try:
+            source = UUID(str(spec).strip())
+        except ValueError:
+            print(f"[--ref: not a thread id: {spec!r}]")
+            continue
+        if source == thread_id:
+            print("[--ref: that is this thread; skipped]")
+            continue
+        try:
+            notice = compaction.summarize_thread(source, model, provider_name)
+        except Exception as e:  # noqa: BLE001 -- a failed reference must not
+            # stop the session from starting.
+            logger.warning("Could not summarise thread %s: %s", source, e)
+            print(f"[--ref: could not summarise {source}: {e}]")
+            continue
+        if notice is None:
+            print(f"[--ref: nothing to summarise in {source}]")
+            continue
+        ok, message = attach_ref(memory, source, notice["text"])
+        print(f"[--ref: {message}]")
+
+
 def build_chat_authorization():
     """Authorization for a CLI chat turn: nobody granted anything, but
     someone is here to ask (ROADMAP_v2 §21b, M16).
@@ -692,6 +763,26 @@ def build_parser() -> argparse.ArgumentParser:
         "--forget",
         metavar="ID",
         help="Delete one durable memory by id (see --memories) and exit.",
+    )
+    # ROADMAP_v2 §21c (M21). Flags rather than /summary and /ref for the same
+    # reason --memories is a flag: the CLI has no slash-command layer, and
+    # adding one is §23's business rather than this section's. The accepted
+    # limit is that a CLI user attaches a reference at LAUNCH -- mid-conversation
+    # referencing is the TUI's.
+    parser.add_argument(
+        "--summary",
+        metavar="THREAD",
+        nargs="?",
+        const="",
+        help="Print a thread's distilled summary and exit (ROADMAP_v2 §21c). "
+             "Defaults to the thread given by --thread.",
+    )
+    parser.add_argument(
+        "--ref",
+        metavar="THREAD",
+        action="append",
+        help="Attach another thread's summary to this session as context. "
+             "Repeatable, up to config.MAX_INJECTED_REFS.",
     )
     return parser
 
@@ -999,6 +1090,12 @@ if __name__ == "__main__":
     if args.memories or args.forget:
         raise SystemExit(run_memory_command(args))
 
+    # §21c (M21). Beside the memory commands and for the same reasons: it
+    # needs the resolved project path for nothing, but it DOES need the
+    # resolved provider/model, and it runs no tool and needs no MCP server.
+    if args.summary is not None:
+        raise SystemExit(run_summary_command(args, provider, model))
+
     # Argument validation before connecting anything: parser.error() exits,
     # and doing it after setup_mcp() would spawn stdio server subprocesses
     # only to abandon them on the way out.
@@ -1064,7 +1161,19 @@ if __name__ == "__main__":
                 review=build_review_consent() if review_on else None,
             )
         else:
-            run_chat(args.thread, provider, model, first_message=args.query)
+            thread_id = args.thread
+            if args.ref:
+                # §21c (M21). A reference needs a thread to attach TO, and the
+                # CLI otherwise creates one lazily on the first turn -- so with
+                # --ref the thread is created here and printed, which is also
+                # what makes it resumable. The cost of --ref with no message is
+                # one empty thread, the same cost /new already carries.
+                if thread_id is None:
+                    from core.memory import ConversationMemory
+                    thread_id = ConversationMemory().thread_id
+                    print(f"[thread: {thread_id}]")
+                attach_cli_refs(thread_id, args.ref, provider, model)
+            run_chat(thread_id, provider, model, first_message=args.query)
     finally:
         # finally, not "at the end": run_research raises SystemExit(1) on a
         # failed pipeline, and Ctrl+C reaches here as KeyboardInterrupt.

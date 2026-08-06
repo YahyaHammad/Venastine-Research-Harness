@@ -503,3 +503,301 @@ async def test_the_tui_turn_sends_them_too(mocker, fake_storage):
 
     assert stream.call_args is not None, "the turn never reached the model"
     assert "REFERENCED-SUMMARY" in stream.call_args[0][4]
+
+
+# ===========================================================================
+# ---- The shells ------------------------------------------------------------
+# ===========================================================================
+
+class _StubTranscript:
+    """Records what a command wrote, by role. The real widget needs a running
+    app; these tests are about which message a handler chose."""
+
+    def __init__(self):
+        self.system = []
+        self.errors = []
+        self.answers = []
+
+    def write_system(self, text): self.system.append(text)
+    def write_error(self, text): self.errors.append(text)
+    def write_answer(self, text): self.answers.append(text)
+    def write_role(self, role, text): self.system.append(text)
+    def flush_stream(self): return ""
+
+    @property
+    def all(self):
+        return self.system + self.errors + self.answers
+
+
+class _StubApp:
+    """Enough of VenastineApp for a command handler, with the worker run
+    INLINE -- these tests are about what the handler does, and Textual's
+    worker needs a running app."""
+
+    def __init__(self, memory=None, busy=False):
+        self._memory = memory
+        self._transcript = _StubTranscript()
+        self._busy = busy
+        self.model = "claude-sonnet-5"
+        self.provider_name = "ANTHROPIC"
+        self.pushed = []
+
+    @property
+    def memory(self):
+        return self._memory
+
+    def call_from_thread(self, fn, *args):
+        return fn(*args)
+
+    def run_worker(self, work, **kwargs):
+        work()
+
+    def push_screen(self, screen, callback=None):
+        self.pushed.append((screen, callback))
+
+
+class TestTheSummaryCommand:
+
+    def test_it_shows_the_summary_without_folding_the_thread(
+            self, fake_storage, summarizer):
+        """M20. /compact shortens what the model sees next turn; /summary
+        leaves the conversation exactly as it is. Two different requests that
+        happen to share a summarizer."""
+        from memories.tui_commands import _cmd_summary
+        from core.memory import ConversationMemory
+
+        memory = ConversationMemory()
+        _thread(memory, turns=30, body="y" * 200)
+        before = list(memory.messages)
+        app = _StubApp(memory)
+
+        _cmd_summary(app, "")
+
+        assert "A distilled summary of the thread." in app._transcript.answers
+        assert fake_storage.latest_checkpoint(memory.thread_id) is None, \
+            "/summary must not fold the thread it describes"
+        assert ConversationMemory(thread_id=memory.thread_id).messages == before
+
+    def test_it_refuses_while_a_turn_is_running(self, fake_storage, summarizer):
+        from memories.tui_commands import _cmd_summary
+        from core.memory import ConversationMemory
+
+        app = _StubApp(ConversationMemory(), busy=True)
+
+        _cmd_summary(app, "")
+
+        assert app._transcript.errors
+        assert summarizer == []
+
+    def test_an_empty_session_says_so(self, fake_storage, summarizer):
+        from memories.tui_commands import _cmd_summary
+
+        app = _StubApp(memory=None)
+
+        _cmd_summary(app, "")
+
+        assert app._transcript.errors
+        assert summarizer == []
+
+
+class TestTheRefCommand:
+
+    def test_the_picker_excludes_the_current_thread(self, fake_storage,
+                                                   summarizer, mocker):
+        """Referencing yourself spends a model call to inject what the model is
+        already reading."""
+        from memories.tui_commands import _cmd_ref
+        from core.memory import ConversationMemory
+
+        memory = ConversationMemory()
+        memory.add_user_message("this conversation")
+        other = fake_storage.create_thread()
+        fake_storage.save_message(other, "user", "another conversation")
+        mocker.patch("storage.list_threads",
+                     return_value=fake_storage.list_threads())
+
+        app = _StubApp(memory)
+        _cmd_ref(app, "")
+
+        screen, _ = app.pushed[0]
+        offered = [row["id"] for row in screen._threads]
+        assert other in offered
+        assert memory.thread_id not in offered
+
+    def test_choosing_a_thread_attaches_its_summary(self, fake_storage,
+                                                   summarizer, mocker):
+        from memories.tui_commands import _cmd_ref
+        from core.loop import with_refs
+        from core.memory import ConversationMemory
+
+        memory = ConversationMemory()
+        memory.add_user_message("this conversation")
+        source = fake_storage.create_thread()
+        fake_storage.save_message(source, "user", "the source " + "s" * 3000)
+        mocker.patch("storage.list_threads",
+                     return_value=fake_storage.list_threads())
+
+        app = _StubApp(memory)
+        _cmd_ref(app, "")
+        _, callback = app.pushed[0]
+        callback(source)
+
+        assert "A distilled summary of the thread." in with_refs("base", memory)
+        assert any(str(source) in line for line in app._transcript.all)
+
+    def test_a_dismissed_picker_does_nothing_at_all(self, fake_storage,
+                                                   summarizer, mocker):
+        """Escape must be a NO-OP, not a failed attach.
+
+        Asserting only "nothing was attached" is not enough, and this test
+        proved it: with the `thread_id is None` guard removed it still passed,
+        because summarizing a None thread returns None downstream and the
+        handler reports a failure. The refs stayed empty either way -- while
+        the user pressing escape got told "Could not summarise thread None".
+        So the assertion is on the WHOLE outcome: no work, no output.
+        """
+        from memories.tui_commands import _cmd_ref
+        from core.memory import ConversationMemory
+
+        memory = ConversationMemory()
+        memory.add_user_message("this conversation")
+        fake_storage.save_message(fake_storage.create_thread(), "user", "other")
+        mocker.patch("storage.list_threads",
+                     return_value=fake_storage.list_threads())
+
+        app = _StubApp(memory)
+        _cmd_ref(app, "")
+        written_before = list(app._transcript.all)
+        _, callback = app.pushed[0]
+        callback(None)
+
+        assert memory.extra.get("refs") in (None, [])
+        assert summarizer == []
+        assert app._transcript.all == written_before, \
+            "a cancelled picker must say nothing, not report a failure"
+        assert app._busy is False
+
+    def test_list_and_clear(self, fake_storage, summarizer):
+        from memories.tui_commands import _cmd_ref
+        from core.loop import attach_ref
+        from core.memory import ConversationMemory
+
+        memory = ConversationMemory()
+        source = fake_storage.create_thread()
+        attach_ref(memory, source, "a summary", label="a label")
+        app = _StubApp(memory)
+
+        _cmd_ref(app, "--list")
+        assert any("a label" in line for line in app._transcript.system)
+
+        _cmd_ref(app, "--clear")
+        assert memory.extra.get("refs") in (None, [])
+
+        _cmd_ref(app, "--list")
+        assert any("references nothing" in line
+                   for line in app._transcript.system)
+
+    def test_an_unknown_option_is_an_error_not_a_picker(self, fake_storage,
+                                                       summarizer):
+        """A mistyped flag must not silently do the default thing -- the same
+        rule /compact's argument parsing follows."""
+        from memories.tui_commands import _cmd_ref
+        from core.memory import ConversationMemory
+
+        app = _StubApp(ConversationMemory())
+
+        _cmd_ref(app, "--clera")
+
+        assert app._transcript.errors
+        assert app.pushed == []
+
+
+class TestTheCliFlags:
+    """M21: flags rather than slash commands, because the CLI has no
+    slash-command layer and adding one is §23's business."""
+
+    def test_summary_prints_a_thread_s_summary(self, fake_storage, summarizer,
+                                              capsys):
+        import main
+        from core.memory import ConversationMemory
+
+        memory = ConversationMemory()
+        _thread(memory, turns=30, body="y" * 200)
+        args = _cli_args(summary=str(memory.thread_id))
+
+        assert main.run_summary_command(args, "ANTHROPIC", "m") == 0
+        assert "A distilled summary of the thread." in capsys.readouterr().out
+
+    def test_summary_falls_back_to_the_thread_flag(self, fake_storage,
+                                                  summarizer, capsys):
+        """`--thread <id> --summary` should read the way it sounds."""
+        import main
+        from core.memory import ConversationMemory
+
+        memory = ConversationMemory()
+        _thread(memory, turns=30, body="y" * 200)
+        args = _cli_args(summary="", thread=memory.thread_id)
+
+        assert main.run_summary_command(args, "ANTHROPIC", "m") == 0
+        assert "A distilled summary" in capsys.readouterr().out
+
+    def test_summary_with_no_thread_at_all_says_so(self, fake_storage,
+                                                  summarizer, capsys):
+        import main
+
+        assert main.run_summary_command(_cli_args(summary=""), "ANTHROPIC", "m") == 1
+        assert "needs a thread id" in capsys.readouterr().out
+        assert summarizer == []
+
+    def test_ref_attaches_through_the_shared_writer(self, fake_storage,
+                                                    summarizer, capsys):
+        """Same writer as the TUI's /ref, so the two shells cannot disagree
+        about the cap or the stored shape."""
+        import main
+        from core.loop import with_refs
+        from core.memory import ConversationMemory
+
+        target = ConversationMemory()
+        source = ConversationMemory()
+        _thread(source, turns=30, body="y" * 200)
+
+        main.attach_cli_refs(target.thread_id, [str(source.thread_id)],
+                             "ANTHROPIC", "m")
+
+        resumed = ConversationMemory(thread_id=target.thread_id)
+        assert "A distilled summary of the thread." in with_refs("base", resumed)
+
+    def test_a_malformed_ref_reports_and_the_session_still_starts(
+            self, fake_storage, summarizer, capsys):
+        """A mistyped id is worth saying out loud and is not a reason to
+        decline to start the conversation the user asked for."""
+        import main
+        from core.memory import ConversationMemory
+
+        target = ConversationMemory()
+
+        main.attach_cli_refs(target.thread_id, ["not-a-uuid"], "ANTHROPIC", "m")
+
+        assert "not a thread id" in capsys.readouterr().out
+        assert summarizer == []
+
+    def test_referencing_the_current_thread_is_skipped(self, fake_storage,
+                                                      summarizer, capsys):
+        import main
+        from core.memory import ConversationMemory
+
+        target = ConversationMemory()
+        _thread(target, turns=30, body="y" * 200)
+
+        main.attach_cli_refs(target.thread_id, [str(target.thread_id)],
+                             "ANTHROPIC", "m")
+
+        assert "that is this thread" in capsys.readouterr().out
+        assert summarizer == []
+
+
+def _cli_args(**overrides):
+    import types
+    base = {"summary": None, "thread": None, "ref": None}
+    base.update(overrides)
+    return types.SimpleNamespace(**base)
