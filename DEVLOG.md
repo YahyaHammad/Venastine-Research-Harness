@@ -2705,6 +2705,17 @@ and `test_cli.py`'s two `SpyMemory` classes (a `TypeError` about `kind`, raised
 from inside `core/loop.py`), `FakeStorage.create_thread` / `list_threads`, and the
 `_param_digest` tests, which moved with the function rather than being duplicated.
 
+## Verified outside the suite
+
+The CLI half was driven against a real SQLite database rather than only through
+tests: a seeded thread carrying a credential in a `fetch_url` argument and a 48 KB
+tool result replays with the credential `[REDACTED]` and the result absent, and a
+database shaped like a pre-§27 one (three threads, two of them inside a finished
+run's window, all labelled `chat`) is reclassified at launch to one `chat` and two
+`research_pass`, logged at INFO, with the real conversation still resuming and
+replaying. The TUI half is covered by the pilot test only — this environment has no
+terminal to run it in.
+
 ## Not verified
 
 Nothing offline can judge whether a long thread's replay is pleasant to scroll

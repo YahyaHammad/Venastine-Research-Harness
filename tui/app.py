@@ -945,8 +945,9 @@ class VenastineApp(App):
                     self._transcript.write_role(role, text)
             if entries:
                 self._last_response = last_assistant_text(entries)
+                noun = "entry" if len(entries) == 1 else "entries"
                 self._transcript.write_system(
-                    f"— end of {len(entries)} replayed entries —")
+                    f"— end of {len(entries)} replayed {noun} —")
             else:
                 self._transcript.write_system("This thread has no messages yet.")
 

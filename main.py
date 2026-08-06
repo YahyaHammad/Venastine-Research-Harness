@@ -88,7 +88,8 @@ def _print_replay(thread_id: UUID) -> None:
             print(f"\nAgent: {text}\n")
         else:
             print(f"     {text}")
-    print(f"--- end of {len(entries)} replayed entries ---")
+    noun = "entry" if len(entries) == 1 else "entries"
+    print(f"--- end of {len(entries)} replayed {noun} ---")
 
 
 def run_chat(
