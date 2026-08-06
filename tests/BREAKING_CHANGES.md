@@ -796,3 +796,34 @@ starts calling a new one, all three need it — the failure is an `AttributeErro
 raised from inside `app.py`, nowhere near the widget that grew the method. §26
 added `write_answer`, `write_role`, `rerender` and `as_text`, and made
 `flush_stream` return the flushed text rather than None.
+
+---
+
+## 12. ROADMAP_v2 §27 — thread kinds, and the doubles that construct a memory
+
+§27 gave `ConversationMemory.__init__` a second parameter (`kind`) and
+`storage.create_thread` / `storage.list_threads` a keyword each. Nothing in
+production calls them positionally, so the breakage is entirely in doubles —
+and it does not fail at the double, it fails inside `core/loop.py` with a
+`TypeError` about an unexpected keyword argument.
+
+| Change | What breaks | Fix / why |
+|---|---|---|
+| A `ConversationMemory` double that does not accept `kind` | `TypeError: __init__() got an unexpected keyword argument 'kind'` raised from `core/loop.py`, in whichever test installed the double | `tests/conftest.py`'s `FakeMemory` and `test_cli.py`'s two `SpyMemory` classes take `(thread_id=None, kind="chat")` and RECORD the kind. Any new double does the same |
+| A `FakeStorage` that does not mirror `create_thread(kind=...)` / `list_threads(kind=...)` | `TypeError` at the call, or a filter test that passes for the wrong reason | `FakeStorage` mirrors both, plus `thread_kind()` — which is NOT a production method, deliberately named differently, and exists only as §27 AC1's assertion hook |
+| Remove `list_threads`' default filter, or its `kind`/`preview` row fields | `test_list_threads_returns_all_threads_most_recent_first` (shape), `test_machinery_threads_are_not_listed`, `test_list_threads_filters_by_kind_in_sql` | The row shape is asserted exactly, in the fake and against real SQL. `kind=None` is the escape hatch and must keep returning everything |
+| `create_thread` stops defaulting to `chat` | Broadly red: every existing caller creates conversations by omission | The default is what keeps §27 a two-line change at three call sites instead of an audit of every thread creation |
+| Replay reads `memory.messages` instead of `storage.archive_history` | `test_replaying_a_compacted_thread_shows_the_original_first_message` | T3. The derived view leads with the compaction summary, which M8 says must never be rendered as something the user said. Note the test needs a REAL compaction — the two spaces coincide until a checkpoint exists, which is how §21a's watermark defect survived 849 tests |
+| Replay renders tool RESULTS | `test_a_tool_call_is_one_line_and_its_result_is_skipped` | T4. A grounding-heavy thread carries hundreds of kilobytes of fetched page text in those rows |
+| A second copy of `param_digest` | `TestTheParamDigestIsRedacted` still passes — against whichever copy the test imports | §27 moved it to `safety/policy_enforcement.py` because the replay renderer is its second caller. The tests moved WITH it, so there is one place the redact-before-truncate ordering is pinned. A copy is invisible to them |
+| Record a pass's thread AFTER `_check_not_truncated` | `test_a_pass_that_dies_truncated_still_records_its_thread` | That check RAISES for a pass cut off mid-tool-call, whose thread is the one most worth opening |
+| Relax `classify_legacy_pass_threads`' window to include an unfinished run | 3 tests in `TestClassifyingLegacyThreads` | Both guards have to go for it to break: SQL's `x <= NULL` is already not true, so dropping either alone changes nothing. The lenient version (`finished_at IS NULL OR ...`) reads as a kindness and hides every conversation since an abandoned run |
+| `ensure_columns` grows a backfill so the separate classification can go away | — (silent, then destructive) | M7's contract is additive-only. The classification is a separate function precisely so data policy stays out of the one function every launch runs through |
+
+### Standing: `app._transcript` is a query against the ACTIVE screen
+
+A pilot test that opens a modal (`ThreadPickerScreen`, `PermissionScreen`, …)
+and then reads `app._transcript` gets `NoMatches`, because the query runs
+against the pushed screen. Hold a reference to the widget BEFORE opening the
+modal — `test_resuming_clears_the_screen_and_replays` does, and the comment
+there says why.

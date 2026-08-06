@@ -46,7 +46,7 @@ Venastine Research Harness/
 ├── pytest.ini                      # testpaths=tests, --strict-markers
 ├── DEVLOG.md                       # implementation notes for built ROADMAP sections -- see §0
 │
-├── tests/                          # 1059 tests, all offline, ~25s (first run ~7s for matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
+├── tests/                          # 1060 tests, all offline, ~25s (first run ~7s for matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
 │   ├── conftest.py                 # fixtures: make_model_response, make_stream_from_response, make_stream_sequence, FakeStorage, ...
 │   ├── BREAKING_CHANGES.md         # what-breaks-it / symptom / fix per area
 │   ├── test_cli.py                 # 20 tests -- ROADMAP §1 thread_id passthrough + UUID validation + §14 parser defaults/resolution/trust flow
@@ -99,6 +99,7 @@ Venastine Research Harness/
 │   ├── test_memory_injection.py   # 12 tests -- ROADMAP_v2 §21b the three placements and the with_catalogs boundary (M13/K6), plus AC5/AC6 end to end
 │   ├── test_memory_shells.py      # 16 tests -- ROADMAP_v2 §21b M16's CLI approval provider and M15's /memories, /forget
 │   ├── test_pipeline_events.py    # 20 tests -- ROADMAP_v2 §22 AC1-AC4: the drainer, the one trace writer (incl. review.py's and json_retry.py's lines), P1's recorded decision, the abandoned-run record, and the live TUI view
+│   ├── test_thread_legibility.py  # 29 tests -- ROADMAP_v2 §27: what each creation path labels its thread, what the picker is offered, the legacy classification (raw sqlite3), what a replay shows, and the per-thread state a resume must reset
 │   └── test_research_legibility.py # 39 tests -- ROADMAP_v2 §26: a pass's tool calls escaping (P2 amended), the redacted param digest, one stage event per code stage (D2 per ROUND), the role palette, /copy, and ctrl+l vs the Input's ctrl+k
 │
 ├── core/
@@ -109,17 +110,18 @@ Venastine Research Harness/
 │   ├── config_loader.py           # ROADMAP_v2 §14: three-tier .md discovery (harness/project/user), line-anchored frontmatter parse, settings.json merge with loud unknown-key rejection, CONTEXT.md opt-in, frontmatter-only skill catalog
 │   ├── memory.py                  # ConversationMemory -- in-run message list, provider-NEUTRAL shape, backed by storage.py + resume-shape fix. §21a: assembles the DERIVED view (checkpoint summary + pinned rows + tail) and owns pin_last's ordinal-to-id mapping
 │   ├── compaction.py              # ROADMAP_v2 §21a: when to compact (M1 working-set trigger, M6 pipeline backstop), what may be folded (M4/M5's three floors), and the compactor agent run + ratio retry. Owns the re-entrancy guard
+│   ├── replay.py                  # ROADMAP_v2 §27: a stored thread as display entries -- the ARCHIVE (T3), tool calls as one redacted line, results skipped (T4). ONE policy, both shells
 │   ├── approval.py                # ROADMAP_v2 §25/§20: GrantBudget / ApprovalProvider / RunAuthorization / ReviewConsent -- how a run obtains a human's answer, as DATA. Leaf module, no project imports
 │   │
 │   └── reasoning/
-│       ├── base.py                # Claim / PipelineRun data model for the research pipeline (now carries run_id + §25 granted_calls + §20 subagent_reviews)
+│       ├── base.py                # Claim / PipelineRun data model for the research pipeline (now carries run_id + §25 granted_calls + §20 subagent_reviews + §27 pass_threads)
 │       ├── authorization.py       # ROADMAP_v2 §25: the pipeline's grant POLICY -- candidates(), parse_grant_spec(), PIPELINE_UNGRANTABLE. Shared by both shells so they cannot drift
 │       ├── events.py              # §22: PipelineEvent -- kind-discriminated, SEPARATE from core/events.py's LoopEvent (P1). PIPELINE_EVENT_KINDS names all eleven kinds (§26 added stage / tool_call / tool_result / pass_activity)
 │       ├── confidence_scoring.py  # Pass 4 -- deterministic scoring, ZERO LLM calls
 │       ├── orchestrator.py        # sequences all 10 passes + D0/D1/D2 + _run_pass_with_json_retry + §5 per-pass checkpoints + §11 critic-model routing + §25 authorization passthrough + §20's _review_stage. §22: a GENERATOR (stream_deep_research_pipeline) with run_pipeline_to_completion draining it for the unchanged public entry point
 │       ├── review.py              # ROADMAP_v2 §20: the post-pipeline review -- propose (run_review) / consent (walk_consent) / correct (apply), three functions so the mutating one has no model in it
 │       ├── json_retry.py          # ROADMAP §3's malformed-JSON recovery, shared by the ten passes and §20's reviewer. Takes an ALREADY-OBTAINED response; each caller starts its own first attempt
-│       ├── pipeline_storage.py    # ROADMAP §5: PipelineRunRecord table + create/update/load_pipeline_run
+│       ├── pipeline_storage.py    # ROADMAP §5: PipelineRunRecord table + create/update/load_pipeline_run. §27: pass_threads_json + classify_legacy_pass_threads (raw SQL, the ensure_columns seam)
 │       └── output_writer.py      # ROADMAP §12: write_run_artifacts -- human-browsable /output/<run_id>/ directory
 │
 ├── prompts/
@@ -242,7 +244,9 @@ This section exists specifically because earlier drafts of this project put pers
 
 ### 4.5 `storage.py` — the SCHEMA and CRUD only
 
-**Belongs here:** `ConversationThread` / `MessageLog` (SQLModel table classes), `create_thread()`, `get_thread()`, `save_message()`, `get_session_history()`, `list_threads()`. This file owns the JSON encode/decode needed to fit structured message content into a text column — callers pass and receive plain Python objects and never need to know JSON is involved. `list_threads()` returns all threads ordered by `created_at` descending for CLI/TUI thread browsing; `core/memory.py` does NOT call it.
+**Belongs here:** `ConversationThread` / `MessageLog` (SQLModel table classes), `create_thread()`, `get_thread()`, `save_message()`, `get_session_history()`, `list_threads()`. This file owns the JSON encode/decode needed to fit structured message content into a text column — callers pass and receive plain Python objects and never need to know JSON is involved. `list_threads()` returns threads ordered by `created_at` descending for CLI/TUI thread browsing; `core/memory.py` does NOT call it.
+
+**§27 added `ConversationThread.kind` and the `THREAD_KIND_*` vocabulary here**, beside the table that stores it — plain strings rather than an Enum, so an unmigrated row reads back as data instead of raising. `list_threads(kind=...)` filters in SQL and defaults to conversations only; `kind=None` returns everything. It also carries a `preview` of each thread's first user message, read from the ARCHIVE for the same reason replay is (T3). What a *kind* MEANS is not this file's business — `core/loop.py` decides which one a run creates, and `core/reasoning/pipeline_storage.py` owns the one-time classification of pre-§27 rows, because that signal is a pipeline fact.
 
 **Does NOT belong here:** any notion of "the current conversation" or "what the agent loop is doing this turn" — that's `core/memory.py`'s job. `storage.py` has no concept of an active run; it only knows how to durably read and write rows given a `thread_id`.
 
@@ -706,6 +710,90 @@ already returns the dicts `vars(c)` wrote), and the partial picture assembled fr
 events mid-run. One shape means no branch inside the renderer, and it is the shape §5
 already persists.
 
+### 4.27 Thread legibility — replay, thread kinds, and the legacy classification (ROADMAP_v2 §27)
+
+Two independent bugs, both found by using the app rather than reading it: resuming a
+thread displayed nothing (and left the previous thread's transcript on screen under the
+new id), and the picker listed far more threads than there had ever been conversations.
+
+**`core/replay.py` owns what a stored thread LOOKS LIKE; the shells only paint it.**
+
+*Belongs here:* the read (which rows), the policy (which of them are shown, and in what
+form), and the redaction of a replayed tool call. `replay_entries(thread_id)` returns
+`(role, text)` pairs whose roles are transcript palette roles, so `tui/widgets.py` can
+style them with what it already has and `main.py` can label them "You:" / "Agent:".
+`last_assistant_text()` is beside it because AC4's state reset needs the same list.
+
+*Does NOT belong here:* painting, labels, or widget calls. And not a second copy in
+either shell — D12 makes the CLI permanent, so a per-shell renderer would let the two
+disagree about whether tool results are shown, which is policy.
+
+**It reads `storage.archive_history()`, never `memory.messages`** (T3). The derived view
+on a compacted thread begins with the synthesized summary that §21a's M8 says must never
+be mistaken for something a person said — replaying it renders harness-generated text
+under a `you ›` label. The same reasoning applies to `list_threads()`' new `preview`
+field, which is also read from the archive.
+
+**Tool calls replay as one line; tool RESULTS are skipped** (T4). A grounding-heavy
+thread carries hundreds of kilobytes of fetched page text in those rows, and the call is
+what says what happened. The line's parameter digest comes from
+`safety/policy_enforcement.param_digest` — **moved there in §27**, beside
+`redact_secrets`, because the replay renderer is its second caller and the
+redact-before-truncate ordering must not exist as two copies.
+
+**`ConversationThread.kind` (T1) is a column, and deliberately unindexed.** An
+`extra_data` key would need no migration but would force `list_threads()` to load every
+row and filter in Python, and that is the one query which must stay cheap on a database
+gaining ~15 rows per research run. No index, because `ensure_columns()` ALTERs a column
+in without building one and `create_all()` adds none to an existing table — `index=True`
+would mean an index on fresh databases and none on migrated ones, a divergence visible
+only as a performance difference.
+
+**Three kinds, five creation paths.** `chat` is the default, so every existing caller
+keeps creating conversations. `research_pass` comes from `stream_deep_research_mode()`
+— the fresh thread per pass is a locked invariant, and the missing label was the bug.
+`subagent` covers `spawn_subagent`, §20's reviewer (which §20 already calls a subagent,
+so it gets no fourth kind) and **§21a's compactor, which §27's spec did not count** —
+every automatic compaction creates a thread, so the picker filled up fastest on exactly
+the long conversations §21a exists to serve.
+
+**`ConversationMemory` learns nothing from `kind`.** It takes the kwarg and forwards it
+to `storage.create_thread`, passing through `__init__` and nothing more: it owns active
+in-run state and must stay unaware of what data exists. It is ignored when `thread_id`
+is given, because resuming is not reclassification.
+
+**Hiding a pass thread must not orphan it.** `PipelineRun.pass_threads` (T2) records
+`{"pass", "thread_id"}` per pass — a `list[dict]` for the same reason `granted_calls` and
+`subagent_reviews` are, and the run's OWN list shared by reference, so the record exists
+at every §5 checkpoint and on the failure path. Recorded BEFORE
+`_check_not_truncated()`, which raises for a pass cut off mid-tool-call: that pass's
+thread is the one most worth opening. It persists as a checkpointed
+`pass_threads_json` column and is written to `output/<run_id>/pass_threads.json`.
+
+**The legacy classification is separate from the migration, and idempotent by
+construction.** `ensure_columns()` is additive and never backfills (M7), so the column
+arrives with every existing row defaulted to `chat`.
+`pipeline_storage.classify_legacy_pass_threads(connection)` runs at every launch, right
+after `create_db_and_tables()`, as raw SQL over a DBAPI connection — the same seam
+`ensure_columns` uses, and for the same reason (the suite's fake `sqlmodel` can run
+neither DDL nor a correlated subquery, and a seam that only works in production is not a
+seam). It moves only `chat` rows inside a **finished** run's window; the signal is
+structural rather than heuristic, since the CLI is blocked inside the synchronous
+pipeline call and the TUI's `_busy` guard refuses `/new` and thread switching mid-run. A
+run with `finished_at IS NULL` (§22's abandoned generator) has no closing bound and is
+skipped: under-classifying leaves a straggler in the picker, over-classifying hides a
+real conversation, and only one of those is recoverable by the user. It lives in
+`pipeline_storage.py` rather than `storage.py` because the signal is a pipeline fact and
+`storage.py` must not learn what a run is.
+
+**Resuming resets per-thread state** (AC4). `_last_run`, `_live_claims` and
+`_last_response` survived a thread switch, so `/claims` or `ctrl+l` after a resume showed
+the PREVIOUS thread's run under the new thread's id — the same class of bug the goal
+banner already fixed in that same callback. `Transcript.reset()` is separate from
+`rerender()`'s `clear()`: the latter keeps `_entries` on purpose so a `/theme` switch can
+redraw them, while a resume must drop them or `/copy all` keeps returning a thread the
+session has left.
+
 ## 5. Request lifecycle — regular conversation, traced end to end
 
 1. Caller calls `RunAgentLoop.run_agent_conversation(user_goal, model, provider_name, max_steps, max_total_tokens)`.
@@ -866,3 +954,5 @@ All math tools share `_math_common.py`'s `safe_parse()` — a SymPy expression p
 - **Ensemble mode (ROADMAP §10) was built, documented as Working, and could not execute against the harness's own default model.** Its diversity mechanism is a raised `temperature`, which current Anthropic models reject outright; `config.MODEL_NAME` defaults to `claude-sonnet-5`. Nothing caught it because `ENSEMBLE_MODE = False`, so the failing request was never made — and ROADMAP_v2 §14 then shipped the first convenient way to enable it. **This is the third instance of one shape** (after `fetch_url` registered-but-denied, and §14's argparse-defaults gap that made settings.json inert): a feature that is wired, documented, and has never been executed end to end on the shipped configuration. The recurring lesson is that "built" and "runs" are different claims, and only the second one is worth writing down. **Fixed:** `_sampling_kwargs()` now drops the rejected parameter with a WARNING instead of sending it, and `run_deep_research_pipeline()` refuses outright with a named `ValueError` rather than generating N identical candidates and reporting maximal cross-candidate consistency for all of them. §10's diversity mechanism still needs a redesign -- see its revisit note.
 - **A fresh database was missing `pipelinerunrecord` entirely, so ROADMAP §5's pipeline persistence did not work on a clean install.** SQLModel table classes register on `SQLModel.metadata` at module-IMPORT time, and `create_db_and_tables()` creates only what is registered when it runs. `storage` reached metadata by luck (`main.py` → `core.loop` → `core.memory` → `storage`); `pipeline_storage` did not, because `main.py` imports the orchestrator lazily inside `run_research()` — after `create_db_and_tables()` has already run. It looked fine only because a long-lived local `app.db` already had the table, and `*.db` is gitignored, so a clone got nothing. **Fixed:** `main.py` now imports both table modules explicitly for the side effect (do not "tidy" those imports away — they are load-bearing), and `create_db_and_tables()` raises if no table classes are registered at all. `database.py` still knows nothing about which tables exist, per §4.4; declaring them is the entry point's job.
 - **`prompts/system_prompts.py`'s loader once built a local `passes_prompts` dict and returned it without ever assigning it back to the module-level variable of the same name** — the module-level dict stayed permanently empty. If you see a function that constructs a local variable shadowing a module-level one, check that the return value is actually being used, not just implicitly expected to "just work" via the shared name.
+- **Resuming a thread loaded it correctly and displayed nothing — and left the PREVIOUS thread's transcript on screen under the new thread's id.** `ConversationMemory(thread_id=...)` reads the full history at construction, so every layer below the shell was right; the TUI's picker callback swapped the object, refreshed the goal banner, wrote `Resumed thread <uuid>.` and stopped, and `main.py --thread` printed one line and dropped into the prompt. **This is the same shape as the ensemble-mode and `fetch_url` gotchas above — wired, documented, never executed end to end — with one addition worth recording: the failure was not "nothing happens" but "the wrong thing is shown confidently", and no test in a 1028-test suite could fail on it, because every one of them asserted on state rather than on what reached the screen.** Fixed in §27 by `core/replay.py` plus `Transcript.reset()`. The generalisable rule: when a fix is "display the state we already have", the test has to assert on the rendered output, since a call-count assertion passes for the version that renders the new thread under the old thread's transcript.
+- **One research run created ~15 threads and every automatic compaction one more, and the thread picker offered all of them as conversations.** The per-pass fresh thread is a locked invariant (passes share distilled JSON, never raw history), so the defect was that `ConversationThread` had no field saying what a thread was. Two things about the fix are worth keeping: the compactor was a **fifth** thread source that §27's own spec did not count, found only by grepping every `run_agent_conversation` call site rather than by reading the section — the project's "grep every call site sharing the root cause" rule, paying off in a section that had already been specified; and the legacy classification had to be **separate from `ensure_columns()`**, which is additive-only and never backfills, so a schema migration would have left every existing database's pass threads in the picker while looking migrated.

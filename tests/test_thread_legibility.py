@@ -511,6 +511,34 @@ class TestPassThreadsAreRecorded:
 
         assert len(run.pass_threads) == 1
 
+    def test_a_pass_that_dies_truncated_still_records_its_thread(self, mocker):
+        """The ordering claim, pinned. _check_not_truncated RAISES for a pass
+        that was cut off mid-tool-call, and that pass's thread is the single
+        most useful one to be able to open -- so recording after the check
+        would lose exactly the one worth having.
+        """
+        from core.reasoning import orchestrator
+        from core.reasoning.base import PipelineRun
+        from tests.conftest import pass_stream
+
+        thread_id = uuid4()
+        truncated = _resp(thread_id)
+        truncated.text = ""
+        truncated.stop_reason = "token_budget_exceeded"
+        truncated.granted_calls = []
+        mocker.patch.object(
+            orchestrator.RunAgentLoop, "stream_deep_research_mode",
+            side_effect=pass_stream(truncated))
+
+        run = PipelineRun(user_query="q")
+        with pytest.raises(ValueError):
+            list(orchestrator._run_pass(
+                "Pass 1", "input", "m", "ANTHROPIC",
+                trace=run.trace, pass_threads=run.pass_threads))
+
+        assert run.pass_threads == [
+            {"pass": "Pass 1", "thread_id": str(thread_id)}]
+
     def test_a_response_with_no_thread_records_nothing(self):
         from core.reasoning.orchestrator import _record_pass_thread
 

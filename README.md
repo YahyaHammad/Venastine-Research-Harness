@@ -44,7 +44,7 @@ python main.py --tui                              # the full-screen interface
 
 The line-based CLI is the default and is never going away — every feature is reachable from it. The TUI is a nicer shell over the same code.
 
-Ctrl+C or Ctrl+D exits. The thread id is printed after the first response so you can resume later.
+Ctrl+C or Ctrl+D exits. The thread id is printed after the first response so you can resume later — and resuming **replays the conversation**, so you can see what you are picking up. Tool calls replay as one line each; their results do not, since a single research turn can carry hundreds of kilobytes of fetched pages.
 
 ---
 
@@ -209,6 +209,8 @@ Older turns are summarised automatically as a thread grows. **The archive is nev
 
 `pin` keeps recent turns out of any summary; `/compact` in the TUI triggers it by hand. A research pass only compacts at a hard backstop near the real context window — spending a model call on a judgement nobody is watching is not worth it mid-run.
 
+A replayed thread always shows what you originally said, never the summary — the archive is what is replayed, so a compacted conversation reads back the way you had it.
+
 ### Durable memory
 
 `remember` saves a fact that outlives its thread, scoped to this project or to everything — **with your approval each time**, which is also why it is unreachable from any unattended research pass.
@@ -246,6 +248,8 @@ Tools are namespaced `mcp__<server>__<tool>`. A server that fails to connect is 
 /memories      /forget
 ```
 
+`/threads` lists your **conversations** — not the ~15 internal threads each research run creates, nor the one every automatic compaction makes. Each row leads with its first message so you can tell them apart. A run's own pass threads are recorded with the run (`output/<run_id>/pass_threads.json`) and can still be opened by id with `--thread`, if you want to see how a particular pass argued.
+
 `/model` switches provider and model for the session and saves nothing — use the launch flags or `default_provider` / `default_model` in `settings.json` to make it stick.
 
 `/copy` exists because Textual 1.0 cannot select text at all. Clipboard delivery uses an escape sequence that some multiplexers drop silently and **cannot be confirmed**, so `--file <path>` is the route that provably worked. Shift+drag usually bypasses the mouse capture and lets your terminal select natively.
@@ -266,11 +270,11 @@ Precedence for provider and model is CLI flag > `settings.json` > `config.py`.
 
 ## Status
 
-**Built:** ROADMAP.md §1–§12 (§10's ensemble mode carries a revisit note) and ROADMAP_v2.md §13 (streaming loop), §14 (config loader + workspace trust), §15 (permissions), §16 (TUI), §17 (MCP), §18 (agents), §19 (skills), §20 (post-pipeline review), §21a (compaction + `pin`), §21b (durable memory), §22 (live pipeline progress), §25 (authorised tool use in the pipeline), §26 (research legibility: per-pass tool calls, code-stage announcements, the claims view, role colour, `/copy`).
+**Built:** ROADMAP.md §1–§12 (§10's ensemble mode carries a revisit note) and ROADMAP_v2.md §13 (streaming loop), §14 (config loader + workspace trust), §15 (permissions), §16 (TUI), §17 (MCP), §18 (agents), §19 (skills), §20 (post-pipeline review), §21a (compaction + `pin`), §21b (durable memory), §22 (live pipeline progress), §25 (authorised tool use in the pipeline), §26 (research legibility: per-pass tool calls, code-stage announcements, the claims view, role colour, `/copy`), §27 (thread legibility: transcript replay on resume, a conversations-only thread picker).
 
 **Remaining:** §21c (cross-thread referencing, session summaries) and §23–§24 (interactive tools, `/init`).
 
-Run the test suite with `pytest` — 1059 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
+Run the test suite with `pytest` — 1060 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
 
 ## Documentation
 

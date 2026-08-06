@@ -235,6 +235,13 @@ def classify_legacy_pass_threads(connection) -> int:
         # A database that has never run research. Nothing to classify, and
         # the subquery below would raise on the missing table.
         return 0
+    # `finished_at IS NOT NULL` is belt-and-braces: SQL's `x <= NULL` is
+    # NULL rather than true, so an open window already matches nothing. It
+    # stays because the guard is the INTENT -- a later edit that made the
+    # upper bound lenient (`finished_at IS NULL OR ...`) would otherwise
+    # relabel every conversation since an abandoned run, and that edit reads
+    # as a kindness. Verified by mutation: dropping BOTH turns three tests
+    # red, dropping either alone turns none.
     cursor.execute(
         "UPDATE conversationthread SET kind = ? "
         " WHERE kind = ? AND EXISTS ("

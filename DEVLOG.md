@@ -2600,3 +2600,116 @@ a retry loop are both in it, whether the tool lines read as belonging to their
 pass at real pass durations, or whether `/copy`'s OSC 52 reaches this terminal's
 clipboard — that last one is unconfirmable by construction, which is why `--file`
 exists.
+
+---
+
+# §27 — Thread legibility (2026-08-06)
+
+Two bugs from §26's first live TUI session, spec'd in the previous commit and
+implemented here. Same cycle as every built section — read the referenced files,
+verify the claims against the code, surface the ambiguities as questions with
+options and a recommendation, lock the answers, implement. One round of
+questions, four decisions (T6–T9).
+
+Every claim in §27's spec held against the code, which is worth recording because
+it usually does not: `chosen()` really did swap memory and write one line
+(`tui/app.py:913`), `--thread` really had the identical gap (`main.py:83`),
+`stream_deep_research_mode` really built a bare `ConversationMemory()`
+(`core/loop.py:696`), and `_last_run` / `_live_claims` really did survive a
+thread switch.
+
+## What the spec missed: the compactor
+
+§27 counted the pipeline's threads (ten passes, up to four retry rounds, the
+reviewer) and stopped there. Grepping every `run_agent_conversation` call site —
+the project's own "grep every other call site sharing the root cause" rule, applied
+to a section that was already written — turned up a fifth: `core/compaction.py`
+runs the compactor as an ordinary agent, so **every automatic compaction creates a
+thread**.
+
+That is the worst possible one to have missed. §21a exists to make long threads
+survivable, so the picker filled up fastest on exactly the conversations the
+harness is best at having. It is labelled `subagent` with the two the spec did
+name. Its legacy threads are also the ones the classifier cannot reach — a
+compaction is not inside a run window — so they stay `chat` forever, which is the
+under-classification direction §27 already prefers.
+
+## What the four questions were actually about
+
+**T6 (where classification runs)** was a choice between a marker and idempotence.
+Idempotence won for a reason worth keeping: a marker records that *this build* has
+classified, and the next database this build opens might be one an older build
+wrote. Running a no-op UPDATE at every launch costs one statement.
+
+**T7 (the reviewer's kind)** looked like a naming question and was really about
+whether the classifier and the live path have to agree on old rows. They do not:
+both `research_pass` and `subagent` are hidden, so the disagreement is invisible
+by construction. A fourth kind would have bought nothing and cost a branch
+everywhere kinds are displayed.
+
+**T8 (AC6's reach)** turned out mostly already true — `get_thread()` never
+filtered by kind, so `--thread <pass uuid>` worked the whole time. The only thing
+missing was somewhere to *find* the id.
+
+**T9 (the picker preview)** is the one addition beyond the ACs, taken because the
+report was "the picker is unusable" and filtering alone makes it short rather than
+readable.
+
+## What the build found
+
+**The `finished_at IS NOT NULL` guard is redundant, and stays.** SQL's `x <= NULL`
+is NULL rather than true, so an open window already matches nothing. Mutation
+testing proved it twice over: dropping *either* the guard or the upper bound turns
+no test red, and dropping both turns three red. It stays because the guard is the
+intent — the lenient version (`finished_at IS NULL OR ...`) reads as a kindness
+and would hide every conversation created since an abandoned run. The comment in
+the code says so, with the mutation result attached.
+
+**`Transcript.reset()` is not `rerender()`'s `clear()`.** The latter deliberately
+keeps `_entries` so a `/theme` switch can redraw them (§26's L-note). A resume has
+to drop them, or `/copy all` and the next `/theme` both keep handing back a thread
+the session has left — the same list paying for itself a third time, and the third
+time it needed the opposite behaviour.
+
+**`app._transcript` queries the ACTIVE screen.** The AC4 pilot test opens the
+picker modal, and reading `app._transcript` while it is up raises `NoMatches` from
+Textual's query. The widget is held before the modal opens. Recorded in
+BREAKING_CHANGES as standing guidance, since every future modal test has it.
+
+**Two of my own mutations were wrong before the tests were.** "Replay reads
+`get_session_history` instead of `archive_history`" turns nothing red — because
+`archive_history` *is* `get_session_history`, by design, and the derived view is
+assembled in `core/memory.py`. The real mutation is replay reading
+`ConversationMemory(thread_id).messages`, and that does turn AC5 red. The lesson
+is the same one §26 recorded about vacuous tests, one level up: a mutation that
+does not change behaviour proves nothing about the test, and it is easy to write
+one while believing you have inverted the decision.
+
+**A `git checkout --` to revert a mutation reverted the section.** Three files
+lost their §27 edits mid-verification, in a working tree with no intermediate
+commit. Recovered from context and re-verified green, but the practice is now:
+back up by copy, and commit before mutating.
+
+## Tests
+
+1028 -> 1059 (one new file, `test_thread_legibility.py`, 29 tests, plus three
+real-storage tests in `test_storage_e2e.py`). Eleven mutations verified red on the
+right test each: `list_threads` losing its filter, a pass reverting to a bare
+memory, the compactor losing its label, resume not clearing / not replaying / not
+resetting `_last_run`, replay on the derived view, the classification's two
+window guards, tool results not skipped, the digest not redacting, and the pass
+thread recorded after the truncation check rather than before.
+
+Doubles that had to change, none of which fail where they were edited: `FakeMemory`
+and `test_cli.py`'s two `SpyMemory` classes (a `TypeError` about `kind`, raised
+from inside `core/loop.py`), `FakeStorage.create_thread` / `list_threads`, and the
+`_param_digest` tests, which moved with the function rather than being duplicated.
+
+## Not verified
+
+Nothing offline can judge whether a long thread's replay is pleasant to scroll
+rather than merely correct, whether the 70-character preview is the right width in
+a real terminal, or how the classification behaves on a database with hundreds of
+runs — the SQL is one statement over an unindexed column, and the deliberate lack
+of an index on `kind` (see the note in `storage.py`) is a fresh-vs-migrated
+consistency choice, not a performance one.

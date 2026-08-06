@@ -79,7 +79,7 @@ Every decision below was made through a structured clarification cycle with the 
 - 24. `/init` — generate `CONTEXT.md` from the project **(added during §16)**
 - 25. Authorized tool use in the research pipeline **(BUILT)**
 - 26. Research legibility — pass internals, code stages, the claims view, colour, copy **(added after §22's first live run; BUILT)**
-- 27. Thread legibility — thread `kind`, chat-only picker, transcript replay on resume **(added after §26's first live session)**
+- 27. Thread legibility — thread `kind`, chat-only picker, transcript replay on resume **(added after §26's first live session; BUILT)**
 - **Open Questions — None Remaining** (Rev. 3 — all decisions locked; verification items only)
 - **Why these calls, not just what they are** (Rev. 3 — the reasoning patterns behind several decisions above)
 
@@ -1603,7 +1603,7 @@ per D22, and pinned by a test that presses the key with text in the input.
 
 ---
 
-## 27. Thread legibility — resume actually resumes, and a thread knows what it is
+## 27. Thread legibility — resume actually resumes, and a thread knows what it is — BUILT
 
 **Added after §26's first live TUI session.** Two bugs, both about threads, independent of
 each other, and both found by using the app rather than by reading it.
@@ -1627,7 +1627,7 @@ never raw history" is what stops a later pass reading how an earlier one argued.
 defect is that `ConversationThread` has no field saying what a thread *is*, so
 `list_threads()` returns pass threads and conversations undifferentiated.
 
-### Decisions record (T1–T5)
+### Decisions record (T1–T9)
 
 | # | Decision |
 |---|---|
@@ -1636,6 +1636,10 @@ defect is that `ConversationThread` has no field saying what a thread *is*, so
 | **T3** | Replay renders the **archive** (`storage.archive_history`), never the derived view. `memory.messages` begins with the synthesized `SUMMARY_PREFIX` message on any compacted thread, and replaying it would render harness-generated text under a `you ›` label — precisely what M8 says that message must never be mistaken for. |
 | **T4** | Replay shows user/assistant text in full and each tool call as a one-line marker; tool **results** are skipped. A grounding-heavy thread would otherwise replay thousands of lines of fetched page text. |
 | **T5** | Both shells replay. §26's L6 again. |
+| **T6** | The legacy classification runs **at every launch**, from `main.py` right after `create_db_and_tables()` — not once behind a persisted marker, and not as an explicit command. It is idempotent by construction (it only ever moves rows still `chat` inside a *finished* run's window), so a repeat run is a no-op, there is no marker state to get wrong, and a database last opened by an older build is still classified. A command-only version leaves the picker cluttered until someone knows to run it, which is the bug. |
+| **T7** | The §20 reviewer's thread is **`subagent`**, not a fourth kind. §20 already calls it a subagent and it runs through the same entry point. Consequence, accepted: the structural classifier labels *legacy* reviewer threads `research_pass` (they were created inside the run window) while new ones are `subagent` — the two disagree about old rows, and it does not matter, because both kinds are hidden from the picker. |
+| **T8** | AC6's "reachable from the run" means **persisted and displayed**: `pass_threads` on the record, in `load_pipeline_run()`, and as `output/<run_id>/pass_threads.json`. Resuming by id already works for any kind (`get_thread()` does not filter), so `--thread <pass uuid>` needs nothing further. A picker mode listing every kind was rejected — it re-introduces the ten-rows-per-run list AC2 exists to remove, behind an opt-in nobody would want twice. |
+| **T9** | A picker row leads with a **truncated first user message**. Beyond the stated ACs, and included because bug 2's actual complaint was that the picker could not be used: filtering makes it correct, and a list of timestamps and uuids is still not answerable. Read from the archive (T3's reasoning) and costing one extra query for the whole list, not one per row. |
 
 ### What this repeats, and must not
 
