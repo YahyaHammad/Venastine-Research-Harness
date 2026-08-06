@@ -246,7 +246,12 @@ Tools are namespaced `mcp__<server>__<tool>`. A server that fails to connect is 
 /compact       /threads             /new                     /quit
 /agent         /goal                /grill-me                /skill
 /memories      /forget               /summary                 /ref [--list|--clear]
+/init [--software|--research]
 ```
+
+`/init` reads the project and writes its documentation set. `.venastine/CONTEXT.md` is the hub — the short, factual description this harness injects into every agent that opts into project context — and it links out to the documents that hold the detail: `ARCHITECTURE`, `ROADMAP`, `DEVLOG`, `TECHNICAL_DEBT`, `DOCUMENTATION_STANDARDS`, `TEST_WRITING` and `BREAKING_CHANGES` for a codebase, or `RESEARCH_QUESTIONS`, `METHODOLOGY`, `SOURCES`, `FINDINGS`, `LIMITATIONS`, `EXPERIMENT_LOG` and `OPEN_QUESTIONS` for written work. It asks which kind you have — proposing an answer when there is something to go on, and asking outright when the folder is empty.
+
+Only `CONTEXT.md` is written for you in full; the rest arrive as skeletons with real headings and a note in each saying what belongs in it and what does not. That is deliberate: a DEVLOG invented for a project with no history is fiction in a file that then gets committed and read as fact. Documents you already have are never touched, and regeneration revises your `CONTEXT.md` rather than replacing it — you see a diff and approve it before anything is written. From the CLI it is `--init`, with `--software-project` / `--research-project` to skip the question.
 
 `/summary` distils this conversation and shows it — it does **not** shorten what the model sees; that is `/compact`. `/ref` picks another conversation, summarises it, and attaches that summary to this one as standing context: you choose what crosses between threads, so nothing read or argued in one conversation can steer another without your say-so. `/ref --list` and `/ref --clear` are the way back out, and the summaries are labelled so the model knows they are not part of this conversation. From the CLI the same two are launch flags: `--summary <thread>` and a repeatable `--ref <thread>`.
 

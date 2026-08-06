@@ -161,7 +161,14 @@ Venastine Research Harness/
 │   └── builtin/
 │       ├── grill-me.md            # built-in agent: surfaces what still needs a decision in the current thread
 │       ├── pipeline-reviewer.md   # ROADMAP_v2 §20: reviews a finished research run and proposes corrections. No spawn_subagent, no load_skill
-│       └── compactor.md           # ROADMAP_v2 §21a: condenses an older stretch of a conversation. allowed_tools: [] -- it summarizes, it does not act
+│       ├── compactor.md           # ROADMAP_v2 §21a: condenses an older stretch of a conversation. allowed_tools: [] -- it summarizes, it does not act
+│       └── initializer.md         # ROADMAP_v2 §24: reads a project and writes its CONTEXT.md. allowed_tools: [read_project_doc] -- it drafts, the shell writes
+│
+├── project_init/                  # ROADMAP_v2 §24: /init. Namespace package, mirroring memories/
+│   ├── doc_sets.py                # WHICH documents each project kind gets, where each lives, and the stub templates. Data + pure rendering, no I/O
+│   ├── manifest.py                # deterministic discovery: the listing the agent is shown, and the facts the stubs interpolate. No model call, no tool call
+│   ├── generator.py               # the ONE place that decides what /init does -- both shells call generate()
+│   └── tui_commands.py            # /init registered into §16's slash registry
 │
 ├── memories/                      # ROADMAP_v2 §21b: durable memory. Namespace package, mirroring skills/
 │   ├── manager.py                 # scope resolution (D25/M12), the injection cap (M14), prompt_fragment() -- the ONE assembly point
@@ -204,6 +211,7 @@ Venastine Research Harness/
         ├── logic.py                # propositional logic (NOT full proof-writing -- see its docstring)
         ├── geometry.py             # points, lines, circles, polygons, triangles
         ├── file_ops.py             # ROADMAP §6: read/write/edit with path-dependent approval + markitdown
+        ├── project_docs.py         # ROADMAP_v2 §24: read_project_doc / write_project_doc -- scoped so /init needs neither `read` nor `write`, which are unoverridably denied
         └── shell.py                # ROADMAP §7: shell execution via sandbox module
 ```
 
@@ -854,6 +862,74 @@ banner already fixed in that same callback. `Transcript.reset()` is separate fro
 redraw them, while a resume must drop them or `/copy all` keeps returning a thread the
 session has left.
 
+### 4.28 `project_init/` — `/init` and the project documentation set (ROADMAP_v2 §24)
+
+`/init` reads a project and scaffolds its documentation: `.venastine/CONTEXT.md` as the
+hub, plus the documents it links. `--init` on the CLI (M21 — no command layer there).
+
+**Four modules, split by what they can be wrong about.** `doc_sets.py` is data and pure
+rendering (which documents, where each lives, what a stub looks like), so it can be
+asserted directly. `manifest.py` is a directory walk. `generator.py` is the only place
+that *decides* anything, and both shells call it — §26's L6 and §27's T5 again, because a
+per-shell implementation is how the CLI and the TUI come to disagree about whether an
+existing document is overwritten, which is policy and not painting. `tui_commands.py`
+does the three things only a TUI can: run the work off the UI thread, render a diff, and
+put a modal in front of a human.
+
+**The reason the two scoped tools exist at all.** §24's spec preferred routing the write
+through the existing `write` tool. That is not possible: `write` is not merely `False` by
+default in `config.ToolPermissions` but unoverridable at runtime — `is_tool_allowed()`
+reads the dataclass directly, `settings.json` has no `permissions` section (and
+`_KNOWN_SETTINGS` *raises* on an unknown key), and D14 forbids a `ToolContext` widening
+anything, with the global check running first and unconditionally. `dispatch("write", …)`
+raises `ToolCallDenied` **before** the `approval_callback` is consulted, for every user.
+`read` is blocked identically, ruling out an exploring agent by the same mechanism. So
+§24 adds `read_project_doc` and `write_project_doc` instead of flipping either global,
+which would have handed every agent and all ten research passes standing file access to
+serve one command.
+
+**`write_project_doc` has no path parameter.** It takes a document *name* from a fixed
+allowlist, and the destination is derived: `CONTEXT.md` under `.venastine/`, everything
+else at the project root. "Cannot be aimed elsewhere" is therefore structural rather than
+validated. The allowlist is the union of both sets plus the hub, so a research project
+that grows a codebase can gain an `ARCHITECTURE.md` without being re-classified first.
+
+**`read_project_doc`'s narrow set is load-bearing, not tidiness.** A registered tool with
+permission `True` is advertised to EVERY run — the initializer's `allowed_tools` narrows
+*that agent*, not plain chat and not a research pass. Restricting it to documentation and
+manifests (and denying `.venastine/`, `.env*` and `providers.json`) means the most a
+prompt-injected pass gains through it is the project's own README. Widening it to source
+files would quietly turn it into `read` with no approval gate.
+
+**One consent, covering a named list.** `write_project_doc` is approval-gated, so a naive
+implementation prompts eight times for one command — the shape of consent that gets
+clicked through. The user sees the `CONTEXT.md` diff and the exact list of files once,
+and that answer is passed as `approval_callback` to each dispatch: the same move
+`core/loop.py` makes after a channel approval. With no way to ask, nothing is written
+(§25's V6, sixth instance).
+
+**Only `CONTEXT.md` is generated; the rest are stubs.** One model call drafts the hub —
+short, factual, and re-sent with every request, so every sentence is paid for repeatedly.
+The others are templates carrying real headings and a what-belongs/what-does-not pair,
+interpolating only facts the manifest established deterministically. A DEVLOG invented
+for a project with no history is confident fiction in a file that then gets committed,
+linked from the hub, and read as established.
+
+**The index is a pure function of the project kind**, and that was a bug fix. Marking
+which documents already existed made the index change on the second `/init` purely
+because the first had created them — rewriting `CONTEXT.md` for no reason, defeating the
+"nothing to do" path, and labelling documents `/init` had authored moments earlier as
+preserved pre-existing work. Which files a run left alone is a fact about that run and is
+in its report.
+
+**Trust is settled after the write, and only for a project that was already trusted.**
+The state is captured *before* it, because the D17 content hash has moved afterwards and
+`is_trusted()` then answers `False` for a project that was trusted a moment ago — exactly
+the state the distinction exists to tell apart. An untrusted project is left untrusted:
+its `.venastine/` may already hold agents, skills and an `mcp.json` that arrived with a
+cloned repo, and granting as a side effect of `/init` would wave all of it through.
+`CONTEXT.md` is never special-cased out of the hash.
+
 ## 5. Request lifecycle — regular conversation, traced end to end
 
 1. Caller calls `RunAgentLoop.run_agent_conversation(user_goal, model, provider_name, max_steps, max_total_tokens)`.
@@ -1000,7 +1076,9 @@ Returns the full `PipelineRun` (not just the final report) — every intermediat
 | `discrete_math` | `discrete_math.py` | Working | Number theory + combinatorics via SymPy |
 | `logic` | `logic.py` | Working | Propositional logic ONLY — see its docstring for scope limits |
 | `geometry` | `geometry.py` | Working | Points/lines/circles/polygons/triangles via SymPy |
-| `file_ops` | `file_ops.py` | Working | read/write/edit with path-dependent approval, markitdown for rich formats, line/char pagination |
+| `file_ops` | `file_ops.py` | Working | read/write/edit with path-dependent approval, markitdown for rich formats, line/char pagination. **Both `read` and `write` are denied by a global that nothing can flip at runtime — see §11** |
+| `read_project_doc` | `project_docs.py` | Working | ROADMAP_v2 §24: project documentation only, confined by realpath, no approval |
+| `write_project_doc` | `project_docs.py` | Working | ROADMAP_v2 §24: a document NAME from a fixed allowlist, no path parameter, approval-gated |
 | `shell` | `shell.py` | Working | Shell execution via sandbox module; inert fast-path; Docker default, subprocess fallback |
 
 All math tools share `_math_common.py`'s `safe_parse()` — a SymPy expression parser with `__builtins__` explicitly blanked, verified via test to actually block a real injection payload, not just assumed safe. Any new math-adjacent tool should use this, not its own `eval`/`sympify` call.
@@ -1016,3 +1094,6 @@ All math tools share `_math_common.py`'s `safe_parse()` — a SymPy expression p
 - **`prompts/system_prompts.py`'s loader once built a local `passes_prompts` dict and returned it without ever assigning it back to the module-level variable of the same name** — the module-level dict stayed permanently empty. If you see a function that constructs a local variable shadowing a module-level one, check that the return value is actually being used, not just implicitly expected to "just work" via the shared name.
 - **Resuming a thread loaded it correctly and displayed nothing — and left the PREVIOUS thread's transcript on screen under the new thread's id.** `ConversationMemory(thread_id=...)` reads the full history at construction, so every layer below the shell was right; the TUI's picker callback swapped the object, refreshed the goal banner, wrote `Resumed thread <uuid>.` and stopped, and `main.py --thread` printed one line and dropped into the prompt. **This is the same shape as the ensemble-mode and `fetch_url` gotchas above — wired, documented, never executed end to end — with one addition worth recording: the failure was not "nothing happens" but "the wrong thing is shown confidently", and no test in a 1028-test suite could fail on it, because every one of them asserted on state rather than on what reached the screen.** Fixed in §27 by `core/replay.py` plus `Transcript.reset()`. The generalisable rule: when a fix is "display the state we already have", the test has to assert on the rendered output, since a call-count assertion passes for the version that renders the new thread under the old thread's transcript.
 - **One research run created ~15 threads and every automatic compaction one more, and the thread picker offered all of them as conversations.** The per-pass fresh thread is a locked invariant (passes share distilled JSON, never raw history), so the defect was that `ConversationThread` had no field saying what a thread was. Two things about the fix are worth keeping: the compactor was a **fifth** thread source that §27's own spec did not count, found only by grepping every `run_agent_conversation` call site rather than by reading the section — the project's "grep every call site sharing the root cause" rule, paying off in a section that had already been specified; and the legacy classification had to be **separate from `ensure_columns()`**, which is additive-only and never backfills, so a schema migration would have left every existing database's pass threads in the picker while looking migrated.
+- **`config.ToolPermissions.write = False` reads as a default and is in fact a permanent denial**, and §24 was specified against the wrong reading of it. The roadmap's preference — "prefer running `/init` through the existing `write` tool rather than bypassing the permission layer" — describes something no user can do: `is_tool_allowed()` reads `config.ToolPermissions()` directly, `settings.json` has no `permissions` section and `_KNOWN_SETTINGS` *raises* on an unknown key, and D14 forbids a `ToolContext` widening anything, with the global check running first and unconditionally. `dispatch("write", …)` therefore raises `ToolCallDenied` **before** the `approval_callback` is even consulted. `read` is denied identically, which also rules out an agent that explores a project with the existing read tool. **The shape to notice: a `False` in a config dataclass invites you to assume something can turn it `True`.** Nothing here can, and grepping for a consumer of the field is what shows that — `security/permissions.py` instantiates the dataclass fresh on every call and nothing else writes to it. §24's answer was two narrowly-scoped tools (`read_project_doc`, `write_project_doc`) rather than flipping a global, because a global flipped for one command's convenience is standing authority for every agent and all ten research passes.
+- **A registered tool is advertised to every run, not to the caller that wanted it.** §24's initializer agent declares `allowed_tools: [read_project_doc]`, which narrows *that agent* — it does nothing to stop plain chat or a research pass from calling the same tool, since a run with no `ToolContext` gets global policy only. This is why `read_project_doc`'s readable set is documentation and manifests rather than "text files under the project", and why `.venastine/`, `.env*` and `providers.json` are denied by name: the question a new scoped tool has to answer is not "what does my caller need?" but "what does the least trusted run in the harness now have?". The pipeline is the answer to that, and it reads attacker-controlled web pages.
+- **Running `/init` twice rewrote `CONTEXT.md` the second time, for no reason.** Its documentation index marked which documents already existed, so the first run created them and the second run's index differed *because of the first run* — which also defeated the "nothing to do" path and, worse, labelled documents `/init` had authored moments earlier as pre-existing work it had carefully preserved. Found by running the command twice, which no test did until one asserted idempotence. The rule that came out of it: **content derived from "what is already on disk" makes an operation non-idempotent by construction**, and a fact about one run (which files it skipped) belongs in that run's report rather than in a file the run writes.

@@ -2842,3 +2842,120 @@ research conversation, whether three references is the right cap, and whether
 the injected fragment reads as clearly to a model mid-conversation as it does
 in a test. All three are judgement calls that need a real session and a real
 provider, and all three are single constants when the answer arrives.
+
+---
+
+## §24 — `/init`, the project documentation set
+
+**Spec:** ROADMAP_v2 §24, decisions I1–I13.
+
+### What the spec got wrong, and how
+
+§24 named two interactions to design around. Both were real. A third one
+invalidated the spec's own preferred answer to the second.
+
+**"`write` is permission `False` by default."** It is not a default. Nothing
+can change it at runtime: `is_tool_allowed()` instantiates
+`config.ToolPermissions()` on every call, `settings.json` has no
+`permissions` section and `_KNOWN_SETTINGS` raises on an unknown key, and
+D14 forbids a `ToolContext` widening anything — the global check runs first
+and unconditionally. `registry.dispatch("write", …)` raises `ToolCallDenied`
+before the `approval_callback` is consulted. So the spec's stated preference
+("prefer running through the existing `write` tool rather than bypassing the
+permission layer") described something no user could do. `read` is denied by
+the same mechanism, which independently ruled out the exploring agent the
+user later asked for.
+
+Found by grepping for consumers of the field rather than by reading its
+comment. Worth recording as a shape: **a `False` in a config dataclass reads
+as a switch, and this one is a wall.**
+
+### What the user changed at build time
+
+The spec generated one file. Mid-implementation the user corrected the
+scope: the document list they had given was **outputs the harness should
+create per project**, not inputs to read — plus `TEST_WRITING` and
+`BREAKING_CHANGES`, plus a parallel set for research-oriented projects, with
+`CONTEXT.md` as the hub linking all of them. That is I9–I13.
+
+Four design choices were put to them and locked before any of it was built
+(I1, I6 in one round; I2, I3, I4, I7 in the next). The one they overrode was
+generation strategy: I proposed a deterministic digest plus a single
+one-shot agent call, and they chose an exploration loop with real reads.
+That is the better call and it is what forced I2 — the digest version needed
+no read capability at all, so the `read` wall would never have surfaced.
+
+### Decisions worth re-reading before changing this
+
+- **The narrow readable set is a security boundary, not tidiness** (I2). A
+  registered tool with permission `True` is advertised to every run. The
+  initializer's `allowed_tools` narrows that agent and nothing else, so
+  `read_project_doc` is reachable from plain chat and from all ten research
+  passes — which read attacker-controlled web pages. Documentation and
+  manifests only, with `.venastine/`, `.env*` and `providers.json` denied.
+- **`write_project_doc` has no path parameter** (I1). Confinement by
+  construction beats confinement by validation.
+- **One consent covering a named list.** Eight gated writes would be eight
+  prompts, which is the shape of consent that gets clicked through.
+- **Trust state is captured before the write** (I6), because the hash has
+  moved afterwards and `is_trusted()` then says `False` for a project that
+  was trusted a moment ago. Re-granting only for an already-trusted project
+  is what stops `/init` laundering a cloned repo's `.venastine/`.
+
+### Bugs found by running it rather than by reading it
+
+**Running `/init` twice rewrote `CONTEXT.md`.** The documentation index
+marked which documents already existed, so the second run's index differed
+purely because the first run had created them — defeating the "nothing to
+do" path, and labelling documents `/init` had authored moments earlier as
+pre-existing work it had preserved. `render_index` is now a pure function of
+the project kind, and which files a run left alone is in that run's report,
+where a fact about one run belongs.
+
+**The layout listing named `providers.json`.** Only the filename, and the
+read tool refuses it — but it costs the agent a step to discover that, and a
+credential filename can itself name a service or an account. Excluded from
+both listings.
+
+### Three test-quality corrections, all the same shape
+
+Each passed for a reason other than the one claimed, and each was found by
+mutation rather than by review:
+
+1. The credential-filename mutation targeted `_root_documents`' `_is_secret`
+   call, which turns out to be **unreachable** — nothing is both
+   "interesting" and secret today. `_tree`'s call is the load-bearing one.
+   The redundant guard stays, since `_MANIFEST_FILES` already holds
+   `package.json` and one more `.json` entry flips its reachability, but it
+   now says so in a comment.
+2. The index mutation used a relative `os.path.exists()` from the wrong
+   working directory, so it varied nothing. Reintroducing the actual defect
+   across both files turns the idempotence test red.
+3. `test_an_unrecognised_kind_answer_cancels` asserted only that nothing was
+   written — which stays true with the fail-safe decode removed, because
+   `generate()` refuses a non-kind downstream anyway. And the assertions had
+   been patched into the *neighbouring* test, whose escape path dismisses
+   with `None` and so passes either way. Both fixed; it now asserts the
+   outcome the guard actually changes.
+
+§26 recorded two of these, §21c three, §24 three. The pattern is stable
+enough that it belongs in the routine rather than in a section's notes:
+**assert the premise before the conclusion, and confirm the mutation
+applied.**
+
+### Verified outside the suite
+
+A temp project with a real filesystem and a faked provider, through both
+shells: the hub lands in `.venastine/` and the seven stubs at the root; a
+second run reports "nothing to do" and rewrites nothing; a pre-existing
+`ARCHITECTURE.md` survives byte-for-byte; an untrusted project stays
+untrusted while a trusted one is re-granted; a piped `--init` prints the
+diff and writes nothing; and `--software-project`/`--research-project`
+scaffold the right set without asking.
+
+### Left for a real session
+
+Whether the initializer's read budget (twelve steps, 20 KB per read) is
+enough for a large unfamiliar codebase, and whether the stub headings are
+the right ones — both are judgement calls that need a real provider against
+a project nobody on this side has seen. Both are constants.

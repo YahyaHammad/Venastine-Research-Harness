@@ -859,3 +859,36 @@ an existing one — that applies one and not the other produces a reference that
 does nothing on that path. The same standing note covers `with_memories`, with the
 caveat that memories are conditional on there being no agent-built prompt and refs are
 not.
+
+## §14 — `/init` and the project documentation set (ROADMAP_v2 §24, `test_project_init.py`)
+
+| Change | Breaks | Why |
+|---|---|---|
+| Write with `open()` instead of `registry.dispatch` | `test_the_write_goes_through_the_registry` | AC3/I1. Dispatch is what applies the approval gate, `check_input_policy` and output redaction |
+| Give `write_project_doc` a `path` parameter | `TestTheScopedTools` | I1. "Cannot be aimed elsewhere" is structural because there is no path to supply — validating one instead is a weaker claim |
+| Drop the document-name allowlist | `TestTheScopedTools` | The allowlist IS the confinement once the path is gone |
+| Resolve `read_project_doc`'s path without `realpath` first | `test_read_follows_symlinks_before_deciding` | A link that looks contained and resolves outside is exactly the case the ordering exists for |
+| Widen `read_project_doc` to any text file | `TestTheScopedTools` | A permission-`True` tool is advertised to EVERY run, not only `/init`'s. Widening it turns it into `read` with no approval gate, reachable from a research pass |
+| Raise `INIT_READ_CHARS` to `MAX_READ_CHARS` | `test_read_caps_below_the_general_read_tool` | TECHNICAL_DEBT item 9: each read is re-billed on every later step |
+| Drop `max_total_tokens=INIT_TOKEN_BUDGET` | `test_the_run_gets_its_own_budget_not_the_chat_one` | §26's reasoning — the chat budget cuts a tool-heavy run off early |
+| Drop `thread_kind` from the initializer run | `test_the_run_is_labelled_as_a_subagent_thread` | §27: the initializer is a SIXTH thread source |
+| Give the initializer a write tool | `test_the_agent_can_only_read` | I8. The agent drafts; the shell writes, because only the shell can show a human a diff |
+| Let `confirm=None` proceed | `test_no_confirm_route_writes_nothing` | §25's V6, sixth instance |
+| Stop passing the existing `CONTEXT.md` to the agent | `test_an_existing_context_is_given_to_the_agent_to_revise` | I4. Hand edits survive by design, not by the user re-applying them after rejecting a diff |
+| Overwrite documents that already exist | `test_an_existing_document_is_left_exactly_as_it_was` | I12. Only `CONTEXT.md` is a file `/init` claims to author |
+| Make `render_index` depend on what is on disk | `test_a_second_run_changes_nothing` | I11, and the defect that found it: the second run rewrote `CONTEXT.md` and called files `/init` had just written "pre-existing" |
+| Re-grant trust unconditionally | `test_an_untrusted_project_is_not_laundered` | I6. A cloned repo's `.venastine/` must not become trusted as a side effect of an unrelated command |
+| Capture `is_trusted()` after the write | `TestWorkspaceTrust` | The hash has already moved, so a trusted project reads as untrusted and is never re-granted |
+| Exclude `CONTEXT.md` from the D17 hash | `test_context_md_still_counts_towards_the_hash` | Same hole as the above, with a smaller mouth |
+| Drop `_is_secret` from `manifest._tree` | `test_the_manifest_hides_credential_files` | NOTE: the identical call in `_root_documents` is currently UNREACHABLE — nothing is both "interesting" and secret — so mutating that one proves nothing. `_tree` is the load-bearing call |
+| Return the raw answer from `ask_project_kind_blocking` | `test_an_unrecognised_kind_answer_cancels` | NOTE: asserting "nothing was written" passes either way, because `generate()` refuses a non-kind downstream. The test asserts the outcome that differs — a clean cancellation rather than an error quoting a value the user never chose |
+
+### Standing: a broken `/init` modal presents as a HUNG suite, not a red one
+
+Two mutations here — `ConfirmScreen.action_decline` dismissing with no value, and
+skipping the project-kind modal so the confirmation opens unexpectedly — leave the
+`/init` worker parked on `queue.get()`. That also blocks `run_test()`'s teardown, so
+pytest stops rather than failing. It is the "every dismissal path carries a value"
+invariant doing its job (§16 AC2's original lesson, now in its sixth place), but if the
+suite hangs in `test_project_init.py`, look for a modal path that dismisses with
+nothing before looking for an infinite loop.

@@ -22,6 +22,9 @@ python main.py --mode research --review "q"       # §20: review the finished ru
 python main.py --summary <thread>                  # §21c: print a thread's distilled summary
 python main.py --ref <thread> --ref <thread>       # §21c: attach other threads' summaries as context
 # §21c in the TUI: /summary distils this conversation; /ref [--list|--clear] references another
+python main.py --init                              # §24: scaffold this project's documentation set
+python main.py --init --research-project           # §24: skip the type question on a piped run
+# §24 in the TUI: /init [--software|--research]
 
 pytest                                            # 1161 tests, offline, ~25s (first run ~30s: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
@@ -43,7 +46,7 @@ MCP servers are a *third* config file again — `mcp.json`, user-level or `.vena
 Read these before changing anything non-trivial — they carry design decisions that are locked, not defaults to re-derive.
 
 - **ARCHITECTURE.md** — what's built, file-by-file contracts ("what belongs here / what does NOT"), known gotchas (§11).
-- **ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **ROADMAP_v2.md** (§13–§27; §13–§22, §25, §26 and §27 built — §21 complete with §21c) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R12 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26 and T1–T9 from §27). Section and D-numbers are stable and cross-referenced everywhere.
+- **ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **ROADMAP_v2.md** (§13–§27; everything except §23 is built) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R12 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27 and I1–I13 from §24). Section and D-numbers are stable and cross-referenced everywhere.
 - **DEVLOG.md** — per-section implementation notes: what was followed verbatim, what was deviated from (every deviation was an explicit user decision — do not silently override).
 - **tests/BREAKING_CHANGES.md** — what breaks each test when production code changes, the symptom, and the fix.
 - **QWEN.md** — a sibling agent-context file. Stale (it predates §13–§16 and disagrees with itself on test counts); prefer ARCHITECTURE.md and the code.
@@ -487,6 +490,80 @@ independent bugs, both found by using the app.
   or `/copy all` keeps handing back a thread the session has left.
 - **In a pilot test, `app._transcript` queries the ACTIVE screen.** Reading it while a
   modal is up raises `NoMatches`; hold the widget before opening one.
+
+### Project scaffolding (`project_init/`, §24)
+
+`/init` reads a project and writes its documentation set: `.venastine/CONTEXT.md`
+as the hub, plus the documents it links. `--init` on the CLI (M21's precedent —
+the CLI has no command layer).
+
+- **`write` and `read` are globally denied and cannot be re-enabled at runtime.**
+  Not a default: `is_tool_allowed()` reads `config.ToolPermissions()` directly,
+  `settings.json` has no `permissions` section (and `_KNOWN_SETTINGS` *raises* on
+  an unknown key), and D14 forbids a `ToolContext` widening anything — the global
+  check runs first and unconditionally. `dispatch("write", …)` therefore raises
+  `ToolCallDenied` **before** the `approval_callback` is consulted. §24's spec
+  preferred routing through `write`; that was not available.
+- **Two narrowly-scoped tools instead of flipping either global** (I1/I2).
+  `read_project_doc` is confined by realpath to the project and by an allowlist to
+  documentation and manifests; `write_project_doc` takes a document **name** from
+  a fixed allowlist and has **no path parameter at all**, so the destination is
+  derived and it cannot be aimed elsewhere. Flipping the globals would hand every
+  agent and all ten research passes standing file access to serve one command.
+- **The readable set is documentation, not "text files", and that is
+  load-bearing.** A registered tool with permission `True` is advertised to EVERY
+  run — the initializer's `allowed_tools` narrows *that agent*, not plain chat or
+  a research pass. Keeping the set narrow means the most a prompt-injected pass
+  gains is the project's own README. `.venastine/`, `.env*` and `providers.json`
+  are denied outright.
+- **`CONTEXT.md` is the hub and the only document in `.venastine/`** (I9). The
+  rest are ordinary committed root files it links out to, so the one file every
+  agent reads is also the map of the ones it does not.
+- **The index is generated, and is a pure function of the kind** (I11). It first
+  marked which documents already existed — which rewrote `CONTEXT.md` on every
+  later `/init` (the index changed because the previous run had created the
+  files) and labelled documents `/init` had authored moments earlier as
+  pre-existing work it had preserved. Which files a run left alone is a fact
+  about that run; it belongs in its report, and is there.
+- **Stubs are templates; only `CONTEXT.md` is generated** (I10). A DEVLOG written
+  for a project with no history is confident fiction in a file that then gets
+  committed, linked from the hub and read as established. Stubs carry headings, a
+  what-belongs/what-does-not pair, and only facts the manifest established
+  deterministically.
+- **Discovery is a directory walk** — no model call, no tool call — so two runs on
+  an unchanged project produce byte-identical input, which is what makes the
+  output diffable. The manifest carries **sizes** because choosing what to read
+  needs them: this repo's own root markdown is 721 KB against a 20 KB per-read cap.
+- **The manifest is the TASK, not a system-prompt tier.** §19's K6 does not apply
+  only because of that — the same way `_summarize` passes `segment_text` as
+  `user_goal`. In the system prompt it would reach all ten research passes.
+- **The agent produces text; the shell writes** (I8). `initializer.md` gets
+  `read_project_doc` and nothing else. Diffing, asking and dispatching happen in
+  `project_init/generator.py`, because consent belongs to the shell (§20's V3) and
+  a tool writing from inside the loop could not show a human a diff first.
+- **One consent, covering a named list.** `write_project_doc` is gated, so the
+  naive version prompts eight times per command — the shape of consent that gets
+  clicked through. The user sees the diff and the file list once, and that answer
+  becomes the `approval_callback` for every dispatch, the move `core/loop.py`
+  already makes after a channel approval.
+- **No confirm route means nothing is written** (I5) — §25's V6, sixth instance.
+- **Trust is re-granted only for a project that was ALREADY trusted** (I6), and
+  the state is captured **before** the write, since the hash has moved afterwards.
+  In an untrusted project `.venastine/` may already hold agents, skills and an
+  `mcp.json` that arrived with a cloned repo, and granting as a side effect of
+  `/init` would wave all of it through. `CONTEXT.md` is never special-cased out of
+  the hash — that is the same hole with a smaller mouth.
+- **`/init` runs on its own budget** (I7). `INIT_TOKEN_BUDGET` for
+  `RESEARCH_PASS_TOKEN_BUDGET`'s reason (TECHNICAL_DEBT item 9's meter re-counts
+  the whole prompt every step), `INIT_READ_CHARS` well below `MAX_READ_CHARS`, and
+  `INIT_MAX_STEPS` because neither of those bounds the *number* of reads.
+- **The initializer is a SIXTH thread source.** §27 found the compactor as the
+  fifth; this run is labelled `thread_kind=THREAD_KIND_SUBAGENT` for the same
+  reason.
+- **Detect-then-confirm, but ask outright for a blank folder** (I13). With no
+  manifests, no source and no docs there is nothing to infer from, so a proposal
+  would be a guess wearing a finding's clothes. The proposal itself is a Python
+  heuristic, not a model call, and the user confirms it either way.
 
 ### Config loading and workspace trust (ROADMAP_v2 §14)
 
