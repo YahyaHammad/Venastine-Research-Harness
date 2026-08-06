@@ -126,6 +126,12 @@ def _root_documents(project_path: str) -> list:
             or lower.startswith("readme")
             or name in _MANIFEST_FILES
         )
+        # `_is_secret` is belt-and-braces HERE and load-bearing in _tree,
+        # which is where the mutation actually turns a test red. Nothing is
+        # both "interesting" and secret today -- .env and providers.json are
+        # neither documents nor manifests -- so this branch is unreachable.
+        # It stays because _MANIFEST_FILES already contains package.json:
+        # one more .json entry and the reachability flips, silently.
         if not interesting or _is_secret(name):
             continue
         try:

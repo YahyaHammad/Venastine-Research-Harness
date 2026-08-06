@@ -23,7 +23,7 @@ python main.py --summary <thread>                  # §21c: print a thread's dis
 python main.py --ref <thread> --ref <thread>       # §21c: attach other threads' summaries as context
 # §21c in the TUI: /summary distils this conversation; /ref [--list|--clear] references another
 
-pytest                                            # 1098 tests, offline, ~25s (first run ~30s: matplotlib font cache)
+pytest                                            # 1161 tests, offline, ~25s (first run ~30s: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
