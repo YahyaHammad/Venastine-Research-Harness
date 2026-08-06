@@ -424,6 +424,67 @@ def run_summary_command(args, provider_name: str, model: str) -> int:
     return 0
 
 
+def run_init_command(args, provider_name: str, model: str) -> int:
+    """`--init`, ROADMAP_v2 §24 (M21's precedent again).
+
+    A flag rather than a slash command because the CLI has no command layer;
+    everything else -- which document set, whether an existing file is
+    overwritten, whether workspace trust is re-granted -- is decided in
+    project_init.generator, exactly as it is for the TUI's /init.
+
+    The two shell-supplied capabilities are consent and rendering. On a pipe
+    there is no consent route, so `confirm` stays None and the generator
+    reports what it WOULD write without writing it (I5/V6).
+    """
+    from project_init import doc_sets
+    from project_init.generator import InitError, generate
+
+    kind = None
+    if args.research_project and args.software_project:
+        print("Pass at most one of --research-project / --software-project.")
+        return 1
+    if args.research_project:
+        kind = doc_sets.RESEARCH
+    elif args.software_project:
+        kind = doc_sets.SOFTWARE
+
+    interactive = sys.stdin.isatty()
+
+    def _confirm(summary: str) -> bool:
+        print(f"\n{summary}")
+        return _ask("Write these files? [y/N]: ").strip().lower() in ("y", "yes")
+
+    def _choose_kind(proposal, reason, blank):
+        if blank:
+            print("\nThis folder is empty, so there is nothing to go on.")
+        elif proposal:
+            print(f"\nThis looks like a {proposal} project — {reason}.")
+        answer = _ask("Document set — [s]oftware or [r]esearch? "
+                      "(enter accepts the suggestion): ").strip().lower()
+        if not answer:
+            return proposal
+        if answer in ("s", "software"):
+            return doc_sets.SOFTWARE
+        if answer in ("r", "research"):
+            return doc_sets.RESEARCH
+        return None
+
+    try:
+        notice = generate(
+            model=model,
+            provider_name=provider_name,
+            kind=kind,
+            confirm=_confirm if interactive else None,
+            notify=print,
+            choose_kind=_choose_kind if interactive else None,
+        )
+    except InitError as e:
+        print(f"\n{e}")
+        return 1
+    print(f"\n{notice['text']}")
+    return 0
+
+
 def attach_cli_refs(thread_id, specs, provider_name: str, model: str) -> None:
     """Attach each `--ref <thread>` to `thread_id` (§21c, M21).
 
@@ -784,6 +845,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Attach another thread's summary to this session as context. "
              "Repeatable, up to config.MAX_INJECTED_REFS.",
     )
+    # ROADMAP_v2 §24. A flag for M21's reason, and the two kind flags exist
+    # so a piped run can skip the question rather than being refused.
+    parser.add_argument(
+        "--init",
+        action="store_true",
+        help="Generate this project's documentation set -- .venastine/"
+             "CONTEXT.md plus the stubs it links -- and exit.",
+    )
+    parser.add_argument(
+        "--software-project",
+        action="store_true",
+        help="With --init: scaffold the software document set without asking.",
+    )
+    parser.add_argument(
+        "--research-project",
+        action="store_true",
+        help="With --init: scaffold the research document set without asking.",
+    )
     return parser
 
 
@@ -1095,6 +1174,13 @@ if __name__ == "__main__":
     # resolved provider/model, and it runs no tool and needs no MCP server.
     if args.summary is not None:
         raise SystemExit(run_summary_command(args, provider, model))
+
+    # §24. Beside the others, and AFTER load_project_config for a reason the
+    # rest do not share: the generator resolves its destination through
+    # config_loader.get_project_path(), and reads the trust state that
+    # initialize() has just settled.
+    if args.init:
+        raise SystemExit(run_init_command(args, provider, model))
 
     # Argument validation before connecting anything: parser.error() exits,
     # and doing it after setup_mcp() would spawn stdio server subprocesses

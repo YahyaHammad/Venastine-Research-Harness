@@ -290,6 +290,98 @@ def _thread_row(thread: dict) -> str:
         else f"{stamp}  {thread['id']}"
 
 
+class ConfirmScreen(ModalScreen[bool]):
+    """A titled yes/no over a block of text (ROADMAP_v2 §24).
+
+    PermissionScreen is the wrong shape here even though it also returns a
+    bool: it titles itself "Allow <tool>?" and renders params as JSON,
+    because it exists to gate ONE tool call. /init's question is about a
+    set of files, and the substance is the diff -- so the body is text the
+    caller composed and the title says what is being decided.
+
+    Escape declines rather than dismissing with no value. Fifth place that
+    invariant applies, and here the unsafe failure is a worker parked on a
+    queue nobody will answer.
+    """
+
+    BINDINGS = [("escape", "decline", "No")]
+
+    def __init__(self, title: str, body: str, confirm_label: str = "Yes"):
+        super().__init__()
+        self._title = title
+        self._body = body
+        self._confirm_label = confirm_label
+
+    def compose(self) -> ComposeResult:
+        yield Grid(
+            Label(self._title, id="permission-title"),
+            Static(self._body, id="permission-params"),
+            Button(self._confirm_label, variant="success", id="allow"),
+            Button("No", variant="error", id="deny"),
+            id="permission-dialog",
+        )
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(event.button.id == "allow")
+
+    def action_decline(self) -> None:
+        self.dismiss(False)
+
+
+class ProjectKindScreen(ModalScreen[object]):
+    """Which document set /init scaffolds (§24, I13).
+
+    Dismisses with "software", "research", or None to cancel -- three
+    answers, not a bool, because cancelling is not the same as picking the
+    other one.
+
+    An established project arrives here with a PROPOSAL and the reason for
+    it, so the user is confirming a finding. A blank folder arrives with
+    neither: there is nothing to infer from, and a proposal would be a
+    guess wearing a finding's clothes.
+    """
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, proposal=None, reason: str = "", blank: bool = False):
+        super().__init__()
+        self._proposal = proposal
+        self._reason = reason
+        self._blank = blank
+
+    def compose(self) -> ComposeResult:
+        if self._blank:
+            explanation = ("This folder is empty, so there is nothing to go "
+                           "on. Which kind of project is this?")
+        elif self._proposal:
+            explanation = (f"This looks like a {self._proposal} project — "
+                           f"{self._reason}. Change it if that is wrong.")
+        else:
+            explanation = "Which kind of project is this?"
+        yield Grid(
+            Label("Set up documentation for which kind of project?",
+                  id="permission-title"),
+            Static(
+                f"{explanation}\n\n"
+                "software — ARCHITECTURE, ROADMAP, DEVLOG, TECHNICAL_DEBT, "
+                "DOCUMENTATION_STANDARDS, TEST_WRITING, BREAKING_CHANGES\n"
+                "research — RESEARCH_QUESTIONS, METHODOLOGY, SOURCES, "
+                "FINDINGS, LIMITATIONS, EXPERIMENT_LOG, OPEN_QUESTIONS, "
+                "DOCUMENTATION_STANDARDS",
+                id="permission-params"),
+            Button("Software", variant="success", id="kind-software"),
+            Button("Research", variant="primary", id="kind-research"),
+            id="permission-dialog",
+        )
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss("research" if event.button.id == "kind-research"
+                     else "software")
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class ThreadPickerScreen(ModalScreen[object]):
     """Pick a thread to resume. Dismisses with a UUID, or None to cancel.
 

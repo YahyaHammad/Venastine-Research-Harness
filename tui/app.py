@@ -42,6 +42,7 @@ from agents.manager import manager
 from agents.tui_commands import register_agent_commands
 from skills.manager import manager as skills
 from memories.tui_commands import register_memory_commands
+from project_init.tui_commands import register_init_commands
 from skills.tui_commands import register_skill_commands
 from core import config_loader
 from core.client import api_initialization, effort_levels_for_model
@@ -59,7 +60,8 @@ from prompts import system_prompts
 from tui import ravens, themes
 from tui.commands import SlashCommand, registry as commands
 from tui.screens import (
-    ClaimsScreen, GrantPickerScreen, PermissionScreen, ReviewScreen,
+    ClaimsScreen, ConfirmScreen, GrantPickerScreen, PermissionScreen,
+    ProjectKindScreen, ReviewScreen,
     ThreadPickerScreen,
 )
 from tui.widgets import (
@@ -707,6 +709,72 @@ class VenastineApp(App):
             return False
         finally:
             self._permission_channel = None
+
+    def ask_confirm_blocking(self, title: str, body: str,
+                             confirm_label: str = "Yes") -> bool:
+        """Show a yes/no and BLOCK until answered (§24).
+
+        Called from the /init worker, and shaped exactly like
+        ask_permission_blocking for the same reason: the generator is
+        plain synchronous code draining nothing, so no LoopEvent carries
+        its question to the UI.
+
+        The SAME `_permission_channel` field, so
+        `_release_permission_channel` already covers it -- quitting with
+        this modal open must not leave a non-daemon worker parked on a
+        Queue nobody will answer. That release puts a bare False, which
+        decodes here as "no", which is the safe direction: nothing is
+        written.
+        """
+        if self._shutting_down:
+            return False
+        channel: queue.Queue = queue.Queue()
+        self._permission_channel = channel
+        screen = ConfirmScreen(title, body, confirm_label)
+        self.call_from_thread(
+            self.push_screen, screen, lambda ok: channel.put(bool(ok)))
+        try:
+            return channel.get(timeout=config.ATTENDED_APPROVAL_TIMEOUT_S)
+        except queue.Empty:
+            self.call_from_thread(self._timed_out_confirm, screen)
+            return False
+        finally:
+            self._permission_channel = None
+
+    def _timed_out_confirm(self, screen) -> None:
+        # Only report a timeout if there genuinely was one -- the user may
+        # have clicked between the get() timeout and this callback.
+        if screen in self.screen_stack:
+            screen.dismiss(False)
+            self._transcript.write_system("[no answer — nothing was written]")
+
+    def ask_project_kind_blocking(self, proposal, reason: str, blank: bool):
+        """Which document set /init scaffolds. Blocks; returns a kind or
+        None (§24 I13).
+
+        Anything that is not a recognised kind decodes to None -- the same
+        fail-safe rule ask_review_blocking applies, and for the same
+        reason: `_release_permission_channel` puts a bare False, and a
+        dismissal path added later must cancel rather than silently
+        scaffold seven files of a kind nobody chose.
+        """
+        from project_init.doc_sets import PROJECT_KINDS
+
+        if self._shutting_down:
+            return None
+        channel: queue.Queue = queue.Queue()
+        self._permission_channel = channel
+        screen = ProjectKindScreen(proposal, reason, blank)
+        self.call_from_thread(
+            self.push_screen, screen, lambda answer: channel.put(answer))
+        try:
+            answer = channel.get(timeout=config.ATTENDED_APPROVAL_TIMEOUT_S)
+        except queue.Empty:
+            self.call_from_thread(self._timed_out_confirm, screen)
+            return None
+        finally:
+            self._permission_channel = None
+        return answer if answer in PROJECT_KINDS else None
 
     def ask_review_blocking(self, finding: dict, round_index: int):
         """Show the review modal and BLOCK until answered. §20 V4.
@@ -1647,6 +1715,7 @@ register_builtin_commands()
 register_agent_commands()  # §18: /agent, /goal, /grill-me
 register_skill_commands()  # §19: /skill
 register_memory_commands()  # §21b: /memories, /forget
+register_init_commands()  # §24: /init
 
 
 def run(provider_name: str, model: str, settings: dict | None = None) -> None:
