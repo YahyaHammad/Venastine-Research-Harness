@@ -27,7 +27,7 @@ from tools.base import ToolSpec
 from tools.builtin import (
     web_search, fetch_url, get_time, arxiv,
     symbolic_math, linear_algebra, probability_stats, discrete_math, logic, geometry,
-    file_ops, shell, load_skill, pin, remember,
+    file_ops, shell, load_skill, pin, remember, project_docs,
 )
 from security.permissions import (
     assert_permissions_declared, is_tool_allowed, requires_approval,
@@ -384,6 +384,16 @@ registry.register(ToolSpec(
     # the gate worth having, since "remember wants to run" tells the
     # user nothing they can act on.
     approval_notice=remember.approval_notice))
+registry.register(ToolSpec(
+    "read_project_doc", project_docs.READ_TOOL_SCHEMA, project_docs.read_run))
+registry.register(ToolSpec(
+    "write_project_doc", project_docs.WRITE_TOOL_SCHEMA, project_docs.write_run,
+    # Gated in config.ToolApprovals; the notice names the destination and
+    # the size, because "write_project_doc wants to run" is not a decision
+    # anyone can make. The content itself is not repeated here -- /init has
+    # already shown it as a diff, and several kilobytes of markdown inside
+    # a modal buries the one line that says which file changes.
+    approval_notice=project_docs.approval_notice))
 registry.register(ToolSpec(
     "spawn_subagent", subagent_tool.TOOL_SCHEMA, subagent_tool.run,
     # Approving a spawn IS the subagent sign-off (§18 S1): it authorises

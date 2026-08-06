@@ -156,6 +156,28 @@ MAX_FILE_SIZE_BYTES = 10_000_000   # 10 MB — hard reject before opening
 MAX_READ_LINES = 500               # max lines per read call
 MAX_READ_CHARS = 50_000            # max chars per read call
 
+# --- /init (ROADMAP_v2 §24) ---
+INITIALIZER_AGENT = "initializer"
+
+# Three bounds, each doing a different job (I7). /init is a tool-heavy loop
+# over documentation that can run to hundreds of kilobytes -- this repo's own
+# root markdown is 721KB, with DEVLOG.md alone at 226KB.
+#
+# INIT_READ_CHARS is well below MAX_READ_CHARS because of TECHNICAL_DEBT item
+# 9: the budget meter re-counts the WHOLE prompt on every step, so each 50KB
+# read is re-billed for every step that follows it. 20KB keeps a dozen reads
+# affordable and still returns a useful span of a document per call.
+INIT_READ_CHARS = 20_000
+# And the budget itself, for the same reason RESEARCH_PASS_TOKEN_BUDGET
+# exists (§26): a tool-heavy run hits the chat ceiling long before its
+# context is a problem. MAX_TOKEN_BUDGET is a spend meter, not a context
+# limit. Item 9's real fix -- counting incrementally -- is still open, and
+# would retire this constant along with the research one.
+INIT_TOKEN_BUDGET = 1_000_000
+# The number of reads, which the other two do not bound: a model can spend
+# an unbounded number of small reads inside a large budget.
+INIT_MAX_STEPS = 12
+
 # --- Shell / sandbox (ROADMAP §7) ---
 SHELL_BINARY = os.environ.get("AGENT_SHELL", "")  # auto-detect if empty
 ALLOW_INSECURE_SANDBOX_FALLBACK = False  # explicitly enable subprocess fallback
@@ -427,6 +449,15 @@ class ToolPermissions:
     # §21b. Allowed everywhere; whether it can actually RUN is decided
     # by the approval gate below plus §13's headless rule.
     remember: bool = True
+    # §24 (I2). Allowed, unlike `read`, because it is confined to the
+    # project directory by realpath and to documentation/manifest files by
+    # an allowlist -- see tools/builtin/project_docs.py for what that
+    # deliberately excludes and why the narrow set is load-bearing.
+    read_project_doc: bool = True
+    # §24 (I1). Allowed, unlike `write`, because it takes a document NAME
+    # from a fixed allowlist rather than a path: the destination is derived,
+    # so the tool cannot be aimed anywhere else. The gate is below.
+    write_project_doc: bool = True
 
 @dataclass
 class ToolApprovals:
@@ -487,3 +518,16 @@ class ToolApprovals:
     # reinforced by PIPELINE_UNGRANTABLE, because a grant would otherwise
     # route around it.
     remember: bool = True
+    # §24 (I2): no approval. Reading the project's own documentation, at the
+    # user's explicit request, on the files the manifest already listed to
+    # them, is not an escalation -- and a gate here would mean a dozen
+    # prompts for one /init, which is the shape of consent that gets clicked
+    # through. The confinement in project_docs.py is the control.
+    read_project_doc: bool = False
+    # §24 (I1): gated, on the same axis that separates `read` from `write`.
+    # This writes a file into the user's project that is then injected into
+    # future prompts, and it invalidates the D17 trust hash as it goes.
+    # /init supplies the approval itself, as the yes to a rendered diff --
+    # so the gate is what makes "no silent overwrite" (AC2) structural
+    # rather than a promise the command makes about itself.
+    write_project_doc: bool = True
