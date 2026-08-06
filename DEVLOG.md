@@ -2724,3 +2724,121 @@ a real terminal, or how the classification behaves on a database with hundreds o
 runs — the SQL is one statement over an unindexed column, and the deliberate lack
 of an index on `kind` (see the note in `storage.py`) is a fresh-vs-migrated
 consistency choice, not a performance one.
+
+---
+
+# §21c — `/ref` and session summaries (2026-08-06)
+
+The last third of §21, and the first section in a while that was mostly
+assembly. §21a built the summariser (`_summarize`, the compactor agent, the
+length-checked retry), §21b built the prompt-tier pattern, and §27 — finished
+an hour earlier — built the thread picker this needs and made it list
+conversations only. What §21c adds is one table, one storage read, one prompt
+tier, and four commands.
+
+Same cycle: read the referenced files, verify the spec against the code,
+surface the ambiguities as questions with options and a recommendation, lock
+the answers, implement. One round of four questions (M18–M21).
+
+## The decision the section turns on
+
+**A thread summary and a compaction checkpoint carry nearly the same columns
+and mean opposite things.** Reusing `CompactionCheckpoint` with a different
+`strategy` value would have saved a table and been a silent disaster:
+`latest_checkpoint()` resolves by timestamp and feeds
+`ConversationMemory._derived_view()`, so a summary row there becomes the live
+compaction watermark — newest wins — and folds the thread it was only meant to
+describe. The user picked the separate table; the docstring on
+`ThreadSummary` now says why, because the economy of reusing the other one is
+exactly the kind of idea that arrives twice.
+
+Its consequence is the part worth keeping: **`save_thread_summary` has no
+advance guard and `save_checkpoint`'s is not cargo.** A backwards compaction
+watermark un-compacts a live thread. A redundant summary row can only describe
+a thread as it was a moment ago, which the next `advances()` check notices. The
+absent guard is a decision, so it is written down where someone would
+otherwise add one out of symmetry.
+
+## What the spec left for build time, and what it got wrong
+
+**"Session summaries" was already half-built and half-unserved.** §21's text
+frames them as compaction invoked deliberately — which `/compact` has been
+since §21a. What remained was the request that produced the feature: *show me
+what this conversation has been about*, without shortening what the model sees
+next turn. Hence M20, and hence `/summary` folding nothing.
+
+**The target could not be a strength ratio.** `COMPACTION_TARGET_RATIOS` is
+proportional, which is right for a fold: the summary replaces the span, so the
+thread shrinks whatever the ratio. §21c's summary is injected on every turn of
+the referencing thread with nothing replacing it, so a 500KB source at strength
+3 would put 75KB into every call indefinitely. `config.SUMMARY_TARGET_CHARS` is
+absolute, and `_summarize` needed no change — it takes `target` and `original`
+as plain values.
+
+**A thread shorter than the budget should not reach a model at all.** Its own
+text is its best summary; compressing three messages into more characters than
+they occupy spends a call to make the answer worse. This is compact()'s
+no-progress-no-call guard in a different costume.
+
+## What the build found
+
+**The ref tier had to be unconditional, and the memories line above it is why
+that is not obvious.** `run_agent_conversation` appends memories only when it
+built the prompt itself, because an agent already got them inside
+`system_prompt_for()`. Copying that guard for refs would make an active agent
+lose every attached reference — `system_prompt_for` has no memory object, so
+nothing would put them back. The wrong version is a two-word edit that reads as
+consistency, so it has a test of its own.
+
+**Three tests of mine passed for the wrong reason, and two were mine to catch
+before they mattered.** The absolute-vs-ratio test asserted a number appeared
+without asserting the two candidate numbers DIFFER — it would have passed
+against either implementation on a thread where they coincided. The
+dismissed-picker test asserted "nothing was attached", which stayed true with
+the `thread_id is None` guard removed, because summarising a None thread fails
+downstream: the refs stayed empty while the user who pressed escape got told
+"Could not summarise thread None". And the real-storage
+summary-of-a-compacted-thread test read the COMPACTION's model call rather than
+the summary's, because the derived view was short enough to be stored verbatim
+and no summary call happened at all. All three now assert the premise
+(`ratio_target != SUMMARY_TARGET_CHARS`, no output at all, a new call was
+made) before asserting the conclusion. §26 recorded two vacuous tests; this
+section found three, which suggests the check belongs in the routine rather
+than in a section's notes.
+
+**A `/ref` of the current thread is excluded rather than discouraged.** It
+would spend a model call to inject what the model is already reading.
+
+## Tests
+
+1060 -> 1098. One new file (`test_thread_refs.py`, 35 tests) plus three
+real-storage tests in `test_storage_e2e.py`, which is the only file that can
+hold them — one sqlmodel swap per module, as its docstring explains.
+
+Twenty-one mutations verified red on the right test: the ratio target, the
+fits-already branch, both staleness directions, the re-entrancy guard, the
+derived view (twice — fake and real), a checkpoint write (twice), the K6
+boundary, the cap dropping instead of refusing, the cap going unstated, the
+"not this conversation" line, duplicate re-attachment, both `with_refs` call
+sites independently, the agent-prompt guard, `/summary` folding, the picker not
+excluding the current thread, a dismissed picker acting anyway, an unknown
+`/ref` flag opening the picker, `--summary` not falling back to `--thread`, and
+a malformed `--ref` aborting the session.
+
+## Verified outside the suite
+
+`--summary` on a real database: a short thread stored verbatim with no model
+call, and the second invocation reporting that it served a stored summary.
+`--ref` attaching across two real threads, with the fragment reaching an
+assembled chat prompt — carrying its "NOT part of this conversation's history"
+line — and reaching none of the ten pass prompts. The TUI half has its
+handler tests only; there is no terminal here to run the pilot's picker
+against.
+
+## Not verified
+
+Whether a 2,000-character budget produces a useful summary of a genuinely long
+research conversation, whether three references is the right cap, and whether
+the injected fragment reads as clearly to a model mid-conversation as it does
+in a test. All three are judgement calls that need a real session and a real
+provider, and all three are single constants when the answer arrives.

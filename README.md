@@ -245,8 +245,10 @@ Tools are namespaced `mcp__<server>__<tool>`. A server that fails to connect is 
 /research      /claims [run id]     /copy [last|report|claims|all] [--file <path>]
 /compact       /threads             /new                     /quit
 /agent         /goal                /grill-me                /skill
-/memories      /forget
+/memories      /forget               /summary                 /ref [--list|--clear]
 ```
+
+`/summary` distils this conversation and shows it — it does **not** shorten what the model sees; that is `/compact`. `/ref` picks another conversation, summarises it, and attaches that summary to this one as standing context: you choose what crosses between threads, so nothing read or argued in one conversation can steer another without your say-so. `/ref --list` and `/ref --clear` are the way back out, and the summaries are labelled so the model knows they are not part of this conversation. From the CLI the same two are launch flags: `--summary <thread>` and a repeatable `--ref <thread>`.
 
 `/threads` lists your **conversations** — not the ~15 internal threads each research run creates, nor the one every automatic compaction makes. Each row leads with its first message so you can tell them apart. A run's own pass threads are recorded with the run (`output/<run_id>/pass_threads.json`) and can still be opened by id with `--thread`, if you want to see how a particular pass argued.
 
@@ -270,9 +272,9 @@ Precedence for provider and model is CLI flag > `settings.json` > `config.py`.
 
 ## Status
 
-**Built:** ROADMAP.md §1–§12 (§10's ensemble mode carries a revisit note) and ROADMAP_v2.md §13 (streaming loop), §14 (config loader + workspace trust), §15 (permissions), §16 (TUI), §17 (MCP), §18 (agents), §19 (skills), §20 (post-pipeline review), §21a (compaction + `pin`), §21b (durable memory), §22 (live pipeline progress), §25 (authorised tool use in the pipeline), §26 (research legibility: per-pass tool calls, code-stage announcements, the claims view, role colour, `/copy`), §27 (thread legibility: transcript replay on resume, a conversations-only thread picker).
+**Built:** ROADMAP.md §1–§12 (§10's ensemble mode carries a revisit note) and ROADMAP_v2.md §13 (streaming loop), §14 (config loader + workspace trust), §15 (permissions), §16 (TUI), §17 (MCP), §18 (agents), §19 (skills), §20 (post-pipeline review), §21a (compaction + `pin`), §21b (durable memory), §22 (live pipeline progress), §25 (authorised tool use in the pipeline), §26 (research legibility: per-pass tool calls, code-stage announcements, the claims view, role colour, `/copy`), §27 (thread legibility: transcript replay on resume, a conversations-only thread picker), §21c (session summaries and cross-thread referencing — §21 is now complete).
 
-**Remaining:** §21c (cross-thread referencing, session summaries) and §23–§24 (interactive tools, `/init`).
+**Remaining:** §23–§24 (interactive tools, `/init`).
 
 Run the test suite with `pytest` — 1098 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
 

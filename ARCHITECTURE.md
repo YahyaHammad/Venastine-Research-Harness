@@ -99,6 +99,7 @@ Venastine Research Harness/
 │   ├── test_memory_injection.py   # 12 tests -- ROADMAP_v2 §21b the three placements and the with_catalogs boundary (M13/K6), plus AC5/AC6 end to end
 │   ├── test_memory_shells.py      # 16 tests -- ROADMAP_v2 §21b M16's CLI approval provider and M15's /memories, /forget
 │   ├── test_pipeline_events.py    # 20 tests -- ROADMAP_v2 §22 AC1-AC4: the drainer, the one trace writer (incl. review.py's and json_retry.py's lines), P1's recorded decision, the abandoned-run record, and the live TUI view
+│   ├── test_thread_refs.py       # 35 tests -- ROADMAP_v2 §21c: what summarize_thread reads and when it spends a call, the ref tier and the pass-prompt boundary it must not cross, the cap that refuses, and both shells' commands
 │   ├── test_thread_legibility.py  # 29 tests -- ROADMAP_v2 §27: what each creation path labels its thread, what the picker is offered, the legacy classification (raw sqlite3), what a replay shows, and the per-thread state a resume must reset
 │   └── test_research_legibility.py # 39 tests -- ROADMAP_v2 §26: a pass's tool calls escaping (P2 amended), the redacted param digest, one stage event per code stage (D2 per ROUND), the role palette, /copy, and ctrl+l vs the Input's ctrl+k
 │
@@ -109,7 +110,7 @@ Venastine Research Harness/
 │   ├── workspace_trust.py         # ROADMAP_v2 §14 (D17): trust store keyed by resolved path + content hash; is_trusted/grant_trust; sorted-walk deterministic hash with path-in-hash
 │   ├── config_loader.py           # ROADMAP_v2 §14: three-tier .md discovery (harness/project/user), line-anchored frontmatter parse, settings.json merge with loud unknown-key rejection, CONTEXT.md opt-in, frontmatter-only skill catalog
 │   ├── memory.py                  # ConversationMemory -- in-run message list, provider-NEUTRAL shape, backed by storage.py + resume-shape fix. §21a: assembles the DERIVED view (checkpoint summary + pinned rows + tail) and owns pin_last's ordinal-to-id mapping
-│   ├── compaction.py              # ROADMAP_v2 §21a: when to compact (M1 working-set trigger, M6 pipeline backstop), what may be folded (M4/M5's three floors), and the compactor agent run + ratio retry. Owns the re-entrancy guard
+│   ├── compaction.py              # ROADMAP_v2 §21a: when to compact (M1 working-set trigger, M6 pipeline backstop), what may be folded (M4/M5's three floors), and the compactor agent run + ratio retry. Owns the re-entrancy guard. §21c adds summarize_thread() -- a whole-thread DESCRIPTION that folds nothing
 │   ├── replay.py                  # ROADMAP_v2 §27: a stored thread as display entries -- the ARCHIVE (T3), tool calls as one redacted line, results skipped (T4). ONE policy, both shells
 │   ├── approval.py                # ROADMAP_v2 §25/§20: GrantBudget / ApprovalProvider / RunAuthorization / ReviewConsent -- how a run obtains a human's answer, as DATA. Leaf module, no project imports
 │   │
@@ -565,6 +566,65 @@ than by the assembly point they share.
 **A package under the project root, not a module under `core/`** — `core/memory.py`
 already means the in-run conversation state, and two names that close together is a
 trap rather than a convention.
+
+### 4.21b Thread summaries and cross-thread references (ROADMAP_v2 §21c)
+
+The last third of §21. A thread can be distilled on demand, and one thread's
+distillation can be attached to another as context. Built almost entirely from §21a's
+parts, so the file contracts matter more than the new code does.
+
+**`storage.ThreadSummary` is a SEPARATE TABLE from `CompactionCheckpoint`, and that is
+the section's central decision** (M18). The two carry nearly the same columns and mean
+opposite things:
+
+| | `CompactionCheckpoint` | `ThreadSummary` |
+|---|---|---|
+| effect | CHANGES what the model sees — `latest_checkpoint` feeds `_derived_view` | changes nothing about the thread |
+| read by | `ConversationMemory` every turn | `/summary` to show a person, `/ref` to inject elsewhere |
+| stale row | un-compacts a live conversation, silently and durably | describes a thread as it was; `advances()` notices |
+
+So a summary row in the checkpoint table would compact the thread it was only meant to
+describe, and would win by being newest. Separate tables make that impossible rather
+than warned about — and `save_thread_summary` therefore has **no** advance guard, which
+its docstring explains so nobody copies `save_checkpoint`'s or routes a summary through
+it to get one.
+
+**`compaction.summarize_thread()` describes; `compact()` folds** (M20). Same summariser,
+different requests. It reads `archive_history()` rather than the derived view (T3's
+reasoning), so a summary of a compacted thread describes the conversation instead of
+describing the summary of it. Its target is `config.SUMMARY_TARGET_CHARS` — **absolute,
+not a `COMPACTION_TARGET_RATIOS` entry**, because §21c's consumer is a prompt tier
+present on every turn of the referencing thread, where nothing it replaces bounds it. A
+thread already shorter than that is stored verbatim with no model call at all.
+
+**`core/loop.py` owns the tier: `with_refs` / `attach_ref` / `clear_refs`.**
+
+*Belongs there:* one reader and one writer, beside `with_goal` and taking the same
+argument, because a reference is THREAD state — attached by a person, persisting across
+a resume, applying whichever agent is active. Both shells go through them, so neither can
+disagree about the cap or the stored shape.
+
+*Does NOT belong there:* the summarising (that is `core/compaction.py`), the storage
+(`storage.py`), or the picking (each shell). And `agents/manager.system_prompt_for()` is
+deliberately NOT a third call site the way it is for memories: it has no memory object,
+and a ref is not an agent's opt-in.
+
+**`with_refs` is appended OUTSIDE `with_catalogs()`** — §19's K6, third instance after
+§21b's M13. It is also appended **unconditionally**, unlike `with_memories`: copying the
+`if system_prompt is None` guard from the line above would make an active agent lose
+every attached reference, which is why that has its own test.
+
+**The cap refuses rather than dropping** (`config.MAX_INJECTED_REFS`). A reference is
+something a person chose by name, so making room silently is what M15's rule against
+substring removal exists to prevent. The fragment states the cap when it truncates (M14)
+and says outright that its contents are not this conversation's history — the same risk
+`SUMMARY_PREFIX` addresses one section earlier.
+
+**The CLI gets flags, the TUI gets commands** (M21). `--summary [thread]` and a repeatable
+`--ref <thread>` mirror `--memories` / `--forget`, because the CLI has no slash-command
+layer and building one is §23's business. `/summary` and `/ref [--list|--clear]` live in
+`memories/tui_commands.py` with §21b's pair — same section's family, and `/ref` reads what
+`/summary` writes.
 
 ### 4.22 `core/reasoning/events.py` + the pipeline generator (ROADMAP_v2 §22)
 

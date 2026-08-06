@@ -73,7 +73,7 @@ Every decision below was made through a structured clarification cycle with the 
 - 18. Agent system — agent `.md` format + manager + subagent tool + per-agent scoping + intersection rule
 - 19. Skill system — skill `.md` format + manager + activation + default skills **(BUILT)**
 - 20. Subagent reviewing — opt-in post-pipeline review with consented correction **(BUILT)**
-- 21. Memory system — compaction, archive, thread-scoped pinning, user/project memory
+- 21. Memory system — compaction, archive, thread-scoped pinning, user/project memory **(BUILT: §21a + §21b + §21c)**
 - 22. Pipeline observability — orchestrator events + the live research view **(added during §16; BUILT)**
 - 23. Interactive tools — question tool, todo list, and the response channel they share **(added during §16)**
 - 24. `/init` — generate `CONTEXT.md` from the project **(added during §16)**
@@ -1011,7 +1011,7 @@ Implemented; decision record in DEVLOG §20, file contracts in ARCHITECTURE.md. 
 
 ---
 
-## 21. Memory system — compaction, archive, thread-scoped pinning, user/project memory — §21a + §21b BUILT
+## 21. Memory system — compaction, archive, thread-scoped pinning, user/project memory — BUILT (§21a + §21b + §21c)
 
 **This section fully replaces Rev. 1's placeholder** (D16 originally called it a thin, deferrable truncation strategy). Discussion surfaced that this is, in substance, the long-term memory feature that was deliberately deferred at the very start of this project's build ("persistence yes, extracted long-term memory not yet") — it's arriving on schedule as the harness grows, not as scope creep.
 
@@ -1132,7 +1132,8 @@ Both of these were asked for as TUI features and are really this section's:
 
 §21 was split at build time. **§21a (BUILT)** is compaction, the checkpoint, the
 hyperparameters and `pin`. **§21b (BUILT)** is durable `remember` / `use_memory` /
-`/memories` / `/forget`. **§21c** is `/ref` and session summaries. Each is independently useful and
+`/memories` / `/forget`. **§21c (BUILT)** is `/ref` and session summaries — see M18–M21
+below. Each is independently useful and
 independently testable, and §21a is roughly §20-sized on its own.
 
 Tracing this section against the code before writing any surfaced two holes in its
@@ -1343,6 +1344,52 @@ the default shell. Without it §13's headless rule makes `remember` invisible
 everywhere but the TUI — the §25 cautionary tale, one section later. `pin` needs no
 approval (D26), so §21a does not depend on it.
 
+### Decisions record (M18–M21), added at §21c's build
+
+**M18 — a thread summary gets its OWN TABLE, not a `CompactionCheckpoint` row with a
+different `strategy`.** The two carry nearly identical columns and mean opposite
+things: `latest_checkpoint` resolves by timestamp and feeds
+`ConversationMemory._derived_view()`, so writing one is an edit to a live conversation,
+while a summary is a description that changes nothing. A summary row in that table
+would therefore silently compact the thread it was meant to describe, and would win by
+being newest. Two tables make that impossible instead of documented. `extra_data` was
+the other candidate and was rejected for T1's reason — an opaque JSON blob cannot be
+filtered in SQL, and the roadmap keeps a future `search_threads` open.
+
+Its consequence, stated because it looks like an oversight: **`save_thread_summary` has
+no advance guard while `save_checkpoint` does.** A backwards compaction watermark
+un-compacts a thread; a redundant summary row can only describe a thread as it was a
+moment ago, which the next `advances()` check notices. The guard would be cargo, and
+copying it would imply the two writes are the same kind of thing.
+
+**M19 — a referenced summary is a PROMPT TIER, not a message.** `with_refs` sits beside
+`with_goal` and `with_memories`, reading a list off the thread's `extra_data`. The
+alternative — writing `[Reference from thread X] …` into the archive as a `user`
+message — was rejected on §27's ground: replay would render harness-generated text
+under a `you ›` label, which M8 forbids, and a later compaction would summarise the
+summary. Appended OUTSIDE `with_catalogs()` (K6's third instance) and
+**unconditionally**, unlike memories: a reference belongs to the thread rather than to
+an agent, and `system_prompt_for()` has no memory object to read one from.
+
+**M20 — `/summary` describes, `/compact` folds.** §21's text treats "session summaries"
+as compaction invoked deliberately, which §21a's `/compact` already is. What remained
+unserved is the request that produced the feature: *show me what this conversation has
+been about*, without shortening what the model sees next turn. Two different requests
+that share a summariser.
+
+**M21 — the CLI gets flags (`--summary`, `--ref`), not a slash-command layer.** M15's
+precedent, for M15's reason: the CLI has no command layer, and adding one is §23's
+business, where the response channel it would share is already specified. The accepted
+limit is that a CLI user attaches a reference at launch rather than mid-conversation.
+
+**The summary target is absolute, not a `COMPACTION_TARGET_RATIOS` entry.** A ratio is
+correct for a fold, where the summary replaces the span it came from and the thread
+shrinks either way. §21c's summary is injected on EVERY turn of the referencing thread
+with nothing bounding it, so a 500KB source at strength 3 would inject 75KB
+indefinitely. `config.SUMMARY_TARGET_CHARS` is passed as `_summarize`'s `target`, which
+takes plain values and needed no change. A thread already shorter than the budget is
+stored verbatim and costs no model call.
+
 ### Acceptance criteria
 
 1. Compaction never modifies or deletes rows in `MessageLog` — only adds `CompactionCheckpoint` rows. A full-history query against `MessageLog` alone always returns everything ever said, regardless of how many times compaction has run.
@@ -1353,6 +1400,9 @@ approval (D26), so §21a does not depend on it.
 6. **(D25) `remember()` with no explicit `scope` writes a `"project"`-scoped row**, keyed to the same resolved project path the trust store uses — and that memory does not surface in a thread opened from a different project directory.
 7. **(D26) `remember()` is denied on a path with no approval channel** (CLI, pipeline passes) rather than writing silently; `pin()` succeeds on those same paths. Both tools have declared fields in `ToolPermissions` and `ToolApprovals`, per D24's consistency check.
 8. **(D27) A `compaction` block in a trusted project's `settings.json` overrides the `config.py` defaults**, a user-level `settings.json` overrides `config.py` but loses to the project, and an out-of-range value (`strength: 9`, or `warning_margin >= buffer`) is rejected with a clear message at load time rather than producing incoherent trigger math later.
+9. **(§21c) A thread summary leaves the thread it describes untouched** — no `CompactionCheckpoint` row, and the derived view identical before and after.
+10. **(§21c) A summary of a compacted thread describes the original conversation**, not the compaction summary, and a second summary of an unchanged thread costs no model call.
+11. **(§21c) An attached reference reaches a chat prompt in both shells and NO research pass prompt**, states that it is not this conversation's history, and is refused rather than silently rotated once `MAX_INJECTED_REFS` is reached.
 
 ---
 

@@ -827,3 +827,35 @@ and then reads `app._transcript` gets `NoMatches`, because the query runs
 against the pushed screen. Hold a reference to the widget BEFORE opening the
 modal — `test_resuming_clears_the_screen_and_replays` does, and the comment
 there says why.
+
+---
+
+## 13. ROADMAP_v2 §21c — the summary store, and the tier every shell owes
+
+§21c added `storage.ThreadSummary` plus three functions, and a prompt tier that two
+shells must both apply. Nothing here fails at the edit site.
+
+| Change | What breaks | Fix / why |
+|---|---|---|
+| A `FakeStorage` without `latest_thread_summary` / `save_thread_summary` | `AttributeError` from inside `core/compaction.py`, in whichever test drove a summary | Both are mirrored in `_thread_summaries`, a dict kept SEPARATE from `_checkpoints` for the same reason production uses a separate table. `last_message_id` and `advances` are deliberately NOT mirrored — both read `_ordered_rows`, which is faked, so the real position arithmetic runs under test |
+| Route a summary through `save_checkpoint` (or add an advance guard to `save_thread_summary`) | `test_a_thread_summary_does_not_compact_the_thread` (real SQL), `test_summarizing_does_not_change_what_the_model_sees` | M18. `latest_checkpoint` resolves by timestamp and feeds `_derived_view`, so a summary row there becomes the live watermark and folds the thread it describes. The missing guard is a decision, not an omission |
+| `summarize_thread` reads `memory.messages` | `test_it_reads_the_archive_not_the_derived_view`, and the real-storage `test_a_summary_of_a_compacted_thread_describes_the_conversation` | T3's reasoning. Note the real-storage test needs a thread whose DERIVED VIEW alone exceeds `SUMMARY_TARGET_CHARS` — otherwise the view-based version stores verbatim, makes no call, and the assertions read the compaction's call instead. That is how it was wrong the first time |
+| Make the summary target a `COMPACTION_TARGET_RATIOS` entry | `test_the_target_is_absolute_not_a_strength_ratio` | The consumer is a prompt tier on every turn, so nothing bounds a proportional target. The test asserts the two candidate numbers DIFFER before asserting which was used — without that it passes either way |
+| Remove the fits-already branch | `test_a_short_thread_costs_no_model_call` | A thread shorter than the budget is its own best summary |
+| Drop the `advances()` staleness check, either direction | `test_an_unchanged_thread_is_served_from_the_store` or `test_a_grown_thread_is_re_summarized` | Both directions matter: serving stale, and paying twice for an unchanged thread |
+| Append `with_refs` inside `with_catalogs()` | `test_no_ref_reaches_a_research_pass_prompt` | K6's THIRD instance (skills, then §21b's memories). A conversation referenced in a chat session must not reach ten research passes |
+| Guard `with_refs` with `if system_prompt is None`, copying the memories line above it | `test_an_agent_built_prompt_still_gets_them` | Refs are thread state, and `system_prompt_for()` has no memory object — so an active agent would silently lose every attached reference. A two-word edit that reads as consistency |
+| Remove either `with_refs` call site | `test_a_real_chat_turn_sends_the_refs` or `test_the_tui_turn_sends_them_too` | Tested independently, because §21b recorded that testing only the helper leaves everything green when a call site goes |
+| Make the ref cap drop the oldest | `test_the_cap_refuses_rather_than_dropping_the_oldest` | A reference is something a person chose by name; M15's rule against silent removal |
+| Stop stating the cap in the fragment | `test_the_cap_is_applied_and_stated` | M14's no-silent-caps rule: the count reaches the MODEL, not only a log |
+| `/summary` calls `compact()` | `test_it_shows_the_summary_without_folding_the_thread` | M20. Same summariser, different request |
+| Remove the picker's `thread_id is None` guard | `test_a_dismissed_picker_does_nothing_at_all` | NOTE: an earlier version of this test asserted only "nothing was attached" and passed with the guard gone — summarising a None thread fails downstream, so refs stayed empty while the user got told "Could not summarise thread None". The assertion is on the whole outcome: no work, no output, `_busy` released |
+
+### Standing: a shell that applies `with_goal` owes the same site a `with_refs`
+
+Both are thread state read off `memory.extra`, and both are appended by the shells
+rather than by the assembly point they share (K6). A new shell — or a new turn path in
+an existing one — that applies one and not the other produces a reference that silently
+does nothing on that path. The same standing note covers `with_memories`, with the
+caveat that memories are conditional on there being no agent-built prompt and refs are
+not.

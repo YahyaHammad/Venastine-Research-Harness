@@ -19,6 +19,9 @@ python main.py --mode research --attended "q"     # §25: approve every gated ca
 python main.py --mode research --review "q"       # §20: review the finished run, consent to each correction
 # §21a compaction runs automatically in every shell; /compact triggers it by hand in the TUI
 # §26: /claims [run id] or ctrl+l opens a run's claims; /copy [last|report|claims|all] [--file path]
+python main.py --summary <thread>                  # §21c: print a thread's distilled summary
+python main.py --ref <thread> --ref <thread>       # §21c: attach other threads' summaries as context
+# §21c in the TUI: /summary distils this conversation; /ref [--list|--clear] references another
 
 pytest                                            # 1098 tests, offline, ~25s (first run ~30s: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
@@ -40,7 +43,7 @@ MCP servers are a *third* config file again — `mcp.json`, user-level or `.vena
 Read these before changing anything non-trivial — they carry design decisions that are locked, not defaults to re-derive.
 
 - **ARCHITECTURE.md** — what's built, file-by-file contracts ("what belongs here / what does NOT"), known gotchas (§11).
-- **ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **ROADMAP_v2.md** (§13–§27; §13–§20, §21a, §21b, §22, §25, §26 and §27 built) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R12 from §25, K1–K7 from §19, V1–V9 from §20, M1–M17 from §21a/§21b, P1–P4 from §22, L1–L6 from §26 and T1–T9 from §27). Section and D-numbers are stable and cross-referenced everywhere.
+- **ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **ROADMAP_v2.md** (§13–§27; §13–§22, §25, §26 and §27 built — §21 complete with §21c) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R12 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26 and T1–T9 from §27). Section and D-numbers are stable and cross-referenced everywhere.
 - **DEVLOG.md** — per-section implementation notes: what was followed verbatim, what was deviated from (every deviation was an explicit user decision — do not silently override).
 - **tests/BREAKING_CHANGES.md** — what breaks each test when production code changes, the symptom, and the fix.
 - **QWEN.md** — a sibling agent-context file. Stale (it predates §13–§16 and disagrees with itself on test counts); prefer ARCHITECTURE.md and the code.
@@ -312,7 +315,58 @@ parsed since §14 with no consumer at all — this is its first.
   every MCP tool are advertised and promptable there, not just `remember`. `None` on a
   non-tty, so piped runs stay headless.
 
-**§21c (`/ref`, session summaries) is not built.**
+### Thread summaries and cross-thread references (`§21c`)
+
+`compaction.summarize_thread()` distils a whole thread and stores the result;
+`/summary` shows one, `/ref` attaches another thread's to the current conversation as a
+prompt tier. Built almost entirely out of §21a's parts — the compactor agent,
+`_summarize`'s length-checked retry, `_as_text`, `advances()` — so the load-bearing
+decisions are about the seams.
+
+- **A `ThreadSummary` is NOT a `CompactionCheckpoint`, and that is why it has its own
+  table** (M18). They carry nearly the same columns and mean opposite things: a
+  checkpoint *changes what the model sees* (`latest_checkpoint` resolves by timestamp and
+  feeds `_derived_view`), while a summary describes a thread and changes nothing about it.
+  A summary row in the checkpoint table would silently compact the thread it was only
+  meant to describe, and would win, being newest. Separate tables make that impossible
+  rather than warned about.
+- **`save_thread_summary` has no advance guard, and `save_checkpoint`'s is not cargo.** A
+  backwards compaction watermark un-compacts a live thread; a redundant summary row can
+  only describe a thread as it was a moment ago, which the next `advances()` check
+  notices. Do not copy the guard, and do not route a summary through `save_checkpoint`.
+- **The summary target is ABSOLUTE (`config.SUMMARY_TARGET_CHARS`), not a strength
+  ratio.** A ratio is right for a fold, where the summary replaces the span it came from
+  and scales with it. §21c's consumer is a prompt tier present on *every* turn of the
+  referencing thread, so a 500 KB source at strength 3 would inject 75 KB into every call
+  indefinitely.
+- **A thread already shorter than the target is stored verbatim, with no model call.** Its
+  own text is its best summary. Same instinct as `compact()`'s no-progress-no-call guard.
+- **Summaries read the ARCHIVE** (T3's reasoning, one section on). A view-based summary of
+  a compacted thread describes the *summary* of the conversation, degrading on every
+  compaction — the chaining loss M2 arranges the fold to avoid, arriving through another
+  door. The test for this needs a REAL compaction: the two spaces coincide until a
+  checkpoint exists.
+- **Staleness is detected, not assumed.** The stored watermark plus `advances()` means an
+  unchanged thread costs nothing however many times it is referenced, and a grown one is
+  re-summarized rather than served stale.
+- **`with_refs` goes OUTSIDE `with_catalogs()`** (M19) — §19's K6, **third** instance
+  after §21b's M13. A conversation referenced in a chat session would otherwise land in
+  all ten research passes.
+- **Refs are appended UNCONDITIONALLY, unlike memories.** Copying the
+  `if system_prompt is None` guard from the line above would make an active agent lose
+  every attached reference: a ref is thread state, and `system_prompt_for()` has no memory
+  object to read one from. It has its own test because the edit looks right.
+- **The cap REFUSES rather than dropping the oldest** (`MAX_INJECTED_REFS`). A reference is
+  something a person chose by name; making room silently is what M15's "removal is by id,
+  never by substring" rule exists to prevent. The fragment states the cap when it
+  truncates (M14) and says outright that the summaries are **not** this conversation's
+  history — the risk `SUMMARY_PREFIX` addresses for a compaction summary.
+- **`/summary` describes; `/compact` folds** (M20). Two different requests that happen to
+  share a summariser.
+- **The CLI gets flags, not slash commands** (M21): `--summary [thread]`, `--ref <thread>`
+  (repeatable). The CLI has no slash-command layer and adding one is §23's business. Both
+  go through the same `attach_ref` / `summarize_thread` the TUI uses, so the shells cannot
+  disagree about the cap or the stored shape.
 
 ### Live research view (§22)
 
