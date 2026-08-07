@@ -50,6 +50,10 @@ _INJECTABLE_PARAMS = (
     # permission-specific, and a tool that needs to ask a human anything
     # receives the same object the loop asks through.
     "parent_context", "parent_run", "response_channel",
+    # §23 AC1b: the approved SUBSET from a subagent sign-off. The comment
+    # above anticipated §23's tools adding a name here without reopening
+    # dispatch(); this is that name.
+    "signoff",
     # ROADMAP_v2 §21: the live ConversationMemory, for `pin`. The
     # comment above anticipated a third name arriving without touching
     # dispatch() again; this is it.
@@ -241,6 +245,38 @@ class ToolRegistry:
         spec = self._tools.get(tool_name)
         return spec.grant_scope if spec is not None else None
 
+    def request_kind(self, tool_name: str) -> str:
+        """Which kind of question approving this tool asks (§23).
+
+        Mechanism, not policy, exactly like grant_scope above: the loop
+        asks rather than knowing that spawn_subagent is special.
+        """
+        spec = self._tools.get(tool_name)
+        return spec.request_kind if spec is not None else "approval"
+
+    def request_payload(
+        self, tool_name: str, params: dict,
+        context: Optional["ToolContext"] = None,
+    ) -> dict:
+        """Extra payload fields for that question, or {}.
+
+        Never raises, for approval_notice's reason: a tool whose payload
+        callable blows up must still be answerable. It degrades to an
+        empty dict, which for a sign-off means no candidates -- and
+        interaction.decode intersects the answer with the candidates, so
+        the safe consequence follows automatically rather than needing a
+        second rule here.
+        """
+        spec = self._tools.get(tool_name)
+        if spec is None or spec.request_payload is None:
+            return {}
+        try:
+            return dict(spec.request_payload(params, context) or {})
+        except Exception:  # noqa: BLE001 - a broken payload must not block
+            logger.warning("request_payload for %r failed", tool_name,
+                           exc_info=True)
+            return {}
+
     def approval_notice(
         self, tool_name: str, params: dict,
         context: Optional["ToolContext"] = None,
@@ -267,6 +303,7 @@ class ToolRegistry:
         approval_callback=None,
         parent_run: Optional["RunInfo"] = None,
         response_channel=None,
+        signoff=None,
         memory=None,
     ) -> dict:
         # Unknown-tool guard: ValueError, deliberately NOT ToolCallDenied.
@@ -316,6 +353,7 @@ class ToolRegistry:
             "parent_context": context,
             "parent_run": parent_run,
             "response_channel": response_channel,
+            "signoff": signoff,
             "memory": memory,
         }
         injected = {p: available[p] for p in self._injectable.get(tool_name, ())}
@@ -399,6 +437,10 @@ registry.register(ToolSpec(
     approval_notice=project_docs.approval_notice))
 registry.register(ToolSpec(
     "spawn_subagent", subagent_tool.TOOL_SCHEMA, subagent_tool.run,
+    # §23 AC1b. Approving a spawn is not a yes/no any more: the request
+    # carries the candidate tools and the answer carries the subset.
+    request_kind="subagent_signoff",
+    request_payload=subagent_tool.request_payload,
     # Approving a spawn IS the subagent sign-off (§18 S1): it authorises
     # the child's whole approval-gated tool set for the rest of the turn,
     # which is why grant_scope is "run" -- a second spawn in the same turn

@@ -360,13 +360,61 @@ def build_attended_provider(honour_run_scope: bool = False):
             return False
         return answer.strip().lower() in ("y", "yes")
 
+    def _signoff(request):
+        """Per-tool subagent sign-off (§23 AC1b).
+
+        Three answers, and the terminal has to offer all three: a name
+        list grants those, empty grants none but still spawns, and a
+        refusal denies the spawn. None for anything unparsed is
+        belt-and-braces -- interaction.decode does it too -- but saying
+        so out loud beats leaving the user to infer it from a spawn that
+        quietly did not happen.
+        """
+        agent = request.payload.get("agent", "the subagent")
+        candidates = list(request.payload.get("candidates") or [])
+        if not candidates:
+            print(f"\n[subagent] {agent} needs no approval-gated tools.")
+            answer = reader.ask(
+                f"  Run it? [y/N] ({config.ATTENDED_APPROVAL_TIMEOUT_S}s): ",
+                config.ATTENDED_APPROVAL_TIMEOUT_S)
+            if answer and answer.strip().lower() in ("y", "yes"):
+                return set()
+            print("  [the spawn was refused]")
+            return None
+        print(f"\n[subagent] {agent} may be granted, for this turn only:")
+        for index, name in enumerate(candidates, 1):
+            print(f"  {index}. {name}")
+        answer = reader.ask(
+            "  Grant which? [numbers / 'all' / 'none' / blank to refuse] "
+            f"({config.ATTENDED_APPROVAL_TIMEOUT_S}s): ",
+            config.ATTENDED_APPROVAL_TIMEOUT_S)
+        if answer is None:
+            print("  [no answer — the spawn was refused]")
+            return None
+        cleaned = answer.strip().lower()
+        if not cleaned:
+            return None
+        if cleaned == "all":
+            return set(candidates)
+        if cleaned == "none":
+            return set()
+        chosen = set()
+        for piece in cleaned.replace(",", " ").split():
+            if piece.isdigit() and 1 <= int(piece) <= len(candidates):
+                chosen.add(candidates[int(piece) - 1])
+            else:
+                print(f"  [ignoring {piece!r} — not one of the numbers above]")
+        return chosen
+
     def ask(request):
         if request.kind == interaction.APPROVAL:
             return _approval(request)
-        # SUBAGENT_SIGNOFF and REVIEW arrive in the commits that migrate
-        # them. Until then they fall through and interaction.decode
-        # supplies the declining default, which is the correct answer for
-        # a question this shell cannot yet put.
+        if request.kind == interaction.SUBAGENT_SIGNOFF:
+            return _signoff(request)
+        if request.kind == interaction.REVIEW:
+            return _prompt_review_decision(
+                reader, request.payload.get("finding") or {},
+                request.payload.get("round", 0))
         # An unrecognised kind is a bug in whoever built the Request, and
         # interaction.decode raises on one. Returning None here lets that
         # happen rather than inventing an answer for a question this shell

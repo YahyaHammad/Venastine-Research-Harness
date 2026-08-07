@@ -568,10 +568,39 @@ def test_spawn_forwards_the_channel_and_the_grant(_roots, _mcp_tool, mocker,
     channel = object()
     subagent_tool.run({"agent_name": "worker", "task": "t"},
                       parent_context=ToolContext(),
-                      response_channel=channel)
+                      response_channel=channel,
+                      signoff={"mcp__probe__tool"})
 
     assert captured["response_channel"] is channel
-    assert "mcp__probe__tool" in captured["granted_tools"]
+    # §23 AC1b: the grant is the SUBSET the user ticked, injected by
+    # dispatch(), not every candidate the child could reach. §18 shipped
+    # this all-or-nothing (S1) because a boolean channel could not carry a
+    # list out and a subset back.
+    assert captured["granted_tools"] == {"mcp__probe__tool"}
+
+
+def test_spawn_grants_only_what_was_signed_off(_roots, _mcp_tool, mocker,
+                                               fake_storage):
+    """The narrowing itself. Before §23, approving a spawn authorised the
+    child's ENTIRE approval-gated set; a user who wanted it to have one
+    tool had no way to say so."""
+    _write_harness_agent(_roots, "worker")
+    config_loader.initialize(str(_roots["project"]))
+
+    captured = {}
+    mocker.patch.object(
+        RunAgentLoop, "run_agent_conversation",
+        side_effect=lambda **kw: (captured.update(kw),
+                                  make_model_response(text="x"))[1])
+
+    subagent_tool.run({"agent_name": "worker", "task": "t"},
+                      parent_context=ToolContext(),
+                      response_channel=object(), signoff=set())
+
+    assert captured["granted_tools"] is None, (
+        "an empty sign-off spawns the agent with nothing granted -- it is "
+        "not the same answer as refusing the spawn, which never reaches "
+        "this function at all")
 
 
 def test_spawn_grants_nothing_when_there_is_no_channel(_roots, _mcp_tool,
@@ -596,49 +625,64 @@ def test_spawn_grants_nothing_when_there_is_no_channel(_roots, _mcp_tool,
     assert captured["granted_tools"] is None
 
 
-def test_s1_grant_means_one_prompt_per_turn_not_per_spawn(mocker):
-    """S1's chosen scope: a parent spawning several subagents in one turn
-    is asked ONCE. _run() is called once per turn, so run-scope is
-    turn-scope -- and the loop learns which tools work this way from the
-    registry rather than naming spawn_subagent itself."""
-    import queue as _queue
+def test_s1_signoff_is_remembered_per_agent_not_per_tool_name(mocker):
+    """§23 AC1b amends S1's scope, and this is the amendment.
 
+    S1 made a spawn approval run-scoped: a parent spawning several
+    subagents in one turn was asked ONCE. That was defensible while the
+    answer was a bare yes -- but the test that pinned it spawned agent `a`
+    and then agent `b`, so approving `a` silently authorised `b`'s entire
+    gated set on the strength of a prompt about `a`.
+
+    Per-tool sign-off makes the answer specific to one agent's candidate
+    list, so the memo is keyed by AGENT. The anti-noise intent survives:
+    the same agent twice is still one prompt. A different agent is a
+    different question and gets asked.
+    """
     from tests.conftest import FakeMemory as _Mem
 
-    two_spawns = make_model_response(text="", tool_calls=[
-        {"id": "s1", "name": "spawn_subagent",
-         "input": {"agent_name": "a", "task": "t"}},
-        {"id": "s2", "name": "spawn_subagent",
-         "input": {"agent_name": "b", "task": "t"}},
-    ])
-    done = make_model_response(text="done")
+    def _drive(first, second):
+        spawns = make_model_response(text="", tool_calls=[
+            {"id": "s1", "name": "spawn_subagent",
+             "input": {"agent_name": first, "task": "t"}},
+            {"id": "s2", "name": "spawn_subagent",
+             "input": {"agent_name": second, "task": "t"}},
+        ])
+        done = make_model_response(text="done")
+        seq = [spawns, done]
 
-    def _stream(*a, **kw):
-        for r in (two_spawns, done)[_stream.i:_stream.i + 1]:
-            _stream.i += 1
-            yield StreamToken(final_response=r)
-    _stream.i = 0
+        def _stream(*a, **kw):
+            yield StreamToken(final_response=(
+                seq.pop(0) if seq else make_model_response(text="x")))
 
-    mocker.patch("core.loop.api_initialization", return_value=object())
-    mocker.patch("core.loop.effort_for", return_value=None)
-    mocker.patch("core.loop.call_model_stream", side_effect=_stream)
-    mocker.patch("core.loop.registry.dispatch", return_value={"result": "ok"})
+        mocker.patch("core.loop.api_initialization", return_value=object())
+        mocker.patch("core.loop.effort_for", return_value=None)
+        mocker.patch("core.loop.call_model_stream", side_effect=_stream)
+        mocker.patch("core.loop.registry.dispatch",
+                     return_value={"result": "ok"})
+        # The payload is what carries the subject; faking it here keeps
+        # this test about the MEMO rather than about agent discovery.
+        mocker.patch(
+            "core.loop.registry.request_payload",
+            side_effect=lambda name, params, ctx: {
+                "subject": params.get("agent_name"),
+                "agent": params.get("agent_name"),
+                "candidates": ["mcp__probe__tool"]})
+        mocker.patch("core.loop.registry.request_kind",
+                     return_value="subagent_signoff")
 
-    # Two answers available, so a re-asking loop gets served rather than
-    # running dry. The COUNT is the assertion: a channel that starved the
-    # loop would hang on revert, and a hang is a worse signal than a
-    # failure -- it stalls the suite rather than naming the regression.
-    answers = [True, True]
-    channel = ResponseChannel(
-        ask=lambda _r: answers.pop(0) if answers else False)
+        answers = [{"mcp__probe__tool"}, {"mcp__probe__tool"}]
+        channel = ResponseChannel(
+            ask=lambda _r: answers.pop(0) if answers else None)
+        events = list(RunAgentLoop._run(
+            memory=_Mem(), system_prompt="s", provider_name="ANTHROPIC",
+            model="m", context=None, max_steps=2, response_channel=channel))
+        return [e for e in events if e.permission_request is not None]
 
-    events = list(RunAgentLoop._run(
-        memory=_Mem(), system_prompt="s", provider_name="ANTHROPIC",
-        model="m", context=None, max_steps=2, response_channel=channel))
-
-    prompts_shown = [e for e in events if e.permission_request is not None]
-    assert len(prompts_shown) == 1, \
-        "the second spawn in the same turn re-asked despite the grant"
+    assert len(_drive("a", "a")) == 1, \
+        "the same agent twice in one turn must be asked about once"
+    assert len(_drive("a", "b")) == 2, \
+        "a different agent is a different question and must be asked"
 
 
 def test_grant_does_not_leak_into_the_next_turn(mocker):
@@ -701,3 +745,166 @@ def test_run_agent_conversation_defaults_to_the_catalog_prompt(mocker):
 
     assert "CUSTOM" not in captured["prompt"]
     assert captured["prompt"]
+
+
+# ===========================================================================
+# ---- §23 AC1b: the sign-off modal's three answers -------------------------
+# ===========================================================================
+
+class TestTheSignoffScreen:
+    """A bool cannot hold three intentions, which is exactly why §18
+    shipped this all-or-nothing (S1) and why it needed §23 first."""
+
+    @staticmethod
+    def _screen(candidates=("shell", "mcp__probe__tool")):
+        from tui.screens import SubagentSignoffScreen
+        return SubagentSignoffScreen("worker", list(candidates))
+
+    def test_escape_refuses_the_spawn(self):
+        """None, not an empty set. The key a user reaches for when they
+        did not mean to start this is a refusal, not 'run it with nothing
+        granted'."""
+        dismissed = []
+        screen = self._screen()
+        screen.dismiss = dismissed.append
+        screen.action_refuse()
+        assert dismissed == [None]
+
+    def test_every_dismissal_path_carries_a_value(self):
+        """The worker parks on a queue inside _blocking_modal. A path that
+        dismisses with nothing hangs it forever -- the invariant that now
+        applies in a seventh place."""
+        import inspect
+
+        from tui.screens import SubagentSignoffScreen
+
+        source = inspect.getsource(SubagentSignoffScreen)
+        for line in source.splitlines():
+            if "self.dismiss(" in line:
+                assert "self.dismiss()" not in line, line
+
+    def test_the_three_answers_are_distinguishable(self):
+        """A set grants those names, an EMPTY set spawns with nothing
+        granted, and None refuses the spawn. The middle one is the answer
+        a bool cannot express and the one easiest to collapse."""
+        class _Button:
+            def __init__(self, id):
+                self.id = id
+
+        class _Pressed:
+            def __init__(self, id):
+                self.button = _Button(id)
+
+        screen = self._screen(candidates=())
+        dismissed = []
+        screen.dismiss = dismissed.append
+
+        screen.on_button_pressed(_Pressed("signoff-none"))
+        screen.on_button_pressed(_Pressed("signoff-refuse"))
+
+        assert dismissed[0] == set()
+        assert dismissed[0] is not None, "empty is not a refusal"
+        assert dismissed[1] is None
+
+
+# ===========================================================================
+# ---- §23 AC1b: the real wiring, not a patched stand-in --------------------
+# ===========================================================================
+#
+# The memo test above patches registry.request_kind and request_payload so it
+# can be about the MEMO. That makes it blind to whether spawn_subagent
+# actually declares either -- four mutations proved nothing until these
+# existed. Anything a test patches, some other test has to assert for real.
+
+class TestTheSignoffIsActuallyWired:
+
+    def test_spawn_subagent_declares_the_signoff_kind(self):
+        from core.interaction import SUBAGENT_SIGNOFF
+        from tools.registry import registry
+
+        assert registry.request_kind("spawn_subagent") == SUBAGENT_SIGNOFF
+
+    def test_every_other_tool_asks_a_plain_yes_no(self):
+        from core.interaction import APPROVAL
+        from tools.registry import registry
+
+        assert registry.request_kind("shell") == APPROVAL
+        assert registry.request_kind("write_project_doc") == APPROVAL
+
+    def test_the_payload_carries_the_agent_and_its_candidates(
+            self, _roots, _mcp_tool, fake_storage):
+        """Through the registry, against a real agent -- so a payload
+        callable that stopped returning candidates would show up here even
+        though the memo test patches it away."""
+        from tools.registry import registry
+
+        _write_harness_agent(_roots, "worker")
+        config_loader.initialize(str(_roots["project"]))
+
+        payload = registry.request_payload(
+            "spawn_subagent", {"agent_name": "worker", "task": "t"},
+            ToolContext())
+
+        assert payload["subject"] == "worker"
+        assert payload["agent"] == "worker"
+        assert "mcp__probe__tool" in payload["candidates"]
+
+    def test_dispatch_injects_the_subset_into_the_handler(self):
+        """subagent_tool.run is called directly everywhere else, so the
+        injection itself was uncovered: the map in dispatch() could be
+        pointed at None and every sign-off test would still pass."""
+        from tools.base import ToolSpec
+        from tools.registry import ToolRegistry
+
+        seen = {}
+
+        def handler(params, signoff=None):
+            seen["signoff"] = signoff
+            return {"result": "ok"}
+
+        registry = ToolRegistry()
+        registry.register(
+            ToolSpec("mcp__probe__signoff", {"name": "mcp__probe__signoff"},
+                     handler))
+        registry.dispatch("mcp__probe__signoff", {}, signoff={"shell"},
+                          approval_callback=lambda _n, _p: True)
+        assert seen["signoff"] == {"shell"}
+
+
+def test_refusing_a_spawn_stops_it_happening(mocker):
+    """None from the sign-off means REFUSE, and the loop must treat that
+    as a denial rather than as 'spawn with nothing granted'.
+
+    The two outcomes differ by whether the subagent runs at all, which is
+    the whole reason the answer is three-way.
+    """
+    from tests.conftest import FakeMemory as _Mem
+
+    spawn = make_model_response(text="", tool_calls=[
+        {"id": "s1", "name": "spawn_subagent",
+         "input": {"agent_name": "a", "task": "t"}}])
+    seq = [spawn, make_model_response(text="done")]
+
+    def _stream(*a, **kw):
+        yield StreamToken(final_response=(
+            seq.pop(0) if seq else make_model_response(text="x")))
+
+    mocker.patch("core.loop.api_initialization", return_value=object())
+    mocker.patch("core.loop.effort_for", return_value=None)
+    mocker.patch("core.loop.call_model_stream", side_effect=_stream)
+    dispatched = mocker.patch("core.loop.registry.dispatch",
+                              return_value={"result": "ran"})
+    mocker.patch("core.loop.registry.request_kind",
+                 return_value="subagent_signoff")
+    mocker.patch("core.loop.registry.request_payload",
+                 return_value={"subject": "a", "agent": "a",
+                               "candidates": ["mcp__probe__tool"]})
+
+    channel = ResponseChannel(ask=lambda _r: None)   # the user refused
+    events = list(RunAgentLoop._run(
+        memory=_Mem(), system_prompt="s", provider_name="ANTHROPIC",
+        model="m", context=None, max_steps=2, response_channel=channel))
+
+    assert not dispatched.called, "a refused spawn must not run the subagent"
+    results = [e.tool_result for e in events if e.tool_result is not None]
+    assert "requires approval" in results[0]["result"]["error"]

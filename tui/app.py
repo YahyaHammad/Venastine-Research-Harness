@@ -65,7 +65,7 @@ from tui import ravens, themes
 from tui.commands import SlashCommand, registry as commands
 from tui.screens import (
     ClaimsScreen, ConfirmScreen, GrantPickerScreen, PermissionScreen,
-    ProjectKindScreen, ReviewScreen,
+    ProjectKindScreen, ReviewScreen, SubagentSignoffScreen,
     ThreadPickerScreen,
 )
 from tui.widgets import (
@@ -726,6 +726,10 @@ class VenastineApp(App):
                 request.payload.get("confirm_label", "Yes"))
         if request.kind == interaction.CHOICE:
             return self.ask_choice_blocking(request.payload)
+        if request.kind == interaction.SUBAGENT_SIGNOFF:
+            return self.ask_signoff_blocking(
+                request.payload.get("agent", "this subagent"),
+                request.payload.get("candidates") or [])
         # An unrecognised kind is a bug in whoever built the Request;
         # interaction.decode raises on one, and falling through lets that
         # happen rather than answering a question this app cannot render.
@@ -829,6 +833,21 @@ class VenastineApp(App):
                                    payload.get("reason", ""),
                                    payload.get("blank", False))
         return self._blocking_modal(screen, on_timeout=self._timed_out_confirm)
+
+    def ask_signoff_blocking(self, agent: str, candidates: list):
+        """Which of a subagent's gated tools it may use unprompted (§23
+        AC1b). Blocks; returns a set, or None to refuse the spawn.
+
+        Returns the dismissal RAW, including None on timeout, because
+        interaction.decode both supplies the declining default and
+        intersects the answer with the candidates that were offered.
+        """
+        if self._shutting_down:
+            return None
+        return self._blocking_modal(
+            SubagentSignoffScreen(agent, candidates),
+            on_timeout=lambda screen: self._timed_out_permission(
+                screen, f"{agent} (subagent sign-off)"))
 
     def ask_review_blocking(self, finding: dict, round_index: int):
         """Show the review modal and BLOCK until answered. §20 V4.

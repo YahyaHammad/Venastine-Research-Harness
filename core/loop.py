@@ -226,8 +226,8 @@ def _authorization_kwargs(authorization) -> dict:
 
 
 def _obtain_approval(response_channel, tool_name: str, params: dict,
-                     notice) -> bool:
-    """Get the human's answer for one gated call. False with no route.
+                     notice, request_payload=None) -> tuple:
+    """Ask the human about one gated call. Returns (approved, grant).
 
     ONE route since §23. There were two -- a queue.Queue the TUI's worker
     parked on while its UI thread rendered a modal, and an
@@ -238,15 +238,28 @@ def _obtain_approval(response_channel, tool_name: str, params: dict,
     the shells now supply one ResponseChannel whose `ask` does whichever
     of those two things that shell needs.
 
-    A thin wrapper rather than an inlined call, because the SHAPE of the
-    request is the loop's knowledge: which kind, and that the notice comes
-    from the tool rather than the shell.
+    TWO RETURN VALUES, because §23 AC1b made one question's answer richer
+    than a yes/no. A subagent sign-off answers with the SUBSET of tools
+    the child may then use unprompted -- None to refuse the spawn, an
+    empty set to allow it with nothing granted, a non-empty set to grant
+    those. `grant` is None for every other kind, which carries no subset.
+
+    Which kind to ask comes from the REGISTRY, not from a name test here:
+    the loop asks what shape of question a tool needs the same way it asks
+    whether it needs one at all. `request_payload` is passed in already
+    computed, because the caller needs it before this point to look up the
+    sign-off memo -- and building a subagent's candidate list twice per
+    call would be wasteful and could disagree with itself.
     """
-    return interaction.ask(response_channel, interaction.Request(
-        kind=interaction.APPROVAL,
-        payload={"tool_name": tool_name, "params": params},
-        notice=notice,
-    ))
+    kind = registry.request_kind(tool_name)
+    payload = {"tool_name": tool_name, "params": params}
+    payload.update(request_payload or {})
+    answer = interaction.ask(response_channel, interaction.Request(
+        kind=kind, payload=payload, notice=notice))
+    if kind == interaction.SUBAGENT_SIGNOFF:
+        # None denies the spawn; any set (including empty) allows it.
+        return answer is not None, answer
+    return bool(answer), None
 
 
 # ROADMAP_v2 §21. Notice kinds that describe a STANDING CONDITION rather
@@ -566,14 +579,32 @@ class RunAgentLoop:
                 #     tool runs. Exhaustion falls back to ASKING, not to
                 #     failing: supervised runs continue, headless ones deny
                 #     exactly as they would for any gated tool.
+                #
+                # §23 AC1b: the memo is keyed by (tool, SUBJECT), not by
+                # tool name alone. A subagent sign-off answers about one
+                # agent's candidate list, so reusing it for a different
+                # agent would grant a set nobody was shown -- which is
+                # what the name-only version did: approving a spawn of `a`
+                # silently covered a later spawn of `b` in the same turn.
+                # Tools with no subject (every other one) memo under None
+                # and behave exactly as before.
+                request_payload = registry.request_payload(
+                    call.name, call.input, context)
+                subject = request_payload.get("subject")
+                remembered, signoff = run_info.recall_signoff(
+                    call.name, subject)
                 if (needs_approval
-                        and call.name in run_info.granted_tools
+                        and remembered
                         and registry.grantable(call.name)
                         and (run_info.grant_budget is None
                              or run_info.grant_budget.take())):
                     needs_approval = False
                     granted_calls.append(
                         {"tool": call.name, "params": call.input})
+                else:
+                    # Not reused: nothing is carried into dispatch unless
+                    # this call's own answer supplies it below.
+                    signoff = None
                 if needs_approval:
                     notice = registry.approval_notice(
                         call.name, call.input, context)
@@ -581,8 +612,9 @@ class RunAgentLoop:
                         "tool_name": call.name, "params": call.input,
                         "notice": notice,
                     })
-                    approved = _obtain_approval(
-                        response_channel, call.name, call.input, notice)
+                    approved, signoff = _obtain_approval(
+                        response_channel, call.name, call.input, notice,
+                        request_payload)
                     if not approved:
                         result = {
                             "error": f"{call.name} requires approval and was not given",
@@ -597,7 +629,8 @@ class RunAgentLoop:
                         if (registry.grant_scope(call.name) == "run"
                                 and (response_channel is None
                                      or response_channel.honour_run_scope)):
-                            run_info.granted_tools.add(call.name)
+                            run_info.remember_signoff(
+                                call.name, subject, signoff)
                         # Approval already obtained — pass a callback that
                         # returns True so dispatch()'s internal re-check
                         # doesn't deny an already-approved call.
@@ -607,6 +640,7 @@ class RunAgentLoop:
                                 approval_callback=lambda n, p: True,
                                 parent_run=run_info,
                                 response_channel=response_channel,
+                                signoff=signoff,
                                 memory=memory,
                             )
                         except ToolCallDenied as e:
