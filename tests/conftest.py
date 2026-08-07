@@ -11,6 +11,7 @@ behavior.
 
 import importlib
 import sys
+import time
 import types
 from uuid import uuid4
 
@@ -139,8 +140,110 @@ def make_stream_sequence(*responses: ModelResponse):
 
 
 # ---------------------------------------------------------------------------
+# ---- Waiting in a Textual pilot test (TECHNICAL_DEBT 8) -------------------
+# ---------------------------------------------------------------------------
+#
+# TWO helpers, because there are two jobs and only one of them is a wait.
+# `settle` waits for something to BECOME true; `pump` gives the loop a
+# fixed number of turns to prove something did NOT happen. Merging them
+# would make every negative assertion pay a full timeout for nothing --
+# which is why they are separately named rather than one function with a
+# flag. See the mutation table in tests/BREAKING_CHANGES.md.
+
+async def settle(pilot, predicate, timeout: float = 10.0) -> bool:
+    """Wait until `predicate()` holds, then let the event loop go quiet.
+
+    A worker runs on a real OS thread and hands things back via
+    `post_message` / `call_from_thread`, so there is no single await that
+    guarantees arrival. Polling is honest. What is NOT honest is polling a
+    fixed number of times, which is what the five copies of this helper
+    used to do, and which carried two independent bugs:
+
+    1. A PUMP COUNT IS NOT A WAIT. `pilot.pause()` with no argument ends
+       on `textual._wait.wait_for_idle(0)`, whose exit condition is a
+       process-wide CPU heuristic (`process_time()` deltas), floored at
+       20ms and capped at 1000ms. Measured: 21ms per pause with nothing
+       burning CPU in-process, 1021ms with one busy sibling thread -- a
+       46x swing. So `tries=120` was worth anywhere from 2.5s to 122s,
+       set by something entirely unrelated to what was being waited for.
+       Instrumenting a clean full run found the real need: 44 calls, max
+       0.304s, median 45ms. The default below is ~33x the observed
+       maximum, and a passing wait costs no more than it used to -- both
+       return the moment the predicate holds. Only failures pay.
+
+    2. A PREDICATE CAN GO TRUE BEFORE THE STATE A TEST DEPENDS ON. This
+       is the quiescing `pause()` below, and it is load-bearing.
+       `isinstance(app.screen, PermissionScreen)` becomes true while the
+       worker is still inside `call_from_thread(push_screen, ...)`,
+       blocked on the loop until the mount completes -- it has NOT yet
+       reached `channel.get()`. A test that then joins that thread from
+       the event-loop thread deadlocks: worker waits for loop, loop waits
+       for worker. The old helper hid this by ACCIDENT, because
+       `wait_for_idle`'s 20ms-1s sleep happens to let the mount finish;
+       any more responsive polling exposed it. That is the whole reason
+       TECHNICAL_DEBT 8's first fix attempt turned a rare flake into a
+       deterministic failure, and why its diagnosis pointed at the
+       message queue -- where there is nothing to find. `Pilot.pause`
+       runs the same `_wait_for_screen()` barrier and the same
+       `_on_timer_update()` in both branches; only the exit condition
+       differs.
+
+    Returns True if the predicate held, False on timeout -- callers
+    assert on it with a message, so a timeout reads as a named failure
+    rather than as a later mystery.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        if predicate():
+            # Defect 2. Do not remove: `test_quitting_during_an_attended_
+            # research_prompt_releases_the_worker` fails without it.
+            await pilot.pause()
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        await pilot.pause()
+
+
+async def pump(pilot, times: int = 20) -> None:
+    """Give the event loop `times` turns. For NEGATIVE assertions only.
+
+    `settle` is wrong for "prove X did not happen": there is no predicate
+    to wait for, so it would burn its whole timeout at every such site and
+    prove nothing a bounded pump does not. A count is the right instrument
+    here precisely because the thing being asserted is an absence.
+
+    If you are waiting for something to become true, use `settle`.
+    """
+    for _ in range(times):
+        await pilot.pause()
+
+
+# ---------------------------------------------------------------------------
 # ---- Per-test isolation --------------------------------------------------
 # ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def shrink_approval_timeout():
+    """Make an unanswered modal FAIL rather than stall the suite.
+
+    `tui/app.py`'s `_blocking_modal` parks on
+    `channel.get(timeout=config.ATTENDED_APPROVAL_TIMEOUT_S)`, which is
+    600s in production -- correct there, indistinguishable from a hang
+    under pytest. A dismissal path that drops its value therefore stopped
+    the whole run for ten minutes instead of failing, which is the
+    "mutations present as a hung suite" note in ARCHITECTURE 11.
+
+    Read at call time, so patching the module attribute is enough. Nothing
+    asserts on the value or on the rendered "600s" string, and the tests
+    that exercise the timeout path call `_timed_out_review` directly
+    rather than through the wait.
+    """
+    import config
+    original = config.ATTENDED_APPROVAL_TIMEOUT_S
+    config.ATTENDED_APPROVAL_TIMEOUT_S = 5
+    yield
+    config.ATTENDED_APPROVAL_TIMEOUT_S = original
+
 
 @pytest.fixture(autouse=True)
 def clear_client_cache():
