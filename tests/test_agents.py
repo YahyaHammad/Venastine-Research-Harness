@@ -31,6 +31,7 @@ from agents.manager import manager
 from core import config_loader
 from core.client import StreamToken
 from core.events import LoopEvent
+from core.interaction import ResponseChannel
 from core.loop import RunAgentLoop
 from security.permissions import is_tool_allowed, requires_approval
 from tools.base import ToolSpec
@@ -455,7 +456,7 @@ def test_cmd_grill_me_routes_to_run_one_shot(tmp_path, fake_storage):
 #   f12  the child dropped the parent's approval tightenings, so a tool
 #        the parent gated ran ungated one hop down.
 #   r3-1 the child ran headless (run_agent_conversation took no
-#        permission_channel), so it silently lost every approval-gated
+#        response_channel), so it silently lost every approval-gated
 #        tool -- and the SAME agent behaved differently depending on
 #        whether it was activated with /agent or spawned.
 
@@ -567,9 +568,9 @@ def test_spawn_forwards_the_channel_and_the_grant(_roots, _mcp_tool, mocker,
     channel = object()
     subagent_tool.run({"agent_name": "worker", "task": "t"},
                       parent_context=ToolContext(),
-                      permission_channel=channel)
+                      response_channel=channel)
 
-    assert captured["permission_channel"] is channel
+    assert captured["response_channel"] is channel
     assert "mcp__probe__tool" in captured["granted_tools"]
 
 
@@ -591,7 +592,7 @@ def test_spawn_grants_nothing_when_there_is_no_channel(_roots, _mcp_tool,
     subagent_tool.run({"agent_name": "worker", "task": "t"},
                       parent_context=ToolContext())
 
-    assert captured["permission_channel"] is None
+    assert captured["response_channel"] is None
     assert captured["granted_tools"] is None
 
 
@@ -624,17 +625,16 @@ def test_s1_grant_means_one_prompt_per_turn_not_per_spawn(mocker):
     mocker.patch("core.loop.registry.dispatch", return_value={"result": "ok"})
 
     # Two answers available, so a re-asking loop gets served rather than
-    # deadlocking on an empty queue. The COUNT is the assertion: a test
-    # that starved the loop instead would hang on revert, and a hang is a
-    # worse signal than a failure -- it stalls the suite rather than
-    # naming the regression.
-    channel = _queue.Queue()
-    channel.put(True)
-    channel.put(True)
+    # running dry. The COUNT is the assertion: a channel that starved the
+    # loop would hang on revert, and a hang is a worse signal than a
+    # failure -- it stalls the suite rather than naming the regression.
+    answers = [True, True]
+    channel = ResponseChannel(
+        ask=lambda _r: answers.pop(0) if answers else False)
 
     events = list(RunAgentLoop._run(
         memory=_Mem(), system_prompt="s", provider_name="ANTHROPIC",
-        model="m", context=None, max_steps=2, permission_channel=channel))
+        model="m", context=None, max_steps=2, response_channel=channel))
 
     prompts_shown = [e for e in events if e.permission_request is not None]
     assert len(prompts_shown) == 1, \

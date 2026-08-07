@@ -73,7 +73,7 @@ def approval_notice(params: dict, context=None) -> str:
 
 
 def run(params: dict, parent_context=None, parent_run=None,
-        permission_channel=None) -> dict:
+        response_channel=None) -> dict:
     from core.loop import (
         RunAgentLoop, DEFAULT_PROVIDER, DEFAULT_SYSTEM_PROMPT,
     )
@@ -129,8 +129,8 @@ def run(params: dict, parent_context=None, parent_run=None,
         # the catalog re-invite its child to spawn one (review f19).
         system_prompt=manager.system_prompt_for(
             agent, DEFAULT_SYSTEM_PROMPT, context=child),
-        permission_channel=permission_channel,
-        granted_tools=granted if permission_channel is not None else None,
+        response_channel=response_channel,
+        granted_tools=granted if response_channel is not None else None,
         # §27 AC1. A spawned agent's thread is not a conversation anyone
         # will resume, and one goal-mode turn can spawn several.
         thread_kind=THREAD_KIND_SUBAGENT,

@@ -25,8 +25,9 @@ carry an authorization bundle at all.
 
 import pytest
 
+from core.interaction import ResponseChannel
 from core.approval import (
-    ApprovalProvider, GrantBudget, ReviewConsent, RunAuthorization,
+    GrantBudget, ReviewConsent, RunAuthorization,
 )
 from core.events import LoopEvent
 from core.loop import RunAgentLoop
@@ -88,7 +89,7 @@ class TestAgentConversationCarriesAuthorization:
     def test_the_bundle_is_unpacked_into_the_loop(self, mocker):
         captured = {}
         budget = GrantBudget(5)
-        provider = ApprovalProvider(ask=lambda n, p, x: True)
+        provider = ResponseChannel(ask=lambda request: True)
         mocker.patch.object(RunAgentLoop, "_run",
                             side_effect=_capturing_run(captured))
 
@@ -100,7 +101,7 @@ class TestAgentConversationCarriesAuthorization:
         )
 
         assert captured["granted_tools"] == {"web_search"}
-        assert captured["approval_provider"] is provider
+        assert captured["response_channel"] is provider
         # IDENTITY, not equality. A rebuilt budget with the same limit
         # compares equal on nothing that matters and multiplies the
         # ceiling by however many runs share the bundle.

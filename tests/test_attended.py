@@ -4,7 +4,7 @@ test_attended.py
 ROADMAP_v2 §25 decisions R9, R10 and R11 -- live per-call approval for a
 run that drains its generator instead of watching it.
 
-Why a provider exists at all, rather than reusing permission_channel: the
+Why a provider existed at all, rather than reusing permission_channel: the
 loop yields a LoopEvent carrying the question, and run_to_completion()
 DISCARDS it. The TUI's chat path is fine because its UI thread sees the
 event and shows the modal while the worker parks on the queue. A research
@@ -17,8 +17,10 @@ import queue
 
 import pytest
 
-from core.approval import ApprovalProvider, GrantBudget
+from core.approval import GrantBudget
+from core.interaction import Request, ResponseChannel
 from core.client import StreamToken
+from core.events import LoopEvent
 from core.loop import RunAgentLoop
 from tools.base import ToolSpec
 from tools.registry import registry
@@ -53,7 +55,7 @@ def spawner():
         registry.unregister("mcp__a__spawnish")
 
 
-def _drive(tool_name, *, provider=None, channel=None, granted=None,
+def _drive(tool_name, *, provider=None, granted=None,
            budget=None, calls=1, mocker=None):
     uses = make_model_response(text="", tool_calls=[
         {"id": f"c{i}", "name": tool_name, "input": {"n": i}}
@@ -72,20 +74,25 @@ def _drive(tool_name, *, provider=None, channel=None, granted=None,
 
     events = list(RunAgentLoop._run(
         memory=_Mem(), system_prompt="s", provider_name="ANTHROPIC",
-        model="m", context=None, max_steps=2, permission_channel=channel,
+        model="m", context=None, max_steps=2,
         granted_tools=granted, grant_budget=budget,
-        approval_provider=provider))
+        response_channel=provider))
     return events
 
 
 def _recording_provider(answers, honour_run_scope=True):
+    """§23: a ResponseChannel, not an ApprovalProvider. `asked` keeps the
+    old (tool_name, params, notice) triple so every assertion below reads
+    unchanged -- the shape of the QUESTION moved into Request, and what
+    these tests are about is which questions got asked."""
     asked = []
 
-    def ask(tool_name, params, notice):
-        asked.append((tool_name, params, notice))
+    def ask(request):
+        asked.append((request.payload.get("tool_name"),
+                      request.payload.get("params"), request.notice))
         return answers.pop(0) if answers else False
 
-    return ApprovalProvider(ask=ask, honour_run_scope=honour_run_scope), asked
+    return ResponseChannel(ask=ask, honour_run_scope=honour_run_scope), asked
 
 
 # ===========================================================================
@@ -140,16 +147,20 @@ class TestTheProviderAnswers:
         finals = [e for e in events if e.final_response is not None]
         assert finals[-1].stop_reason == "complete"
 
-    def test_the_channel_wins_when_both_are_present(self, gated_tool, mocker):
-        """The more specific arrangement: a live UI is already showing the
-        request, so a provider asking again would be a second prompt for a
-        question already on screen."""
-        channel = queue.Queue()
-        channel.put(True)
+    def test_there_is_exactly_one_route(self, gated_tool, mocker):
+        """§23 AC1, and this test replaces one that could only exist while
+        there were two.
+
+        `test_the_channel_wins_when_both_are_present` asserted that a live
+        queue beat an ApprovalProvider, because a run could carry both and
+        something had to break the tie. There is now one channel and no
+        tie to break -- so the thing worth pinning is that the loop asks
+        through it exactly once per gated call, rather than which of two
+        mechanisms won.
+        """
         provider, asked = _recording_provider([True])
-        _drive("mcp__a__gated", provider=provider, channel=channel,
-               mocker=mocker)
-        assert asked == [], "the provider was consulted despite a live channel"
+        _drive("mcp__a__gated", provider=provider, mocker=mocker)
+        assert len(asked) == 1, asked
 
     def test_the_notice_reaches_the_provider(self, gated_tool, mocker):
         """What approving authorises is the TOOL's knowledge, and the CLI
@@ -207,10 +218,8 @@ class TestRunScope:
     def test_run_scope_is_honoured_by_default(self, spawner, mocker):
         """Control, and it is §18's shipped behaviour: a chat turn asking
         twice about the same spawn seconds apart is noise."""
-        channel = queue.Queue()
-        channel.put(True)
-        channel.put(True)
-        events = _drive("mcp__a__spawnish", channel=channel, calls=2,
+        provider, _asked = _recording_provider([True, True])
+        events = _drive("mcp__a__spawnish", provider=provider, calls=2,
                         mocker=mocker)
         prompts = [e for e in events if e.permission_request is not None]
         assert len(prompts) == 1
@@ -233,3 +242,120 @@ class TestRunScope:
             [True, True], honour_run_scope=True)
         _drive("mcp__a__spawnish", provider=provider, calls=2, mocker=mocker)
         assert len(asked) == 1
+
+
+# ===========================================================================
+# ---- §23: one name, and therefore a collision that could not exist before -
+# ===========================================================================
+
+class TestTheChannelAndTheBundleAreOneKindOfThing:
+    """`run_agent_conversation` takes a `response_channel` AND may take a
+    RunAuthorization carrying one.
+
+    Before §23 those were different types with different names -- a
+    queue.Queue called permission_channel and an ApprovalProvider called
+    approval_provider -- so both could be forwarded and neither collided.
+    Merging them made `_authorization_kwargs` return a key the explicit
+    parameter already occupies, which is a TypeError at the call site the
+    moment a caller supplies both. §20's reviewer is such a caller.
+    """
+
+    @staticmethod
+    def _capture(mocker):
+        captured = {}
+
+        def _fake_run(*args, **kwargs):
+            captured.update(kwargs)
+            yield LoopEvent(final_response=make_model_response(text="ok"),
+                            stop_reason="complete")
+
+        mocker.patch.object(RunAgentLoop, "_run", side_effect=_fake_run)
+        return captured
+
+    def test_the_bundle_supplies_the_channel_when_there_is_no_explicit_one(
+            self, mocker):
+        from core.approval import RunAuthorization
+
+        captured = self._capture(mocker)
+        bundled = ResponseChannel(ask=lambda _r: True)
+        RunAgentLoop.run_agent_conversation(
+            user_goal="hi", model="m", provider_name="ANTHROPIC",
+            authorization=RunAuthorization(provider=bundled))
+        assert captured["response_channel"] is bundled
+
+    def test_an_explicit_channel_wins_over_the_bundle(self, mocker):
+        """Preserves _obtain_approval's old precedence: a caller passing
+        one is describing THIS run, while the bundle may have been
+        assembled for a pipeline several layers up."""
+        from core.approval import RunAuthorization
+
+        captured = self._capture(mocker)
+        explicit = ResponseChannel(ask=lambda _r: True)
+        bundled = ResponseChannel(ask=lambda _r: False)
+        RunAgentLoop.run_agent_conversation(
+            user_goal="hi", model="m", provider_name="ANTHROPIC",
+            response_channel=explicit,
+            authorization=RunAuthorization(provider=bundled))
+        assert captured["response_channel"] is explicit
+
+    def test_passing_both_does_not_raise(self, mocker):
+        """The regression itself. `a or kwargs.pop(...)` short-circuits, so
+        an early version left the bundle's key in the splat on exactly the
+        path where an explicit channel was passed -- 'got multiple values
+        for keyword argument response_channel'."""
+        from core.approval import RunAuthorization
+
+        self._capture(mocker)
+        RunAgentLoop.run_agent_conversation(
+            user_goal="hi", model="m", provider_name="ANTHROPIC",
+            response_channel=ResponseChannel(ask=lambda _r: True),
+            authorization=RunAuthorization(
+                provider=ResponseChannel(ask=lambda _r: True)))
+
+
+class TestTheChannelReachesAToolThatAsksForIt:
+    """dispatch() injects run-scoped values by signature inspection, and
+    §23 renamed the one a tool receives. The subagent tests drive
+    subagent_tool.run() directly, so nothing covered the INJECTION itself
+    -- the map in dispatch() could be pointed at None and every one of
+    them would still pass."""
+
+    def test_a_handler_declaring_response_channel_receives_it(self):
+        from tools.base import ToolSpec
+        from tools.registry import ToolRegistry
+
+        seen = {}
+
+        def handler(params, response_channel=None):
+            seen["channel"] = response_channel
+            return {"result": "ok"}
+
+        # An mcp__ name, because _default_for_unknown_tool allows only
+        # those -- anything else is denied by policy before the handler is
+        # reached. They also default to requiring approval, hence the
+        # callback: this test is about INJECTION, not about the gate.
+        registry = ToolRegistry()
+        registry.register(
+            ToolSpec("mcp__probe__ask", {"name": "mcp__probe__ask"}, handler))
+        channel = ResponseChannel(ask=lambda _r: True)
+        registry.dispatch("mcp__probe__ask", {}, response_channel=channel,
+                          approval_callback=lambda _n, _p: True)
+        assert seen["channel"] is channel
+
+    def test_a_handler_that_does_not_ask_is_called_with_params_only(self):
+        """The other half of the injection contract: the pre-§18 tools are
+        byte-for-byte untouched by a name being added to the map."""
+        from tools.base import ToolSpec
+        from tools.registry import ToolRegistry
+
+        def handler(params):
+            return {"result": "ok"}
+
+        registry = ToolRegistry()
+        registry.register(
+            ToolSpec("mcp__probe__plain", {"name": "mcp__probe__plain"},
+                     handler))
+        assert registry.dispatch(
+            "mcp__probe__plain", {},
+            response_channel=ResponseChannel(ask=lambda _r: True),
+            approval_callback=lambda _n, _p: True) == {"result": "ok"}

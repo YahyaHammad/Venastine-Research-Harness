@@ -46,7 +46,10 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 # so §23's response-channel tools can add a third name later without
 # touching dispatch() again.
 _INJECTABLE_PARAMS = (
-    "parent_context", "parent_run", "permission_channel",
+    # §23 renamed permission_channel -> response_channel: it is no longer
+    # permission-specific, and a tool that needs to ask a human anything
+    # receives the same object the loop asks through.
+    "parent_context", "parent_run", "response_channel",
     # ROADMAP_v2 §21: the live ConversationMemory, for `pin`. The
     # comment above anticipated a third name arriving without touching
     # dispatch() again; this is it.
@@ -123,7 +126,7 @@ class ToolRegistry:
           * spec.available_check() -- the tool's own "I have nothing to
             act on yet" signal (load_skill with an empty skill catalog).
           * callable_only (§18, user-widened headless callability rule) --
-            when the run has no permission_channel, a tool whose
+            when the run has no response_channel, a tool whose
             approval_needed() is True for empty params is UNCALLABLE in
             this configuration (nothing can grant the approval), so it is
             not advertised. autoApproved MCP servers and approval-free
@@ -141,7 +144,7 @@ class ToolRegistry:
         return out
 
     def headless_hidden(self, context: Optional["ToolContext"] = None) -> list[str]:
-        """Names that would be advertised with a permission_channel but
+        """Names that would be advertised with a response_channel but
         are dropped by schemas(callable_only=True) -- i.e. advertised yet
         uncallable headless. The loop logs exactly this list once, so a
         tool hidden by the headless filter is named and explained rather
@@ -263,7 +266,7 @@ class ToolRegistry:
         context: Optional["ToolContext"] = None,
         approval_callback=None,
         parent_run: Optional["RunInfo"] = None,
-        permission_channel=None,
+        response_channel=None,
         memory=None,
     ) -> dict:
         # Unknown-tool guard: ValueError, deliberately NOT ToolCallDenied.
@@ -312,7 +315,7 @@ class ToolRegistry:
         available = {
             "parent_context": context,
             "parent_run": parent_run,
-            "permission_channel": permission_channel,
+            "response_channel": response_channel,
             "memory": memory,
         }
         injected = {p: available[p] for p in self._injectable.get(tool_name, ())}

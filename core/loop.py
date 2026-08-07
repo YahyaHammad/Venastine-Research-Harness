@@ -27,7 +27,6 @@ budget-truncated responses.
 """
 
 import logging
-import queue
 from typing import Optional
 from uuid import UUID
 
@@ -37,6 +36,7 @@ from core.client import (
     api_initialization, call_model_stream, effort_for, ModelResponse,
 )
 from core.events import LoopEvent
+from core import interaction
 from core.memory import ConversationMemory
 # §27 (T1). The loop is where a thread's kind is DECIDED -- it knows which
 # of its three entry points is running -- and storage.create_thread is
@@ -221,34 +221,32 @@ def _authorization_kwargs(authorization) -> dict:
     return {
         "granted_tools": authorization.granted_tools or None,
         "grant_budget": authorization.budget,
-        "approval_provider": authorization.provider,
+        "response_channel": authorization.provider,
     }
 
 
-def _obtain_approval(permission_channel, approval_provider,
-                     tool_name: str, params: dict, notice) -> bool:
-    """Get the human's answer for one gated call, by whichever route this
-    run has. False when there is no route at all.
+def _obtain_approval(response_channel, tool_name: str, params: dict,
+                     notice) -> bool:
+    """Get the human's answer for one gated call. False with no route.
 
-    TWO routes, because they solve different problems and §23 has not yet
-    merged them. A queue is a thread handoff: the TUI's worker parks here
-    while its UI thread renders the modal, and the question travels in the
-    LoopEvent yielded just above. A provider is a callable the shell
-    supplies, and it exists because run_to_completion() DISCARDS that
-    event -- so the CLI and the research pipeline, which drain the
-    generator rather than watching it, would otherwise block on a queue
-    with nothing displayed.
+    ONE route since §23. There were two -- a queue.Queue the TUI's worker
+    parked on while its UI thread rendered a modal, and an
+    ApprovalProvider callable, which existed only because
+    run_to_completion() DISCARDS the LoopEvent carrying the question, so
+    the CLI and the pipeline would have blocked on a queue with nothing
+    displayed. Both were the same exchange with different plumbing, and
+    the shells now supply one ResponseChannel whose `ask` does whichever
+    of those two things that shell needs.
 
-    The channel wins when both are present: it is the more specific
-    arrangement (a live UI is already showing the request), and the
-    provider would be asking a second time about a question already on
-    screen.
+    A thin wrapper rather than an inlined call, because the SHAPE of the
+    request is the loop's knowledge: which kind, and that the notice comes
+    from the tool rather than the shell.
     """
-    if permission_channel is not None:
-        return bool(permission_channel.get())
-    if approval_provider is not None:
-        return bool(approval_provider.ask(tool_name, params, notice))
-    return False
+    return interaction.ask(response_channel, interaction.Request(
+        kind=interaction.APPROVAL,
+        payload={"tool_name": tool_name, "params": params},
+        notice=notice,
+    ))
 
 
 # ROADMAP_v2 §21. Notice kinds that describe a STANDING CONDITION rather
@@ -379,10 +377,9 @@ class RunAgentLoop:
         max_total_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
         effort: Optional[str] = None,
-        permission_channel: Optional[queue.Queue] = None,
+        response_channel=None,
         granted_tools: Optional[set] = None,
         grant_budget=None,
-        approval_provider=None,
         compaction_mode: str = "working_set",
     ):
         """Generator yielding LoopEvent objects as the loop progresses.
@@ -395,12 +392,13 @@ class RunAgentLoop:
         membership itself, it just hands the context to the registry and
         lets security/permissions.py compose the layers.
 
-        permission_channel: an optional queue.Queue (plain stdlib, NOT
-        asyncio — this is a thread-to-thread handoff between the TUI's
-        worker thread running this generator and the TUI's main/UI
-        thread). If None (CLI/pipeline paths), any tool call that would
-        need approval is denied by default — same behavior as today's
-        dispatch() with no approval_callback.
+        response_channel: an optional core.interaction.ResponseChannel --
+        the ONE way this loop asks a human anything (§23 AC1). None means
+        nothing can be asked, and any call that would need approval is
+        denied. Replaced a queue.Queue plus a separate ApprovalProvider,
+        which were the same exchange with two sets of plumbing; a shell
+        that needs the thread handoff (the TUI parks its worker while the
+        UI thread renders a modal) does that inside its own `ask`.
 
         granted_tools: names the user has ALREADY approved for this run
         (§18 subagent sign-off). A spawned subagent receives the set the
@@ -436,10 +434,11 @@ class RunAgentLoop:
         # this configuration, so it is not advertised -- but named once in
         # a WARNING so the hiding is never silent.
         #
-        # §25: "no way to ask" now means neither route. A research pass
-        # with an ApprovalProvider CAN ask, so hiding its gated tools would
-        # be reporting a limitation the run does not have.
-        headless = permission_channel is None and approval_provider is None
+        # §25: "no way to ask" is not "not a TUI". A research pass with a
+        # channel CAN ask, so hiding its gated tools would report a
+        # limitation the run does not have. §23 made this one condition
+        # again -- it was two while there were two routes.
+        headless = response_channel is None
         tool_schemas = registry.schemas(context, callable_only=headless)
         if headless:
             hidden = tuple(sorted(registry.headless_hidden(context)))
@@ -583,8 +582,7 @@ class RunAgentLoop:
                         "notice": notice,
                     })
                     approved = _obtain_approval(
-                        permission_channel, approval_provider,
-                        call.name, call.input, notice)
+                        response_channel, call.name, call.input, notice)
                     if not approved:
                         result = {
                             "error": f"{call.name} requires approval and was not given",
@@ -597,8 +595,8 @@ class RunAgentLoop:
                         # attended mode -- and one yes must not silently
                         # cover later calls there.
                         if (registry.grant_scope(call.name) == "run"
-                                and (approval_provider is None
-                                     or approval_provider.honour_run_scope)):
+                                and (response_channel is None
+                                     or response_channel.honour_run_scope)):
                             run_info.granted_tools.add(call.name)
                         # Approval already obtained — pass a callback that
                         # returns True so dispatch()'s internal re-check
@@ -608,7 +606,7 @@ class RunAgentLoop:
                                 call.name, call.input, context=context,
                                 approval_callback=lambda n, p: True,
                                 parent_run=run_info,
-                                permission_channel=permission_channel,
+                                response_channel=response_channel,
                                 memory=memory,
                             )
                         except ToolCallDenied as e:
@@ -618,7 +616,7 @@ class RunAgentLoop:
                         result = registry.dispatch(
                             call.name, call.input, context=context,
                             parent_run=run_info,
-                            permission_channel=permission_channel,
+                            response_channel=response_channel,
                             memory=memory)
                     except ToolCallDenied as e:
                         result = {"error": str(e)}
@@ -658,7 +656,7 @@ class RunAgentLoop:
         effort: Optional[str] = None,
         context: Optional[ToolContext] = None,
         system_prompt: Optional[str] = None,
-        permission_channel: Optional[queue.Queue] = None,
+        response_channel=None,
         granted_tools: Optional[set] = None,
         authorization=None,
         thread_kind: str = THREAD_KIND_CHAT,
@@ -676,7 +674,7 @@ class RunAgentLoop:
         prompt is used, so it applies in every shell without the callers
         knowing about it.
 
-        permission_channel / granted_tools exist for spawn_subagent (§18
+        response_channel / granted_tools exist for spawn_subagent (§18
         S1). Without the channel a spawned subagent ran HEADLESS while its
         parent could prompt, so it silently lost every approval-gated tool
         -- including all MCP tools -- and the same agent behaved
@@ -730,11 +728,26 @@ class RunAgentLoop:
             _authorization_kwargs(authorization) if authorization is not None
             else {"granted_tools": granted_tools}
         )
+        # §23: the bundle's channel and the explicit parameter are now the
+        # SAME kind of thing, so they can collide -- they could not before,
+        # when one was a queue named permission_channel and the other an
+        # ApprovalProvider named approval_provider, and both were passed.
+        #
+        # The explicit argument wins, preserving _obtain_approval's old
+        # precedence ("the channel wins when both are present"). A caller
+        # that passes one is describing THIS run; the bundle may have been
+        # assembled for a pipeline several layers up.
+        # Popped UNCONDITIONALLY, then merged. `a or kwargs.pop(...)`
+        # short-circuits, so the key would survive in auth_kwargs on
+        # exactly the path where an explicit channel was passed -- and
+        # collide with it at the call below.
+        bundled_channel = auth_kwargs.pop("response_channel", None)
+        response_channel = response_channel or bundled_channel
         response = run_to_completion(RunAgentLoop._run(
             memory, prompt,
             provider_name, model, context,
             max_steps, max_total_tokens, temperature=temperature, effort=effort,
-            permission_channel=permission_channel, **auth_kwargs,
+            response_channel=response_channel, **auth_kwargs,
         ))
         response.thread_id = memory.thread_id
         return response
@@ -816,8 +829,8 @@ class RunAgentLoop:
         A GENERATOR SIBLING, not an observer callback on the existing
         function. That shape is the project's own, used three times
         already, and §23 AC1 exists specifically to stop a third bespoke
-        request/response channel appearing beside permission_channel and
-        ApprovalProvider.
+        request/response channel appearing beside the ones that already
+        existed -- which §23 has now merged into core.interaction.
 
         The response is RETURNED rather than read off the terminal event
         because `thread_id` is attached after the loop finishes -- see

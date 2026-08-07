@@ -318,7 +318,12 @@ def _stdin_reader() -> _StdinReader:
 
 
 def build_attended_provider(honour_run_scope: bool = False):
-    """An ApprovalProvider that asks at the terminal (§25 R9).
+    """A ResponseChannel that asks at the terminal (§25 R9, §23 AC1).
+
+    ONE channel for every kind of question the CLI can be asked, replacing
+    §25's ApprovalProvider. `ask` dispatches on request.kind; adding a kind
+    means adding a branch here, not a second builder and a second parameter
+    threaded through four layers.
 
     honour_run_scope=False for ATTENDED RESEARCH: that mode exists for
     per-call supervision, so one yes must not silently cover later calls of
@@ -329,22 +334,24 @@ def build_attended_provider(honour_run_scope: bool = False):
     asked about the same tool three times in one turn is the noise §18
     added grant_scope to remove.
     """
-    from core.approval import ApprovalProvider
+    from core import interaction
 
     reader = _stdin_reader()
 
-    def ask(tool_name: str, params: dict, notice) -> bool:
+    def _render_params(params: dict) -> None:
         import json as _json
-
-        print(f"\n[approval] {tool_name}")
-        if notice:
-            print(f"  {notice}")
         try:
             rendered = _json.dumps(params, indent=2, default=str)
         except (TypeError, ValueError):
             rendered = repr(params)
         for line in rendered.splitlines():
             print(f"  {line}")
+
+    def _approval(request) -> bool:
+        print(f"\n[approval] {request.payload.get('tool_name')}")
+        if request.notice:
+            print(f"  {request.notice}")
+        _render_params(request.payload.get("params") or {})
         answer = reader.ask(
             f"  Allow? [y/N] ({config.ATTENDED_APPROVAL_TIMEOUT_S}s): ",
             config.ATTENDED_APPROVAL_TIMEOUT_S)
@@ -353,7 +360,21 @@ def build_attended_provider(honour_run_scope: bool = False):
             return False
         return answer.strip().lower() in ("y", "yes")
 
-    return ApprovalProvider(ask=ask, honour_run_scope=honour_run_scope)
+    def ask(request):
+        if request.kind == interaction.APPROVAL:
+            return _approval(request)
+        # SUBAGENT_SIGNOFF and REVIEW arrive in the commits that migrate
+        # them. Until then they fall through and interaction.decode
+        # supplies the declining default, which is the correct answer for
+        # a question this shell cannot yet put.
+        # An unrecognised kind is a bug in whoever built the Request, and
+        # interaction.decode raises on one. Returning None here lets that
+        # happen rather than inventing an answer for a question this shell
+        # does not know how to put.
+        return None
+
+    return interaction.ResponseChannel(
+        ask=ask, honour_run_scope=honour_run_scope)
 
 
 def run_memory_command(args) -> int:
@@ -535,10 +556,10 @@ def build_chat_authorization():
     done and is the intended outcome; it is also a real change to the
     default shell's posture, larger than the one tool §21b needed it for.
 
-    A RunAuthorization with an empty grant set rather than a new
-    approval_provider= parameter on run_agent_conversation: the bundle
-    already threads through _authorization_kwargs, and a second spelling of
-    the same argument is what that function exists to prevent.
+    A RunAuthorization with an empty grant set rather than a second
+    channel parameter on run_agent_conversation: the bundle already
+    threads through _authorization_kwargs, and a second spelling of the
+    same argument is what that function exists to prevent.
 
     None on a non-tty, matching build_review_consent. A piped run has
     nobody to ask, so it stays headless and behaves exactly as before --

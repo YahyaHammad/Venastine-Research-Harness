@@ -13,9 +13,13 @@ and register into this shell rather than being written into it.
 Two hard acceptance criteria live in this file:
 
   AC2  a permission prompt shown mid-loop resumes the SAME generator with
-       the user's answer. The worker thread blocks inside _run() on
-       permission_channel.get(); the UI thread shows the modal and puts the
-       decision on the queue. Nothing re-enters or restarts the generator.
+       the user's answer. The worker thread blocks inside _run(), in this
+       app's `ask` on the response channel (§23); the UI thread shows the
+       modal and puts the decision on a queue that `ask` is waiting on.
+       Nothing re-enters or restarts the generator. Before §23 the chat
+       path did this differently from the research path -- the modal was
+       pushed from on_loop_event and the loop itself held the queue --
+       which was two mechanisms for one exchange.
 
   AC3  a tool call that raises must not kill the app. Textual's run_worker
        defaults to exit_on_error=True, which would tear the whole TUI down
@@ -509,8 +513,12 @@ class VenastineApp(App):
         if fragment:
             prompt = f"{prompt}\n\n{fragment}"
 
-        channel: queue.Queue = queue.Queue()
-        self._permission_channel = channel
+        # §23: the SAME channel the research path uses. The chat turn used
+        # to hand the loop a bare queue and push its modal from
+        # on_loop_event, which meant two code paths for one exchange -- and
+        # the event-driven one could not carry a question with more than
+        # two answers. The worker now blocks inside the channel's `ask`,
+        # exactly as an attended research pass already did.
         generator = RunAgentLoop._run(
             self.memory,
             prompt,
@@ -520,7 +528,7 @@ class VenastineApp(App):
             max_steps,
             config.MAX_TOKEN_BUDGET,
             effort=self.effort,
-            permission_channel=channel,
+            response_channel=self.response_channel(),
         )
         self.run_worker(
             lambda: self._consume(generator),
@@ -638,9 +646,11 @@ class VenastineApp(App):
                 transcript.write_system(f"— {event.notice['text']} —")
 
         if event.permission_request:
+            # §23: informational only. The modal is opened by the response
+            # channel from the worker thread, so this no longer pushes one
+            # -- doing both would stack two modals for one question.
             self._raven.resume_animation()
             self._raven.state = ravens.WAITING
-            self._ask_permission(event.permission_request)
 
         if event.final_response is not None:
             transcript.flush_stream()
@@ -672,23 +682,56 @@ class VenastineApp(App):
         self._release_permission_channel()
         return super().exit(*args, **kwargs)
 
+    def response_channel(self, honour_run_scope: bool = True):
+        """This app's one way of being asked anything (§23 AC1).
+
+        ONE object for the chat turn, an attended research pass, and every
+        tool that needs a human -- replacing a bare queue.Queue for chat
+        and an ApprovalProvider for research, which were the same exchange
+        with two sets of plumbing and could not agree on a question with
+        more than two answers.
+
+        honour_run_scope=False for attended research (§25 R11): a mode
+        whose purpose is per-call supervision must not let one yes cover
+        later calls.
+        """
+        from core import interaction
+
+        return interaction.ResponseChannel(
+            ask=self._ask_blocking, honour_run_scope=honour_run_scope)
+
+    def _ask_blocking(self, request):
+        """Route one Request to its modal and BLOCK. Runs on a worker.
+
+        Dispatch by kind lives here rather than in each caller, so a new
+        kind is a branch in one method instead of a new field, a new
+        parameter, and a new release path -- which is how there came to be
+        five of these.
+        """
+        from core import interaction
+
+        if request.kind == interaction.APPROVAL:
+            return self.ask_permission_blocking(
+                request.payload.get("tool_name"),
+                request.payload.get("params") or {},
+                request.notice)
+        # Other kinds arrive in the commits that migrate them. Falling
+        # through lets interaction.decode supply the declining default.
+        return None
+
     def ask_permission_blocking(self, tool_name: str, params: dict,
                                 notice) -> bool:
-        """Show the permission modal and BLOCK until answered. §25 R9.
+        """Show the permission modal and BLOCK until answered.
 
-        Called from the /research worker thread, not the UI thread. The
-        chat path cannot use this: there the loop yields a LoopEvent the UI
-        already reacts to, so the modal is pushed from on_loop_event and
-        the worker parks on the channel. A research pass drains its
-        generator inside run_to_completion(), which DISCARDS that event, so
-        the question has to be carried here instead -- which is the whole
-        reason ApprovalProvider exists as a callable rather than a queue.
+        Called from a worker thread, never the UI thread -- both the chat
+        turn and an attended research pass reach it through
+        `_ask_blocking`. §23 unified those: the chat path used to push its
+        modal from on_loop_event while the worker parked on a queue the
+        loop held, which was a second mechanism for one exchange.
 
-        The same PermissionScreen and the same channel field as the chat
-        path, so `_release_permission_channel` covers this too: quitting
-        with a research approval open must not leave a non-daemon worker
-        parked on a Queue.get() nothing will ever answer (review f10, and
-        this is the fourth place that invariant applies).
+        `_release_permission_channel` covers this: quitting with a prompt
+        open must not leave a non-daemon worker parked on a Queue.get()
+        nothing will ever answer (review f10).
         """
         if self._shutting_down:
             # The one-shot release already fired; parking here would hang
@@ -840,22 +883,6 @@ class VenastineApp(App):
             screen.dismiss(False)
         self._transcript.write_system(
             f"[no answer for {tool_name} — denied; the run continues]")
-
-    def _ask_permission(self, request: dict) -> None:
-        channel = self._permission_channel
-
-        def answered(approved: bool | None) -> None:
-            # The worker thread is blocked on channel.get(). A dismissal
-            # carrying None would hang it, so anything that is not an
-            # explicit approval is a denial.
-            channel.put(bool(approved))
-            self._raven.state = ravens.THINKING
-
-        self.push_screen(
-            PermissionScreen(request["tool_name"], request["params"],
-                             request.get("notice")),
-            answered,
-        )
 
     def on_turn_finished(self, message: TurnFinished) -> None:
         self._busy = False
@@ -1309,17 +1336,13 @@ def _cmd_research(app: VenastineApp, args: str) -> None:
 def _authorization_for(app: VenastineApp, granted: set):
     """A RunAuthorization for this run, or None when there is no
     authorization of any kind (the pre-§25 status quo)."""
-    from core.approval import ApprovalProvider, GrantBudget, RunAuthorization
+    from core.approval import GrantBudget, RunAuthorization
 
     provider = None
     if getattr(app, "_research_attended", False):
         # honour_run_scope=False (R11): a mode whose purpose is per-call
         # supervision must not let one yes cover later calls.
-        provider = ApprovalProvider(
-            ask=lambda name, params, notice:
-                app.ask_permission_blocking(name, params, notice),
-            honour_run_scope=False,
-        )
+        provider = app.response_channel(honour_run_scope=False)
         app._transcript.write_system(
             "Attended: every approval-gated call will be asked about as it "
             f"happens; {config.ATTENDED_APPROVAL_TIMEOUT_S}s with no answer "
