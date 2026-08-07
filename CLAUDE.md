@@ -46,7 +46,7 @@ MCP servers are a *third* config file again — `mcp.json`, user-level or `.vena
 Read these before changing anything non-trivial — they carry design decisions that are locked, not defaults to re-derive.
 
 - **ARCHITECTURE.md** — what's built, file-by-file contracts ("what belongs here / what does NOT"), known gotchas (§11).
-- **ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **ROADMAP_v2.md** (§13–§27; everything except §23 is built) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R12 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27 and I1–I13 from §24). Section and D-numbers are stable and cross-referenced everywhere.
+- **ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **ROADMAP_v2.md** (§13–§27; all built except §23's slice 2 — the question tool and the todo list) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R12 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I13 from §24 and J1–J8 from §23). Section and D-numbers are stable and cross-referenced everywhere.
 - **DEVLOG.md** — per-section implementation notes: what was followed verbatim, what was deviated from (every deviation was an explicit user decision — do not silently override).
 - **tests/BREAKING_CHANGES.md** — what breaks each test when production code changes, the symptom, and the fix.
 - **QWEN.md** — a sibling agent-context file. Stale (it predates §13–§16 and disagrees with itself on test counts); prefer ARCHITECTURE.md and the code.
@@ -490,6 +490,60 @@ independent bugs, both found by using the app.
   or `/copy all` keeps handing back a thread the session has left.
 - **In a pilot test, `app._transcript` queries the ACTIVE screen.** Reading it while a
   modal is up raises `NoMatches`; hold the widget before opening one.
+
+### The response channel (`core/interaction.py`, §23 slice 1)
+
+**One way to ask a human anything.** There were five: `permission_channel`
+(§13), `ApprovalProvider` (§25), `ReviewConsent` (§20), and §24's
+`ask_confirm_blocking` / `ask_project_kind_blocking`. Each re-derived what a
+dismissal carries, what a timeout means, how shutdown releases a parked
+worker, and how a malformed answer decodes.
+
+- **What is shared is `decode`, not the dataclasses** (J2). A `Request` /
+  `ResponseChannel` pair is nearly free to write badly — five call sites can
+  each build one and still each invent their own failure handling, which is
+  how there came to be five. One function owning the declining default per
+  kind is the part that pays, and §25's "the inability to ask is not
+  permission to proceed" becomes a property of the module rather than a habit
+  five places remember.
+- **`decode(request, raw)` takes the REQUEST** (J3). Two kinds cannot be
+  validated without knowing what was asked: a `CHOICE` only against the
+  options offered, a `SUBAGENT_SIGNOFF` subset only against the candidates
+  listed. With the kind alone, a shell could return a tool nobody offered and
+  thereby grant it.
+- **`decode(Request(kind), None) == SAFE_DEFAULTS[kind]` for every kind**
+  (J4), pinned by a test. That is what lets `ask()` route its no-channel and
+  callback-raised paths through `decode` rather than reading the table, so a
+  kind added later cannot carry a default its decoder disagrees with.
+- **An unknown KIND raises; an unanswerable question declines** (J5). An
+  unanswerable question is a runtime condition to fail safe on; an undefined
+  one is a bug, and inventing "no" would hide the typo that built the Request.
+- **Review decoding is STRICT** (J6). The two decoders it replaced disagreed —
+  `review.py` accepted a bare `"accept"` string, `tui/app.py` did not — and
+  neither behaviour was tested. Strict wins because review is the only kind
+  whose permissive failure *applies* an edit rather than declining one.
+- **`ToolSpec.request_kind` / `request_payload`** (J7) carry the shape of the
+  question and its tool-specific fields, for `grant_scope`'s reason: the loop
+  asks the registry, so no tool name appears in `core/loop.py`.
+- **The sign-off memo is keyed by (tool, SUBJECT)** (J8). `grant_scope="run"`
+  meant a second spawn was not asked at all — and the test pinning it spawned
+  agent `a` then agent `b`, so approving `a` authorised `b`'s whole gated set.
+  Per-tool sign-off makes the answer agent-specific, so the memo is too; the
+  same agent twice is still one prompt.
+- **The two parameters stay two.** §23 unified the mechanism, not the
+  arguments: `review` stays separate from `authorization.provider` because
+  `--review` without `--attended` is legitimate and one object would make it
+  unexpressible.
+- **`_obtain_approval` returns (approved, grant).** A sign-off's answer is
+  three-way — `None` refuses the spawn, `set()` spawns with nothing granted, a
+  non-empty set grants those — and `TUI`/`CLI` both offer all three. Collapsing
+  the middle one is the easy mistake; `interaction.decode` tests `isinstance`
+  rather than truthiness for exactly that reason.
+- **`tui/app.py` has one `_blocking_modal`.** Four asks did the same six lines,
+  and the `_permission_channel` field each published is what
+  `_release_permission_channel` reaches for when the app exits with a modal
+  open. It is no longer the loop's channel — it is this app's parked-worker
+  queue.
 
 ### Project scaffolding (`project_init/`, §24)
 

@@ -75,7 +75,7 @@ Every decision below was made through a structured clarification cycle with the 
 - 20. Subagent reviewing — opt-in post-pipeline review with consented correction **(BUILT)**
 - 21. Memory system — compaction, archive, thread-scoped pinning, user/project memory **(BUILT: §21a + §21b + §21c)**
 - 22. Pipeline observability — orchestrator events + the live research view **(added during §16; BUILT)**
-- 23. Interactive tools — question tool, todo list, and the response channel they share **(added during §16)**
+- 23. Interactive tools — question tool, todo list, and the response channel they share **(added during §16; slice 1 BUILT — the channel, its three consumers, and §18's deferred per-tool sign-off. The two tools are slice 2)**
 - 24. `/init` — generate the project's documentation set **(added during §16; BUILT)**
 - 25. Authorized tool use in the research pipeline **(BUILT)**
 - 26. Research legibility — pass internals, code stages, the claims view, colour, copy **(added after §22's first live run; BUILT)**
@@ -1488,11 +1488,32 @@ symptom is the whole app failing to lay out with `'NoneType' object has no attri
 
 ## 23. Interactive tools — question tool, todo list, and the response channel they share
 
+**Added during §16. SLICE 1 BUILT after §24** — the channel (AC1), its three consumers, and §18's deferred per-tool sign-off (AC1b). The question tool and the todo list (ACs 2–4) are slice 2.
+
 **Added during §16.** Two requested capabilities need the same missing piece: a way for a *tool* to ask the user something and block until answered. §13 built exactly one of these — `permission_channel`, a `queue.Queue` carrying a boolean — and both of these need a richer version of it.
 
 ### The shared piece first
 
 Generalise the approval bridge into a response channel that carries a typed request and a typed response, with `permission_channel` becoming one case of it rather than a parallel mechanism. Doing the tools first and the generalisation afterwards produces two bespoke channels and a third when §18 wants one.
+
+**The warning was right, and it was already five by the time this was built.** `permission_channel` (§13), `ApprovalProvider` (§25), `ReviewConsent` (§20), and §24 added two more — `ask_confirm_blocking` and `ask_project_kind_blocking` — in the section immediately before this one. Each re-derived the same four rules: what a dismissal carries, what a timeout means, how shutdown releases a parked worker, and how a malformed answer decodes.
+
+### Decisions record (slice 1: J1–J8)
+
+| # | Decision | Why |
+|---|---|---|
+| **J1** | **`core/interaction.py`**, a leaf module beside `core/approval.py`. `Request(kind, payload, notice)` + `ResponseChannel(ask, honour_run_scope)` | Authorization DATA (what was decided, how much is left to spend) is a different thing from the MEANS of asking, which is why the two stay separate modules rather than merging |
+| **J2** | **What is shared is `decode`, not the dataclasses** | A request/response pair is nearly free to write badly — five call sites can each build one and still each invent their own failure handling, which is exactly how there came to be five. One function owning the declining default per kind is the part that pays |
+| **J3** | **`decode(request, raw)` takes the REQUEST, not the kind** | Two kinds cannot be validated without knowing what was asked: a CHOICE only against the options offered, a SUBAGENT_SIGNOFF subset only against the candidates listed. Passing the kind alone made both unverifiable — a shell could return a tool nobody offered and thereby grant it |
+| **J4** | **`decode(Request(kind), None) == SAFE_DEFAULTS[kind]` for every kind**, pinned by a test | Lets `ask()` route its no-channel and callback-raised paths through `decode` rather than reading the table, so a kind added later cannot carry a default its decoder disagrees with |
+| **J5** | **An unknown KIND raises; an unanswerable question declines** | An unanswerable question is a runtime condition to fail safe on. A question nobody defined is a bug, and inventing "no" for it would hide the typo that built the Request |
+| **J6** | **Review decoding is STRICT** — a well-formed pair or nothing | The two decoders this replaced disagreed (review.py took a bare `"accept"` string, tui/app.py did not) and neither behaviour was tested. Strict wins because this is the only kind whose permissive failure APPLIES an edit rather than declining one |
+| **J7** | **`ToolSpec.request_kind` / `request_payload`** carry the question's shape and its tool-specific fields | grant_scope's reason exactly: the loop asks the registry what shape of question a tool needs, so no tool name appears in `core/loop.py` |
+| **J8** | **The sign-off memo is keyed by (tool, SUBJECT)**, amending S1 | `grant_scope="run"` meant a second spawn was not asked at all — and the test pinning it spawned agent `a` then agent `b`, so approving `a` authorised `b`'s whole gated set. Per-tool sign-off makes the answer agent-specific, so the memo is too. The anti-noise intent survives: the same agent twice is one prompt |
+
+### What the two parameters keep separate
+
+§23 unified the MECHANISM, not the arguments. "May this edit be applied?" (`review`) stays supplied separately from "may this call proceed?" (`authorization.provider`), because `--review` without `--attended` is a legitimate combination and one shared object would make it unexpressible.
 
 ### Question tool
 
@@ -1517,6 +1538,8 @@ Open question to settle at build time: whether the list is thread-scoped state i
 2. Both tools deny cleanly **with no way to ask** — no response channel and no `ApprovalProvider` — and say why. (Amended by §25: "in every pipeline pass" is no longer the same condition; an attended run can ask.)
 3. Both tools have declared permission/approval fields (D24).
 4. The todo panel re-renders from an event, not from polling.
+
+**Slice 1 status:** AC1 ✓ (one mechanism, three consumers — approval, review, sign-off — plus §24's two). AC1b ✓ (`SubagentSignoffScreen`, the subset intersected with the offered candidates, and S1's scope amended per J8). ACs 2–4 are slice 2, along with P1's `LoopEvent`-vs-tagged-union decision, which only the todo event needs.
 
 ---
 

@@ -892,3 +892,36 @@ pytest stops rather than failing. It is the "every dismissal path carries a valu
 invariant doing its job (§16 AC2's original lesson, now in its sixth place), but if the
 suite hangs in `test_project_init.py`, look for a modal path that dismisses with
 nothing before looking for an infinite loop.
+
+## §15 — the response channel (ROADMAP_v2 §23 slice 1, `test_interaction.py`)
+
+| Change | Breaks | Why |
+|---|---|---|
+| Make `decode` return the raw value | `TestReview`, `TestChoice` | The whole module exists so one function decides what a non-answer means |
+| Make `ask(None, request)` permissive | `TestEveryRouteDeclines` | §25's V6: the inability to ask is not permission to proceed |
+| Narrow `ask`'s `except Exception` | `TestEveryRouteDeclines` | A shell that raises must decline, not propagate into the loop |
+| Give a kind a permissive default | `test_every_default_declines` | The asymmetry IS the design |
+| Return a default for an unknown kind | `test_an_unknown_kind_raises_rather_than_defaulting` | An undefined question is a bug; inventing "no" hides the typo |
+| Accept a bare `"accept"` string for review | `TestReview`, `test_the_modal_answer_decoder_fails_safe` | The one kind whose permissive failure APPLIES an edit. The two decoders this replaced disagreed here |
+| Test sign-off emptiness with `if raw:` | `TestSubagentSignoff` | Folds "spawn with nothing granted" into "refuse the spawn" — the middle of three answers |
+| Drop the candidates intersection | `test_a_name_that_was_not_offered_is_not_granted` | A shell must not grant a tool nobody offered. Only possible because `decode` takes the request |
+| Drop the options check on a choice | `TestChoice` | Same, and it is the guard §24 shipped by hand and untested |
+| Pass the kind to `decode` instead of the request | everything above | Two kinds become unverifiable |
+
+### §23's migration, in the files it touched
+
+| Change | Breaks | Why |
+|---|---|---|
+| Bypass `interaction.ask` in `_obtain_approval` | `test_streaming_loop.py`, `test_attended.py` | One route is the point |
+| `headless = False` | `TestHeadlessIsAboutBeingUNABLEToAsk` | "No way to ask" is one condition again |
+| Ignore `honour_run_scope` | `TestRunScope` | §25 R11: attended mode must re-ask |
+| Drop the bundle's channel from `_authorization_kwargs` | `test_review.py`, `test_research_authorization.py` | §20's reviewer inherits the run's channel |
+| `a or kwargs.pop(...)` for the channel merge | `test_passing_both_does_not_raise` | Short-circuits, so the key survives on the path where an explicit channel was passed — "got multiple values for keyword argument" |
+| Remove `walk_consent`'s `consent is None` branch | `test_findings_are_recorded_but_nothing_is_applied` | NOTE: V6's OUTCOME now holds without it, because `ask(None, …)` declines. What the guard uniquely provides is the audit trail — a `reason_declined` and a trace line, rather than a rejection indistinguishable from a human's |
+| Drop `request_kind="subagent_signoff"` from the registration | `TestTheSignoffIsActuallyWired` | NOTE: the memo test PATCHES `request_kind`, so it cannot see this |
+| Empty `request_payload`'s candidate list | `TestTheSignoffIsActuallyWired` | Same — patched away by the memo test |
+| Drop `signoff` from dispatch's injection map | `test_dispatch_injects_the_subset_into_the_handler` | Every other sign-off test calls `subagent_tool.run()` directly |
+| Grant `candidate_approvals` wholesale again | `test_spawn_forwards_the_channel_and_the_grant` | The pre-§23 behaviour AC1b exists to end |
+| Treat a `None` sign-off as approval | `test_refusing_a_spawn_stops_it_happening` | Refusing the spawn and spawning with nothing granted are different outcomes |
+| Key the sign-off memo by tool name only | `test_s1_signoff_is_remembered_per_agent_not_per_tool_name` | J8: one prompt about agent `a` must not cover agent `b` |
+| `SubagentSignoffScreen`'s escape dismissing `set()` | `TestTheSignoffScreen` | Escape refuses; it does not run with nothing granted |

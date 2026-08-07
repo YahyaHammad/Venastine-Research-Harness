@@ -112,6 +112,7 @@ Venastine Research Harness/
 │   ├── memory.py                  # ConversationMemory -- in-run message list, provider-NEUTRAL shape, backed by storage.py + resume-shape fix. §21a: assembles the DERIVED view (checkpoint summary + pinned rows + tail) and owns pin_last's ordinal-to-id mapping
 │   ├── compaction.py              # ROADMAP_v2 §21a: when to compact (M1 working-set trigger, M6 pipeline backstop), what may be folded (M4/M5's three floors), and the compactor agent run + ratio retry. Owns the re-entrancy guard. §21c adds summarize_thread() -- a whole-thread DESCRIPTION that folds nothing
 │   ├── replay.py                  # ROADMAP_v2 §27: a stored thread as display entries -- the ARCHIVE (T3), tool calls as one redacted line, results skipped (T4). ONE policy, both shells
+│   ├── interaction.py             # ROADMAP_v2 §23: Request / ResponseChannel / decode -- the ONE way anything asks a human. Replaced permission_channel, ApprovalProvider and ReviewConsent
 │   ├── approval.py                # ROADMAP_v2 §25/§20: GrantBudget / ApprovalProvider / RunAuthorization / ReviewConsent -- how a run obtains a human's answer, as DATA. Leaf module, no project imports
 │   │
 │   └── reasoning/
@@ -930,6 +931,68 @@ its `.venastine/` may already hold agents, skills and an `mcp.json` that arrived
 cloned repo, and granting as a side effect of `/init` would wave all of it through.
 `CONTEXT.md` is never special-cased out of the hash.
 
+### 4.29 `core/interaction.py` — the response channel (ROADMAP_v2 §23 slice 1)
+
+Five ways to ask a human something became one. `permission_channel` (§13, a
+`queue.Queue` of booleans), `ApprovalProvider` (§25, a callable), `ReviewConsent`
+(§20, another callable) and §24's two TUI methods were the same exchange with
+five sets of plumbing, each re-deriving what a dismissal carries, what a timeout
+means, how shutdown releases a parked worker, and how a malformed answer decodes.
+
+**The dataclasses are the cheap part; `decode` is the point.** A
+`Request(kind, payload, notice)` / `ResponseChannel(ask, honour_run_scope)` pair
+is nearly free to write badly — five call sites can each build one and still each
+invent their own failure handling. What pays is that every route into an answer —
+no channel, a callback that raised, a timeout, a shutdown release's bare `False`,
+a return of the wrong shape — funnels through one function owning the declining
+default per kind. §25's "the inability to ask is not permission to proceed" stops
+being a habit five places remember.
+
+**`decode` takes the REQUEST, not the kind**, because two kinds cannot be
+validated without knowing what was asked. A `CHOICE` is valid only against the
+options offered; a `SUBAGENT_SIGNOFF` subset only against the candidates listed.
+That second one is a real control rather than tidiness: a shell returning a tool
+name nobody offered must not thereby grant it, and the intersection is what stops
+it. `decode(Request(kind), None) == SAFE_DEFAULTS[kind]` for every kind, pinned by
+a test, which is what lets `ask()` route its failure paths through `decode` rather
+than reading the table.
+
+**Every default declines, and review's is the strictest.** Review decoding
+requires a well-formed `(decision, notes)` pair — the two decoders it replaced
+disagreed about a bare `"accept"` string, neither behaviour was tested, and strict
+won because review is the only kind whose *permissive* failure applies an edit
+rather than declining one.
+
+**The loop asks the registry what shape of question a tool needs.**
+`ToolSpec.request_kind` and `ToolSpec.request_payload` sit beside `grant_scope`
+and `approval_notice` for the same reason it does: no tool name appears in
+`core/loop.py`. `spawn_subagent` sets `request_kind="subagent_signoff"` and
+supplies the agent and its candidates, computed through the same
+`manager.candidate_approvals()` that builds the notice — so the list shown, the
+list offered and the list granted cannot drift.
+
+**Per-tool sign-off (AC1b) is what proves the abstraction.** Approving a spawn
+used to authorise the child's entire approval-gated set; §18 shipped it that way
+as S1 precisely because a boolean channel cannot carry a list out and a subset
+back. `_obtain_approval` now returns `(approved, grant)`, and the sign-off's
+answer is three-way: `None` refuses the spawn, `set()` spawns with nothing
+granted, a non-empty set grants those. The middle value is the fragile one, which
+is why `decode` tests `isinstance` rather than truthiness.
+
+**`RunInfo.signoffs` is keyed by (tool, subject)** — J8's amendment to S1.
+`grant_scope="run"` meant a second spawn in the same turn was not asked at all,
+and the test pinning that spawned agent `a` then agent `b`, so one prompt about
+`a` silently covered `b`. Keying the memo by agent keeps the anti-noise intent
+(the same agent twice is one prompt) without the part that was wrong.
+
+**`tui/app.py` collapsed two paths into one.** The chat turn used to push its
+modal from `on_loop_event` while the loop held a queue; an attended research pass
+pushed from its worker. Both now go through `_ask_blocking`, and
+`_blocking_modal` holds the park-on-a-queue mechanics that four asks had copied.
+`_permission_channel` survives, but it is no longer the loop's channel — it is
+this app's parked-worker queue, and it is what `_release_permission_channel`
+reaches for when the app exits with a modal open.
+
 ## 5. Request lifecycle — regular conversation, traced end to end
 
 1. Caller calls `RunAgentLoop.run_agent_conversation(user_goal, model, provider_name, max_steps, max_total_tokens)`.
@@ -1097,3 +1160,6 @@ All math tools share `_math_common.py`'s `safe_parse()` — a SymPy expression p
 - **`config.ToolPermissions.write = False` reads as a default and is in fact a permanent denial**, and §24 was specified against the wrong reading of it. The roadmap's preference — "prefer running `/init` through the existing `write` tool rather than bypassing the permission layer" — describes something no user can do: `is_tool_allowed()` reads `config.ToolPermissions()` directly, `settings.json` has no `permissions` section and `_KNOWN_SETTINGS` *raises* on an unknown key, and D14 forbids a `ToolContext` widening anything, with the global check running first and unconditionally. `dispatch("write", …)` therefore raises `ToolCallDenied` **before** the `approval_callback` is even consulted. `read` is denied identically, which also rules out an agent that explores a project with the existing read tool. **The shape to notice: a `False` in a config dataclass invites you to assume something can turn it `True`.** Nothing here can, and grepping for a consumer of the field is what shows that — `security/permissions.py` instantiates the dataclass fresh on every call and nothing else writes to it. §24's answer was two narrowly-scoped tools (`read_project_doc`, `write_project_doc`) rather than flipping a global, because a global flipped for one command's convenience is standing authority for every agent and all ten research passes.
 - **A registered tool is advertised to every run, not to the caller that wanted it.** §24's initializer agent declares `allowed_tools: [read_project_doc]`, which narrows *that agent* — it does nothing to stop plain chat or a research pass from calling the same tool, since a run with no `ToolContext` gets global policy only. This is why `read_project_doc`'s readable set is documentation and manifests rather than "text files under the project", and why `.venastine/`, `.env*` and `providers.json` are denied by name: the question a new scoped tool has to answer is not "what does my caller need?" but "what does the least trusted run in the harness now have?". The pipeline is the answer to that, and it reads attacker-controlled web pages.
 - **Running `/init` twice rewrote `CONTEXT.md` the second time, for no reason.** Its documentation index marked which documents already existed, so the first run created them and the second run's index differed *because of the first run* — which also defeated the "nothing to do" path and, worse, labelled documents `/init` had authored moments earlier as pre-existing work it had carefully preserved. Found by running the command twice, which no test did until one asserted idempotence. The rule that came out of it: **content derived from "what is already on disk" makes an operation non-idempotent by construction**, and a fact about one run (which files it skipped) belongs in that run's report rather than in a file the run writes.
+- **Five ways to ask a human something, and the fifth two were added by the section immediately before the one that unified them.** §13 built `permission_channel`; §25 added `ApprovalProvider` because `run_to_completion()` discards the event carrying the question; §20 added `ReviewConsent`; §24 added two TUI methods. Each re-derived the same four rules, and one of §24's — the project-kind guard — shipped with a mutation that proved nothing, because the only test covering it dismissed with `None`, which returns `None` with or without the guard. **The shape: a mechanism that is *nearly* general gets copied rather than extended, and every copy is a fresh chance to get the failure path wrong.** §23's spec predicted it exactly ("doing the tools first and the generalisation afterwards produces two bespoke channels and a third when §18 wants one") and was under by two. The fix is not the dataclass; it is that one function now owns what a non-answer means.
+- **A test that PATCHES the wiring cannot see the wiring break.** §23's sign-off memo test mocks `registry.request_kind` and `request_payload` so it can be about the memo — which left four mutations green: removing `request_kind="subagent_signoff"` from the registration, emptying the candidate list, and dropping the injected subset from `dispatch()`'s map all passed. Every sign-off test called `subagent_tool.run()` directly, so the injection itself was never exercised either. **Anything a test patches, some other test has to assert for real**, and the same applies to a handler that tests reach past its dispatcher.
+- **A pilot test that asserts while a modal is open turns a failure into a hung suite.** Textual runs thread workers on non-daemon threads, so a worker parked on `queue.get()` blocks `run_test()`'s teardown — and an assertion that fires before the modal is dismissed leaves it parked. Two §23 mutations presented as a stalled pytest rather than a red test. **Capture what you need, dismiss, settle, then assert**: it costs nothing and turns the same regression into a readable failure.

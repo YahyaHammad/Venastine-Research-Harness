@@ -2959,3 +2959,106 @@ Whether the initializer's read budget (twelve steps, 20 KB per read) is
 enough for a large unfamiliar codebase, and whether the stub headings are
 the right ones — both are judgement calls that need a real provider against
 a project nobody on this side has seen. Both are constants.
+
+---
+
+## §23 slice 1 — the response channel, and the sign-off it made possible
+
+**Spec:** ROADMAP_v2 §23, ACs 1 and 1b, decisions J1–J8. The question tool
+and the todo list (ACs 2–4) are slice 2.
+
+### Why this, and why now
+
+§23's spec says to generalise first: *"doing the tools first and the
+generalisation afterwards produces two bespoke channels and a third when
+§18 wants one."* By the time it was built there were **five**, and §24 —
+the section immediately before — had added two of them. `/init`'s
+confirmation and its project-kind picker were written the day before this
+work started, and one of them shipped a fail-safe guard whose first
+mutation proved nothing.
+
+That is the argument for the ordering, and it held: the abstraction was
+designed against three genuinely different answer shapes (a bool, a
+four-value tuple with free text, a three-way subset) rather than against
+approval alone.
+
+### The design, in one line each
+
+- **`decode` is the product, not the dataclasses** (J2). A Request/Channel
+  pair is easy to write badly; five call sites can each build one and each
+  invent their own failure handling, which is how there came to be five.
+- **`decode(request, raw)`, not `decode(kind, raw)`** (J3). Found while
+  migrating §24: a choice is valid only against the options offered. The
+  same signature then let the sign-off intersect its answer with the
+  candidates that were listed — a control that did not exist before and
+  was not in the plan.
+- **Every default declines, and review's is strictest** (J6).
+- **The loop asks the registry what shape of question a tool needs** (J7),
+  so `spawn_subagent` appears nowhere in `core/loop.py`.
+
+### The one behaviour change, and it needed a decision
+
+S1 made a spawn approval run-scoped. The test pinning it spawned agent `a`
+and then agent `b`, and asserted ONE prompt — so approving `a` silently
+authorised `b`'s entire gated set. That is defensible for a bare yes and
+indefensible once the answer is a per-agent subset.
+
+Put to the user with three options; they chose the memo keyed by agent
+(J8). The anti-noise intent survives — the same agent twice is one prompt
+— and the part that was wrong is gone.
+
+### What the migration turned up
+
+**A collision that could not exist before.** `_authorization_kwargs`
+returns `response_channel` now, and `run_agent_conversation` already had a
+parameter of that name; they were differently named and differently typed
+before, and §20's reviewer passes both. The first fix used
+`a or kwargs.pop(...)`, which **short-circuits** — leaving the key in the
+splat on exactly the path where an explicit channel was passed. Popped
+unconditionally now, with a test named after the traceback.
+
+**A test that stopped making sense.** `test_the_channel_wins_when_both_are_present`
+asserted that a live queue beat an ApprovalProvider. That is only a
+question while there are two mechanisms. Replaced by
+`test_there_is_exactly_one_route`. A test that loses its meaning is the
+signal a merge actually merged something.
+
+**V6 now holds without its guard.** Removing `walk_consent`'s
+`consent is None` branch left every assertion passing, because
+`interaction.ask(None, ...)` declines on its own. What the guard still
+uniquely provides is the audit trail — a `reason_declined` saying nobody
+could be asked, rather than a rejection indistinguishable from a human's.
+The test asserts that now.
+
+### Test-quality lessons, and there were two new ones
+
+1. **A test that patches the wiring cannot see the wiring break.** The
+   sign-off memo test mocks `request_kind` and `request_payload` so it can
+   be about the memo. Four mutations stayed green as a result: the
+   registration itself, the candidate list, and dispatch's injection of
+   the subset. Every sign-off test also called `subagent_tool.run()`
+   directly, so the injection was never exercised. **Anything a test
+   patches, some other test has to assert for real.**
+2. **A pilot that asserts with a modal open turns a failure into a hang.**
+   The worker is parked on a queue and blocks `run_test()`'s teardown, so
+   two mutations stalled pytest instead of failing it. Capture, dismiss,
+   settle, then assert.
+
+Together with §24's three and §21c's three, the running tally says the
+same thing every time: **assert the premise before the conclusion, and
+confirm the mutation applied.**
+
+### Verified outside the suite
+
+Against the real registry and a real agent: `spawn_subagent` declares the
+sign-off kind, its payload carries the agent and its live candidate list,
+all three answers decode correctly, a name that was never offered is
+dropped with a warning, a shell answering `True` refuses rather than
+granting everything, and the CLI renders the numbered per-tool prompt.
+
+### Left for slice 2
+
+The question tool and the todo list, P1's `LoopEvent`-vs-tagged-union
+decision (only the todo event needs it), and whether the todo list lives
+in `ConversationThread.extra_data` — now shared with goal mode and §21c's
+refs — or its own table.
