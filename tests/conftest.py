@@ -178,7 +178,21 @@ async def settle(pilot, predicate, timeout: float = 10.0) -> bool:
        blocked on the loop until the mount completes -- it has NOT yet
        reached `channel.get()`. A test that then joins that thread from
        the event-loop thread deadlocks: worker waits for loop, loop waits
-       for worker. The old helper hid this by ACCIDENT, because
+       for worker.
+
+       BE PRECISE ABOUT WHAT THE QUIESCE BUYS. With the bare `pause()`
+       used for polling below, removing it leaves the whole TUI suite
+       green -- 43/43, verified under 4x CPU load. It is not currently
+       load-bearing; it is what stops this helper becoming a trap again
+       the moment someone makes polling faster. Measured, three runs each,
+       under load: deadline + `pause(0.01)` fails
+       `test_quitting_during_an_attended_research_prompt_releases_the_worker`
+       3/3; the same thing plus this one line passes 3/3. So the choice of
+       a bare `pause()` for polling and the presence of this line are two
+       independent defences against the same deadlock, and the tests in
+       test_pilot_wait.py pin the line because no TUI test can.
+
+       The old helper hid the deadlock by ACCIDENT, because
        `wait_for_idle`'s 20ms-1s sleep happens to let the mount finish;
        any more responsive polling exposed it. That is the whole reason
        TECHNICAL_DEBT 8's first fix attempt turned a rare flake into a
@@ -195,8 +209,11 @@ async def settle(pilot, predicate, timeout: float = 10.0) -> bool:
     deadline = time.monotonic() + timeout
     while True:
         if predicate():
-            # Defect 2. Do not remove: `test_quitting_during_an_attended_
-            # research_prompt_releases_the_worker` fails without it.
+            # Defect 2. Pinned by test_pilot_wait.py, NOT by any TUI test:
+            # deleting this line leaves tests/test_tui.py green 43/43 even
+            # under load, because the bare `pause()` below already masks
+            # the need. That masking is precisely what must not be relied
+            # on -- see the docstring.
             await pilot.pause()
             return True
         if time.monotonic() >= deadline:

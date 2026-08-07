@@ -72,6 +72,15 @@ class TestTheQuiesce:
         Asserted on the pause COUNT rather than on any state, because a
         quiesce that had an observable effect on the predicate would not
         be a quiesce.
+
+        THIS TEST IS THE ONLY PIN. Deleting the quiesce leaves
+        tests/test_tui.py green 43/43 under 4x CPU load, because the bare
+        `pause()` used for polling already masks the need. The pairing that
+        actually fails is fast polling WITHOUT the quiesce -- measured 3/3
+        on `test_quitting_during_an_attended_research_prompt_releases_the_
+        worker`. So the deadlock is real and the line prevents it, but no
+        TUI test can currently demonstrate that, which is exactly why the
+        helper needed tests of its own.
         """
         async with _Tiny().run_test() as pilot:
             counting = _Counting(pilot)
@@ -116,7 +125,12 @@ class TestItWaitsOnTime:
             assert await settle(pilot, lambda: False, timeout=0.5) is False
             elapsed = time.monotonic() - started
         assert elapsed >= 0.5, f"gave up early after {elapsed:.3f}s"
-        assert elapsed < 3.0, f"overshot badly at {elapsed:.3f}s"
+        # < 2.0 rather than < 3.0 so this discriminates too: the old
+        # 120-pump helper takes ~2.5s here on an idle machine regardless of
+        # the timeout asked for, because a count cannot honour one. The
+        # ceiling allows one full `pause()` of overshoot (capped at 1000ms
+        # under load) on top of the 0.5s deadline.
+        assert elapsed < 2.0, f"overshot the deadline at {elapsed:.3f}s"
 
     @pytest.mark.asyncio
     async def test_it_outlasts_the_old_pump_budget(self):
@@ -182,6 +196,28 @@ class TestPump:
             elapsed = time.monotonic() - started
         assert elapsed < 2.0, \
             f"pump({3}) took {elapsed:.3f}s -- has it grown a deadline?"
+
+
+# ---------------------------------------------------------------------------
+# ---- The stall-vs-fail fixture --------------------------------------------
+# ---------------------------------------------------------------------------
+
+def test_the_approval_timeout_is_shrunk_for_tests():
+    """`shrink_approval_timeout` has no other pin, by its nature.
+
+    Deleting it breaks no assertion anywhere: it does not change an
+    outcome, only how long a broken modal path takes to get there --
+    600s in production, which under pytest is a stall rather than a
+    failure. Nothing green turns red when it goes, so the fixture being
+    in effect is asserted directly.
+
+    `tui/app.py` reads this at call time, so patching the module
+    attribute is enough to reach `_blocking_modal`'s `channel.get`.
+    """
+    import config
+    assert config.ATTENDED_APPROVAL_TIMEOUT_S <= 10, (
+        "an unanswered modal will stall the suite instead of failing it -- "
+        "is the shrink_approval_timeout fixture still autouse?")
 
 
 # ---------------------------------------------------------------------------
