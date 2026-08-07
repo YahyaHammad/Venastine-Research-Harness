@@ -717,7 +717,8 @@ def stream_deep_research_pipeline(
     granted live in core/reasoning/authorization.py, and the enforcement
     lives in core/loop.py.
 
-    review (§20): a core.approval.ReviewConsent, or None. Carried the same
+    review (§20): a core.interaction.ResponseChannel, or None (§23 moved
+    it there from core.approval.ReviewConsent). Carried the same
     way and for the same reason -- only a shell knows how to reach a
     human. A SECOND parameter rather than a field on the authorization
     bundle: that bundle answers "may this gated call proceed?" and this

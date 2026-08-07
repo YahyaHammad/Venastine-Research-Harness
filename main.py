@@ -923,8 +923,55 @@ def resolve_review(args, settings: dict) -> bool:
     return bool(config.SUBAGENT_REVIEW)
 
 
+def _prompt_review_decision(reader, finding, round_index):
+    """Put one proposed correction to the terminal. (decision, notes).
+
+    Extracted from build_review_consent so the review-only channel and the
+    general one can share it -- §23's whole point is that there is one way
+    to ask, and two copies of the prompt would be the same divergence one
+    layer up.
+    """
+    kind = finding.get("kind")
+    target = finding.get("claim_id") or "the report"
+    print(f"\n[review] {kind} correction to {target} "
+          f"(severity: {finding.get('severity', 'unknown')})")
+    print(f"  why: {finding.get('reason', '(no reason given)')}")
+    print(f"  proposed: {finding.get('proposed')}")
+    if round_index:
+        print(f"  (refinement {round_index} of "
+              f"{config.MAX_REVIEW_REFINEMENTS})")
+    answer = reader.ask(
+        "  [a]ccept / [r]eject / [f] refine <note> / [!] reject the "
+        f"rest ({config.ATTENDED_APPROVAL_TIMEOUT_S}s): ",
+        config.ATTENDED_APPROVAL_TIMEOUT_S)
+    if answer is None:
+        # Same direction as an unanswered approval prompt: declining is
+        # safe and continuing is useful, so walking away from a review
+        # degrades it rather than wedging the run.
+        print("  [no answer — rejected; the review continues]")
+        return ("reject", "")
+    answer = answer.strip()
+    head, _, note = answer.partition(" ")
+    head = head.lower()
+    if head in ("a", "accept"):
+        return ("accept", "")
+    if head in ("f", "refine"):
+        return ("refine", note.strip())
+    if head in ("!", "reject-all"):
+        return ("reject_all", "")
+    return ("reject", "")
+
+
 def build_review_consent():
-    """A ReviewConsent that asks at the terminal (§20 V4).
+    """A ResponseChannel that asks about corrections at the terminal (§20
+    V4, §23 AC1).
+
+    A SEPARATE channel from the approval one, and deliberately so. §20
+    kept "may this edit be applied?" apart from "may this call proceed?"
+    because they are different questions a user can answer differently:
+    `--review` without `--attended` is a legitimate combination, and one
+    shared object would make it unexpressible. §23 unified the MECHANISM,
+    not the two parameters.
 
     Returns None when stdin is not a terminal, and that is load-bearing
     rather than defensive: V6 says nothing is applied without a consent
@@ -933,45 +980,24 @@ def build_review_consent():
     Reading a decision off a pipe would also be answering on the user's
     behalf with whatever bytes happened to be there.
     """
-    from core.approval import ReviewConsent
+    from core import interaction
 
     if not sys.stdin.isatty():
         return None
 
     reader = _stdin_reader()
 
-    def decide(finding, round_index):
-        kind = finding.get("kind")
-        target = finding.get("claim_id") or "the report"
-        print(f"\n[review] {kind} correction to {target} "
-              f"(severity: {finding.get('severity', 'unknown')})")
-        print(f"  why: {finding.get('reason', '(no reason given)')}")
-        print(f"  proposed: {finding.get('proposed')}")
-        if round_index:
-            print(f"  (refinement {round_index} of "
-                  f"{config.MAX_REVIEW_REFINEMENTS})")
-        answer = reader.ask(
-            "  [a]ccept / [r]eject / [f] refine <note> / [!] reject the "
-            f"rest ({config.ATTENDED_APPROVAL_TIMEOUT_S}s): ",
-            config.ATTENDED_APPROVAL_TIMEOUT_S)
-        if answer is None:
-            # Same direction as an unanswered approval prompt: declining
-            # is safe and continuing is useful, so walking away from a
-            # review degrades it rather than wedging the run.
-            print("  [no answer — rejected; the review continues]")
-            return ("reject", "")
-        answer = answer.strip()
-        head, _, note = answer.partition(" ")
-        head = head.lower()
-        if head in ("a", "accept"):
-            return ("accept", "")
-        if head in ("f", "refine"):
-            return ("refine", note.strip())
-        if head in ("!", "reject-all"):
-            return ("reject_all", "")
-        return ("reject", "")
+    def ask(request):
+        if request.kind != interaction.REVIEW:
+            # This channel answers one kind. Anything else falls through
+            # to interaction.decode's declining default rather than being
+            # answered by a prompt written for a different question.
+            return None
+        return _prompt_review_decision(
+            reader, request.payload.get("finding") or {},
+            request.payload.get("round", 0))
 
-    return ReviewConsent(decide=decide)
+    return interaction.ResponseChannel(ask=ask)
 
 
 def _ask(prompt: str) -> str:

@@ -35,23 +35,10 @@ depends on them.
 """
 
 from dataclasses import dataclass, field
-from typing import Callable, TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, never imported at runtime
     from core.interaction import ResponseChannel
-
-
-@dataclass
-class ReviewConsent:
-    """A caller-supplied way to ask about one proposed correction (§20).
-
-    MID-MIGRATION. ApprovalProvider is already gone; this follows it into
-    core.interaction in the next commit, along with review.py's own
-    decoder. It stays for one commit only so the approval migration can
-    land green on its own and a bisect can tell the two apart.
-    """
-
-    decide: Callable[[dict, int], tuple]
 
 
 class GrantBudget:

@@ -43,6 +43,12 @@ from __future__ import annotations
 import logging
 
 import config
+from core import interaction
+# §23: the decision vocabulary lives in core.interaction, beside the decoder
+# that validates it. Imported under the names this module and its tests
+# already use -- two spellings of the same four strings is how a decoder and
+# its caller come to disagree about what "refine" is.
+from core.interaction import ACCEPT, REJECT, REFINE, REJECT_ALL
 from core.reasoning.json_retry import parse_json_response, retry_until_json
 from storage import THREAD_KIND_SUBAGENT
 
@@ -52,11 +58,6 @@ REVIEWER_AGENT = "pipeline-reviewer"
 
 VALID_KINDS = {"text", "tier", "synthesis"}
 VALID_TIERS = {"HIGH", "MEDIUM", "LOW", "UNVERIFIED"}
-
-ACCEPT = "accept"
-REJECT = "reject"
-REFINE = "refine"
-REJECT_ALL = "reject_all"
 
 
 # ===========================================================================
@@ -265,6 +266,9 @@ def walk_consent(findings, consent, run, *, model=None, provider_name=None,
                  thread_id=None, authorization=None) -> list:
     """Returns one decision record per finding, in the order asked.
 
+    `consent` is a core.interaction.ResponseChannel (§23) -- it was a
+    ReviewConsent with its own `decide` callable until the two collapsed.
+
     V6 -- consent is None means nobody can be asked, and every finding is
     recorded as rejected without a prompt. This is the property that keeps
     a MUTATING stage from widening the security stance: a piped CLI, a
@@ -344,27 +348,24 @@ def _decide_one(finding, consent, run, *, model, provider_name, thread_id,
 
 
 def _ask(consent, finding, round_index):
-    """Normalises whatever the shell's callback returned.
+    """Put one finding to the human and return (decision, notes).
 
-    Anything unrecognised is a REJECT. A shell that returns None, raises,
-    or is torn down mid-prompt must not have its silence read as approval
-    -- which is the same reason tui/app.py's permission channel treats a
-    dismissal carrying None as a denial.
+    §23: the normalising this used to do itself now lives in
+    core.interaction.decode, which every kind of question funnels through.
+    That matters here more than anywhere else -- this is the only request
+    whose permissive failure APPLIES an edit rather than declining one, and
+    it previously had a SECOND decoder in tui/app.py that disagreed with
+    this one about whether a bare "accept" string counted. It did here and
+    did not there; neither behaviour was tested, and the strict rule won.
+
+    A shell that returns None, raises, or is torn down mid-prompt still
+    reads as a rejection. That is now a property of the module rather than
+    a try/except each caller remembers.
     """
-    try:
-        answer = consent.decide(finding, round_index)
-    except Exception:
-        logger.exception("Review consent callback failed; treating as reject.")
-        return REJECT, ""
-    if isinstance(answer, str):
-        answer = (answer, "")
-    if not isinstance(answer, (tuple, list)) or not answer:
-        return REJECT, ""
-    decision = answer[0]
-    notes = answer[1] if len(answer) > 1 else ""
-    if decision not in (ACCEPT, REJECT, REFINE, REJECT_ALL):
-        return REJECT, ""
-    return decision, notes or ""
+    return interaction.ask(consent, interaction.Request(
+        kind=interaction.REVIEW,
+        payload={"finding": finding, "round": round_index},
+    ))
 
 
 def _refine(finding, notes, run, *, model, provider_name, thread_id,

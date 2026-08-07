@@ -25,9 +25,10 @@ carry an authorization bundle at all.
 
 import pytest
 
+from core import interaction
 from core.interaction import ResponseChannel
 from core.approval import (
-    GrantBudget, ReviewConsent, RunAuthorization,
+    GrantBudget, RunAuthorization,
 )
 from core.events import LoopEvent
 from core.loop import RunAgentLoop
@@ -44,7 +45,7 @@ def _capturing_run(captured):
 
 
 # ===========================================================================
-# ---- ReviewConsent is its own thing, not a field on RunAuthorization ------
+# ---- The review channel is its own thing, not a field on RunAuthorization -
 # ===========================================================================
 
 class TestConsentIsSeparateFromAuthorization:
@@ -56,21 +57,33 @@ class TestConsentIsSeparateFromAuthorization:
         assert not hasattr(RunAuthorization(), "consent")
         assert not hasattr(RunAuthorization(), "review")
 
-    def test_consent_carries_a_decide_callable(self):
-        consent = ReviewConsent(decide=lambda f, r: ("accept", ""))
-        assert consent.decide({}, 0) == ("accept", "")
+    def test_consent_is_a_response_channel(self):
+        """§23: ReviewConsent's own `decide` callable is gone. It and
+        ApprovalProvider were the same exchange, and the review stage now
+        asks through the shared channel like everything else."""
+        consent = ResponseChannel(ask=lambda _r: ("accept", ""))
+        assert interaction.ask(consent, interaction.Request(
+            kind=interaction.REVIEW,
+            payload={"finding": {}, "round": 0})) == ("accept", "")
+
+    def test_the_two_parameters_stay_two(self):
+        """§23 unified the MECHANISM, not the parameters. `--review`
+        without `--attended` is a legitimate combination, so "may this
+        edit be applied?" and "may this call proceed?" remain separately
+        supplied even though both now travel the same kind of object."""
+        assert not hasattr(RunAuthorization(), "review")
 
     def test_consent_needs_no_project_imports(self):
-        """core/approval.py is deliberately a leaf so both shells can build
-        a consent object without importing core.reasoning -- which would
+        """core/interaction.py is deliberately a leaf so both shells can
+        build a channel without importing core.reasoning -- which would
         pull the orchestrator, the loop and every tool module into a shell
         that only wanted a dataclass."""
-        import core.approval as approval
+        import core.interaction as interaction_mod
 
-        assert approval.__doc__ is not None
+        assert interaction_mod.__doc__ is not None
         offenders = [
-            name for name in dir(approval)
-            if getattr(getattr(approval, name, None), "__module__", "")
+            name for name in dir(interaction_mod)
+            if getattr(getattr(interaction_mod, name, None), "__module__", "")
             .startswith(("core.reasoning", "tools.", "tui."))
         ]
         assert offenders == []
@@ -257,21 +270,22 @@ def _stub_resynthesis(mocker, text="REPORT v2"):
 
 
 def _consent(*answers):
-    """A ReviewConsent returning one canned answer per finding.
+    """A ResponseChannel returning one canned answer per finding (§23).
 
     Returns REJECT when starved rather than raising or blocking -- an
     under-supplied test must FAIL on its assertion, not die on a
-    StopIteration that names nothing. Same reasoning as the _AnswerQueue
+    StopIteration that names nothing. Same reasoning as the _AnswerChannel
     §25 needed after a starved permission channel hung the whole suite.
     """
     queued = list(answers)
     asked = []
 
-    def decide(finding, round_index):
-        asked.append((finding, round_index))
+    def ask(request):
+        asked.append((request.payload.get("finding"),
+                      request.payload.get("round")))
         return queued.pop(0) if queued else ("reject", "")
 
-    consent = ReviewConsent(decide=decide)
+    consent = ResponseChannel(ask=ask)
     consent.asked = asked        # for assertions
     return consent
 
@@ -381,6 +395,18 @@ class TestNobodyToAskAppliesNothing:
         assert resynth == [], "nothing accepted must mean no re-synthesis"
         assert len(run.subagent_reviews) == 1
         assert run.subagent_reviews[0]["decision"] == "reject"
+        assert run.subagent_reviews[0]["reason_declined"] == (
+            "no consent route"), (
+            "§23 made the OUTCOME of V6 hold without the guard -- "
+            "interaction.ask(None, ...) declines on its own, so removing "
+            "walk_consent's `consent is None` branch still rejects every "
+            "finding and every assertion above still passes. What the "
+            "guard uniquely provides is the AUDIT TRAIL: a reason saying "
+            "nobody could be asked, rather than a bare rejection "
+            "indistinguishable from a human declining"
+        )
+        assert any("no consent route" in line for line in run.trace), (
+            "the run's trace must say why nothing was applied")
         assert run.subagent_reviews[0]["proposed"] == "corrected text", (
             "the finding must survive into the record -- an advisory review "
             "whose findings vanish is not advisory, it is discarded"
@@ -606,7 +632,7 @@ class TestConsentEdges:
         def boom(finding, round_index):
             raise RuntimeError("the UI went away")
 
-        _stage(run, mocker, consent=ReviewConsent(decide=boom))
+        _stage(run, mocker, consent=ResponseChannel(ask=boom))
 
         assert run.claims[0].final_text == "original text"
         assert run.subagent_reviews[0]["decision"] == "reject"
@@ -1224,15 +1250,19 @@ class TestTheCliShell:
         mocker.patch.object(main._StdinReader, "ask",
                             side_effect=lambda *a, **k: next(answers))
 
-        assert consent.decide(TEXT_FINDING, 0) == ("accept", "")
-        assert consent.decide(TEXT_FINDING, 0) == ("accept", "")
-        assert consent.decide(TEXT_FINDING, 0) == ("reject", "")
-        assert consent.decide(TEXT_FINDING, 0) == (
-            "refine", "the source is dated 2019")
-        assert consent.decide(TEXT_FINDING, 0) == ("reject_all", "")
+        def _decide():
+            return interaction.ask(consent, interaction.Request(
+                kind=interaction.REVIEW,
+                payload={"finding": TEXT_FINDING, "round": 0}))
+
+        assert _decide() == ("accept", "")
+        assert _decide() == ("accept", "")
+        assert _decide() == ("reject", "")
+        assert _decide() == ("refine", "the source is dated 2019")
+        assert _decide() == ("reject_all", "")
         # Anything unrecognised, including a bare newline, declines.
-        assert consent.decide(TEXT_FINDING, 0) == ("reject", "")
-        assert consent.decide(TEXT_FINDING, 0) == ("reject", "")
+        assert _decide() == ("reject", "")
+        assert _decide() == ("reject", "")
 
     def test_an_unanswered_prompt_rejects_rather_than_hanging(self, mocker):
         import main
@@ -1241,7 +1271,9 @@ class TestTheCliShell:
         consent = main.build_review_consent()
         mocker.patch.object(main._StdinReader, "ask", return_value=None)
 
-        assert consent.decide(TEXT_FINDING, 0) == ("reject", "")
+        assert interaction.ask(consent, interaction.Request(
+            kind=interaction.REVIEW,
+            payload={"finding": TEXT_FINDING, "round": 0})) == ("reject", "")
 
     def test_run_research_forwards_both_review_arguments(self, mocker):
         import main
@@ -1251,7 +1283,7 @@ class TestTheCliShell:
             side_effect=lambda **kw: _stub_events(_reviewed_run()))
         mocker.patch("core.reasoning.output_writer.write_run_artifacts",
                      return_value="/out")
-        sentinel = ReviewConsent(decide=lambda f, r: ("reject", ""))
+        sentinel = ResponseChannel(ask=lambda _r: ("reject", ""))
 
         main.run_research("q", "ANTHROPIC", "m", review=sentinel,
                           subagent_review=True)
@@ -1286,17 +1318,28 @@ class TestTheTuiShell:
     def test_the_modal_answer_decoder_fails_safe(self):
         """Every dismissal path must carry a value, and the release path
         puts a bare False. Anything that is not a well-formed pair is a
-        REJECT -- this is the first place where the unsafe failure is
-        silently applying an edit rather than merely hanging."""
-        from tui.app import _decode_review_answer
+        REJECT -- the one place where the unsafe failure is silently
+        applying an edit rather than merely hanging.
 
-        assert _decode_review_answer(("accept", "")) == ("accept", "")
-        assert _decode_review_answer(("refine", "note")) == ("refine", "note")
-        assert _decode_review_answer(False) == ("reject", "")
-        assert _decode_review_answer(None) == ("reject", "")
-        assert _decode_review_answer(("accept",)) == ("reject", "")
-        assert _decode_review_answer(("yes", "")) == ("reject", "")
-        assert _decode_review_answer(("accept", None)) == ("accept", "")
+        §23: the decoder moved. tui/app.py had `_decode_review_answer` and
+        core/reasoning/review.py had its own normaliser, and the two
+        DISAGREED -- review.py accepted a bare "accept" string, this one
+        did not. Neither behaviour was tested, and the strict rule won.
+        The assertions are otherwise the same ones, against the single
+        decoder every route now funnels through.
+        """
+        decode = interaction.decode
+        REVIEW = interaction.REVIEW
+
+        assert decode(REVIEW, ("accept", "")) == ("accept", "")
+        assert decode(REVIEW, ("refine", "note")) == ("refine", "note")
+        assert decode(REVIEW, False) == ("reject", "")
+        assert decode(REVIEW, None) == ("reject", "")
+        assert decode(REVIEW, ("accept",)) == ("reject", "")
+        assert decode(REVIEW, ("yes", "")) == ("reject", "")
+        assert decode(REVIEW, ("accept", None)) == ("accept", "")
+        # The disagreement itself, pinned: a bare string declines.
+        assert decode(REVIEW, "accept") == ("reject", "")
 
     def test_every_review_screen_dismissal_carries_a_decision(self):
         """The worker parks on a Queue inside the consent callback. A
@@ -1423,6 +1466,13 @@ class _FakeTuiApp:
     def post_message(self, message):
         self.messages.append(message)
 
+    def response_channel(self, honour_run_scope=True):
+        """§23. The real app builds its channel here; the double returns
+        one that never gets asked -- these tests assert on WHAT the
+        pipeline was handed, not on what the modal does with it."""
+        return ResponseChannel(ask=lambda _r: None,
+                               honour_run_scope=honour_run_scope)
+
 
 class _NullTranscript:
     # Every write path the real Transcript exposes. A stub that lags
@@ -1458,7 +1508,6 @@ class TestTuiReviewLifecycle:
         """f17: the TUI's review-ON handoff was untested -- a dropped
         guard would prompt users who never asked, or silently skip."""
         from tui import app as tui_app
-        from core.approval import ReviewConsent
 
         run = _reviewed_run()
         captured = {}
@@ -1478,7 +1527,7 @@ class TestTuiReviewLifecycle:
         app.run_the_worker()
 
         assert captured["subagent_review"] is True
-        assert isinstance(captured["review"], ReviewConsent)
+        assert isinstance(captured["review"], ResponseChannel)
 
     def test_asks_after_exit_reject_instantly(self):
         """r1-1: a walk that re-arms after exit()'s one-shot release must
@@ -1488,7 +1537,13 @@ class TestTuiReviewLifecycle:
         app = VenastineApp.__new__(VenastineApp)
         app._shutting_down = True
 
-        assert app.ask_review_blocking({}, 0) == ("reject", "")
+        # §23: ask_review_blocking returns None after shutdown rather
+        # than a hand-built rejection, so that path uses the same decoder
+        # as every other. The DECODED answer is what the review stage
+        # sees, and it is still a rejection.
+        assert app.ask_review_blocking({}, 0) is None
+        assert interaction.decode(
+            interaction.REVIEW, app.ask_review_blocking({}, 0)) == ("reject", "")
         assert app.ask_permission_blocking("shell", {}, None) is False
 
     def test_the_no_answer_line_only_prints_when_there_was_no_answer(self):

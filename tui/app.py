@@ -715,6 +715,10 @@ class VenastineApp(App):
                 request.payload.get("tool_name"),
                 request.payload.get("params") or {},
                 request.notice)
+        if request.kind == interaction.REVIEW:
+            return self.ask_review_blocking(
+                request.payload.get("finding") or {},
+                request.payload.get("round", 0))
         # Other kinds arrive in the commits that migrate them. Falling
         # through lets interaction.decode supply the declining default.
         return None
@@ -830,16 +834,22 @@ class VenastineApp(App):
         The SAME `_permission_channel` field, so `_release_permission_channel`
         already covers it -- quitting with a review modal open must not
         leave a non-daemon worker parked on a Queue nobody will ever
-        answer. That release puts a bare False, which is why the decode
-        below treats anything that is not a (decision, notes) pair as a
-        rejection: a new dismissal path added later fails safe instead of
-        silently applying an edit.
+        answer. That release puts a bare False.
+
+        §23: this method no longer decodes. Every value it can return --
+        the modal's tuple, the shutdown release's bare False, the
+        timeout's None -- goes back to interaction.decode, which turns
+        anything that is not a well-formed (decision, notes) pair into a
+        rejection. There used to be a local `_decode_review_answer` here
+        AND a second normaliser in review.py, and they disagreed about
+        whether a bare "accept" string counted.
         """
         if self._shutting_down:
             # Same hang as ask_permission_blocking: exit()'s release is
             # one-shot, and this ask would re-arm a queue nobody answers
-            # (review r1-1).
-            return ("reject", "")
+            # (review r1-1). None rather than a hand-built rejection, so
+            # this path uses the same decoder as every other.
+            return None
         channel: queue.Queue = queue.Queue()
         self._permission_channel = channel
         screen = ReviewScreen(finding, round_index,
@@ -847,16 +857,15 @@ class VenastineApp(App):
         self.call_from_thread(
             self.push_screen, screen, lambda answer: channel.put(answer))
         try:
-            return _decode_review_answer(
-                channel.get(timeout=config.ATTENDED_APPROVAL_TIMEOUT_S))
+            return channel.get(timeout=config.ATTENDED_APPROVAL_TIMEOUT_S)
         except queue.Empty:
             self.call_from_thread(self._timed_out_review, screen)
-            # Through the decoder, same as the modal and release paths:
-            # the docstring promises one rule for all three, and a
-            # rejection shape that gains content must not skip this one
-            # (review §19-20 f25). _decode_review_answer(None) is
-            # ("reject", "") today.
-            return _decode_review_answer(None)
+            # None, not a hand-built rejection: interaction.decode turns
+            # it into one, the same way it does for the modal and the
+            # shutdown-release paths. §23 removed the local decoder this
+            # used to call, so there is now genuinely one rule rather
+            # than a promise that three paths share one (review f25).
+            return None
         finally:
             self._permission_channel = None
 
@@ -1248,24 +1257,6 @@ def _cmd_effort(app: VenastineApp, args: str) -> None:
     app.start_effort_lookup(args)
 
 
-def _decode_review_answer(answer):
-    """Anything that is not a well-formed (decision, notes) pair is a
-    REJECT.
-
-    Module-level and shared so the timeout path, the modal path and
-    `_release_permission_channel`'s bare False all funnel through one
-    rule. This is the fifth place the "every dismissal must carry a
-    value" invariant applies, and the first where the unsafe failure is
-    silently applying an edit rather than merely hanging.
-    """
-    if not isinstance(answer, (tuple, list)) or len(answer) != 2:
-        return ("reject", "")
-    decision, notes = answer
-    if decision not in ("accept", "reject", "refine", "reject_all"):
-        return ("reject", "")
-    return (decision, notes or "")
-
-
 def _cmd_research(app: VenastineApp, args: str) -> None:
     """Run the deep-research pipeline on a query, off the UI thread.
 
@@ -1403,10 +1394,15 @@ def _split_research_flags(args: str):
 
 
 def _review_consent_for(app: VenastineApp):
-    """A ReviewConsent backed by the modal, or None when the review is
-    off. §20 V4/V6."""
-    from core.approval import ReviewConsent
+    """A ResponseChannel backed by the review modal, or None when the
+    review is off. §20 V4/V6, §23 AC1.
 
+    A separate channel object from the approval one even though both route
+    into `_ask_blocking`: §20 keeps "may this edit be applied?" apart from
+    "may this call proceed?" because /research --review without --attended
+    is a legitimate combination, and one shared object would make it
+    unexpressible. §23 unified the mechanism, not the two parameters.
+    """
     if not getattr(app, "_research_review", False):
         return None
     app._transcript.write_system(
@@ -1414,9 +1410,7 @@ def _review_consent_for(app: VenastineApp):
         "and report. Each proposed correction is yours to accept, reject or "
         f"refine; {config.ATTENDED_APPROVAL_TIMEOUT_S}s with no answer "
         "rejects that one and the review continues.")
-    return ReviewConsent(
-        decide=lambda finding, round_index:
-            app.ask_review_blocking(finding, round_index))
+    return app.response_channel()
 
 
 def _forwarding(app: VenastineApp, events):
