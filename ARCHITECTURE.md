@@ -46,7 +46,7 @@ Venastine Research Harness/
 ├── pytest.ini                      # testpaths=tests, --strict-markers
 ├── DEVLOG.md                       # implementation notes for built ROADMAP sections -- see §0
 │
-├── tests/                          # 1060 tests, all offline, ~25s (first run ~7s for matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
+├── tests/                          # 1246 tests, all offline, ~25s (first run ~7s for matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
 │   ├── conftest.py                 # fixtures: make_model_response, make_stream_from_response, make_stream_sequence, FakeStorage, ...
 │   ├── BREAKING_CHANGES.md         # what-breaks-it / symptom / fix per area
 │   ├── test_cli.py                 # 20 tests -- ROADMAP §1 thread_id passthrough + UUID validation + §14 parser defaults/resolution/trust flow
@@ -99,6 +99,7 @@ Venastine Research Harness/
 │   ├── test_memory_injection.py   # 12 tests -- ROADMAP_v2 §21b the three placements and the with_catalogs boundary (M13/K6), plus AC5/AC6 end to end
 │   ├── test_memory_shells.py      # 16 tests -- ROADMAP_v2 §21b M16's CLI approval provider and M15's /memories, /forget
 │   ├── test_pipeline_events.py    # 20 tests -- ROADMAP_v2 §22 AC1-AC4: the drainer, the one trace writer (incl. review.py's and json_retry.py's lines), P1's recorded decision, the abandoned-run record, and the live TUI view
+│   ├── test_thread_refs.py       # 35 tests -- ROADMAP_v2 §21c: what summarize_thread reads and when it spends a call, the ref tier and the pass-prompt boundary it must not cross, the cap that refuses, and both shells' commands
 │   ├── test_thread_legibility.py  # 29 tests -- ROADMAP_v2 §27: what each creation path labels its thread, what the picker is offered, the legacy classification (raw sqlite3), what a replay shows, and the per-thread state a resume must reset
 │   └── test_research_legibility.py # 39 tests -- ROADMAP_v2 §26: a pass's tool calls escaping (P2 amended), the redacted param digest, one stage event per code stage (D2 per ROUND), the role palette, /copy, and ctrl+l vs the Input's ctrl+k
 │
@@ -109,8 +110,9 @@ Venastine Research Harness/
 │   ├── workspace_trust.py         # ROADMAP_v2 §14 (D17): trust store keyed by resolved path + content hash; is_trusted/grant_trust; sorted-walk deterministic hash with path-in-hash
 │   ├── config_loader.py           # ROADMAP_v2 §14: three-tier .md discovery (harness/project/user), line-anchored frontmatter parse, settings.json merge with loud unknown-key rejection, CONTEXT.md opt-in, frontmatter-only skill catalog
 │   ├── memory.py                  # ConversationMemory -- in-run message list, provider-NEUTRAL shape, backed by storage.py + resume-shape fix. §21a: assembles the DERIVED view (checkpoint summary + pinned rows + tail) and owns pin_last's ordinal-to-id mapping
-│   ├── compaction.py              # ROADMAP_v2 §21a: when to compact (M1 working-set trigger, M6 pipeline backstop), what may be folded (M4/M5's three floors), and the compactor agent run + ratio retry. Owns the re-entrancy guard
+│   ├── compaction.py              # ROADMAP_v2 §21a: when to compact (M1 working-set trigger, M6 pipeline backstop), what may be folded (M4/M5's three floors), and the compactor agent run + ratio retry. Owns the re-entrancy guard. §21c adds summarize_thread() -- a whole-thread DESCRIPTION that folds nothing
 │   ├── replay.py                  # ROADMAP_v2 §27: a stored thread as display entries -- the ARCHIVE (T3), tool calls as one redacted line, results skipped (T4). ONE policy, both shells
+│   ├── interaction.py             # ROADMAP_v2 §23: Request / ResponseChannel / decode -- the ONE way anything asks a human. Replaced permission_channel, ApprovalProvider and ReviewConsent
 │   ├── approval.py                # ROADMAP_v2 §25/§20: GrantBudget / ApprovalProvider / RunAuthorization / ReviewConsent -- how a run obtains a human's answer, as DATA. Leaf module, no project imports
 │   │
 │   └── reasoning/
@@ -160,7 +162,14 @@ Venastine Research Harness/
 │   └── builtin/
 │       ├── grill-me.md            # built-in agent: surfaces what still needs a decision in the current thread
 │       ├── pipeline-reviewer.md   # ROADMAP_v2 §20: reviews a finished research run and proposes corrections. No spawn_subagent, no load_skill
-│       └── compactor.md           # ROADMAP_v2 §21a: condenses an older stretch of a conversation. allowed_tools: [] -- it summarizes, it does not act
+│       ├── compactor.md           # ROADMAP_v2 §21a: condenses an older stretch of a conversation. allowed_tools: [] -- it summarizes, it does not act
+│       └── initializer.md         # ROADMAP_v2 §24: reads a project and writes its CONTEXT.md. allowed_tools: [read_project_doc] -- it drafts, the shell writes
+│
+├── project_init/                  # ROADMAP_v2 §24: /init. Namespace package, mirroring memories/
+│   ├── doc_sets.py                # WHICH documents each project kind gets, where each lives, and the stub templates. Data + pure rendering, no I/O
+│   ├── manifest.py                # deterministic discovery: the listing the agent is shown, and the facts the stubs interpolate. No model call, no tool call
+│   ├── generator.py               # the ONE place that decides what /init does -- both shells call generate()
+│   └── tui_commands.py            # /init registered into §16's slash registry
 │
 ├── memories/                      # ROADMAP_v2 §21b: durable memory. Namespace package, mirroring skills/
 │   ├── manager.py                 # scope resolution (D25/M12), the injection cap (M14), prompt_fragment() -- the ONE assembly point
@@ -203,6 +212,7 @@ Venastine Research Harness/
         ├── logic.py                # propositional logic (NOT full proof-writing -- see its docstring)
         ├── geometry.py             # points, lines, circles, polygons, triangles
         ├── file_ops.py             # ROADMAP §6: read/write/edit with path-dependent approval + markitdown
+        ├── project_docs.py         # ROADMAP_v2 §24: read_project_doc / write_project_doc -- scoped so /init needs neither `read` nor `write`, which are unoverridably denied
         └── shell.py                # ROADMAP §7: shell execution via sandbox module
 ```
 
@@ -566,6 +576,65 @@ than by the assembly point they share.
 already means the in-run conversation state, and two names that close together is a
 trap rather than a convention.
 
+### 4.21b Thread summaries and cross-thread references (ROADMAP_v2 §21c)
+
+The last third of §21. A thread can be distilled on demand, and one thread's
+distillation can be attached to another as context. Built almost entirely from §21a's
+parts, so the file contracts matter more than the new code does.
+
+**`storage.ThreadSummary` is a SEPARATE TABLE from `CompactionCheckpoint`, and that is
+the section's central decision** (M18). The two carry nearly the same columns and mean
+opposite things:
+
+| | `CompactionCheckpoint` | `ThreadSummary` |
+|---|---|---|
+| effect | CHANGES what the model sees — `latest_checkpoint` feeds `_derived_view` | changes nothing about the thread |
+| read by | `ConversationMemory` every turn | `/summary` to show a person, `/ref` to inject elsewhere |
+| stale row | un-compacts a live conversation, silently and durably | describes a thread as it was; `advances()` notices |
+
+So a summary row in the checkpoint table would compact the thread it was only meant to
+describe, and would win by being newest. Separate tables make that impossible rather
+than warned about — and `save_thread_summary` therefore has **no** advance guard, which
+its docstring explains so nobody copies `save_checkpoint`'s or routes a summary through
+it to get one.
+
+**`compaction.summarize_thread()` describes; `compact()` folds** (M20). Same summariser,
+different requests. It reads `archive_history()` rather than the derived view (T3's
+reasoning), so a summary of a compacted thread describes the conversation instead of
+describing the summary of it. Its target is `config.SUMMARY_TARGET_CHARS` — **absolute,
+not a `COMPACTION_TARGET_RATIOS` entry**, because §21c's consumer is a prompt tier
+present on every turn of the referencing thread, where nothing it replaces bounds it. A
+thread already shorter than that is stored verbatim with no model call at all.
+
+**`core/loop.py` owns the tier: `with_refs` / `attach_ref` / `clear_refs`.**
+
+*Belongs there:* one reader and one writer, beside `with_goal` and taking the same
+argument, because a reference is THREAD state — attached by a person, persisting across
+a resume, applying whichever agent is active. Both shells go through them, so neither can
+disagree about the cap or the stored shape.
+
+*Does NOT belong there:* the summarising (that is `core/compaction.py`), the storage
+(`storage.py`), or the picking (each shell). And `agents/manager.system_prompt_for()` is
+deliberately NOT a third call site the way it is for memories: it has no memory object,
+and a ref is not an agent's opt-in.
+
+**`with_refs` is appended OUTSIDE `with_catalogs()`** — §19's K6, third instance after
+§21b's M13. It is also appended **unconditionally**, unlike `with_memories`: copying the
+`if system_prompt is None` guard from the line above would make an active agent lose
+every attached reference, which is why that has its own test.
+
+**The cap refuses rather than dropping** (`config.MAX_INJECTED_REFS`). A reference is
+something a person chose by name, so making room silently is what M15's rule against
+substring removal exists to prevent. The fragment states the cap when it truncates (M14)
+and says outright that its contents are not this conversation's history — the same risk
+`SUMMARY_PREFIX` addresses one section earlier.
+
+**The CLI gets flags, the TUI gets commands** (M21). `--summary [thread]` and a repeatable
+`--ref <thread>` mirror `--memories` / `--forget`, because the CLI has no slash-command
+layer and building one is §23's business. `/summary` and `/ref [--list|--clear]` live in
+`memories/tui_commands.py` with §21b's pair — same section's family, and `/ref` reads what
+`/summary` writes.
+
 ### 4.22 `core/reasoning/events.py` + the pipeline generator (ROADMAP_v2 §22)
 
 **Belongs here:** `PipelineEvent` and `PIPELINE_EVENT_KINDS` — the kinds
@@ -794,6 +863,136 @@ banner already fixed in that same callback. `Transcript.reset()` is separate fro
 redraw them, while a resume must drop them or `/copy all` keeps returning a thread the
 session has left.
 
+### 4.28 `project_init/` — `/init` and the project documentation set (ROADMAP_v2 §24)
+
+`/init` reads a project and scaffolds its documentation: `.venastine/CONTEXT.md` as the
+hub, plus the documents it links. `--init` on the CLI (M21 — no command layer there).
+
+**Four modules, split by what they can be wrong about.** `doc_sets.py` is data and pure
+rendering (which documents, where each lives, what a stub looks like), so it can be
+asserted directly. `manifest.py` is a directory walk. `generator.py` is the only place
+that *decides* anything, and both shells call it — §26's L6 and §27's T5 again, because a
+per-shell implementation is how the CLI and the TUI come to disagree about whether an
+existing document is overwritten, which is policy and not painting. `tui_commands.py`
+does the three things only a TUI can: run the work off the UI thread, render a diff, and
+put a modal in front of a human.
+
+**The reason the two scoped tools exist at all.** §24's spec preferred routing the write
+through the existing `write` tool. That is not possible: `write` is not merely `False` by
+default in `config.ToolPermissions` but unoverridable at runtime — `is_tool_allowed()`
+reads the dataclass directly, `settings.json` has no `permissions` section (and
+`_KNOWN_SETTINGS` *raises* on an unknown key), and D14 forbids a `ToolContext` widening
+anything, with the global check running first and unconditionally. `dispatch("write", …)`
+raises `ToolCallDenied` **before** the `approval_callback` is consulted, for every user.
+`read` is blocked identically, ruling out an exploring agent by the same mechanism. So
+§24 adds `read_project_doc` and `write_project_doc` instead of flipping either global,
+which would have handed every agent and all ten research passes standing file access to
+serve one command.
+
+**`write_project_doc` has no path parameter.** It takes a document *name* from a fixed
+allowlist, and the destination is derived: `CONTEXT.md` under `.venastine/`, everything
+else at the project root. "Cannot be aimed elsewhere" is therefore structural rather than
+validated. The allowlist is the union of both sets plus the hub, so a research project
+that grows a codebase can gain an `ARCHITECTURE.md` without being re-classified first.
+
+**`read_project_doc`'s narrow set is load-bearing, not tidiness.** A registered tool with
+permission `True` is advertised to EVERY run — the initializer's `allowed_tools` narrows
+*that agent*, not plain chat and not a research pass. Restricting it to documentation and
+manifests (and denying `.venastine/`, `.env*` and `providers.json`) means the most a
+prompt-injected pass gains through it is the project's own README. Widening it to source
+files would quietly turn it into `read` with no approval gate.
+
+**One consent, covering a named list.** `write_project_doc` is approval-gated, so a naive
+implementation prompts eight times for one command — the shape of consent that gets
+clicked through. The user sees the `CONTEXT.md` diff and the exact list of files once,
+and that answer is passed as `approval_callback` to each dispatch: the same move
+`core/loop.py` makes after a channel approval. With no way to ask, nothing is written
+(§25's V6, sixth instance).
+
+**Only `CONTEXT.md` is generated; the rest are stubs.** One model call drafts the hub —
+short, factual, and re-sent with every request, so every sentence is paid for repeatedly.
+The others are templates carrying real headings and a what-belongs/what-does-not pair,
+interpolating only facts the manifest established deterministically. A DEVLOG invented
+for a project with no history is confident fiction in a file that then gets committed,
+linked from the hub, and read as established.
+
+**The index is a pure function of the project kind**, and that was a bug fix. Marking
+which documents already existed made the index change on the second `/init` purely
+because the first had created them — rewriting `CONTEXT.md` for no reason, defeating the
+"nothing to do" path, and labelling documents `/init` had authored moments earlier as
+preserved pre-existing work. Which files a run left alone is a fact about that run and is
+in its report.
+
+**Trust is settled after the write, and only for a project that was already trusted.**
+The state is captured *before* it, because the D17 content hash has moved afterwards and
+`is_trusted()` then answers `False` for a project that was trusted a moment ago — exactly
+the state the distinction exists to tell apart. An untrusted project is left untrusted:
+its `.venastine/` may already hold agents, skills and an `mcp.json` that arrived with a
+cloned repo, and granting as a side effect of `/init` would wave all of it through.
+`CONTEXT.md` is never special-cased out of the hash.
+
+### 4.29 `core/interaction.py` — the response channel (ROADMAP_v2 §23 slice 1)
+
+Five ways to ask a human something became one. `permission_channel` (§13, a
+`queue.Queue` of booleans), `ApprovalProvider` (§25, a callable), `ReviewConsent`
+(§20, another callable) and §24's two TUI methods were the same exchange with
+five sets of plumbing, each re-deriving what a dismissal carries, what a timeout
+means, how shutdown releases a parked worker, and how a malformed answer decodes.
+
+**The dataclasses are the cheap part; `decode` is the point.** A
+`Request(kind, payload, notice)` / `ResponseChannel(ask, honour_run_scope)` pair
+is nearly free to write badly — five call sites can each build one and still each
+invent their own failure handling. What pays is that every route into an answer —
+no channel, a callback that raised, a timeout, a shutdown release's bare `False`,
+a return of the wrong shape — funnels through one function owning the declining
+default per kind. §25's "the inability to ask is not permission to proceed" stops
+being a habit five places remember.
+
+**`decode` takes the REQUEST, not the kind**, because two kinds cannot be
+validated without knowing what was asked. A `CHOICE` is valid only against the
+options offered; a `SUBAGENT_SIGNOFF` subset only against the candidates listed.
+That second one is a real control rather than tidiness: a shell returning a tool
+name nobody offered must not thereby grant it, and the intersection is what stops
+it. `decode(Request(kind), None) == SAFE_DEFAULTS[kind]` for every kind, pinned by
+a test, which is what lets `ask()` route its failure paths through `decode` rather
+than reading the table.
+
+**Every default declines, and review's is the strictest.** Review decoding
+requires a well-formed `(decision, notes)` pair — the two decoders it replaced
+disagreed about a bare `"accept"` string, neither behaviour was tested, and strict
+won because review is the only kind whose *permissive* failure applies an edit
+rather than declining one.
+
+**The loop asks the registry what shape of question a tool needs.**
+`ToolSpec.request_kind` and `ToolSpec.request_payload` sit beside `grant_scope`
+and `approval_notice` for the same reason it does: no tool name appears in
+`core/loop.py`. `spawn_subagent` sets `request_kind="subagent_signoff"` and
+supplies the agent and its candidates, computed through the same
+`manager.candidate_approvals()` that builds the notice — so the list shown, the
+list offered and the list granted cannot drift.
+
+**Per-tool sign-off (AC1b) is what proves the abstraction.** Approving a spawn
+used to authorise the child's entire approval-gated set; §18 shipped it that way
+as S1 precisely because a boolean channel cannot carry a list out and a subset
+back. `_obtain_approval` now returns `(approved, grant)`, and the sign-off's
+answer is three-way: `None` refuses the spawn, `set()` spawns with nothing
+granted, a non-empty set grants those. The middle value is the fragile one, which
+is why `decode` tests `isinstance` rather than truthiness.
+
+**`RunInfo.signoffs` is keyed by (tool, subject)** — J8's amendment to S1.
+`grant_scope="run"` meant a second spawn in the same turn was not asked at all,
+and the test pinning that spawned agent `a` then agent `b`, so one prompt about
+`a` silently covered `b`. Keying the memo by agent keeps the anti-noise intent
+(the same agent twice is one prompt) without the part that was wrong.
+
+**`tui/app.py` collapsed two paths into one.** The chat turn used to push its
+modal from `on_loop_event` while the loop held a queue; an attended research pass
+pushed from its worker. Both now go through `_ask_blocking`, and
+`_blocking_modal` holds the park-on-a-queue mechanics that four asks had copied.
+`_permission_channel` survives, but it is no longer the loop's channel — it is
+this app's parked-worker queue, and it is what `_release_permission_channel`
+reaches for when the app exits with a modal open.
+
 ## 5. Request lifecycle — regular conversation, traced end to end
 
 1. Caller calls `RunAgentLoop.run_agent_conversation(user_goal, model, provider_name, max_steps, max_total_tokens)`.
@@ -940,7 +1139,9 @@ Returns the full `PipelineRun` (not just the final report) — every intermediat
 | `discrete_math` | `discrete_math.py` | Working | Number theory + combinatorics via SymPy |
 | `logic` | `logic.py` | Working | Propositional logic ONLY — see its docstring for scope limits |
 | `geometry` | `geometry.py` | Working | Points/lines/circles/polygons/triangles via SymPy |
-| `file_ops` | `file_ops.py` | Working | read/write/edit with path-dependent approval, markitdown for rich formats, line/char pagination |
+| `file_ops` | `file_ops.py` | Working | read/write/edit with path-dependent approval, markitdown for rich formats, line/char pagination. **Both `read` and `write` are denied by a global that nothing can flip at runtime — see §11** |
+| `read_project_doc` | `project_docs.py` | Working | ROADMAP_v2 §24: project documentation only, confined by realpath, no approval |
+| `write_project_doc` | `project_docs.py` | Working | ROADMAP_v2 §24: a document NAME from a fixed allowlist, no path parameter, approval-gated |
 | `shell` | `shell.py` | Working | Shell execution via sandbox module; inert fast-path; Docker default, subprocess fallback |
 
 All math tools share `_math_common.py`'s `safe_parse()` — a SymPy expression parser with `__builtins__` explicitly blanked, verified via test to actually block a real injection payload, not just assumed safe. Any new math-adjacent tool should use this, not its own `eval`/`sympify` call.
@@ -956,3 +1157,9 @@ All math tools share `_math_common.py`'s `safe_parse()` — a SymPy expression p
 - **`prompts/system_prompts.py`'s loader once built a local `passes_prompts` dict and returned it without ever assigning it back to the module-level variable of the same name** — the module-level dict stayed permanently empty. If you see a function that constructs a local variable shadowing a module-level one, check that the return value is actually being used, not just implicitly expected to "just work" via the shared name.
 - **Resuming a thread loaded it correctly and displayed nothing — and left the PREVIOUS thread's transcript on screen under the new thread's id.** `ConversationMemory(thread_id=...)` reads the full history at construction, so every layer below the shell was right; the TUI's picker callback swapped the object, refreshed the goal banner, wrote `Resumed thread <uuid>.` and stopped, and `main.py --thread` printed one line and dropped into the prompt. **This is the same shape as the ensemble-mode and `fetch_url` gotchas above — wired, documented, never executed end to end — with one addition worth recording: the failure was not "nothing happens" but "the wrong thing is shown confidently", and no test in a 1028-test suite could fail on it, because every one of them asserted on state rather than on what reached the screen.** Fixed in §27 by `core/replay.py` plus `Transcript.reset()`. The generalisable rule: when a fix is "display the state we already have", the test has to assert on the rendered output, since a call-count assertion passes for the version that renders the new thread under the old thread's transcript.
 - **One research run created ~15 threads and every automatic compaction one more, and the thread picker offered all of them as conversations.** The per-pass fresh thread is a locked invariant (passes share distilled JSON, never raw history), so the defect was that `ConversationThread` had no field saying what a thread was. Two things about the fix are worth keeping: the compactor was a **fifth** thread source that §27's own spec did not count, found only by grepping every `run_agent_conversation` call site rather than by reading the section — the project's "grep every call site sharing the root cause" rule, paying off in a section that had already been specified; and the legacy classification had to be **separate from `ensure_columns()`**, which is additive-only and never backfills, so a schema migration would have left every existing database's pass threads in the picker while looking migrated.
+- **`config.ToolPermissions.write = False` reads as a default and is in fact a permanent denial**, and §24 was specified against the wrong reading of it. The roadmap's preference — "prefer running `/init` through the existing `write` tool rather than bypassing the permission layer" — describes something no user can do: `is_tool_allowed()` reads `config.ToolPermissions()` directly, `settings.json` has no `permissions` section and `_KNOWN_SETTINGS` *raises* on an unknown key, and D14 forbids a `ToolContext` widening anything, with the global check running first and unconditionally. `dispatch("write", …)` therefore raises `ToolCallDenied` **before** the `approval_callback` is even consulted. `read` is denied identically, which also rules out an agent that explores a project with the existing read tool. **The shape to notice: a `False` in a config dataclass invites you to assume something can turn it `True`.** Nothing here can, and grepping for a consumer of the field is what shows that — `security/permissions.py` instantiates the dataclass fresh on every call and nothing else writes to it. §24's answer was two narrowly-scoped tools (`read_project_doc`, `write_project_doc`) rather than flipping a global, because a global flipped for one command's convenience is standing authority for every agent and all ten research passes.
+- **A registered tool is advertised to every run, not to the caller that wanted it.** §24's initializer agent declares `allowed_tools: [read_project_doc]`, which narrows *that agent* — it does nothing to stop plain chat or a research pass from calling the same tool, since a run with no `ToolContext` gets global policy only. This is why `read_project_doc`'s readable set is documentation and manifests rather than "text files under the project", and why `.venastine/`, `.env*` and `providers.json` are denied by name: the question a new scoped tool has to answer is not "what does my caller need?" but "what does the least trusted run in the harness now have?". The pipeline is the answer to that, and it reads attacker-controlled web pages.
+- **Running `/init` twice rewrote `CONTEXT.md` the second time, for no reason.** Its documentation index marked which documents already existed, so the first run created them and the second run's index differed *because of the first run* — which also defeated the "nothing to do" path and, worse, labelled documents `/init` had authored moments earlier as pre-existing work it had carefully preserved. Found by running the command twice, which no test did until one asserted idempotence. The rule that came out of it: **content derived from "what is already on disk" makes an operation non-idempotent by construction**, and a fact about one run (which files it skipped) belongs in that run's report rather than in a file the run writes.
+- **Five ways to ask a human something, and the fifth two were added by the section immediately before the one that unified them.** §13 built `permission_channel`; §25 added `ApprovalProvider` because `run_to_completion()` discards the event carrying the question; §20 added `ReviewConsent`; §24 added two TUI methods. Each re-derived the same four rules, and one of §24's — the project-kind guard — shipped with a mutation that proved nothing, because the only test covering it dismissed with `None`, which returns `None` with or without the guard. **The shape: a mechanism that is *nearly* general gets copied rather than extended, and every copy is a fresh chance to get the failure path wrong.** §23's spec predicted it exactly ("doing the tools first and the generalisation afterwards produces two bespoke channels and a third when §18 wants one") and was under by two. The fix is not the dataclass; it is that one function now owns what a non-answer means.
+- **A test that PATCHES the wiring cannot see the wiring break.** §23's sign-off memo test mocks `registry.request_kind` and `request_payload` so it can be about the memo — which left four mutations green: removing `request_kind="subagent_signoff"` from the registration, emptying the candidate list, and dropping the injected subset from `dispatch()`'s map all passed. Every sign-off test called `subagent_tool.run()` directly, so the injection itself was never exercised either. **Anything a test patches, some other test has to assert for real**, and the same applies to a handler that tests reach past its dispatcher.
+- **A pilot test that asserts while a modal is open turns a failure into a hung suite.** Textual runs thread workers on non-daemon threads, so a worker parked on `queue.get()` blocks `run_test()`'s teardown — and an assertion that fires before the modal is dismissed leaves it parked. Two §23 mutations presented as a stalled pytest rather than a red test. **Capture what you need, dismiss, settle, then assert**: it costs nothing and turns the same regression into a readable failure.

@@ -405,7 +405,8 @@ class TestAuthorizationReachesThePasses:
         run_deep_research_mode turns it into the primitives _run() enforces
         rather than accepting it and dropping it, which would leave every
         test above passing and every gated tool still hidden."""
-        from core.approval import ApprovalProvider, GrantBudget
+        from core.approval import GrantBudget
+        from core.interaction import ResponseChannel
         from core.loop import RunAgentLoop
 
         seen = {}
@@ -416,7 +417,7 @@ class TestAuthorizationReachesThePasses:
         mocker.patch("core.loop.ConversationMemory")
         mocker.patch("prompts.system_prompts.pass_prompt", return_value="s")
 
-        provider = ApprovalProvider(ask=lambda n, p, notice: True)
+        provider = ResponseChannel(ask=lambda request: True)
         budget = GrantBudget(7)
         RunAgentLoop.run_deep_research_mode(
             "in", "m", "Pass 1",
@@ -426,7 +427,7 @@ class TestAuthorizationReachesThePasses:
 
         assert seen["granted_tools"] == {"mcp__lib__search"}
         assert seen["grant_budget"] is budget
-        assert seen["approval_provider"] is provider
+        assert seen["response_channel"] is provider
 
     def test_no_bundle_records_nothing_and_does_not_crash(self, mocker):
         """Every pre-§25 caller passes nothing, including the ensemble path

@@ -44,6 +44,20 @@ def _fake_client(mocker):
 # conftest -- see FakeMemory there for why.
 from tests.conftest import FakeMemory as _FakeMemory
 
+def _answering_channel(*answers):
+    """A ResponseChannel that hands back canned answers in order (§23).
+
+    Replaces the pre-loaded queue.Queue these tests used before the
+    channel existed. The queue WAS the mechanism; now it is one shell's
+    implementation detail, and what the loop holds is a callable.
+    """
+    from core.interaction import ResponseChannel
+
+    pending = list(answers)
+    return ResponseChannel(
+        ask=lambda _request: pending.pop(0) if pending else False)
+
+
 def _run_kwargs(memory, **overrides):
     base = dict(
         memory=memory,
@@ -269,8 +283,8 @@ def test_ac6_resumed_thread_sees_persisted_assistant_turn(fake_storage, mocker):
 # ---------------------------------------------------------------------------
 
 def test_permission_channel_yields_request_and_dispatches_on_approval(mocker):
-    """When a tool needs approval and a permission_channel is provided,
-    _run() must yield a permission_request event, block on the channel,
+    """When a tool needs approval and a response_channel is provided,
+    _run() must yield a permission_request event, ask the channel,
     and — on approval — dispatch with a callback that returns True so the
     approved tool actually runs (not silently denied)."""
     import queue as queue_mod
@@ -292,14 +306,13 @@ def test_permission_channel_yields_request_and_dispatches_on_approval(mocker):
 
     dispatched = []
     def fake_dispatch(name, params, context=None, approval_callback=None,
-                      parent_run=None, permission_channel=None,
+                      parent_run=None, response_channel=None, signoff=None,
                       memory=None):
         dispatched.append((name, approval_callback))
         return {"ok": True}
     mocker.patch.object(registry, "dispatch", side_effect=fake_dispatch)
 
-    channel = queue_mod.Queue()
-    channel.put(True)  # the user approves
+    channel = _answering_channel(True)  # the user approves
 
     events = list(RunAgentLoop._run(
         memory=memory,
@@ -308,7 +321,7 @@ def test_permission_channel_yields_request_and_dispatches_on_approval(mocker):
         model="test",
         context=None,
         max_steps=5,
-        permission_channel=channel,
+        response_channel=channel,
     ))
 
     perm = [e.permission_request for e in events if e.permission_request is not None]
@@ -359,7 +372,7 @@ def test_permission_channel_denial_when_not_approved(mocker):
         model="test",
         context=None,
         max_steps=5,
-        permission_channel=None,  # headless → denied by default
+        response_channel=None,  # headless → denied by default
     ))
 
     dispatch_mock.assert_not_called()
@@ -390,13 +403,12 @@ def test_an_unreachable_tool_is_not_prompted_for(mocker):
                  side_effect=make_stream_sequence(with_tool, done))
     mocker.patch("core.loop.registry.approval_needed", return_value=True)
 
-    channel = queue.Queue()
-    channel.put(True)          # an answer IS available, if one is asked for
+    channel = _answering_channel(True)  # an answer IS available if asked for
 
     events = list(RunAgentLoop._run(
         memory, "p", "ANTHROPIC", "m",
         ToolContext(allowed_tools={"get_time"}),   # excludes web_search
-        max_steps=2, permission_channel=channel,
+        max_steps=2, response_channel=channel,
     ))
 
     assert not [e for e in events if e.permission_request is not None], \
@@ -420,13 +432,12 @@ def test_a_reachable_tool_is_still_prompted_for(mocker):
     mocker.patch("core.loop.registry.approval_needed", return_value=True)
     mocker.patch("core.loop.registry.dispatch", return_value={"result": "ran"})
 
-    channel = queue.Queue()
-    channel.put(True)
+    channel = _answering_channel(True)
 
     events = list(RunAgentLoop._run(
         memory, "p", "ANTHROPIC", "m",
         ToolContext(allowed_tools={"web_search"}),
-        max_steps=2, permission_channel=channel,
+        max_steps=2, response_channel=channel,
     ))
 
     assert [e for e in events if e.permission_request is not None]

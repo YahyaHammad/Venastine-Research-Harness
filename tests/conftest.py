@@ -333,6 +333,7 @@ class FakeStorage:
         self._messages_by_thread = {}  # thread_id -> list of neutral-shape dicts
         self._thread_extra = {}   # thread_id -> dict (extra_data mirror)
         self._checkpoints = {}    # thread_id -> the latest CompactionCheckpoint (§21)
+        self._thread_summaries = {}  # thread_id -> the latest ThreadSummary (§21c)
         self._memories = []       # UserMemory rows, oldest first (§21b)
 
     def create_thread(self, kind="chat"):
@@ -538,6 +539,28 @@ class FakeStorage:
         self._checkpoints[thread_id] = checkpoint
         return checkpoint.id
 
+    # -- ROADMAP_v2 §21c thread summaries ----------------------------------
+    #
+    # A SEPARATE dict from _checkpoints, mirroring the separate table and for
+    # the same reason (M18): a summary that landed among the checkpoints would
+    # become the live compaction watermark. Keeping them apart here means a
+    # test cannot pass against a fake that conflates what production must not.
+    #
+    # `last_message_id` is deliberately NOT mirrored: the real one reads
+    # `_ordered_rows`, which IS faked, so it works unchanged over this fake --
+    # the same arrangement that already lets the real `advances()` run here.
+
+    def latest_thread_summary(self, thread_id):
+        return self._thread_summaries.get(thread_id)
+
+    def save_thread_summary(self, thread_id, summary_text,
+                            covers_up_to_message_id):
+        summary = types.SimpleNamespace(
+            id=uuid4(), thread_id=thread_id, summary_text=summary_text,
+            covers_up_to_message_id=covers_up_to_message_id)
+        self._thread_summaries[thread_id] = summary
+        return summary.id
+
     def _reconstruct(self, rows):
         formatted = []
         for row in rows:
@@ -595,6 +618,11 @@ STORAGE_SYMBOLS = MEMORY_STORAGE_SYMBOLS + (
     # ROADMAP_v2 §21b durable memory. memories/manager.py imports these
     # lazily, so patching the module covers it.
     "save_memory", "list_memories", "forget_memory",
+    # ROADMAP_v2 §21c thread summaries. core/compaction.py imports these
+    # lazily too. `last_message_id` and `advances` are absent on purpose --
+    # both read `_ordered_rows`, which is faked above, so the REAL functions
+    # run here and their position arithmetic is exercised rather than mocked.
+    "latest_thread_summary", "save_thread_summary",
 )
 
 

@@ -24,7 +24,8 @@ import queue
 
 import pytest
 
-from core.approval import ApprovalProvider, GrantBudget, RunAuthorization
+from core.approval import GrantBudget, RunAuthorization
+from core.interaction import ResponseChannel
 from core.client import StreamToken
 from core.loop import RunAgentLoop
 from tools.base import ToolSpec
@@ -38,27 +39,35 @@ from tests.conftest import make_model_response
 from tests.conftest import FakeMemory as _Mem
 
 
-class _AnswerQueue(queue.Queue):
-    """A permission channel that never blocks.
+class _AnswerChannel:
+    """A response channel that never blocks.
 
-    _run() blocks inside the generator on permission_channel.get(), so a
-    test that under-supplies answers HANGS THE WHOLE SUITE rather than
-    naming the regression -- and a hang is a worse signal than a failure,
-    because it stalls every test after it and gives no assertion to read.
-    This bit once already, in the §18 sign-off tests.
+    §23 turned the permission queue into a ResponseChannel, and this
+    double follows it: `.put()` still queues an answer so every call site
+    below reads unchanged, but what the loop receives is something with
+    `.ask()` and `.honour_run_scope`, which is what it now asks through.
+
+    Never blocking is the load-bearing part. _run() used to block inside
+    the generator on channel.get(), so a test that under-supplied answers
+    HUNG THE WHOLE SUITE rather than naming the regression -- and a hang
+    is a worse signal than a failure, because it stalls every test after
+    it and leaves no assertion to read. This bit once already, in the §18
+    sign-off tests.
 
     Returning False on empty is also the honest fallback: nobody answered
     is a denial, which is exactly what a headless run does.
     """
 
-    def get(self, *args, **kwargs):
-        # super().get(block=False), NOT self.get_nowait(): get_nowait() is
-        # implemented as self.get(block=False), so it dispatches straight
-        # back into this override and recurses to the stack limit.
-        try:
-            return super().get(block=False)
-        except queue.Empty:
-            return False
+    honour_run_scope = True
+
+    def __init__(self):
+        self._answers = []
+
+    def put(self, answer):
+        self._answers.append(answer)
+
+    def ask(self, _request):
+        return self._answers.pop(0) if self._answers else False
 
 
 @pytest.fixture
@@ -113,7 +122,7 @@ def _drive(tool_name, *, granted=None, budget=None, channel=None,
     events = list(RunAgentLoop._run(
         memory=_Mem(), system_prompt="s", provider_name="ANTHROPIC",
         model="m", context=None, max_steps=max_steps,
-        permission_channel=channel, granted_tools=granted,
+        response_channel=channel, granted_tools=granted,
         grant_budget=budget))
 
     prompts = [e for e in events if e.permission_request is not None]
@@ -152,7 +161,7 @@ class TestTheLoopEnforcesGrantability:
         against a loop that ignores grants entirely and asks about
         everything."""
         prompts, _ = _drive("mcp__t__plain", granted={"mcp__t__plain"},
-                            channel=_AnswerQueue(), mocker=mocker)
+                            channel=_AnswerChannel(), mocker=mocker)
         assert prompts == []
 
     def test_a_non_grantable_tool_is_asked_about_despite_the_grant(
@@ -160,7 +169,7 @@ class TestTheLoopEnforcesGrantability:
         """The R2 narrowing, at the point that matters. Before it, a
         signed-off subagent could run any shell command for the rest of
         the turn on the strength of one prompt reading 'shell'."""
-        channel = _AnswerQueue()
+        channel = _AnswerChannel()
         channel.put(True)
         prompts, _ = _drive("mcp__t__paramwise",
                             granted={"mcp__t__paramwise"},
@@ -173,7 +182,7 @@ class TestTheLoopEnforcesGrantability:
         than filtered once when it was built. A hand-edited or stale set
         reaching RunInfo must not widen anything -- the loop is the
         enforcement point, not the shell that assembled the set."""
-        channel = _AnswerQueue()
+        channel = _AnswerChannel()
         channel.put(True)
         prompts, _ = _drive(
             "mcp__t__paramwise",
@@ -195,7 +204,7 @@ class TestGrantBudget:
 
     def test_calls_within_budget_are_not_asked_about(self, gated_pair, mocker):
         prompts, _ = _drive("mcp__t__plain", granted={"mcp__t__plain"},
-                            budget=GrantBudget(3), channel=_AnswerQueue(),
+                            budget=GrantBudget(3), channel=_AnswerChannel(),
                             calls=3, mocker=mocker)
         assert prompts == []
 
@@ -205,7 +214,7 @@ class TestGrantBudget:
         other two must PROMPT. Denying instead would make the ceiling a
         hard stop on a supervised run, and skipping the check would make
         it no ceiling at all."""
-        channel = _AnswerQueue()
+        channel = _AnswerChannel()
         for _ in range(5):
             channel.put(True)
         prompts, _ = _drive("mcp__t__plain", granted={"mcp__t__plain"},
@@ -231,14 +240,14 @@ class TestGrantBudget:
         budget = GrantBudget(3)
         for _ in range(2):
             _drive("mcp__t__plain", granted={"mcp__t__plain"},
-                   budget=budget, channel=_AnswerQueue(), calls=2,
+                   budget=budget, channel=_AnswerChannel(), calls=2,
                    mocker=mocker)
         assert budget.used == 3, "the second pass got a fresh ceiling"
 
     def test_no_budget_means_no_ceiling(self, gated_pair, mocker):
         """None is not zero. Every caller before §25 passes nothing."""
         prompts, _ = _drive("mcp__t__plain", granted={"mcp__t__plain"},
-                            budget=None, channel=_AnswerQueue(), calls=5,
+                            budget=None, channel=_AnswerChannel(), calls=5,
                             mocker=mocker)
         assert prompts == []
 
@@ -254,7 +263,7 @@ class TestGrantedCallsAreRecorded:
 
     def test_granted_calls_land_on_the_response(self, gated_pair, mocker):
         _, final = _drive("mcp__t__plain", granted={"mcp__t__plain"},
-                          channel=_AnswerQueue(), calls=2, mocker=mocker)
+                          channel=_AnswerChannel(), calls=2, mocker=mocker)
         assert [c["tool"] for c in final.granted_calls] == \
             ["mcp__t__plain", "mcp__t__plain"]
         assert final.granted_calls[1]["params"] == {"n": 1}
@@ -264,7 +273,7 @@ class TestGrantedCallsAreRecorded:
         """The trail records what the GRANT authorised. A call the user
         approved live is already accounted for by the prompt they saw, and
         conflating the two would overstate what the up-front yes covered."""
-        channel = _AnswerQueue()
+        channel = _AnswerChannel()
         channel.put(True)
         _, final = _drive("mcp__t__paramwise", granted={"mcp__t__paramwise"},
                           channel=channel, mocker=mocker)
@@ -272,7 +281,7 @@ class TestGrantedCallsAreRecorded:
 
     def test_an_ungranted_run_records_nothing(self, gated_pair, mocker):
         _, final = _drive("mcp__t__plain", granted=None,
-                          channel=_AnswerQueue(), mocker=mocker)
+                          channel=_AnswerChannel(), mocker=mocker)
         assert final.granted_calls == []
 
 
@@ -292,7 +301,7 @@ class TestRunAuthorization:
     def test_provider_defaults_to_honouring_run_scope(self):
         """Chat keeps §18's once-per-turn shortcut; only attended mode
         turns it off (R11), and it must do so explicitly."""
-        p = ApprovalProvider(ask=lambda n, p, notice: True)
+        p = ResponseChannel(ask=lambda request: True)
         assert p.honour_run_scope is True
 
     def test_run_info_defaults_to_no_budget(self):

@@ -72,8 +72,31 @@ def approval_notice(params: dict, context=None) -> str:
             f"rest of this turn:\n{listed}")
 
 
+def request_payload(params: dict, context=None) -> dict:
+    """What the sign-off question is ABOUT (§23 AC1b).
+
+    Carries the agent's name as the memo `subject` and the candidate tool
+    list as the options the user picks from. Computed through
+    manager.candidate_approvals(), the SAME helper approval_notice uses
+    and the same one that used to build the grant wholesale -- so the list
+    shown, the list offered and the list granted cannot drift apart.
+
+    Lives on the TOOL rather than in core/loop.py because which tools a
+    child could reach is agents/manager.py's knowledge. The loop asks the
+    registry for this the same way it asks for the notice.
+    """
+    from agents.manager import manager
+
+    agent = manager.get(params.get("agent_name", ""))
+    if agent is None:
+        return {}
+    child = manager.child_context(agent, context or ToolContext())
+    return {"subject": agent.name, "agent": agent.name,
+            "candidates": manager.candidate_approvals(child)}
+
+
 def run(params: dict, parent_context=None, parent_run=None,
-        permission_channel=None) -> dict:
+        response_channel=None, signoff=None) -> dict:
     from core.loop import (
         RunAgentLoop, DEFAULT_PROVIDER, DEFAULT_SYSTEM_PROMPT,
     )
@@ -106,7 +129,14 @@ def run(params: dict, parent_context=None, parent_run=None,
     # on a non-inert command) only resolves once the call exists, so those
     # still have to reach a human mid-run. Without the channel the child
     # ran headless and lost every approval-gated tool silently.
-    granted = manager.candidate_approvals(child)
+    #
+    # §23 AC1b: the grant is the SUBSET the user ticked, not every
+    # candidate. §18 shipped this all-or-nothing (S1) because a boolean
+    # channel could not carry a list out and a subset back; approving a
+    # spawn therefore authorised the child's entire approval-gated set.
+    # `signoff` is injected by dispatch() and is None only when nothing
+    # asked -- a headless run, where the child gets no grant anyway.
+    granted = set(signoff) if signoff else set()
 
     # Inherit the parent run's identity only where the agent definition
     # is silent -- an agent's declared model/provider is its identity.
@@ -129,8 +159,9 @@ def run(params: dict, parent_context=None, parent_run=None,
         # the catalog re-invite its child to spawn one (review f19).
         system_prompt=manager.system_prompt_for(
             agent, DEFAULT_SYSTEM_PROMPT, context=child),
-        permission_channel=permission_channel,
-        granted_tools=granted if permission_channel is not None else None,
+        response_channel=response_channel,
+        granted_tools=granted if (response_channel is not None
+                                  and granted) else None,
         # §27 AC1. A spawned agent's thread is not a conversation anyone
         # will resume, and one goal-mode turn can spawn several.
         thread_kind=THREAD_KIND_SUBAGENT,

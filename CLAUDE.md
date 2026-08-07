@@ -19,8 +19,14 @@ python main.py --mode research --attended "q"     # §25: approve every gated ca
 python main.py --mode research --review "q"       # §20: review the finished run, consent to each correction
 # §21a compaction runs automatically in every shell; /compact triggers it by hand in the TUI
 # §26: /claims [run id] or ctrl+l opens a run's claims; /copy [last|report|claims|all] [--file path]
+python main.py --summary <thread>                  # §21c: print a thread's distilled summary
+python main.py --ref <thread> --ref <thread>       # §21c: attach other threads' summaries as context
+# §21c in the TUI: /summary distils this conversation; /ref [--list|--clear] references another
+python main.py --init                              # §24: scaffold this project's documentation set
+python main.py --init --research-project           # §24: skip the type question on a piped run
+# §24 in the TUI: /init [--software|--research]
 
-pytest                                            # 1060 tests, offline, ~25s (first run ~30s: matplotlib font cache)
+pytest                                            # 1246 tests, offline, ~25s (first run ~30s: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -40,7 +46,7 @@ MCP servers are a *third* config file again — `mcp.json`, user-level or `.vena
 Read these before changing anything non-trivial — they carry design decisions that are locked, not defaults to re-derive.
 
 - **ARCHITECTURE.md** — what's built, file-by-file contracts ("what belongs here / what does NOT"), known gotchas (§11).
-- **ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **ROADMAP_v2.md** (§13–§27; §13–§20, §21a, §21b, §22, §25, §26 and §27 built) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R12 from §25, K1–K7 from §19, V1–V9 from §20, M1–M17 from §21a/§21b, P1–P4 from §22, L1–L6 from §26 and T1–T9 from §27). Section and D-numbers are stable and cross-referenced everywhere.
+- **ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **ROADMAP_v2.md** (§13–§27; all built except §23's slice 2 — the question tool and the todo list) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R12 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I13 from §24 and J1–J8 from §23). Section and D-numbers are stable and cross-referenced everywhere.
 - **DEVLOG.md** — per-section implementation notes: what was followed verbatim, what was deviated from (every deviation was an explicit user decision — do not silently override).
 - **tests/BREAKING_CHANGES.md** — what breaks each test when production code changes, the symptom, and the fix.
 - **QWEN.md** — a sibling agent-context file. Stale (it predates §13–§16 and disagrees with itself on test counts); prefer ARCHITECTURE.md and the code.
@@ -312,7 +318,58 @@ parsed since §14 with no consumer at all — this is its first.
   every MCP tool are advertised and promptable there, not just `remember`. `None` on a
   non-tty, so piped runs stay headless.
 
-**§21c (`/ref`, session summaries) is not built.**
+### Thread summaries and cross-thread references (`§21c`)
+
+`compaction.summarize_thread()` distils a whole thread and stores the result;
+`/summary` shows one, `/ref` attaches another thread's to the current conversation as a
+prompt tier. Built almost entirely out of §21a's parts — the compactor agent,
+`_summarize`'s length-checked retry, `_as_text`, `advances()` — so the load-bearing
+decisions are about the seams.
+
+- **A `ThreadSummary` is NOT a `CompactionCheckpoint`, and that is why it has its own
+  table** (M18). They carry nearly the same columns and mean opposite things: a
+  checkpoint *changes what the model sees* (`latest_checkpoint` resolves by timestamp and
+  feeds `_derived_view`), while a summary describes a thread and changes nothing about it.
+  A summary row in the checkpoint table would silently compact the thread it was only
+  meant to describe, and would win, being newest. Separate tables make that impossible
+  rather than warned about.
+- **`save_thread_summary` has no advance guard, and `save_checkpoint`'s is not cargo.** A
+  backwards compaction watermark un-compacts a live thread; a redundant summary row can
+  only describe a thread as it was a moment ago, which the next `advances()` check
+  notices. Do not copy the guard, and do not route a summary through `save_checkpoint`.
+- **The summary target is ABSOLUTE (`config.SUMMARY_TARGET_CHARS`), not a strength
+  ratio.** A ratio is right for a fold, where the summary replaces the span it came from
+  and scales with it. §21c's consumer is a prompt tier present on *every* turn of the
+  referencing thread, so a 500 KB source at strength 3 would inject 75 KB into every call
+  indefinitely.
+- **A thread already shorter than the target is stored verbatim, with no model call.** Its
+  own text is its best summary. Same instinct as `compact()`'s no-progress-no-call guard.
+- **Summaries read the ARCHIVE** (T3's reasoning, one section on). A view-based summary of
+  a compacted thread describes the *summary* of the conversation, degrading on every
+  compaction — the chaining loss M2 arranges the fold to avoid, arriving through another
+  door. The test for this needs a REAL compaction: the two spaces coincide until a
+  checkpoint exists.
+- **Staleness is detected, not assumed.** The stored watermark plus `advances()` means an
+  unchanged thread costs nothing however many times it is referenced, and a grown one is
+  re-summarized rather than served stale.
+- **`with_refs` goes OUTSIDE `with_catalogs()`** (M19) — §19's K6, **third** instance
+  after §21b's M13. A conversation referenced in a chat session would otherwise land in
+  all ten research passes.
+- **Refs are appended UNCONDITIONALLY, unlike memories.** Copying the
+  `if system_prompt is None` guard from the line above would make an active agent lose
+  every attached reference: a ref is thread state, and `system_prompt_for()` has no memory
+  object to read one from. It has its own test because the edit looks right.
+- **The cap REFUSES rather than dropping the oldest** (`MAX_INJECTED_REFS`). A reference is
+  something a person chose by name; making room silently is what M15's "removal is by id,
+  never by substring" rule exists to prevent. The fragment states the cap when it
+  truncates (M14) and says outright that the summaries are **not** this conversation's
+  history — the risk `SUMMARY_PREFIX` addresses for a compaction summary.
+- **`/summary` describes; `/compact` folds** (M20). Two different requests that happen to
+  share a summariser.
+- **The CLI gets flags, not slash commands** (M21): `--summary [thread]`, `--ref <thread>`
+  (repeatable). The CLI has no slash-command layer and adding one is §23's business. Both
+  go through the same `attach_ref` / `summarize_thread` the TUI uses, so the shells cannot
+  disagree about the cap or the stored shape.
 
 ### Live research view (§22)
 
@@ -433,6 +490,134 @@ independent bugs, both found by using the app.
   or `/copy all` keeps handing back a thread the session has left.
 - **In a pilot test, `app._transcript` queries the ACTIVE screen.** Reading it while a
   modal is up raises `NoMatches`; hold the widget before opening one.
+
+### The response channel (`core/interaction.py`, §23 slice 1)
+
+**One way to ask a human anything.** There were five: `permission_channel`
+(§13), `ApprovalProvider` (§25), `ReviewConsent` (§20), and §24's
+`ask_confirm_blocking` / `ask_project_kind_blocking`. Each re-derived what a
+dismissal carries, what a timeout means, how shutdown releases a parked
+worker, and how a malformed answer decodes.
+
+- **What is shared is `decode`, not the dataclasses** (J2). A `Request` /
+  `ResponseChannel` pair is nearly free to write badly — five call sites can
+  each build one and still each invent their own failure handling, which is
+  how there came to be five. One function owning the declining default per
+  kind is the part that pays, and §25's "the inability to ask is not
+  permission to proceed" becomes a property of the module rather than a habit
+  five places remember.
+- **`decode(request, raw)` takes the REQUEST** (J3). Two kinds cannot be
+  validated without knowing what was asked: a `CHOICE` only against the
+  options offered, a `SUBAGENT_SIGNOFF` subset only against the candidates
+  listed. With the kind alone, a shell could return a tool nobody offered and
+  thereby grant it.
+- **`decode(Request(kind), None) == SAFE_DEFAULTS[kind]` for every kind**
+  (J4), pinned by a test. That is what lets `ask()` route its no-channel and
+  callback-raised paths through `decode` rather than reading the table, so a
+  kind added later cannot carry a default its decoder disagrees with.
+- **An unknown KIND raises; an unanswerable question declines** (J5). An
+  unanswerable question is a runtime condition to fail safe on; an undefined
+  one is a bug, and inventing "no" would hide the typo that built the Request.
+- **Review decoding is STRICT** (J6). The two decoders it replaced disagreed —
+  `review.py` accepted a bare `"accept"` string, `tui/app.py` did not — and
+  neither behaviour was tested. Strict wins because review is the only kind
+  whose permissive failure *applies* an edit rather than declining one.
+- **`ToolSpec.request_kind` / `request_payload`** (J7) carry the shape of the
+  question and its tool-specific fields, for `grant_scope`'s reason: the loop
+  asks the registry, so no tool name appears in `core/loop.py`.
+- **The sign-off memo is keyed by (tool, SUBJECT)** (J8). `grant_scope="run"`
+  meant a second spawn was not asked at all — and the test pinning it spawned
+  agent `a` then agent `b`, so approving `a` authorised `b`'s whole gated set.
+  Per-tool sign-off makes the answer agent-specific, so the memo is too; the
+  same agent twice is still one prompt.
+- **The two parameters stay two.** §23 unified the mechanism, not the
+  arguments: `review` stays separate from `authorization.provider` because
+  `--review` without `--attended` is legitimate and one object would make it
+  unexpressible.
+- **`_obtain_approval` returns (approved, grant).** A sign-off's answer is
+  three-way — `None` refuses the spawn, `set()` spawns with nothing granted, a
+  non-empty set grants those — and `TUI`/`CLI` both offer all three. Collapsing
+  the middle one is the easy mistake; `interaction.decode` tests `isinstance`
+  rather than truthiness for exactly that reason.
+- **`tui/app.py` has one `_blocking_modal`.** Four asks did the same six lines,
+  and the `_permission_channel` field each published is what
+  `_release_permission_channel` reaches for when the app exits with a modal
+  open. It is no longer the loop's channel — it is this app's parked-worker
+  queue.
+
+### Project scaffolding (`project_init/`, §24)
+
+`/init` reads a project and writes its documentation set: `.venastine/CONTEXT.md`
+as the hub, plus the documents it links. `--init` on the CLI (M21's precedent —
+the CLI has no command layer).
+
+- **`write` and `read` are globally denied and cannot be re-enabled at runtime.**
+  Not a default: `is_tool_allowed()` reads `config.ToolPermissions()` directly,
+  `settings.json` has no `permissions` section (and `_KNOWN_SETTINGS` *raises* on
+  an unknown key), and D14 forbids a `ToolContext` widening anything — the global
+  check runs first and unconditionally. `dispatch("write", …)` therefore raises
+  `ToolCallDenied` **before** the `approval_callback` is consulted. §24's spec
+  preferred routing through `write`; that was not available.
+- **Two narrowly-scoped tools instead of flipping either global** (I1/I2).
+  `read_project_doc` is confined by realpath to the project and by an allowlist to
+  documentation and manifests; `write_project_doc` takes a document **name** from
+  a fixed allowlist and has **no path parameter at all**, so the destination is
+  derived and it cannot be aimed elsewhere. Flipping the globals would hand every
+  agent and all ten research passes standing file access to serve one command.
+- **The readable set is documentation, not "text files", and that is
+  load-bearing.** A registered tool with permission `True` is advertised to EVERY
+  run — the initializer's `allowed_tools` narrows *that agent*, not plain chat or
+  a research pass. Keeping the set narrow means the most a prompt-injected pass
+  gains is the project's own README. `.venastine/`, `.env*` and `providers.json`
+  are denied outright.
+- **`CONTEXT.md` is the hub and the only document in `.venastine/`** (I9). The
+  rest are ordinary committed root files it links out to, so the one file every
+  agent reads is also the map of the ones it does not.
+- **The index is generated, and is a pure function of the kind** (I11). It first
+  marked which documents already existed — which rewrote `CONTEXT.md` on every
+  later `/init` (the index changed because the previous run had created the
+  files) and labelled documents `/init` had authored moments earlier as
+  pre-existing work it had preserved. Which files a run left alone is a fact
+  about that run; it belongs in its report, and is there.
+- **Stubs are templates; only `CONTEXT.md` is generated** (I10). A DEVLOG written
+  for a project with no history is confident fiction in a file that then gets
+  committed, linked from the hub and read as established. Stubs carry headings, a
+  what-belongs/what-does-not pair, and only facts the manifest established
+  deterministically.
+- **Discovery is a directory walk** — no model call, no tool call — so two runs on
+  an unchanged project produce byte-identical input, which is what makes the
+  output diffable. The manifest carries **sizes** because choosing what to read
+  needs them: this repo's own root markdown is 721 KB against a 20 KB per-read cap.
+- **The manifest is the TASK, not a system-prompt tier.** §19's K6 does not apply
+  only because of that — the same way `_summarize` passes `segment_text` as
+  `user_goal`. In the system prompt it would reach all ten research passes.
+- **The agent produces text; the shell writes** (I8). `initializer.md` gets
+  `read_project_doc` and nothing else. Diffing, asking and dispatching happen in
+  `project_init/generator.py`, because consent belongs to the shell (§20's V3) and
+  a tool writing from inside the loop could not show a human a diff first.
+- **One consent, covering a named list.** `write_project_doc` is gated, so the
+  naive version prompts eight times per command — the shape of consent that gets
+  clicked through. The user sees the diff and the file list once, and that answer
+  becomes the `approval_callback` for every dispatch, the move `core/loop.py`
+  already makes after a channel approval.
+- **No confirm route means nothing is written** (I5) — §25's V6, sixth instance.
+- **Trust is re-granted only for a project that was ALREADY trusted** (I6), and
+  the state is captured **before** the write, since the hash has moved afterwards.
+  In an untrusted project `.venastine/` may already hold agents, skills and an
+  `mcp.json` that arrived with a cloned repo, and granting as a side effect of
+  `/init` would wave all of it through. `CONTEXT.md` is never special-cased out of
+  the hash — that is the same hole with a smaller mouth.
+- **`/init` runs on its own budget** (I7). `INIT_TOKEN_BUDGET` for
+  `RESEARCH_PASS_TOKEN_BUDGET`'s reason (TECHNICAL_DEBT item 9's meter re-counts
+  the whole prompt every step), `INIT_READ_CHARS` well below `MAX_READ_CHARS`, and
+  `INIT_MAX_STEPS` because neither of those bounds the *number* of reads.
+- **The initializer is a SIXTH thread source.** §27 found the compactor as the
+  fifth; this run is labelled `thread_kind=THREAD_KIND_SUBAGENT` for the same
+  reason.
+- **Detect-then-confirm, but ask outright for a blank folder** (I13). With no
+  manifests, no source and no docs there is nothing to infer from, so a proposal
+  would be a guess wearing a finding's clothes. The proposal itself is a Python
+  heuristic, not a model call, and the user confirms it either way.
 
 ### Config loading and workspace trust (ROADMAP_v2 §14)
 

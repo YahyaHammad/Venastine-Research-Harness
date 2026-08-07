@@ -582,3 +582,107 @@ def test_replaying_a_compacted_thread_shows_the_original_first_message(
     assert "THE ORIGINAL FIRST QUESTION" in entries[0][1]
     assert not any(SUMMARY_PREFIX in text for _, text in entries), \
         "a replay must never render the summary as something the user said"
+
+
+# ---------------------------------------------------------------------------
+# ---- ROADMAP_v2 §21c: a summary is not a checkpoint ------------------------
+# ---------------------------------------------------------------------------
+#
+# HERE rather than in test_thread_refs.py because the question is what the two
+# TABLES do to each other on a real database. The fake keeps them in separate
+# dicts, which is exactly what a test asserting they stay separate must not
+# rely on.
+
+def test_a_thread_summary_does_not_compact_the_thread(real_storage, compactor):
+    """M18, against real SQL. ThreadSummary and CompactionCheckpoint carry
+    almost the same columns and mean opposite things: `latest_checkpoint`
+    resolves by timestamp and drives the derived view, so a summary written
+    into that table would become the live watermark -- being newest -- and fold
+    the thread it was only meant to describe.
+    """
+    import importlib
+
+    from core import compaction
+    from core.memory import ConversationMemory
+    import core.replay as replay_module
+
+    importlib.reload(replay_module)
+
+    memory = ConversationMemory()
+    memory.add_user_message("THE ORIGINAL FIRST QUESTION " + "x" * 200)
+    memory.add_assistant_message(_Resp("an answer " + "x" * 200))
+    _add_turns(memory, 4, "later")
+    before = list(memory.messages)
+
+    notice = compaction.summarize_thread(
+        memory.thread_id, "claude-sonnet-5", "ANTHROPIC")
+
+    assert notice is not None
+    assert real_storage.latest_thread_summary(memory.thread_id) is not None
+    assert real_storage.latest_checkpoint(memory.thread_id) is None
+    assert ConversationMemory(thread_id=memory.thread_id).messages == before
+
+
+def test_a_summary_of_a_compacted_thread_describes_the_conversation(
+        real_storage, compactor):
+    """The archive, not the derived view. A view-based summary would describe
+    the SUMMARY of the early conversation rather than the conversation -- the
+    compounding loss M2 arranges the fold to avoid, arriving through a
+    different door.
+
+    Needs a REAL compaction: the archive and the view coincide until a
+    checkpoint exists, which is how §21a's watermark defect survived 849 tests.
+    """
+    from core import compaction
+    from core.memory import ConversationMemory
+
+    memory = ConversationMemory()
+    memory.add_user_message("THE ORIGINAL FIRST QUESTION " + "x" * 200)
+    memory.add_assistant_message(_Resp("an answer " + "x" * 200))
+    # Big enough that the DERIVED VIEW alone still exceeds
+    # SUMMARY_TARGET_CHARS. Without this the view-based version returns the
+    # verbatim short-thread result, makes no call at all, and the assertions
+    # below read the COMPACTION's call instead -- which carries the original
+    # text and so passes. That is how this test was wrong the first time.
+    _add_turns(memory, 12, "later")
+    compaction.compact(memory, "claude-sonnet-5", "ANTHROPIC",
+                       overrides=OVERRIDES)
+    assert real_storage.latest_checkpoint(memory.thread_id) is not None
+    calls_before = len(compactor)
+
+    compaction.summarize_thread(
+        memory.thread_id, "claude-sonnet-5", "ANTHROPIC")
+
+    assert len(compactor) > calls_before, \
+        "the summary made no model call, so the assertions below would be " \
+        "reading the compaction's call rather than the summary's"
+    sent = compactor[-1]["user_goal"]
+    assert "THE ORIGINAL FIRST QUESTION" in sent
+    assert "Summary #" not in sent, \
+        "the summary was built from the compaction summary, not the archive"
+
+
+def test_the_stored_summary_survives_and_reports_staleness(real_storage,
+                                                          compactor):
+    """The cache is the point: a `/ref` of an unchanged thread must cost no
+    model call however many times it is referenced."""
+    from core import compaction
+    from core.memory import ConversationMemory
+
+    memory = ConversationMemory()
+    _add_turns(memory, 6, "material")
+    compaction.summarize_thread(memory.thread_id, "claude-sonnet-5", "ANTHROPIC")
+    calls_after_first = len(compactor)
+
+    again = compaction.summarize_thread(
+        memory.thread_id, "claude-sonnet-5", "ANTHROPIC")
+
+    assert len(compactor) == calls_after_first, "an unchanged thread paid twice"
+    assert again["fresh"] is False
+
+    _add_turns(memory, 1, "new")
+    fresh = compaction.summarize_thread(
+        memory.thread_id, "claude-sonnet-5", "ANTHROPIC")
+
+    assert len(compactor) > calls_after_first
+    assert fresh["fresh"] is True

@@ -36,6 +36,22 @@ class ToolSpec:
     # the registry what a tool's grant scope is, the same way it asks
     # whether approval is needed at all. §23's response channel reuses it.
     grant_scope: Optional[str] = None
+    # ROADMAP_v2 §23. Which KIND of question approving this tool asks.
+    # "approval" (the default) is a yes/no; spawn_subagent sets
+    # "subagent_signoff", whose answer is the SUBSET of tools the child may
+    # then use without asking again.
+    #
+    # A property of the tool rather than a name hard-coded into
+    # core/loop.py, for exactly the reason grant_scope is: the loop asks
+    # the registry what shape of question a tool needs, the same way it
+    # asks whether it needs one at all.
+    request_kind: str = "approval"
+    # Optional extra fields for that question's payload, when the answer
+    # depends on something only the tool knows. Signature:
+    # (params, context) -> dict. spawn_subagent uses it to carry the
+    # candidate tool list, which is agents/manager.py's knowledge and must
+    # not become the loop's. Mirrors approval_notice exactly.
+    request_payload: Optional[Callable[[dict, object], dict]] = None
     # Optional extra text shown in the approval prompt, above the params.
     # Signature: (params, context) -> str. Lets a tool explain what
     # approving actually authorises when the params alone don't say --

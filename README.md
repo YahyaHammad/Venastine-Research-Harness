@@ -245,8 +245,17 @@ Tools are namespaced `mcp__<server>__<tool>`. A server that fails to connect is 
 /research      /claims [run id]     /copy [last|report|claims|all] [--file <path>]
 /compact       /threads             /new                     /quit
 /agent         /goal                /grill-me                /skill
-/memories      /forget
+/memories      /forget               /summary                 /ref [--list|--clear]
+/init [--software|--research]
 ```
+
+When a subagent is spawned, you are asked which of its approval-gated tools it may use without asking again — per tool, all unticked by default. Running it with none selected is fine, and refusing the spawn entirely is a separate answer from granting it nothing. Before this, approving a spawn authorised the child's whole set.
+
+`/init` reads the project and writes its documentation set. `.venastine/CONTEXT.md` is the hub — the short, factual description this harness injects into every agent that opts into project context — and it links out to the documents that hold the detail: `ARCHITECTURE`, `ROADMAP`, `DEVLOG`, `TECHNICAL_DEBT`, `DOCUMENTATION_STANDARDS`, `TEST_WRITING` and `BREAKING_CHANGES` for a codebase, or `RESEARCH_QUESTIONS`, `METHODOLOGY`, `SOURCES`, `FINDINGS`, `LIMITATIONS`, `EXPERIMENT_LOG` and `OPEN_QUESTIONS` for written work. It asks which kind you have — proposing an answer when there is something to go on, and asking outright when the folder is empty.
+
+Only `CONTEXT.md` is written for you in full; the rest arrive as skeletons with real headings and a note in each saying what belongs in it and what does not. That is deliberate: a DEVLOG invented for a project with no history is fiction in a file that then gets committed and read as fact. Documents you already have are never touched, and regeneration revises your `CONTEXT.md` rather than replacing it — you see a diff and approve it before anything is written. From the CLI it is `--init`, with `--software-project` / `--research-project` to skip the question.
+
+`/summary` distils this conversation and shows it — it does **not** shorten what the model sees; that is `/compact`. `/ref` picks another conversation, summarises it, and attaches that summary to this one as standing context: you choose what crosses between threads, so nothing read or argued in one conversation can steer another without your say-so. `/ref --list` and `/ref --clear` are the way back out, and the summaries are labelled so the model knows they are not part of this conversation. From the CLI the same two are launch flags: `--summary <thread>` and a repeatable `--ref <thread>`.
 
 `/threads` lists your **conversations** — not the ~15 internal threads each research run creates, nor the one every automatic compaction makes. Each row leads with its first message so you can tell them apart. A run's own pass threads are recorded with the run (`output/<run_id>/pass_threads.json`) and can still be opened by id with `--thread`, if you want to see how a particular pass argued.
 
@@ -270,11 +279,11 @@ Precedence for provider and model is CLI flag > `settings.json` > `config.py`.
 
 ## Status
 
-**Built:** ROADMAP.md §1–§12 (§10's ensemble mode carries a revisit note) and ROADMAP_v2.md §13 (streaming loop), §14 (config loader + workspace trust), §15 (permissions), §16 (TUI), §17 (MCP), §18 (agents), §19 (skills), §20 (post-pipeline review), §21a (compaction + `pin`), §21b (durable memory), §22 (live pipeline progress), §25 (authorised tool use in the pipeline), §26 (research legibility: per-pass tool calls, code-stage announcements, the claims view, role colour, `/copy`), §27 (thread legibility: transcript replay on resume, a conversations-only thread picker).
+**Built:** ROADMAP.md §1–§12 (§10's ensemble mode carries a revisit note) and ROADMAP_v2.md §13 (streaming loop), §14 (config loader + workspace trust), §15 (permissions), §16 (TUI), §17 (MCP), §18 (agents), §19 (skills), §20 (post-pipeline review), §21a (compaction + `pin`), §21b (durable memory), §22 (live pipeline progress), §25 (authorised tool use in the pipeline), §26 (research legibility: per-pass tool calls, code-stage announcements, the claims view, role colour, `/copy`), §27 (thread legibility: transcript replay on resume, a conversations-only thread picker), §21c (session summaries and cross-thread referencing — §21 is now complete).
 
-**Remaining:** §21c (cross-thread referencing, session summaries) and §23–§24 (interactive tools, `/init`).
+**Remaining:** §23–§24 (interactive tools, `/init`).
 
-Run the test suite with `pytest` — 1060 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
+Run the test suite with `pytest` — 1246 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
 
 ## Documentation
 

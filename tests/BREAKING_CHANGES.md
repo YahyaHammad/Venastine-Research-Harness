@@ -827,3 +827,101 @@ and then reads `app._transcript` gets `NoMatches`, because the query runs
 against the pushed screen. Hold a reference to the widget BEFORE opening the
 modal — `test_resuming_clears_the_screen_and_replays` does, and the comment
 there says why.
+
+---
+
+## 13. ROADMAP_v2 §21c — the summary store, and the tier every shell owes
+
+§21c added `storage.ThreadSummary` plus three functions, and a prompt tier that two
+shells must both apply. Nothing here fails at the edit site.
+
+| Change | What breaks | Fix / why |
+|---|---|---|
+| A `FakeStorage` without `latest_thread_summary` / `save_thread_summary` | `AttributeError` from inside `core/compaction.py`, in whichever test drove a summary | Both are mirrored in `_thread_summaries`, a dict kept SEPARATE from `_checkpoints` for the same reason production uses a separate table. `last_message_id` and `advances` are deliberately NOT mirrored — both read `_ordered_rows`, which is faked, so the real position arithmetic runs under test |
+| Route a summary through `save_checkpoint` (or add an advance guard to `save_thread_summary`) | `test_a_thread_summary_does_not_compact_the_thread` (real SQL), `test_summarizing_does_not_change_what_the_model_sees` | M18. `latest_checkpoint` resolves by timestamp and feeds `_derived_view`, so a summary row there becomes the live watermark and folds the thread it describes. The missing guard is a decision, not an omission |
+| `summarize_thread` reads `memory.messages` | `test_it_reads_the_archive_not_the_derived_view`, and the real-storage `test_a_summary_of_a_compacted_thread_describes_the_conversation` | T3's reasoning. Note the real-storage test needs a thread whose DERIVED VIEW alone exceeds `SUMMARY_TARGET_CHARS` — otherwise the view-based version stores verbatim, makes no call, and the assertions read the compaction's call instead. That is how it was wrong the first time |
+| Make the summary target a `COMPACTION_TARGET_RATIOS` entry | `test_the_target_is_absolute_not_a_strength_ratio` | The consumer is a prompt tier on every turn, so nothing bounds a proportional target. The test asserts the two candidate numbers DIFFER before asserting which was used — without that it passes either way |
+| Remove the fits-already branch | `test_a_short_thread_costs_no_model_call` | A thread shorter than the budget is its own best summary |
+| Drop the `advances()` staleness check, either direction | `test_an_unchanged_thread_is_served_from_the_store` or `test_a_grown_thread_is_re_summarized` | Both directions matter: serving stale, and paying twice for an unchanged thread |
+| Append `with_refs` inside `with_catalogs()` | `test_no_ref_reaches_a_research_pass_prompt` | K6's THIRD instance (skills, then §21b's memories). A conversation referenced in a chat session must not reach ten research passes |
+| Guard `with_refs` with `if system_prompt is None`, copying the memories line above it | `test_an_agent_built_prompt_still_gets_them` | Refs are thread state, and `system_prompt_for()` has no memory object — so an active agent would silently lose every attached reference. A two-word edit that reads as consistency |
+| Remove either `with_refs` call site | `test_a_real_chat_turn_sends_the_refs` or `test_the_tui_turn_sends_them_too` | Tested independently, because §21b recorded that testing only the helper leaves everything green when a call site goes |
+| Make the ref cap drop the oldest | `test_the_cap_refuses_rather_than_dropping_the_oldest` | A reference is something a person chose by name; M15's rule against silent removal |
+| Stop stating the cap in the fragment | `test_the_cap_is_applied_and_stated` | M14's no-silent-caps rule: the count reaches the MODEL, not only a log |
+| `/summary` calls `compact()` | `test_it_shows_the_summary_without_folding_the_thread` | M20. Same summariser, different request |
+| Remove the picker's `thread_id is None` guard | `test_a_dismissed_picker_does_nothing_at_all` | NOTE: an earlier version of this test asserted only "nothing was attached" and passed with the guard gone — summarising a None thread fails downstream, so refs stayed empty while the user got told "Could not summarise thread None". The assertion is on the whole outcome: no work, no output, `_busy` released |
+
+### Standing: a shell that applies `with_goal` owes the same site a `with_refs`
+
+Both are thread state read off `memory.extra`, and both are appended by the shells
+rather than by the assembly point they share (K6). A new shell — or a new turn path in
+an existing one — that applies one and not the other produces a reference that silently
+does nothing on that path. The same standing note covers `with_memories`, with the
+caveat that memories are conditional on there being no agent-built prompt and refs are
+not.
+
+## §14 — `/init` and the project documentation set (ROADMAP_v2 §24, `test_project_init.py`)
+
+| Change | Breaks | Why |
+|---|---|---|
+| Write with `open()` instead of `registry.dispatch` | `test_the_write_goes_through_the_registry` | AC3/I1. Dispatch is what applies the approval gate, `check_input_policy` and output redaction |
+| Give `write_project_doc` a `path` parameter | `TestTheScopedTools` | I1. "Cannot be aimed elsewhere" is structural because there is no path to supply — validating one instead is a weaker claim |
+| Drop the document-name allowlist | `TestTheScopedTools` | The allowlist IS the confinement once the path is gone |
+| Resolve `read_project_doc`'s path without `realpath` first | `test_read_follows_symlinks_before_deciding` | A link that looks contained and resolves outside is exactly the case the ordering exists for |
+| Widen `read_project_doc` to any text file | `TestTheScopedTools` | A permission-`True` tool is advertised to EVERY run, not only `/init`'s. Widening it turns it into `read` with no approval gate, reachable from a research pass |
+| Raise `INIT_READ_CHARS` to `MAX_READ_CHARS` | `test_read_caps_below_the_general_read_tool` | TECHNICAL_DEBT item 9: each read is re-billed on every later step |
+| Drop `max_total_tokens=INIT_TOKEN_BUDGET` | `test_the_run_gets_its_own_budget_not_the_chat_one` | §26's reasoning — the chat budget cuts a tool-heavy run off early |
+| Drop `thread_kind` from the initializer run | `test_the_run_is_labelled_as_a_subagent_thread` | §27: the initializer is a SIXTH thread source |
+| Give the initializer a write tool | `test_the_agent_can_only_read` | I8. The agent drafts; the shell writes, because only the shell can show a human a diff |
+| Let `confirm=None` proceed | `test_no_confirm_route_writes_nothing` | §25's V6, sixth instance |
+| Stop passing the existing `CONTEXT.md` to the agent | `test_an_existing_context_is_given_to_the_agent_to_revise` | I4. Hand edits survive by design, not by the user re-applying them after rejecting a diff |
+| Overwrite documents that already exist | `test_an_existing_document_is_left_exactly_as_it_was` | I12. Only `CONTEXT.md` is a file `/init` claims to author |
+| Make `render_index` depend on what is on disk | `test_a_second_run_changes_nothing` | I11, and the defect that found it: the second run rewrote `CONTEXT.md` and called files `/init` had just written "pre-existing" |
+| Re-grant trust unconditionally | `test_an_untrusted_project_is_not_laundered` | I6. A cloned repo's `.venastine/` must not become trusted as a side effect of an unrelated command |
+| Capture `is_trusted()` after the write | `TestWorkspaceTrust` | The hash has already moved, so a trusted project reads as untrusted and is never re-granted |
+| Exclude `CONTEXT.md` from the D17 hash | `test_context_md_still_counts_towards_the_hash` | Same hole as the above, with a smaller mouth |
+| Drop `_is_secret` from `manifest._tree` | `test_the_manifest_hides_credential_files` | NOTE: the identical call in `_root_documents` is currently UNREACHABLE — nothing is both "interesting" and secret — so mutating that one proves nothing. `_tree` is the load-bearing call |
+| Return the raw answer from `ask_project_kind_blocking` | `test_an_unrecognised_kind_answer_cancels` | NOTE: asserting "nothing was written" passes either way, because `generate()` refuses a non-kind downstream. The test asserts the outcome that differs — a clean cancellation rather than an error quoting a value the user never chose |
+
+### Standing: a broken `/init` modal presents as a HUNG suite, not a red one
+
+Two mutations here — `ConfirmScreen.action_decline` dismissing with no value, and
+skipping the project-kind modal so the confirmation opens unexpectedly — leave the
+`/init` worker parked on `queue.get()`. That also blocks `run_test()`'s teardown, so
+pytest stops rather than failing. It is the "every dismissal path carries a value"
+invariant doing its job (§16 AC2's original lesson, now in its sixth place), but if the
+suite hangs in `test_project_init.py`, look for a modal path that dismisses with
+nothing before looking for an infinite loop.
+
+## §15 — the response channel (ROADMAP_v2 §23 slice 1, `test_interaction.py`)
+
+| Change | Breaks | Why |
+|---|---|---|
+| Make `decode` return the raw value | `TestReview`, `TestChoice` | The whole module exists so one function decides what a non-answer means |
+| Make `ask(None, request)` permissive | `TestEveryRouteDeclines` | §25's V6: the inability to ask is not permission to proceed |
+| Narrow `ask`'s `except Exception` | `TestEveryRouteDeclines` | A shell that raises must decline, not propagate into the loop |
+| Give a kind a permissive default | `test_every_default_declines` | The asymmetry IS the design |
+| Return a default for an unknown kind | `test_an_unknown_kind_raises_rather_than_defaulting` | An undefined question is a bug; inventing "no" hides the typo |
+| Accept a bare `"accept"` string for review | `TestReview`, `test_the_modal_answer_decoder_fails_safe` | The one kind whose permissive failure APPLIES an edit. The two decoders this replaced disagreed here |
+| Test sign-off emptiness with `if raw:` | `TestSubagentSignoff` | Folds "spawn with nothing granted" into "refuse the spawn" — the middle of three answers |
+| Drop the candidates intersection | `test_a_name_that_was_not_offered_is_not_granted` | A shell must not grant a tool nobody offered. Only possible because `decode` takes the request |
+| Drop the options check on a choice | `TestChoice` | Same, and it is the guard §24 shipped by hand and untested |
+| Pass the kind to `decode` instead of the request | everything above | Two kinds become unverifiable |
+
+### §23's migration, in the files it touched
+
+| Change | Breaks | Why |
+|---|---|---|
+| Bypass `interaction.ask` in `_obtain_approval` | `test_streaming_loop.py`, `test_attended.py` | One route is the point |
+| `headless = False` | `TestHeadlessIsAboutBeingUNABLEToAsk` | "No way to ask" is one condition again |
+| Ignore `honour_run_scope` | `TestRunScope` | §25 R11: attended mode must re-ask |
+| Drop the bundle's channel from `_authorization_kwargs` | `test_review.py`, `test_research_authorization.py` | §20's reviewer inherits the run's channel |
+| `a or kwargs.pop(...)` for the channel merge | `test_passing_both_does_not_raise` | Short-circuits, so the key survives on the path where an explicit channel was passed — "got multiple values for keyword argument" |
+| Remove `walk_consent`'s `consent is None` branch | `test_findings_are_recorded_but_nothing_is_applied` | NOTE: V6's OUTCOME now holds without it, because `ask(None, …)` declines. What the guard uniquely provides is the audit trail — a `reason_declined` and a trace line, rather than a rejection indistinguishable from a human's |
+| Drop `request_kind="subagent_signoff"` from the registration | `TestTheSignoffIsActuallyWired` | NOTE: the memo test PATCHES `request_kind`, so it cannot see this |
+| Empty `request_payload`'s candidate list | `TestTheSignoffIsActuallyWired` | Same — patched away by the memo test |
+| Drop `signoff` from dispatch's injection map | `test_dispatch_injects_the_subset_into_the_handler` | Every other sign-off test calls `subagent_tool.run()` directly |
+| Grant `candidate_approvals` wholesale again | `test_spawn_forwards_the_channel_and_the_grant` | The pre-§23 behaviour AC1b exists to end |
+| Treat a `None` sign-off as approval | `test_refusing_a_spawn_stops_it_happening` | Refusing the spawn and spawning with nothing granted are different outcomes |
+| Key the sign-off memo by tool name only | `test_s1_signoff_is_remembered_per_agent_not_per_tool_name` | J8: one prompt about agent `a` must not cover agent `b` |
+| `SubagentSignoffScreen`'s escape dismissing `set()` | `TestTheSignoffScreen` | Escape refuses; it does not run with nothing granted |

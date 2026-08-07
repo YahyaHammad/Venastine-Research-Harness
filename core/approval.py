@@ -16,28 +16,29 @@ whether a tool is allowed at all and whether a call needs approval (D14,
 question that policy raised. That is why a grant lives on RunInfo and not
 in ToolContext.approval_overrides -- those OR, so they can only tighten.
 
-§20 adds a THIRD thing that is not either of those: ReviewConsent, the
-human's answer to "may this edit be applied?". It lives here because it
-has the same shape and the same reason for existing -- a decision the
-shell knows how to obtain and the pipeline must not hard-code -- not
-because it is a way for a tool call to proceed. See its docstring for why
-it is not folded into RunAuthorization.
+§23 CARRIED OUT the generalisation this module used to anticipate.
+`ApprovalProvider` and `ReviewConsent` both lived here and are gone: they
+were two caller-supplied ways to ask a question and block for an answer,
+and they are now one, `core.interaction.ResponseChannel`. What remains
+here is authorization DATA -- what the human already decided and how much
+of it is left to spend -- which is a different thing from the means of
+asking, and is why the two are separate modules rather than one.
 
-Deliberately a leaf module with no project imports. core/loop.py,
-main.py, tui/app.py and core/reasoning/ all depend on it; it depends on
-none of them.
+`RunAuthorization.provider` therefore holds a ResponseChannel now. The
+field keeps its name because it plays the same role in the bundle: the
+route by which a run can obtain an answer it does not already have.
 
-§23 will generalise `permission_channel` into a response channel carrying
-typed requests and responses. ApprovalProvider is the shape that channel
-should ABSORB -- one caller-supplied way to ask a question and block for
-an answer -- not a second mechanism to sit alongside it. It exists now
-because the research pipeline needs to ask before §22 makes the
-orchestrator a generator: run_to_completion() discards the LoopEvent that
-carries the question, so a bare queue would block with nothing displayed.
+Deliberately a leaf module with no project imports -- core/interaction.py
+is imported for typing only, and it is itself a leaf. core/loop.py,
+main.py, tui/app.py and core/reasoning/ all depend on both; neither
+depends on them.
 """
 
 from dataclasses import dataclass, field
-from typing import Callable, Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:  # pragma: no cover - typing only, never imported at runtime
+    from core.interaction import ResponseChannel
 
 
 class GrantBudget:
@@ -76,57 +77,6 @@ class GrantBudget:
 
 
 @dataclass
-class ApprovalProvider:
-    """A caller-supplied way to ask the user about one call and block.
-
-    ask(tool_name, params, notice) -> bool. Implementations live in the
-    shells, because only they know how to reach the human: main.py reads
-    stdin, tui/app.py posts to the UI thread and waits on a queue.
-
-    honour_run_scope mirrors ToolSpec.grant_scope. A provider that sets it
-    False makes every call ask, even for a tool whose approval would
-    normally cover the rest of the run. Attended mode sets it False: a
-    mode whose entire purpose is per-call supervision must not let one yes
-    silently cover later calls, however sensible that shortcut is in a
-    chat turn.
-    """
-
-    ask: Callable[[str, dict, Optional[str]], bool]
-    honour_run_scope: bool = True
-
-
-@dataclass
-class ReviewConsent:
-    """A caller-supplied way to ask the user about one proposed correction
-    and block. ROADMAP_v2 §20 (V3/V4).
-
-    decide(finding, round) -> (decision, notes), where decision is one of
-    "accept", "reject", "refine" or "reject_all", and notes carries the
-    free-text steer that only "refine" reads.
-
-    NOT a field on RunAuthorization, deliberately. That bundle answers "may
-    this gated call proceed?"; this answers "may this edit be applied?" --
-    a different question, at a different stage, with a different set of
-    answers. §25 warned against multiplying KINDS of authorization inside
-    the bundle, and folding an edit decision in there would be exactly
-    that. Both belong in §23's response channel eventually; until then they
-    stay two named things rather than one overloaded one.
-
-    Absent means nobody can be asked, and V6 makes that decisive: the
-    review still runs and still records what it found, but nothing is
-    applied. Same posture as a headless run's gated tools -- the inability
-    to ask is not permission to proceed.
-
-    "reject_all" ends the walk and declines everything remaining. It is
-    safe by construction because it only ever DECLINES: the escape hatch a
-    long review needs cannot be the one that turns fatigue into a
-    reflexive accept.
-    """
-
-    decide: Callable[[dict, int], tuple]
-
-
-@dataclass
 class RunAuthorization:
     """Everything a run needs to answer "may this gated call proceed?".
 
@@ -140,12 +90,14 @@ class RunAuthorization:
         tools the registry reports as grantable; the loop re-checks rather
         than trusting the set, so a stale or hand-edited name cannot widen
         anything.
-    provider: present iff someone can be asked during the run.
+    provider: a core.interaction.ResponseChannel, present iff someone can
+        be asked during the run. §23 replaced ApprovalProvider here; the
+        field name stays because its role in the bundle is unchanged.
     budget: shared across every pass of one pipeline run.
     """
 
     granted_tools: set = field(default_factory=set)
-    provider: Optional[ApprovalProvider] = None
+    provider: Optional["ResponseChannel"] = None
     budget: Optional[GrantBudget] = None
     # Calls that proceeded on the grant, accumulated across every pass of
     # one run. Lives here rather than in module state or a per-pass return

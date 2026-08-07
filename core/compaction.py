@@ -373,6 +373,124 @@ def compact(memory, model: str, provider_name: str,
     }
 
 
+def summarize_thread(thread_id, model: str, provider_name: str,
+                     overrides: Optional[dict] = None,
+                     authorization=None) -> Optional[dict]:
+    """Distil a WHOLE thread into a stored summary (ROADMAP_v2 §21c).
+
+    Returns a notice dict carrying the summary, or None if the thread has
+    nothing in it. The shape matches compact()'s notices, so both shells
+    render it with code they already have.
+
+    THIS IS NOT A COMPACTION and must never become one. compact() folds a
+    span of the thread it is given, changing what the model sees on the next
+    turn; this reads a thread and writes a description of it, leaving the
+    thread untouched -- which is what lets `/ref` inject one thread's summary
+    into a different thread, and what lets `/summary` show one without
+    quietly shortening the conversation the user is having (M20).
+
+    THE ARCHIVE, NEVER THE DERIVED VIEW. `archive_history` returns every
+    message ever written, so a summary of a compacted thread describes the
+    conversation rather than describing the summary of it. A view-based
+    version would degrade a little on every compaction, exactly the chaining
+    loss M2 arranges the fold to avoid.
+
+    CACHED, AND STALENESS IS DETECTED RATHER THAN ASSUMED. The stored row
+    carries the last archive position it accounts for, so `advances()` --
+    which already answers "has this thread moved past that point?" for
+    compaction -- says whether the summary still holds. An unchanged thread
+    therefore costs no model call however many times it is referenced, and a
+    grown one is re-summarized rather than silently served stale.
+
+    A THREAD ALREADY SHORTER THAN THE TARGET IS NOT SENT TO A MODEL. Its
+    rendered text IS its own best summary, and asking a model to compress
+    three messages into more characters than they occupy spends a call to
+    make the answer worse. Same instinct as compact()'s no-progress-no-call
+    guard.
+
+    The target is an ABSOLUTE character budget (`config.SUMMARY_TARGET_CHARS`),
+    not `_target_chars`' strength ratio. A ratio is right for a fold, where
+    the summary replaces the span it came from and scales with it. It is wrong
+    here: §21c's consumer is a prompt tier present on EVERY turn of the
+    referencing thread, so a proportional target would let one big thread
+    inject tens of kilobytes into every call indefinitely.
+    """
+    global _compacting
+
+    from agents.manager import manager
+    from core.loop import RunAgentLoop, DEFAULT_SYSTEM_PROMPT
+    from storage import (
+        advances, archive_history, last_message_id, latest_thread_summary,
+        save_thread_summary,
+    )
+
+    if _compacting:
+        return None
+
+    watermark = last_message_id(thread_id)
+    if watermark is None:
+        return None
+
+    existing = latest_thread_summary(thread_id)
+    if existing is not None and not advances(
+            thread_id, existing.covers_up_to_message_id, watermark):
+        return {
+            "kind": "thread_summary",
+            "text": existing.summary_text,
+            "thread_id": str(thread_id),
+            "fresh": False,
+        }
+
+    thread_text = _as_text(archive_history(thread_id))
+    original = len(thread_text)
+    target = config.SUMMARY_TARGET_CHARS
+
+    if original <= target:
+        save_thread_summary(thread_id, thread_text, watermark)
+        return {
+            "kind": "thread_summary",
+            "text": thread_text,
+            "thread_id": str(thread_id),
+            "fresh": True,
+            "verbatim": True,
+        }
+
+    agent = manager.get(config.COMPACTOR_AGENT)
+    if agent is None:
+        logger.warning(
+            "A thread summary was wanted but the %r agent is not available; "
+            "skipped.", config.COMPACTOR_AGENT)
+        return None
+
+    settings = config_loader.effective_compaction(overrides)
+    # The guard for the same reason compact() sets it (M3): the compactor is
+    # an agent, so summarizing runs the loop, which evaluates the compaction
+    # trigger. Its own thread is one turn long and would not trip it today,
+    # which is exactly the kind of "cannot happen yet" that stops being true
+    # quietly.
+    _compacting = True
+    try:
+        summary = _summarize(
+            RunAgentLoop, manager, agent, DEFAULT_SYSTEM_PROMPT,
+            thread_text, target, original, model, provider_name,
+            settings["max_retries"], authorization)
+    finally:
+        _compacting = False
+
+    if summary is None:
+        return None
+
+    save_thread_summary(thread_id, summary, watermark)
+    logger.info("Summarized thread %s: %s chars -> %s.",
+                thread_id, original, len(summary))
+    return {
+        "kind": "thread_summary",
+        "text": summary,
+        "thread_id": str(thread_id),
+        "fresh": True,
+    }
+
+
 def _summarize(loop_cls, manager, agent, base_prompt, segment_text, target,
                original, model, provider_name, max_retries, authorization):
     """Run the compactor, retrying while the summary overshoots its target.

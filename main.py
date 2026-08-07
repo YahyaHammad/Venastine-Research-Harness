@@ -318,7 +318,12 @@ def _stdin_reader() -> _StdinReader:
 
 
 def build_attended_provider(honour_run_scope: bool = False):
-    """An ApprovalProvider that asks at the terminal (§25 R9).
+    """A ResponseChannel that asks at the terminal (§25 R9, §23 AC1).
+
+    ONE channel for every kind of question the CLI can be asked, replacing
+    §25's ApprovalProvider. `ask` dispatches on request.kind; adding a kind
+    means adding a branch here, not a second builder and a second parameter
+    threaded through four layers.
 
     honour_run_scope=False for ATTENDED RESEARCH: that mode exists for
     per-call supervision, so one yes must not silently cover later calls of
@@ -329,22 +334,24 @@ def build_attended_provider(honour_run_scope: bool = False):
     asked about the same tool three times in one turn is the noise §18
     added grant_scope to remove.
     """
-    from core.approval import ApprovalProvider
+    from core import interaction
 
     reader = _stdin_reader()
 
-    def ask(tool_name: str, params: dict, notice) -> bool:
+    def _render_params(params: dict) -> None:
         import json as _json
-
-        print(f"\n[approval] {tool_name}")
-        if notice:
-            print(f"  {notice}")
         try:
             rendered = _json.dumps(params, indent=2, default=str)
         except (TypeError, ValueError):
             rendered = repr(params)
         for line in rendered.splitlines():
             print(f"  {line}")
+
+    def _approval(request) -> bool:
+        print(f"\n[approval] {request.payload.get('tool_name')}")
+        if request.notice:
+            print(f"  {request.notice}")
+        _render_params(request.payload.get("params") or {})
         answer = reader.ask(
             f"  Allow? [y/N] ({config.ATTENDED_APPROVAL_TIMEOUT_S}s): ",
             config.ATTENDED_APPROVAL_TIMEOUT_S)
@@ -353,7 +360,69 @@ def build_attended_provider(honour_run_scope: bool = False):
             return False
         return answer.strip().lower() in ("y", "yes")
 
-    return ApprovalProvider(ask=ask, honour_run_scope=honour_run_scope)
+    def _signoff(request):
+        """Per-tool subagent sign-off (§23 AC1b).
+
+        Three answers, and the terminal has to offer all three: a name
+        list grants those, empty grants none but still spawns, and a
+        refusal denies the spawn. None for anything unparsed is
+        belt-and-braces -- interaction.decode does it too -- but saying
+        so out loud beats leaving the user to infer it from a spawn that
+        quietly did not happen.
+        """
+        agent = request.payload.get("agent", "the subagent")
+        candidates = list(request.payload.get("candidates") or [])
+        if not candidates:
+            print(f"\n[subagent] {agent} needs no approval-gated tools.")
+            answer = reader.ask(
+                f"  Run it? [y/N] ({config.ATTENDED_APPROVAL_TIMEOUT_S}s): ",
+                config.ATTENDED_APPROVAL_TIMEOUT_S)
+            if answer and answer.strip().lower() in ("y", "yes"):
+                return set()
+            print("  [the spawn was refused]")
+            return None
+        print(f"\n[subagent] {agent} may be granted, for this turn only:")
+        for index, name in enumerate(candidates, 1):
+            print(f"  {index}. {name}")
+        answer = reader.ask(
+            "  Grant which? [numbers / 'all' / 'none' / blank to refuse] "
+            f"({config.ATTENDED_APPROVAL_TIMEOUT_S}s): ",
+            config.ATTENDED_APPROVAL_TIMEOUT_S)
+        if answer is None:
+            print("  [no answer — the spawn was refused]")
+            return None
+        cleaned = answer.strip().lower()
+        if not cleaned:
+            return None
+        if cleaned == "all":
+            return set(candidates)
+        if cleaned == "none":
+            return set()
+        chosen = set()
+        for piece in cleaned.replace(",", " ").split():
+            if piece.isdigit() and 1 <= int(piece) <= len(candidates):
+                chosen.add(candidates[int(piece) - 1])
+            else:
+                print(f"  [ignoring {piece!r} — not one of the numbers above]")
+        return chosen
+
+    def ask(request):
+        if request.kind == interaction.APPROVAL:
+            return _approval(request)
+        if request.kind == interaction.SUBAGENT_SIGNOFF:
+            return _signoff(request)
+        if request.kind == interaction.REVIEW:
+            return _prompt_review_decision(
+                reader, request.payload.get("finding") or {},
+                request.payload.get("round", 0))
+        # An unrecognised kind is a bug in whoever built the Request, and
+        # interaction.decode raises on one. Returning None here lets that
+        # happen rather than inventing an answer for a question this shell
+        # does not know how to put.
+        return None
+
+    return interaction.ResponseChannel(
+        ask=ask, honour_run_scope=honour_run_scope)
 
 
 def run_memory_command(args) -> int:
@@ -391,6 +460,138 @@ def run_memory_command(args) -> int:
     return 0
 
 
+def run_summary_command(args, provider_name: str, model: str) -> int:
+    """`--summary [thread]`, ROADMAP_v2 §21c (M21).
+
+    Prints one thread's distilled summary and exits. DESCRIBES, DOES NOT FOLD
+    (M20): the thread is left exactly as it is, unlike the automatic
+    compaction a chat session performs on itself.
+
+    Falls back to `--thread` when no id is given, so `--thread <id> --summary`
+    reads the way it sounds.
+    """
+    from core import compaction
+
+    raw = (args.summary or "").strip() or (str(args.thread) if args.thread else "")
+    if not raw:
+        print("--summary needs a thread id, or a --thread to take one from.")
+        return 1
+    try:
+        thread_id = UUID(raw)
+    except ValueError:
+        print(f"Not a thread id: {raw!r}.")
+        return 1
+
+    notice = compaction.summarize_thread(thread_id, model, provider_name)
+    if notice is None:
+        print(f"Nothing to summarise in thread {thread_id}.")
+        return 1
+    if not notice.get("fresh"):
+        print(f"[stored summary of {thread_id}; the thread has not changed "
+              f"since]")
+    print(notice["text"])
+    return 0
+
+
+def run_init_command(args, provider_name: str, model: str) -> int:
+    """`--init`, ROADMAP_v2 §24 (M21's precedent again).
+
+    A flag rather than a slash command because the CLI has no command layer;
+    everything else -- which document set, whether an existing file is
+    overwritten, whether workspace trust is re-granted -- is decided in
+    project_init.generator, exactly as it is for the TUI's /init.
+
+    The two shell-supplied capabilities are consent and rendering. On a pipe
+    there is no consent route, so `confirm` stays None and the generator
+    reports what it WOULD write without writing it (I5/V6).
+    """
+    from project_init import doc_sets
+    from project_init.generator import InitError, generate
+
+    kind = None
+    if args.research_project and args.software_project:
+        print("Pass at most one of --research-project / --software-project.")
+        return 1
+    if args.research_project:
+        kind = doc_sets.RESEARCH
+    elif args.software_project:
+        kind = doc_sets.SOFTWARE
+
+    interactive = sys.stdin.isatty()
+
+    def _confirm(summary: str) -> bool:
+        print(f"\n{summary}")
+        return _ask("Write these files? [y/N]: ").strip().lower() in ("y", "yes")
+
+    def _choose_kind(proposal, reason, blank):
+        if blank:
+            print("\nThis folder is empty, so there is nothing to go on.")
+        elif proposal:
+            print(f"\nThis looks like a {proposal} project — {reason}.")
+        answer = _ask("Document set — [s]oftware or [r]esearch? "
+                      "(enter accepts the suggestion): ").strip().lower()
+        if not answer:
+            return proposal
+        if answer in ("s", "software"):
+            return doc_sets.SOFTWARE
+        if answer in ("r", "research"):
+            return doc_sets.RESEARCH
+        return None
+
+    try:
+        notice = generate(
+            model=model,
+            provider_name=provider_name,
+            kind=kind,
+            confirm=_confirm if interactive else None,
+            notify=print,
+            choose_kind=_choose_kind if interactive else None,
+        )
+    except InitError as e:
+        print(f"\n{e}")
+        return 1
+    print(f"\n{notice['text']}")
+    return 0
+
+
+def attach_cli_refs(thread_id, specs, provider_name: str, model: str) -> None:
+    """Attach each `--ref <thread>` to `thread_id` (§21c, M21).
+
+    Reports every outcome and refuses none of the session: a mistyped id or a
+    reference past the cap is worth saying out loud, and is not a reason to
+    decline to start the conversation the user asked for.
+
+    Goes through core.loop.attach_ref, the same writer the TUI's /ref uses, so
+    the two shells cannot disagree about the cap or the stored shape.
+    """
+    from core import compaction
+    from core.loop import attach_ref
+    from core.memory import ConversationMemory
+
+    memory = ConversationMemory(thread_id=thread_id)
+    for spec in specs:
+        try:
+            source = UUID(str(spec).strip())
+        except ValueError:
+            print(f"[--ref: not a thread id: {spec!r}]")
+            continue
+        if source == thread_id:
+            print("[--ref: that is this thread; skipped]")
+            continue
+        try:
+            notice = compaction.summarize_thread(source, model, provider_name)
+        except Exception as e:  # noqa: BLE001 -- a failed reference must not
+            # stop the session from starting.
+            logger.warning("Could not summarise thread %s: %s", source, e)
+            print(f"[--ref: could not summarise {source}: {e}]")
+            continue
+        if notice is None:
+            print(f"[--ref: nothing to summarise in {source}]")
+            continue
+        ok, message = attach_ref(memory, source, notice["text"])
+        print(f"[--ref: {message}]")
+
+
 def build_chat_authorization():
     """Authorization for a CLI chat turn: nobody granted anything, but
     someone is here to ask (ROADMAP_v2 §21b, M16).
@@ -403,10 +604,10 @@ def build_chat_authorization():
     done and is the intended outcome; it is also a real change to the
     default shell's posture, larger than the one tool §21b needed it for.
 
-    A RunAuthorization with an empty grant set rather than a new
-    approval_provider= parameter on run_agent_conversation: the bundle
-    already threads through _authorization_kwargs, and a second spelling of
-    the same argument is what that function exists to prevent.
+    A RunAuthorization with an empty grant set rather than a second
+    channel parameter on run_agent_conversation: the bundle already
+    threads through _authorization_kwargs, and a second spelling of the
+    same argument is what that function exists to prevent.
 
     None on a non-tty, matching build_review_consent. A piped run has
     nobody to ask, so it stays headless and behaves exactly as before --
@@ -693,6 +894,44 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="ID",
         help="Delete one durable memory by id (see --memories) and exit.",
     )
+    # ROADMAP_v2 §21c (M21). Flags rather than /summary and /ref for the same
+    # reason --memories is a flag: the CLI has no slash-command layer, and
+    # adding one is §23's business rather than this section's. The accepted
+    # limit is that a CLI user attaches a reference at LAUNCH -- mid-conversation
+    # referencing is the TUI's.
+    parser.add_argument(
+        "--summary",
+        metavar="THREAD",
+        nargs="?",
+        const="",
+        help="Print a thread's distilled summary and exit (ROADMAP_v2 §21c). "
+             "Defaults to the thread given by --thread.",
+    )
+    parser.add_argument(
+        "--ref",
+        metavar="THREAD",
+        action="append",
+        help="Attach another thread's summary to this session as context. "
+             "Repeatable, up to config.MAX_INJECTED_REFS.",
+    )
+    # ROADMAP_v2 §24. A flag for M21's reason, and the two kind flags exist
+    # so a piped run can skip the question rather than being refused.
+    parser.add_argument(
+        "--init",
+        action="store_true",
+        help="Generate this project's documentation set -- .venastine/"
+             "CONTEXT.md plus the stubs it links -- and exit.",
+    )
+    parser.add_argument(
+        "--software-project",
+        action="store_true",
+        help="With --init: scaffold the software document set without asking.",
+    )
+    parser.add_argument(
+        "--research-project",
+        action="store_true",
+        help="With --init: scaffold the research document set without asking.",
+    )
     return parser
 
 
@@ -732,8 +971,55 @@ def resolve_review(args, settings: dict) -> bool:
     return bool(config.SUBAGENT_REVIEW)
 
 
+def _prompt_review_decision(reader, finding, round_index):
+    """Put one proposed correction to the terminal. (decision, notes).
+
+    Extracted from build_review_consent so the review-only channel and the
+    general one can share it -- §23's whole point is that there is one way
+    to ask, and two copies of the prompt would be the same divergence one
+    layer up.
+    """
+    kind = finding.get("kind")
+    target = finding.get("claim_id") or "the report"
+    print(f"\n[review] {kind} correction to {target} "
+          f"(severity: {finding.get('severity', 'unknown')})")
+    print(f"  why: {finding.get('reason', '(no reason given)')}")
+    print(f"  proposed: {finding.get('proposed')}")
+    if round_index:
+        print(f"  (refinement {round_index} of "
+              f"{config.MAX_REVIEW_REFINEMENTS})")
+    answer = reader.ask(
+        "  [a]ccept / [r]eject / [f] refine <note> / [!] reject the "
+        f"rest ({config.ATTENDED_APPROVAL_TIMEOUT_S}s): ",
+        config.ATTENDED_APPROVAL_TIMEOUT_S)
+    if answer is None:
+        # Same direction as an unanswered approval prompt: declining is
+        # safe and continuing is useful, so walking away from a review
+        # degrades it rather than wedging the run.
+        print("  [no answer — rejected; the review continues]")
+        return ("reject", "")
+    answer = answer.strip()
+    head, _, note = answer.partition(" ")
+    head = head.lower()
+    if head in ("a", "accept"):
+        return ("accept", "")
+    if head in ("f", "refine"):
+        return ("refine", note.strip())
+    if head in ("!", "reject-all"):
+        return ("reject_all", "")
+    return ("reject", "")
+
+
 def build_review_consent():
-    """A ReviewConsent that asks at the terminal (§20 V4).
+    """A ResponseChannel that asks about corrections at the terminal (§20
+    V4, §23 AC1).
+
+    A SEPARATE channel from the approval one, and deliberately so. §20
+    kept "may this edit be applied?" apart from "may this call proceed?"
+    because they are different questions a user can answer differently:
+    `--review` without `--attended` is a legitimate combination, and one
+    shared object would make it unexpressible. §23 unified the MECHANISM,
+    not the two parameters.
 
     Returns None when stdin is not a terminal, and that is load-bearing
     rather than defensive: V6 says nothing is applied without a consent
@@ -742,45 +1028,24 @@ def build_review_consent():
     Reading a decision off a pipe would also be answering on the user's
     behalf with whatever bytes happened to be there.
     """
-    from core.approval import ReviewConsent
+    from core import interaction
 
     if not sys.stdin.isatty():
         return None
 
     reader = _stdin_reader()
 
-    def decide(finding, round_index):
-        kind = finding.get("kind")
-        target = finding.get("claim_id") or "the report"
-        print(f"\n[review] {kind} correction to {target} "
-              f"(severity: {finding.get('severity', 'unknown')})")
-        print(f"  why: {finding.get('reason', '(no reason given)')}")
-        print(f"  proposed: {finding.get('proposed')}")
-        if round_index:
-            print(f"  (refinement {round_index} of "
-                  f"{config.MAX_REVIEW_REFINEMENTS})")
-        answer = reader.ask(
-            "  [a]ccept / [r]eject / [f] refine <note> / [!] reject the "
-            f"rest ({config.ATTENDED_APPROVAL_TIMEOUT_S}s): ",
-            config.ATTENDED_APPROVAL_TIMEOUT_S)
-        if answer is None:
-            # Same direction as an unanswered approval prompt: declining
-            # is safe and continuing is useful, so walking away from a
-            # review degrades it rather than wedging the run.
-            print("  [no answer — rejected; the review continues]")
-            return ("reject", "")
-        answer = answer.strip()
-        head, _, note = answer.partition(" ")
-        head = head.lower()
-        if head in ("a", "accept"):
-            return ("accept", "")
-        if head in ("f", "refine"):
-            return ("refine", note.strip())
-        if head in ("!", "reject-all"):
-            return ("reject_all", "")
-        return ("reject", "")
+    def ask(request):
+        if request.kind != interaction.REVIEW:
+            # This channel answers one kind. Anything else falls through
+            # to interaction.decode's declining default rather than being
+            # answered by a prompt written for a different question.
+            return None
+        return _prompt_review_decision(
+            reader, request.payload.get("finding") or {},
+            request.payload.get("round", 0))
 
-    return ReviewConsent(decide=decide)
+    return interaction.ResponseChannel(ask=ask)
 
 
 def _ask(prompt: str) -> str:
@@ -999,6 +1264,19 @@ if __name__ == "__main__":
     if args.memories or args.forget:
         raise SystemExit(run_memory_command(args))
 
+    # §21c (M21). Beside the memory commands and for the same reasons: it
+    # needs the resolved project path for nothing, but it DOES need the
+    # resolved provider/model, and it runs no tool and needs no MCP server.
+    if args.summary is not None:
+        raise SystemExit(run_summary_command(args, provider, model))
+
+    # §24. Beside the others, and AFTER load_project_config for a reason the
+    # rest do not share: the generator resolves its destination through
+    # config_loader.get_project_path(), and reads the trust state that
+    # initialize() has just settled.
+    if args.init:
+        raise SystemExit(run_init_command(args, provider, model))
+
     # Argument validation before connecting anything: parser.error() exits,
     # and doing it after setup_mcp() would spawn stdio server subprocesses
     # only to abandon them on the way out.
@@ -1064,7 +1342,19 @@ if __name__ == "__main__":
                 review=build_review_consent() if review_on else None,
             )
         else:
-            run_chat(args.thread, provider, model, first_message=args.query)
+            thread_id = args.thread
+            if args.ref:
+                # §21c (M21). A reference needs a thread to attach TO, and the
+                # CLI otherwise creates one lazily on the first turn -- so with
+                # --ref the thread is created here and printed, which is also
+                # what makes it resumable. The cost of --ref with no message is
+                # one empty thread, the same cost /new already carries.
+                if thread_id is None:
+                    from core.memory import ConversationMemory
+                    thread_id = ConversationMemory().thread_id
+                    print(f"[thread: {thread_id}]")
+                attach_cli_refs(thread_id, args.ref, provider, model)
+            run_chat(thread_id, provider, model, first_message=args.query)
     finally:
         # finally, not "at the end": run_research raises SystemExit(1) on a
         # failed pipeline, and Ctrl+C reaches here as KeyboardInterrupt.

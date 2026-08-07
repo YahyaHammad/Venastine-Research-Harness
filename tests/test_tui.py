@@ -12,7 +12,7 @@ that look fine until they aren't:
        user's answer. Asserted against the DISPATCHED TOOL, not against the
        modal appearing -- a modal that renders and then drops the answer on
        the floor leaves the worker thread blocked forever on
-       permission_channel.get(), which looks like a hang, not a bug.
+       the response channel's queue, which looks like a hang, not a bug.
 
   AC3  a tool call that raises must not kill the app. Textual's run_worker
        defaults to exit_on_error=True, so the natural implementation tears
@@ -158,8 +158,8 @@ async def test_attended_research_shows_the_modal_and_returns_the_answer():
     returns what the user clicked.
 
     Driven through ask_permission_blocking directly on a worker thread,
-    because that is the exact call an ApprovalProvider makes -- going via
-    a whole pipeline run would test the orchestrator instead.
+    because that is the exact call the response channel makes (§23) --
+    going via a whole pipeline run would test the orchestrator instead.
     """
     import threading
 

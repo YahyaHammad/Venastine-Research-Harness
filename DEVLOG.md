@@ -2724,3 +2724,341 @@ a real terminal, or how the classification behaves on a database with hundreds o
 runs — the SQL is one statement over an unindexed column, and the deliberate lack
 of an index on `kind` (see the note in `storage.py`) is a fresh-vs-migrated
 consistency choice, not a performance one.
+
+---
+
+# §21c — `/ref` and session summaries (2026-08-06)
+
+The last third of §21, and the first section in a while that was mostly
+assembly. §21a built the summariser (`_summarize`, the compactor agent, the
+length-checked retry), §21b built the prompt-tier pattern, and §27 — finished
+an hour earlier — built the thread picker this needs and made it list
+conversations only. What §21c adds is one table, one storage read, one prompt
+tier, and four commands.
+
+Same cycle: read the referenced files, verify the spec against the code,
+surface the ambiguities as questions with options and a recommendation, lock
+the answers, implement. One round of four questions (M18–M21).
+
+## The decision the section turns on
+
+**A thread summary and a compaction checkpoint carry nearly the same columns
+and mean opposite things.** Reusing `CompactionCheckpoint` with a different
+`strategy` value would have saved a table and been a silent disaster:
+`latest_checkpoint()` resolves by timestamp and feeds
+`ConversationMemory._derived_view()`, so a summary row there becomes the live
+compaction watermark — newest wins — and folds the thread it was only meant to
+describe. The user picked the separate table; the docstring on
+`ThreadSummary` now says why, because the economy of reusing the other one is
+exactly the kind of idea that arrives twice.
+
+Its consequence is the part worth keeping: **`save_thread_summary` has no
+advance guard and `save_checkpoint`'s is not cargo.** A backwards compaction
+watermark un-compacts a live thread. A redundant summary row can only describe
+a thread as it was a moment ago, which the next `advances()` check notices. The
+absent guard is a decision, so it is written down where someone would
+otherwise add one out of symmetry.
+
+## What the spec left for build time, and what it got wrong
+
+**"Session summaries" was already half-built and half-unserved.** §21's text
+frames them as compaction invoked deliberately — which `/compact` has been
+since §21a. What remained was the request that produced the feature: *show me
+what this conversation has been about*, without shortening what the model sees
+next turn. Hence M20, and hence `/summary` folding nothing.
+
+**The target could not be a strength ratio.** `COMPACTION_TARGET_RATIOS` is
+proportional, which is right for a fold: the summary replaces the span, so the
+thread shrinks whatever the ratio. §21c's summary is injected on every turn of
+the referencing thread with nothing replacing it, so a 500KB source at strength
+3 would put 75KB into every call indefinitely. `config.SUMMARY_TARGET_CHARS` is
+absolute, and `_summarize` needed no change — it takes `target` and `original`
+as plain values.
+
+**A thread shorter than the budget should not reach a model at all.** Its own
+text is its best summary; compressing three messages into more characters than
+they occupy spends a call to make the answer worse. This is compact()'s
+no-progress-no-call guard in a different costume.
+
+## What the build found
+
+**The ref tier had to be unconditional, and the memories line above it is why
+that is not obvious.** `run_agent_conversation` appends memories only when it
+built the prompt itself, because an agent already got them inside
+`system_prompt_for()`. Copying that guard for refs would make an active agent
+lose every attached reference — `system_prompt_for` has no memory object, so
+nothing would put them back. The wrong version is a two-word edit that reads as
+consistency, so it has a test of its own.
+
+**Three tests of mine passed for the wrong reason, and two were mine to catch
+before they mattered.** The absolute-vs-ratio test asserted a number appeared
+without asserting the two candidate numbers DIFFER — it would have passed
+against either implementation on a thread where they coincided. The
+dismissed-picker test asserted "nothing was attached", which stayed true with
+the `thread_id is None` guard removed, because summarising a None thread fails
+downstream: the refs stayed empty while the user who pressed escape got told
+"Could not summarise thread None". And the real-storage
+summary-of-a-compacted-thread test read the COMPACTION's model call rather than
+the summary's, because the derived view was short enough to be stored verbatim
+and no summary call happened at all. All three now assert the premise
+(`ratio_target != SUMMARY_TARGET_CHARS`, no output at all, a new call was
+made) before asserting the conclusion. §26 recorded two vacuous tests; this
+section found three, which suggests the check belongs in the routine rather
+than in a section's notes.
+
+**A `/ref` of the current thread is excluded rather than discouraged.** It
+would spend a model call to inject what the model is already reading.
+
+## Tests
+
+1060 -> 1098. One new file (`test_thread_refs.py`, 35 tests) plus three
+real-storage tests in `test_storage_e2e.py`, which is the only file that can
+hold them — one sqlmodel swap per module, as its docstring explains.
+
+Twenty-one mutations verified red on the right test: the ratio target, the
+fits-already branch, both staleness directions, the re-entrancy guard, the
+derived view (twice — fake and real), a checkpoint write (twice), the K6
+boundary, the cap dropping instead of refusing, the cap going unstated, the
+"not this conversation" line, duplicate re-attachment, both `with_refs` call
+sites independently, the agent-prompt guard, `/summary` folding, the picker not
+excluding the current thread, a dismissed picker acting anyway, an unknown
+`/ref` flag opening the picker, `--summary` not falling back to `--thread`, and
+a malformed `--ref` aborting the session.
+
+## Verified outside the suite
+
+`--summary` on a real database: a short thread stored verbatim with no model
+call, and the second invocation reporting that it served a stored summary.
+`--ref` attaching across two real threads, with the fragment reaching an
+assembled chat prompt — carrying its "NOT part of this conversation's history"
+line — and reaching none of the ten pass prompts. The TUI half has its
+handler tests only; there is no terminal here to run the pilot's picker
+against.
+
+## Not verified
+
+Whether a 2,000-character budget produces a useful summary of a genuinely long
+research conversation, whether three references is the right cap, and whether
+the injected fragment reads as clearly to a model mid-conversation as it does
+in a test. All three are judgement calls that need a real session and a real
+provider, and all three are single constants when the answer arrives.
+
+---
+
+## §24 — `/init`, the project documentation set
+
+**Spec:** ROADMAP_v2 §24, decisions I1–I13.
+
+### What the spec got wrong, and how
+
+§24 named two interactions to design around. Both were real. A third one
+invalidated the spec's own preferred answer to the second.
+
+**"`write` is permission `False` by default."** It is not a default. Nothing
+can change it at runtime: `is_tool_allowed()` instantiates
+`config.ToolPermissions()` on every call, `settings.json` has no
+`permissions` section and `_KNOWN_SETTINGS` raises on an unknown key, and
+D14 forbids a `ToolContext` widening anything — the global check runs first
+and unconditionally. `registry.dispatch("write", …)` raises `ToolCallDenied`
+before the `approval_callback` is consulted. So the spec's stated preference
+("prefer running through the existing `write` tool rather than bypassing the
+permission layer") described something no user could do. `read` is denied by
+the same mechanism, which independently ruled out the exploring agent the
+user later asked for.
+
+Found by grepping for consumers of the field rather than by reading its
+comment. Worth recording as a shape: **a `False` in a config dataclass reads
+as a switch, and this one is a wall.**
+
+### What the user changed at build time
+
+The spec generated one file. Mid-implementation the user corrected the
+scope: the document list they had given was **outputs the harness should
+create per project**, not inputs to read — plus `TEST_WRITING` and
+`BREAKING_CHANGES`, plus a parallel set for research-oriented projects, with
+`CONTEXT.md` as the hub linking all of them. That is I9–I13.
+
+Four design choices were put to them and locked before any of it was built
+(I1, I6 in one round; I2, I3, I4, I7 in the next). The one they overrode was
+generation strategy: I proposed a deterministic digest plus a single
+one-shot agent call, and they chose an exploration loop with real reads.
+That is the better call and it is what forced I2 — the digest version needed
+no read capability at all, so the `read` wall would never have surfaced.
+
+### Decisions worth re-reading before changing this
+
+- **The narrow readable set is a security boundary, not tidiness** (I2). A
+  registered tool with permission `True` is advertised to every run. The
+  initializer's `allowed_tools` narrows that agent and nothing else, so
+  `read_project_doc` is reachable from plain chat and from all ten research
+  passes — which read attacker-controlled web pages. Documentation and
+  manifests only, with `.venastine/`, `.env*` and `providers.json` denied.
+- **`write_project_doc` has no path parameter** (I1). Confinement by
+  construction beats confinement by validation.
+- **One consent covering a named list.** Eight gated writes would be eight
+  prompts, which is the shape of consent that gets clicked through.
+- **Trust state is captured before the write** (I6), because the hash has
+  moved afterwards and `is_trusted()` then says `False` for a project that
+  was trusted a moment ago. Re-granting only for an already-trusted project
+  is what stops `/init` laundering a cloned repo's `.venastine/`.
+
+### Bugs found by running it rather than by reading it
+
+**Running `/init` twice rewrote `CONTEXT.md`.** The documentation index
+marked which documents already existed, so the second run's index differed
+purely because the first run had created them — defeating the "nothing to
+do" path, and labelling documents `/init` had authored moments earlier as
+pre-existing work it had preserved. `render_index` is now a pure function of
+the project kind, and which files a run left alone is in that run's report,
+where a fact about one run belongs.
+
+**The layout listing named `providers.json`.** Only the filename, and the
+read tool refuses it — but it costs the agent a step to discover that, and a
+credential filename can itself name a service or an account. Excluded from
+both listings.
+
+### Three test-quality corrections, all the same shape
+
+Each passed for a reason other than the one claimed, and each was found by
+mutation rather than by review:
+
+1. The credential-filename mutation targeted `_root_documents`' `_is_secret`
+   call, which turns out to be **unreachable** — nothing is both
+   "interesting" and secret today. `_tree`'s call is the load-bearing one.
+   The redundant guard stays, since `_MANIFEST_FILES` already holds
+   `package.json` and one more `.json` entry flips its reachability, but it
+   now says so in a comment.
+2. The index mutation used a relative `os.path.exists()` from the wrong
+   working directory, so it varied nothing. Reintroducing the actual defect
+   across both files turns the idempotence test red.
+3. `test_an_unrecognised_kind_answer_cancels` asserted only that nothing was
+   written — which stays true with the fail-safe decode removed, because
+   `generate()` refuses a non-kind downstream anyway. And the assertions had
+   been patched into the *neighbouring* test, whose escape path dismisses
+   with `None` and so passes either way. Both fixed; it now asserts the
+   outcome the guard actually changes.
+
+§26 recorded two of these, §21c three, §24 three. The pattern is stable
+enough that it belongs in the routine rather than in a section's notes:
+**assert the premise before the conclusion, and confirm the mutation
+applied.**
+
+### Verified outside the suite
+
+A temp project with a real filesystem and a faked provider, through both
+shells: the hub lands in `.venastine/` and the seven stubs at the root; a
+second run reports "nothing to do" and rewrites nothing; a pre-existing
+`ARCHITECTURE.md` survives byte-for-byte; an untrusted project stays
+untrusted while a trusted one is re-granted; a piped `--init` prints the
+diff and writes nothing; and `--software-project`/`--research-project`
+scaffold the right set without asking.
+
+### Left for a real session
+
+Whether the initializer's read budget (twelve steps, 20 KB per read) is
+enough for a large unfamiliar codebase, and whether the stub headings are
+the right ones — both are judgement calls that need a real provider against
+a project nobody on this side has seen. Both are constants.
+
+---
+
+## §23 slice 1 — the response channel, and the sign-off it made possible
+
+**Spec:** ROADMAP_v2 §23, ACs 1 and 1b, decisions J1–J8. The question tool
+and the todo list (ACs 2–4) are slice 2.
+
+### Why this, and why now
+
+§23's spec says to generalise first: *"doing the tools first and the
+generalisation afterwards produces two bespoke channels and a third when
+§18 wants one."* By the time it was built there were **five**, and §24 —
+the section immediately before — had added two of them. `/init`'s
+confirmation and its project-kind picker were written the day before this
+work started, and one of them shipped a fail-safe guard whose first
+mutation proved nothing.
+
+That is the argument for the ordering, and it held: the abstraction was
+designed against three genuinely different answer shapes (a bool, a
+four-value tuple with free text, a three-way subset) rather than against
+approval alone.
+
+### The design, in one line each
+
+- **`decode` is the product, not the dataclasses** (J2). A Request/Channel
+  pair is easy to write badly; five call sites can each build one and each
+  invent their own failure handling, which is how there came to be five.
+- **`decode(request, raw)`, not `decode(kind, raw)`** (J3). Found while
+  migrating §24: a choice is valid only against the options offered. The
+  same signature then let the sign-off intersect its answer with the
+  candidates that were listed — a control that did not exist before and
+  was not in the plan.
+- **Every default declines, and review's is strictest** (J6).
+- **The loop asks the registry what shape of question a tool needs** (J7),
+  so `spawn_subagent` appears nowhere in `core/loop.py`.
+
+### The one behaviour change, and it needed a decision
+
+S1 made a spawn approval run-scoped. The test pinning it spawned agent `a`
+and then agent `b`, and asserted ONE prompt — so approving `a` silently
+authorised `b`'s entire gated set. That is defensible for a bare yes and
+indefensible once the answer is a per-agent subset.
+
+Put to the user with three options; they chose the memo keyed by agent
+(J8). The anti-noise intent survives — the same agent twice is one prompt
+— and the part that was wrong is gone.
+
+### What the migration turned up
+
+**A collision that could not exist before.** `_authorization_kwargs`
+returns `response_channel` now, and `run_agent_conversation` already had a
+parameter of that name; they were differently named and differently typed
+before, and §20's reviewer passes both. The first fix used
+`a or kwargs.pop(...)`, which **short-circuits** — leaving the key in the
+splat on exactly the path where an explicit channel was passed. Popped
+unconditionally now, with a test named after the traceback.
+
+**A test that stopped making sense.** `test_the_channel_wins_when_both_are_present`
+asserted that a live queue beat an ApprovalProvider. That is only a
+question while there are two mechanisms. Replaced by
+`test_there_is_exactly_one_route`. A test that loses its meaning is the
+signal a merge actually merged something.
+
+**V6 now holds without its guard.** Removing `walk_consent`'s
+`consent is None` branch left every assertion passing, because
+`interaction.ask(None, ...)` declines on its own. What the guard still
+uniquely provides is the audit trail — a `reason_declined` saying nobody
+could be asked, rather than a rejection indistinguishable from a human's.
+The test asserts that now.
+
+### Test-quality lessons, and there were two new ones
+
+1. **A test that patches the wiring cannot see the wiring break.** The
+   sign-off memo test mocks `request_kind` and `request_payload` so it can
+   be about the memo. Four mutations stayed green as a result: the
+   registration itself, the candidate list, and dispatch's injection of
+   the subset. Every sign-off test also called `subagent_tool.run()`
+   directly, so the injection was never exercised. **Anything a test
+   patches, some other test has to assert for real.**
+2. **A pilot that asserts with a modal open turns a failure into a hang.**
+   The worker is parked on a queue and blocks `run_test()`'s teardown, so
+   two mutations stalled pytest instead of failing it. Capture, dismiss,
+   settle, then assert.
+
+Together with §24's three and §21c's three, the running tally says the
+same thing every time: **assert the premise before the conclusion, and
+confirm the mutation applied.**
+
+### Verified outside the suite
+
+Against the real registry and a real agent: `spawn_subagent` declares the
+sign-off kind, its payload carries the agent and its live candidate list,
+all three answers decode correctly, a name that was never offered is
+dropped with a warning, a shell answering `True` refuses rather than
+granting everything, and the CLI renders the numbered per-tool prompt.
+
+### Left for slice 2
+
+The question tool and the todo list, P1's `LoopEvent`-vs-tagged-union
+decision (only the todo event needs it), and whether the todo list lives
+in `ConversationThread.extra_data` — now shared with goal mode and §21c's
+refs — or its own table.

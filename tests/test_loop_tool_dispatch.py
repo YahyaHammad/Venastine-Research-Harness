@@ -75,7 +75,7 @@ def test_single_tool_call_dispatches_and_feeds_result_to_memory(mocker):
 
     dispatch_calls = []
     def fake_dispatch(name, params, context=None, approval_callback=None,
-                      parent_run=None, permission_channel=None,
+                      parent_run=None, response_channel=None,
                       memory=None):
         dispatch_calls.append((name, params))
         return {"echoed": params}
@@ -91,7 +91,7 @@ def test_single_tool_call_dispatches_and_feeds_result_to_memory(mocker):
     assert memory.tool_results == [("t1", {"echoed": {"query": "x"}})]
     dispatch_mock.assert_called_once_with(
         "web_search", {"query": "x"}, context=None, parent_run=ANY,
-        permission_channel=None, memory=ANY)
+        response_channel=None, memory=ANY)
 
 
 # ---------------------------------------------------------------------------
@@ -117,7 +117,7 @@ def test_two_tool_calls_in_one_response_dispatch_each_in_order(mocker):
 
     dispatched = []
     def fake_dispatch(name, params, context=None, approval_callback=None,
-                      parent_run=None, permission_channel=None,
+                      parent_run=None, response_channel=None,
                       memory=None):
         dispatched.append((name, params))
         return {"result_for": name}
@@ -220,7 +220,7 @@ def test_registry_dispatch_raises_ToolCallDenied_caught_and_recorded_as_error(mo
     mocker.patch("core.loop.call_model_stream", side_effect=fake_call_model_stream)
 
     def fake_dispatch(name, params, context=None, approval_callback=None,
-                      parent_run=None, permission_channel=None,
+                      parent_run=None, response_channel=None,
                       memory=None):
         raise ToolCallDenied(f"{name} requires approval and was not given")
     mocker.patch("core.loop.registry.dispatch", side_effect=fake_dispatch)
@@ -262,7 +262,7 @@ def test_context_none_passes_every_tool_through_to_dispatch(mocker):
 
     dispatch_mock.assert_called_once_with(
         "arbitrary_tool_name", {"x": 1}, context=None, parent_run=ANY,
-        permission_channel=None, memory=ANY)
+        response_channel=None, memory=ANY)
 
 
 def test_context_is_forwarded_to_dispatch_and_approval_needed(mocker):
@@ -299,4 +299,4 @@ def test_context_is_forwarded_to_dispatch_and_approval_needed(mocker):
         assert call.args == ("get_time", {}, context)
     dispatch_mock.assert_called_once_with(
         "get_time", {}, context=context, parent_run=ANY,
-        permission_channel=None, memory=ANY)
+        response_channel=None, memory=ANY)

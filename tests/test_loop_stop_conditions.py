@@ -89,7 +89,7 @@ def test_stop_condition_2_max_steps_call_count_equals_max_steps(mocker):
     dispatch_calls = {"n": 0}
 
     def fake_dispatch(name, params, context=None, approval_callback=None,
-                      parent_run=None, permission_channel=None,
+                      parent_run=None, response_channel=None,
                       memory=None):
         dispatch_calls["n"] += 1
         return {"result": "ok"}

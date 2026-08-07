@@ -111,6 +111,72 @@ class GrantPickerScreen(ModalScreen[object]):
         self.dismiss(None)
 
 
+class SubagentSignoffScreen(ModalScreen[object]):
+    """Pick which of a subagent's gated tools it may use unprompted
+    (ROADMAP_v2 §23 AC1b).
+
+    Modelled on GrantPickerScreen, and dismissing with the same THREE
+    answers for the same reason: a set of names grants those, an EMPTY set
+    spawns the agent with nothing granted, and None refuses the spawn
+    outright. Those are three different intentions and a bool cannot hold
+    them -- which is precisely why §18 shipped this all-or-nothing (S1)
+    on a boolean channel, and why it could only be built once §23 gave the
+    channel a typed answer.
+
+    Every option starts UNSELECTED. A pre-ticked list makes the convenient
+    action the permissive one, and the point of this prompt is that
+    approving a spawn used to authorise the child's ENTIRE gated set.
+    """
+
+    BINDINGS = [("escape", "refuse", "Refuse")]
+
+    def __init__(self, agent: str, candidates: list):
+        super().__init__()
+        self._agent = agent
+        self._candidates = list(candidates)
+
+    def compose(self) -> ComposeResult:
+        if not self._candidates:
+            yield Grid(
+                Label(f"Run {self._agent}?", id="permission-title"),
+                Static(f"{self._agent} needs no approval-gated tools.",
+                       id="permission-params"),
+                Button("Run", variant="success", id="signoff-none"),
+                Button("Refuse", variant="error", id="signoff-refuse"),
+                id="permission-dialog",
+            )
+            return
+        options = [Selection(name, name, False) for name in self._candidates]
+        yield Vertical(
+            Label(f"What may {self._agent} use without asking again?",
+                  id="grant-title"),
+            Static(
+                "Space toggles, then choose. Anything left unticked still "
+                "prompts you if the subagent tries it.\nRunning with none "
+                "selected is fine. Escape refuses the spawn entirely.",
+                id="grant-help"),
+            SelectionList(*options, id="signoff-list"),
+            Button("Run with selected", variant="success", id="signoff-ok"),
+            Button("Refuse the spawn", variant="error", id="signoff-refuse"),
+            id="grant-dialog",
+        )
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "signoff-refuse":
+            self.dismiss(None)
+        elif event.button.id == "signoff-none":
+            self.dismiss(set())
+        else:
+            self.dismiss(
+                set(self.query_one("#signoff-list", SelectionList).selected))
+
+    def action_refuse(self) -> None:
+        # Escape REFUSES rather than running with nothing granted. The two
+        # are different answers, and the one a user reaches for when they
+        # did not mean to start this is the refusal.
+        self.dismiss(None)
+
+
 class ReviewScreen(ModalScreen[object]):
     """Decide one proposed correction to a finished research run (§20 V4).
 
@@ -288,6 +354,98 @@ def _thread_row(thread: dict) -> str:
     preview = (thread.get("preview") or "").strip()
     return f"{stamp}  {preview}  ({thread['id']})" if preview \
         else f"{stamp}  {thread['id']}"
+
+
+class ConfirmScreen(ModalScreen[bool]):
+    """A titled yes/no over a block of text (ROADMAP_v2 §24).
+
+    PermissionScreen is the wrong shape here even though it also returns a
+    bool: it titles itself "Allow <tool>?" and renders params as JSON,
+    because it exists to gate ONE tool call. /init's question is about a
+    set of files, and the substance is the diff -- so the body is text the
+    caller composed and the title says what is being decided.
+
+    Escape declines rather than dismissing with no value. Fifth place that
+    invariant applies, and here the unsafe failure is a worker parked on a
+    queue nobody will answer.
+    """
+
+    BINDINGS = [("escape", "decline", "No")]
+
+    def __init__(self, title: str, body: str, confirm_label: str = "Yes"):
+        super().__init__()
+        self._title = title
+        self._body = body
+        self._confirm_label = confirm_label
+
+    def compose(self) -> ComposeResult:
+        yield Grid(
+            Label(self._title, id="permission-title"),
+            Static(self._body, id="permission-params"),
+            Button(self._confirm_label, variant="success", id="allow"),
+            Button("No", variant="error", id="deny"),
+            id="permission-dialog",
+        )
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(event.button.id == "allow")
+
+    def action_decline(self) -> None:
+        self.dismiss(False)
+
+
+class ProjectKindScreen(ModalScreen[object]):
+    """Which document set /init scaffolds (§24, I13).
+
+    Dismisses with "software", "research", or None to cancel -- three
+    answers, not a bool, because cancelling is not the same as picking the
+    other one.
+
+    An established project arrives here with a PROPOSAL and the reason for
+    it, so the user is confirming a finding. A blank folder arrives with
+    neither: there is nothing to infer from, and a proposal would be a
+    guess wearing a finding's clothes.
+    """
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, proposal=None, reason: str = "", blank: bool = False):
+        super().__init__()
+        self._proposal = proposal
+        self._reason = reason
+        self._blank = blank
+
+    def compose(self) -> ComposeResult:
+        if self._blank:
+            explanation = ("This folder is empty, so there is nothing to go "
+                           "on. Which kind of project is this?")
+        elif self._proposal:
+            explanation = (f"This looks like a {self._proposal} project — "
+                           f"{self._reason}. Change it if that is wrong.")
+        else:
+            explanation = "Which kind of project is this?"
+        yield Grid(
+            Label("Set up documentation for which kind of project?",
+                  id="permission-title"),
+            Static(
+                f"{explanation}\n\n"
+                "software — ARCHITECTURE, ROADMAP, DEVLOG, TECHNICAL_DEBT, "
+                "DOCUMENTATION_STANDARDS, TEST_WRITING, BREAKING_CHANGES\n"
+                "research — RESEARCH_QUESTIONS, METHODOLOGY, SOURCES, "
+                "FINDINGS, LIMITATIONS, EXPERIMENT_LOG, OPEN_QUESTIONS, "
+                "DOCUMENTATION_STANDARDS",
+                id="permission-params"),
+            Button("Software", variant="success", id="kind-software"),
+            Button("Research", variant="primary", id="kind-research"),
+            id="permission-dialog",
+        )
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss("research" if event.button.id == "kind-research"
+                     else "software")
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
 
 
 class ThreadPickerScreen(ModalScreen[object]):

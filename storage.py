@@ -82,6 +82,41 @@ class CompactionCheckpoint(SQLModel, table=True):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+class ThreadSummary(SQLModel, table=True):
+    """A DESCRIPTION of one whole thread (ROADMAP_v2 §21c, M18).
+
+    NOT A COMPACTION, and the distinction is the entire reason this is a
+    separate table rather than a row in CompactionCheckpoint with a
+    different `strategy`. The two carry almost the same columns and mean
+    opposite things:
+
+      * a CompactionCheckpoint CHANGES WHAT THE MODEL SEES. `latest_checkpoint`
+        resolves by timestamp and feeds ConversationMemory._derived_view(), so
+        writing one is an edit to the live conversation.
+      * a ThreadSummary changes nothing. It is read by `/summary` to show a
+        person, and by `/ref` to inject into a DIFFERENT thread. The thread it
+        describes is untouched.
+
+    So a summary row in the checkpoint table would silently compact the
+    thread it was only meant to describe -- and it would win, because it
+    would be the newest row. That is the failure this table exists to make
+    impossible rather than to warn about.
+
+    `covers_up_to_message_id` is the last archive row the summary accounts
+    for, which is what makes staleness answerable: storage.advances() already
+    knows whether a thread has moved past a given position, so a `/ref` of an
+    unchanged thread costs no model call and a `/ref` of a grown one is
+    re-summarized. Same column name as the checkpoint's on purpose -- it means
+    the same thing there, and `advances()` serves both.
+    """
+
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    thread_id: UUID = Field(foreign_key="conversationthread.id", index=True)
+    summary_text: str
+    covers_up_to_message_id: UUID
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
 class UserMemory(SQLModel, table=True):
     """One durable fact, carried BETWEEN threads (ROADMAP_v2 §21b).
 
@@ -562,6 +597,75 @@ def save_checkpoint(
         session.commit()
         session.refresh(checkpoint)
         return checkpoint.id
+
+
+# ---------------------------------------------------------------------------
+# ---- Thread summaries (ROADMAP_v2 §21c) -----------------------------------
+# ---------------------------------------------------------------------------
+
+def last_message_id(thread_id: UUID) -> Optional[UUID]:
+    """The id of this thread's most recent archive row, or None if empty.
+
+    §21c needs a position meaning "everything, as of now", to store as a
+    summary's watermark and to compare against a stored one. Nothing existing
+    answers it: `message_ids_from` needs a start id, `turn_start_ids` returns
+    turn starts (and the last row is usually not one), and `_ordered_rows` is
+    private for the reasons its docstring gives.
+
+    Reads the ARCHIVE, like everything else here -- the ordering is
+    `(created_at, id)`, so this is the same last row `advances()` compares
+    positions within.
+    """
+    rows = _ordered_rows(thread_id)
+    return rows[-1]["id"] if rows else None
+
+
+def latest_thread_summary(thread_id: UUID) -> Optional[ThreadSummary]:
+    """The most recent summary of this thread, or None if never summarized.
+
+    Newest by `(created_at, id)`, matching `latest_checkpoint` -- but note
+    that the resemblance ends at the query. A stale row winning here shows
+    someone an out-of-date description, which `advances()` then detects and
+    corrects; a stale row winning in `latest_checkpoint` silently rewrites a
+    live conversation. See ThreadSummary's docstring.
+    """
+    with Session(engine) as session:
+        statement = (
+            select(ThreadSummary)
+            .where(ThreadSummary.thread_id == thread_id)
+            .order_by(ThreadSummary.created_at.desc(), ThreadSummary.id.desc())
+        )
+        return next(iter(session.exec(statement).all()), None)
+
+
+def save_thread_summary(
+    thread_id: UUID, summary_text: str, covers_up_to_message_id: UUID,
+) -> UUID:
+    """Record one summary of one thread. Adds a row; touches nothing else.
+
+    NO ADVANCE GUARD, deliberately, and this is the one place the difference
+    from `save_checkpoint` above is load-bearing rather than decorative. That
+    function REFUSES a watermark that does not advance, because a backwards
+    compaction watermark becomes the live one and un-compacts the thread. A
+    summary row changes what NO model sees: the worst a redundant or
+    backwards one can do is describe the thread as it was a moment ago, which
+    the next `advances()` check notices.
+
+    So the guard is absent because it would be cargo -- not because the
+    monotonic property does not matter here. Do not add one, and do not route
+    a summary through `save_checkpoint` to get one.
+    """
+    with Session(engine) as session:
+        summary = ThreadSummary(
+            thread_id=thread_id,
+            summary_text=summary_text,
+            covers_up_to_message_id=covers_up_to_message_id,
+        )
+        session.add(summary)
+        session.commit()
+        session.refresh(summary)
+        return summary.id
+
 
 # ---------------------------------------------------------------------------
 # ---- Durable memory (ROADMAP_v2 §21b) -------------------------------------

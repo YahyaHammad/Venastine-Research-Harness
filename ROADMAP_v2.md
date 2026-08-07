@@ -73,10 +73,10 @@ Every decision below was made through a structured clarification cycle with the 
 - 18. Agent system — agent `.md` format + manager + subagent tool + per-agent scoping + intersection rule
 - 19. Skill system — skill `.md` format + manager + activation + default skills **(BUILT)**
 - 20. Subagent reviewing — opt-in post-pipeline review with consented correction **(BUILT)**
-- 21. Memory system — compaction, archive, thread-scoped pinning, user/project memory
+- 21. Memory system — compaction, archive, thread-scoped pinning, user/project memory **(BUILT: §21a + §21b + §21c)**
 - 22. Pipeline observability — orchestrator events + the live research view **(added during §16; BUILT)**
-- 23. Interactive tools — question tool, todo list, and the response channel they share **(added during §16)**
-- 24. `/init` — generate `CONTEXT.md` from the project **(added during §16)**
+- 23. Interactive tools — question tool, todo list, and the response channel they share **(added during §16; slice 1 BUILT — the channel, its three consumers, and §18's deferred per-tool sign-off. The two tools are slice 2)**
+- 24. `/init` — generate the project's documentation set **(added during §16; BUILT)**
 - 25. Authorized tool use in the research pipeline **(BUILT)**
 - 26. Research legibility — pass internals, code stages, the claims view, colour, copy **(added after §22's first live run; BUILT)**
 - 27. Thread legibility — thread `kind`, chat-only picker, transcript replay on resume **(added after §26's first live session; BUILT)**
@@ -1011,7 +1011,7 @@ Implemented; decision record in DEVLOG §20, file contracts in ARCHITECTURE.md. 
 
 ---
 
-## 21. Memory system — compaction, archive, thread-scoped pinning, user/project memory — §21a + §21b BUILT
+## 21. Memory system — compaction, archive, thread-scoped pinning, user/project memory — BUILT (§21a + §21b + §21c)
 
 **This section fully replaces Rev. 1's placeholder** (D16 originally called it a thin, deferrable truncation strategy). Discussion surfaced that this is, in substance, the long-term memory feature that was deliberately deferred at the very start of this project's build ("persistence yes, extracted long-term memory not yet") — it's arriving on schedule as the harness grows, not as scope creep.
 
@@ -1132,7 +1132,8 @@ Both of these were asked for as TUI features and are really this section's:
 
 §21 was split at build time. **§21a (BUILT)** is compaction, the checkpoint, the
 hyperparameters and `pin`. **§21b (BUILT)** is durable `remember` / `use_memory` /
-`/memories` / `/forget`. **§21c** is `/ref` and session summaries. Each is independently useful and
+`/memories` / `/forget`. **§21c (BUILT)** is `/ref` and session summaries — see M18–M21
+below. Each is independently useful and
 independently testable, and §21a is roughly §20-sized on its own.
 
 Tracing this section against the code before writing any surfaced two holes in its
@@ -1343,6 +1344,52 @@ the default shell. Without it §13's headless rule makes `remember` invisible
 everywhere but the TUI — the §25 cautionary tale, one section later. `pin` needs no
 approval (D26), so §21a does not depend on it.
 
+### Decisions record (M18–M21), added at §21c's build
+
+**M18 — a thread summary gets its OWN TABLE, not a `CompactionCheckpoint` row with a
+different `strategy`.** The two carry nearly identical columns and mean opposite
+things: `latest_checkpoint` resolves by timestamp and feeds
+`ConversationMemory._derived_view()`, so writing one is an edit to a live conversation,
+while a summary is a description that changes nothing. A summary row in that table
+would therefore silently compact the thread it was meant to describe, and would win by
+being newest. Two tables make that impossible instead of documented. `extra_data` was
+the other candidate and was rejected for T1's reason — an opaque JSON blob cannot be
+filtered in SQL, and the roadmap keeps a future `search_threads` open.
+
+Its consequence, stated because it looks like an oversight: **`save_thread_summary` has
+no advance guard while `save_checkpoint` does.** A backwards compaction watermark
+un-compacts a thread; a redundant summary row can only describe a thread as it was a
+moment ago, which the next `advances()` check notices. The guard would be cargo, and
+copying it would imply the two writes are the same kind of thing.
+
+**M19 — a referenced summary is a PROMPT TIER, not a message.** `with_refs` sits beside
+`with_goal` and `with_memories`, reading a list off the thread's `extra_data`. The
+alternative — writing `[Reference from thread X] …` into the archive as a `user`
+message — was rejected on §27's ground: replay would render harness-generated text
+under a `you ›` label, which M8 forbids, and a later compaction would summarise the
+summary. Appended OUTSIDE `with_catalogs()` (K6's third instance) and
+**unconditionally**, unlike memories: a reference belongs to the thread rather than to
+an agent, and `system_prompt_for()` has no memory object to read one from.
+
+**M20 — `/summary` describes, `/compact` folds.** §21's text treats "session summaries"
+as compaction invoked deliberately, which §21a's `/compact` already is. What remained
+unserved is the request that produced the feature: *show me what this conversation has
+been about*, without shortening what the model sees next turn. Two different requests
+that share a summariser.
+
+**M21 — the CLI gets flags (`--summary`, `--ref`), not a slash-command layer.** M15's
+precedent, for M15's reason: the CLI has no command layer, and adding one is §23's
+business, where the response channel it would share is already specified. The accepted
+limit is that a CLI user attaches a reference at launch rather than mid-conversation.
+
+**The summary target is absolute, not a `COMPACTION_TARGET_RATIOS` entry.** A ratio is
+correct for a fold, where the summary replaces the span it came from and the thread
+shrinks either way. §21c's summary is injected on EVERY turn of the referencing thread
+with nothing bounding it, so a 500KB source at strength 3 would inject 75KB
+indefinitely. `config.SUMMARY_TARGET_CHARS` is passed as `_summarize`'s `target`, which
+takes plain values and needed no change. A thread already shorter than the budget is
+stored verbatim and costs no model call.
+
 ### Acceptance criteria
 
 1. Compaction never modifies or deletes rows in `MessageLog` — only adds `CompactionCheckpoint` rows. A full-history query against `MessageLog` alone always returns everything ever said, regardless of how many times compaction has run.
@@ -1353,6 +1400,9 @@ approval (D26), so §21a does not depend on it.
 6. **(D25) `remember()` with no explicit `scope` writes a `"project"`-scoped row**, keyed to the same resolved project path the trust store uses — and that memory does not surface in a thread opened from a different project directory.
 7. **(D26) `remember()` is denied on a path with no approval channel** (CLI, pipeline passes) rather than writing silently; `pin()` succeeds on those same paths. Both tools have declared fields in `ToolPermissions` and `ToolApprovals`, per D24's consistency check.
 8. **(D27) A `compaction` block in a trusted project's `settings.json` overrides the `config.py` defaults**, a user-level `settings.json` overrides `config.py` but loses to the project, and an out-of-range value (`strength: 9`, or `warning_margin >= buffer`) is rejected with a clear message at load time rather than producing incoherent trigger math later.
+9. **(§21c) A thread summary leaves the thread it describes untouched** — no `CompactionCheckpoint` row, and the derived view identical before and after.
+10. **(§21c) A summary of a compacted thread describes the original conversation**, not the compaction summary, and a second summary of an unchanged thread costs no model call.
+11. **(§21c) An attached reference reaches a chat prompt in both shells and NO research pass prompt**, states that it is not this conversation's history, and is refused rather than silently rotated once `MAX_INJECTED_REFS` is reached.
 
 ---
 
@@ -1438,11 +1488,32 @@ symptom is the whole app failing to lay out with `'NoneType' object has no attri
 
 ## 23. Interactive tools — question tool, todo list, and the response channel they share
 
+**Added during §16. SLICE 1 BUILT after §24** — the channel (AC1), its three consumers, and §18's deferred per-tool sign-off (AC1b). The question tool and the todo list (ACs 2–4) are slice 2.
+
 **Added during §16.** Two requested capabilities need the same missing piece: a way for a *tool* to ask the user something and block until answered. §13 built exactly one of these — `permission_channel`, a `queue.Queue` carrying a boolean — and both of these need a richer version of it.
 
 ### The shared piece first
 
 Generalise the approval bridge into a response channel that carries a typed request and a typed response, with `permission_channel` becoming one case of it rather than a parallel mechanism. Doing the tools first and the generalisation afterwards produces two bespoke channels and a third when §18 wants one.
+
+**The warning was right, and it was already five by the time this was built.** `permission_channel` (§13), `ApprovalProvider` (§25), `ReviewConsent` (§20), and §24 added two more — `ask_confirm_blocking` and `ask_project_kind_blocking` — in the section immediately before this one. Each re-derived the same four rules: what a dismissal carries, what a timeout means, how shutdown releases a parked worker, and how a malformed answer decodes.
+
+### Decisions record (slice 1: J1–J8)
+
+| # | Decision | Why |
+|---|---|---|
+| **J1** | **`core/interaction.py`**, a leaf module beside `core/approval.py`. `Request(kind, payload, notice)` + `ResponseChannel(ask, honour_run_scope)` | Authorization DATA (what was decided, how much is left to spend) is a different thing from the MEANS of asking, which is why the two stay separate modules rather than merging |
+| **J2** | **What is shared is `decode`, not the dataclasses** | A request/response pair is nearly free to write badly — five call sites can each build one and still each invent their own failure handling, which is exactly how there came to be five. One function owning the declining default per kind is the part that pays |
+| **J3** | **`decode(request, raw)` takes the REQUEST, not the kind** | Two kinds cannot be validated without knowing what was asked: a CHOICE only against the options offered, a SUBAGENT_SIGNOFF subset only against the candidates listed. Passing the kind alone made both unverifiable — a shell could return a tool nobody offered and thereby grant it |
+| **J4** | **`decode(Request(kind), None) == SAFE_DEFAULTS[kind]` for every kind**, pinned by a test | Lets `ask()` route its no-channel and callback-raised paths through `decode` rather than reading the table, so a kind added later cannot carry a default its decoder disagrees with |
+| **J5** | **An unknown KIND raises; an unanswerable question declines** | An unanswerable question is a runtime condition to fail safe on. A question nobody defined is a bug, and inventing "no" for it would hide the typo that built the Request |
+| **J6** | **Review decoding is STRICT** — a well-formed pair or nothing | The two decoders this replaced disagreed (review.py took a bare `"accept"` string, tui/app.py did not) and neither behaviour was tested. Strict wins because this is the only kind whose permissive failure APPLIES an edit rather than declining one |
+| **J7** | **`ToolSpec.request_kind` / `request_payload`** carry the question's shape and its tool-specific fields | grant_scope's reason exactly: the loop asks the registry what shape of question a tool needs, so no tool name appears in `core/loop.py` |
+| **J8** | **The sign-off memo is keyed by (tool, SUBJECT)**, amending S1 | `grant_scope="run"` meant a second spawn was not asked at all — and the test pinning it spawned agent `a` then agent `b`, so approving `a` authorised `b`'s whole gated set. Per-tool sign-off makes the answer agent-specific, so the memo is too. The anti-noise intent survives: the same agent twice is one prompt |
+
+### What the two parameters keep separate
+
+§23 unified the MECHANISM, not the arguments. "May this edit be applied?" (`review`) stays supplied separately from "may this call proceed?" (`authorization.provider`), because `--review` without `--attended` is a legitimate combination and one shared object would make it unexpressible.
 
 ### Question tool
 
@@ -1468,11 +1539,15 @@ Open question to settle at build time: whether the list is thread-scoped state i
 3. Both tools have declared permission/approval fields (D24).
 4. The todo panel re-renders from an event, not from polling.
 
+**Slice 1 status:** AC1 ✓ (one mechanism, three consumers — approval, review, sign-off — plus §24's two). AC1b ✓ (`SubagentSignoffScreen`, the subset intersected with the offered candidates, and S1's scope amended per J8). ACs 2–4 are slice 2, along with P1's `LoopEvent`-vs-tagged-union decision, which only the todo event needs.
+
 ---
 
-## 24. `/init` — generate `CONTEXT.md` from the project
+## 24. `/init` — generate the project's documentation set — BUILT
 
-**Added during §16.** A command that reads the project and writes `.venastine/CONTEXT.md`, the free-text project context §14 already loads and injects into opted-in agents' prompts.
+**Added during §16, built after §21c.** A command that reads the project and writes `.venastine/CONTEXT.md`, the free-text project context §14 already loads and injects into opted-in agents' prompts.
+
+**Widened at build time, on the user's correction.** The spec generated one file. What ships scaffolds a SET: `CONTEXT.md` is the hub and the only document inside `.venastine/`, and it links out to ordinary committed root documents — `ARCHITECTURE`, `ROADMAP`, `DEVLOG`, `TECHNICAL_DEBT`, `DOCUMENTATION_STANDARDS`, `TEST_WRITING`, `BREAKING_CHANGES` for a software project, or `RESEARCH_QUESTIONS`, `METHODOLOGY`, `SOURCES`, `FINDINGS`, `LIMITATIONS`, `EXPERIMENT_LOG`, `OPEN_QUESTIONS` plus the shared `DOCUMENTATION_STANDARDS` for a research one.
 
 ### Two interactions to design around, not discover
 
@@ -1480,11 +1555,31 @@ Open question to settle at build time: whether the list is thread-scoped state i
 
 **`write` is permission `False` by default.** §24 either runs through the existing `write` tool (and so needs approval, which is right for a command that writes into the project) or writes directly from the command handler. Prefer the former: a command that bypasses the tool permission layer to write files is a precedent worth not setting.
 
+**Correction found at build time: neither option was available as written.** `write` is not merely `False` by default — it is unoverridable at runtime. `is_tool_allowed()` reads `config.ToolPermissions()` directly, `settings.json` has no `permissions` section and `_KNOWN_SETTINGS` raises on an unknown key, and D14 forbids a `ToolContext` widening anything, with the global check running first and unconditionally. `dispatch("write", …)` therefore raises `ToolCallDenied` before the `approval_callback` is ever consulted, for every user, out of the box. `read` is blocked identically, which also ruled out an agent that explores the project with the existing read tool. I1 and I2 are what the preference above became once that was true.
+
+### Decisions record (I1–I13)
+
+| # | Decision | Why |
+|---|---|---|
+| **I1** | A new narrowly-scoped **`write_project_doc`**, not `write`. It takes a document NAME from a fixed allowlist and has no path parameter at all | AC3 holds literally — dispatch, approval gate, `check_input_policy`, output redaction — without flipping a global or inventing a `permissions` config surface in the one file where project tier beats user tier. The destination is derived, so the tool cannot be aimed elsewhere |
+| **I2** | A scoped **`read_project_doc`**, rather than flipping `ToolPermissions.read`. Allowed, no approval | Reading the project's own documents at the user's explicit request is not an escalation, and a gate would mean a dozen prompts per run — the shape of consent that gets clicked through. Flipping the global would hand every agent and all ten research passes standing file access. The readable set is DOCUMENTATION rather than "text files" because a permission-`True` tool is advertised to every run, not only `/init`'s |
+| **I3** | Discovery is a **manifest injected into the user message**, built by a directory walk | No model call and no tool call, so two runs on an unchanged project produce byte-identical input — which is what makes the output diffable. Sizes are included because choosing what to read needs them: this repo's root markdown is 721 KB against a 20 KB per-read cap. Recursing for markdown was rejected; here it pulls in `prompts/`, `skills/builtin/` and `agents/builtin/`, which are harness assets competing for a bounded budget |
+| **I4** | Regeneration **revises**; an existing `CONTEXT.md` is a labelled input | Hand edits survive by design rather than by the user rejecting a diff and re-applying them |
+| **I5** | An existing file gets a **unified diff and an explicit yes**; with no way to ask, `/init` refuses | §25's V6, sixth instance: the inability to ask is not permission to proceed. No stored state — the diff comes from what is on disk |
+| **I6** | Trust is re-granted **only if the project was already trusted** before the write | The user just authored the content, so consent is unambiguous — but `.venastine/` in an untrusted project may already hold agents, skills and an `mcp.json` that arrived with a cloned repo. Granting as a side effect of `/init` would wave all of it through: a hole in D17 opened from a direction the trust prompt never sees. `CONTEXT.md` is never special-cased out of the hash |
+| **I7** | Three bounds: `INIT_TOKEN_BUDGET`, `INIT_READ_CHARS`, `INIT_MAX_STEPS` | TECHNICAL_DEBT item 9's meter re-counts the whole prompt every step, so a tool-heavy loop exhausts the chat budget in a handful of calls — §26 hit this exact profile and it is why research passes got their own. The three bound different things: total spend, per-read size, and the number of reads, which neither of the others limits |
+| **I8** | The agent produces **text**; the shell writes | Consent belongs to the shell (§20's V3), and a tool writing from inside the loop could not show a human a diff first. `initializer.md` gets `read_project_doc` and nothing else |
+| **I9** | `/init` scaffolds a **set**, with `CONTEXT.md` as the hub and the only document in `.venastine/` | The rest are ordinary committed root files, where humans reading the repo will find them. The one file every agent reads is also the map of the ones it does not |
+| **I10** | `CONTEXT.md` is generated in full; the others are **structured stubs** | A DEVLOG written for a project with no history, or an ARCHITECTURE describing code an agent skimmed once, is confident fiction in files that then get committed, linked from the hub and read as established fact. An honest empty section outperforms a plausible wrong one |
+| **I11** | The index is generated, and is a **pure function of the kind** | Found by running the command twice. An index that marked which documents already existed changed on the second run purely because the first had created them — rewriting `CONTEXT.md` for no reason and defeating the "nothing to do" path — and the mark was false, labelling documents `/init` had authored moments earlier as preserved pre-existing work. Which files a run left alone is a fact about that RUN, and belongs in its report |
+| **I12** | An existing document is **never** overwritten by the stub path | Only `CONTEXT.md` goes through diff-and-confirm, because it is the only file `/init` claims to author |
+| **I13** | **Detect-then-confirm** for an established project; **ask outright** for a blank folder | With no manifests, no source and no docs there is nothing to infer from, so a proposal would be a guess wearing a finding's clothes. The proposal is a Python heuristic rather than a model call — a code manifest is a strong, checkable signal, and the user confirms either way |
+
 ### Acceptance criteria
 
-1. Running `/init` on a trusted project leaves it trusted, without weakening the content hash.
-2. The generated file is the user's to edit — regeneration must not silently overwrite hand-edits without saying so.
-3. The write goes through the permission layer.
+1. Running `/init` on a trusted project leaves it trusted, without weakening the content hash. ✓ (I6)
+2. The generated file is the user's to edit — regeneration must not silently overwrite hand-edits without saying so. ✓ (I4 revises rather than replaces; I5 diffs and asks; I12 never touches the other documents)
+3. The write goes through the permission layer. ✓ (I1)
 
 ---
 

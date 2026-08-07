@@ -27,7 +27,6 @@ budget-truncated responses.
 """
 
 import logging
-import queue
 from typing import Optional
 from uuid import UUID
 
@@ -37,6 +36,7 @@ from core.client import (
     api_initialization, call_model_stream, effort_for, ModelResponse,
 )
 from core.events import LoopEvent
+from core import interaction
 from core.memory import ConversationMemory
 # §27 (T1). The loop is where a thread's kind is DECIDED -- it knows which
 # of its three entry points is running -- and storage.create_thread is
@@ -93,6 +93,119 @@ def with_memories(system_prompt: str, agent=None) -> str:
     return f"{system_prompt}\n\n{fragment}"
 
 
+def with_refs(system_prompt: str, memory: ConversationMemory) -> str:
+    """Append §21c's referenced-conversation tier to a prompt. No-op when the
+    thread has no references attached.
+
+    Beside with_goal and taking the same argument, because a reference is a
+    property of the THREAD rather than of the agent or the session: it was
+    attached to this conversation by a person, it persists across a resume,
+    and it applies whichever agent happens to be active. That is also why it
+    is not routed through agents.manager.system_prompt_for() the way §21b's
+    memories are -- that function has no memory object, and refs are not an
+    agent's opt-in.
+
+    MUST NOT move inside prompts.system_prompts.with_catalogs(). That function
+    feeds pass_prompt(), so a reference attached in a chat session would land
+    in all ten passes of a research run the user started separately. §19's K6,
+    THIRD instance -- after §21b's memories, which is recorded as M13.
+
+    THE SUMMARIES ARE ANNOUNCED AS SUMMARIES OF SOMETHING ELSE. A referenced
+    thread is not this conversation's history, and a model that cannot tell
+    the difference will answer as though the user said things they said
+    elsewhere. Same reason §21a's compaction summary carries SUMMARY_PREFIX.
+    """
+    refs = memory.extra.get("refs") or []
+    if not refs:
+        return system_prompt
+
+    # CAPPED, AND THE CAP IS STATED IN THE TEXT (M14). The attach path already
+    # refuses to exceed it, so this is the second line of defence rather than
+    # the first -- but MAX_INJECTED_REFS can be lowered between sessions, and a
+    # thread carrying four refs under a cap of three must drop one visibly
+    # rather than silently.
+    cap = config.MAX_INJECTED_REFS
+    shown, total = refs[:cap], len(refs)
+    header = ("## Referenced conversations\n\n"
+              "Distilled summaries of OTHER conversations, attached by the "
+              "user for context. They are NOT part of this conversation's "
+              "history -- nothing here was said to you in this thread.")
+    if total > cap:
+        logger.warning(
+            "Injecting %s of %s attached references; the rest are not in this "
+            "prompt. Raise config.MAX_INJECTED_REFS or drop one with "
+            "/ref --clear.", cap, total)
+        header = (f"{header}\n\nShowing {cap} of {total} attached references. "
+                  f"The others exist and are not included here.")
+
+    lines = [header]
+    for ref in shown:
+        label = ref.get("label") or "(no preview)"
+        lines.append(f"\n### {label}\n(thread {ref.get('thread_id')})\n"
+                     f"{ref.get('summary', '')}")
+    return f"{system_prompt}\n\n" + "\n".join(lines)
+
+
+def attach_ref(memory: ConversationMemory, thread_id, summary: str,
+               label: str = "") -> tuple:
+    """Attach one thread's summary to `memory`'s thread. Returns (ok, message).
+
+    ONE writer for both shells, like with_refs is one reader: the CLI's --ref
+    and the TUI's /ref must agree about the cap, about re-attaching the same
+    thread, and about the stored shape, or the two disagree about what a
+    reference IS.
+
+    REFUSES AT THE CAP rather than dropping the oldest. A reference is
+    something a person chose by name; making room by discarding one silently
+    is what §21b's "removal is by id, never by substring" rule exists to
+    prevent. The message names the command that makes room.
+
+    Re-attaching a thread already attached REPLACES its summary rather than
+    adding a second entry -- the newer summary is strictly better information
+    about the same source, and two entries for one thread would spend the cap
+    on a duplicate.
+    """
+    from datetime import datetime, timezone
+
+    refs = [dict(r) for r in (memory.extra.get("refs") or [])]
+    key = str(thread_id)
+    existing = next((r for r in refs if r.get("thread_id") == key), None)
+    if existing is None and len(refs) >= config.MAX_INJECTED_REFS:
+        return False, (
+            f"Already referencing {len(refs)} conversations, which is the "
+            f"limit (config.MAX_INJECTED_REFS). Drop one with /ref --clear "
+            f"first -- none is removed automatically.")
+
+    entry = {
+        "thread_id": key,
+        "summary": summary,
+        "label": label,
+        "attached_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if existing is not None:
+        refs[refs.index(existing)] = entry
+        verb = "Updated the reference to"
+    else:
+        refs.append(entry)
+        verb = "Now referencing"
+    memory.set_extra("refs", refs)
+    return True, f"{verb} thread {key}."
+
+
+def clear_refs(memory: ConversationMemory) -> int:
+    """Drop every attached reference. Returns how many were dropped.
+
+    All or nothing, deliberately: a per-reference removal needs a stable way
+    for a person to name one, and the only handle a ref has is a thread uuid
+    the user would have to retype. `/ref --list` then `/ref` to re-attach the
+    ones still wanted is two steps with nothing to mistype.
+    """
+    refs = memory.extra.get("refs") or []
+    if refs:
+        memory.set_extra("refs", None)
+    return len(refs)
+
+
 def _authorization_kwargs(authorization) -> dict:
     """Unpack a RunAuthorization into _run()'s primitives.
 
@@ -108,34 +221,45 @@ def _authorization_kwargs(authorization) -> dict:
     return {
         "granted_tools": authorization.granted_tools or None,
         "grant_budget": authorization.budget,
-        "approval_provider": authorization.provider,
+        "response_channel": authorization.provider,
     }
 
 
-def _obtain_approval(permission_channel, approval_provider,
-                     tool_name: str, params: dict, notice) -> bool:
-    """Get the human's answer for one gated call, by whichever route this
-    run has. False when there is no route at all.
+def _obtain_approval(response_channel, tool_name: str, params: dict,
+                     notice, request_payload=None) -> tuple:
+    """Ask the human about one gated call. Returns (approved, grant).
 
-    TWO routes, because they solve different problems and §23 has not yet
-    merged them. A queue is a thread handoff: the TUI's worker parks here
-    while its UI thread renders the modal, and the question travels in the
-    LoopEvent yielded just above. A provider is a callable the shell
-    supplies, and it exists because run_to_completion() DISCARDS that
-    event -- so the CLI and the research pipeline, which drain the
-    generator rather than watching it, would otherwise block on a queue
-    with nothing displayed.
+    ONE route since §23. There were two -- a queue.Queue the TUI's worker
+    parked on while its UI thread rendered a modal, and an
+    ApprovalProvider callable, which existed only because
+    run_to_completion() DISCARDS the LoopEvent carrying the question, so
+    the CLI and the pipeline would have blocked on a queue with nothing
+    displayed. Both were the same exchange with different plumbing, and
+    the shells now supply one ResponseChannel whose `ask` does whichever
+    of those two things that shell needs.
 
-    The channel wins when both are present: it is the more specific
-    arrangement (a live UI is already showing the request), and the
-    provider would be asking a second time about a question already on
-    screen.
+    TWO RETURN VALUES, because §23 AC1b made one question's answer richer
+    than a yes/no. A subagent sign-off answers with the SUBSET of tools
+    the child may then use unprompted -- None to refuse the spawn, an
+    empty set to allow it with nothing granted, a non-empty set to grant
+    those. `grant` is None for every other kind, which carries no subset.
+
+    Which kind to ask comes from the REGISTRY, not from a name test here:
+    the loop asks what shape of question a tool needs the same way it asks
+    whether it needs one at all. `request_payload` is passed in already
+    computed, because the caller needs it before this point to look up the
+    sign-off memo -- and building a subagent's candidate list twice per
+    call would be wasteful and could disagree with itself.
     """
-    if permission_channel is not None:
-        return bool(permission_channel.get())
-    if approval_provider is not None:
-        return bool(approval_provider.ask(tool_name, params, notice))
-    return False
+    kind = registry.request_kind(tool_name)
+    payload = {"tool_name": tool_name, "params": params}
+    payload.update(request_payload or {})
+    answer = interaction.ask(response_channel, interaction.Request(
+        kind=kind, payload=payload, notice=notice))
+    if kind == interaction.SUBAGENT_SIGNOFF:
+        # None denies the spawn; any set (including empty) allows it.
+        return answer is not None, answer
+    return bool(answer), None
 
 
 # ROADMAP_v2 §21. Notice kinds that describe a STANDING CONDITION rather
@@ -266,10 +390,9 @@ class RunAgentLoop:
         max_total_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
         effort: Optional[str] = None,
-        permission_channel: Optional[queue.Queue] = None,
+        response_channel=None,
         granted_tools: Optional[set] = None,
         grant_budget=None,
-        approval_provider=None,
         compaction_mode: str = "working_set",
     ):
         """Generator yielding LoopEvent objects as the loop progresses.
@@ -282,12 +405,13 @@ class RunAgentLoop:
         membership itself, it just hands the context to the registry and
         lets security/permissions.py compose the layers.
 
-        permission_channel: an optional queue.Queue (plain stdlib, NOT
-        asyncio — this is a thread-to-thread handoff between the TUI's
-        worker thread running this generator and the TUI's main/UI
-        thread). If None (CLI/pipeline paths), any tool call that would
-        need approval is denied by default — same behavior as today's
-        dispatch() with no approval_callback.
+        response_channel: an optional core.interaction.ResponseChannel --
+        the ONE way this loop asks a human anything (§23 AC1). None means
+        nothing can be asked, and any call that would need approval is
+        denied. Replaced a queue.Queue plus a separate ApprovalProvider,
+        which were the same exchange with two sets of plumbing; a shell
+        that needs the thread handoff (the TUI parks its worker while the
+        UI thread renders a modal) does that inside its own `ask`.
 
         granted_tools: names the user has ALREADY approved for this run
         (§18 subagent sign-off). A spawned subagent receives the set the
@@ -323,10 +447,11 @@ class RunAgentLoop:
         # this configuration, so it is not advertised -- but named once in
         # a WARNING so the hiding is never silent.
         #
-        # §25: "no way to ask" now means neither route. A research pass
-        # with an ApprovalProvider CAN ask, so hiding its gated tools would
-        # be reporting a limitation the run does not have.
-        headless = permission_channel is None and approval_provider is None
+        # §25: "no way to ask" is not "not a TUI". A research pass with a
+        # channel CAN ask, so hiding its gated tools would report a
+        # limitation the run does not have. §23 made this one condition
+        # again -- it was two while there were two routes.
+        headless = response_channel is None
         tool_schemas = registry.schemas(context, callable_only=headless)
         if headless:
             hidden = tuple(sorted(registry.headless_hidden(context)))
@@ -454,14 +579,32 @@ class RunAgentLoop:
                 #     tool runs. Exhaustion falls back to ASKING, not to
                 #     failing: supervised runs continue, headless ones deny
                 #     exactly as they would for any gated tool.
+                #
+                # §23 AC1b: the memo is keyed by (tool, SUBJECT), not by
+                # tool name alone. A subagent sign-off answers about one
+                # agent's candidate list, so reusing it for a different
+                # agent would grant a set nobody was shown -- which is
+                # what the name-only version did: approving a spawn of `a`
+                # silently covered a later spawn of `b` in the same turn.
+                # Tools with no subject (every other one) memo under None
+                # and behave exactly as before.
+                request_payload = registry.request_payload(
+                    call.name, call.input, context)
+                subject = request_payload.get("subject")
+                remembered, signoff = run_info.recall_signoff(
+                    call.name, subject)
                 if (needs_approval
-                        and call.name in run_info.granted_tools
+                        and remembered
                         and registry.grantable(call.name)
                         and (run_info.grant_budget is None
                              or run_info.grant_budget.take())):
                     needs_approval = False
                     granted_calls.append(
                         {"tool": call.name, "params": call.input})
+                else:
+                    # Not reused: nothing is carried into dispatch unless
+                    # this call's own answer supplies it below.
+                    signoff = None
                 if needs_approval:
                     notice = registry.approval_notice(
                         call.name, call.input, context)
@@ -469,9 +612,9 @@ class RunAgentLoop:
                         "tool_name": call.name, "params": call.input,
                         "notice": notice,
                     })
-                    approved = _obtain_approval(
-                        permission_channel, approval_provider,
-                        call.name, call.input, notice)
+                    approved, signoff = _obtain_approval(
+                        response_channel, call.name, call.input, notice,
+                        request_payload)
                     if not approved:
                         result = {
                             "error": f"{call.name} requires approval and was not given",
@@ -484,9 +627,10 @@ class RunAgentLoop:
                         # attended mode -- and one yes must not silently
                         # cover later calls there.
                         if (registry.grant_scope(call.name) == "run"
-                                and (approval_provider is None
-                                     or approval_provider.honour_run_scope)):
-                            run_info.granted_tools.add(call.name)
+                                and (response_channel is None
+                                     or response_channel.honour_run_scope)):
+                            run_info.remember_signoff(
+                                call.name, subject, signoff)
                         # Approval already obtained — pass a callback that
                         # returns True so dispatch()'s internal re-check
                         # doesn't deny an already-approved call.
@@ -495,7 +639,8 @@ class RunAgentLoop:
                                 call.name, call.input, context=context,
                                 approval_callback=lambda n, p: True,
                                 parent_run=run_info,
-                                permission_channel=permission_channel,
+                                response_channel=response_channel,
+                                signoff=signoff,
                                 memory=memory,
                             )
                         except ToolCallDenied as e:
@@ -505,7 +650,7 @@ class RunAgentLoop:
                         result = registry.dispatch(
                             call.name, call.input, context=context,
                             parent_run=run_info,
-                            permission_channel=permission_channel,
+                            response_channel=response_channel,
                             memory=memory)
                     except ToolCallDenied as e:
                         result = {"error": str(e)}
@@ -545,7 +690,7 @@ class RunAgentLoop:
         effort: Optional[str] = None,
         context: Optional[ToolContext] = None,
         system_prompt: Optional[str] = None,
-        permission_channel: Optional[queue.Queue] = None,
+        response_channel=None,
         granted_tools: Optional[set] = None,
         authorization=None,
         thread_kind: str = THREAD_KIND_CHAT,
@@ -563,7 +708,7 @@ class RunAgentLoop:
         prompt is used, so it applies in every shell without the callers
         knowing about it.
 
-        permission_channel / granted_tools exist for spawn_subagent (§18
+        response_channel / granted_tools exist for spawn_subagent (§18
         S1). Without the channel a spawned subagent ran HEADLESS while its
         parent could prompt, so it silently lost every approval-gated tool
         -- including all MCP tools -- and the same agent behaved
@@ -609,15 +754,34 @@ class RunAgentLoop:
         # plain chat turn count as opted in -- see memories.manager.
         if system_prompt is None:
             prompt = with_memories(prompt)
+        # §21c. UNCONDITIONAL, unlike memories above: a reference belongs to
+        # the thread, not to an agent, so an agent-built prompt needs it too --
+        # and system_prompt_for() has no memory to read it from.
+        prompt = with_refs(prompt, memory)
         auth_kwargs = (
             _authorization_kwargs(authorization) if authorization is not None
             else {"granted_tools": granted_tools}
         )
+        # §23: the bundle's channel and the explicit parameter are now the
+        # SAME kind of thing, so they can collide -- they could not before,
+        # when one was a queue named permission_channel and the other an
+        # ApprovalProvider named approval_provider, and both were passed.
+        #
+        # The explicit argument wins, preserving _obtain_approval's old
+        # precedence ("the channel wins when both are present"). A caller
+        # that passes one is describing THIS run; the bundle may have been
+        # assembled for a pipeline several layers up.
+        # Popped UNCONDITIONALLY, then merged. `a or kwargs.pop(...)`
+        # short-circuits, so the key would survive in auth_kwargs on
+        # exactly the path where an explicit channel was passed -- and
+        # collide with it at the call below.
+        bundled_channel = auth_kwargs.pop("response_channel", None)
+        response_channel = response_channel or bundled_channel
         response = run_to_completion(RunAgentLoop._run(
             memory, prompt,
             provider_name, model, context,
             max_steps, max_total_tokens, temperature=temperature, effort=effort,
-            permission_channel=permission_channel, **auth_kwargs,
+            response_channel=response_channel, **auth_kwargs,
         ))
         response.thread_id = memory.thread_id
         return response
@@ -699,8 +863,8 @@ class RunAgentLoop:
         A GENERATOR SIBLING, not an observer callback on the existing
         function. That shape is the project's own, used three times
         already, and §23 AC1 exists specifically to stop a third bespoke
-        request/response channel appearing beside permission_channel and
-        ApprovalProvider.
+        request/response channel appearing beside the ones that already
+        existed -- which §23 has now merged into core.interaction.
 
         The response is RETURNED rather than read off the terminal event
         because `thread_id` is attached after the loop finishes -- see

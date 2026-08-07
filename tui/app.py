@@ -13,9 +13,13 @@ and register into this shell rather than being written into it.
 Two hard acceptance criteria live in this file:
 
   AC2  a permission prompt shown mid-loop resumes the SAME generator with
-       the user's answer. The worker thread blocks inside _run() on
-       permission_channel.get(); the UI thread shows the modal and puts the
-       decision on the queue. Nothing re-enters or restarts the generator.
+       the user's answer. The worker thread blocks inside _run(), in this
+       app's `ask` on the response channel (§23); the UI thread shows the
+       modal and puts the decision on a queue that `ask` is waiting on.
+       Nothing re-enters or restarts the generator. Before §23 the chat
+       path did this differently from the research path -- the modal was
+       pushed from on_loop_event and the loop itself held the queue --
+       which was two mechanisms for one exchange.
 
   AC3  a tool call that raises must not kill the app. Textual's run_worker
        defaults to exit_on_error=True, which would tear the whole TUI down
@@ -42,11 +46,12 @@ from agents.manager import manager
 from agents.tui_commands import register_agent_commands
 from skills.manager import manager as skills
 from memories.tui_commands import register_memory_commands
+from project_init.tui_commands import register_init_commands
 from skills.tui_commands import register_skill_commands
 from core import config_loader
 from core.client import api_initialization, effort_levels_for_model
 from core.loop import (
-    DEFAULT_PROVIDER, DEFAULT_SYSTEM_PROMPT, RunAgentLoop, with_goal,
+    DEFAULT_PROVIDER, DEFAULT_SYSTEM_PROMPT, RunAgentLoop, with_goal, with_refs,
     with_memories,
 )
 from core.memory import ConversationMemory
@@ -59,7 +64,8 @@ from prompts import system_prompts
 from tui import ravens, themes
 from tui.commands import SlashCommand, registry as commands
 from tui.screens import (
-    ClaimsScreen, GrantPickerScreen, PermissionScreen, ReviewScreen,
+    ClaimsScreen, ConfirmScreen, GrantPickerScreen, PermissionScreen,
+    ProjectKindScreen, ReviewScreen, SubagentSignoffScreen,
     ThreadPickerScreen,
 )
 from tui.widgets import (
@@ -492,6 +498,9 @@ class VenastineApp(App):
         # would duplicate them.
         if self.active_agent is None:
             prompt = with_memories(prompt)
+        # §21c. Unconditional, for the reason the loop's copy of this line
+        # gives: a reference is thread state, not an agent's opt-in.
+        prompt = with_refs(prompt, self.memory)
         # §19 K1/K6: active skill bodies are pinned HERE, beside with_goal,
         # and deliberately NOT inside with_catalogs -- that function feeds
         # pass_prompt(), so pinning there would inject a skill activated in
@@ -504,8 +513,12 @@ class VenastineApp(App):
         if fragment:
             prompt = f"{prompt}\n\n{fragment}"
 
-        channel: queue.Queue = queue.Queue()
-        self._permission_channel = channel
+        # §23: the SAME channel the research path uses. The chat turn used
+        # to hand the loop a bare queue and push its modal from
+        # on_loop_event, which meant two code paths for one exchange -- and
+        # the event-driven one could not carry a question with more than
+        # two answers. The worker now blocks inside the channel's `ask`,
+        # exactly as an attended research pass already did.
         generator = RunAgentLoop._run(
             self.memory,
             prompt,
@@ -515,7 +528,7 @@ class VenastineApp(App):
             max_steps,
             config.MAX_TOKEN_BUDGET,
             effort=self.effort,
-            permission_channel=channel,
+            response_channel=self.response_channel(),
         )
         self.run_worker(
             lambda: self._consume(generator),
@@ -633,9 +646,11 @@ class VenastineApp(App):
                 transcript.write_system(f"— {event.notice['text']} —")
 
         if event.permission_request:
+            # §23: informational only. The modal is opened by the response
+            # channel from the worker thread, so this no longer pushes one
+            # -- doing both would stack two modals for one question.
             self._raven.resume_animation()
             self._raven.state = ravens.WAITING
-            self._ask_permission(event.permission_request)
 
         if event.final_response is not None:
             transcript.flush_stream()
@@ -667,43 +682,172 @@ class VenastineApp(App):
         self._release_permission_channel()
         return super().exit(*args, **kwargs)
 
+    def response_channel(self, honour_run_scope: bool = True):
+        """This app's one way of being asked anything (§23 AC1).
+
+        ONE object for the chat turn, an attended research pass, and every
+        tool that needs a human -- replacing a bare queue.Queue for chat
+        and an ApprovalProvider for research, which were the same exchange
+        with two sets of plumbing and could not agree on a question with
+        more than two answers.
+
+        honour_run_scope=False for attended research (§25 R11): a mode
+        whose purpose is per-call supervision must not let one yes cover
+        later calls.
+        """
+        from core import interaction
+
+        return interaction.ResponseChannel(
+            ask=self._ask_blocking, honour_run_scope=honour_run_scope)
+
+    def _ask_blocking(self, request):
+        """Route one Request to its modal and BLOCK. Runs on a worker.
+
+        Dispatch by kind lives here rather than in each caller, so a new
+        kind is a branch in one method instead of a new field, a new
+        parameter, and a new release path -- which is how there came to be
+        five of these.
+        """
+        from core import interaction
+
+        if request.kind == interaction.APPROVAL:
+            return self.ask_permission_blocking(
+                request.payload.get("tool_name"),
+                request.payload.get("params") or {},
+                request.notice)
+        if request.kind == interaction.REVIEW:
+            return self.ask_review_blocking(
+                request.payload.get("finding") or {},
+                request.payload.get("round", 0))
+        if request.kind == interaction.CONFIRM:
+            return self.ask_confirm_blocking(
+                request.payload.get("title", ""),
+                request.payload.get("body", ""),
+                request.payload.get("confirm_label", "Yes"))
+        if request.kind == interaction.CHOICE:
+            return self.ask_choice_blocking(request.payload)
+        if request.kind == interaction.SUBAGENT_SIGNOFF:
+            return self.ask_signoff_blocking(
+                request.payload.get("agent", "this subagent"),
+                request.payload.get("candidates") or [])
+        # An unrecognised kind is a bug in whoever built the Request;
+        # interaction.decode raises on one, and falling through lets that
+        # happen rather than answering a question this app cannot render.
+        return None
+
     def ask_permission_blocking(self, tool_name: str, params: dict,
                                 notice) -> bool:
-        """Show the permission modal and BLOCK until answered. §25 R9.
+        """Show the permission modal and BLOCK until answered.
 
-        Called from the /research worker thread, not the UI thread. The
-        chat path cannot use this: there the loop yields a LoopEvent the UI
-        already reacts to, so the modal is pushed from on_loop_event and
-        the worker parks on the channel. A research pass drains its
-        generator inside run_to_completion(), which DISCARDS that event, so
-        the question has to be carried here instead -- which is the whole
-        reason ApprovalProvider exists as a callable rather than a queue.
+        Called from a worker thread, never the UI thread -- both the chat
+        turn and an attended research pass reach it through
+        `_ask_blocking`. §23 unified those: the chat path used to push its
+        modal from on_loop_event while the worker parked on a queue the
+        loop held, which was a second mechanism for one exchange.
 
-        The same PermissionScreen and the same channel field as the chat
-        path, so `_release_permission_channel` covers this too: quitting
-        with a research approval open must not leave a non-daemon worker
-        parked on a Queue.get() nothing will ever answer (review f10, and
-        this is the fourth place that invariant applies).
+        `_release_permission_channel` covers this: quitting with a prompt
+        open must not leave a non-daemon worker parked on a Queue.get()
+        nothing will ever answer (review f10).
         """
         if self._shutting_down:
             # The one-shot release already fired; parking here would hang
             # the worker (and the interpreter) forever (review r1-1).
             return False
+        # Deny and keep going on a timeout (R9). Leaving the modal on
+        # screen would also leave the user answering a question whose
+        # answer no longer goes anywhere.
+        return self._blocking_modal(
+            PermissionScreen(tool_name, params, notice),
+            on_timeout=lambda screen: self._timed_out_permission(
+                screen, tool_name))
+
+    def ask_confirm_blocking(self, title: str, body: str,
+                             confirm_label: str = "Yes") -> bool:
+        """Show a yes/no and BLOCK until answered (§24).
+
+        Called from the /init worker, and shaped exactly like
+        ask_permission_blocking for the same reason: the generator is
+        plain synchronous code draining nothing, so no LoopEvent carries
+        its question to the UI.
+
+        The SAME `_permission_channel` field, so
+        `_release_permission_channel` already covers it -- quitting with
+        this modal open must not leave a non-daemon worker parked on a
+        Queue nobody will answer. That release puts a bare False, which
+        decodes here as "no", which is the safe direction: nothing is
+        written.
+        """
+        if self._shutting_down:
+            return False
+        return self._blocking_modal(
+            ConfirmScreen(title, body, confirm_label),
+            on_timeout=self._timed_out_confirm)
+
+    def _blocking_modal(self, screen, *, on_timeout):
+        """Push `screen` from a worker thread and park until it dismisses.
+
+        THE MECHANICS, ONCE. Four asks did this identically -- make a
+        queue, publish it on `_permission_channel` so the shutdown release
+        can find it, push from the UI thread, wait with a timeout, clear
+        the field. Each copy was a chance to forget the `finally`, and the
+        field is what `_release_permission_channel` reaches for when the
+        app exits with a modal open.
+
+        Returns the dismissal value RAW, including None on timeout.
+        interaction.decode turns anything unusable into that kind's
+        declining default, which is why nothing here fabricates an answer.
+        """
         channel: queue.Queue = queue.Queue()
         self._permission_channel = channel
-        screen = PermissionScreen(tool_name, params, notice)
         self.call_from_thread(
-            self.push_screen, screen, lambda ok: channel.put(bool(ok)))
+            self.push_screen, screen, lambda answer: channel.put(answer))
         try:
             return channel.get(timeout=config.ATTENDED_APPROVAL_TIMEOUT_S)
         except queue.Empty:
-            # Deny and keep going (R9). Leaving the modal on screen would
-            # also leave the user answering a question whose answer no
-            # longer goes anywhere.
-            self.call_from_thread(self._timed_out_permission, screen, tool_name)
-            return False
+            self.call_from_thread(on_timeout, screen)
+            return None
         finally:
             self._permission_channel = None
+
+    def _timed_out_confirm(self, screen) -> None:
+        # Only report a timeout if there genuinely was one -- the user may
+        # have clicked between the get() timeout and this callback.
+        if screen in self.screen_stack:
+            screen.dismiss(False)
+            self._transcript.write_system("[no answer — nothing was written]")
+
+    def ask_choice_blocking(self, payload: dict):
+        """Pick one of a set of offered options. Blocks; returns whatever
+        the modal dismissed with, RAW.
+
+        §23: this no longer validates. It used to end with
+        `answer if answer in PROJECT_KINDS else None`, which was the one
+        guard §24 shipped untested -- and the check belongs where the
+        options are known to be the ones that were OFFERED, which is
+        interaction.decode reading them off the request. This method's job
+        is to render and to block.
+        """
+        if self._shutting_down:
+            return None
+        screen = ProjectKindScreen(payload.get("proposal"),
+                                   payload.get("reason", ""),
+                                   payload.get("blank", False))
+        return self._blocking_modal(screen, on_timeout=self._timed_out_confirm)
+
+    def ask_signoff_blocking(self, agent: str, candidates: list):
+        """Which of a subagent's gated tools it may use unprompted (§23
+        AC1b). Blocks; returns a set, or None to refuse the spawn.
+
+        Returns the dismissal RAW, including None on timeout, because
+        interaction.decode both supplies the declining default and
+        intersects the answer with the candidates that were offered.
+        """
+        if self._shutting_down:
+            return None
+        return self._blocking_modal(
+            SubagentSignoffScreen(agent, candidates),
+            on_timeout=lambda screen: self._timed_out_permission(
+                screen, f"{agent} (subagent sign-off)"))
 
     def ask_review_blocking(self, finding: dict, round_index: int):
         """Show the review modal and BLOCK until answered. §20 V4.
@@ -716,35 +860,30 @@ class VenastineApp(App):
         The SAME `_permission_channel` field, so `_release_permission_channel`
         already covers it -- quitting with a review modal open must not
         leave a non-daemon worker parked on a Queue nobody will ever
-        answer. That release puts a bare False, which is why the decode
-        below treats anything that is not a (decision, notes) pair as a
-        rejection: a new dismissal path added later fails safe instead of
-        silently applying an edit.
+        answer. That release puts a bare False.
+
+        §23: this method no longer decodes. Every value it can return --
+        the modal's tuple, the shutdown release's bare False, the
+        timeout's None -- goes back to interaction.decode, which turns
+        anything that is not a well-formed (decision, notes) pair into a
+        rejection. There used to be a local `_decode_review_answer` here
+        AND a second normaliser in review.py, and they disagreed about
+        whether a bare "accept" string counted.
         """
         if self._shutting_down:
             # Same hang as ask_permission_blocking: exit()'s release is
             # one-shot, and this ask would re-arm a queue nobody answers
-            # (review r1-1).
-            return ("reject", "")
-        channel: queue.Queue = queue.Queue()
-        self._permission_channel = channel
-        screen = ReviewScreen(finding, round_index,
-                              config.MAX_REVIEW_REFINEMENTS)
-        self.call_from_thread(
-            self.push_screen, screen, lambda answer: channel.put(answer))
-        try:
-            return _decode_review_answer(
-                channel.get(timeout=config.ATTENDED_APPROVAL_TIMEOUT_S))
-        except queue.Empty:
-            self.call_from_thread(self._timed_out_review, screen)
-            # Through the decoder, same as the modal and release paths:
-            # the docstring promises one rule for all three, and a
-            # rejection shape that gains content must not skip this one
-            # (review §19-20 f25). _decode_review_answer(None) is
-            # ("reject", "") today.
-            return _decode_review_answer(None)
-        finally:
-            self._permission_channel = None
+            # (review r1-1). None rather than a hand-built rejection, so
+            # this path uses the same decoder as every other.
+            return None
+        # The timeout returns None rather than a hand-built rejection:
+        # interaction.decode turns it into one, the same way it does for
+        # the modal and the shutdown-release paths. §23 removed the local
+        # decoder this used to call, so there is now genuinely one rule
+        # rather than a promise that three paths share one (review f25).
+        return self._blocking_modal(
+            ReviewScreen(finding, round_index, config.MAX_REVIEW_REFINEMENTS),
+            on_timeout=self._timed_out_review)
 
     def _timed_out_review(self, screen) -> None:
         # Only say "no answer" when there genuinely was none: if the user
@@ -769,22 +908,6 @@ class VenastineApp(App):
             screen.dismiss(False)
         self._transcript.write_system(
             f"[no answer for {tool_name} — denied; the run continues]")
-
-    def _ask_permission(self, request: dict) -> None:
-        channel = self._permission_channel
-
-        def answered(approved: bool | None) -> None:
-            # The worker thread is blocked on channel.get(). A dismissal
-            # carrying None would hang it, so anything that is not an
-            # explicit approval is a denial.
-            channel.put(bool(approved))
-            self._raven.state = ravens.THINKING
-
-        self.push_screen(
-            PermissionScreen(request["tool_name"], request["params"],
-                             request.get("notice")),
-            answered,
-        )
 
     def on_turn_finished(self, message: TurnFinished) -> None:
         self._busy = False
@@ -1150,24 +1273,6 @@ def _cmd_effort(app: VenastineApp, args: str) -> None:
     app.start_effort_lookup(args)
 
 
-def _decode_review_answer(answer):
-    """Anything that is not a well-formed (decision, notes) pair is a
-    REJECT.
-
-    Module-level and shared so the timeout path, the modal path and
-    `_release_permission_channel`'s bare False all funnel through one
-    rule. This is the fifth place the "every dismissal must carry a
-    value" invariant applies, and the first where the unsafe failure is
-    silently applying an edit rather than merely hanging.
-    """
-    if not isinstance(answer, (tuple, list)) or len(answer) != 2:
-        return ("reject", "")
-    decision, notes = answer
-    if decision not in ("accept", "reject", "refine", "reject_all"):
-        return ("reject", "")
-    return (decision, notes or "")
-
-
 def _cmd_research(app: VenastineApp, args: str) -> None:
     """Run the deep-research pipeline on a query, off the UI thread.
 
@@ -1238,17 +1343,13 @@ def _cmd_research(app: VenastineApp, args: str) -> None:
 def _authorization_for(app: VenastineApp, granted: set):
     """A RunAuthorization for this run, or None when there is no
     authorization of any kind (the pre-§25 status quo)."""
-    from core.approval import ApprovalProvider, GrantBudget, RunAuthorization
+    from core.approval import GrantBudget, RunAuthorization
 
     provider = None
     if getattr(app, "_research_attended", False):
         # honour_run_scope=False (R11): a mode whose purpose is per-call
         # supervision must not let one yes cover later calls.
-        provider = ApprovalProvider(
-            ask=lambda name, params, notice:
-                app.ask_permission_blocking(name, params, notice),
-            honour_run_scope=False,
-        )
+        provider = app.response_channel(honour_run_scope=False)
         app._transcript.write_system(
             "Attended: every approval-gated call will be asked about as it "
             f"happens; {config.ATTENDED_APPROVAL_TIMEOUT_S}s with no answer "
@@ -1309,10 +1410,15 @@ def _split_research_flags(args: str):
 
 
 def _review_consent_for(app: VenastineApp):
-    """A ReviewConsent backed by the modal, or None when the review is
-    off. §20 V4/V6."""
-    from core.approval import ReviewConsent
+    """A ResponseChannel backed by the review modal, or None when the
+    review is off. §20 V4/V6, §23 AC1.
 
+    A separate channel object from the approval one even though both route
+    into `_ask_blocking`: §20 keeps "may this edit be applied?" apart from
+    "may this call proceed?" because /research --review without --attended
+    is a legitimate combination, and one shared object would make it
+    unexpressible. §23 unified the mechanism, not the two parameters.
+    """
     if not getattr(app, "_research_review", False):
         return None
     app._transcript.write_system(
@@ -1320,9 +1426,7 @@ def _review_consent_for(app: VenastineApp):
         "and report. Each proposed correction is yours to accept, reject or "
         f"refine; {config.ATTENDED_APPROVAL_TIMEOUT_S}s with no answer "
         "rejects that one and the review continues.")
-    return ReviewConsent(
-        decide=lambda finding, round_index:
-            app.ask_review_blocking(finding, round_index))
+    return app.response_channel()
 
 
 def _forwarding(app: VenastineApp, events):
@@ -1644,6 +1748,7 @@ register_builtin_commands()
 register_agent_commands()  # §18: /agent, /goal, /grill-me
 register_skill_commands()  # §19: /skill
 register_memory_commands()  # §21b: /memories, /forget
+register_init_commands()  # §24: /init
 
 
 def run(provider_name: str, model: str, settings: dict | None = None) -> None:
