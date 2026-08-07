@@ -182,3 +182,36 @@ class TestPump:
             elapsed = time.monotonic() - started
         assert elapsed < 2.0, \
             f"pump({3}) took {elapsed:.3f}s -- has it grown a deadline?"
+
+
+# ---------------------------------------------------------------------------
+# ---- No sixth copy --------------------------------------------------------
+# ---------------------------------------------------------------------------
+
+def test_no_test_module_defines_its_own_settle():
+    """The duplication was the reason the bugs survived 1246 tests.
+
+    Five implementations existed -- budgets 40/60/120/120/200 and two
+    incompatible orderings -- so a fix to the one TECHNICAL_DEBT 8 named
+    by filename reached one of them. Worse, the copy in
+    test_shell_compaction.py was deliberate and its docstring said so:
+    importing the canonical one would have coupled this file's timing to a
+    known-broken helper. That reasoning was sound while the helper was
+    broken and is exactly wrong now, which is the sort of comment that
+    outlives its premise unless something checks.
+
+    A grep test rather than a convention, because a convention is what
+    produced five copies.
+    """
+    import pathlib
+
+    offenders = []
+    for path in sorted(pathlib.Path("tests").glob("test_*.py")):
+        for number, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), start=1):
+            if line.startswith(("async def _settle", "def _settle",
+                                "async def settle", "def settle")):
+                offenders.append(f"{path}:{number}")
+    assert not offenders, (
+        "a local wait helper is back -- import `settle` from tests/conftest.py "
+        f"instead: {offenders}")
