@@ -1328,18 +1328,19 @@ class TestTheTuiShell:
         The assertions are otherwise the same ones, against the single
         decoder every route now funnels through.
         """
-        decode = interaction.decode
-        REVIEW = interaction.REVIEW
+        def decode(raw):
+            return interaction.decode(
+                interaction.Request(kind=interaction.REVIEW), raw)
 
-        assert decode(REVIEW, ("accept", "")) == ("accept", "")
-        assert decode(REVIEW, ("refine", "note")) == ("refine", "note")
-        assert decode(REVIEW, False) == ("reject", "")
-        assert decode(REVIEW, None) == ("reject", "")
-        assert decode(REVIEW, ("accept",)) == ("reject", "")
-        assert decode(REVIEW, ("yes", "")) == ("reject", "")
-        assert decode(REVIEW, ("accept", None)) == ("accept", "")
+        assert decode(("accept", "")) == ("accept", "")
+        assert decode(("refine", "note")) == ("refine", "note")
+        assert decode(False) == ("reject", "")
+        assert decode(None) == ("reject", "")
+        assert decode(("accept",)) == ("reject", "")
+        assert decode(("yes", "")) == ("reject", "")
+        assert decode(("accept", None)) == ("accept", "")
         # The disagreement itself, pinned: a bare string declines.
-        assert decode(REVIEW, "accept") == ("reject", "")
+        assert decode("accept") == ("reject", "")
 
     def test_every_review_screen_dismissal_carries_a_decision(self):
         """The worker parks on a Queue inside the consent callback. A
@@ -1543,7 +1544,8 @@ class TestTuiReviewLifecycle:
         # sees, and it is still a rejection.
         assert app.ask_review_blocking({}, 0) is None
         assert interaction.decode(
-            interaction.REVIEW, app.ask_review_blocking({}, 0)) == ("reject", "")
+            interaction.Request(kind=interaction.REVIEW),
+            app.ask_review_blocking({}, 0)) == ("reject", "")
         assert app.ask_permission_blocking("shell", {}, None) is False
 
     def test_the_no_answer_line_only_prints_when_there_was_no_answer(self):

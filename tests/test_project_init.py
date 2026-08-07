@@ -683,6 +683,57 @@ async def test_cancelling_the_kind_modal_never_reaches_the_confirmation(
 
 
 @pytest.mark.asyncio
+async def test_the_kind_modal_is_told_what_was_proposed(project, fake_agent):
+    """§23 moved these arguments into a Request payload dict, so a typo in
+    a key now silently shows an empty modal instead of failing at a
+    signature. The pilot above only dismisses the screen; this asserts the
+    screen was given something to render."""
+    from tui.app import VenastineApp
+    from tui.screens import ProjectKindScreen
+    from project_init.tui_commands import _cmd_init
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        _cmd_init(app, "")
+        assert await _settle(
+            pilot, lambda: isinstance(app.screen, ProjectKindScreen))
+        # Captured and DISMISSED before asserting. A failed assertion with
+        # the modal still up leaves the worker parked on its queue and
+        # blocks run_test()'s teardown, so the regression presents as a
+        # stalled suite rather than a red test (BREAKING_CHANGES §14).
+        # Releasing first costs nothing and makes this one fail properly.
+        proposal, reason, blank = (app.screen._proposal, app.screen._reason,
+                                   app.screen._blank)
+        app.screen.dismiss(None)
+        assert await _settle(pilot, lambda: app._busy is False)
+
+        assert proposal == doc_sets.SOFTWARE
+        assert "Python" in reason
+        assert blank is False
+
+
+@pytest.mark.asyncio
+async def test_the_confirmation_is_told_what_it_is_confirming(project,
+                                                              fake_agent):
+    """The other half: the diff summary travels in the payload too."""
+    from tui.app import VenastineApp
+    from tui.screens import ConfirmScreen
+    from project_init.tui_commands import _cmd_init
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        _cmd_init(app, "--software")
+        assert await _settle(
+            pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        body, label = app.screen._body, app.screen._confirm_label
+        app.screen.dismiss(False)
+        assert await _settle(pilot, lambda: app._busy is False)
+
+        assert "CONTEXT.md" in body
+        assert label == "Write"
+
+
+@pytest.mark.asyncio
 async def test_an_explicit_flag_skips_the_kind_modal(project, fake_agent):
     from tui.app import VenastineApp
     from tui.screens import ConfirmScreen

@@ -19,17 +19,22 @@ permissive, kind by kind and route by route:
     failure applies an edit rather than declining one
 
 The invariant that ties it together and is pinned below:
-`decode(kind, None) == SAFE_DEFAULTS[kind]` for every kind. That is what
-lets `ask()` route its failure paths through `decode` instead of reading
-the table, so a kind added later cannot carry a default the decoder
-disagrees with.
+`decode(Request(kind), None) == SAFE_DEFAULTS[kind]` for every kind. That
+is what lets `ask()` route its failure paths through `decode` instead of
+reading the table, so a kind added later cannot carry a default the
+decoder disagrees with.
+
+`decode` takes the REQUEST rather than the kind because two kinds cannot
+be validated without knowing what was asked: a choice is only valid
+against the options offered, and a sign-off subset only against the
+candidates listed.
 """
 
 import pytest
 
 from core import interaction
 from core.interaction import (
-    APPROVAL, REVIEW, SAFE_DEFAULTS, SUBAGENT_SIGNOFF,
+    APPROVAL, CHOICE, CONFIRM, REVIEW, SAFE_DEFAULTS, SUBAGENT_SIGNOFF,
     Request, ResponseChannel, ask, decode,
 )
 
@@ -53,7 +58,7 @@ class TestTheDefaultInvariant:
     @pytest.mark.parametrize("kind", sorted(SAFE_DEFAULTS))
     def test_decoding_nothing_gives_the_declining_default(self, kind):
         """What lets ask() funnel its failure paths through decode()."""
-        assert decode(kind, None) == SAFE_DEFAULTS[kind]
+        assert decode(Request(kind=kind), None) == SAFE_DEFAULTS[kind]
 
     @pytest.mark.parametrize("kind", sorted(SAFE_DEFAULTS))
     def test_every_default_declines(self, kind):
@@ -65,7 +70,7 @@ class TestTheDefaultInvariant:
         """An unanswerable question fails safe; an undefined one is a bug,
         and inventing 'no' for it would hide the typo that built it."""
         with pytest.raises(ValueError):
-            decode("summon_a_wizard", True)
+            decode(Request(kind="summon_a_wizard"), True)
 
 
 # ---------------------------------------------------------------------------
@@ -144,32 +149,49 @@ class TestApproval:
 
 class TestSubagentSignoff:
 
+    @staticmethod
+    def _request(candidates=("shell", "fetch_url")):
+        return Request(kind=SUBAGENT_SIGNOFF,
+                       payload={"agent": "worker",
+                                "candidates": list(candidates)})
+
     def test_a_subset_comes_back_as_a_set_of_names(self):
-        answer = ask(_channel({"shell", "fetch_url"}),
-                     Request(kind=SUBAGENT_SIGNOFF))
+        answer = ask(_channel({"shell", "fetch_url"}), self._request())
         assert answer == {"shell", "fetch_url"}
 
     def test_a_list_is_accepted_and_normalised(self):
         """A shell building the answer from a SelectionList hands back a
         list; the loop compares against a set."""
-        assert ask(_channel(["shell"]), Request(kind=SUBAGENT_SIGNOFF)) == {"shell"}
+        assert ask(_channel(["shell"]), self._request()) == {"shell"}
 
     def test_an_empty_set_is_a_real_answer_not_a_denial(self):
         """Spawn the subagent, grant it nothing. Distinct from None, and
         collapsing the two is the easy mistake — GrantPickerScreen draws
         the same three-way distinction for the same reason."""
-        answer = ask(_channel(set()), Request(kind=SUBAGENT_SIGNOFF))
+        answer = ask(_channel(set()), self._request())
         assert answer == set()
         assert answer is not None
 
     def test_none_denies_the_spawn(self):
-        assert ask(_channel(None), Request(kind=SUBAGENT_SIGNOFF)) is None
+        assert ask(_channel(None), self._request()) is None
 
     @pytest.mark.parametrize("raw", [True, False, "shell", 3, {"a": 1}])
     def test_anything_else_denies_the_spawn(self, raw):
         """Notably True: a shell that answered this like an approval must
         not accidentally grant the child everything."""
-        assert ask(_channel(raw), Request(kind=SUBAGENT_SIGNOFF)) is None
+        assert ask(_channel(raw), self._request()) is None
+
+    def test_a_name_that_was_not_offered_is_not_granted(self):
+        """The sign-off's whole substance is that the list SHOWN and the
+        list GRANTED are the same -- agents/manager.py's
+        candidate_approvals() says so in its own docstring. A shell
+        returning a name nobody proposed is answering a different
+        question, and this is why decode takes the request."""
+        answer = ask(_channel({"shell", "rm_minus_rf"}), self._request())
+        assert answer == {"shell"}
+
+    def test_nothing_offered_means_nothing_granted(self):
+        assert ask(_channel({"shell"}), self._request(candidates=())) == set()
 
 
 # ---------------------------------------------------------------------------
@@ -207,6 +229,52 @@ class TestReview:
     @pytest.mark.parametrize("raw", [None, True, {}, ("a", "b", "c")])
     def test_malformed_answers_reject(self, raw):
         assert ask(_channel(raw), Request(kind=REVIEW)) == ("reject", "")
+
+
+# ---------------------------------------------------------------------------
+# ---- Confirm and choice (§24's two, migrated) ------------------------------
+# ---------------------------------------------------------------------------
+
+class TestConfirm:
+
+    def test_yes_and_no(self):
+        assert ask(_channel(True), Request(kind=CONFIRM)) is True
+        assert ask(_channel(False), Request(kind=CONFIRM)) is False
+
+    def test_a_dismissal_declines(self):
+        assert ask(_channel(None), Request(kind=CONFIRM)) is False
+
+    def test_it_is_a_separate_kind_from_approval(self):
+        """Both answer with a bool, and the KIND is what tells a shell how
+        to render: APPROVAL is a gated call with params, CONFIRM is a
+        titled yes/no over text the caller composed."""
+        assert CONFIRM != APPROVAL
+
+
+class TestChoice:
+
+    @staticmethod
+    def _request():
+        return Request(kind=CHOICE,
+                       payload={"options": ["software", "research"]})
+
+    def test_an_offered_option_comes_back(self):
+        assert ask(_channel("research"), self._request()) == "research"
+
+    def test_an_unoffered_answer_is_no_choice_at_all(self):
+        assert ask(_channel("webapp"), self._request()) is None
+
+    def test_a_dismissal_picks_nothing(self):
+        """None, never the first option: nobody answered is not a choice,
+        and picking one on the user's behalf is what a declining default
+        exists to avoid."""
+        assert ask(_channel(None), self._request()) is None
+
+    def test_the_shutdown_releases_false_picks_nothing(self):
+        """`_release_permission_channel` puts a bare False. Without the
+        options check that False would be returned as if it were a
+        choice -- this is the guard §24 shipped by hand in tui/app.py."""
+        assert ask(_channel(False), self._request()) is None
 
 
 # ---------------------------------------------------------------------------

@@ -54,6 +54,12 @@ logger = logging.getLogger(__name__)
 APPROVAL = "approval"
 SUBAGENT_SIGNOFF = "subagent_signoff"
 REVIEW = "review"
+# §24's two, migrated in §23 slice 1. CONFIRM and APPROVAL both answer with
+# a bool and are still separate kinds, because the KIND is what tells a
+# shell how to render: APPROVAL is a gated tool call with params, CONFIRM
+# is a titled yes/no over a block of text the caller composed.
+CONFIRM = "confirm"
+CHOICE = "choice"
 
 # Review decisions, moved here from core/reasoning/review.py so the decoder
 # and the pipeline cannot disagree about what a valid answer is.
@@ -66,7 +72,8 @@ REVIEW_DECISIONS = (ACCEPT, REJECT, REFINE, REJECT_ALL)
 # What each kind means when nobody answered, answered incoherently, or could
 # not be asked at all. Every entry declines.
 #
-# INVARIANT, pinned by a test: `decode(kind, None) == SAFE_DEFAULTS[kind]` for
+# INVARIANT, pinned by a test: `decode(Request(kind), None) ==
+# SAFE_DEFAULTS[kind]` for
 # every kind. That is what lets `ask()` route the no-channel and the
 # callback-raised paths through `decode` rather than reading this table -- so
 # there is genuinely one function deciding what a non-answer means, and a new
@@ -80,6 +87,11 @@ SAFE_DEFAULTS = {
     # headless run there is nobody to ask later either.
     SUBAGENT_SIGNOFF: None,
     REVIEW: (REJECT, ""),
+    CONFIRM: False,
+    # None, not the first option: "nobody answered" is not a choice, and
+    # picking one on the user's behalf is exactly what a declining default
+    # exists to avoid.
+    CHOICE: None,
 }
 
 
@@ -131,7 +143,7 @@ class ResponseChannel:
 # ---- Decoding --------------------------------------------------------------
 # ---------------------------------------------------------------------------
 
-def decode(kind: str, raw: Any) -> Any:
+def decode(request: "Request", raw: Any) -> Any:
     """Normalise whatever a shell returned into this kind's answer type.
 
     Anything unrecognised becomes SAFE_DEFAULTS[kind]. That covers a
@@ -139,23 +151,40 @@ def decode(kind: str, raw: Any) -> Any:
     bare False), a timeout, and a shell that returned something of the
     wrong shape entirely.
 
+    TAKES THE REQUEST, NOT JUST THE KIND, because two kinds cannot be
+    validated without knowing what was ASKED. A choice is only valid
+    against the options it was offered, and a sign-off subset is only
+    valid against the candidates that were listed -- a shell returning a
+    tool nobody offered must not thereby grant it. Passing the kind alone
+    made those two unverifiable, which is the sort of gap that shows up
+    later as "the answer was honoured but nothing had proposed it".
+
     Raises on an unknown KIND, deliberately, rather than returning a
     default. An unanswerable question is a runtime condition to fail safe
     on; a question nobody defined is a bug, and inventing "no" for it would
     hide the typo in whichever call site built the Request.
     """
+    kind = request.kind
     if kind not in SAFE_DEFAULTS:
         raise ValueError(
             f"Unknown request kind {kind!r}; expected one of "
             f"{', '.join(sorted(SAFE_DEFAULTS))}.")
 
-    if kind == APPROVAL:
+    if kind in (APPROVAL, CONFIRM):
         # bool(), not `is True`: a shell answering with a truthy value it
         # considers a yes should not be silently denied. The permissive
         # direction is safe here ONLY because the alternative is also a
         # decision the user made -- unlike the shapes below, there is no
         # third state to confuse it with.
         return bool(raw)
+
+    if kind == CHOICE:
+        # Valid ONLY against what was offered. A shell returning something
+        # nobody proposed is answering a different question, and the
+        # options live on the request precisely so this can be checked --
+        # `decode(kind, raw)` could not, which is why it takes the request.
+        options = request.payload.get("options") or ()
+        return raw if raw in options else None
 
     if kind == SUBAGENT_SIGNOFF:
         # Three answers, and the middle one is the easy one to lose: None
@@ -170,9 +199,24 @@ def decode(kind: str, raw: Any) -> Any:
         # branch, since bool subclasses int rather than any collection --
         # one was written here and removed, because a guard that cannot
         # fire still reads as the thing protecting you.
-        if isinstance(raw, (set, frozenset, list, tuple)):
-            return {str(name) for name in raw}
-        return None
+        if not isinstance(raw, (set, frozenset, list, tuple)):
+            return None
+        chosen = {str(name) for name in raw}
+        # INTERSECTED with what was offered. A shell returning a name that
+        # was never a candidate must not grant it -- the sign-off's whole
+        # substance is that the list shown and the list granted are the
+        # same, which agents/manager.py's candidate_approvals() says in its
+        # own docstring. An empty `candidates` means nothing was offered,
+        # so nothing can be granted.
+        offered = {str(name) for name in
+                   (request.payload.get("candidates") or ())}
+        unoffered = chosen - offered
+        if unoffered:
+            logger.warning(
+                "Sign-off answer named %s, which %s not offered; ignoring "
+                "them.", sorted(unoffered),
+                "was" if len(unoffered) == 1 else "were")
+        return chosen & offered
 
     # REVIEW. Strict: a well-formed (decision, notes) pair or nothing.
     #
@@ -204,7 +248,7 @@ def ask(channel: Optional[ResponseChannel], request: Request) -> Any:
     the declining default.
     """
     if channel is None:
-        return decode(request.kind, None)
+        return decode(request, None)
     try:
         raw = channel.ask(request)
     except Exception:  # noqa: BLE001 -- a shell's failure is not the run's
@@ -216,5 +260,5 @@ def ask(channel: Optional[ResponseChannel], request: Request) -> Any:
         logger.exception(
             "Response channel raised answering a %r request; "
             "treating as declined.", request.kind)
-        return decode(request.kind, None)
-    return decode(request.kind, raw)
+        return decode(request, None)
+    return decode(request, raw)

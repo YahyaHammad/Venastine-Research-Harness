@@ -45,17 +45,39 @@ def _cmd_init(app, args: str) -> None:
     transcript = app._transcript  # held before any modal opens (§27's note)
 
     def _work() -> None:
+        from core import interaction
+        from project_init import doc_sets
         from project_init.generator import InitError, generate
+
+        # §23: generate()'s confirm/choose_kind parameters are unchanged --
+        # they are a shell-agnostic API the CLI implements too. What moved
+        # is the plumbing beneath them: both now go down the same channel
+        # as every other question, so the fail-safe decoding is the shared
+        # one rather than a guard written by hand here.
+        channel = app.response_channel()
+
+        def _confirm(summary: str) -> bool:
+            return interaction.ask(channel, interaction.Request(
+                kind=interaction.CONFIRM,
+                payload={"title": "Write these files?", "body": summary,
+                         "confirm_label": "Write"}))
+
+        def _choose_kind(proposal, reason, blank):
+            return interaction.ask(channel, interaction.Request(
+                kind=interaction.CHOICE,
+                payload={"options": list(doc_sets.PROJECT_KINDS),
+                         "proposal": proposal, "reason": reason,
+                         "blank": blank}))
+
         try:
             notice = generate(
                 model=app.model,
                 provider_name=app.provider_name,
                 kind=kind,
-                confirm=lambda summary: app.ask_confirm_blocking(
-                    "Write these files?", summary, confirm_label="Write"),
+                confirm=_confirm,
                 notify=lambda text: app.call_from_thread(
                     transcript.write_system, text),
-                choose_kind=app.ask_project_kind_blocking,
+                choose_kind=_choose_kind,
             )
         except InitError as e:
             app.call_from_thread(transcript.write_error, str(e))

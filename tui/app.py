@@ -719,8 +719,16 @@ class VenastineApp(App):
             return self.ask_review_blocking(
                 request.payload.get("finding") or {},
                 request.payload.get("round", 0))
-        # Other kinds arrive in the commits that migrate them. Falling
-        # through lets interaction.decode supply the declining default.
+        if request.kind == interaction.CONFIRM:
+            return self.ask_confirm_blocking(
+                request.payload.get("title", ""),
+                request.payload.get("body", ""),
+                request.payload.get("confirm_label", "Yes"))
+        if request.kind == interaction.CHOICE:
+            return self.ask_choice_blocking(request.payload)
+        # An unrecognised kind is a bug in whoever built the Request;
+        # interaction.decode raises on one, and falling through lets that
+        # happen rather than answering a question this app cannot render.
         return None
 
     def ask_permission_blocking(self, tool_name: str, params: dict,
@@ -741,21 +749,13 @@ class VenastineApp(App):
             # The one-shot release already fired; parking here would hang
             # the worker (and the interpreter) forever (review r1-1).
             return False
-        channel: queue.Queue = queue.Queue()
-        self._permission_channel = channel
-        screen = PermissionScreen(tool_name, params, notice)
-        self.call_from_thread(
-            self.push_screen, screen, lambda ok: channel.put(bool(ok)))
-        try:
-            return channel.get(timeout=config.ATTENDED_APPROVAL_TIMEOUT_S)
-        except queue.Empty:
-            # Deny and keep going (R9). Leaving the modal on screen would
-            # also leave the user answering a question whose answer no
-            # longer goes anywhere.
-            self.call_from_thread(self._timed_out_permission, screen, tool_name)
-            return False
-        finally:
-            self._permission_channel = None
+        # Deny and keep going on a timeout (R9). Leaving the modal on
+        # screen would also leave the user answering a question whose
+        # answer no longer goes anywhere.
+        return self._blocking_modal(
+            PermissionScreen(tool_name, params, notice),
+            on_timeout=lambda screen: self._timed_out_permission(
+                screen, tool_name))
 
     def ask_confirm_blocking(self, title: str, body: str,
                              confirm_label: str = "Yes") -> bool:
@@ -775,16 +775,33 @@ class VenastineApp(App):
         """
         if self._shutting_down:
             return False
+        return self._blocking_modal(
+            ConfirmScreen(title, body, confirm_label),
+            on_timeout=self._timed_out_confirm)
+
+    def _blocking_modal(self, screen, *, on_timeout):
+        """Push `screen` from a worker thread and park until it dismisses.
+
+        THE MECHANICS, ONCE. Four asks did this identically -- make a
+        queue, publish it on `_permission_channel` so the shutdown release
+        can find it, push from the UI thread, wait with a timeout, clear
+        the field. Each copy was a chance to forget the `finally`, and the
+        field is what `_release_permission_channel` reaches for when the
+        app exits with a modal open.
+
+        Returns the dismissal value RAW, including None on timeout.
+        interaction.decode turns anything unusable into that kind's
+        declining default, which is why nothing here fabricates an answer.
+        """
         channel: queue.Queue = queue.Queue()
         self._permission_channel = channel
-        screen = ConfirmScreen(title, body, confirm_label)
         self.call_from_thread(
-            self.push_screen, screen, lambda ok: channel.put(bool(ok)))
+            self.push_screen, screen, lambda answer: channel.put(answer))
         try:
             return channel.get(timeout=config.ATTENDED_APPROVAL_TIMEOUT_S)
         except queue.Empty:
-            self.call_from_thread(self._timed_out_confirm, screen)
-            return False
+            self.call_from_thread(on_timeout, screen)
+            return None
         finally:
             self._permission_channel = None
 
@@ -795,33 +812,23 @@ class VenastineApp(App):
             screen.dismiss(False)
             self._transcript.write_system("[no answer — nothing was written]")
 
-    def ask_project_kind_blocking(self, proposal, reason: str, blank: bool):
-        """Which document set /init scaffolds. Blocks; returns a kind or
-        None (§24 I13).
+    def ask_choice_blocking(self, payload: dict):
+        """Pick one of a set of offered options. Blocks; returns whatever
+        the modal dismissed with, RAW.
 
-        Anything that is not a recognised kind decodes to None -- the same
-        fail-safe rule ask_review_blocking applies, and for the same
-        reason: `_release_permission_channel` puts a bare False, and a
-        dismissal path added later must cancel rather than silently
-        scaffold seven files of a kind nobody chose.
+        §23: this no longer validates. It used to end with
+        `answer if answer in PROJECT_KINDS else None`, which was the one
+        guard §24 shipped untested -- and the check belongs where the
+        options are known to be the ones that were OFFERED, which is
+        interaction.decode reading them off the request. This method's job
+        is to render and to block.
         """
-        from project_init.doc_sets import PROJECT_KINDS
-
         if self._shutting_down:
             return None
-        channel: queue.Queue = queue.Queue()
-        self._permission_channel = channel
-        screen = ProjectKindScreen(proposal, reason, blank)
-        self.call_from_thread(
-            self.push_screen, screen, lambda answer: channel.put(answer))
-        try:
-            answer = channel.get(timeout=config.ATTENDED_APPROVAL_TIMEOUT_S)
-        except queue.Empty:
-            self.call_from_thread(self._timed_out_confirm, screen)
-            return None
-        finally:
-            self._permission_channel = None
-        return answer if answer in PROJECT_KINDS else None
+        screen = ProjectKindScreen(payload.get("proposal"),
+                                   payload.get("reason", ""),
+                                   payload.get("blank", False))
+        return self._blocking_modal(screen, on_timeout=self._timed_out_confirm)
 
     def ask_review_blocking(self, finding: dict, round_index: int):
         """Show the review modal and BLOCK until answered. §20 V4.
@@ -850,24 +857,14 @@ class VenastineApp(App):
             # (review r1-1). None rather than a hand-built rejection, so
             # this path uses the same decoder as every other.
             return None
-        channel: queue.Queue = queue.Queue()
-        self._permission_channel = channel
-        screen = ReviewScreen(finding, round_index,
-                              config.MAX_REVIEW_REFINEMENTS)
-        self.call_from_thread(
-            self.push_screen, screen, lambda answer: channel.put(answer))
-        try:
-            return channel.get(timeout=config.ATTENDED_APPROVAL_TIMEOUT_S)
-        except queue.Empty:
-            self.call_from_thread(self._timed_out_review, screen)
-            # None, not a hand-built rejection: interaction.decode turns
-            # it into one, the same way it does for the modal and the
-            # shutdown-release paths. §23 removed the local decoder this
-            # used to call, so there is now genuinely one rule rather
-            # than a promise that three paths share one (review f25).
-            return None
-        finally:
-            self._permission_channel = None
+        # The timeout returns None rather than a hand-built rejection:
+        # interaction.decode turns it into one, the same way it does for
+        # the modal and the shutdown-release paths. §23 removed the local
+        # decoder this used to call, so there is now genuinely one rule
+        # rather than a promise that three paths share one (review f25).
+        return self._blocking_modal(
+            ReviewScreen(finding, round_index, config.MAX_REVIEW_REFINEMENTS),
+            on_timeout=self._timed_out_review)
 
     def _timed_out_review(self, screen) -> None:
         # Only say "no answer" when there genuinely was none: if the user
