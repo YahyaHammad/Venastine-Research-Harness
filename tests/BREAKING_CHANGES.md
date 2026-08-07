@@ -253,7 +253,11 @@ them. Three new test files: `test_tui.py`, `test_client_effort.py`,
 | Change | Symptom | Fix |
 |---|---|---|
 | Revert `run_worker(..., exit_on_error=False)` to Textual's default | `test_ac3_exception_in_a_tool_does_not_terminate_the_app` fails, and it fails by tearing down the whole test app — the output is a full Textual crash dump, not an assertion | Restore it. The default kills the app on any transient worker exception. `on_worker_state_changed` is required alongside it or the error is reported nowhere |
-| Make a permission dismissal path not put a boolean on the channel (return early, dismiss with `None`, drop the `put`) | The AC2 tests **hang** rather than fail — the worker blocks forever on `queue.get()`. Under a timeout they show as a killed run | Every dismissal path, including Escape, must resolve to a boolean. This is why the AC2 tests assert on the dispatched tool: a modal that renders and drops the answer looks identical to one that works, right up until it doesn't |
+| Make a permission dismissal path not put a boolean on the channel (return early, dismiss with `None`, drop the `put`) | The AC2 tests **stall** rather than fail — the worker parks on `queue.get(timeout=ATTENDED_APPROVAL_TIMEOUT_S)`. Since TECHNICAL_DEBT 8 an autouse fixture shrinks that under test, so it now stalls for seconds and then fails, instead of stalling for ten minutes | Every dismissal path, including Escape, must resolve to a boolean. This is why the AC2 tests assert on the dispatched tool: a modal that renders and drops the answer looks identical to one that works, right up until it doesn't |
+| Delete the quiescing `await pilot.pause()` from `settle` | `test_pilot_wait.py::TestTheQuiesce` — two tests, on the pause count. **Not** any TUI test: 43/43 stay green under 4× CPU load, because the bare `pause()` used for polling masks the need. That masking is what made this take two attempts to find | Restore it. It and the bare `pause()` are two independent defences against one deadlock (a modal predicate goes true before the worker reaches `channel.get()`), and the pairing that actually fails is fast polling *without* it — measured 3/3 on the quitting test |
+| Swap `settle`'s wall-clock deadline back for `for _ in range(120)` | `test_it_outlasts_the_old_pump_budget` and `test_a_never_true_predicate_gives_up_after_the_timeout` | A pump count is not a wait: `pilot.pause()` is 21ms with nothing burning CPU in-process and 1021ms with one busy sibling thread, so 120 pumps was worth 2.5s–122s. Re-run that mutation on an **idle** machine — under load the old helper is over-patient and passes too |
+| Give `pump` a deadline, or route a negative assertion through `settle` | `TestPump` — two tests, one of them on runtime. Suite time also regresses by ~20s | `pump` backs "prove X did *not* happen", where there is no predicate to wait for; a deadline makes every such site pay its full timeout for nothing |
+| Drop the `shrink_approval_timeout` autouse fixture | `test_the_approval_timeout_is_shrunk_for_tests`, and nothing else — by nature it changes no outcome, only how long a broken modal path takes to reach one | Keep it. It is asserted directly precisely because no other test can notice it going |
 | Restart or re-enter the generator on approval instead of resuming it | `test_ac2_approving_...` fails on the dispatch assertion — a fresh generator re-issues the model call and never reaches the tool | Resume. `permission_channel` exists (§13) so the SAME generator continues |
 | Add `asyncio_mode = auto` to `pytest.ini` | Nothing breaks immediately, but ARCHITECTURE §4.13's "no asyncio in pytest.ini" stops being true | Not needed — TUI tests carry explicit `@pytest.mark.asyncio`. `--strict-markers` accepts it because pytest-asyncio registers the marker |
 | Change `call_model_stream`'s positional parameter order | `test_effort_reaches_the_model_call` asserts `call_args[0][7] == "high"` | Update the index, or switch the assertion to a keyword — but keep asserting on the *call arguments*, not on the raven: the indicator can be right while the parameter never leaves the UI |
@@ -570,10 +574,21 @@ memory contract turned 43 tests red at once. Adding a storage import to
 `core/memory.py` means adding one name to that tuple; adding a method the loop calls
 on a memory means adding it to `FakeMemory`. Do not re-copy either.
 
-**`test_shell_compaction.py` has its own `_settle`, copied rather than imported.**
-`test_tui.py`'s version is TECHNICAL_DEBT theme 8 — it budgets event-loop pumps
+**~~`test_shell_compaction.py` has its own `_settle`, copied rather than imported.~~**
+~~`test_tui.py`'s version is TECHNICAL_DEBT theme 8 — it budgets event-loop pumps
 rather than time. Importing it would make a fix there silently change this file's
-timing too. Whoever fixes theme 8 should fix both.
+timing too. Whoever fixes theme 8 should fix both.~~
+
+**Superseded 2026-08-07 (TECHNICAL_DEBT 8 closed).** There is now one helper,
+`settle` in `tests/conftest.py`, and every pilot test imports it. The note above
+was sound while the canonical helper was broken and became exactly wrong when it
+was fixed — the argument for copying was "don't couple to something known-bad",
+and coupling is the point once it is good. It also under-counted: there were
+**five** implementations, not two (budgets 40/60/120/120/200, and
+`test_thread_legibility.py`'s was pause-then-check rather than check-then-pause),
+so a fix to the one named by filename would have reached one of them.
+`test_pilot_wait.py::test_no_test_module_defines_its_own_settle` now enforces
+this, because a convention is what produced five copies.
 
 ### §21a review pass (2026-08-05)
 

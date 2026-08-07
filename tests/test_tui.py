@@ -195,12 +195,32 @@ async def test_quitting_during_an_attended_research_prompt_releases_the_worker()
     existing release path covers it; a private queue would have been a
     fourth uncovered dismissal route.
 
-    Asserted on the REGISTRATION and on what the release path put, not on
-    the worker thread unblocking. Textual dismisses open screens during
+    Asserted on the REGISTRATION first, because that assertion NAMES the
+    cause -- the research prompt's channel being the one the release path
+    knows about. Same instinct as the chat-side f10 test, which asserts
+    channel.puts == [False].
+
+    CORRECTION (TECHNICAL_DEBT 8, 2026-08-07), on two counts.
+
+    This docstring used to add "Textual dismisses open screens during
     shutdown, which fires the modal's own callback and answers the queue
-    anyway -- so "the thread finished" stays true even with the release
-    wiring removed, and a liveness assertion here proves nothing. Same
-    lesson as the chat-side f10 test, which asserts channel.puts == [False].
+    anyway". That is **false** on textual 1.0.0: `_result_callbacks` is
+    invoked only from `Screen.dismiss()` (`screen.py:1442`), and
+    `App._close_all()` prunes screens without going near it.
+    `_release_permission_channel` is the only thing that unblocks this
+    worker.
+
+    It then concluded that "a liveness assertion here proves nothing".
+    Also false, and measured: neuter `_release_permission_channel` so it
+    puts nothing, and the `not t.is_alive()` assertion below is the one
+    that fails. The reason is a second no-timeout block, not the queue --
+    the worker times out of `channel.get`, then calls
+    `call_from_thread(on_timeout, screen)`, whose `future.result()` has no
+    timeout and whose event loop `exit()` has already stopped. So it parks
+    there instead, and stays alive.
+
+    Both assertions therefore earn their place: liveness catches the
+    regression, the registration says which regression it was.
     """
     import threading
 

@@ -122,33 +122,135 @@ vs a real `__init__.py`; f8 missing **(BUILT)** marker).
   way, extend this file's check rather than adding a new practice to
   remember.
 
-## 8. `test_tui.py::_settle` budgets pumps, not time (open)
+## 8. `test_tui.py::_settle` budgets pumps, not time (**closed 2026-08-07**)
 
-Found during the 2026-08-05 follow-up, **not fixed**, and the attempted
-fix is the useful part of the record.
+Found during the 2026-08-05 follow-up and left open; fixed on 2026-08-07,
+after measuring. The 2026-08-05 entry is kept below in full, because two of
+its three claims were wrong and *how* they were wrong is the useful part.
 
-`_settle(pilot, predicate, tries=120)` pumps Textual's event loop a fixed
-number of times waiting for a worker thread to hand a message back. A
-count is not a wait: 120 bare `pilot.pause()` calls elapse in microseconds
-on an idle machine and rather longer on a loaded one, so
-`test_ac2_approving_a_permission_prompt_resumes_the_same_generator` failed
-roughly one full-suite run in five while passing every time in isolation.
-A false failure is worse than a slow test.
+### What was actually wrong: two independent defects
 
-The obvious fix -- a wall-clock deadline with `await pilot.pause(0.01)` --
-made things **worse**: it turned a 1-in-5 flake in one test into a
-deterministic failure of
-`test_quitting_during_an_attended_research_prompt_releases_the_worker`,
-whose worker then never unblocked at all. `pilot.pause(delay)` evidently
-does not drive the message pump the way a bare `pilot.pause()` does, so
-the two are not interchangeable and the delay changes what the helper is
-actually waiting for. Reverted.
+**Defect 1 — a pump count is not a wait, and swings 46×.** `pilot.pause()`
+with no argument ends on `textual._wait.wait_for_idle(0)`, whose exit
+condition is a **process-wide CPU heuristic** (`process_time()` deltas),
+floored at one 20 ms tick and capped at 1000 ms. Measured in the fix
+container:
 
-Left open deliberately rather than half-fixed. Whoever takes it should
-start from what `pilot.pause(delay)` does to the message queue, not from
-the timeout value. Six consecutive full-suite runs were clean afterwards,
-so it is rare -- rare enough that a fix applied without understanding it
-will look like it worked.
+| Condition | per `pause()` | `tries=120` was worth |
+|---|---|---|
+| nothing burning CPU in-process | 21 ms | **2.5 s** |
+| one busy sibling thread | 1021 ms | **122 s** |
+
+So the helper's patience was set by something unrelated to what it waited
+for. Instrumenting every `_settle` call in a clean full run gave the real
+requirement: **44 calls, max 0.304 s, p90 0.132 s, median 45 ms**. The fix
+is a wall-clock deadline defaulting to 10 s — ~33× the observed maximum.
+Suite runtime is unchanged (35 s → 36.5 s, all of it the new tests),
+because a satisfied predicate returns immediately either way; only
+failures pay a deadline.
+
+**Defect 2 — a predicate can go true before the state a test depends on.**
+`isinstance(app.screen, PermissionScreen)` becomes true while the worker is
+still inside `call_from_thread(push_screen, …)`, blocked on the loop until
+the mount completes — it has **not** reached `channel.get()`. A test that
+then calls `t.join()` from the event-loop thread deadlocks: worker waits
+for loop, loop waits for worker. The old helper hid this by **accident**,
+because `wait_for_idle`'s sleep happens to let the mount finish. Fixed by
+quiescing (`await pilot.pause()`) once the predicate holds.
+
+The two defects pull in opposite directions, which is why the first attempt
+read as a mystery: raising patience alone leaves the deadlock, and making
+polling more responsive exposes it.
+
+### What the 2026-08-05 entry got wrong
+
+- **"120 bare `pilot.pause()` calls elapse in microseconds"** — false.
+  Measured 2.535 s. The 20 ms `SLEEP_GRANULARITY` floor makes microseconds
+  impossible. The *variance* was real; the magnitude was not.
+- **"`pilot.pause(delay)` does not drive the message pump the way a bare
+  `pilot.pause()` does"** — false, and it sent the next reader somewhere
+  there is nothing to find. `Pilot.pause` (textual 1.0.0, `pilot.py:520`)
+  runs the same `_wait_for_screen()` barrier *before* and the same
+  `_on_timer_update()` *after* in both branches; only the exit condition
+  differs (`wait_for_idle(0)` versus `asyncio.sleep(delay)`).
+- **"start from what `pilot.pause(delay)` does to the message queue"** — a
+  dead end, for the reason above. The thing to start from was what
+  *`wait_for_idle`* does, and what the predicate is true of.
+
+Its **conclusion** was right, though: the two are genuinely not
+interchangeable. Reconstructed and measured, three runs each, under 4× CPU
+load, on `tests/test_tui.py`:
+
+| Variant | Result |
+|---|---|
+| baseline (`tries=120`) | 43 passed ×3 |
+| deadline 10 s + bare `pause()` | 43 passed ×3 |
+| deadline 10 s + `pause(0.01)` | **1 failed ×3** — the quitting test |
+| deadline 2 s + `pause(0.01)` (the reverted attempt) | **1 failed ×3** — same |
+| deadline 10 s + `pause(0.01)` + quiesce | 43 passed ×3 |
+| deadline 10 s + bare `pause()` + quiesce | 43 passed ×3 |
+
+The deadline *length* was never the issue — 10 s fails identically to 2 s.
+
+### What shipped
+
+`settle` and `pump` in `tests/conftest.py`, replacing **five** copies
+(budgets 40/60/120/120/200 and two incompatible orderings) plus one
+open-coded inline loop. `pump` is deliberately separate and stays
+count-based: it backs *negative* assertions, where there is no predicate
+and a deadline would make each site pay its full timeout — measured at +20 s
+of suite runtime when mutated to one.
+
+Two honesty notes, both discovered by mutation testing *after* the fix was
+written:
+
+1. **The quiesce is not load-bearing as shipped.** Deleting it leaves
+   `tests/test_tui.py` green 43/43 under load, because the bare `pause()`
+   used for polling already masks the need. It is the second of two
+   independent defences, and `tests/test_pilot_wait.py` pins it because no
+   TUI test can. The first version of this fix claimed a red test that does
+   not exist.
+2. **The flake itself was never reproduced.** Zero failures in ~10
+   full-suite runs in the fix container, so "it stopped failing" was not
+   available as evidence and is not being claimed. The patience half rests
+   on the measurement (2.5 s–122 s budget against a 0.304 s requirement)
+   and on `test_pilot_wait.py`, which pins the deadline semantics directly.
+   This is the 2026-08-05 entry's own warning — "rare enough that a fix
+   applied without understanding it will look like it worked" — taken
+   seriously in the one direction it can be.
+
+Adjacent, fixed with it: `_blocking_modal` parks on
+`channel.get(timeout=ATTENDED_APPROVAL_TIMEOUT_S)` = 600 s, so a dismissal
+path that drops its value **stalled** the suite for ten minutes instead of
+failing. An autouse fixture shrinks it under test.
+
+### The original entry, 2026-08-05
+
+> Found during the 2026-08-05 follow-up, **not fixed**, and the attempted
+> fix is the useful part of the record.
+>
+> `_settle(pilot, predicate, tries=120)` pumps Textual's event loop a fixed
+> number of times waiting for a worker thread to hand a message back. A
+> count is not a wait: 120 bare `pilot.pause()` calls elapse in microseconds
+> on an idle machine and rather longer on a loaded one, so
+> `test_ac2_approving_a_permission_prompt_resumes_the_same_generator` failed
+> roughly one full-suite run in five while passing every time in isolation.
+> A false failure is worse than a slow test.
+>
+> The obvious fix -- a wall-clock deadline with `await pilot.pause(0.01)` --
+> made things **worse**: it turned a 1-in-5 flake in one test into a
+> deterministic failure of
+> `test_quitting_during_an_attended_research_prompt_releases_the_worker`,
+> whose worker then never unblocked at all. `pilot.pause(delay)` evidently
+> does not drive the message pump the way a bare `pilot.pause()` does, so
+> the two are not interchangeable and the delay changes what the helper is
+> actually waiting for. Reverted.
+>
+> Left open deliberately rather than half-fixed. Whoever takes it should
+> start from what `pilot.pause(delay)` does to the message queue, not from
+> the timeout value. Six consecutive full-suite runs were clean afterwards,
+> so it is rare -- rare enough that a fix applied without understanding it
+> will look like it worked.
 
 ## 9. `MAX_TOKEN_BUDGET` counts the prompt once per step (open)
 

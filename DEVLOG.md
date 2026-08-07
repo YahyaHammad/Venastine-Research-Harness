@@ -3062,3 +3062,109 @@ The question tool and the todo list, P1's `LoopEvent`-vs-tagged-union
 decision (only the todo event needs it), and whether the todo list lives
 in `ConversationThread.extra_data` — now shared with goal mode and §21c's
 refs — or its own table.
+
+## TECHNICAL_DEBT 8 — the pilot wait helper
+
+Not a ROADMAP section: a debt item, taken before §23 slice 2 because slice
+2's question tool is another blocking modal in the loop and would have been
+debugged through this.
+
+### What the record said, and why it was a dead end
+
+The 2026-08-05 entry recorded a flake in
+`test_ac2_approving_a_permission_prompt_resumes_the_same_generator`, an
+attempted fix that turned it into a deterministic failure of
+`test_quitting_during_an_attended_research_prompt_releases_the_worker`, and
+an instruction: "start from what `pilot.pause(delay)` does to the message
+queue".
+
+There is nothing there. `Pilot.pause` (textual 1.0.0) runs the same
+`_wait_for_screen()` barrier before and the same `_on_timer_update()` after
+in **both** branches; only the exit condition differs. Its other factual
+claim — that 120 bare pauses "elapse in microseconds" — is off by five
+orders of magnitude: measured 2.535s, because `wait_for_idle`'s
+`SLEEP_GRANULARITY` floors each pause at 20ms.
+
+Its *conclusion* was right, though, and finding out why took measurement
+rather than reading.
+
+### Two defects, pulling opposite ways
+
+**1. A pump count is not a wait.** `pause()`'s exit condition is a
+process-wide CPU heuristic. Measured: **21ms** per pause with nothing
+burning CPU in-process, **1021ms** with one busy sibling thread — a 46×
+swing, so `tries=120` was worth 2.5s–122s depending on something unrelated
+to what it waited for. Instrumenting every call in a clean full run gave
+the requirement: 44 calls, max **0.304s**, median 45ms.
+
+**2. A predicate can go true before the state a test depends on.**
+`isinstance(app.screen, PermissionScreen)` is true while the worker is
+still inside `call_from_thread(push_screen, …)` and has not reached
+`channel.get()`. Join that thread from the event-loop thread and both sides
+wait for each other. Bare `pause()` hides this by accident — its 20ms–1s
+sleep lets the mount finish — which is exactly why making polling faster
+exposed it, and why one fix looked like it broke an unrelated test.
+
+Raising patience alone leaves the deadlock; improving responsiveness alone
+exposes it. That is the whole shape of the item.
+
+### What shipped
+
+`settle` (wall-clock deadline, quiesces once the predicate holds) and
+`pump` (a count, for negative assertions) in `tests/conftest.py`, replacing
+**five** implementations — budgets 40/60/120/120/200, two incompatible
+orderings — plus one open-coded inline loop. Suite runtime is effectively
+unchanged (35s → 36.5s, all of it the new tests): a satisfied predicate
+returns immediately either way, so only failures pay a deadline.
+
+`pump` is separate on purpose. Mutating it into a deadline costs +20s and
+proves nothing extra, because a negative assertion has no predicate to wait
+for.
+
+Adjacent, fixed with it: an autouse fixture shrinks
+`ATTENDED_APPROVAL_TIMEOUT_S`, so a dismissal path that drops its value
+fails in seconds instead of stalling the suite for ten minutes. Verified it
+does not weaken what it touches — neuter `_release_permission_channel` and
+two tests still go red.
+
+### What the build found: three claims of mine, all wrong, all caught by measuring
+
+This item produced no new mechanism, so this is its actual output.
+
+1. **"Textual's source contradicts the record's diagnosis."** Half right.
+   The mechanism claim was wrong, but I reported the conclusion as doubtful
+   and it was correct. Reading source told me `pause(delay)` drives the
+   pump identically; only running it told me the variant still fails 3/3.
+2. **"The quiesce is load-bearing — `test_quitting_…` fails without it."**
+   Written into the code as a "do not remove" comment. False: delete it and
+   the TUI suite is green 43/43 under load, because the bare `pause()`
+   masks the need. The pairing that fails is fast polling *without* it. The
+   line stays — it is the second of two independent defences — but only
+   `test_pilot_wait.py` can pin it, and the comment now says so.
+3. **"A liveness assertion in the quitting test proves nothing."** Inherited
+   from that test's own docstring and repeated by me. False: neuter the
+   release and `not t.is_alive()` is the assertion that fails. Not via the
+   queue — the worker times out of `channel.get`, then parks in
+   `call_from_thread(on_timeout, …)`, whose `future.result()` has no
+   timeout and whose loop `exit()` already stopped.
+
+Also corrected in place: that docstring's claim that Textual fires a
+modal's result callback while pruning screens at shutdown.
+`_result_callbacks` is invoked only from `Screen.dismiss()`;
+`_release_permission_channel` is the only thing that unblocks the worker.
+
+With §23 slice 1's two, §24's three and §21c's three, the tally is no
+longer about mutation hygiene alone: **a claim about timing cannot be
+derived from reading, and a comment asserting a red test must be checked
+against that test.** Two of the three above were written by me *in the same
+session* that found the first one.
+
+### Not verified
+
+The flake itself was never reproduced — zero failures across ~10 full-suite
+runs in this container, including three under 4× CPU load. So "it stopped
+failing" is not available as evidence and is not being claimed. The patience
+half rests on the measurement and on `test_pilot_wait.py`, which pins the
+deadline semantics directly; the original entry's warning that "a fix applied
+without understanding it will look like it worked" is the reason that
+distinction is drawn out rather than glossed.
