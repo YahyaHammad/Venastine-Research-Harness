@@ -52,7 +52,7 @@ from core import config_loader
 from core.client import api_initialization, effort_levels_for_model
 from core.loop import (
     DEFAULT_PROVIDER, DEFAULT_SYSTEM_PROMPT, RunAgentLoop, with_goal, with_refs,
-    with_memories,
+    with_memories, with_todos,
 )
 from core.memory import ConversationMemory
 from core.replay import last_assistant_text, replay_entries
@@ -69,7 +69,8 @@ from tui.screens import (
     ThreadPickerScreen,
 )
 from tui.widgets import (
-    EffortRaven, GoalBanner, RavenPanel, ResearchProgress, Transcript,
+    EffortRaven, GoalBanner, RavenPanel, ResearchProgress, TodoPanel,
+    Transcript,
 )
 
 logger = logging.getLogger(__name__)
@@ -237,6 +238,9 @@ class VenastineApp(App):
         self._theme_name = themes.resolve(tui_settings.get("theme"))
         self._animations = tui_settings.get("animations", True)
         self.effort = tui_settings.get("effort") or config.DEFAULT_EFFORT
+        # §23 slice 2. Validated at load by config_loader against
+        # TODO_POSITIONS, so an unknown value never reaches here.
+        self._todo_position = tui_settings.get("todo_position", "side")
 
         self._memory: ConversationMemory | None = None
         self._permission_channel: queue.Queue | None = None
@@ -272,11 +276,23 @@ class VenastineApp(App):
         with Horizontal():
             with Vertical(id="main"):
                 yield GoalBanner(id="goal-banner")
+                # §23 slice 2. Composed into one of three slots per
+                # `tui.todo_position`. The widget hides itself when the list
+                # is empty, so an unused slot costs nothing -- but the SLOT
+                # is chosen once at mount, because moving a mounted widget
+                # between containers to follow a setting nobody changed
+                # mid-session is machinery with no user.
+                if self._todo_position == "top":
+                    yield TodoPanel(id="todo-panel")
                 yield Transcript(id="transcript")
+                if self._todo_position == "bottom":
+                    yield TodoPanel(id="todo-panel")
                 yield Input(placeholder="Message, or /help", id="prompt")
             with Vertical(id="sidebar"):
                 yield RavenPanel(animations=self._animations, id="raven")
                 yield EffortRaven(id="effort-raven")
+                if self._todo_position not in ("top", "bottom"):
+                    yield TodoPanel(id="todo-panel")
                 yield ResearchProgress(id="research-progress")
         yield Footer()
 
@@ -292,6 +308,7 @@ class VenastineApp(App):
         self.theme = self._theme_name
         self.query_one("#effort-raven", EffortRaven).effort = self.effort
         self.refresh_goal_banner()
+        self.refresh_todo_panel()
         self.refresh_status()
         self._transcript.write_system(
             f"{self.provider_name} | {self.model} | theme {self._theme_name}"
@@ -431,6 +448,20 @@ class VenastineApp(App):
         goal = self._memory.extra.get("goal") if self._memory else None
         self.query_one("#goal-banner", GoalBanner).goal = goal
 
+    def refresh_todo_panel(self) -> None:
+        """Re-read the checklist from thread state and repaint.
+
+        Called from the `todo_changed` notice (AC4: from an event, never
+        polled), and on mount/resume so a resumed thread shows the list it
+        already had -- §27's lesson that per-thread state must follow the
+        thread, or the panel keeps showing the previous one's.
+
+        self._memory, not self.memory, for refresh_goal_banner's reason:
+        painting a panel must not be what creates a thread.
+        """
+        todos = self._memory.extra.get("todos") if self._memory else None
+        self.query_one("#todo-panel", TodoPanel).todos = todos
+
     @property
     def _transcript(self) -> Transcript:
         return self.query_one("#transcript", Transcript)
@@ -501,6 +532,8 @@ class VenastineApp(App):
         # §21c. Unconditional, for the reason the loop's copy of this line
         # gives: a reference is thread state, not an agent's opt-in.
         prompt = with_refs(prompt, self.memory)
+        # §23 slice 2. Unconditional too: a checklist is thread state.
+        prompt = with_todos(prompt, self.memory)
         # §19 K1/K6: active skill bodies are pinned HERE, beside with_goal,
         # and deliberately NOT inside with_catalogs -- that function feeds
         # pass_prompt(), so pinning there would inject a skill activated in
@@ -640,7 +673,14 @@ class VenastineApp(App):
             # so the marker lands between messages rather than inside a
             # half-streamed reply.
             transcript.flush_stream()
-            if event.notice["kind"] in ("compaction_failed", "compaction_blocked"):
+            if event.notice["kind"] == "todo_changed":
+                # §23 slice 2 (AC4). PANEL ONLY, no transcript line: the
+                # list changes several times in a turn, and in an
+                # append-only transcript that is a column of near-identical
+                # lines -- §26 made the same call for `pass_activity`.
+                self.refresh_todo_panel()
+            elif event.notice["kind"] in ("compaction_failed",
+                                          "compaction_blocked"):
                 transcript.write_error(f"— {event.notice['text']} —")
             else:
                 transcript.write_system(f"— {event.notice['text']} —")
@@ -1063,6 +1103,10 @@ class VenastineApp(App):
             # the PREVIOUS thread's objective, misrepresenting what
             # governs the session. /goal was the only path that refreshed.
             self.refresh_goal_banner()
+            # §23 slice 2, the same reasoning one tier along: a checklist is
+            # per-thread state too, and without this a resume showed the
+            # previous thread's list.
+            self.refresh_todo_panel()
             # §27 AC4, and the same class of bug the banner above already
             # fixed in this same callback: `_last_run` and `_live_claims`
             # survived a thread switch, so /claims or ctrl+l after a resume
@@ -1534,6 +1578,7 @@ def _cmd_new(app: VenastineApp, args: str) -> None:
     # not leave two empty threads behind. The next turn creates it.
     app.memory = None
     app.refresh_goal_banner()
+    app.refresh_todo_panel()
     app._transcript.write_system("Started a new thread.")
 
 

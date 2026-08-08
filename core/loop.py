@@ -71,6 +71,43 @@ def with_goal(system_prompt: str, memory: ConversationMemory) -> str:
     return f"{system_prompt}\n\n## Persistent objective\n{goal}"
 
 
+def with_todos(system_prompt: str, memory: ConversationMemory) -> str:
+    """Append §23's todo list to a prompt. No-op when the thread has none.
+
+    Beside with_goal and taking the same argument, for the same reason: a
+    checklist is a property of the THREAD, not of the agent or the session.
+    It survives a resume and applies whichever agent is active.
+
+    MUST NOT move inside prompts.system_prompts.with_catalogs(). That
+    function feeds pass_prompt(), so a checklist written in a chat session
+    would land in all ten passes of a research run the user started
+    separately -- §19's K6, FOURTH instance, after §21b's memories (M13) and
+    §21c's refs (M19). Four copies of one warning is why the convergence of
+    these four functions is now a recorded deferral rather than a docstring
+    aside (J11).
+
+    THE MODEL IS TOLD IT OWNS THIS. Unlike a memory or a reference, which
+    are context the model reads, the todo list is state the model WRITES --
+    so the fragment has to say that the way to change it is to call the
+    tool, or the model reports progress in prose while the panel the user is
+    watching stays stale.
+    """
+    todos = memory.extra.get("todos") or []
+    if not todos:
+        return system_prompt
+
+    lines = ["## Your checklist for this conversation",
+             "",
+             "You maintain this with `todo_write`, which replaces the whole "
+             "list. Keep it current as you work -- the user can see it.",
+             ""]
+    for item in todos:
+        status = item.get("status", "pending")
+        marker = {"completed": "[x]", "in_progress": "[>]"}.get(status, "[ ]")
+        lines.append(f"{marker} {item.get('content', '')}")
+    return f"{system_prompt}\n\n" + "\n".join(lines)
+
+
 def with_memories(system_prompt: str, agent=None) -> str:
     """Append §21b's durable-memory tier to a prompt. No-op when this run
     is opted out or nothing is in scope.
@@ -655,6 +692,32 @@ class RunAgentLoop:
                     except ToolCallDenied as e:
                         result = {"error": str(e)}
 
+                # §23 slice 2 (J10). A tool may attach a `notice` to its
+                # result for the shell to show; it is forwarded as a
+                # LoopEvent and REMOVED from what the model sees.
+                #
+                # Generic on purpose. The alternative was for the loop to
+                # notice that `todo_write` had just run, which puts a tool
+                # name in this file -- exactly what ToolSpec.grant_scope and
+                # ToolSpec.request_kind exist to avoid. Any later tool that
+                # wants to say something mid-turn gets this route free.
+                #
+                # POPPED, not copied: a notice is plumbing for the shell, and
+                # leaving it in the result would send the TUI panel's trigger
+                # to the model as if it were part of the tool's answer.
+                if isinstance(result, dict) and "notice" in result:
+                    notice = result.pop("notice")
+                    if isinstance(notice, dict) and notice.get("kind"):
+                        yield LoopEvent(notice=notice)
+                    else:
+                        # A malformed notice is a bug in the tool, not a
+                        # reason to fail the call -- the result is still
+                        # good. Logged rather than raised, and the key is
+                        # gone either way so it cannot reach the model.
+                        logger.warning(
+                            "%s returned a malformed notice; dropping it: %r",
+                            call.name, notice)
+
                 yield LoopEvent(tool_result={"id": call.id, "result": result})
                 memory.add_tool_result(call.id, result)
 
@@ -758,6 +821,9 @@ class RunAgentLoop:
         # the thread, not to an agent, so an agent-built prompt needs it too --
         # and system_prompt_for() has no memory to read it from.
         prompt = with_refs(prompt, memory)
+        # §23 slice 2. Unconditional too, and for with_refs' reason: a
+        # checklist is thread state, so an agent-built prompt needs it.
+        prompt = with_todos(prompt, memory)
         auth_kwargs = (
             _authorization_kwargs(authorization) if authorization is not None
             else {"granted_tools": granted_tools}

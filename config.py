@@ -369,6 +369,20 @@ SUMMARY_TARGET_CHARS = 2_000
 # fragment the model reads, per M14's no-silent-caps rule.
 MAX_INJECTED_REFS = 3
 
+# §23 slice 2. The todo list's vocabulary and its ceiling.
+#
+# A plain tuple rather than an Enum, for storage.py's THREAD_KIND_* reason: a
+# list persisted under an older vocabulary reads back as data rather than
+# raising, and the tool can then say which status it did not recognise.
+TODO_STATUSES = ("pending", "in_progress", "completed")
+
+# The list is injected into every turn's system prompt, so its length is a
+# per-call cost for as long as the thread lives. REFUSES rather than
+# truncating, MAX_INJECTED_REFS' rule: a checklist silently cut to 50 would
+# have the model believe it had recorded work it has now forgotten, which is
+# worse than being told to write a shorter list.
+MAX_TODO_ITEMS = 50
+
 # M6. A research pass is headless and unattended, and each one already
 # returns a distillation, so routine compaction there would spend on a
 # judgment call nobody is watching. Passes compact only when approaching
@@ -462,6 +476,9 @@ class ToolPermissions:
     # can actually reach a person is decided by whether the run has a
     # response channel, which the tool itself checks.
     ask_user: bool = True
+    # §23 slice 2. Thread-scoped, reversible, and it asks nobody -- so it is
+    # allowed and ungated for `pin`'s reasons (J9).
+    todo_write: bool = True
 
 @dataclass
 class ToolApprovals:
@@ -544,3 +561,9 @@ class ToolApprovals:
     # a person is not an action that needs authorising -- it is the least
     # unilateral thing a run can do.
     ask_user: bool = False
+    # §23 slice 2 (J9): UNGATED, on the axis that already separates `pin`
+    # from `remember`. A todo list is thread-scoped and reversible, and
+    # rewriting it costs some prompt budget inside a conversation the user
+    # can see. Gating it would also make it invisible in every research pass
+    # (§13), which is where a checklist across ten passes helps most.
+    todo_write: bool = False

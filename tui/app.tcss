@@ -189,3 +189,14 @@ QuestionScreen {
     max-height: 8;
     margin-bottom: 1;
 }
+
+/* §23 slice 2's checklist. `height: auto` so an empty list costs no rows in
+   whichever slot tui.todo_position put it in -- the widget hides itself, and
+   this is what makes the unused slots free. */
+#todo-panel {
+    height: auto;
+    max-height: 14;
+    overflow-y: auto;
+    padding: 0 1;
+    color: $text-muted;
+}

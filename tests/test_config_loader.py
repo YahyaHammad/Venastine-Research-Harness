@@ -794,3 +794,53 @@ class TestGroupedCatalog:
         config_loader.initialize(str(_redirect_roots["project"]))
 
         assert "ACTIVE" not in config_loader.skill_catalog_text()
+
+
+# ---------------------------------------------------------------------------
+# ---- tui.todo_position (ROADMAP_v2 §23 slice 2) ---------------------------
+# ---------------------------------------------------------------------------
+
+class TestTodoPosition:
+    """Validated AT LOAD and raising, following research.approval_mode
+    rather than tui.theme.
+
+    tui.theme validates at use and falls back for a stated reason: the
+    loader cannot know the valid names without importing tui/themes.py, and
+    a stale theme name should not stop the app starting. Neither applies
+    here -- the vocabulary is three words that live in config_loader itself,
+    and a position the renderer does not understand would silently put the
+    panel somewhere the user did not ask for. tui.effort had neither check,
+    and that was a shipped bug.
+    """
+
+    @pytest.mark.parametrize("position", config_loader.TODO_POSITIONS)
+    def test_every_valid_position_loads(self, _redirect_roots, position):
+        _write_settings(_redirect_roots["user"],
+                        {"tui": {"todo_position": position}})
+        config_loader.initialize(str(_redirect_roots["project"]))
+
+        assert config_loader.get_settings()["tui"]["todo_position"] == position
+
+    def test_an_unknown_position_raises_and_names_the_vocabulary(
+            self, _redirect_roots):
+        _write_settings(_redirect_roots["user"],
+                        {"tui": {"todo_position": "middle"}})
+
+        with pytest.raises(ValueError, match="todo_position") as caught:
+            config_loader.initialize(str(_redirect_roots["project"]))
+        for name in config_loader.TODO_POSITIONS:
+            assert name in str(caught.value)
+
+    def test_a_wrong_type_raises_before_the_vocabulary_check(
+            self, _redirect_roots):
+        _write_settings(_redirect_roots["user"], {"tui": {"todo_position": 3}})
+
+        with pytest.raises(ValueError, match="must be str"):
+            config_loader.initialize(str(_redirect_roots["project"]))
+
+    def test_absent_is_fine(self, _redirect_roots):
+        """The panel defaults to the sidebar; the key is optional."""
+        _write_settings(_redirect_roots["user"], {"tui": {"theme": "dark-plain"}})
+        config_loader.initialize(str(_redirect_roots["project"]))
+
+        assert "todo_position" not in config_loader.get_settings()["tui"]

@@ -99,7 +99,20 @@ _KNOWN_TUI = {
     "theme": str,        # one of tui/themes.py's registered names
     "animations": bool,  # master switch for the raven + transitions
     "effort": str,       # persisted reasoning-effort level (§16)
+    "todo_position": str,  # §23 slice 2: one of TODO_POSITIONS below
 }
+
+# §23 slice 2. Validated AT LOAD and raising, following
+# research.approval_mode rather than tui.theme.
+#
+# tui.theme validates at use and falls back, for a stated reason: the loader
+# cannot know the valid names without importing tui/themes.py, and a stale
+# theme name should not stop the app from starting. Neither applies here --
+# the vocabulary is three words that live in this file, and a position the
+# renderer does not understand would silently put the panel somewhere the
+# user did not ask for. tui.effort had neither check and that was a shipped
+# bug (§16), which is the third precedent and the one that decided it.
+TODO_POSITIONS = ("top", "bottom", "side")
 
 # Settings whose value is a nested object. Both the validator and the
 # cross-tier merge below iterate this rather than naming keys twice --
@@ -426,6 +439,11 @@ def _validate_settings(data, source: str) -> None:
                     f"settings.json at {source}: research.approval_mode must "
                     f"be one of {', '.join(RESEARCH_APPROVAL_MODES)}, "
                     f"got {value!r}")
+            if section == "tui" and key == "todo_position" and \
+                    value not in TODO_POSITIONS:
+                raise ValueError(
+                    f"settings.json at {source}: tui.todo_position must be "
+                    f"one of {', '.join(TODO_POSITIONS)}, got {value!r}")
 
 
 # ---------------------------------------------------------------------------
