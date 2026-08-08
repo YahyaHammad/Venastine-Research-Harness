@@ -177,6 +177,118 @@ class SubagentSignoffScreen(ModalScreen[object]):
         self.dismiss(None)
 
 
+class QuestionScreen(ModalScreen[object]):
+    """Ask the user the model's question (§23 slice 2, AC2).
+
+    Dismisses with a dict, or None. THREE answers, and the middle one is
+    the one to lose -- the same distinction SubagentSignoffScreen draws:
+
+      None                     nobody answered. Escape, and the app's
+                               shutdown release.
+      {"defer": True}          "let's talk about it instead". A REAL
+                               answer: the user engaged and declined to
+                               pick, which tells the model something that
+                               closing the modal does not.
+      {"options": [...],       what they chose, what they typed, or both.
+       "text": "..."}
+
+    Four affordances, all four from the spec. Options are a SelectionList
+    when several may be chosen and Buttons when only one may -- a
+    single-select SelectionList would let a user tick three and then be
+    told only one counted, which is a worse lie than not offering it.
+
+    UNSELECTED and EMPTY to start, like every other picker here. The
+    convenient action must not be the one that answers on the user's
+    behalf, and this modal exists precisely because the model does not
+    know the answer.
+
+    The screen does NOT validate. Whether a returned option was actually
+    offered is core.interaction.decode's job, which is why it takes the
+    request -- ProjectKindScreen made the same move for the same reason.
+    """
+
+    BINDINGS = [("escape", "dismiss_unanswered", "No answer")]
+
+    def __init__(self, question: str, options=(), multi_select: bool = False,
+                 allow_text: bool = True):
+        super().__init__()
+        self._question = question
+        self._options = list(options)
+        self._multi = bool(multi_select)
+        self._allow_text = bool(allow_text)
+
+    def compose(self) -> ComposeResult:
+        widgets = [Label("The assistant has a question", id="question-title"),
+                   Static(self._question, id="question-body")]
+
+        if self._options and self._multi:
+            widgets.append(Static(
+                "Space toggles; several may be chosen.", id="question-help"))
+            widgets.append(SelectionList(
+                *[Selection(o, o, False) for o in self._options],
+                id="question-list"))
+            widgets.append(
+                Button("Answer", variant="success", id="question-ok"))
+        elif self._options:
+            for index, option in enumerate(self._options):
+                widgets.append(Button(option, variant="primary",
+                                      id=f"question-opt-{index}"))
+
+        if self._allow_text:
+            widgets.append(Input(
+                placeholder="…or write your own answer",
+                id="question-text"))
+            if not (self._options and self._multi):
+                # A submit button for the typed answer. The multi-select
+                # branch already has one, and the single-select branch's
+                # option Buttons read the Input too -- but an open question
+                # with no options at all would otherwise have no way to
+                # submit anything.
+                widgets.append(
+                    Button("Answer", variant="success", id="question-ok"))
+
+        # Always last, always available: the spec's escape is an answer the
+        # user can give on purpose, not only a thing that happens when they
+        # close the window.
+        widgets.append(Button("Discuss instead", variant="default",
+                              id="question-defer"))
+        yield Vertical(*widgets, id="question-dialog")
+
+    def _typed(self) -> str:
+        if not self._allow_text:
+            return ""
+        # Read on EVERY path, like ReviewScreen's note: a user who ticks an
+        # option and qualifies it in the box has given one answer, and
+        # dropping half of it because they pressed the wrong button first
+        # would be silent.
+        try:
+            return self.query_one("#question-text", Input).value.strip()
+        except Exception:  # noqa: BLE001 -- absent when allow_text is False
+            return ""
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        button_id = event.button.id or ""
+        if button_id == "question-defer":
+            self.dismiss({"defer": True})
+            return
+
+        chosen = []
+        if button_id.startswith("question-opt-"):
+            index = int(button_id.rsplit("-", 1)[1])
+            chosen = [self._options[index]]
+        elif self._options and self._multi:
+            chosen = list(
+                self.query_one("#question-list", SelectionList).selected)
+        self.dismiss({"options": chosen, "text": self._typed()})
+
+    def action_dismiss_unanswered(self) -> None:
+        # None, NOT a deferral. Escape means "I am not dealing with this";
+        # "Discuss instead" means "I want to talk about it". The tool says
+        # different things to the model about each, so collapsing them here
+        # would make the button pointless.
+        self.dismiss(None)
+
+
 class ReviewScreen(ModalScreen[object]):
     """Decide one proposed correction to a finished research run (§20 V4).
 

@@ -28,6 +28,7 @@ from tools.builtin import (
     web_search, fetch_url, get_time, arxiv,
     symbolic_math, linear_algebra, probability_stats, discrete_math, logic, geometry,
     file_ops, shell, load_skill, pin, remember, project_docs,
+    ask_user,
 )
 from security.permissions import (
     assert_permissions_declared, is_tool_allowed, requires_approval,
@@ -418,6 +419,11 @@ registry.register(ToolSpec("edit", file_ops.EDIT_TOOL_SCHEMA, file_ops.edit_run,
 registry.register(ToolSpec("shell", shell.TOOL_SCHEMA, shell.run, approval_check=shell._shell_approval_check))
 registry.register(ToolSpec("load_skill", load_skill.TOOL_SCHEMA, load_skill.run, available_check=load_skill.has_skills))
 registry.register(ToolSpec("pin", pin.TOOL_SCHEMA, pin.run, available_check=pin.available))
+# §23 slice 2. No request_kind: this tool does NOT ask through the approval
+# bridge -- it is ungated (J12), so the bridge never fires for it. It names
+# `response_channel` in its handler signature and asks with it directly,
+# which is what _INJECTABLE_PARAMS was generalised for.
+registry.register(ToolSpec("ask_user", ask_user.TOOL_SCHEMA, ask_user.run))
 registry.register(ToolSpec(
     "remember", remember.TOOL_SCHEMA, remember.run,
     available_check=remember.available,

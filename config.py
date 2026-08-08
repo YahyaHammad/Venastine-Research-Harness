@@ -458,6 +458,10 @@ class ToolPermissions:
     # from a fixed allowlist rather than a path: the destination is derived,
     # so the tool cannot be aimed anywhere else. The gate is below.
     write_project_doc: bool = True
+    # §23 slice 2. Allowed everywhere, and ungated below (J12): whether it
+    # can actually reach a person is decided by whether the run has a
+    # response channel, which the tool itself checks.
+    ask_user: bool = True
 
 @dataclass
 class ToolApprovals:
@@ -531,3 +535,12 @@ class ToolApprovals:
     # so the gate is what makes "no silent overwrite" (AC2) structural
     # rather than a promise the command makes about itself.
     write_project_doc: bool = True
+    # §23 slice 2 (J12): UNGATED. Two reasons, and the second is the one
+    # that decides it. Gating would mean approving a prompt in order to be
+    # shown a prompt -- but worse, §13 does not merely deny a gated tool
+    # where nothing can ask, it stops ADVERTISING it. Gated, this tool would
+    # be invisible in every headless run; AC2 requires it be visible,
+    # called, and answered with a denial the model can work around. Asking
+    # a person is not an action that needs authorising -- it is the least
+    # unilateral thing a run can do.
+    ask_user: bool = False

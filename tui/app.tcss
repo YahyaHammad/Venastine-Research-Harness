@@ -151,3 +151,41 @@ ClaimsScreen {
     height: auto;
     max-height: 18;
 }
+
+/* §23 slice 2's question modal. Borrows the grant dialog's proportions --
+   both are "read this, then choose" rather than "allow or deny" -- but
+   takes the primary border rather than the warning one: this authorises
+   nothing, it answers something. */
+QuestionScreen {
+    align: center middle;
+}
+
+#question-dialog {
+    width: 66;
+    height: auto;
+    padding: 1 2;
+    border: thick $primary;
+    background: $surface;
+}
+
+#question-title {
+    text-style: bold;
+    width: 100%;
+}
+
+#question-body {
+    padding: 1 0;
+    width: 100%;
+}
+
+#question-help {
+    color: $text-muted;
+    padding-bottom: 1;
+    width: 100%;
+}
+
+#question-list {
+    height: auto;
+    max-height: 8;
+    margin-bottom: 1;
+}

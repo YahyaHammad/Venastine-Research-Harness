@@ -65,7 +65,7 @@ from tui import ravens, themes
 from tui.commands import SlashCommand, registry as commands
 from tui.screens import (
     ClaimsScreen, ConfirmScreen, GrantPickerScreen, PermissionScreen,
-    ProjectKindScreen, ReviewScreen, SubagentSignoffScreen,
+    ProjectKindScreen, QuestionScreen, ReviewScreen, SubagentSignoffScreen,
     ThreadPickerScreen,
 )
 from tui.widgets import (
@@ -726,6 +726,8 @@ class VenastineApp(App):
                 request.payload.get("confirm_label", "Yes"))
         if request.kind == interaction.CHOICE:
             return self.ask_choice_blocking(request.payload)
+        if request.kind == interaction.QUESTION:
+            return self.ask_question_blocking(request.payload)
         if request.kind == interaction.SUBAGENT_SIGNOFF:
             return self.ask_signoff_blocking(
                 request.payload.get("agent", "this subagent"),
@@ -833,6 +835,24 @@ class VenastineApp(App):
                                    payload.get("reason", ""),
                                    payload.get("blank", False))
         return self._blocking_modal(screen, on_timeout=self._timed_out_confirm)
+
+    def ask_question_blocking(self, payload: dict):
+        """Put the model's question to the user (§23 slice 2). Blocks;
+        returns the dismissal RAW.
+
+        Raw, like every other ask here: interaction.decode supplies the
+        declining default for a timeout and intersects the chosen options
+        with the ones that were offered. This method renders and blocks.
+        """
+        if self._shutting_down:
+            return None
+        screen = QuestionScreen(
+            payload.get("question", ""),
+            payload.get("options") or (),
+            payload.get("multi_select", False),
+            payload.get("allow_text", True))
+        return self._blocking_modal(
+            screen, on_timeout=self._timed_out_confirm)
 
     def ask_signoff_blocking(self, agent: str, candidates: list):
         """Which of a subagent's gated tools it may use unprompted (§23
