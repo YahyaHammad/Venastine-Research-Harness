@@ -26,7 +26,7 @@ python main.py --init                              # §24: scaffold this project
 python main.py --init --research-project           # §24: skip the type question on a piped run
 # §24 in the TUI: /init [--software|--research]
 
-pytest                                            # 1256 tests, offline, ~25s (first run ~30s: matplotlib font cache)
+pytest                                            # 1280 tests, offline, ~25s (first run ~30s: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
