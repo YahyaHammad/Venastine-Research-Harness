@@ -931,7 +931,7 @@ its `.venastine/` may already hold agents, skills and an `mcp.json` that arrived
 cloned repo, and granting as a side effect of `/init` would wave all of it through.
 `CONTEXT.md` is never special-cased out of the hash.
 
-### 4.29 `core/interaction.py` — the response channel (ROADMAP_v2 §23 slice 1)
+### 4.29 `core/interaction.py` — the response channel (ROADMAP_v2 §23)
 
 Five ways to ask a human something became one. `permission_channel` (§13, a
 `queue.Queue` of booleans), `ApprovalProvider` (§25, a callable), `ReviewConsent`
@@ -992,6 +992,38 @@ pushed from its worker. Both now go through `_ask_blocking`, and
 `_permission_channel` survives, but it is no longer the loop's channel — it is
 this app's parked-worker queue, and it is what `_release_permission_channel`
 reaches for when the app exits with a modal open.
+
+
+**Slice 2 added one kind, `QUESTION`, whose answer is three-way.** `None` is
+nobody answering — dismissed, timed out, no channel, or a shape `decode` cannot
+read. A dict carrying `defer=True` is the spec's "chat about this" escape and is
+a **real answer**: the user engaged and declined to pick, which tells the model
+something a closed modal does not. Anything else is
+`{"options": [...], "text": str, "defer": False}`, with the options intersected
+against `payload["options"]` in **offered order** — J3's rule for its third time.
+
+That is `SUBAGENT_SIGNOFF`'s `None`/`set()`/subset distinction one kind along,
+and it is why the dict test is `isinstance` rather than truthiness: a blank
+submission is someone who was present, not someone who was absent, and the tool
+says different things about each.
+
+**A kind is four edits plus two renderers.** A constant, a `SAFE_DEFAULTS`
+entry, a `decode` branch, and a branch in each shell's dispatcher
+(`tui/app.py`'s `_ask_blocking`, `main.py`'s `ask`). The renderers are not
+optional: a kind a shell does not render falls through to `None`, which `decode`
+turns into the declining default — so the feature reports "nobody answered" on
+every run in that shell while looking wired up. `CONFIRM` and `CHOICE` are in
+exactly that state on the CLI today, masked only because `/init` supplies its own
+callbacks instead of going through the channel.
+
+`tests/test_interaction.py` parametrizes its invariant tests over
+`sorted(SAFE_DEFAULTS)`, so a new kind inherits J4's default check and the
+every-default-declines check without being named in either.
+
+**The two tools this existed for** are `ask_user` (`tools/builtin/ask_user.py`)
+and `todo_write` (`tools/builtin/todo.py`). Neither goes through the approval
+bridge and neither is gated (J12/J9) — see §11's entries for why, and for the
+generic tool-result `notice` route that feeds the TUI's `TodoPanel`.
 
 ## 5. Request lifecycle — regular conversation, traced end to end
 
@@ -1165,3 +1197,7 @@ All math tools share `_math_common.py`'s `safe_parse()` — a SymPy expression p
 - **A pilot test that asserts while a modal is open turns a failure into a hung suite.** Textual runs thread workers on non-daemon threads, so a worker parked on `queue.get()` blocks `run_test()`'s teardown — and an assertion that fires before the modal is dismissed leaves it parked. Two §23 mutations presented as a stalled pytest rather than a red test. **Capture what you need, dismiss, settle, then assert**: it costs nothing and turns the same regression into a readable failure. TECHNICAL_DEBT 8 shortened the stall by shrinking `ATTENDED_APPROVAL_TIMEOUT_S` under test, which makes the same mistake fail in seconds instead of ten minutes — it does not make the mistake safe.
 - **A pilot predicate can go true before the state the test depends on** (TECHNICAL_DEBT 8). `isinstance(app.screen, SomeModal)` becomes true while the worker is still inside `call_from_thread(push_screen, …)` — blocked on the loop until the mount completes, and *not yet* parked on `channel.get()`. Join that thread from the event-loop thread and it deadlocks both ways. `tests/conftest.py`'s `settle` quiesces once its predicate holds, for exactly this. The reason it took two attempts to find: bare `pilot.pause()` masks it, because `wait_for_idle`'s 20ms–1s sleep incidentally lets the mount finish. Any faster polling removes that cover.
 - **`pilot.pause()` is not a fixed unit of time, and `settle` is the only place that should care.** Its exit condition is a process-wide CPU heuristic — 21ms per call with nothing burning CPU in-process, 1021ms with one busy sibling thread. Never wait on a pump count; use `settle` (wall-clock deadline) to wait for something to happen, and `pump` (a count) only to show that something did *not*.
+- **A tool that needs to ask a human uses the INJECTED `response_channel`, not the approval bridge** (§23 slice 2). `_obtain_approval` fires only under `if needs_approval:`, always builds a `{"tool_name", "params"}` payload, and coerces the answer to `(bool, grant)` — so a multi-select or free-text answer has nowhere to go in it. `response_channel` is injected into any handler that names it, on both dispatch branches; `ask_user` calls `interaction.ask` itself and `core/loop.py` is untouched. Adding a kind means a constant, a `SAFE_DEFAULTS` entry, a `decode` branch, and **a branch in each shell's dispatcher** — miss the CLI one and every question decodes as "nobody answered" while looking wired up, which is the state `CONFIRM` and `CHOICE` are in today.
+- **A tool result's `notice` is forwarded as a `LoopEvent` and STRIPPED** (§23 slice 2, J10). Generic on purpose: the alternative was for the loop to recognise `todo_write` by name, which is what `ToolSpec.grant_scope` and `request_kind` exist to prevent. Popping matters — a notice is plumbing for the shell, and leaving it in sends the panel's trigger to the model as part of the tool's answer. This is also how §23 discharged P1 without growing `LoopEvent`: `notice` was already kind-discriminated.
+- **A panel fed by an event must read its CONTENT from state, not from the event** (§23 slice 2). `TodoPanel` re-renders when a `todo_changed` notice arrives and then reads `extra_data["todos"]`, so the list never exists in two places that can disagree. The event says when; the thread says what.
+- **A Textual `reactive`'s watch method does not fire for its initial value.** `TodoPanel.__init__` sets `display = False` explicitly for this reason; `GoalBanner` gets away without it only because `app.py` refreshes it during `on_mount`. Without it the panel is a visible empty box on a fresh thread.

@@ -279,9 +279,9 @@ Precedence for provider and model is CLI flag > `settings.json` > `config.py`.
 
 ## Status
 
-**Built:** ROADMAP.md §1–§12 (§10's ensemble mode carries a revisit note) and ROADMAP_v2.md §13 (streaming loop), §14 (config loader + workspace trust), §15 (permissions), §16 (TUI), §17 (MCP), §18 (agents), §19 (skills), §20 (post-pipeline review), §21a (compaction + `pin`), §21b (durable memory), §22 (live pipeline progress), §25 (authorised tool use in the pipeline), §26 (research legibility: per-pass tool calls, code-stage announcements, the claims view, role colour, `/copy`), §27 (thread legibility: transcript replay on resume, a conversations-only thread picker), §21c (session summaries and cross-thread referencing — §21 is now complete).
+**Built:** ROADMAP.md §1–§12 (§10's ensemble mode carries a revisit note) and ROADMAP_v2.md §13 (streaming loop), §14 (config loader + workspace trust), §15 (permissions), §16 (TUI), §17 (MCP), §18 (agents), §19 (skills), §20 (post-pipeline review), §21a (compaction + `pin`), §21b (durable memory), §22 (live pipeline progress), §25 (authorised tool use in the pipeline), §26 (research legibility: per-pass tool calls, code-stage announcements, the claims view, role colour, `/copy`), §27 (thread legibility: transcript replay on resume, a conversations-only thread picker), §21c (session summaries and cross-thread referencing — §21 is now complete), §24 (`/init`), §23 (interactive tools: the response channel, per-tool subagent sign-off, `ask_user`, and the todo list).
 
-**Remaining:** §23–§24 (interactive tools, `/init`).
+**Remaining:** nothing in either roadmap. §10's ensemble mode carries a revisit note (its diversity mechanism is a raised `temperature`, which current Anthropic models reject), and TECHNICAL_DEBT.md items 9 and 10 are open.
 
 Run the test suite with `pytest` — 1384 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
 

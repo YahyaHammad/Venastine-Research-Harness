@@ -25,6 +25,8 @@ python main.py --ref <thread> --ref <thread>       # §21c: attach other threads
 python main.py --init                              # §24: scaffold this project's documentation set
 python main.py --init --research-project           # §24: skip the type question on a piped run
 # §24 in the TUI: /init [--software|--research]
+# §23 slice 2: the model asks with `ask_user` and keeps a checklist with
+#   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
 pytest                                            # 1384 tests, offline, ~25s (first run ~30s: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
@@ -46,7 +48,7 @@ MCP servers are a *third* config file again — `mcp.json`, user-level or `.vena
 Read these before changing anything non-trivial — they carry design decisions that are locked, not defaults to re-derive.
 
 - **ARCHITECTURE.md** — what's built, file-by-file contracts ("what belongs here / what does NOT"), known gotchas (§11).
-- **ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **ROADMAP_v2.md** (§13–§27; all built except §23's slice 2 — the question tool and the todo list) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R12 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I13 from §24 and J1–J8 from §23). Section and D-numbers are stable and cross-referenced everywhere.
+- **ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **ROADMAP_v2.md** (§13–§27, all built) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R12 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I13 from §24 and J1–J14 from §23). Section and D-numbers are stable and cross-referenced everywhere.
 - **DEVLOG.md** — per-section implementation notes: what was followed verbatim, what was deviated from (every deviation was an explicit user decision — do not silently override).
 - **tests/BREAKING_CHANGES.md** — what breaks each test when production code changes, the symptom, and the fix.
 - **QWEN.md** — a sibling agent-context file. Stale (it predates §13–§16 and disagrees with itself on test counts); prefer ARCHITECTURE.md and the code.
@@ -491,7 +493,7 @@ independent bugs, both found by using the app.
 - **In a pilot test, `app._transcript` queries the ACTIVE screen.** Reading it while a
   modal is up raises `NoMatches`; hold the widget before opening one.
 
-### The response channel (`core/interaction.py`, §23 slice 1)
+### The response channel (`core/interaction.py`, §23)
 
 **One way to ask a human anything.** There were five: `permission_channel`
 (§13), `ApprovalProvider` (§25), `ReviewConsent` (§20), and §24's
@@ -540,6 +542,40 @@ worker, and how a malformed answer decodes.
   the middle one is the easy mistake; `interaction.decode` tests `isinstance`
   rather than truthiness for exactly that reason.
 - **`tui/app.py` has one `_blocking_modal`.** Four asks did the same six lines,
+
+**Slice 2 — the two tools the channel existed for.**
+
+- **A tool that asks uses the INJECTED `response_channel`, not the approval
+  bridge.** `_obtain_approval` fires only under `if needs_approval:`, always
+  builds a `{"tool_name", "params"}` payload, and coerces the answer to
+  `(bool, grant)` — a multi-select or free-text answer has nowhere to go in it.
+  `response_channel` is injected into any handler naming it, on both dispatch
+  branches, so `ask_user` calls `interaction.ask` itself and `core/loop.py` is
+  untouched. `_INJECTABLE_PARAMS`' comment predicted this.
+- **`QUESTION`'s answer is three-way** (J10's sibling shape): `None` is nobody
+  answering; `defer=True` is the "chat about this" escape and a REAL answer;
+  anything else is options-plus-text with the options intersected against what
+  was offered. A blank submission is someone who was present — `isinstance`,
+  never truthiness.
+- **Adding a kind needs a branch in BOTH shells.** A kind a shell does not
+  render falls through to `None` and decodes as "nobody answered" on every run
+  there while looking wired up. `CONFIRM` and `CHOICE` are in that state on the
+  CLI today, masked because `/init` supplies its own callbacks.
+- **Both tools are UNGATED** (J12/J9), and for `ask_user` the deciding reason is
+  not "asking is harmless" — it is that §13 stops *advertising* a gated tool
+  where nothing can ask, so gated it would be invisible rather than deniable and
+  AC2's "an error result it can work around" would be unreachable.
+- **A tool result's `notice` is forwarded as a `LoopEvent` and STRIPPED** (J10),
+  generically — the alternative was the loop recognising `todo_write` by name.
+  This is also how P1's deferred event-shape decision was discharged with
+  neither a new field nor a new type: `notice` was already kind-discriminated.
+- **The todo panel reads its CONTENT from thread state**, using the event only
+  as a trigger, so the list never exists in two places that can disagree.
+- **`with_todos` is K6's FOURTH instance** (after M13 and M19), and converging
+  the four `with_*` tiers is now a recorded deferral (J11) rather than a
+  docstring aside — they differ in signature *and* in conditionality.
+- **Whole-list write** (J13): no item is ever addressed by name or index, which
+  is the problem `clear_refs` refused to solve.
   and the `_permission_channel` field each published is what
   `_release_permission_channel` reaches for when the app exits with a modal
   open. It is no longer the loop's channel — it is this app's parked-worker

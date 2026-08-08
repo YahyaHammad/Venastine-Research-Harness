@@ -24,7 +24,7 @@ WHAT WOULD MAKE THESE VACUOUS, and what each one does about it:
     away, because a test that only exercises orchestrator's own
     checkpoint calls proves the easy case.
   - AC4 is a decision, not a behaviour, so the test pins the observable
-    consequence: LoopEvent still has exactly its six fields. Adding a
+    consequence: LoopEvent's field set is unchanged. Adding a
     seventh -- which is what P1 rejected -- turns it red.
 """
 

@@ -3168,3 +3168,122 @@ half rests on the measurement and on `test_pilot_wait.py`, which pins the
 deadline semantics directly; the original entry's warning that "a fix applied
 without understanding it will look like it worked" is the reason that
 distinction is drawn out rather than glossed.
+
+## §23 slice 2 — the question tool and the todo list
+
+**Spec:** ROADMAP_v2 §23, ACs 2–4, decisions J9–J14. Slice 1 (the channel and
+per-tool sign-off) shipped earlier; TECHNICAL_DEBT 8 was closed in between
+because the question tool is another blocking modal in the loop.
+
+The spec is 55 lines with **no code sketch**, no tool name, no schema, and
+nothing at all about the todo list's operations — so most of this was
+decisions rather than implementation.
+
+### The finding that shaped it
+
+**The loop's ask path is approval-only.** `_obtain_approval` is entered only
+under `if needs_approval:`, always builds a `{"tool_name", "params"}` payload,
+and coerces the answer to `(bool, grant)` — discarding `answer` entirely for
+every kind but `SUBAGENT_SIGNOFF`. A multi-select or free-text answer has
+nowhere to go in it.
+
+It did not need one. `response_channel` was already in `_INJECTABLE_PARAMS`,
+injected into any handler that names it on **both** dispatch branches, which is
+exactly what that comment anticipated: *"Generalised so §23's response-channel
+tools add a third injectable name without reopening `dispatch()`."* So
+`ask_user` asks for itself and **`core/loop.py`'s approval bridge is
+untouched** — the only loop change in the whole slice is the generic notice
+forwarding below.
+
+### P1 was discharged by not needing either option
+
+§22 deferred the `LoopEvent`-vs-tagged-union decision to whichever section
+first wanted a chat-side event, and §23's spec called the todo event "a
+decision to make here, not a field to add quietly". Both options were wrong:
+adding a field is what P1 rejected, and a whole new type for **one** event is
+the over-engineering P1's own wording guarded against ("the precedent *if this
+family grows the same way*" — it did not).
+
+`notice` was already a kind-discriminated dict that `_run()` already yields.
+So the todo event is a `notice` kind, `LoopEvent`'s field set is untouched, and
+`test_loop_event_did_not_grow_a_seventh_field` never came into it (J10).
+
+The forwarding is **generic**: any tool result carrying a `notice` is
+forwarded and the key stripped. The alternative was for the loop to recognise
+`todo_write` by name, which is precisely what `ToolSpec.grant_scope` and
+`request_kind` exist to prevent. `TestTheLoopForwardsAndStripsIt` drives a fake
+`probe` tool rather than the real one, so the mechanism is tested without the
+tool that motivated it.
+
+Popping rather than copying is load-bearing: a notice is plumbing for the
+shell, and leaving it in the result sends the panel's trigger to the model as
+part of the tool's answer.
+
+### Two decisions that turned on §13 rather than on taste
+
+**Both tools are ungated (J12/J9), and the reason is not "these are harmless".**
+Gating `ask_user` would mean approving a prompt in order to be shown a prompt —
+but the deciding fact is that §13 does not merely *deny* a gated tool where
+nothing can ask, it stops **advertising** it. Gated, `ask_user` would be
+invisible in every headless run, and AC2's "the model receives an error result
+it can work around" would be unreachable, because the model would never learn
+the tool exists. Ungated, it is advertised, called, and denied with a reason.
+
+The same fact decided J9. AC2 says "both tools deny cleanly with no way to
+ask", written before the todo list's shape was settled — but a checklist asks
+nobody and blocks on nothing, so there is nothing to deny, and gating it would
+hide it from exactly the ten-pass run where a checklist helps most. AC2 is
+amended in place with the reason rather than satisfied literally.
+
+### The three-way answer, for the third time
+
+`QUESTION` decodes to `None` (nobody answered), `defer=True` (the spec's "chat
+about this" escape — a REAL answer, because the user engaged and declined to
+pick), or options-plus-text. That is `SUBAGENT_SIGNOFF`'s `None`/`set()`/subset
+distinction one kind along, and the dict test is `isinstance` rather than
+truthiness for the same reason: a blank submission is someone who was present,
+and the tool says something different about that than about an empty room.
+
+### What the build found
+
+1. **`CONFIRM` and `CHOICE` are unreachable on the CLI.** `main.py`'s `ask`
+   handles only `APPROVAL`, `SUBAGENT_SIGNOFF` and `REVIEW`; the other two
+   decode to their declining defaults there. It is masked because `/init`
+   supplies its own `confirm`/`choose_kind` callbacks instead of going through
+   the channel — so nothing is broken today, but the channel has two kinds that
+   silently do not work in one shell. Recorded rather than fixed: it is §24's
+   surface, not this slice's, and `/init` works. It is why `ask_user`'s CLI
+   branch was written first and has eight tests.
+2. **`LoopEvent` has seven fields, not six.** Four places said six — including
+   the pinning test's own docstring. The test asserts SET EQUALITY, so the real
+   constraint is "frozen", and the count was never the point. Corrected.
+3. **A Textual `reactive`'s watcher does not fire for its initial value.**
+   `TodoPanel` was a visible empty box on a fresh thread until `__init__` set
+   `display = False` explicitly. `GoalBanner` gets away without it only because
+   `app.py` refreshes it during `on_mount` — which is luck, not design.
+4. **Three of my own test-authoring mistakes, all caught by running them.** A
+   `_run()` driver invented from scratch instead of reusing
+   `test_streaming_loop.py`'s `_run_kwargs` (wrong signature); a pass id guessed
+   as `"pass1_exploration"` when the real keys are `"Pass 1"` and friends; and
+   two settings-validation tests written against a `_load_settings_file` that
+   does not exist, which belonged in `test_config_loader.py` with its fixtures
+   all along. The reuse instinct §26's L6 records for production code applies to
+   test scaffolding just as well.
+
+### Verified outside the suite
+
+The headless denial's exact wording as the model receives it; the CLI's numbered
+form for both a multi-select and an open question, including a typed answer
+carrying a condition (`"2 but only if X"` reads as text, not as option 2); the
+modal composing all four affordances across its four shapes, with the discuss
+escape present in every one; and a full turn through the real loop and real
+registry — `todo_write` called, the notice emitted, the key absent from what the
+model saw, the list persisted, and the next turn's prompt tier rendering
+`[x] / [>] / [ ]`.
+
+### Left deferred, with owners recorded
+
+The CLI slash-command layer §21c's M21 assigned to §23 (no AC, no decisions
+record, and neither tool needs it), and the convergence of the four `with_*`
+prompt tiers (J11) — `with_todos` is K6's fourth copy of the same warning, and
+that cost is now recorded rather than accidental.
