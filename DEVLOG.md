@@ -3287,3 +3287,191 @@ The CLI slash-command layer §21c's M21 assigned to §23 (no AC, no decisions
 record, and neither tool needs it), and the convergence of the four `with_*`
 prompt tiers (J11) — `with_todos` is K6's fourth copy of the same warning, and
 that cost is now recorded rather than accidental.
+
+---
+
+## ROADMAP §10 revisit — the ensemble redesign
+
+The last open design item in the project. §10's diversity mechanism was
+`temperature=1.0` on N runs of one model; current Anthropic models reject
+sampling parameters outright, so the section had been built, documented as
+working, and could not execute against `config.MODEL_NAME`'s default. §16 stopped
+the crash with a refusal and deferred the redesign. This is it.
+
+### What reading the code changed about the problem
+
+Five findings, in the order they landed. Two of them changed what got built.
+
+1. **The knob was an absolute value used as though it were a delta.**
+   `_sampling_kwargs` sends `temperature` only when explicitly given, so omitting
+   it means "provider default" — and `ENSEMBLE_TEMPERATURE = 1.0` is the
+   documented default on OpenAI Chat Completions and Google's
+   `GenerateContentConfig`. On the two providers §10's revisit note said ensemble
+   "works only on", the diversity knob plausibly sent the value the provider
+   would have used anyway. **Recorded as needing a live check** — it cannot be
+   settled offline. The structural half needs no check: across the 14 providers
+   in `providers.json.example` the default differs, so how much diversity a run
+   got, and therefore what "2 of 3 agreed" meant, varied by provider with no way
+   for Pass 4 to know.
+
+   The generalisable half is worth keeping: **a config value that reads as a
+   delta but is sent as an absolute is not checkable by any test that mocks the
+   provider.** Nothing in a 1384-test suite could have caught this.
+
+2. **The guard was incomplete where it mattered.**
+   `MODELS_REJECTING_SAMPLING_PARAMS` lists only Anthropic names, but OpenAI's
+   own reasoning models restrict `temperature` the same way — and CLAUDE.md's
+   example command is `--provider OPENAI --model gpt-5.1`. So the guard built to
+   stop exactly this failure likely never fired for the OpenAI model the docs
+   suggest. Also recorded as needing a live check; moot for ensemble mode now.
+
+3. **Per-candidate provider/model needed no new plumbing.** `_run()` calls
+   `api_initialization(provider_name)` itself and `effort_for` validates against
+   the receiving model, so a heterogeneous roster is correct by construction. The
+   orchestrator already routes 3a/3b/6c to `critic_provider`/`critic_model`. This
+   is what made the multi-model option the *smallest* change rather than the
+   largest, and it is why E1 went the way it did.
+
+4. **§11's rationale is the argument against self-consistency.** §11 exists
+   because "a model checking its own output for errors shares that model's blind
+   spots". That is the identical objection to temperature self-consistency: N
+   samples of one model agree most confidently on that model's systematic errors,
+   which is exactly where a research harness needs agreement to mean something.
+
+5. **Ensemble mode diluted grounding, and mostly demoted.** Measured by calling
+   `score_claim` directly rather than by reading the formula:
+
+   ```
+   grounded factual, critic severity 0.0, no flags:
+     3/3 → HIGH (0.85)   2/3 → MEDIUM   1/3 → MEDIUM (0.75)
+     ensemble OFF → HIGH (0.85)
+   ```
+
+   §10's formula redistributed `0.5/0.35` → `0.4/0.3` to make room for a `0.15`
+   consistency term, so enabling ensemble made grounding count for less — and
+   because the maximum stayed `0.85`, consistency could only ever *cost* a
+   well-grounded claim. A claim Pass 3a grounded and Pass 3b found nothing wrong
+   with dropped a tier because 2 of 3 candidates asserted it.
+
+### The decision that deviates from the roadmap
+
+**§10's revisit note proposed prompt-level framing variation. It was rejected.**
+Framings partition what each candidate looks for, so a claim two of three
+candidates omit is a deterministic artifact of having told them to look
+elsewhere — a *systematic bias* where temperature sampling had noise. Finding 5
+is what makes that concrete rather than theoretical: the penalty is real enough
+to move a tier, so a biased consistency number demotes grounded claims for the
+wrong reason. The score's meaning would also have quietly changed from
+self-consistency to framing-invariance, and its weight was calibrated for
+neither.
+
+So diversity comes from a **roster of different models** (E1), which is finding
+4 applied to this section.
+
+### Decisions E1–E12
+
+| # | Decision |
+|---|---|
+| E1 | Diversity from different MODELS. `config.ENSEMBLE_MODELS`, entries `{provider_name, model}`. Deviates from §10's own note; see above. |
+| E2 | `config.py` only, following `CRITIC_MODEL`. `ensemble_models` is rejected from `settings.json` **by name** — R12's rule applied to a second kind of authority. Turning the mode on can only spend more of the provider the user already chose; a *roster* chooses providers, and a project's `settings.json` beats the user's. §14 already flagged project-tier provider selection as its own grant; this is that grant times N. |
+| E3 | N is `len(ENSEMBLE_MODELS)`, derived. A separately configured count could disagree with the roster that produced the candidates, and a confidence score's denominator must not be able to lie. |
+| E4 | `ensemble_n` stays a known settings key and a pipeline parameter, vestigial, with a WARNING when set. Removing the key would make every existing `settings.json` that sets it **raise** — unknown keys raise by design. |
+| E5 | Refuse on fewer than 2 **distinct** `(provider, model)` pairs. The load-bearing guard: `[X, X, X]` recreates §16's exact defect through the new config. |
+| E6 | API keys are not pre-validated; validation is by connecting. Matches §16's `/model` (warns on an empty `API_KEY` so a local endpoint stays usable) and MCP's per-server posture. |
+| E7 | A failed candidate is named, traced and skipped; the denominator is the number that produced text. One survivor **degrades to the single-candidate path** rather than being scored as an ensemble of one, which would report unanimous corroboration from a single source. All candidates failing is an error. |
+| E8 | Consistency enters as a **disagreement penalty**: `raw -= 0.15 * (1 - consistency)`, factual claims only, subtracted like `ASSUMPTION_FLAG_PENALTY`. Unanimity is free, dissent subtracts. |
+| E9 | Non-factual claims untouched. §10 decided consistency does not *rescue* them from the cap; whether dissent should *penalise* a speculative claim is a different judgment and was never made. |
+| E10 | `score_claim` rounds once, then uses that value for both the tier and the breakdown. |
+| E11 | Candidate labels follow the **survivors**, never roster position. |
+| E12 | No new `Claim` field, no new `PipelineRun` field, no schema change. The denominator goes in the existing `score_breakdown` (§20's precedent, which put tier overrides there to avoid migrating every `vars(c)` site); the roster goes in `run.trace`. |
+
+### E8's shape is why the regression guard now holds by construction
+
+A penalty rather than a re-weighting means the non-ensemble formula is
+*literally* unchanged, so §10's "byte-for-byte identical" acceptance criterion is
+true by construction instead of by arithmetic coincidence. It also collapses four
+formula arms to two, which puts CLAUDE.md's "the cap applies before the
+assumption penalty" invariant — a real bug once — in one place instead of two
+that can drift.
+
+It is also the honest reading of the signal. Candidates asked the same question
+usually answer alike, so agreement is the null hypothesis and disagreement is the
+part that carries information.
+
+### E10: a latent bug found by computing §10's own acceptance criterion
+
+`score_claim` held two scores. The tier compared the unrounded float; the
+breakdown stored `round(raw, 4)`. A claim computing `0.7999999999999999` was
+persisted as `raw_score: 0.8` and tiered MEDIUM — against a `TIER_THRESHOLDS`
+table that says `≥ 0.8` is HIGH. Reachable from ordinary weights, and it is
+exactly what §10's AC produces (two of three candidates agreeing on a grounded
+claim). That AC asserts the `consistency_score` and never the tier, which is why
+nothing caught it.
+
+**Blast radius measured rather than assumed.** Sweeping the whole non-ensemble
+input space — four grounding states × 21 severities × 0–2 flags × both claim
+types — exactly *one* shape changes tier: a speculative claim at severity 0.55
+with one assumption flag, which records `0.3` and now tiers LOW instead of
+UNVERIFIED. That is what the threshold table always specified, and none of the
+three cases in `test_non_ensemble_regression_identical_output` is affected.
+
+Committed first and alone, so the one behaviour change is attributable rather
+than buried in the formula rewrite.
+
+### The mutation that ran green, and why
+
+E9's mutation — leaking the disagreement penalty into the non-factual arm —
+**passed**. `test_ensemble_non_factual_ignores_consistency` asserted its point
+with `asserted_by_candidates=[1, 2, 3]` against `ensemble_n=3`: unanimous, so the
+penalty it was meant to exclude is zero for that input, and leaking it changed
+nothing. The test now sweeps 3/3, 1/3 and 0/3.
+
+This is the sixth section where the same rule earned its keep: **assert the
+premise before the conclusion means anything, and confirm a mutation was applied
+before trusting that it was survived.** One mutation in this section also failed
+to apply at all (shell escaping ate a `\n`), and the "17 passed" that followed
+would have read as a passing mutation had the applied-check not been there.
+
+### Tests
+
+- `tests/test_ensemble_guard.py` rewritten (3 → 15). The file's own docstring
+  records that it used to guard a different thing, and why the reason carried
+  over even though the mechanism did not.
+- `tests/test_orchestrator.py` +7: per-candidate routing, skip-and-trace with the
+  cause surviving into the trace, survivor labelling, degrade-to-single,
+  all-failed, and `ensemble_n` being ignored in favour of the roster. A new
+  `_routing_mock` records `(pass_id, provider_name, model)` — the existing
+  `call_log` records only pass ids, which cannot tell a three-model ensemble from
+  three runs of one model, the entire distinction this section rests on.
+- `tests/test_confidence_scoring.py` +4, including a sweep asserting that
+  re-deriving the tier from the **recorded** score agrees with the tier assigned.
+  Under E10's mutation it reports the original symptom verbatim: *"recorded 0.8
+  tiered MEDIUM, but the thresholds say HIGH"*.
+
+### Verified outside the suite
+
+The three refusal messages as a human reads them. Then a full run through the
+**real** orchestrator, `_run_pass`, `RunAgentLoop._run`, tool registry and
+SQLite persistence — faked only at `call_model_stream` and
+`api_initialization` — with a roster of three where the middle provider raises
+for real:
+
+- Pass 1 dispatched to `ANTHROPIC/claude-opus-5` and `OPENAI/gpt-5.1`, each on
+  its own model.
+- The dead provider named in the trace with its actual cause, and skipped.
+- Survivors labelled 1 and 2 — not 1 and 3 — with `consistency_denominator: 2`.
+- `status='complete'`, report written.
+- An assertion on the faked wire call that **no temperature reached it**.
+
+The one-survivor variant separately: single-candidate input shape, no consistency
+keys in the breakdown at all, `raw_score` 0.85, `status='complete'`.
+
+### Recorded, not fixed
+
+The two live checks (findings 1 and 2). Both are recorded as open regardless of
+outcome, because neither can be settled offline and neither blocks the redesign.
+
+**Routing disagreement to verification instead of to a score.** A claim two of
+three models decline is arguably a signal to *check it* rather than to deduct
+0.05 — but D2 and 6c make zero LLM calls by design, and re-routing them is a
+rearchitecture. Worth a future section, not a change smuggled into this one.

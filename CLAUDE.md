@@ -140,7 +140,22 @@ Two things in `tui/app.py` are load-bearing and easy to break silently:
 
 ### Sampling parameters
 
-Current Anthropic models reject `temperature`/`top_p`/`top_k` (`config.MODELS_REJECTING_SAMPLING_PARAMS`). `_sampling_kwargs()` drops them with a WARNING, and the orchestrator **refuses** to run ensemble mode on such a model rather than generating N identical candidates and reporting maximal cross-candidate consistency for all of them. ROADMAP §10's diversity mechanism needs a redesign — see its revisit note.
+Current Anthropic models reject `temperature`/`top_p`/`top_k` (`config.MODELS_REJECTING_SAMPLING_PARAMS`). `_sampling_kwargs()` drops them with a WARNING.
+
+**Nothing in the harness passes a `temperature` any more, and the WARNING is what keeps that safe.** Ensemble mode was the one caller; §10's revisit replaced sampling variation with a roster of different models, so `_sampling_kwargs` is now a **backstop** rather than a guard on a live path — the boundary the next caller wanting sampling variation will meet, and the warning is how that caller learns it cannot have it. The threading through `core/loop.py` stays for the same reason. Do not delete either as dead code: silence here is exactly how §10 came to be built, documented as working, and incapable of running against this harness's own default model.
+
+### Ensemble mode (ROADMAP §10, as revisited)
+
+**Diversity comes from different MODELS, not different sampling** (E1). `config.ENSEMBLE_MODELS` is a roster of `{provider_name, model}`; Pass 1 runs once per entry, each on its own provider/model. §11's stated reason is the argument — "a model checking its own output for errors shares that model's blind spots" is the identical objection to self-consistency, since N samples of one model agree most confidently on that model's systematic errors. §10's own revisit note proposed *prompt-framing* variation; that was rejected, because framings partition what each candidate looks for, so an omission becomes a systematic bias rather than noise.
+
+- **No new plumbing was needed.** `_run()` calls `api_initialization(provider_name)` itself and `effort_for` validates against the receiving model, so a heterogeneous roster is correct by construction — the same way §11 already routes 3a/3b/6c to `critic_provider`/`critic_model`.
+- **`config.py` only** (E2), following `CRITIC_MODEL`. `ensemble_models` is rejected from `settings.json` **by name**, R12's rule applied to a second kind of authority: turning the mode on can only spend more of the provider the user already chose, but a *roster* chooses providers, and a project's `settings.json` beats the user's.
+- **N is `len(ENSEMBLE_MODELS)`** (E3). `ensemble_n` survives as a vestigial parameter and settings key with a WARNING — removing the key would make every existing `settings.json` that sets it raise.
+- **Fewer than two DISTINCT `(provider, model)` pairs is refused** (E5). Repeating one entry N times recreates the original defect through the new config: no sampling variation remains to make the candidates differ, so they arrive near-identical and every claim scores maximal consistency. Counting entries instead of distinct pairs is a pinned mutation.
+- **A failed candidate is named, traced and skipped** (E7) — §20's containment rule. One survivor **degrades to the single-candidate path** (`ensemble_n=0`), which is the correct formula when there is nothing to compare against, not a degraded one; scoring one candidate as an ensemble of one would report unanimous corroboration from a single source.
+- **Candidate labels follow the SURVIVORS, never roster position** (E11). A gap ("Candidate 1, Candidate 3") makes Pass 2 tag a claim both survivors asserted as `[1, 3]` against a denominator of 2, so unanimous claims read as dissented-against.
+- **Consistency enters as a DISAGREEMENT PENALTY** (E8): `raw -= 0.15 * (1 - consistency)`, factual claims only, subtracted like `ASSUMPTION_FLAG_PENALTY`. §10's shipped formula redistributed `0.5/0.35` → `0.4/0.3`, which made grounding count for *less* whenever ensemble was on and — since the maximum stayed `0.85` — meant consistency could only ever demote a well-grounded claim. As a penalty, unanimity is free and the non-ensemble formula is *literally* unchanged, so §10's byte-for-byte regression holds by construction. Non-factual claims are untouched (E9).
+- **`score_claim` rounds ONCE** (E10). The tier used to compare the unrounded float while the breakdown stored `round(raw, 4)`, so a claim computing `0.7999999999999999` was persisted as `raw_score: 0.8` and tiered MEDIUM against a table saying `≥0.8` is HIGH. Reachable from ordinary weights, and it is what §10's own acceptance criterion produces.
 
 ### Provider translation (`core/client.py`)
 

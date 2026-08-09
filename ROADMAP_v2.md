@@ -664,7 +664,9 @@ So `effort_levels_for_model()` queries Anthropic and tabulates the rest — a ne
 
 `orchestrator.py` passed `temperature=config.ENSEMBLE_TEMPERATURE` into `call_model`, and current Anthropic models reject sampling parameters — removed outright on Opus 5 / 4.8 / 4.7 and Fable 5, non-default values rejected on Sonnet 5, which is `config.MODEL_NAME`'s default. ROADMAP §10 was built, documented as working, and **could not execute against this harness's own default model**. It never surfaced because `ENSEMBLE_MODE = False`, and §14 shipped the first convenient way to turn it on.
 
-Two changes: `call_model`/`call_model_stream` omit sampling parameters where the model rejects them, and the orchestrator **refuses** to run ensemble mode on such a model. Refusing rather than silently dropping the parameter is the point — dropping it would generate `ensemble_n` identical candidates, spend N× the tokens, and then report maximal cross-candidate consistency for every claim, feeding a falsely confident score into Pass 4. Redesigning §10's diversity mechanism (prompt-level rather than sampling-level variation) is a deferred **§10 revisit**.
+Two changes: `call_model`/`call_model_stream` omit sampling parameters where the model rejects them, and the orchestrator **refuses** to run ensemble mode on such a model. Refusing rather than silently dropping the parameter is the point — dropping it would generate `ensemble_n` identical candidates, spend N× the tokens, and then report maximal cross-candidate consistency for every claim, feeding a falsely confident score into Pass 4. Redesigning §10's diversity mechanism was a deferred **§10 revisit**.
+
+> **That revisit has since landed, and it did NOT take the prompt-level variation this section proposed.** Framings partition what each candidate looks for, so an omission becomes a systematic bias rather than noise. Diversity comes from a roster of different models (`config.ENSEMBLE_MODELS`), which needs no sampling parameter at all — so the refusal above no longer applies to ensemble mode, and AC5 below is superseded. `ENSEMBLE_TEMPERATURE` is deleted; `_sampling_kwargs` and its WARNING are kept as a backstop for the next caller. Decisions E1–E12 are in DEVLOG's §10-revisit entry.
 
 ### Research mode
 
@@ -676,7 +678,7 @@ Coarse by construction. `run_deep_research_pipeline()` is synchronous and report
 2. A permission prompt shown mid-loop resumes the SAME generator with the user's response, verified end to end **against the dispatched tool**, not against the modal rendering. Denial and Escape both block the tool and both let the turn finish.
 3. A tool call that raises results in a visible, graceful error notification, not an app crash — verified with `exit_on_error=False` explicitly set and a forced exception in a mocked tool call, and with the raven returning to idle rather than sticking mid-activity.
 4. **(§16)** Effort switching offers only levels the current model reports, and the chosen level reaches the provider payload — asserted on the translated call arguments, not on the UI.
-5. **(§16)** Ensemble mode on a sampling-rejecting model raises a clear error naming the model, before any LLM call or `PipelineRunRecord` row.
+5. **(§16)** Ensemble mode on a sampling-rejecting model raises a clear error naming the model, before any LLM call or `PipelineRunRecord` row. **Superseded by §10's revisit** — ensemble mode no longer uses sampling variation, so it now runs on those models; what raises before any work is an unusable *roster* (`_ensemble_roster`), and the before-any-work half of this criterion carried over intact.
 
 ### Built
 

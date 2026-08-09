@@ -306,6 +306,43 @@ a focused pass unreviewable. The fix is a shared fixture that initializes agains
 tmp_path project with the harness root pointed at the real one —
 `tests/test_config_loader.py`'s `_redirect_roots` is most of it already.
 
+## 11. Two provider facts about sampling parameters are unverified (open, needs network)
+
+Found while redesigning ROADMAP §10's ensemble mode. Both are recorded rather
+than resolved because neither can be settled offline, and neither blocks
+anything: §10's revisit removed the harness's only caller of `temperature`.
+
+**(a) `ENSEMBLE_TEMPERATURE = 1.0` may have been a no-op on the very providers
+§10 said it worked on.** `_sampling_kwargs` sends `temperature` only when
+explicitly given, so omitting it means "provider default" — and 1.0 is the
+documented default for OpenAI Chat Completions and Google's
+`GenerateContentConfig`. If that is right, the "raised temperature" that was
+§10's entire diversity mechanism sent the value the provider would have used
+anyway, and the diversity a run actually got came from the provider's own
+nondeterminism rather than from anything this repo configured.
+
+The constant is deleted, so nothing depends on the answer. It is recorded
+because the **shape** generalises and will recur: *a config value that reads as
+a delta but is sent as an absolute is not checkable by any test that mocks the
+provider.* Nothing in a 1400-test offline suite could have caught it.
+
+**(b) `config.MODELS_REJECTING_SAMPLING_PARAMS` lists only Anthropic names.**
+OpenAI's own reasoning models restrict `temperature` the same way, and
+CLAUDE.md's example command is `--provider OPENAI --model gpt-5.1`. So §16's
+guard — added specifically to stop a sampling parameter reaching a model that
+rejects it — likely never fired for the OpenAI model the docs suggest.
+
+Now moot for ensemble mode, and the set is still correct for what it claims
+(it is documented as deliberately incomplete, and the failure mode is a loud
+400 rather than a wrong answer). But `_sampling_kwargs` is a live backstop for
+the next caller that wants sampling variation, and it will consult this set.
+
+**Suggested trigger:** the next time anything passes a `temperature`, or the
+next time a live API key is available for either provider, check both and
+either extend the set or record that it was checked and is right.
+
+---
+
 ## Accepted risks noted in the review, deliberately not "fixed"
 
 - `07_review.json` absent on zero-finding reviewed runs — presence-implies-

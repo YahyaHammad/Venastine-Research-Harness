@@ -266,7 +266,7 @@ them. Three new test files: `test_tui.py`, `test_client_effort.py`,
 | Query a non-Anthropic provider for capabilities | `test_non_anthropic_uses_the_table_without_querying` fails the client stub deliberately | No OpenAI-compatible provider in `providers.json` exposes a capability endpoint |
 | Send `ThinkingConfig(thinking_budget=...)` unconditionally on Google | `test_google_effort_tracks_what_the_installed_sdk_can_express` fails; against the real pinned SDK it is a `TypeError` | The pinned `google-genai==1.0.0` has no such field. Keep the `_google_supports_thinking_budget()` gate, or move the pin deliberately — which also puts §9's Google implementation back in scope for retest |
 | Drop the sampling parameter silently instead of logging | `test_sampling_dropped_for_models_that_reject_it` fails on the caplog assertion | Warn. A silent drop is how ensemble mode came to look like it worked |
-| Make the ensemble guard warn-and-continue instead of raising | `test_ensemble_on_a_sampling_rejecting_model_raises_before_any_work` fails | Raise. Continuing produces N identical candidates and reports maximal cross-candidate consistency for all of them — an expensive wrong answer, not a degraded one |
+| Make the roster guard warn-and-continue instead of raising | `test_the_refusal_lands_before_any_work` fails | Raise. Continuing produces N near-identical candidates and reports maximal cross-candidate consistency for all of them — an expensive wrong answer, not a degraded one. §16's row here named the *sampling* guard, which §10's revisit replaced; the reason carried over, the mechanism did not |
 | Change `config.MODEL_NAME` to a model that accepts sampling params | `test_default_model_is_in_the_reject_set` fails | Intended as a deliberate signal: update the test in the same commit, having checked the new default really does accept them |
 | Change `config.MAX_TOKENS` | Nothing fails — `test_call_model_google_text_only` asserts against the setting, not a literal | That test used to hardcode 4096 and broke when §16 raised it. Assert against the setting for tunables |
 | Add a settings key without adding it to `_KNOWN_SETTINGS`/`_KNOWN_TUI` | `ValueError: unknown tui key` at load | Intended (§14 amendment 1). A preference the loader doesn't know about is a startup error, not a silently ignored line |
@@ -965,3 +965,46 @@ class in `tests/test_interaction.py`.
 | Drop `TodoPanel.__init__`'s `self.display = False` | `TestThePanelWidget::test_it_starts_hidden` | A Textual `reactive`'s watch method does not fire for its initial value, so the panel is a visible empty box until something first sets `todos` — which on a fresh thread may be never |
 | Set `display = True` once (ResearchProgress's shape) instead of toggling it | `test_clearing_HIDES_IT_AGAIN` | A todo list empties as well as fills, so the reveal has to be reversible |
 | Write a transcript line for a `todo_changed` notice | `test_a_todo_notice_writes_NO_transcript_line` | The list changes several times in a turn; in an append-only transcript that is a column of near-identical lines. §26 made the same call for `pass_activity`. The neighbouring test asserts other notice kinds STILL write theirs, which §21a's "no silent compaction, ever" depends on |
+
+---
+
+## §10 revisit — the ensemble redesign (`test_ensemble_guard.py`, `test_orchestrator.py`, `test_confidence_scoring.py`)
+
+`test_ensemble_guard.py` was rewritten wholesale (3 → 15 tests). It used to guard
+§16's refusal of ensemble mode on a model that rejects sampling parameters;
+diversity now comes from a roster of different models, so no sampling parameter
+is involved and no model is excluded. **The reason the guard exists carried over
+even though the mechanism did not** — refusing beats running degraded, because a
+degraded ensemble run does not fail, it reports false confidence expensively.
+
+Two constants were **deleted**: `config.ENSEMBLE_TEMPERATURE` (the defect) and
+`config.ENSEMBLE_N` (N is `len(config.ENSEMBLE_MODELS)` now). The
+`settings.json` key `ensemble_n` and the `ensemble_n` pipeline parameter both
+**survive** — removing the key would make every existing `settings.json` that
+sets it raise, since unknown keys raise by design.
+
+### What breaks these
+
+| Change | Symptom | Fix |
+|---|---|---|
+| Count roster entries instead of **distinct** `(provider, model)` pairs | `test_one_distinct_model_repeated_is_refused` | The distinctness is the guard. `[X, X, X]` recreates §10's original defect through the new config: no sampling variation remains to make the candidates differ, so they arrive near-identical and every claim scores maximal consistency |
+| Add `ensemble_models` to `_KNOWN_SETTINGS` (or drop the named rejection) | `TestSettingsRejectsARoster::test_ensemble_models_is_rejected_by_name` | R12's rule, second instance. The mode is a bool that can only spend more of the provider the user already chose; a **roster chooses providers**, and a project's `settings.json` beats the user's. Rejected by name so the omission does not read as an oversight to fix |
+| Run every Pass 1 candidate on the run's own `model`/`provider_name` | `test_each_candidate_runs_on_its_own_provider_and_model`, plus two others | That *is* the mechanism. Note the plain `call_log` cannot catch this — it records only pass ids, so three runs of one model look identical to a three-model ensemble. Use `_routing_mock`, which records `(pass_id, provider_name, model)` |
+| Let a candidate's exception propagate instead of skipping | `test_a_failed_candidate_is_named_traced_and_skipped` and three others | §20's containment rule. One unreachable provider must not flip a ten-pass run to `failed` |
+| Drop the cause from the skip trace line | Same test, on the `"connection refused"` assertion | "A candidate failed" with no cause is not something a user can act on |
+| Label candidates by roster position rather than survivor order | `test_candidate_labels_follow_survivors_not_roster_positions` | A gap ("Candidate 1, Candidate 3") makes Pass 2 tag a claim both survivors asserted as `[1, 3]` against a denominator of 2, so unanimous claims read as dissented-against. Silently deflated confidence is the failure class this section removes |
+| Score a single survivor as an ensemble of one (`effective_n >= 1`) | `test_one_surviving_candidate_scores_without_a_penalty` | One candidate cannot disagree with itself, so every claim would score consistency 1.0 and report unanimous corroboration from a single source. `ensemble_n=0` is the **correct** formula there, not a degraded one |
+| Honour a passed `ensemble_n` over `len(ENSEMBLE_MODELS)` | `test_ensemble_n_is_ignored_in_favour_of_the_roster` | A confidence score's denominator must not be able to disagree with the roster that produced the candidates |
+| Make the disagreement penalty `W * consistency` instead of `W * (1 - consistency)` | `test_ensemble_factual_uses_ensemble_formula`, `test_ensemble_dissent_subtracts_and_grounding_is_not_diluted` | Unanimity must be free. A claim is not penalised for having been generated by an ensemble |
+| Restore `0.4/0.3` weighting for ensemble runs | The two above plus `test_partial_grounding_factual_lands_medium` and `test_non_ensemble_regression_identical_output` | Grounding is the pipeline's strongest evidence; which generation strategy produced a claim is no reason to weigh its verification differently |
+| Subtract the disagreement penalty in the **non-factual** arm | `test_ensemble_non_factual_ignores_consistency` | E9. **This mutation ran GREEN before that test was fixed**: it asserted with `asserted_by_candidates=[1,2,3]` against `ensemble_n=3`, so the penalty it excluded was zero for that input. It now sweeps 3/3, 1/3 and 0/3 — assert the premise, or the conclusion means nothing |
+| Compare the unrounded score against `TIER_THRESHOLDS` (i.e. revert E10) | `test_a_recorded_score_on_a_threshold_gets_that_threshold_s_tier` and `test_the_tier_reads_the_same_number_the_breakdown_stores`, the latter reporting the original symptom verbatim | Round once, use it for both. Note the swept test also covers ensemble inputs, so it catches this regardless of which formula produced the score |
+| Delete `_sampling_kwargs`, `MODELS_REJECTING_SAMPLING_PARAMS` or `temperature`'s threading as dead code | Nothing fails immediately — which is the hazard | They are a **backstop** now: nothing in the harness passes a temperature, and the WARNING is how the next caller that wants sampling variation learns it cannot have it. Silence here is exactly how §10's defect stayed invisible |
+
+### Standing: the doc-count guard fires on every added test
+
+`test_docs_consistency.py::test_the_documented_count_is_the_real_one` compares
+the collected total against the number quoted in `README.md`, `CLAUDE.md` and
+`ARCHITECTURE.md`. It **skips** on a narrowed invocation, so a green
+`pytest tests/test_ensemble_guard.py` says nothing about it. Run the full suite
+before committing, and update all three quotes together.
