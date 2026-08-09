@@ -27,7 +27,7 @@ Two general coverage cases follow.
 import pytest
 
 from core.reasoning.base import Claim
-from core.reasoning.confidence_scoring import score_claim
+from core.reasoning.confidence_scoring import score_claim, TIER_THRESHOLDS
 
 
 # ---------------------------------------------------------------------------
@@ -275,3 +275,62 @@ def test_non_ensemble_regression_identical_output():
     flagged_tier, flagged_bd = score_claim(flagged, ensemble_n=0)
     assert clean_tier != flagged_tier
     assert round(clean_bd["raw_score"] - flagged_bd["raw_score"], 4) == 0.15
+
+
+# ---- §10 revisit (E10): the tier and the record must agree -----------------
+# The tier used to compare the RAW float while the breakdown stored
+# round(raw, 4), so a claim could be persisted with a raw_score that
+# contradicted TIER_THRESHOLDS. Binary floating point reaches this from
+# ordinary weights; both cases below are measured, not contrived.
+
+def test_a_recorded_score_on_a_threshold_gets_that_threshold_s_tier():
+    """0.5*1.0 + 0.35*0.45(capped) - 0.15 is 0.29999999999999993, which
+    records as 0.3 -- and TIER_THRESHOLDS says >= 0.3 is LOW. Before the
+    round-once fix this claim was recorded at 0.3 and tiered UNVERIFIED.
+
+    This is the ONE input shape in the whole non-ensemble space whose tier
+    the fix changes; the sweep that established that is described at the
+    rounding site in confidence_scoring.py."""
+    claim = Claim(id="C", text="Perhaps.", type="speculative",
+                  critic_severity=0.55, assumption_flags=["one"])
+    tier, breakdown = score_claim(claim, ensemble_n=0)
+    assert breakdown["raw_score"] == 0.3
+    assert tier == "LOW", (
+        "a claim recorded at exactly a threshold must get that threshold's "
+        "tier -- otherwise the persisted artifact contradicts the published "
+        "table"
+    )
+
+
+def test_the_tier_reads_the_same_number_the_breakdown_stores():
+    """The general invariant, independent of which formula produced the
+    score: re-deriving the tier from the RECORDED raw_score must agree with
+    the tier that was assigned. Swept over the reachable input space so it
+    cannot be satisfied by one lucky case."""
+    for grounding in ("grounded", "partial", "ungrounded", None):
+        for severity in (i / 20 for i in range(21)):
+            for flags in range(3):
+                for claim_type in ("factual", "speculative"):
+                    for ensemble_n in (0, 3):
+                        claim = Claim(id="C", text="t", type=claim_type,
+                                      grounding_status=grounding,
+                                      critic_severity=severity,
+                                      assumption_flags=["x"] * flags)
+                        claim.asserted_by_candidates = [1, 2]
+                        tier, breakdown = score_claim(claim, ensemble_n=ensemble_n)
+                        # The one documented override: an ungrounded factual
+                        # claim is UNVERIFIED whatever it scored.
+                        if claim_type == "factual" and grounding == "ungrounded":
+                            assert tier == "UNVERIFIED"
+                            continue
+                        expected = "UNVERIFIED"
+                        for threshold, name in TIER_THRESHOLDS:
+                            if breakdown["raw_score"] >= threshold:
+                                expected = name
+                                break
+                        assert tier == expected, (
+                            f"recorded {breakdown['raw_score']} tiered {tier}, "
+                            f"but the thresholds say {expected} "
+                            f"({claim_type}/{grounding}/sev={severity}/"
+                            f"flags={flags}/n={ensemble_n})"
+                        )

@@ -82,7 +82,21 @@ def score_claim(claim: Claim, ensemble_n: int = 0) -> tuple[ConfidenceTier, dict
                 - assumption_penalty
             )
 
-    raw_score = max(0.0, min(1.0, raw_score))
+    # ROUND ONCE, then use that one value for BOTH the tier comparison and
+    # the breakdown. These used to be two values: the tier compared the raw
+    # float while the breakdown stored round(raw, 4), so a claim scoring
+    # 0.7999999999999999 was recorded as `raw_score: 0.8` and tiered MEDIUM
+    # -- against a TIER_THRESHOLDS table that says >= 0.8 is HIGH. Anyone
+    # auditing a run artifact read a number that contradicted the published
+    # thresholds, and the tier was the one that mattered.
+    #
+    # Binary floating point makes this reachable from ordinary weights, not
+    # from an exotic input: 0.5 + 0.35 - 0.15 * (1/3) is exactly that value.
+    # Sweeping the whole non-ensemble input space, exactly ONE shape changes
+    # tier under this fix -- a speculative claim at severity 0.55 with one
+    # assumption flag, which records 0.3 and now tiers LOW instead of
+    # UNVERIFIED. That is what the threshold table always specified.
+    raw_score = round(max(0.0, min(1.0, raw_score)), 4)
 
     if claim.type == "factual" and claim.grounding_status == "ungrounded":
         tier: ConfidenceTier = "UNVERIFIED"
@@ -97,7 +111,9 @@ def score_claim(claim: Claim, ensemble_n: int = 0) -> tuple[ConfidenceTier, dict
         "grounding_component": grounding_component,
         "critic_component": critic_component,
         "assumption_penalty": assumption_penalty,
-        "raw_score": round(raw_score, 4),
+        # Already rounded above -- rounding again here is what let the two
+        # values drift apart in the first place.
+        "raw_score": raw_score,
     }
     if ensemble_n > 0:
         breakdown["consistency_score"] = round(
