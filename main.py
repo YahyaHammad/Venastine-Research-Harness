@@ -360,6 +360,62 @@ def build_attended_provider(honour_run_scope: bool = False):
             return False
         return answer.strip().lower() in ("y", "yes")
 
+    def _question(request):
+        """Put the model's question to a terminal (§23 slice 2).
+
+        D12 makes this mandatory, not optional: a kind the CLI does not
+        render falls through `ask` to None, which interaction.decode turns
+        into the declining default -- so the tool would report "the user did
+        not answer" on every CLI run while looking wired up. CONFIRM and
+        CHOICE are in exactly that state today, reachable only because
+        /init supplies its own callbacks instead of using the channel.
+
+        All four affordances, and the same three-way answer the modal gives:
+        numbers choose, free text answers in the user's own words, `d`
+        defers, and an empty line is no answer at all.
+        """
+        payload = request.payload
+        options = [str(o) for o in (payload.get("options") or ())]
+        multi = bool(payload.get("multi_select"))
+        allow_text = payload.get("allow_text", True) is not False
+
+        print(f"\n[question] {payload.get('question', '')}")
+        for index, option in enumerate(options, start=1):
+            print(f"  {index}. {option}")
+        how = []
+        if options:
+            how.append("numbers separated by spaces" if multi else "a number")
+        if allow_text:
+            how.append("your own answer")
+        how.append("'d' to discuss it instead")
+        prompt = f"  {', or '.join(how)} (blank to skip): "
+
+        answer = reader.ask(prompt, config.ATTENDED_APPROVAL_TIMEOUT_S)
+        if answer is None:
+            print("  [no answer — the model will be told nobody replied]")
+            return None
+        cleaned = answer.strip()
+        if not cleaned:
+            return None
+        if cleaned.lower() in ("d", "discuss"):
+            return {"defer": True}
+
+        # Numbers pick options; anything else is the user's own words. A
+        # mixed line is read as text rather than half-parsed -- "2 but only
+        # if X" is a sentence, not a selection, and treating it as option 2
+        # would drop the condition the user attached to it.
+        pieces = cleaned.replace(",", " ").split()
+        if pieces and all(p.isdigit() for p in pieces):
+            chosen = [options[int(p) - 1] for p in pieces
+                      if 1 <= int(p) <= len(options)]
+            if chosen:
+                return {"options": chosen[:1] if not multi else chosen,
+                        "text": ""}
+            print("  [none of those were option numbers — treating it as text]")
+        if not allow_text:
+            return None
+        return {"options": [], "text": cleaned}
+
     def _signoff(request):
         """Per-tool subagent sign-off (§23 AC1b).
 
@@ -411,6 +467,8 @@ def build_attended_provider(honour_run_scope: bool = False):
             return _approval(request)
         if request.kind == interaction.SUBAGENT_SIGNOFF:
             return _signoff(request)
+        if request.kind == interaction.QUESTION:
+            return _question(request)
         if request.kind == interaction.REVIEW:
             return _prompt_review_decision(
                 reader, request.payload.get("finding") or {},

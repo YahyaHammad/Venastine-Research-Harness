@@ -87,6 +87,79 @@ class GoalBanner(Static):
             self.update("")
 
 
+class TodoPanel(Static):
+    """The model's checklist for this thread (ROADMAP_v2 §23 slice 2, AC4).
+
+    GoalBanner's reactive-and-hide shape rather than ResearchProgress's
+    one-way reveal, because a todo list EMPTIES as well as fills: clearing
+    it must take the panel away again, and `display = True` set once cannot.
+
+    Re-rendered from an EVENT, never polled (AC4). app.py sets `todos` when
+    a `todo_changed` notice arrives, reading the list from thread state --
+    the event says when, the thread says what. That split is why this widget
+    holds no authoritative copy of anything: the panel cannot disagree with
+    the conversation about what the list is.
+
+    Statuses are mapped with a local table defaulting to the pending marker,
+    so a list persisted under an older vocabulary renders rather than
+    raising. Same instinct as storage.py keeping THREAD_KIND_* a plain string
+    -- and the reason this file still imports nothing from core/ or config.
+    """
+
+    MARKERS = {"completed": "x", "in_progress": ">", "pending": "·"}
+
+    # A window, for ResearchProgress's reason: a Static does not scroll
+    # itself to the bottom, so an unbounded list would push the newest item
+    # out of view -- the opposite of the problem being solved.
+    ROWS = 12
+
+    todos = reactive(None, always_update=True)
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        # EXPLICIT, not left to the watcher. A reactive's watch method does
+        # not fire for its initial value, so without this the panel is a
+        # visible empty box until something first sets `todos` -- which on
+        # a fresh thread may be never. ResearchProgress does the same for
+        # the same reason; GoalBanner gets away without it only because
+        # app.py refreshes it during on_mount.
+        self.display = False
+
+    def _styles(self) -> dict:
+        try:
+            app = self.app
+        except Exception:  # noqa: BLE001 -- see Transcript._styles
+            return {}
+        return themes.styles_for(app)
+
+    def watch_todos(self) -> None:
+        items = self.todos or []
+        if not items:
+            self.display = False
+            self.update("")
+            return
+
+        styles = self._styles()
+        done = sum(1 for i in items if i.get("status") == "completed")
+        body = Text()
+        body.append(f"todo {done}/{len(items)}\n\n")
+        for item in items[-self.ROWS:]:
+            status = item.get("status", "pending")
+            marker = self.MARKERS.get(status, self.MARKERS["pending"])
+            # Only the three theme-invariant roles are safe across all eight
+            # themes (tui/themes.py), so a completed item uses `success` and
+            # everything else stays unstyled rather than reaching for a hue
+            # that means something different in half the palettes.
+            role = "success" if status == "completed" else ""
+            body.append(f"{marker} {item.get('content', '')}\n",
+                        styles.get(role, "") if role else "")
+        if len(items) > self.ROWS:
+            body.append(f"(+{len(items) - self.ROWS} earlier)\n",
+                        styles.get("system", ""))
+        self.display = True
+        self.update(body)
+
+
 class ResearchProgress(Static):
     """Live state of a /research run (ROADMAP_v2 §22).
 

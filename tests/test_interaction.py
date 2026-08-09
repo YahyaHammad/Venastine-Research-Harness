@@ -17,6 +17,10 @@ permissive, kind by kind and route by route:
     the easy mistake
   * review stays strict, because it is the only kind whose permissive
     failure applies an edit rather than declining one
+  * a question's three-way answer survives too (§23 slice 2): a deferral
+    ("let's talk about it instead") is a REAL answer and must not decode
+    like a dismissal, which is the sign-off's middle-answer trap one kind
+    along
 
 The invariant that ties it together and is pinned below:
 `decode(Request(kind), None) == SAFE_DEFAULTS[kind]` for every kind. That
@@ -34,8 +38,8 @@ import pytest
 
 from core import interaction
 from core.interaction import (
-    APPROVAL, CHOICE, CONFIRM, REVIEW, SAFE_DEFAULTS, SUBAGENT_SIGNOFF,
-    Request, ResponseChannel, ask, decode,
+    APPROVAL, CHOICE, CONFIRM, QUESTION, REVIEW, SAFE_DEFAULTS,
+    SUBAGENT_SIGNOFF, Request, ResponseChannel, ask, decode,
 )
 
 
@@ -275,6 +279,112 @@ class TestChoice:
         options check that False would be returned as if it were a
         choice -- this is the guard §24 shipped by hand in tui/app.py."""
         assert ask(_channel(False), self._request()) is None
+
+
+# ---------------------------------------------------------------------------
+# ---- Question (§23 slice 2) ------------------------------------------------
+# ---------------------------------------------------------------------------
+
+class TestQuestion:
+    """The four affordances the spec names, and the three-way answer.
+
+    A QUESTION is not a CHOICE with extras: it can come back as several
+    options, as free text, as both, or as a deferral. The rule it shares
+    with CHOICE and SUBAGENT_SIGNOFF is J3's -- an option nobody offered
+    cannot come back, and that is checkable only because decode takes the
+    request.
+    """
+
+    @staticmethod
+    def _request(options=("red", "blue")):
+        return Request(kind=QUESTION,
+                       payload={"question": "which?",
+                                "options": list(options)})
+
+    def test_a_single_option_comes_back(self):
+        answer = ask(_channel({"options": ["red"]}), self._request())
+        assert answer == {"options": ["red"], "text": "", "defer": False}
+
+    def test_several_options_come_back(self):
+        """multi-select. CHOICE cannot express this at all -- it returns the
+        single value it was given or None."""
+        answer = ask(_channel({"options": ["blue", "red"]}), self._request())
+        assert answer["options"] == ["red", "blue"], \
+            "options must come back in OFFERED order, not answer order"
+
+    def test_free_text_comes_back(self):
+        answer = ask(_channel({"text": "something else entirely"}),
+                     self._request())
+        assert answer["text"] == "something else entirely"
+        assert answer["options"] == []
+
+    def test_options_and_text_together(self):
+        """"a write-your-own answer" is additive, not exclusive: picking an
+        option and qualifying it is one answer, not two."""
+        answer = ask(_channel({"options": ["red"], "text": "but darker"}),
+                     self._request())
+        assert answer == {"options": ["red"], "text": "but darker",
+                          "defer": False}
+
+    def test_an_unoffered_option_is_dropped(self):
+        """J3, third instance. A shell returning something nobody proposed
+        is answering a different question."""
+        answer = ask(_channel({"options": ["red", "chartreuse"]}),
+                     self._request())
+        assert answer["options"] == ["red"]
+
+    def test_nothing_offered_means_no_options_come_back(self):
+        answer = ask(_channel({"options": ["red"]}),
+                     self._request(options=()))
+        assert answer["options"] == []
+
+    # ---- the deferral, which is an ANSWER ---------------------------------
+
+    def test_defer_is_a_real_answer(self):
+        """The spec's "chat about this" escape. Distinct from a dismissal:
+        the user engaged and chose to discuss, which tells the model
+        something. Nobody answering tells it nothing."""
+        answer = ask(_channel({"defer": True}), self._request())
+        assert answer == {"options": [], "text": "", "defer": True}
+        assert answer is not None
+
+    def test_defer_ignores_anything_alongside_it(self):
+        """A deferral is not a partial answer. Carrying half-filled options
+        beside it would invite a caller to act on both."""
+        answer = ask(_channel({"defer": True, "options": ["red"],
+                               "text": "hmm"}), self._request())
+        assert answer == {"options": [], "text": "", "defer": True}
+
+    def test_a_dismissal_is_not_a_deferral(self):
+        """Both mean "no choice was made" and they must not decode alike --
+        this is the middle-answer collapse SUBAGENT_SIGNOFF warns about,
+        one kind along."""
+        assert ask(_channel(None), self._request()) is None
+
+    def test_a_blank_submission_is_not_a_dismissal_either(self):
+        """Someone submitting an empty form was present. The tool decides
+        what to say about it; decode must not erase the difference."""
+        answer = ask(_channel({"options": [], "text": ""}), self._request())
+        assert answer == {"options": [], "text": "", "defer": False}
+        assert answer is not None
+
+    # ---- shapes that are not answers -------------------------------------
+
+    @pytest.mark.parametrize("raw", [None, True, False, "red", 3, ["red"],
+                                     ("red",), set()])
+    def test_non_dict_answers_decline(self, raw):
+        """Notably False: `_release_permission_channel` puts a bare False on
+        every parked queue, and notably the bare string and list, which are
+        what a shell written against CHOICE or SUBAGENT_SIGNOFF would
+        return."""
+        assert ask(_channel(raw), self._request()) is None
+
+    def test_a_wrong_shaped_options_value_is_not_an_error(self):
+        """A dict IS an answer, so a malformed `options` inside it degrades
+        to no options rather than discarding the free text beside it."""
+        answer = ask(_channel({"options": "red", "text": "keep me"}),
+                     self._request())
+        assert answer == {"options": [], "text": "keep me", "defer": False}
 
 
 # ---------------------------------------------------------------------------

@@ -664,7 +664,9 @@ So `effort_levels_for_model()` queries Anthropic and tabulates the rest — a ne
 
 `orchestrator.py` passed `temperature=config.ENSEMBLE_TEMPERATURE` into `call_model`, and current Anthropic models reject sampling parameters — removed outright on Opus 5 / 4.8 / 4.7 and Fable 5, non-default values rejected on Sonnet 5, which is `config.MODEL_NAME`'s default. ROADMAP §10 was built, documented as working, and **could not execute against this harness's own default model**. It never surfaced because `ENSEMBLE_MODE = False`, and §14 shipped the first convenient way to turn it on.
 
-Two changes: `call_model`/`call_model_stream` omit sampling parameters where the model rejects them, and the orchestrator **refuses** to run ensemble mode on such a model. Refusing rather than silently dropping the parameter is the point — dropping it would generate `ensemble_n` identical candidates, spend N× the tokens, and then report maximal cross-candidate consistency for every claim, feeding a falsely confident score into Pass 4. Redesigning §10's diversity mechanism (prompt-level rather than sampling-level variation) is a deferred **§10 revisit**.
+Two changes: `call_model`/`call_model_stream` omit sampling parameters where the model rejects them, and the orchestrator **refuses** to run ensemble mode on such a model. Refusing rather than silently dropping the parameter is the point — dropping it would generate `ensemble_n` identical candidates, spend N× the tokens, and then report maximal cross-candidate consistency for every claim, feeding a falsely confident score into Pass 4. Redesigning §10's diversity mechanism was a deferred **§10 revisit**.
+
+> **That revisit has since landed, and it did NOT take the prompt-level variation this section proposed.** Framings partition what each candidate looks for, so an omission becomes a systematic bias rather than noise. Diversity comes from a roster of different models (`config.ENSEMBLE_MODELS`), which needs no sampling parameter at all — so the refusal above no longer applies to ensemble mode, and AC5 below is superseded. `ENSEMBLE_TEMPERATURE` is deleted; `_sampling_kwargs` and its WARNING are kept as a backstop for the next caller. Decisions E1–E12 are in DEVLOG's §10-revisit entry.
 
 ### Research mode
 
@@ -676,7 +678,7 @@ Coarse by construction. `run_deep_research_pipeline()` is synchronous and report
 2. A permission prompt shown mid-loop resumes the SAME generator with the user's response, verified end to end **against the dispatched tool**, not against the modal rendering. Denial and Escape both block the tool and both let the turn finish.
 3. A tool call that raises results in a visible, graceful error notification, not an app crash — verified with `exit_on_error=False` explicitly set and a forced exception in a mocked tool call, and with the raven returning to idle rather than sticking mid-activity.
 4. **(§16)** Effort switching offers only levels the current model reports, and the chosen level reaches the provider payload — asserted on the translated call arguments, not on the UI.
-5. **(§16)** Ensemble mode on a sampling-rejecting model raises a clear error naming the model, before any LLM call or `PipelineRunRecord` row.
+5. **(§16)** Ensemble mode on a sampling-rejecting model raises a clear error naming the model, before any LLM call or `PipelineRunRecord` row. **Superseded by §10's revisit** — ensemble mode no longer uses sampling variation, so it now runs on those models; what raises before any work is an unusable *roster* (`_ensemble_roster`), and the before-any-work half of this criterion carried over intact.
 
 ### Built
 
@@ -1488,7 +1490,7 @@ symptom is the whole app failing to lay out with `'NoneType' object has no attri
 
 ## 23. Interactive tools — question tool, todo list, and the response channel they share
 
-**Added during §16. SLICE 1 BUILT after §24** — the channel (AC1), its three consumers, and §18's deferred per-tool sign-off (AC1b). The question tool and the todo list (ACs 2–4) are slice 2.
+**Added during §16. BUILT in two slices.** Slice 1: the channel (AC1), its three consumers, and §18's deferred per-tool sign-off (AC1b). Slice 2: the question tool and the todo list (ACs 2–4), plus P1's deferred event-shape decision, settled by J10 without needing a new type.
 
 **Added during §16.** Two requested capabilities need the same missing piece: a way for a *tool* to ask the user something and block until answered. §13 built exactly one of these — `permission_channel`, a `queue.Queue` carrying a boolean — and both of these need a richer version of it.
 
@@ -1498,7 +1500,7 @@ Generalise the approval bridge into a response channel that carries a typed requ
 
 **The warning was right, and it was already five by the time this was built.** `permission_channel` (§13), `ApprovalProvider` (§25), `ReviewConsent` (§20), and §24 added two more — `ask_confirm_blocking` and `ask_project_kind_blocking` — in the section immediately before this one. Each re-derived the same four rules: what a dismissal carries, what a timeout means, how shutdown releases a parked worker, and how a malformed answer decodes.
 
-### Decisions record (slice 1: J1–J8)
+### Decisions record (slice 1: J1–J8; slice 2: J9–J14)
 
 | # | Decision | Why |
 |---|---|---|
@@ -1510,6 +1512,12 @@ Generalise the approval bridge into a response channel that carries a typed requ
 | **J6** | **Review decoding is STRICT** — a well-formed pair or nothing | The two decoders this replaced disagreed (review.py took a bare `"accept"` string, tui/app.py did not) and neither behaviour was tested. Strict wins because this is the only kind whose permissive failure APPLIES an edit rather than declining one |
 | **J7** | **`ToolSpec.request_kind` / `request_payload`** carry the question's shape and its tool-specific fields | grant_scope's reason exactly: the loop asks the registry what shape of question a tool needs, so no tool name appears in `core/loop.py` |
 | **J8** | **The sign-off memo is keyed by (tool, SUBJECT)**, amending S1 | `grant_scope="run"` meant a second spawn was not asked at all — and the test pinning it spawned agent `a` then agent `b`, so approving `a` authorised `b`'s whole gated set. Per-tool sign-off makes the answer agent-specific, so the memo is too. The anti-noise intent survives: the same agent twice is one prompt |
+| **J9** | **The todo list works HEADLESS**, amending AC2 | AC2 says "both tools deny cleanly with no way to ask", written before this tool's shape was settled. The deny rule exists because a blocking prompt nobody answers turns into a hang — and this tool blocks on nothing and asks nobody. A research run keeping a checklist across ten passes is where one helps most, and ungating it is what makes it visible in a pass at all (§13 hides a gated tool rather than merely denying it) |
+| **J10** | **A todo change travels as a `notice` KIND; the panel reads the list from thread state** | Discharges P1's deferred question without a new type. `notice` is already a kind-discriminated dict and `_run()` already yields it. The event says WHEN and `extra_data["todos"]` says WHAT, so the panel holds no authoritative copy and cannot disagree with the conversation. `LoopEvent`'s field set stays frozen. The forwarding is GENERIC — any tool result carrying a `notice` is forwarded and the key stripped — because the alternative was for `core/loop.py` to recognise `todo_write` by name, which is what `grant_scope` and `request_kind` exist to prevent |
+| **J11** | **`with_todos` is a FOURTH parallel prompt tier; converging them stays deferred** | `with_memories`' docstring asks §23 to merge goal/skills/memories into one assembly point. They differ in signature (agent vs memory) *and* in conditionality — refs append unconditionally while memories are guarded — and CLAUDE.md already records that asymmetry as needing its own test "because the edit looks right". Merging is a refactor with real regression risk and no AC behind it. Recorded so the fourth copy of K6's warning is a known cost, not an accident |
+| **J12** | **Both tools are UNGATED** | Gating the question tool would mean approving a prompt in order to be shown a prompt — but the deciding reason is §13: it does not merely deny a gated tool where nothing can ask, it stops ADVERTISING it. Gated, `ask_user` would be invisible in every headless run, and AC2 requires it be visible, called, and answered with a denial the model can work around. `pin` is ungated for the same shape of reason (D26) |
+| **J13** | **Whole-list write, not granular operations** | One call replaces the list, so it is always internally consistent and reordering is free. Granular add/complete/remove each need a stable way to name one item — the problem `clear_refs` refused to solve and §21b's "removal is by id, never by substring" rule exists to prevent. A model naming the wrong id silently mutates the wrong entry; a model rewriting the list cannot |
+| **J14** | **`extra_data["todos"]`, not its own table** | `storage.get_thread_extra`'s docstring has named this tenant since §18, and §27's column-versus-`extra_data` argument was about keeping `list_threads()` cheap. A todo list is only ever read for the current thread, so queryability buys nothing. It shares the column under its own key beside §18's goal and §21c's refs |
 
 ### What the two parameters keep separate
 
@@ -1527,7 +1535,7 @@ Per D24 the tool needs declared fields in both `ToolPermissions` and `ToolApprov
 
 ### Todo list tool
 
-A model-maintained checklist, persisted per thread, rendered in a TUI panel whose placement (top / bottom / side) is a `tui.todo_position` preference. Needs an event so the panel re-renders on change. **§22 settled the event-shape question as P1** and left `LoopEvent` at six fields deliberately, with a test that fails if a seventh appears — so a todo event is a decision to make here, not a field to add quietly. `PipelineEvent`'s kind-discriminated shape is the precedent if this family grows the same way.
+A model-maintained checklist, persisted per thread, rendered in a TUI panel whose placement (top / bottom / side) is a `tui.todo_position` preference. Needs an event so the panel re-renders on change. **§22 settled the event-shape question as P1** and froze `LoopEvent`'s field set, with a test that fails if it changes — so a todo event is a decision to make here, not a field to add quietly. `PipelineEvent`'s kind-discriminated shape is the precedent if this family grows the same way. (**Corrected in slice 2:** this said "six fields" and the field set is seven — `token_delta`, `tool_call_start`, `tool_result`, `permission_request`, `notice`, `final_response`, `stop_reason`. The test asserts SET EQUALITY, so the operative constraint is "frozen", not a count; J10 needed neither an addition nor a new type.)
 
 Open question to settle at build time: whether the list is thread-scoped state in `ConversationThread.extra_data` or its own table. `extra_data` is the cheaper answer and the field was put there for this kind of thing -- note it is NO LONGER unused, since §18 shipped goal mode into it via key-scoped `set_extra()`, so a todo list would share the column under its own key.
 
@@ -1535,11 +1543,15 @@ Open question to settle at build time: whether the list is thread-scoped state i
 
 1. `permission_channel` is one case of the general channel, not a second mechanism alongside it. **§25 added a second case that this must ABSORB rather than replace:** `core.approval.ApprovalProvider` — a caller-supplied `ask(tool_name, params, notice) -> bool` plus an `honour_run_scope` flag. It exists because `run_to_completion()` discards the `permission_request` event, so the CLI and the research pipeline (which drain the generator rather than watching it) would otherwise block on a queue with nothing displayed. Its `ask` signature is the request/response pair this section generalises; folding it in means one mechanism with three consumers, and NOT folding it in means the third bespoke channel this section exists to prevent.
 1b. **Per-tool subagent sign-off is a named consumer of this channel.** (§25 R1 built the per-tool selection for *pipeline* grants, where the prompt is a shell-side question before the run rather than a mid-loop exchange — so it needed no channel and does not discharge this criterion.) The §14-§18 review shipped §18's sign-off as all-or-nothing (decision S1) precisely because the boolean channel cannot carry a list-out/subset-back exchange: approving a spawn authorises the child's entire approval-gated set. The per-tool version -- request carries the candidate tools, response carries the approved subset, and rejected names are removed from the child's `allowed_tools` -- is deliberately deferred here rather than built on a bespoke second channel. `ToolSpec.approval_notice` and `ToolSpec.grant_scope` already exist and generalise to it.
-2. Both tools deny cleanly **with no way to ask** — no response channel and no `ApprovalProvider` — and say why. (Amended by §25: "in every pipeline pass" is no longer the same condition; an attended run can ask.)
-3. Both tools have declared permission/approval fields (D24).
-4. The todo panel re-renders from an event, not from polling.
+2. Both tools deny cleanly **with no way to ask** — no response channel and no `ApprovalProvider` — and say why. (Amended by §25: "in every pipeline pass" is no longer the same condition; an attended run can ask.) ✓ **for `ask_user`; AMENDED for the todo list by J10/J9** — a checklist asks nobody and blocks on nothing, so "deny cleanly" has nothing to deny. `todo_write` works headless deliberately. `ask_user` denies with an error naming the condition and telling the model to state its assumption, and stays ADVERTISED headless (J12) so the denial is reachable at all.
+3. Both tools have declared permission/approval fields (D24). ✓ Both allowed, both ungated (J12/J9); `assert_permissions_declared` raises at import if either field goes missing, verified by removing one.
+4. The todo panel re-renders from an event, not from polling. ✓ A `todo_changed` notice is the trigger; the panel re-reads `extra_data["todos"]` for the content (J10). Pinned by a test that sets the thread state, asserts the panel is STALE, then posts the event — so a polling implementation fails it.
 
-**Slice 1 status:** AC1 ✓ (one mechanism, three consumers — approval, review, sign-off — plus §24's two). AC1b ✓ (`SubagentSignoffScreen`, the subset intersected with the offered candidates, and S1's scope amended per J8). ACs 2–4 are slice 2, along with P1's `LoopEvent`-vs-tagged-union decision, which only the todo event needs.
+**Slice 1 status:** AC1 ✓ (one mechanism, three consumers — approval, review, sign-off — plus §24's two). AC1b ✓ (`SubagentSignoffScreen`, the subset intersected with the offered candidates, and S1's scope amended per J8).
+
+**Slice 2 status:** ACs 2–4 ✓. `ask_user` and `todo_write`, a new `QUESTION` kind whose answer is three-way (an option set / free text, a deferral, or nothing), and a TUI panel fed by a `notice` kind. **P1's deferred `LoopEvent`-vs-tagged-union decision is settled by J10 and needed neither option:** `notice` is already kind-discriminated, so the todo event added no field and no type, and `test_loop_event_did_not_grow_a_seventh_field` is untouched.
+
+**Out of slice 2, recorded rather than dropped:** the CLI slash-command layer §21c's M21 deferred here (no AC, no decisions record, and neither tool needs it — the CLI reaches both through `build_attended_provider`), and the convergence of the four `with_*` prompt tiers (J11).
 
 ---
 

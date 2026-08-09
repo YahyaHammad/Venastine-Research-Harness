@@ -25,8 +25,10 @@ python main.py --ref <thread> --ref <thread>       # §21c: attach other threads
 python main.py --init                              # §24: scaffold this project's documentation set
 python main.py --init --research-project           # §24: skip the type question on a piped run
 # §24 in the TUI: /init [--software|--research]
+# §23 slice 2: the model asks with `ask_user` and keeps a checklist with
+#   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 1246 tests, offline, ~25s (first run ~30s: matplotlib font cache)
+pytest                                            # 1406 tests, offline, ~25s (first run ~30s: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -46,7 +48,7 @@ MCP servers are a *third* config file again — `mcp.json`, user-level or `.vena
 Read these before changing anything non-trivial — they carry design decisions that are locked, not defaults to re-derive.
 
 - **ARCHITECTURE.md** — what's built, file-by-file contracts ("what belongs here / what does NOT"), known gotchas (§11).
-- **ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **ROADMAP_v2.md** (§13–§27; all built except §23's slice 2 — the question tool and the todo list) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R12 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I13 from §24 and J1–J8 from §23). Section and D-numbers are stable and cross-referenced everywhere.
+- **ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **ROADMAP_v2.md** (§13–§27, all built) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R12 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I13 from §24 and J1–J14 from §23). Section and D-numbers are stable and cross-referenced everywhere.
 - **DEVLOG.md** — per-section implementation notes: what was followed verbatim, what was deviated from (every deviation was an explicit user decision — do not silently override).
 - **tests/BREAKING_CHANGES.md** — what breaks each test when production code changes, the symptom, and the fix.
 - **QWEN.md** — a sibling agent-context file. Stale (it predates §13–§16 and disagrees with itself on test counts); prefer ARCHITECTURE.md and the code.
@@ -138,7 +140,22 @@ Two things in `tui/app.py` are load-bearing and easy to break silently:
 
 ### Sampling parameters
 
-Current Anthropic models reject `temperature`/`top_p`/`top_k` (`config.MODELS_REJECTING_SAMPLING_PARAMS`). `_sampling_kwargs()` drops them with a WARNING, and the orchestrator **refuses** to run ensemble mode on such a model rather than generating N identical candidates and reporting maximal cross-candidate consistency for all of them. ROADMAP §10's diversity mechanism needs a redesign — see its revisit note.
+Current Anthropic models reject `temperature`/`top_p`/`top_k` (`config.MODELS_REJECTING_SAMPLING_PARAMS`). `_sampling_kwargs()` drops them with a WARNING.
+
+**Nothing in the harness passes a `temperature` any more, and the WARNING is what keeps that safe.** Ensemble mode was the one caller; §10's revisit replaced sampling variation with a roster of different models, so `_sampling_kwargs` is now a **backstop** rather than a guard on a live path — the boundary the next caller wanting sampling variation will meet, and the warning is how that caller learns it cannot have it. The threading through `core/loop.py` stays for the same reason. Do not delete either as dead code: silence here is exactly how §10 came to be built, documented as working, and incapable of running against this harness's own default model.
+
+### Ensemble mode (ROADMAP §10, as revisited)
+
+**Diversity comes from different MODELS, not different sampling** (E1). `config.ENSEMBLE_MODELS` is a roster of `{provider_name, model}`; Pass 1 runs once per entry, each on its own provider/model. §11's stated reason is the argument — "a model checking its own output for errors shares that model's blind spots" is the identical objection to self-consistency, since N samples of one model agree most confidently on that model's systematic errors. §10's own revisit note proposed *prompt-framing* variation; that was rejected, because framings partition what each candidate looks for, so an omission becomes a systematic bias rather than noise.
+
+- **No new plumbing was needed.** `_run()` calls `api_initialization(provider_name)` itself and `effort_for` validates against the receiving model, so a heterogeneous roster is correct by construction — the same way §11 already routes 3a/3b/6c to `critic_provider`/`critic_model`.
+- **`config.py` only** (E2), following `CRITIC_MODEL`. `ensemble_models` is rejected from `settings.json` **by name**, R12's rule applied to a second kind of authority: turning the mode on can only spend more of the provider the user already chose, but a *roster* chooses providers, and a project's `settings.json` beats the user's.
+- **N is `len(ENSEMBLE_MODELS)`** (E3). `ensemble_n` survives as a vestigial parameter and settings key with a WARNING — removing the key would make every existing `settings.json` that sets it raise.
+- **Fewer than two DISTINCT `(provider, model)` pairs is refused** (E5). Repeating one entry N times recreates the original defect through the new config: no sampling variation remains to make the candidates differ, so they arrive near-identical and every claim scores maximal consistency. Counting entries instead of distinct pairs is a pinned mutation.
+- **A failed candidate is named, traced and skipped** (E7) — §20's containment rule. One survivor **degrades to the single-candidate path** (`ensemble_n=0`), which is the correct formula when there is nothing to compare against, not a degraded one; scoring one candidate as an ensemble of one would report unanimous corroboration from a single source.
+- **Candidate labels follow the SURVIVORS, never roster position** (E11). A gap ("Candidate 1, Candidate 3") makes Pass 2 tag a claim both survivors asserted as `[1, 3]` against a denominator of 2, so unanimous claims read as dissented-against.
+- **Consistency enters as a DISAGREEMENT PENALTY** (E8): `raw -= 0.15 * (1 - consistency)`, factual claims only, subtracted like `ASSUMPTION_FLAG_PENALTY`. §10's shipped formula redistributed `0.5/0.35` → `0.4/0.3`, which made grounding count for *less* whenever ensemble was on and — since the maximum stayed `0.85` — meant consistency could only ever demote a well-grounded claim. As a penalty, unanimity is free and the non-ensemble formula is *literally* unchanged, so §10's byte-for-byte regression holds by construction. Non-factual claims are untouched (E9).
+- **`score_claim` rounds ONCE** (E10). The tier used to compare the unrounded float while the breakdown stored `round(raw, 4)`, so a claim computing `0.7999999999999999` was persisted as `raw_score: 0.8` and tiered MEDIUM against a table saying `≥0.8` is HIGH. Reachable from ordinary weights, and it is what §10's own acceptance criterion produces.
 
 ### Provider translation (`core/client.py`)
 
@@ -491,7 +508,7 @@ independent bugs, both found by using the app.
 - **In a pilot test, `app._transcript` queries the ACTIVE screen.** Reading it while a
   modal is up raises `NoMatches`; hold the widget before opening one.
 
-### The response channel (`core/interaction.py`, §23 slice 1)
+### The response channel (`core/interaction.py`, §23)
 
 **One way to ask a human anything.** There were five: `permission_channel`
 (§13), `ApprovalProvider` (§25), `ReviewConsent` (§20), and §24's
@@ -540,6 +557,40 @@ worker, and how a malformed answer decodes.
   the middle one is the easy mistake; `interaction.decode` tests `isinstance`
   rather than truthiness for exactly that reason.
 - **`tui/app.py` has one `_blocking_modal`.** Four asks did the same six lines,
+
+**Slice 2 — the two tools the channel existed for.**
+
+- **A tool that asks uses the INJECTED `response_channel`, not the approval
+  bridge.** `_obtain_approval` fires only under `if needs_approval:`, always
+  builds a `{"tool_name", "params"}` payload, and coerces the answer to
+  `(bool, grant)` — a multi-select or free-text answer has nowhere to go in it.
+  `response_channel` is injected into any handler naming it, on both dispatch
+  branches, so `ask_user` calls `interaction.ask` itself and `core/loop.py` is
+  untouched. `_INJECTABLE_PARAMS`' comment predicted this.
+- **`QUESTION`'s answer is three-way** (J10's sibling shape): `None` is nobody
+  answering; `defer=True` is the "chat about this" escape and a REAL answer;
+  anything else is options-plus-text with the options intersected against what
+  was offered. A blank submission is someone who was present — `isinstance`,
+  never truthiness.
+- **Adding a kind needs a branch in BOTH shells.** A kind a shell does not
+  render falls through to `None` and decodes as "nobody answered" on every run
+  there while looking wired up. `CONFIRM` and `CHOICE` are in that state on the
+  CLI today, masked because `/init` supplies its own callbacks.
+- **Both tools are UNGATED** (J12/J9), and for `ask_user` the deciding reason is
+  not "asking is harmless" — it is that §13 stops *advertising* a gated tool
+  where nothing can ask, so gated it would be invisible rather than deniable and
+  AC2's "an error result it can work around" would be unreachable.
+- **A tool result's `notice` is forwarded as a `LoopEvent` and STRIPPED** (J10),
+  generically — the alternative was the loop recognising `todo_write` by name.
+  This is also how P1's deferred event-shape decision was discharged with
+  neither a new field nor a new type: `notice` was already kind-discriminated.
+- **The todo panel reads its CONTENT from thread state**, using the event only
+  as a trigger, so the list never exists in two places that can disagree.
+- **`with_todos` is K6's FOURTH instance** (after M13 and M19), and converging
+  the four `with_*` tiers is now a recorded deferral (J11) rather than a
+  docstring aside — they differ in signature *and* in conditionality.
+- **Whole-list write** (J13): no item is ever addressed by name or index, which
+  is the problem `clear_refs` refused to solve.
   and the `_permission_channel` field each published is what
   `_release_permission_channel` reaches for when the app exits with a modal
   open. It is no longer the loop's channel — it is this app's parked-worker
@@ -650,6 +701,8 @@ A tool that should not always be *offered* (as opposed to not allowed) supplies 
 ### Testing
 
 All tests run offline: zero network, zero real API keys. The **root** `conftest.py` stubs 6 SDK packages into `sys.modules` at import time (`openai`, `anthropic`, `google`/`google.genai`, `sqlmodel`, `httpx`, `ddgs`) — fixtures run too late, since `core/client.py`'s imports fire during collection. `pydantic` and `sympy` are deliberately *not* faked. Tests needing real SQLite monkeypatch the fake `sqlmodel` away (pattern documented in `test_memory_write_through.py`'s docstring).
+
+**Waiting in a Textual pilot test: `settle`, never a pump count** (`tests/conftest.py`, TECHNICAL_DEBT 8). `await settle(pilot, predicate)` waits on a wall-clock deadline and quiesces once the predicate holds; `await pump(pilot, n)` gives the loop `n` turns and is for *negative* assertions only ("prove X did not happen"), where there is no predicate and a deadline would make every such site pay its full timeout. Do not hand-roll either — there were five copies with five budgets and two orderings, and the two bugs in them were invisible to 1246 passing tests, so `test_pilot_wait.py` now fails on a sixth. Two facts behind this: `pilot.pause()` is **not** a fixed unit of time (21ms with nothing burning CPU in-process, 1021ms with one busy sibling thread — its exit condition is a process-wide CPU heuristic), and a predicate like `isinstance(app.screen, SomeModal)` goes true *before* the worker reaches `channel.get()`, so joining that thread from the event-loop thread deadlocks both ways.
 
 ### Before calling a change done
 

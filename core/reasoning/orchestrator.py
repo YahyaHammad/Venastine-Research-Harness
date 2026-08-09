@@ -277,6 +277,62 @@ def _check_not_truncated(pass_id: str, response, trace: list[str] | None):
         trace.append(message)
 
 
+def _ensemble_roster(ensemble_mode: bool) -> list[dict]:
+    """The (provider_name, model) pairs Pass 1 runs on, or [] when ensemble
+    mode is off. Raises ValueError on a roster that cannot produce a
+    meaningful consistency signal (ROADMAP §10 revisit, E1/E5).
+
+    A separate function so every refusal is testable without running a
+    pipeline, and so the reasons stay together: this replaces §16's
+    sampling-parameter guard, which refused for a mechanism that no longer
+    exists.
+
+    Validated by SHAPE only -- provider names and API keys are not checked
+    here (E6). §16's /model warns rather than refuses on an empty API_KEY so
+    a local OpenAI-compatible endpoint stays usable, and MCP's posture is
+    that validation happens by connecting. A candidate whose provider is
+    unreachable is named, traced and skipped at run time instead.
+    """
+    if not ensemble_mode:
+        return []
+
+    roster = config.ENSEMBLE_MODELS
+    if not roster:
+        raise ValueError(
+            "Ensemble mode is on but config.ENSEMBLE_MODELS is empty. "
+            "Diversity comes from different models now, not from a raised "
+            "temperature (ROADMAP §10 revisit), so the roster is required. "
+            "Set it in config.py to a list of at least two distinct "
+            '{"provider_name": ..., "model": ...} entries, or disable '
+            "ensemble_mode. There is deliberately no settings.json key for "
+            "the roster -- see E2."
+        )
+
+    for entry in roster:
+        if not isinstance(entry, dict) or not entry.get("provider_name") or not entry.get("model"):
+            raise ValueError(
+                f"Malformed config.ENSEMBLE_MODELS entry {entry!r}: every "
+                f'entry needs both "provider_name" and "model".'
+            )
+
+    # DISTINCT pairs, not merely two entries. Repeating one model N times
+    # would generate N near-identical candidates -- there is no sampling
+    # variation left to make them differ -- and then report maximal
+    # cross-candidate consistency for every claim, which Pass 4 reads as
+    # confidence. That is precisely the failure §16's guard was added to
+    # prevent, and this config is the way to recreate it.
+    distinct = {(e["provider_name"], e["model"]) for e in roster}
+    if len(distinct) < 2:
+        raise ValueError(
+            f"Ensemble mode needs at least two DISTINCT models; "
+            f"config.ENSEMBLE_MODELS resolves to {len(distinct)} "
+            f"({sorted(distinct)}). One model cannot disagree with itself, so "
+            f"every claim would score maximal consistency and Pass 4 would "
+            f"read that as confidence."
+        )
+    return list(roster)
+
+
 def _run_pass(pass_id: str, pass_input: str, model: str, provider_name: str,
               temperature: float | None = None, authorization=None,
               trace: list[str] | None = None, pass_threads: list | None = None):
@@ -730,27 +786,25 @@ def stream_deep_research_pipeline(
     pattern. Separate from `review` because --review on a piped run must
     still produce findings while applying nothing."""
     ensemble_mode = config.ENSEMBLE_MODE if ensemble_mode is None else ensemble_mode
-    ensemble_n = config.ENSEMBLE_N if ensemble_n is None else ensemble_n
     subagent_review = (config.SUBAGENT_REVIEW if subagent_review is None
                        else subagent_review)
 
-    # ROADMAP_v2 §16 prerequisite. Ensemble mode's entire diversity mechanism
-    # is a raised temperature on Pass 1 -- and current Anthropic models reject
-    # sampling parameters outright (HTTP 400). Before this guard the request
-    # simply failed; the tempting "fix" is to drop the parameter and carry on,
-    # which is worse: it spends ensemble_n x the tokens to generate N
-    # identical candidates and then reports high cross-candidate consistency
-    # for all of them, feeding a falsely confident score into Pass 4.
-    #
-    # Refuse instead, and say what to do about it. Redesigning the diversity
-    # mechanism (prompt-level variation rather than sampling-level) is a
-    # deferred §10 revisit -- see DEVLOG §16.
-    if ensemble_mode and model in config.MODELS_REJECTING_SAMPLING_PARAMS:
-        raise ValueError(
-            f"Ensemble mode needs sampling variation, which {model!r} does not "
-            f"support (it rejects temperature/top_p/top_k). Run ensemble mode "
-            f"on an OpenAI-compatible or Google model, or disable ensemble_mode."
+    # §10 revisit (E4). `ensemble_n` is vestigial: N is len(ENSEMBLE_MODELS)
+    # now, because a separately configured count could disagree with the
+    # roster that produced the candidates, and the denominator of a
+    # confidence score must not be able to lie. The parameter and the
+    # settings.json key are KEPT rather than removed -- unknown settings keys
+    # raise, so deleting the key would make every existing settings.json that
+    # sets it fail to load.
+    if ensemble_n is not None:
+        logger.warning(
+            "Ignoring ensemble_n=%s: the number of candidates is "
+            "len(config.ENSEMBLE_MODELS) now (ROADMAP §10 revisit, E3). "
+            "Change the roster in config.py to change N.",
+            ensemble_n,
         )
+
+    roster = _ensemble_roster(ensemble_mode)
 
     run = PipelineRun(user_query=user_query)
 
@@ -783,21 +837,73 @@ def stream_deep_research_pipeline(
 
         # --- Pass 1: initial generation (ensemble mode: N candidates) ---
         pass1_input = f"Original query:\n{user_query}\n\nPreliminary plan (loose context, may deviate freely):\n{json.dumps(run.plan)}"
-        if ensemble_mode:
+        effective_n = 0
+        if roster:
             # A LOOP, not a comprehension: _run_pass is a generator now
             # (§22), and a comprehension would collect generator objects
             # without ever running a pass.
+            #
+            # One candidate per roster entry, each on its OWN provider/model
+            # (E1). No new plumbing: _run() calls api_initialization() itself
+            # and effort_for() validates against the receiving model, so a
+            # heterogeneous roster is correct by construction -- the same way
+            # §11 already routes 3a/3b/6c to critic_provider/critic_model.
             candidates = []
-            for _ in range(ensemble_n):
-                candidates.append((yield from _run_pass(
-                    "Pass 1", pass1_input, model, provider_name,
-                    temperature=config.ENSEMBLE_TEMPERATURE,
-                    authorization=authorization, trace=run.trace, pass_threads=run.pass_threads)))
-            run.raw_response = candidates[0]
-            pass2_input = "\n\n".join(
-                f"Candidate {i + 1}:\n{c}" for i, c in enumerate(candidates)
-            )
-            run.log(f"Pass 1: ensemble mode — {ensemble_n} candidates generated.")
+            for entry in roster:
+                label = f"{entry['provider_name']}/{entry['model']}"
+                try:
+                    candidates.append((yield from _run_pass(
+                        "Pass 1", pass1_input, entry["model"], entry["provider_name"],
+                        authorization=authorization, trace=run.trace,
+                        pass_threads=run.pass_threads)))
+                except Exception as e:
+                    # NAMED, TRACED, SKIPPED (E7) -- §20's containment rule.
+                    # An optional generation strategy must not flip a
+                    # ten-pass run to status='failed' because one provider
+                    # was unreachable. Same posture MCP takes per server.
+                    message = (f"Pass 1: ensemble candidate on {label} failed "
+                               f"({type(e).__name__}: {e}) — skipped.")
+                    logger.warning("%s", message)
+                    run.log(message)
+                    continue
+                run.log(f"Pass 1: ensemble candidate {len(candidates)} generated on {label}.")
+
+            # Labels come from the SURVIVORS, never from position in the
+            # roster (E11). Labelling by roster position leaves a gap when a
+            # candidate fails -- "Candidate 1, Candidate 3" -- so Pass 2
+            # would tag a claim both survivors asserted as [1, 3] while the
+            # denominator said 2, and a unanimous claim would be scored as
+            # dissented-against. A silently deflated confidence score is the
+            # exact failure class this section exists to remove.
+            effective_n = len(candidates)
+            if effective_n >= 2:
+                run.raw_response = candidates[0]
+                pass2_input = "\n\n".join(
+                    f"Candidate {i + 1}:\n{c}" for i, c in enumerate(candidates)
+                )
+                run.log(f"Pass 1: ensemble mode — {effective_n} candidate(s) "
+                        f"across {effective_n} model(s); consistency is measured "
+                        f"out of {effective_n}.")
+            else:
+                # DEGRADE TO THE SINGLE-CANDIDATE PATH (E7), rather than
+                # scoring one candidate as an ensemble of one -- which would
+                # give every claim consistency 1.0 and a zero penalty while
+                # reporting that agreement as if it had been corroborated.
+                # ensemble_n=0 is not a degraded formula, it is the correct
+                # one when there is nothing to compare against.
+                effective_n = 0
+                if candidates:
+                    run.raw_response = candidates[0]
+                    pass2_input = f"Response to extract claims from:\n{run.raw_response}"
+                    run.log("Pass 1: only one ensemble candidate survived — "
+                            "scoring WITHOUT a disagreement penalty, since one "
+                            "candidate cannot disagree with itself.")
+                else:
+                    raise RuntimeError(
+                        "Pass 1: every ensemble candidate failed; there is no "
+                        "response to extract claims from. See the trace for "
+                        "each provider's error."
+                    )
         else:
             run.raw_response = yield from _run_pass("Pass 1", pass1_input, model, provider_name, authorization=authorization, trace=run.trace, pass_threads=run.pass_threads)
             pass2_input = f"Response to extract claims from:\n{run.raw_response}"
@@ -867,7 +973,7 @@ def stream_deep_research_pipeline(
         yield from progress.checkpoint(f"Pass 5: assumption audit complete, {len(run.assumptions.get('per_claim_flags', {}))} claim(s) flagged.")
 
         # --- Pass 4: confidence tiering (0 LLM calls) ---
-        run_confidence_tiering(run, ensemble_n=ensemble_n if ensemble_mode else 0)
+        run_confidence_tiering(run, ensemble_n=effective_n)
         yield from _stage("Pass 4")
         yield from _tier_events(run)
         yield from progress.checkpoint("Pass 4: confidence tiers assigned (pure code, zero LLM calls).")
@@ -907,7 +1013,7 @@ def stream_deep_research_pipeline(
             revalidation = _parse_json_response((yield from _run_pass_with_json_retry("Pass 6c", pass6c_input, critic_model, critic_provider, run.trace, authorization=authorization, pass_threads=run.pass_threads)))
             _apply_grounding(run.claims, revalidation.get("grounding", []))
             _apply_critic(run.claims, revalidation.get("critic", []))
-            run_confidence_tiering(run, ensemble_n=ensemble_n if ensemble_mode else 0)  # Pass 4's function again -- code, not a call
+            run_confidence_tiering(run, ensemble_n=effective_n)  # Pass 4's function again -- code, not a call
             yield from _tier_events(run)
 
             still_flagged = [c for c in flagged if c.confidence_tier in FLAGGED_TIERS]

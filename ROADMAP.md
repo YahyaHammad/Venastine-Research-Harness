@@ -819,25 +819,58 @@ Implemented against `google-genai==1.0.0` with all SDK shapes verified by inspec
 
 ## 10. Ensemble mode
 
-> **⚠ Revisit required (found during ROADMAP_v2 §16).** The diversity mechanism below —
-> running Pass 1 N times at a raised `temperature` — does not work on current Anthropic
-> models, which reject sampling parameters outright (`temperature`/`top_p`/`top_k` were
-> removed on Opus 5 / 4.8 / 4.7 and Fable 5; Sonnet 5 rejects non-default values). Since
-> `config.MODEL_NAME` defaults to `claude-sonnet-5`, this section was built, documented as
-> working, and **could not execute against the harness's own default model**. It went
-> unnoticed because `ENSEMBLE_MODE = False` by default, so the failing request was never
-> made; ROADMAP_v2 §14 then shipped the first convenient way to enable it.
+> **✅ Revisited and rebuilt.** The diversity mechanism specified below — running Pass 1
+> N times at a raised `temperature` — is gone. Read the rest of this section as the
+> historical spec; the decisions record at the end of it is what shipped.
 >
-> §16 stopped the crash: `core/client.py` omits sampling parameters where the model rejects
-> them, and `orchestrator.py` **refuses** to run ensemble mode on such a model rather than
-> silently producing N identical candidates and reporting maximal cross-candidate
-> consistency for all of them (which would feed a falsely confident score into Pass 4).
+> **The defect.** Current Anthropic models reject sampling parameters outright
+> (`temperature`/`top_p`/`top_k` removed on Opus 5 / 4.8 / 4.7 and Fable 5; Sonnet 5
+> rejects non-default values). Since `config.MODEL_NAME` defaults to `claude-sonnet-5`,
+> this section was built, documented as working, and **could not execute against the
+> harness's own default model**. It went unnoticed because `ENSEMBLE_MODE = False` by
+> default, so the failing request was never made; ROADMAP_v2 §14 then shipped the first
+> convenient way to enable it. §16 stopped the crash: `core/client.py` omits sampling
+> parameters where the model rejects them, and `orchestrator.py` **refused** to run
+> ensemble mode on such a model rather than silently producing N identical candidates and
+> reporting maximal cross-candidate consistency for all of them.
 >
-> What remains is the redesign: replace sampling-level variation with **prompt-level**
-> variation — each candidate gets a distinct framing instruction — and re-evaluate whether
-> prompt-varied candidates are diverse enough for the cross-candidate consistency score to
-> mean what §4's formula assumes. Until then, ensemble mode works only on
-> OpenAI-compatible and Google models.
+> **Reading the code found the defect was wider than "broken on Anthropic".**
+> `_sampling_kwargs` sends `temperature` only when explicitly given, so omitting it means
+> "provider default" — which makes `ENSEMBLE_TEMPERATURE = 1.0` an **absolute value used
+> as though it were a raise**. On OpenAI Chat Completions and Google's
+> `GenerateContentConfig` the documented default is already 1.0, so on the two providers
+> this note previously said ensemble "works only on", the knob plausibly sent the value the
+> provider would have used anyway. Across the 14 providers in `providers.json.example` the
+> default differs, so how much diversity a run got — and therefore what "2 of 3 agreed"
+> meant — varied by provider with no way for Pass 4 to know. **Needs a live check**; it
+> cannot be settled offline. Separately, `MODELS_REJECTING_SAMPLING_PARAMS` lists only
+> Anthropic names while OpenAI's own reasoning models restrict `temperature` the same way,
+> so the guard likely did not fire for `gpt-5.1` — the model CLAUDE.md's example command
+> names. Also needs a live check; both are moot for ensemble mode now.
+>
+> **What shipped is not what this note proposed.** It proposed prompt-level framing
+> variation. That was rejected: framings partition what each candidate looks for, so a
+> claim two of three candidates omit is an artifact of having told them to look elsewhere —
+> a *systematic bias* where temperature sampling had noise, and the consistency score's
+> meaning would quietly change from self-consistency to framing-invariance. Diversity comes
+> from a **roster of different models** instead (E1), which is §11's own stated reasoning
+> applied to this section: "a model checking its own output for errors shares that model's
+> blind spots" is the identical objection to self-consistency, since N samples of one model
+> agree most confidently on that model's systematic errors.
+>
+> **The consistency term also changed shape.** §10's formula redistributed `0.5/0.35` to
+> `0.4/0.3` to make room for a `0.15` consistency term. Measured, that meant enabling
+> ensemble mode made grounding — the pipeline's strongest evidence — count for less, and
+> because the maximum stayed `0.85` the term could only ever *cost* a well-grounded claim:
+> a claim Pass 3a grounded and Pass 3b found nothing wrong with dropped HIGH → MEDIUM at
+> 2-of-3 agreement. It is now a **disagreement penalty** (E8), subtracted like
+> `ASSUMPTION_FLAG_PENALTY`.
+>
+> **Decisions record: E1–E12.** See DEVLOG §10-revisit. The acceptance criteria at the end
+> of this section still hold with two amendments, both recorded there: N comes from
+> `len(config.ENSEMBLE_MODELS)` rather than `ensemble_n`, and the 2-of-3 case's
+> `consistency_score` is still `0.667` but its tier is now HIGH rather than MEDIUM — which
+> is the rounding bug E10 fixed, found by computing this section's own AC.
 
 **Problem:** `config.py` has no ensemble settings; `core/reasoning/orchestrator.py` always runs Pass 1 exactly once. The original spec described this as optional/off-by-default, folding a cross-candidate consistency signal into Pass 4's scoring — but left the exact mechanics (does Pass 2 run once on combined candidates, or once per candidate?) underspecified. Decision made below, not left open.
 

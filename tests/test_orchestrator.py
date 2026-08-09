@@ -62,6 +62,7 @@ itself actually changed (the latter is a real regression to investigate).
 """
 
 import json
+import logging
 
 import pytest
 
@@ -780,11 +781,276 @@ def test_json_retry_path_calls_continue_conversation_on_malformed_json(mocker):
 # ---------------------------------------------------------------------------
 # ---- ROADMAP §10: ensemble mode -----------------------------------------
 # ---------------------------------------------------------------------------
+# The mechanism is a roster of DIFFERENT MODELS since §10's revisit, not N
+# runs of one model at a raised temperature. Diversity that depends on
+# sampling could not work on this harness's own default model.
 
-def test_pipeline_ensemble_mode_passes_1_runs_n_times(mocker):
-    """With ensemble_mode=True, ensemble_n=3, Pass 1 must be called
-    exactly 3 times (once per candidate), and Pass 2 must receive
-    the concatenated candidates."""
+THREE_MODELS = [
+    {"provider_name": "ANTHROPIC", "model": "claude-opus-5"},
+    {"provider_name": "OPENAI", "model": "gpt-5.1"},
+    {"provider_name": "GOOGLE", "model": "gemini-2.5-pro"},
+]
+
+
+def _routing_mock(routes: list, canned: dict):
+    """_build_pass_mock, but recording (pass_id, provider_name, model) so a
+    test can assert WHERE each pass ran. The plain call_log records only the
+    pass id, which cannot tell a three-model ensemble from three runs of
+    one model -- the entire distinction this section rests on."""
+    inner = _build_pass_mock([], canned)
+
+    def side_effect(*, pass_input, model, pass_id, provider_name="ANTHROPIC", **kwargs):
+        routes.append((pass_id, provider_name, model))
+        return inner(pass_input=pass_input, model=model, pass_id=pass_id,
+                     provider_name=provider_name, **kwargs)
+    return side_effect
+
+
+def _ensemble_payloads(candidates):
+    """A clean two-claim ensemble run. C1 is unanimous, C2 is asserted by
+    candidates 1 and 3 -- §10's own acceptance-criteria shape."""
+    return {
+        "Pass 0": json.dumps({"key_entities_or_subjects": ["x"], "outline": ["p"]}),
+        "Pass 1": list(candidates),
+        "Pass 2": json.dumps([
+            {"id": "C1", "text": "Claim A.", "type": "factual",
+             "entities": ["A"], "source_span": "", "asserted_by_candidates": [1, 2, 3]},
+            {"id": "C2", "text": "Claim B.", "type": "factual",
+             "entities": ["B"], "source_span": "", "asserted_by_candidates": [1, 3]},
+        ]),
+        "Pass 3a": json.dumps([
+            {"claim_id": "C1", "sources": [], "status": "grounded"},
+            {"claim_id": "C2", "sources": [], "status": "grounded"},
+        ]),
+        "Pass 3b": json.dumps([
+            {"claim_id": "C1", "fallacies": [], "contradictions": [], "severity": 0.0},
+            {"claim_id": "C2", "fallacies": [], "contradictions": [], "severity": 0.0},
+        ]),
+        "Pass 3c": json.dumps({"coverage_score": 0.9, "gaps": []}),
+        "Pass 5": json.dumps({"per_claim_flags": {}}),
+        "Final synthesis": "Ensemble report.",
+    }
+
+
+def test_each_candidate_runs_on_its_own_provider_and_model(monkeypatch, mocker):
+    """E1. Pass 1 runs once per roster entry, each on THAT entry's
+    provider/model -- and every other pass stays on the run's own model.
+
+    Needs no new plumbing: _run() calls api_initialization() itself, so a
+    heterogeneous roster is correct by construction. This asserts it, since
+    a mock that only records pass ids cannot tell three models from three
+    runs of one."""
+    monkeypatch.setattr(config, "ENSEMBLE_MODELS", THREE_MODELS)
+    routes: list = []
+    mocker.patch.object(
+        RunAgentLoop, "stream_deep_research_mode",
+        side_effect=pass_stream(_routing_mock(routes, _ensemble_payloads([
+            "Candidate 1 text.", "Candidate 2 text.", "Candidate 3 text.",
+        ]))),
+    )
+
+    run_deep_research_pipeline(
+        user_query="test", model="main-model", provider_name="ANTHROPIC",
+        ensemble_mode=True,
+    )
+
+    pass1 = [(prov, mod) for pid, prov, mod in routes if pid == "Pass 1"]
+    assert pass1 == [(e["provider_name"], e["model"]) for e in THREE_MODELS], (
+        "each Pass 1 candidate must run on its own roster entry, in order"
+    )
+    # Every other pass keeps the run's model -- the roster is Pass 1's alone.
+    others = {(prov, mod) for pid, prov, mod in routes if pid != "Pass 1"}
+    assert others == {("ANTHROPIC", "main-model")}
+
+
+def test_a_failed_candidate_is_named_traced_and_skipped(monkeypatch, mocker):
+    """E7. One provider being unreachable must not flip a ten-pass run to
+    failed -- §20's containment rule, and MCP's posture per server. The run
+    completes on the survivors, and the trace names what was lost."""
+    monkeypatch.setattr(config, "ENSEMBLE_MODELS", THREE_MODELS)
+    payloads = _ensemble_payloads(["Candidate 1 text.", "Candidate 3 text."])
+
+    inner = _build_pass_mock([], payloads)
+    seen_pass1 = []
+
+    def side_effect(*, pass_input, model, pass_id, provider_name="ANTHROPIC", **kwargs):
+        if pass_id == "Pass 1":
+            seen_pass1.append(model)
+            if model == "gpt-5.1":
+                raise RuntimeError("connection refused")
+        return inner(pass_input=pass_input, model=model, pass_id=pass_id,
+                     provider_name=provider_name, **kwargs)
+
+    mocker.patch.object(RunAgentLoop, "stream_deep_research_mode",
+                        side_effect=pass_stream(side_effect))
+
+    run = run_deep_research_pipeline(
+        user_query="test", model="main-model", provider_name="ANTHROPIC",
+        ensemble_mode=True,
+    )
+
+    assert seen_pass1 == ["claude-opus-5", "gpt-5.1", "gemini-2.5-pro"], (
+        "a failed candidate must not stop the remaining ones from running"
+    )
+    failure_lines = [line for line in run.trace if "gpt-5.1" in line]
+    assert failure_lines, "the trace must name the provider/model that failed"
+    assert "skipped" in failure_lines[0]
+    assert "connection refused" in failure_lines[0], (
+        "the reason has to survive into the trace -- 'a candidate failed' "
+        "with no cause is not something a user can act on"
+    )
+    # The run completed rather than failing.
+    assert run.final_report
+
+
+def test_candidate_labels_follow_survivors_not_roster_positions(monkeypatch, mocker):
+    """E11. With the middle candidate lost, the two survivors must be
+    labelled Candidate 1 and Candidate 2 -- and the denominator must be 2.
+
+    Labelling by roster position would send Pass 2 "Candidate 1" and
+    "Candidate 3", so a claim BOTH survivors asserted comes back as [1, 3]
+    against a denominator of 2. Unanimous agreement would then read as
+    consistency 1.0 only by accident of the numbers, and any claim tagged
+    [3] alone would score 0.5 while being asserted by half the candidates
+    that actually ran. A silently deflated confidence score is the failure
+    class this whole section exists to remove."""
+    monkeypatch.setattr(config, "ENSEMBLE_MODELS", THREE_MODELS)
+    payloads = _ensemble_payloads(["Candidate A text.", "Candidate C text."])
+    # Both survivors assert C1; only the first asserts C2.
+    payloads["Pass 2"] = json.dumps([
+        {"id": "C1", "text": "Claim A.", "type": "factual", "entities": ["A"],
+         "source_span": "", "asserted_by_candidates": [1, 2]},
+        {"id": "C2", "text": "Claim B.", "type": "factual", "entities": ["B"],
+         "source_span": "", "asserted_by_candidates": [1]},
+    ])
+    inner = _build_pass_mock([], payloads)
+    pass2_input_seen = []
+
+    def side_effect(*, pass_input, model, pass_id, provider_name="ANTHROPIC", **kwargs):
+        if pass_id == "Pass 1" and model == "gpt-5.1":
+            raise RuntimeError("down")
+        if pass_id == "Pass 2":
+            pass2_input_seen.append(pass_input)
+        return inner(pass_input=pass_input, model=model, pass_id=pass_id,
+                     provider_name=provider_name, **kwargs)
+
+    mocker.patch.object(RunAgentLoop, "stream_deep_research_mode",
+                        side_effect=pass_stream(side_effect))
+
+    run = run_deep_research_pipeline(
+        user_query="test", model="main-model", provider_name="ANTHROPIC",
+        ensemble_mode=True,
+    )
+
+    body = pass2_input_seen[0]
+    assert "Candidate 1:" in body and "Candidate 2:" in body
+    assert "Candidate 3:" not in body, (
+        "a gap in the labels tells Pass 2 there were three candidates when "
+        "two ran"
+    )
+    assert run.claim_by_id("C1").score_breakdown["consistency_denominator"] == 2
+    assert run.claim_by_id("C1").score_breakdown["consistency_score"] == 1.0
+    assert run.claim_by_id("C2").score_breakdown["consistency_score"] == 0.5
+
+
+def test_one_surviving_candidate_scores_without_a_penalty(monkeypatch, mocker):
+    """E7's second half. One candidate is not an ensemble of one: scoring it
+    that way gives every claim consistency 1.0 and a zero penalty, reporting
+    unanimous corroboration from a single source. Degrade to the
+    single-candidate path instead -- ensemble_n=0 is the CORRECT formula
+    when there is nothing to compare against, not a degraded one."""
+    monkeypatch.setattr(config, "ENSEMBLE_MODELS", THREE_MODELS)
+    payloads = _ensemble_payloads(["The only candidate."])
+    payloads["Pass 2"] = json.dumps([
+        {"id": "C1", "text": "Claim A.", "type": "factual", "entities": ["A"],
+         "source_span": "", "asserted_by_candidates": [1]},
+    ])
+    payloads["Pass 3a"] = json.dumps([{"claim_id": "C1", "sources": [], "status": "grounded"}])
+    payloads["Pass 3b"] = json.dumps([
+        {"claim_id": "C1", "fallacies": [], "contradictions": [], "severity": 0.0}])
+    inner = _build_pass_mock([], payloads)
+    pass2_input_seen = []
+
+    def side_effect(*, pass_input, model, pass_id, provider_name="ANTHROPIC", **kwargs):
+        if pass_id == "Pass 1" and model != "claude-opus-5":
+            raise RuntimeError("down")
+        if pass_id == "Pass 2":
+            pass2_input_seen.append(pass_input)
+        return inner(pass_input=pass_input, model=model, pass_id=pass_id,
+                     provider_name=provider_name, **kwargs)
+
+    mocker.patch.object(RunAgentLoop, "stream_deep_research_mode",
+                        side_effect=pass_stream(side_effect))
+
+    run = run_deep_research_pipeline(
+        user_query="test", model="main-model", provider_name="ANTHROPIC",
+        ensemble_mode=True,
+    )
+
+    assert "Candidate 1:" not in pass2_input_seen[0], (
+        "one survivor takes the single-candidate input shape, so the "
+        "extraction prompt is not asked to reconcile an ensemble of one"
+    )
+    breakdown = run.claim_by_id("C1").score_breakdown
+    assert "consistency_score" not in breakdown
+    assert breakdown["raw_score"] == 0.85, (
+        "the surviving candidate's claim must score exactly what it would "
+        "with ensemble mode off"
+    )
+    assert any("one ensemble candidate survived" in line for line in run.trace)
+
+
+def test_every_candidate_failing_is_an_error_not_an_empty_report(monkeypatch, mocker):
+    """There is no response to extract claims from, and inventing one would
+    produce a confident report from nothing."""
+    monkeypatch.setattr(config, "ENSEMBLE_MODELS", THREE_MODELS)
+    inner = _build_pass_mock([], _ensemble_payloads([]))
+
+    def side_effect(*, pass_input, model, pass_id, provider_name="ANTHROPIC", **kwargs):
+        if pass_id == "Pass 1":
+            raise RuntimeError("down")
+        return inner(pass_input=pass_input, model=model, pass_id=pass_id,
+                     provider_name=provider_name, **kwargs)
+
+    mocker.patch.object(RunAgentLoop, "stream_deep_research_mode",
+                        side_effect=pass_stream(side_effect))
+
+    with pytest.raises(RuntimeError, match="every ensemble candidate failed"):
+        run_deep_research_pipeline(
+            user_query="test", model="main-model", provider_name="ANTHROPIC",
+            ensemble_mode=True,
+        )
+
+
+def test_ensemble_n_is_ignored_in_favour_of_the_roster(monkeypatch, mocker, caplog):
+    """E3/E4. The denominator is len(ENSEMBLE_MODELS), and a passed
+    ensemble_n cannot override it -- a count that disagrees with the roster
+    that produced the candidates is a confidence score that can lie. The
+    parameter survives because removing the settings.json key would make
+    every existing settings.json that sets it fail to load, so it warns."""
+    monkeypatch.setattr(config, "ENSEMBLE_MODELS", THREE_MODELS)
+    mocker.patch.object(
+        RunAgentLoop, "stream_deep_research_mode",
+        side_effect=pass_stream(_build_pass_mock([], _ensemble_payloads([
+            "Candidate 1 text.", "Candidate 2 text.", "Candidate 3 text.",
+        ]))),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="core.reasoning.orchestrator"):
+        run = run_deep_research_pipeline(
+            user_query="test", model="m", provider_name="ANTHROPIC",
+            ensemble_mode=True, ensemble_n=99,
+        )
+
+    assert any("Ignoring ensemble_n=99" in r.message for r in caplog.records)
+    assert run.claim_by_id("C1").score_breakdown["consistency_denominator"] == 3
+
+
+def test_pipeline_ensemble_mode_passes_1_runs_n_times(monkeypatch, mocker):
+    """§10's acceptance criterion, on the new mechanism: Pass 1 runs once
+    per roster entry, and a claim two of three candidates asserted has
+    consistency 2/3."""
+    monkeypatch.setattr(config, "ENSEMBLE_MODELS", THREE_MODELS)
     payloads = {
         "Pass 0": json.dumps({"key_entities_or_subjects": ["x"], "outline": ["p"]}),
         # 3 candidates for Pass 1
@@ -820,7 +1086,7 @@ def test_pipeline_ensemble_mode_passes_1_runs_n_times(mocker):
 
     run = run_deep_research_pipeline(
         user_query="test", model="m", provider_name="ANTHROPIC",
-        ensemble_mode=True, ensemble_n=3,
+        ensemble_mode=True,
     )
 
     # Pass 1 called exactly 3 times

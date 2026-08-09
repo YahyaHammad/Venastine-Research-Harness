@@ -24,7 +24,7 @@ WHAT WOULD MAKE THESE VACUOUS, and what each one does about it:
     away, because a test that only exercises orchestrator's own
     checkpoint calls proves the easy case.
   - AC4 is a decision, not a behaviour, so the test pins the observable
-    consequence: LoopEvent still has exactly its six fields. Adding a
+    consequence: LoopEvent's field set is unchanged. Adding a
     seventh -- which is what P1 rejected -- turns it red.
 """
 
@@ -326,7 +326,8 @@ async def test_ac2_the_tui_renders_pass_boundaries_and_tiers_as_they_happen(mock
     run never had is what makes that provable: nothing but the event
     could have produced it.
     """
-    from tests.test_tui import _settle, _stub_run
+    from tests.conftest import settle
+    from tests.test_tui import _stub_run
     from tui.app import VenastineApp, _start_research
     from tui.widgets import ResearchProgress
 
@@ -347,10 +348,10 @@ async def test_ac2_the_tui_renders_pass_boundaries_and_tiers_as_they_happen(mock
     async with app.run_test() as pilot:
         _start_research(app, "q", None)
         panel = app.query_one("#research-progress", ResearchProgress)
-        assert await _settle(
+        assert await settle(
             pilot, lambda: "Pass 3a" in str(panel.renderable)), \
             "the pass boundary never reached the panel"
-        assert await _settle(
+        assert await settle(
             pilot, lambda: "medium 1" in str(panel.renderable)), \
             "the claim tier never reached the panel"
         # x, not >: the pass_complete event has to land too, or the panel
@@ -365,7 +366,8 @@ async def test_the_finished_run_does_not_reprint_the_trace(mocker):
     prints the whole run twice, and the second copy reads like a
     different artifact.
     """
-    from tests.test_tui import _settle, _stub_run
+    from tests.conftest import settle
+    from tests.test_tui import _stub_run
     from tui.app import ResearchFinished, VenastineApp
 
     run = _stub_run()
@@ -378,7 +380,7 @@ async def test_the_finished_run_does_not_reprint_the_trace(mocker):
                             side_effect=lambda self, text: written.append(text),
                             autospec=True)
         app.post_message(ResearchFinished(run, None))
-        assert await _settle(pilot, lambda: app._busy is False)
+        assert await settle(pilot, lambda: app._busy is False)
 
     assert not any("Pass 0: plan produced." in line for line in written), (
         "on_research_finished is dumping run.trace again")

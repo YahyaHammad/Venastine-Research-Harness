@@ -99,7 +99,20 @@ _KNOWN_TUI = {
     "theme": str,        # one of tui/themes.py's registered names
     "animations": bool,  # master switch for the raven + transitions
     "effort": str,       # persisted reasoning-effort level (§16)
+    "todo_position": str,  # §23 slice 2: one of TODO_POSITIONS below
 }
+
+# §23 slice 2. Validated AT LOAD and raising, following
+# research.approval_mode rather than tui.theme.
+#
+# tui.theme validates at use and falls back, for a stated reason: the loader
+# cannot know the valid names without importing tui/themes.py, and a stale
+# theme name should not stop the app from starting. Neither applies here --
+# the vocabulary is three words that live in this file, and a position the
+# renderer does not understand would silently put the panel somewhere the
+# user did not ask for. tui.effort had neither check and that was a shipped
+# bug (§16), which is the third precedent and the one that decided it.
+TODO_POSITIONS = ("top", "bottom", "side")
 
 # Settings whose value is a nested object. Both the validator and the
 # cross-tier merge below iterate this rather than naming keys twice --
@@ -385,6 +398,25 @@ def _validate_settings(data, source: str) -> None:
     if not isinstance(data, dict):
         raise ValueError(f"settings.json at {source} is not a JSON object")
     for key, value in data.items():
+        if key == "ensemble_models":
+            # ROADMAP §10 revisit (E2), and R12's rule applied to a second
+            # kind of authority. Rejected BY NAME rather than as an unknown
+            # key, because the generic message reads as an oversight to be
+            # fixed by adding support for it.
+            #
+            # Turning ensemble mode on can only spend more of the provider
+            # the user already chose. A ROSTER chooses providers -- so a
+            # project's settings.json, which beats the user's, could point N
+            # research passes at endpoints the user never configured for this
+            # work and multiply the run's cost by the length of a list it
+            # supplied. §14 already flagged project-tier provider selection as
+            # a distinct grant; this is that grant times N.
+            raise ValueError(
+                f"settings.json at {source}: ensemble_models is deliberately "
+                f"not supported -- a roster chooses which providers N research "
+                f"passes call, and a project's settings.json beats the "
+                f"user's. Set config.ENSEMBLE_MODELS in config.py instead "
+                f"(same posture as CRITIC_MODEL).")
         if key not in _KNOWN_SETTINGS:
             raise ValueError(f"settings.json at {source}: unknown key {key!r}")
         expected = _KNOWN_SETTINGS[key]
@@ -426,6 +458,11 @@ def _validate_settings(data, source: str) -> None:
                     f"settings.json at {source}: research.approval_mode must "
                     f"be one of {', '.join(RESEARCH_APPROVAL_MODES)}, "
                     f"got {value!r}")
+            if section == "tui" and key == "todo_position" and \
+                    value not in TODO_POSITIONS:
+                raise ValueError(
+                    f"settings.json at {source}: tui.todo_position must be "
+                    f"one of {', '.join(TODO_POSITIONS)}, got {value!r}")
 
 
 # ---------------------------------------------------------------------------

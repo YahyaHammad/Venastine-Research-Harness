@@ -30,6 +30,7 @@ from uuid import uuid4
 
 import pytest
 
+from tests.conftest import settle
 import storage
 from core.replay import last_assistant_text, replay_entries
 
@@ -421,11 +422,11 @@ async def test_resuming_clears_the_screen_and_replays(mocker):
         app._live_claims = {"c1": {"id": "c1"}}
 
         app.action_pick_thread()
-        assert await _settle(
+        assert await settle(
             pilot, lambda: isinstance(app.screen, ThreadPickerScreen)), \
             "the picker never opened"
         app.screen.dismiss(resumed)
-        assert await _settle(
+        assert await settle(
             pilot, lambda: any("quorum" in text
                                for _, text in transcript._entries)), \
             "the resumed thread's history never reached the transcript"
@@ -439,14 +440,6 @@ async def test_resuming_clears_the_screen_and_replays(mocker):
     assert app._last_run is None
     assert app._live_claims == {}
     assert app._last_response == "we decided on 3 of 5"
-
-
-async def _settle(pilot, predicate, tries: int = 40) -> bool:
-    for _ in range(tries):
-        await pilot.pause()
-        if predicate():
-            return True
-    return False
 
 
 # ===========================================================================

@@ -26,6 +26,7 @@ import os
 
 import pytest
 
+from tests.conftest import settle
 import config
 from core import config_loader, workspace_trust
 from project_init import doc_sets, generator, manifest
@@ -602,14 +603,6 @@ class TestWorkspaceTrust:
 # drops its answer leaves the worker blocked on a queue forever, which
 # presents as a hang and not as a failure.
 
-async def _settle(pilot, predicate, tries: int = 200):
-    for _ in range(tries):
-        if predicate():
-            return True
-        await pilot.pause()
-    return False
-
-
 @pytest.mark.asyncio
 async def test_the_tui_asks_the_kind_then_confirms_then_writes(
         project, fake_agent, monkeypatch):
@@ -621,21 +614,21 @@ async def test_the_tui_asks_the_kind_then_confirms_then_writes(
     async with app.run_test() as pilot:
         _cmd_init(app, "")
 
-        assert await _settle(
+        assert await settle(
             pilot, lambda: isinstance(app.screen, ProjectKindScreen)), \
             "the project-kind modal never opened"
         app.screen.dismiss("software")
 
-        assert await _settle(
+        assert await settle(
             pilot, lambda: isinstance(app.screen, ConfirmScreen)), \
             "the confirmation never opened"
         app.screen.dismiss(True)
 
-        assert await _settle(
+        assert await settle(
             pilot,
             lambda: (project / ".venastine" / "CONTEXT.md").exists()), \
             "the worker never wrote CONTEXT.md"
-        assert await _settle(pilot, lambda: app._busy is False)
+        assert await settle(pilot, lambda: app._busy is False)
 
 
 @pytest.mark.asyncio
@@ -651,11 +644,11 @@ async def test_dismissing_the_tui_confirmation_writes_nothing(
     async with app.run_test() as pilot:
         _cmd_init(app, "--software")
 
-        assert await _settle(
+        assert await settle(
             pilot, lambda: isinstance(app.screen, ConfirmScreen))
         await pilot.press("escape")
 
-        assert await _settle(pilot, lambda: app._busy is False), \
+        assert await settle(pilot, lambda: app._busy is False), \
             "the worker never came back — the dismissal carried no value"
         assert not (project / ".venastine" / "CONTEXT.md").exists()
         assert not (project / "ARCHITECTURE.md").exists()
@@ -673,11 +666,11 @@ async def test_cancelling_the_kind_modal_never_reaches_the_confirmation(
     async with app.run_test() as pilot:
         _cmd_init(app, "")
 
-        assert await _settle(
+        assert await settle(
             pilot, lambda: isinstance(app.screen, ProjectKindScreen))
         await pilot.press("escape")
 
-        assert await _settle(pilot, lambda: app._busy is False)
+        assert await settle(pilot, lambda: app._busy is False)
         assert not isinstance(app.screen, ConfirmScreen)
         assert not (project / ".venastine" / "CONTEXT.md").exists()
 
@@ -695,7 +688,7 @@ async def test_the_kind_modal_is_told_what_was_proposed(project, fake_agent):
     app = VenastineApp("ANTHROPIC", "test-model", {})
     async with app.run_test() as pilot:
         _cmd_init(app, "")
-        assert await _settle(
+        assert await settle(
             pilot, lambda: isinstance(app.screen, ProjectKindScreen))
         # Captured and DISMISSED before asserting. A failed assertion with
         # the modal still up leaves the worker parked on its queue and
@@ -705,7 +698,7 @@ async def test_the_kind_modal_is_told_what_was_proposed(project, fake_agent):
         proposal, reason, blank = (app.screen._proposal, app.screen._reason,
                                    app.screen._blank)
         app.screen.dismiss(None)
-        assert await _settle(pilot, lambda: app._busy is False)
+        assert await settle(pilot, lambda: app._busy is False)
 
         assert proposal == doc_sets.SOFTWARE
         assert "Python" in reason
@@ -723,11 +716,11 @@ async def test_the_confirmation_is_told_what_it_is_confirming(project,
     app = VenastineApp("ANTHROPIC", "test-model", {})
     async with app.run_test() as pilot:
         _cmd_init(app, "--software")
-        assert await _settle(
+        assert await settle(
             pilot, lambda: isinstance(app.screen, ConfirmScreen))
         body, label = app.screen._body, app.screen._confirm_label
         app.screen.dismiss(False)
-        assert await _settle(pilot, lambda: app._busy is False)
+        assert await settle(pilot, lambda: app._busy is False)
 
         assert "CONTEXT.md" in body
         assert label == "Write"
@@ -742,11 +735,11 @@ async def test_an_explicit_flag_skips_the_kind_modal(project, fake_agent):
     app = VenastineApp("ANTHROPIC", "test-model", {})
     async with app.run_test() as pilot:
         _cmd_init(app, "--research")
-        assert await _settle(
+        assert await settle(
             pilot, lambda: isinstance(app.screen, ConfirmScreen)), \
             "--research should go straight to the confirmation"
         app.screen.dismiss(True)
-        assert await _settle(pilot, lambda: (project / "FINDINGS.md").exists())
+        assert await settle(pilot, lambda: (project / "FINDINGS.md").exists())
 
 
 def test_an_unknown_flag_is_reported(project):
@@ -795,11 +788,11 @@ async def test_an_unrecognised_kind_answer_cancels(project, fake_agent):
     async with app.run_test() as pilot:
         _cmd_init(app, "")
 
-        assert await _settle(
+        assert await settle(
             pilot, lambda: isinstance(app.screen, ProjectKindScreen))
         app.screen.dismiss(False)  # what the shutdown release puts
 
-        assert await _settle(pilot, lambda: app._busy is False)
+        assert await settle(pilot, lambda: app._busy is False)
         assert not isinstance(app.screen, ConfirmScreen)
         assert not (project / ".venastine" / "CONTEXT.md").exists()
 

@@ -21,6 +21,7 @@ from unittest.mock import ANY
 
 import pytest
 
+from tests.conftest import settle
 from core import config_loader
 from tui.app import VenastineApp, _cmd_compact, _parse_compact_args
 
@@ -121,7 +122,7 @@ async def test_compact_runs_the_compaction_with_the_override(mocker):
     async with app.run_test() as pilot:
         app.memory  # force the thread into existence
         _cmd_compact(app, "--strength 4")
-        assert await _settle(pilot, lambda: compacted.called)
+        assert await settle(pilot, lambda: compacted.called)
 
     assert compacted.call_args.kwargs["overrides"] == {"strength": 4}
 
@@ -165,7 +166,7 @@ async def test_a_failed_manual_compaction_releases_the_busy_flag(mocker):
     async with app.run_test() as pilot:
         app.memory
         _cmd_compact(app, "")
-        assert await _settle(pilot, lambda: app._busy is False)
+        assert await settle(pilot, lambda: app._busy is False)
 
 
 @pytest.mark.asyncio
@@ -223,16 +224,3 @@ async def test_a_failed_compaction_is_rendered_as_an_error(mocker):
     assert "Could not compact" in written.call_args[0][0]
 
 
-async def _settle(pilot, predicate, tries: int = 120):
-    """Pump the event loop until `predicate()` holds.
-
-    Copied from test_tui.py deliberately rather than imported: that file's
-    version is the subject of TECHNICAL_DEBT theme 8 (it budgets pumps
-    rather than time), and importing it would make a fix there silently
-    change this file's timing too. Whoever fixes theme 8 should fix both.
-    """
-    for _ in range(tries):
-        if predicate():
-            return True
-        await pilot.pause()
-    return False

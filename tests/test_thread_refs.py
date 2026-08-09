@@ -24,6 +24,7 @@ already fits it costs no model call at all.
 
 import pytest
 
+from tests.conftest import settle
 import config
 from core import compaction, config_loader
 
@@ -496,10 +497,9 @@ async def test_the_tui_turn_sends_them_too(mocker, fake_storage):
     async with app.run_test() as pilot:
         app.memory = memory
         app.run_agent_turn("hello")
-        for _ in range(60):
-            await pilot.pause()
-            if stream.call_args is not None:
-                break
+        assert await settle(
+            pilot, lambda: stream.call_args is not None), \
+            "the turn never reached the model"
 
     assert stream.call_args is not None, "the turn never reached the model"
     assert "REFERENCED-SUMMARY" in stream.call_args[0][4]

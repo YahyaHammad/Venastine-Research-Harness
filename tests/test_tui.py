@@ -27,7 +27,8 @@ import queue
 
 import pytest
 
-from tests.conftest import make_model_response, make_stream_sequence
+from tests.conftest import (make_model_response, make_stream_sequence,
+                            pump, settle)
 from tui.app import VenastineApp
 from tui.screens import PermissionScreen
 
@@ -56,12 +57,12 @@ async def test_research_grant_picker_authorises_the_run(mocker):
     app = VenastineApp("ANTHROPIC", "test-model", {})
     async with app.run_test() as pilot:
         _cmd_research(app, "--grant what is entropy")
-        assert await _settle(
+        assert await settle(
             pilot, lambda: isinstance(app.screen, GrantPickerScreen)), \
             "the picker never opened"
 
         app.screen.dismiss({"mcp__lib__search"})
-        assert await _settle(pilot, lambda: "authorization" in captured), \
+        assert await settle(pilot, lambda: "authorization" in captured), \
             "the pipeline never started after the picker was answered"
 
     auth = captured["authorization"]
@@ -93,7 +94,7 @@ async def test_research_attended_flag_gives_the_pipeline_a_provider(mocker):
     app = VenastineApp("ANTHROPIC", "test-model", {})
     async with app.run_test() as pilot:
         _cmd_research(app, "--attended what is entropy")
-        assert await _settle(pilot, lambda: "authorization" in captured)
+        assert await settle(pilot, lambda: "authorization" in captured)
 
     auth = captured["authorization"]
     assert auth is not None, "--attended produced no authorization"
@@ -119,7 +120,7 @@ async def test_research_attended_can_be_persisted_in_settings(mocker):
                        {"research": {"approval_mode": "attended"}})
     async with app.run_test() as pilot:
         _cmd_research(app, "what is entropy")     # no flag
-        assert await _settle(pilot, lambda: "authorization" in captured)
+        assert await settle(pilot, lambda: "authorization" in captured)
 
     assert captured["authorization"] is not None
     assert captured["authorization"].provider is not None
@@ -142,11 +143,10 @@ async def test_cancelling_the_grant_picker_cancels_the_run(mocker):
     app = VenastineApp("ANTHROPIC", "test-model", {})
     async with app.run_test() as pilot:
         _cmd_research(app, "--grant what is entropy")
-        assert await _settle(
+        assert await settle(
             pilot, lambda: isinstance(app.screen, GrantPickerScreen))
         app.screen.dismiss(None)
-        for _ in range(20):
-            await pilot.pause()
+        await pump(pilot, 20)
         assert started == [], "cancelling the picker still started the run"
         assert app._busy is False
 
@@ -174,12 +174,12 @@ async def test_attended_research_shows_the_modal_and_returns_the_answer():
         t = threading.Thread(target=worker, daemon=True)
         t.start()
 
-        assert await _settle(
+        assert await settle(
             pilot, lambda: isinstance(app.screen, PermissionScreen)), \
             "the research approval modal never opened"
         app.screen.dismiss(True)
 
-        assert await _settle(pilot, lambda: "value" in answer), \
+        assert await settle(pilot, lambda: "value" in answer), \
             "the worker never unblocked"
         assert answer["value"] is True
 
@@ -195,12 +195,32 @@ async def test_quitting_during_an_attended_research_prompt_releases_the_worker()
     existing release path covers it; a private queue would have been a
     fourth uncovered dismissal route.
 
-    Asserted on the REGISTRATION and on what the release path put, not on
-    the worker thread unblocking. Textual dismisses open screens during
+    Asserted on the REGISTRATION first, because that assertion NAMES the
+    cause -- the research prompt's channel being the one the release path
+    knows about. Same instinct as the chat-side f10 test, which asserts
+    channel.puts == [False].
+
+    CORRECTION (TECHNICAL_DEBT 8, 2026-08-07), on two counts.
+
+    This docstring used to add "Textual dismisses open screens during
     shutdown, which fires the modal's own callback and answers the queue
-    anyway -- so "the thread finished" stays true even with the release
-    wiring removed, and a liveness assertion here proves nothing. Same
-    lesson as the chat-side f10 test, which asserts channel.puts == [False].
+    anyway". That is **false** on textual 1.0.0: `_result_callbacks` is
+    invoked only from `Screen.dismiss()` (`screen.py:1442`), and
+    `App._close_all()` prunes screens without going near it.
+    `_release_permission_channel` is the only thing that unblocks this
+    worker.
+
+    It then concluded that "a liveness assertion here proves nothing".
+    Also false, and measured: neuter `_release_permission_channel` so it
+    puts nothing, and the `not t.is_alive()` assertion below is the one
+    that fails. The reason is a second no-timeout block, not the queue --
+    the worker times out of `channel.get`, then calls
+    `call_from_thread(on_timeout, screen)`, whose `future.result()` has no
+    timeout and whose event loop `exit()` has already stopped. So it parks
+    there instead, and stays alive.
+
+    Both assertions therefore earn their place: liveness catches the
+    regression, the registration says which regression it was.
     """
     import threading
 
@@ -214,7 +234,7 @@ async def test_quitting_during_an_attended_research_prompt_releases_the_worker()
 
         t = threading.Thread(target=worker, daemon=True)
         t.start()
-        assert await _settle(
+        assert await settle(
             pilot, lambda: isinstance(app.screen, PermissionScreen))
 
         # THE assertion: the research prompt's channel is the one the
@@ -250,20 +270,6 @@ def _stub_events(run=None, extra=()):
     return iter(list(extra) + [
         PipelineEvent(kind="run_complete", run=run or _stub_run()),
     ])
-
-
-async def _settle(pilot, predicate, tries: int = 120):
-    """Pump the event loop until `predicate()` holds.
-
-    The worker runs on a real thread and hands events back via
-    post_message, so there is no single await that guarantees arrival --
-    polling with a bounded budget is the honest way to wait for it.
-    """
-    for _ in range(tries):
-        if predicate():
-            return True
-        await pilot.pause()
-    return False
 
 
 @pytest.fixture
@@ -311,12 +317,12 @@ async def test_ac2_approving_a_permission_prompt_resumes_the_same_generator(_moc
         app.query_one("#prompt").value = "do a thing"
         await pilot.press("enter")
 
-        assert await _settle(
+        assert await settle(
             pilot, lambda: isinstance(app.screen, PermissionScreen)
         ), "permission modal never appeared"
 
         await pilot.click("#allow")
-        assert await _settle(pilot, lambda: dispatch.called), "tool never dispatched"
+        assert await settle(pilot, lambda: dispatch.called), "tool never dispatched"
 
     name, params = dispatch.call_args[0][0], dispatch.call_args[0][1]
     assert name == "web_search"
@@ -337,10 +343,10 @@ async def test_ac2_denying_a_permission_prompt_blocks_the_tool(_mocked_loop):
     async with app.run_test() as pilot:
         app.query_one("#prompt").value = "do a thing"
         await pilot.press("enter")
-        assert await _settle(pilot, lambda: isinstance(app.screen, PermissionScreen))
+        assert await settle(pilot, lambda: isinstance(app.screen, PermissionScreen))
 
         await pilot.click("#deny")
-        assert await _settle(pilot, lambda: app._busy is False), "turn never finished"
+        assert await settle(pilot, lambda: app._busy is False), "turn never finished"
 
     dispatch.assert_not_called()
 
@@ -357,10 +363,10 @@ async def test_ac2_escape_denies_rather_than_hanging(_mocked_loop):
     async with app.run_test() as pilot:
         app.query_one("#prompt").value = "do a thing"
         await pilot.press("enter")
-        assert await _settle(pilot, lambda: isinstance(app.screen, PermissionScreen))
+        assert await settle(pilot, lambda: isinstance(app.screen, PermissionScreen))
 
         await pilot.press("escape")
-        assert await _settle(pilot, lambda: app._busy is False), "escape left the loop blocked"
+        assert await settle(pilot, lambda: app._busy is False), "escape left the loop blocked"
 
     dispatch.assert_not_called()
 
@@ -386,7 +392,7 @@ async def test_ac3_exception_in_a_tool_does_not_terminate_the_app(_mocked_loop):
         app.query_one("#prompt").value = "do a thing"
         await pilot.press("enter")
 
-        assert await _settle(pilot, lambda: app._busy is False), "turn never finished"
+        assert await settle(pilot, lambda: app._busy is False), "turn never finished"
         # The whole point: still alive after the worker raised.
         assert app.is_running
         assert app._raven.state.key == "idle", "raven must not be stuck mid-activity"
@@ -485,7 +491,7 @@ async def test_effort_reaches_the_model_call(_mocked_loop):
     async with app.run_test() as pilot:
         app.query_one("#prompt").value = "hello"
         await pilot.press("enter")
-        assert await _settle(pilot, lambda: stream.called)
+        assert await settle(pilot, lambda: stream.called)
 
     # call_model_stream(client, provider, model, messages, system, tools,
     #                   temperature, effort)
@@ -534,7 +540,7 @@ async def test_quitting_with_a_prompt_open_releases_the_blocked_worker(
     async with app.run_test() as pilot:
         app.query_one("#prompt").value = "do a thing"
         await pilot.press("enter")
-        assert await _settle(pilot, lambda: isinstance(app.screen, PermissionScreen))
+        assert await settle(pilot, lambda: isinstance(app.screen, PermissionScreen))
 
         channel = app._permission_channel
         assert channel is not None and channel.puts == []
@@ -588,7 +594,7 @@ async def test_persisted_effort_is_validated_at_mount(mocker):
 
     app = VenastineApp("ANTHROPIC", "test-model", {"tui": {"effort": "xhigh"}})
     async with app.run_test() as pilot:
-        assert await _settle(pilot, lambda: app.effort is None), \
+        assert await settle(pilot, lambda: app.effort is None), \
             "an unusable persisted effort was kept"
 
 
@@ -644,7 +650,7 @@ async def test_effort_lookup_does_not_block_the_ui_thread(mocker):
         assert app.query_one("#prompt").value == "still alive"
 
         release.set()
-        assert await _settle(pilot, lambda: app.effort == "high"), \
+        assert await settle(pilot, lambda: app.effort == "high"), \
             "the effort change never landed"
 
 
@@ -668,7 +674,7 @@ async def test_a_warning_reaches_the_transcript():
         app._transcript.write_system = lambda text: written.append(text)
         logging.getLogger("core.compaction").warning(
             "No context window known for model 'x'")
-        assert await _settle(
+        assert await settle(
             pilot, lambda: any("context window" in t for t in written)), \
             "a WARNING never reached the transcript"
 
@@ -687,8 +693,7 @@ async def test_info_is_not_routed_to_the_transcript():
     async with app.run_test() as pilot:
         app._transcript.write_system = lambda text: written.append(text)
         logging.getLogger("core.compaction").info("cache hit")
-        for _ in range(10):
-            await pilot.pause()
+        await pump(pilot, 10)
 
     assert not any("cache hit" in t for t in written)
 
@@ -702,7 +707,7 @@ async def test_an_error_renders_as_an_error():
     async with app.run_test() as pilot:
         app._transcript.write_error = lambda text: errors.append(text)
         logging.getLogger("tools.registry").error("tool exploded")
-        assert await _settle(
+        assert await settle(
             pilot, lambda: any("tool exploded" in t for t in errors))
 
 
@@ -742,8 +747,7 @@ async def test_a_handler_failure_cannot_take_the_app_down():
     async with app.run_test() as pilot:
         app._log_handler._app = None          # force emit() to blow up
         logging.getLogger("core.compaction").warning("boom")
-        for _ in range(5):
-            await pilot.pause()
+        await pump(pilot, 5)
         # Still live and still handling input.
         app.query_one("#prompt").value = "alive"
         await pilot.pause()
@@ -867,7 +871,7 @@ async def test_switching_model_revalidates_the_effort_level(mocker):
         app.effort = "high"          # survived mount validation in this fake
         app.query_one("#prompt").value = "/model OPENAI gpt-4o"
         await pilot.press("enter")
-        assert await _settle(pilot, lambda: app.effort is None), \
+        assert await settle(pilot, lambda: app.effort is None), \
             "a stale effort level survived the model switch"
 
 
@@ -931,7 +935,7 @@ async def test_the_new_model_reaches_the_next_model_call(_mocked_loop):
 
         app.query_one("#prompt").value = "hello"
         await pilot.press("enter")
-        assert await _settle(pilot, lambda: stream.called)
+        assert await settle(pilot, lambda: stream.called)
 
     # call_model_stream(client, provider, model, messages, system, tools, ...)
     assert stream.call_args[0][1] == "OPENAI"
@@ -1086,7 +1090,7 @@ async def test_grill_me_runs_in_the_current_thread(mocker, tmp_path, fake_storag
         app.query_one("#prompt").value = "/grill-me"
         await pilot.press("enter")
 
-        assert await _settle(pilot, lambda: continue_conv.called), \
+        assert await settle(pilot, lambda: continue_conv.called), \
             "/grill-me never ran"
 
     assert continue_conv.call_args.kwargs["thread_id"] == expected

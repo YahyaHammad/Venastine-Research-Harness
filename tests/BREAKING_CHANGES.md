@@ -253,7 +253,11 @@ them. Three new test files: `test_tui.py`, `test_client_effort.py`,
 | Change | Symptom | Fix |
 |---|---|---|
 | Revert `run_worker(..., exit_on_error=False)` to Textual's default | `test_ac3_exception_in_a_tool_does_not_terminate_the_app` fails, and it fails by tearing down the whole test app — the output is a full Textual crash dump, not an assertion | Restore it. The default kills the app on any transient worker exception. `on_worker_state_changed` is required alongside it or the error is reported nowhere |
-| Make a permission dismissal path not put a boolean on the channel (return early, dismiss with `None`, drop the `put`) | The AC2 tests **hang** rather than fail — the worker blocks forever on `queue.get()`. Under a timeout they show as a killed run | Every dismissal path, including Escape, must resolve to a boolean. This is why the AC2 tests assert on the dispatched tool: a modal that renders and drops the answer looks identical to one that works, right up until it doesn't |
+| Make a permission dismissal path not put a boolean on the channel (return early, dismiss with `None`, drop the `put`) | The AC2 tests **stall** rather than fail — the worker parks on `queue.get(timeout=ATTENDED_APPROVAL_TIMEOUT_S)`. Since TECHNICAL_DEBT 8 an autouse fixture shrinks that under test, so it now stalls for seconds and then fails, instead of stalling for ten minutes | Every dismissal path, including Escape, must resolve to a boolean. This is why the AC2 tests assert on the dispatched tool: a modal that renders and drops the answer looks identical to one that works, right up until it doesn't |
+| Delete the quiescing `await pilot.pause()` from `settle` | `test_pilot_wait.py::TestTheQuiesce` — two tests, on the pause count. **Not** any TUI test: 43/43 stay green under 4× CPU load, because the bare `pause()` used for polling masks the need. That masking is what made this take two attempts to find | Restore it. It and the bare `pause()` are two independent defences against one deadlock (a modal predicate goes true before the worker reaches `channel.get()`), and the pairing that actually fails is fast polling *without* it — measured 3/3 on the quitting test |
+| Swap `settle`'s wall-clock deadline back for `for _ in range(120)` | `test_it_outlasts_the_old_pump_budget` and `test_a_never_true_predicate_gives_up_after_the_timeout` | A pump count is not a wait: `pilot.pause()` is 21ms with nothing burning CPU in-process and 1021ms with one busy sibling thread, so 120 pumps was worth 2.5s–122s. Re-run that mutation on an **idle** machine — under load the old helper is over-patient and passes too |
+| Give `pump` a deadline, or route a negative assertion through `settle` | `TestPump` — two tests, one of them on runtime. Suite time also regresses by ~20s | `pump` backs "prove X did *not* happen", where there is no predicate to wait for; a deadline makes every such site pay its full timeout for nothing |
+| Drop the `shrink_approval_timeout` autouse fixture | `test_the_approval_timeout_is_shrunk_for_tests`, and nothing else — by nature it changes no outcome, only how long a broken modal path takes to reach one | Keep it. It is asserted directly precisely because no other test can notice it going |
 | Restart or re-enter the generator on approval instead of resuming it | `test_ac2_approving_...` fails on the dispatch assertion — a fresh generator re-issues the model call and never reaches the tool | Resume. `permission_channel` exists (§13) so the SAME generator continues |
 | Add `asyncio_mode = auto` to `pytest.ini` | Nothing breaks immediately, but ARCHITECTURE §4.13's "no asyncio in pytest.ini" stops being true | Not needed — TUI tests carry explicit `@pytest.mark.asyncio`. `--strict-markers` accepts it because pytest-asyncio registers the marker |
 | Change `call_model_stream`'s positional parameter order | `test_effort_reaches_the_model_call` asserts `call_args[0][7] == "high"` | Update the index, or switch the assertion to a keyword — but keep asserting on the *call arguments*, not on the raven: the indicator can be right while the parameter never leaves the UI |
@@ -262,7 +266,7 @@ them. Three new test files: `test_tui.py`, `test_client_effort.py`,
 | Query a non-Anthropic provider for capabilities | `test_non_anthropic_uses_the_table_without_querying` fails the client stub deliberately | No OpenAI-compatible provider in `providers.json` exposes a capability endpoint |
 | Send `ThinkingConfig(thinking_budget=...)` unconditionally on Google | `test_google_effort_tracks_what_the_installed_sdk_can_express` fails; against the real pinned SDK it is a `TypeError` | The pinned `google-genai==1.0.0` has no such field. Keep the `_google_supports_thinking_budget()` gate, or move the pin deliberately — which also puts §9's Google implementation back in scope for retest |
 | Drop the sampling parameter silently instead of logging | `test_sampling_dropped_for_models_that_reject_it` fails on the caplog assertion | Warn. A silent drop is how ensemble mode came to look like it worked |
-| Make the ensemble guard warn-and-continue instead of raising | `test_ensemble_on_a_sampling_rejecting_model_raises_before_any_work` fails | Raise. Continuing produces N identical candidates and reports maximal cross-candidate consistency for all of them — an expensive wrong answer, not a degraded one |
+| Make the roster guard warn-and-continue instead of raising | `test_the_refusal_lands_before_any_work` fails | Raise. Continuing produces N near-identical candidates and reports maximal cross-candidate consistency for all of them — an expensive wrong answer, not a degraded one. §16's row here named the *sampling* guard, which §10's revisit replaced; the reason carried over, the mechanism did not |
 | Change `config.MODEL_NAME` to a model that accepts sampling params | `test_default_model_is_in_the_reject_set` fails | Intended as a deliberate signal: update the test in the same commit, having checked the new default really does accept them |
 | Change `config.MAX_TOKENS` | Nothing fails — `test_call_model_google_text_only` asserts against the setting, not a literal | That test used to hardcode 4096 and broke when §16 raised it. Assert against the setting for tunables |
 | Add a settings key without adding it to `_KNOWN_SETTINGS`/`_KNOWN_TUI` | `ValueError: unknown tui key` at load | Intended (§14 amendment 1). A preference the loader doesn't know about is a startup error, not a silently ignored line |
@@ -570,10 +574,21 @@ memory contract turned 43 tests red at once. Adding a storage import to
 `core/memory.py` means adding one name to that tuple; adding a method the loop calls
 on a memory means adding it to `FakeMemory`. Do not re-copy either.
 
-**`test_shell_compaction.py` has its own `_settle`, copied rather than imported.**
-`test_tui.py`'s version is TECHNICAL_DEBT theme 8 — it budgets event-loop pumps
+**~~`test_shell_compaction.py` has its own `_settle`, copied rather than imported.~~**
+~~`test_tui.py`'s version is TECHNICAL_DEBT theme 8 — it budgets event-loop pumps
 rather than time. Importing it would make a fix there silently change this file's
-timing too. Whoever fixes theme 8 should fix both.
+timing too. Whoever fixes theme 8 should fix both.~~
+
+**Superseded 2026-08-07 (TECHNICAL_DEBT 8 closed).** There is now one helper,
+`settle` in `tests/conftest.py`, and every pilot test imports it. The note above
+was sound while the canonical helper was broken and became exactly wrong when it
+was fixed — the argument for copying was "don't couple to something known-bad",
+and coupling is the point once it is good. It also under-counted: there were
+**five** implementations, not two (budgets 40/60/120/120/200, and
+`test_thread_legibility.py`'s was pause-then-check rather than check-then-pause),
+so a fix to the one named by filename would have reached one of them.
+`test_pilot_wait.py::test_no_test_module_defines_its_own_settle` now enforces
+this, because a convention is what produced five copies.
 
 ### §21a review pass (2026-08-05)
 
@@ -925,3 +940,71 @@ nothing before looking for an infinite loop.
 | Treat a `None` sign-off as approval | `test_refusing_a_spawn_stops_it_happening` | Refusing the spawn and spawning with nothing granted are different outcomes |
 | Key the sign-off memo by tool name only | `test_s1_signoff_is_remembered_per_agent_not_per_tool_name` | J8: one prompt about agent `a` must not cover agent `b` |
 | `SubagentSignoffScreen`'s escape dismissing `set()` | `TestTheSignoffScreen` | Escape refuses; it does not run with nothing granted |
+
+## §23 slice 2 — the question tool and the todo list
+
+`tests/test_question_tool.py`, `tests/test_todo.py`, and the `TestQuestion`
+class in `tests/test_interaction.py`.
+
+| Change | Symptom | Fix |
+|---|---|---|
+| Return the answered options without intersecting them against `payload["options"]` | `TestQuestion::test_an_unoffered_option_is_dropped`, `test_nothing_offered_means_no_options_come_back` | J3's rule, third instance. A shell returning something nobody proposed is answering a different question. The options live on the request precisely so `decode` can check them |
+| Decode a `defer` answer as `None`, or drop the `defer` key from the decoded dict | `TestQuestion::test_defer_is_a_real_answer` / `test_defer_ignores_anything_alongside_it`, plus `test_question_tool.py`'s deferral and CLI tests | A deferral is a REAL answer — the user engaged and chose to discuss. A dismissal is not. Collapsing them makes the modal's "Discuss instead" button pointless, and it is `SUBAGENT_SIGNOFF`'s middle-answer trap one kind along |
+| Let `ask_user` proceed when `response_channel is None` | `TestHeadlessDeniesAndSaysWhy` (3 tests) | AC2. With nobody to ask, the call is denied and the error tells the model to decide and state its assumption. §25's V6 one section along: the inability to ask is not permission to proceed |
+| Gate `ask_user` (`ToolApprovals.ask_user = True`) | `test_the_tool_is_still_ADVERTISED_with_no_channel`, `test_it_is_ungated_and_allowed` | J12. §13 does not merely deny a gated tool where nothing can ask — it stops ADVERTISING it, so a gated `ask_user` is invisible rather than deniable and the model cannot "work around" anything |
+| Truncate `options` to `MAX_OPTIONS` instead of refusing | `TestTheOptionCap::test_five_options_are_REFUSED_not_truncated`, `test_the_cap_error_names_the_limit_and_the_count` | Truncating shows the user a different question from the one the model asked, and the model then reads the answer as a response to the whole list. M15's rule with the model in the naming role |
+| Drop the `QUESTION` branch from `main.py`'s `ask` or `tui/app.py`'s `_ask_blocking` | `TestTheCliRenderer` (8 tests) / `TestTheTuiModal` (5 tests) | D12. A kind a shell does not render falls through to `None` and decodes as "nobody answered" on every run in that shell, while looking wired up |
+| Have `todo_write` write `memory.extra["todos"] = …` instead of `memory.set_extra(...)` | `test_it_persists_through_set_extra_not_by_mutating_extra` | `extra` is a COPY (`core/memory.py`), so mutating it changes nothing and reports success. The symptom is invisible until the next turn |
+| Truncate an over-cap todo list, or coerce an unknown status to `pending` | `test_over_the_cap_is_REFUSED_not_truncated`, `test_an_unknown_status_is_REFUSED_not_coerced` | Both leave the model believing it recorded something it did not. `MAX_INJECTED_REFS`' refuse-rather-than-drop rule |
+| Stop `_run()` yielding a tool result's `notice` as a `LoopEvent` | `TestTheLoopForwardsAndStripsIt::test_a_notice_on_a_tool_result_becomes_a_loop_event` | AC4's event route (J10). Note the PANEL tests still pass — they post the message directly — so this mutation is caught by the loop test alone, which is why both exist |
+| Leave the `notice` in the result instead of popping it | `test_the_notice_is_STRIPPED_from_what_the_model_sees`, `test_a_malformed_notice_is_dropped_not_raised` | A notice is plumbing for the shell. Leaving it in sends the panel's trigger to the model as part of the tool's answer |
+| Recognise `todo_write` by name in `core/loop.py` instead of forwarding any result `notice` | Nothing goes red — and that is the point of the generic route | `ToolSpec.grant_scope` and `request_kind` exist so no tool name appears in the loop. `TestTheLoopForwardsAndStripsIt` drives a fake `probe` tool precisely so the mechanism is tested without the tool that motivated it |
+| Move `with_todos` inside `with_catalogs()`, or add the fragment to `pass_prompt()` | `TestThePromptTier::test_it_is_NOT_inside_with_catalogs` | §19's K6, FOURTH instance after §21b's M13 and §21c's M19. A checklist written in a chat session would land in all ten passes of a separate research run. The test asserts against three REAL pass prompts, so a leak added one call deeper still fails |
+| Remove `ask_user` or `todo_write` from either `config` dataclass | `RuntimeError` at import of `tools.registry`, naming the tool | D24. Verified by deleting `ToolPermissions.todo_write` |
+| Make `tui.todo_position` fall back on an unknown value instead of raising | `TestTodoPosition::test_an_unknown_position_raises_and_names_the_vocabulary` | `research.approval_mode`'s precedent, not `tui.theme`'s: the vocabulary lives in `config_loader`, and a position the renderer does not understand puts the panel somewhere the user did not ask for. `tui.effort` had neither check and that was a shipped bug |
+| Drop `TodoPanel.__init__`'s `self.display = False` | `TestThePanelWidget::test_it_starts_hidden` | A Textual `reactive`'s watch method does not fire for its initial value, so the panel is a visible empty box until something first sets `todos` — which on a fresh thread may be never |
+| Set `display = True` once (ResearchProgress's shape) instead of toggling it | `test_clearing_HIDES_IT_AGAIN` | A todo list empties as well as fills, so the reveal has to be reversible |
+| Write a transcript line for a `todo_changed` notice | `test_a_todo_notice_writes_NO_transcript_line` | The list changes several times in a turn; in an append-only transcript that is a column of near-identical lines. §26 made the same call for `pass_activity`. The neighbouring test asserts other notice kinds STILL write theirs, which §21a's "no silent compaction, ever" depends on |
+
+---
+
+## §10 revisit — the ensemble redesign (`test_ensemble_guard.py`, `test_orchestrator.py`, `test_confidence_scoring.py`)
+
+`test_ensemble_guard.py` was rewritten wholesale (3 → 15 tests). It used to guard
+§16's refusal of ensemble mode on a model that rejects sampling parameters;
+diversity now comes from a roster of different models, so no sampling parameter
+is involved and no model is excluded. **The reason the guard exists carried over
+even though the mechanism did not** — refusing beats running degraded, because a
+degraded ensemble run does not fail, it reports false confidence expensively.
+
+Two constants were **deleted**: `config.ENSEMBLE_TEMPERATURE` (the defect) and
+`config.ENSEMBLE_N` (N is `len(config.ENSEMBLE_MODELS)` now). The
+`settings.json` key `ensemble_n` and the `ensemble_n` pipeline parameter both
+**survive** — removing the key would make every existing `settings.json` that
+sets it raise, since unknown keys raise by design.
+
+### What breaks these
+
+| Change | Symptom | Fix |
+|---|---|---|
+| Count roster entries instead of **distinct** `(provider, model)` pairs | `test_one_distinct_model_repeated_is_refused` | The distinctness is the guard. `[X, X, X]` recreates §10's original defect through the new config: no sampling variation remains to make the candidates differ, so they arrive near-identical and every claim scores maximal consistency |
+| Add `ensemble_models` to `_KNOWN_SETTINGS` (or drop the named rejection) | `TestSettingsRejectsARoster::test_ensemble_models_is_rejected_by_name` | R12's rule, second instance. The mode is a bool that can only spend more of the provider the user already chose; a **roster chooses providers**, and a project's `settings.json` beats the user's. Rejected by name so the omission does not read as an oversight to fix |
+| Run every Pass 1 candidate on the run's own `model`/`provider_name` | `test_each_candidate_runs_on_its_own_provider_and_model`, plus two others | That *is* the mechanism. Note the plain `call_log` cannot catch this — it records only pass ids, so three runs of one model look identical to a three-model ensemble. Use `_routing_mock`, which records `(pass_id, provider_name, model)` |
+| Let a candidate's exception propagate instead of skipping | `test_a_failed_candidate_is_named_traced_and_skipped` and three others | §20's containment rule. One unreachable provider must not flip a ten-pass run to `failed` |
+| Drop the cause from the skip trace line | Same test, on the `"connection refused"` assertion | "A candidate failed" with no cause is not something a user can act on |
+| Label candidates by roster position rather than survivor order | `test_candidate_labels_follow_survivors_not_roster_positions` | A gap ("Candidate 1, Candidate 3") makes Pass 2 tag a claim both survivors asserted as `[1, 3]` against a denominator of 2, so unanimous claims read as dissented-against. Silently deflated confidence is the failure class this section removes |
+| Score a single survivor as an ensemble of one (`effective_n >= 1`) | `test_one_surviving_candidate_scores_without_a_penalty` | One candidate cannot disagree with itself, so every claim would score consistency 1.0 and report unanimous corroboration from a single source. `ensemble_n=0` is the **correct** formula there, not a degraded one |
+| Honour a passed `ensemble_n` over `len(ENSEMBLE_MODELS)` | `test_ensemble_n_is_ignored_in_favour_of_the_roster` | A confidence score's denominator must not be able to disagree with the roster that produced the candidates |
+| Make the disagreement penalty `W * consistency` instead of `W * (1 - consistency)` | `test_ensemble_factual_uses_ensemble_formula`, `test_ensemble_dissent_subtracts_and_grounding_is_not_diluted` | Unanimity must be free. A claim is not penalised for having been generated by an ensemble |
+| Restore `0.4/0.3` weighting for ensemble runs | The two above plus `test_partial_grounding_factual_lands_medium` and `test_non_ensemble_regression_identical_output` | Grounding is the pipeline's strongest evidence; which generation strategy produced a claim is no reason to weigh its verification differently |
+| Subtract the disagreement penalty in the **non-factual** arm | `test_ensemble_non_factual_ignores_consistency` | E9. **This mutation ran GREEN before that test was fixed**: it asserted with `asserted_by_candidates=[1,2,3]` against `ensemble_n=3`, so the penalty it excluded was zero for that input. It now sweeps 3/3, 1/3 and 0/3 — assert the premise, or the conclusion means nothing |
+| Compare the unrounded score against `TIER_THRESHOLDS` (i.e. revert E10) | `test_a_recorded_score_on_a_threshold_gets_that_threshold_s_tier` and `test_the_tier_reads_the_same_number_the_breakdown_stores`, the latter reporting the original symptom verbatim | Round once, use it for both. Note the swept test also covers ensemble inputs, so it catches this regardless of which formula produced the score |
+| Delete `_sampling_kwargs`, `MODELS_REJECTING_SAMPLING_PARAMS` or `temperature`'s threading as dead code | Nothing fails immediately — which is the hazard | They are a **backstop** now: nothing in the harness passes a temperature, and the WARNING is how the next caller that wants sampling variation learns it cannot have it. Silence here is exactly how §10's defect stayed invisible |
+
+### Standing: the doc-count guard fires on every added test
+
+`test_docs_consistency.py::test_the_documented_count_is_the_real_one` compares
+the collected total against the number quoted in `README.md`, `CLAUDE.md` and
+`ARCHITECTURE.md`. It **skips** on a narrowed invocation, so a green
+`pytest tests/test_ensemble_guard.py` says nothing about it. Run the full suite
+before committing, and update all three quotes together.

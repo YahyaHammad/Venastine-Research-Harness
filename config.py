@@ -77,19 +77,47 @@ RESEARCH_PASS_TOKEN_BUDGET = 1_000_000
 #   (none remaining -- ensemble_mode/ensemble_n built in ROADMAP §10,
 #    critic_model built in ROADMAP §11)
 
-# --- Ensemble mode (ROADMAP §10) ---
-# Run Pass 1 N times at higher temperature for diversity, then extract
-# the union of claims across candidates with a cross-candidate consistency
-# score feeding Pass 4's formula. Off by default.
+# --- Ensemble mode (ROADMAP §10, as redesigned by its revisit) ---
+# Run Pass 1 once per entry below, then extract the union of claims across
+# candidates and subtract a disagreement penalty in Pass 4. Off by default.
 #
-# WARNING: the temperature-based diversity mechanism below does not work on
-# current Anthropic models (see MODELS_REJECTING_SAMPLING_PARAMS). The
-# orchestrator refuses to run ensemble mode on such a model rather than
-# spending ensemble_n x the tokens on N identical candidates. Redesigning
-# the diversity mechanism is a deferred §10 revisit.
+# DIVERSITY COMES FROM DIFFERENT MODELS, NOT DIFFERENT SAMPLING (E1). §10
+# originally raised `temperature` on N runs of one model. That could not work
+# on current Anthropic models, which reject sampling parameters outright (see
+# MODELS_REJECTING_SAMPLING_PARAMS), so the section was built, documented as
+# working, and could not execute against this harness's own default model.
+# ENSEMBLE_TEMPERATURE is deleted rather than repaired: it was an ABSOLUTE
+# value being used as though it were a raise, so what "1.0" meant differed
+# per provider, and so did how much diversity a run actually got.
+#
+# The deeper reason is §11's, verbatim: "a model checking its own output for
+# errors shares that model's blind spots." N samples of one model agree most
+# confidently on that model's systematic errors, which is exactly where a
+# research harness needs agreement to mean something. Different models do
+# not share blind spots, so their agreement is real evidence.
+#
+# N is len(ENSEMBLE_MODELS) -- derived, never configured separately (E3). The
+# denominator of a confidence score must not be able to disagree with the
+# roster that produced it.
+#
+# config.py ONLY, deliberately -- there is no settings.json key for this,
+# following CRITIC_MODEL (E2). Trusting a cloned repo already lets it pick
+# the provider and multiply pipeline cost; a project-tier list of N providers
+# is that same grant multiplied by N.
+#
+# Fewer than two DISTINCT (provider_name, model) pairs is refused, not
+# tolerated: one model cannot disagree with itself, so every claim would
+# score maximal consistency and Pass 4 would read that as confidence. That
+# is the original defect, and repeating the same entry N times is the way to
+# recreate it through this config.
 ENSEMBLE_MODE = False
-ENSEMBLE_N = 3
-ENSEMBLE_TEMPERATURE = 1.0
+ENSEMBLE_MODELS: list[dict] | None = None
+# Example:
+# ENSEMBLE_MODELS = [
+#     {"provider_name": "ANTHROPIC", "model": "claude-opus-5"},
+#     {"provider_name": "OPENAI", "model": "gpt-5.1"},
+#     {"provider_name": "GOOGLE", "model": "gemini-2.5-pro"},
+# ]
 
 # --- Sampling-parameter support (ROADMAP_v2 §16 prerequisite) ---
 # Models that reject temperature/top_p/top_k. Current Anthropic models
@@ -369,6 +397,20 @@ SUMMARY_TARGET_CHARS = 2_000
 # fragment the model reads, per M14's no-silent-caps rule.
 MAX_INJECTED_REFS = 3
 
+# §23 slice 2. The todo list's vocabulary and its ceiling.
+#
+# A plain tuple rather than an Enum, for storage.py's THREAD_KIND_* reason: a
+# list persisted under an older vocabulary reads back as data rather than
+# raising, and the tool can then say which status it did not recognise.
+TODO_STATUSES = ("pending", "in_progress", "completed")
+
+# The list is injected into every turn's system prompt, so its length is a
+# per-call cost for as long as the thread lives. REFUSES rather than
+# truncating, MAX_INJECTED_REFS' rule: a checklist silently cut to 50 would
+# have the model believe it had recorded work it has now forgotten, which is
+# worse than being told to write a shorter list.
+MAX_TODO_ITEMS = 50
+
 # M6. A research pass is headless and unattended, and each one already
 # returns a distillation, so routine compaction there would spend on a
 # judgment call nobody is watching. Passes compact only when approaching
@@ -458,6 +500,13 @@ class ToolPermissions:
     # from a fixed allowlist rather than a path: the destination is derived,
     # so the tool cannot be aimed anywhere else. The gate is below.
     write_project_doc: bool = True
+    # §23 slice 2. Allowed everywhere, and ungated below (J12): whether it
+    # can actually reach a person is decided by whether the run has a
+    # response channel, which the tool itself checks.
+    ask_user: bool = True
+    # §23 slice 2. Thread-scoped, reversible, and it asks nobody -- so it is
+    # allowed and ungated for `pin`'s reasons (J9).
+    todo_write: bool = True
 
 @dataclass
 class ToolApprovals:
@@ -531,3 +580,18 @@ class ToolApprovals:
     # so the gate is what makes "no silent overwrite" (AC2) structural
     # rather than a promise the command makes about itself.
     write_project_doc: bool = True
+    # §23 slice 2 (J12): UNGATED. Two reasons, and the second is the one
+    # that decides it. Gating would mean approving a prompt in order to be
+    # shown a prompt -- but worse, §13 does not merely deny a gated tool
+    # where nothing can ask, it stops ADVERTISING it. Gated, this tool would
+    # be invisible in every headless run; AC2 requires it be visible,
+    # called, and answered with a denial the model can work around. Asking
+    # a person is not an action that needs authorising -- it is the least
+    # unilateral thing a run can do.
+    ask_user: bool = False
+    # §23 slice 2 (J9): UNGATED, on the axis that already separates `pin`
+    # from `remember`. A todo list is thread-scoped and reversible, and
+    # rewriting it costs some prompt budget inside a conversation the user
+    # can see. Gating it would also make it invisible in every research pass
+    # (§13), which is where a checklist across ten passes helps most.
+    todo_write: bool = False

@@ -60,6 +60,12 @@ REVIEW = "review"
 # is a titled yes/no over a block of text the caller composed.
 CONFIRM = "confirm"
 CHOICE = "choice"
+# §23 slice 2. Separate from CHOICE, which answers with exactly one of the
+# options offered and nothing else. A QUESTION can come back as several
+# options, as free text, as both, or as "I would rather talk about this" --
+# four affordances the spec asks for by name, and a shape CHOICE's decoder
+# cannot express without becoming two decoders wearing one name.
+QUESTION = "question"
 
 # Review decisions, moved here from core/reasoning/review.py so the decoder
 # and the pipeline cannot disagree about what a valid answer is.
@@ -92,6 +98,13 @@ SAFE_DEFAULTS = {
     # picking one on the user's behalf is exactly what a declining default
     # exists to avoid.
     CHOICE: None,
+    # None, for CHOICE's reason. Note what this makes indistinguishable, on
+    # purpose: an unanswered question and a dismissed one both arrive here,
+    # and the TOOL turns that into an error result the model can work
+    # around. "I would rather discuss this" is NOT this -- it is a real
+    # answer carrying defer=True, because a user who says that has told the
+    # model something, and a user who closed the modal has not.
+    QUESTION: None,
 }
 
 
@@ -217,6 +230,57 @@ def decode(request: "Request", raw: Any) -> Any:
                 "them.", sorted(unoffered),
                 "was" if len(unoffered) == 1 else "were")
         return chosen & offered
+
+    if kind == QUESTION:
+        # A dict, or nothing. Three answers again, and again the middle one
+        # is the one to lose:
+        #
+        #   None                      nobody answered -- dismissed, timed
+        #                             out, no channel, or a shape this
+        #                             cannot read. The TOOL turns it into an
+        #                             error result.
+        #   {..., "defer": True}      "let's talk about it instead". A REAL
+        #                             answer: the user engaged and declined
+        #                             to pick, which is different from not
+        #                             being there. This is the spec's "chat
+        #                             about this" escape.
+        #   {"options": [...], ...}   a choice, or free text, or both.
+        #
+        # Deliberately NOT truthiness on the dict: an answer of
+        # {"options": [], "text": ""} is someone submitting a blank form,
+        # which is still not "nobody answered", and the tool can say so.
+        if not isinstance(raw, dict):
+            return None
+        if raw.get("defer"):
+            # Nothing else is read. A deferral is not a partial answer, and
+            # carrying half-filled options alongside it would invite a
+            # caller to act on both.
+            return {"options": [], "text": "", "defer": True}
+
+        # INTERSECTED with what was offered, in OFFERED order -- the same
+        # rule as SUBAGENT_SIGNOFF above, and for J3's reason: a shell
+        # returning something nobody proposed is answering a different
+        # question. Offered order rather than answer order so the model
+        # reads options back in the sequence it wrote them, which is the
+        # sequence its own prompt explained.
+        offered = [str(o) for o in (request.payload.get("options") or ())]
+        answered = raw.get("options")
+        if not isinstance(answered, (set, frozenset, list, tuple)):
+            answered = ()
+        chosen = {str(o) for o in answered}
+        unoffered = chosen - set(offered)
+        if unoffered:
+            logger.warning(
+                "Question answer named %s, which %s not offered; ignoring "
+                "them.", sorted(unoffered),
+                "was" if len(unoffered) == 1 else "were")
+
+        text = raw.get("text")
+        return {
+            "options": [o for o in offered if o in chosen],
+            "text": str(text) if text else "",
+            "defer": False,
+        }
 
     # REVIEW. Strict: a well-formed (decision, notes) pair or nothing.
     #

@@ -3062,3 +3062,416 @@ The question tool and the todo list, P1's `LoopEvent`-vs-tagged-union
 decision (only the todo event needs it), and whether the todo list lives
 in `ConversationThread.extra_data` — now shared with goal mode and §21c's
 refs — or its own table.
+
+## TECHNICAL_DEBT 8 — the pilot wait helper
+
+Not a ROADMAP section: a debt item, taken before §23 slice 2 because slice
+2's question tool is another blocking modal in the loop and would have been
+debugged through this.
+
+### What the record said, and why it was a dead end
+
+The 2026-08-05 entry recorded a flake in
+`test_ac2_approving_a_permission_prompt_resumes_the_same_generator`, an
+attempted fix that turned it into a deterministic failure of
+`test_quitting_during_an_attended_research_prompt_releases_the_worker`, and
+an instruction: "start from what `pilot.pause(delay)` does to the message
+queue".
+
+There is nothing there. `Pilot.pause` (textual 1.0.0) runs the same
+`_wait_for_screen()` barrier before and the same `_on_timer_update()` after
+in **both** branches; only the exit condition differs. Its other factual
+claim — that 120 bare pauses "elapse in microseconds" — is off by five
+orders of magnitude: measured 2.535s, because `wait_for_idle`'s
+`SLEEP_GRANULARITY` floors each pause at 20ms.
+
+Its *conclusion* was right, though, and finding out why took measurement
+rather than reading.
+
+### Two defects, pulling opposite ways
+
+**1. A pump count is not a wait.** `pause()`'s exit condition is a
+process-wide CPU heuristic. Measured: **21ms** per pause with nothing
+burning CPU in-process, **1021ms** with one busy sibling thread — a 46×
+swing, so `tries=120` was worth 2.5s–122s depending on something unrelated
+to what it waited for. Instrumenting every call in a clean full run gave
+the requirement: 44 calls, max **0.304s**, median 45ms.
+
+**2. A predicate can go true before the state a test depends on.**
+`isinstance(app.screen, PermissionScreen)` is true while the worker is
+still inside `call_from_thread(push_screen, …)` and has not reached
+`channel.get()`. Join that thread from the event-loop thread and both sides
+wait for each other. Bare `pause()` hides this by accident — its 20ms–1s
+sleep lets the mount finish — which is exactly why making polling faster
+exposed it, and why one fix looked like it broke an unrelated test.
+
+Raising patience alone leaves the deadlock; improving responsiveness alone
+exposes it. That is the whole shape of the item.
+
+### What shipped
+
+`settle` (wall-clock deadline, quiesces once the predicate holds) and
+`pump` (a count, for negative assertions) in `tests/conftest.py`, replacing
+**five** implementations — budgets 40/60/120/120/200, two incompatible
+orderings — plus one open-coded inline loop. Suite runtime is effectively
+unchanged (35s → 36.5s, all of it the new tests): a satisfied predicate
+returns immediately either way, so only failures pay a deadline.
+
+`pump` is separate on purpose. Mutating it into a deadline costs +20s and
+proves nothing extra, because a negative assertion has no predicate to wait
+for.
+
+Adjacent, fixed with it: an autouse fixture shrinks
+`ATTENDED_APPROVAL_TIMEOUT_S`, so a dismissal path that drops its value
+fails in seconds instead of stalling the suite for ten minutes. Verified it
+does not weaken what it touches — neuter `_release_permission_channel` and
+two tests still go red.
+
+### What the build found: three claims of mine, all wrong, all caught by measuring
+
+This item produced no new mechanism, so this is its actual output.
+
+1. **"Textual's source contradicts the record's diagnosis."** Half right.
+   The mechanism claim was wrong, but I reported the conclusion as doubtful
+   and it was correct. Reading source told me `pause(delay)` drives the
+   pump identically; only running it told me the variant still fails 3/3.
+2. **"The quiesce is load-bearing — `test_quitting_…` fails without it."**
+   Written into the code as a "do not remove" comment. False: delete it and
+   the TUI suite is green 43/43 under load, because the bare `pause()`
+   masks the need. The pairing that fails is fast polling *without* it. The
+   line stays — it is the second of two independent defences — but only
+   `test_pilot_wait.py` can pin it, and the comment now says so.
+3. **"A liveness assertion in the quitting test proves nothing."** Inherited
+   from that test's own docstring and repeated by me. False: neuter the
+   release and `not t.is_alive()` is the assertion that fails. Not via the
+   queue — the worker times out of `channel.get`, then parks in
+   `call_from_thread(on_timeout, …)`, whose `future.result()` has no
+   timeout and whose loop `exit()` already stopped.
+
+Also corrected in place: that docstring's claim that Textual fires a
+modal's result callback while pruning screens at shutdown.
+`_result_callbacks` is invoked only from `Screen.dismiss()`;
+`_release_permission_channel` is the only thing that unblocks the worker.
+
+With §23 slice 1's two, §24's three and §21c's three, the tally is no
+longer about mutation hygiene alone: **a claim about timing cannot be
+derived from reading, and a comment asserting a red test must be checked
+against that test.** Two of the three above were written by me *in the same
+session* that found the first one.
+
+### Not verified
+
+The flake itself was never reproduced — zero failures across ~10 full-suite
+runs in this container, including three under 4× CPU load. So "it stopped
+failing" is not available as evidence and is not being claimed. The patience
+half rests on the measurement and on `test_pilot_wait.py`, which pins the
+deadline semantics directly; the original entry's warning that "a fix applied
+without understanding it will look like it worked" is the reason that
+distinction is drawn out rather than glossed.
+
+## §23 slice 2 — the question tool and the todo list
+
+**Spec:** ROADMAP_v2 §23, ACs 2–4, decisions J9–J14. Slice 1 (the channel and
+per-tool sign-off) shipped earlier; TECHNICAL_DEBT 8 was closed in between
+because the question tool is another blocking modal in the loop.
+
+The spec is 55 lines with **no code sketch**, no tool name, no schema, and
+nothing at all about the todo list's operations — so most of this was
+decisions rather than implementation.
+
+### The finding that shaped it
+
+**The loop's ask path is approval-only.** `_obtain_approval` is entered only
+under `if needs_approval:`, always builds a `{"tool_name", "params"}` payload,
+and coerces the answer to `(bool, grant)` — discarding `answer` entirely for
+every kind but `SUBAGENT_SIGNOFF`. A multi-select or free-text answer has
+nowhere to go in it.
+
+It did not need one. `response_channel` was already in `_INJECTABLE_PARAMS`,
+injected into any handler that names it on **both** dispatch branches, which is
+exactly what that comment anticipated: *"Generalised so §23's response-channel
+tools add a third injectable name without reopening `dispatch()`."* So
+`ask_user` asks for itself and **`core/loop.py`'s approval bridge is
+untouched** — the only loop change in the whole slice is the generic notice
+forwarding below.
+
+### P1 was discharged by not needing either option
+
+§22 deferred the `LoopEvent`-vs-tagged-union decision to whichever section
+first wanted a chat-side event, and §23's spec called the todo event "a
+decision to make here, not a field to add quietly". Both options were wrong:
+adding a field is what P1 rejected, and a whole new type for **one** event is
+the over-engineering P1's own wording guarded against ("the precedent *if this
+family grows the same way*" — it did not).
+
+`notice` was already a kind-discriminated dict that `_run()` already yields.
+So the todo event is a `notice` kind, `LoopEvent`'s field set is untouched, and
+`test_loop_event_did_not_grow_a_seventh_field` never came into it (J10).
+
+The forwarding is **generic**: any tool result carrying a `notice` is
+forwarded and the key stripped. The alternative was for the loop to recognise
+`todo_write` by name, which is precisely what `ToolSpec.grant_scope` and
+`request_kind` exist to prevent. `TestTheLoopForwardsAndStripsIt` drives a fake
+`probe` tool rather than the real one, so the mechanism is tested without the
+tool that motivated it.
+
+Popping rather than copying is load-bearing: a notice is plumbing for the
+shell, and leaving it in the result sends the panel's trigger to the model as
+part of the tool's answer.
+
+### Two decisions that turned on §13 rather than on taste
+
+**Both tools are ungated (J12/J9), and the reason is not "these are harmless".**
+Gating `ask_user` would mean approving a prompt in order to be shown a prompt —
+but the deciding fact is that §13 does not merely *deny* a gated tool where
+nothing can ask, it stops **advertising** it. Gated, `ask_user` would be
+invisible in every headless run, and AC2's "the model receives an error result
+it can work around" would be unreachable, because the model would never learn
+the tool exists. Ungated, it is advertised, called, and denied with a reason.
+
+The same fact decided J9. AC2 says "both tools deny cleanly with no way to
+ask", written before the todo list's shape was settled — but a checklist asks
+nobody and blocks on nothing, so there is nothing to deny, and gating it would
+hide it from exactly the ten-pass run where a checklist helps most. AC2 is
+amended in place with the reason rather than satisfied literally.
+
+### The three-way answer, for the third time
+
+`QUESTION` decodes to `None` (nobody answered), `defer=True` (the spec's "chat
+about this" escape — a REAL answer, because the user engaged and declined to
+pick), or options-plus-text. That is `SUBAGENT_SIGNOFF`'s `None`/`set()`/subset
+distinction one kind along, and the dict test is `isinstance` rather than
+truthiness for the same reason: a blank submission is someone who was present,
+and the tool says something different about that than about an empty room.
+
+### What the build found
+
+1. **`CONFIRM` and `CHOICE` are unreachable on the CLI.** `main.py`'s `ask`
+   handles only `APPROVAL`, `SUBAGENT_SIGNOFF` and `REVIEW`; the other two
+   decode to their declining defaults there. It is masked because `/init`
+   supplies its own `confirm`/`choose_kind` callbacks instead of going through
+   the channel — so nothing is broken today, but the channel has two kinds that
+   silently do not work in one shell. Recorded rather than fixed: it is §24's
+   surface, not this slice's, and `/init` works. It is why `ask_user`'s CLI
+   branch was written first and has eight tests.
+2. **`LoopEvent` has seven fields, not six.** Four places said six — including
+   the pinning test's own docstring. The test asserts SET EQUALITY, so the real
+   constraint is "frozen", and the count was never the point. Corrected.
+3. **A Textual `reactive`'s watcher does not fire for its initial value.**
+   `TodoPanel` was a visible empty box on a fresh thread until `__init__` set
+   `display = False` explicitly. `GoalBanner` gets away without it only because
+   `app.py` refreshes it during `on_mount` — which is luck, not design.
+4. **Three of my own test-authoring mistakes, all caught by running them.** A
+   `_run()` driver invented from scratch instead of reusing
+   `test_streaming_loop.py`'s `_run_kwargs` (wrong signature); a pass id guessed
+   as `"pass1_exploration"` when the real keys are `"Pass 1"` and friends; and
+   two settings-validation tests written against a `_load_settings_file` that
+   does not exist, which belonged in `test_config_loader.py` with its fixtures
+   all along. The reuse instinct §26's L6 records for production code applies to
+   test scaffolding just as well.
+
+### Verified outside the suite
+
+The headless denial's exact wording as the model receives it; the CLI's numbered
+form for both a multi-select and an open question, including a typed answer
+carrying a condition (`"2 but only if X"` reads as text, not as option 2); the
+modal composing all four affordances across its four shapes, with the discuss
+escape present in every one; and a full turn through the real loop and real
+registry — `todo_write` called, the notice emitted, the key absent from what the
+model saw, the list persisted, and the next turn's prompt tier rendering
+`[x] / [>] / [ ]`.
+
+### Left deferred, with owners recorded
+
+The CLI slash-command layer §21c's M21 assigned to §23 (no AC, no decisions
+record, and neither tool needs it), and the convergence of the four `with_*`
+prompt tiers (J11) — `with_todos` is K6's fourth copy of the same warning, and
+that cost is now recorded rather than accidental.
+
+---
+
+## ROADMAP §10 revisit — the ensemble redesign
+
+The last open design item in the project. §10's diversity mechanism was
+`temperature=1.0` on N runs of one model; current Anthropic models reject
+sampling parameters outright, so the section had been built, documented as
+working, and could not execute against `config.MODEL_NAME`'s default. §16 stopped
+the crash with a refusal and deferred the redesign. This is it.
+
+### What reading the code changed about the problem
+
+Five findings, in the order they landed. Two of them changed what got built.
+
+1. **The knob was an absolute value used as though it were a delta.**
+   `_sampling_kwargs` sends `temperature` only when explicitly given, so omitting
+   it means "provider default" — and `ENSEMBLE_TEMPERATURE = 1.0` is the
+   documented default on OpenAI Chat Completions and Google's
+   `GenerateContentConfig`. On the two providers §10's revisit note said ensemble
+   "works only on", the diversity knob plausibly sent the value the provider
+   would have used anyway. **Recorded as needing a live check** — it cannot be
+   settled offline. The structural half needs no check: across the 14 providers
+   in `providers.json.example` the default differs, so how much diversity a run
+   got, and therefore what "2 of 3 agreed" meant, varied by provider with no way
+   for Pass 4 to know.
+
+   The generalisable half is worth keeping: **a config value that reads as a
+   delta but is sent as an absolute is not checkable by any test that mocks the
+   provider.** Nothing in a 1384-test suite could have caught this.
+
+2. **The guard was incomplete where it mattered.**
+   `MODELS_REJECTING_SAMPLING_PARAMS` lists only Anthropic names, but OpenAI's
+   own reasoning models restrict `temperature` the same way — and CLAUDE.md's
+   example command is `--provider OPENAI --model gpt-5.1`. So the guard built to
+   stop exactly this failure likely never fired for the OpenAI model the docs
+   suggest. Also recorded as needing a live check; moot for ensemble mode now.
+
+3. **Per-candidate provider/model needed no new plumbing.** `_run()` calls
+   `api_initialization(provider_name)` itself and `effort_for` validates against
+   the receiving model, so a heterogeneous roster is correct by construction. The
+   orchestrator already routes 3a/3b/6c to `critic_provider`/`critic_model`. This
+   is what made the multi-model option the *smallest* change rather than the
+   largest, and it is why E1 went the way it did.
+
+4. **§11's rationale is the argument against self-consistency.** §11 exists
+   because "a model checking its own output for errors shares that model's blind
+   spots". That is the identical objection to temperature self-consistency: N
+   samples of one model agree most confidently on that model's systematic errors,
+   which is exactly where a research harness needs agreement to mean something.
+
+5. **Ensemble mode diluted grounding, and mostly demoted.** Measured by calling
+   `score_claim` directly rather than by reading the formula:
+
+   ```
+   grounded factual, critic severity 0.0, no flags:
+     3/3 → HIGH (0.85)   2/3 → MEDIUM   1/3 → MEDIUM (0.75)
+     ensemble OFF → HIGH (0.85)
+   ```
+
+   §10's formula redistributed `0.5/0.35` → `0.4/0.3` to make room for a `0.15`
+   consistency term, so enabling ensemble made grounding count for less — and
+   because the maximum stayed `0.85`, consistency could only ever *cost* a
+   well-grounded claim. A claim Pass 3a grounded and Pass 3b found nothing wrong
+   with dropped a tier because 2 of 3 candidates asserted it.
+
+### The decision that deviates from the roadmap
+
+**§10's revisit note proposed prompt-level framing variation. It was rejected.**
+Framings partition what each candidate looks for, so a claim two of three
+candidates omit is a deterministic artifact of having told them to look
+elsewhere — a *systematic bias* where temperature sampling had noise. Finding 5
+is what makes that concrete rather than theoretical: the penalty is real enough
+to move a tier, so a biased consistency number demotes grounded claims for the
+wrong reason. The score's meaning would also have quietly changed from
+self-consistency to framing-invariance, and its weight was calibrated for
+neither.
+
+So diversity comes from a **roster of different models** (E1), which is finding
+4 applied to this section.
+
+### Decisions E1–E12
+
+| # | Decision |
+|---|---|
+| E1 | Diversity from different MODELS. `config.ENSEMBLE_MODELS`, entries `{provider_name, model}`. Deviates from §10's own note; see above. |
+| E2 | `config.py` only, following `CRITIC_MODEL`. `ensemble_models` is rejected from `settings.json` **by name** — R12's rule applied to a second kind of authority. Turning the mode on can only spend more of the provider the user already chose; a *roster* chooses providers, and a project's `settings.json` beats the user's. §14 already flagged project-tier provider selection as its own grant; this is that grant times N. |
+| E3 | N is `len(ENSEMBLE_MODELS)`, derived. A separately configured count could disagree with the roster that produced the candidates, and a confidence score's denominator must not be able to lie. |
+| E4 | `ensemble_n` stays a known settings key and a pipeline parameter, vestigial, with a WARNING when set. Removing the key would make every existing `settings.json` that sets it **raise** — unknown keys raise by design. |
+| E5 | Refuse on fewer than 2 **distinct** `(provider, model)` pairs. The load-bearing guard: `[X, X, X]` recreates §16's exact defect through the new config. |
+| E6 | API keys are not pre-validated; validation is by connecting. Matches §16's `/model` (warns on an empty `API_KEY` so a local endpoint stays usable) and MCP's per-server posture. |
+| E7 | A failed candidate is named, traced and skipped; the denominator is the number that produced text. One survivor **degrades to the single-candidate path** rather than being scored as an ensemble of one, which would report unanimous corroboration from a single source. All candidates failing is an error. |
+| E8 | Consistency enters as a **disagreement penalty**: `raw -= 0.15 * (1 - consistency)`, factual claims only, subtracted like `ASSUMPTION_FLAG_PENALTY`. Unanimity is free, dissent subtracts. |
+| E9 | Non-factual claims untouched. §10 decided consistency does not *rescue* them from the cap; whether dissent should *penalise* a speculative claim is a different judgment and was never made. |
+| E10 | `score_claim` rounds once, then uses that value for both the tier and the breakdown. |
+| E11 | Candidate labels follow the **survivors**, never roster position. |
+| E12 | No new `Claim` field, no new `PipelineRun` field, no schema change. The denominator goes in the existing `score_breakdown` (§20's precedent, which put tier overrides there to avoid migrating every `vars(c)` site); the roster goes in `run.trace`. |
+
+### E8's shape is why the regression guard now holds by construction
+
+A penalty rather than a re-weighting means the non-ensemble formula is
+*literally* unchanged, so §10's "byte-for-byte identical" acceptance criterion is
+true by construction instead of by arithmetic coincidence. It also collapses four
+formula arms to two, which puts CLAUDE.md's "the cap applies before the
+assumption penalty" invariant — a real bug once — in one place instead of two
+that can drift.
+
+It is also the honest reading of the signal. Candidates asked the same question
+usually answer alike, so agreement is the null hypothesis and disagreement is the
+part that carries information.
+
+### E10: a latent bug found by computing §10's own acceptance criterion
+
+`score_claim` held two scores. The tier compared the unrounded float; the
+breakdown stored `round(raw, 4)`. A claim computing `0.7999999999999999` was
+persisted as `raw_score: 0.8` and tiered MEDIUM — against a `TIER_THRESHOLDS`
+table that says `≥ 0.8` is HIGH. Reachable from ordinary weights, and it is
+exactly what §10's AC produces (two of three candidates agreeing on a grounded
+claim). That AC asserts the `consistency_score` and never the tier, which is why
+nothing caught it.
+
+**Blast radius measured rather than assumed.** Sweeping the whole non-ensemble
+input space — four grounding states × 21 severities × 0–2 flags × both claim
+types — exactly *one* shape changes tier: a speculative claim at severity 0.55
+with one assumption flag, which records `0.3` and now tiers LOW instead of
+UNVERIFIED. That is what the threshold table always specified, and none of the
+three cases in `test_non_ensemble_regression_identical_output` is affected.
+
+Committed first and alone, so the one behaviour change is attributable rather
+than buried in the formula rewrite.
+
+### The mutation that ran green, and why
+
+E9's mutation — leaking the disagreement penalty into the non-factual arm —
+**passed**. `test_ensemble_non_factual_ignores_consistency` asserted its point
+with `asserted_by_candidates=[1, 2, 3]` against `ensemble_n=3`: unanimous, so the
+penalty it was meant to exclude is zero for that input, and leaking it changed
+nothing. The test now sweeps 3/3, 1/3 and 0/3.
+
+This is the sixth section where the same rule earned its keep: **assert the
+premise before the conclusion means anything, and confirm a mutation was applied
+before trusting that it was survived.** One mutation in this section also failed
+to apply at all (shell escaping ate a `\n`), and the "17 passed" that followed
+would have read as a passing mutation had the applied-check not been there.
+
+### Tests
+
+- `tests/test_ensemble_guard.py` rewritten (3 → 15). The file's own docstring
+  records that it used to guard a different thing, and why the reason carried
+  over even though the mechanism did not.
+- `tests/test_orchestrator.py` +7: per-candidate routing, skip-and-trace with the
+  cause surviving into the trace, survivor labelling, degrade-to-single,
+  all-failed, and `ensemble_n` being ignored in favour of the roster. A new
+  `_routing_mock` records `(pass_id, provider_name, model)` — the existing
+  `call_log` records only pass ids, which cannot tell a three-model ensemble from
+  three runs of one model, the entire distinction this section rests on.
+- `tests/test_confidence_scoring.py` +4, including a sweep asserting that
+  re-deriving the tier from the **recorded** score agrees with the tier assigned.
+  Under E10's mutation it reports the original symptom verbatim: *"recorded 0.8
+  tiered MEDIUM, but the thresholds say HIGH"*.
+
+### Verified outside the suite
+
+The three refusal messages as a human reads them. Then a full run through the
+**real** orchestrator, `_run_pass`, `RunAgentLoop._run`, tool registry and
+SQLite persistence — faked only at `call_model_stream` and
+`api_initialization` — with a roster of three where the middle provider raises
+for real:
+
+- Pass 1 dispatched to `ANTHROPIC/claude-opus-5` and `OPENAI/gpt-5.1`, each on
+  its own model.
+- The dead provider named in the trace with its actual cause, and skipped.
+- Survivors labelled 1 and 2 — not 1 and 3 — with `consistency_denominator: 2`.
+- `status='complete'`, report written.
+- An assertion on the faked wire call that **no temperature reached it**.
+
+The one-survivor variant separately: single-candidate input shape, no consistency
+keys in the breakdown at all, `raw_score` 0.85, `status='complete'`.
+
+### Recorded, not fixed
+
+The two live checks (findings 1 and 2). Both are recorded as open regardless of
+outcome, because neither can be settled offline and neither blocks the redesign.
+
+**Routing disagreement to verification instead of to a score.** A claim two of
+three models decline is arguably a signal to *check it* rather than to deduct
+0.05 — but D2 and 6c make zero LLM calls by design, and re-routing them is a
+rearchitecture. Worth a future section, not a change smuggled into this one.
