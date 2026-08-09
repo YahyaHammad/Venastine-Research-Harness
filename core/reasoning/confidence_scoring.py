@@ -26,12 +26,27 @@ CRITIC_WEIGHT_FACTOR = 0.35
 ASSUMPTION_FLAG_PENALTY = 0.15  # per flag
 NON_FACTUAL_SCORE_CAP = 0.65    # claims never grounded can't reach HIGH
 
-# ROADMAP §10 ensemble-mode weights. The ensemble formula redistributes
-# weight to make room for the consistency term (0.15), keeping the same
-# total (0.4 + 0.3 + 0.15 = 0.85 = 0.5 + 0.35).
-CONSISTENCY_WEIGHT_FACTOR = 0.15
-ENSEMBLE_GROUNDING_WEIGHT = 0.4
-ENSEMBLE_CRITIC_WEIGHT = 0.3
+# ROADMAP §10 (revisit, E8). Cross-candidate disagreement is a PENALTY,
+# subtracted like ASSUMPTION_FLAG_PENALTY above -- not a fourth weighted
+# term with the others scaled down to make room for it.
+#
+# §10 shipped the other shape: 0.5/0.35 redistributed to 0.4/0.3 with a
+# 0.15 consistency term added. Two consequences, neither intended:
+#
+#   1. Turning ensemble mode on made GROUNDING count for less. Grounding is
+#      the pipeline's strongest evidence, and which generation strategy
+#      produced a claim is no reason to weigh its verification differently.
+#   2. Because the maximum stayed 0.85, consistency could only ever cost a
+#      well-grounded claim. A claim Pass 3a grounded and Pass 3b found
+#      nothing wrong with dropped from HIGH to MEDIUM at 2-of-3 agreement.
+#
+# As a penalty, unanimity changes nothing and dissent subtracts, which is
+# also the honest reading of the signal: agreement is the null hypothesis
+# (candidates asked the same question usually answer alike), so disagreement
+# is the part that carries information. It makes the non-ensemble formula
+# literally unchanged rather than coincidentally equal, so §10's
+# byte-for-byte regression guard holds by construction.
+DISAGREEMENT_PENALTY_FACTOR = 0.15
 
 TIER_THRESHOLDS = [
     (0.8, "HIGH"),
@@ -44,43 +59,46 @@ def score_claim(claim: Claim, ensemble_n: int = 0) -> tuple[ConfidenceTier, dict
     """Returns (tier, score_breakdown). Pure function -- no side effects,
     easy to unit test claim-by-claim without running any pass.
 
-    When ensemble_n > 0 (ROADMAP §10), a cross-candidate consistency
-    score (fraction of candidates that independently asserted this claim)
-    becomes an additional term in the formula for factual claims.
+    When ensemble_n > 0 (ROADMAP §10), cross-candidate DISAGREEMENT -- the
+    fraction of candidates that did NOT independently assert this claim --
+    is subtracted from a factual claim's score. ensemble_n is the number of
+    candidates that actually produced text, which on a run where a
+    candidate's provider failed is fewer than the configured roster.
     """
     grounding_component = GROUNDING_WEIGHTS.get(claim.grounding_status, 0.0)
     critic_component = 1.0 - claim.critic_severity
     assumption_penalty = ASSUMPTION_FLAG_PENALTY * len(claim.assumption_flags)
 
+    # Zero when ensemble mode is off, which is what makes the formula below
+    # ONE formula rather than a pair that can drift.
+    consistency_score = None
+    disagreement_penalty = 0.0
     if ensemble_n > 0:
         consistency_score = len(claim.asserted_by_candidates) / ensemble_n
-        if claim.type != "factual":
-            capped_critic = min(critic_component, NON_FACTUAL_SCORE_CAP)
-            raw_score = capped_critic - assumption_penalty
-        else:
-            raw_score = (
-                (ENSEMBLE_GROUNDING_WEIGHT * grounding_component)
-                + (ENSEMBLE_CRITIC_WEIGHT * critic_component)
-                + (CONSISTENCY_WEIGHT_FACTOR * consistency_score)
-                - assumption_penalty
-            )
+        disagreement_penalty = DISAGREEMENT_PENALTY_FACTOR * (1.0 - consistency_score)
+
+    if claim.type != "factual":
+        # Cap applies to the critic component BEFORE subtracting the
+        # assumption penalty -- capping the final score instead would let
+        # the cap swallow the penalty whenever the pre-penalty score
+        # already exceeded it, making assumption flags invisible on any
+        # claim that was already clean under critique. Found this via a
+        # direct test case (two speculative claims, one flagged one not,
+        # both landing at the same tier) before it shipped.
+        #
+        # E9: no disagreement penalty here. §10 decided consistency does not
+        # RESCUE a non-factual claim from the cap; whether dissent should
+        # penalise a speculative claim is a separate judgment about what
+        # candidates declining to speculate means, and it was not made.
+        capped_critic = min(critic_component, NON_FACTUAL_SCORE_CAP)
+        raw_score = capped_critic - assumption_penalty
     else:
-        if claim.type != "factual":
-            # Cap applies to the critic component BEFORE subtracting the
-            # assumption penalty -- capping the final score instead would let
-            # the cap swallow the penalty whenever the pre-penalty score
-            # already exceeded it, making assumption flags invisible on any
-            # claim that was already clean under critique. Found this via a
-            # direct test case (two speculative claims, one flagged one not,
-            # both landing at the same tier) before it shipped.
-            capped_critic = min(critic_component, NON_FACTUAL_SCORE_CAP)
-            raw_score = capped_critic - assumption_penalty
-        else:
-            raw_score = (
-                (GROUNDING_WEIGHT_FACTOR * grounding_component)
-                + (CRITIC_WEIGHT_FACTOR * critic_component)
-                - assumption_penalty
-            )
+        raw_score = (
+            (GROUNDING_WEIGHT_FACTOR * grounding_component)
+            + (CRITIC_WEIGHT_FACTOR * critic_component)
+            - assumption_penalty
+            - disagreement_penalty
+        )
 
     # ROUND ONCE, then use that one value for BOTH the tier comparison and
     # the breakdown. These used to be two values: the tier compared the raw
@@ -115,10 +133,14 @@ def score_claim(claim: Claim, ensemble_n: int = 0) -> tuple[ConfidenceTier, dict
         # values drift apart in the first place.
         "raw_score": raw_score,
     }
-    if ensemble_n > 0:
-        breakdown["consistency_score"] = round(
-            len(claim.asserted_by_candidates) / ensemble_n, 4
-        )
+    if consistency_score is not None:
+        breakdown["consistency_score"] = round(consistency_score, 4)
+        breakdown["disagreement_penalty"] = round(disagreement_penalty, 4)
+        # E12: the DENOMINATOR, so a stored claim is self-describing on a run
+        # where the roster shrank. Without it, "consistency 0.5" is
+        # ambiguous between one of two candidates and two of four, and the
+        # roster that produced it lives only in the trace.
+        breakdown["consistency_denominator"] = ensemble_n
     return tier, breakdown
 
 
