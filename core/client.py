@@ -317,10 +317,21 @@ def _sampling_kwargs(provider_name: str, model: str, temperature) -> dict:
     incapable of running against this harness's own default model.
 
     Dropping the parameter is logged at WARNING rather than done silently.
-    The one caller that actually depends on temperature (ensemble mode) is
-    blocked upstream by an explicit guard in orchestrator.py, so this warning
-    should never fire in normal operation -- if it does, something new is
-    relying on sampling variation without knowing it cannot have it.
+
+    THIS FUNCTION NOW HAS NO CALLER THAT DEPENDS ON IT, and the warning is
+    what makes that safe. Ensemble mode used to be the one, and
+    orchestrator.py carried a guard refusing to run it on a model in the set
+    below. §10's revisit replaced sampling variation with a roster of
+    different models, so the guard is gone and nothing in the harness passes
+    a temperature any more.
+
+    Kept rather than removed: `temperature` still threads through
+    core/loop.py, this is still the correct boundary translation for it, and
+    the next caller to want sampling variation needs to be told rather than
+    silently ignored. If this warning ever fires, something new is relying on
+    sampling variation without knowing it cannot have it -- which is exactly
+    how §10 came to be built, documented as working, and incapable of running
+    against this harness's own default model.
     """
     if temperature is None:
         return {}

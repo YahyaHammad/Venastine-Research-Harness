@@ -283,7 +283,7 @@ Precedence for provider and model is CLI flag > `settings.json` > `config.py`.
 
 **Remaining:** nothing in either roadmap. §10's ensemble mode carries a revisit note (its diversity mechanism is a raised `temperature`, which current Anthropic models reject), and TECHNICAL_DEBT.md items 9 and 10 are open.
 
-Run the test suite with `pytest` — 1388 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
+Run the test suite with `pytest` — 1406 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
 
 ## Documentation
 

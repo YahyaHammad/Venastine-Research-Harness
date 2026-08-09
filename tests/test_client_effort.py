@@ -8,9 +8,20 @@ The sampling tests matter more than they look. ROADMAP §10's ensemble mode
 was built, documented as working, and could not execute against this
 harness's own default model, because current Anthropic models reject
 temperature outright. Nothing caught it: ensemble is off by default, so the
-failing request was never made. These pin both halves of the fix — the
-parameter is dropped rather than sent, and the pipeline refuses rather than
-running a diversity mechanism it does not have.
+failing request was never made.
+
+§16 fixed that with two halves — the parameter is dropped rather than sent,
+and the pipeline refused rather than running a diversity mechanism it did not
+have. §10's revisit then removed the mechanism itself: diversity comes from a
+roster of different models, so no caller passes a temperature and the
+pipeline-side refusal moved to the roster (tests/test_ensemble_guard.py).
+
+What is tested here is therefore the surviving half, and it is now a
+BACKSTOP rather than a guard on a live path: _sampling_kwargs is the boundary
+translation the next caller to want sampling variation will meet, and the
+WARNING is how that caller finds out it cannot have it. Deleting these tests
+because "nothing passes temperature any more" would remove the only thing
+standing between a future caller and §10's original silence.
 """
 
 import logging

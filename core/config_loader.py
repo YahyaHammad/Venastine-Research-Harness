@@ -398,6 +398,25 @@ def _validate_settings(data, source: str) -> None:
     if not isinstance(data, dict):
         raise ValueError(f"settings.json at {source} is not a JSON object")
     for key, value in data.items():
+        if key == "ensemble_models":
+            # ROADMAP §10 revisit (E2), and R12's rule applied to a second
+            # kind of authority. Rejected BY NAME rather than as an unknown
+            # key, because the generic message reads as an oversight to be
+            # fixed by adding support for it.
+            #
+            # Turning ensemble mode on can only spend more of the provider
+            # the user already chose. A ROSTER chooses providers -- so a
+            # project's settings.json, which beats the user's, could point N
+            # research passes at endpoints the user never configured for this
+            # work and multiply the run's cost by the length of a list it
+            # supplied. §14 already flagged project-tier provider selection as
+            # a distinct grant; this is that grant times N.
+            raise ValueError(
+                f"settings.json at {source}: ensemble_models is deliberately "
+                f"not supported -- a roster chooses which providers N research "
+                f"passes call, and a project's settings.json beats the "
+                f"user's. Set config.ENSEMBLE_MODELS in config.py instead "
+                f"(same posture as CRITIC_MODEL).")
         if key not in _KNOWN_SETTINGS:
             raise ValueError(f"settings.json at {source}: unknown key {key!r}")
         expected = _KNOWN_SETTINGS[key]

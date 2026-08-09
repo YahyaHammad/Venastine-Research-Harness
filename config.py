@@ -77,19 +77,47 @@ RESEARCH_PASS_TOKEN_BUDGET = 1_000_000
 #   (none remaining -- ensemble_mode/ensemble_n built in ROADMAP §10,
 #    critic_model built in ROADMAP §11)
 
-# --- Ensemble mode (ROADMAP §10) ---
-# Run Pass 1 N times at higher temperature for diversity, then extract
-# the union of claims across candidates with a cross-candidate consistency
-# score feeding Pass 4's formula. Off by default.
+# --- Ensemble mode (ROADMAP §10, as redesigned by its revisit) ---
+# Run Pass 1 once per entry below, then extract the union of claims across
+# candidates and subtract a disagreement penalty in Pass 4. Off by default.
 #
-# WARNING: the temperature-based diversity mechanism below does not work on
-# current Anthropic models (see MODELS_REJECTING_SAMPLING_PARAMS). The
-# orchestrator refuses to run ensemble mode on such a model rather than
-# spending ensemble_n x the tokens on N identical candidates. Redesigning
-# the diversity mechanism is a deferred §10 revisit.
+# DIVERSITY COMES FROM DIFFERENT MODELS, NOT DIFFERENT SAMPLING (E1). §10
+# originally raised `temperature` on N runs of one model. That could not work
+# on current Anthropic models, which reject sampling parameters outright (see
+# MODELS_REJECTING_SAMPLING_PARAMS), so the section was built, documented as
+# working, and could not execute against this harness's own default model.
+# ENSEMBLE_TEMPERATURE is deleted rather than repaired: it was an ABSOLUTE
+# value being used as though it were a raise, so what "1.0" meant differed
+# per provider, and so did how much diversity a run actually got.
+#
+# The deeper reason is §11's, verbatim: "a model checking its own output for
+# errors shares that model's blind spots." N samples of one model agree most
+# confidently on that model's systematic errors, which is exactly where a
+# research harness needs agreement to mean something. Different models do
+# not share blind spots, so their agreement is real evidence.
+#
+# N is len(ENSEMBLE_MODELS) -- derived, never configured separately (E3). The
+# denominator of a confidence score must not be able to disagree with the
+# roster that produced it.
+#
+# config.py ONLY, deliberately -- there is no settings.json key for this,
+# following CRITIC_MODEL (E2). Trusting a cloned repo already lets it pick
+# the provider and multiply pipeline cost; a project-tier list of N providers
+# is that same grant multiplied by N.
+#
+# Fewer than two DISTINCT (provider_name, model) pairs is refused, not
+# tolerated: one model cannot disagree with itself, so every claim would
+# score maximal consistency and Pass 4 would read that as confidence. That
+# is the original defect, and repeating the same entry N times is the way to
+# recreate it through this config.
 ENSEMBLE_MODE = False
-ENSEMBLE_N = 3
-ENSEMBLE_TEMPERATURE = 1.0
+ENSEMBLE_MODELS: list[dict] | None = None
+# Example:
+# ENSEMBLE_MODELS = [
+#     {"provider_name": "ANTHROPIC", "model": "claude-opus-5"},
+#     {"provider_name": "OPENAI", "model": "gpt-5.1"},
+#     {"provider_name": "GOOGLE", "model": "gemini-2.5-pro"},
+# ]
 
 # --- Sampling-parameter support (ROADMAP_v2 §16 prerequisite) ---
 # Models that reject temperature/top_p/top_k. Current Anthropic models
