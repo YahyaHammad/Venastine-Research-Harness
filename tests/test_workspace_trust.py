@@ -218,3 +218,136 @@ def test_grant_is_written_atomically(tmp_path, _redirect_trust_store,
 
     assert path.read_text(encoding="utf-8") == before
     assert workspace_trust.is_trusted(str(first)) is True
+
+
+# ---------------------------------------------------------------------------
+# ---- Correction (1): descent order does not reach the digest (issue #22) --
+# ---------------------------------------------------------------------------
+#
+# `_content_hash` and `content_files` both call `dirs.sort()` inside their
+# os.walk loop, and `_content_hash`'s docstring argues for it explicitly:
+#
+#     `os.walk` yields subdirectories in filesystem order, not sorted order.
+#     Sorting `files` alone is not enough -- `dirs` must be sorted IN PLACE so
+#     os.walk itself descends deterministically, or the same unchanged
+#     .venastine/ can hash differently between runs and re-prompt for trust
+#     that was already granted.
+#
+# Replacing that line with `pass` left all 1406 tests green. Correction (2)
+# in the same docstring IS pinned (test_hash_sees_paths_not_just_content), so
+# this was one unpinned guard inside an otherwise covered function.
+#
+# The consequence is not a trust bypass -- it is a spurious re-prompt. That
+# still matters, because repeated unexplained trust prompts are exactly what
+# trains someone to approve them without reading, which is the failure the
+# verbatim settings.json/mcp.json display in the prompt exists to prevent.
+
+
+def _walk_in(order):
+    """Build an `os.walk` stand-in that hands the caller subdirectories in a
+    CHOSEN order and then descends in whatever order the caller left them.
+
+    Two things this has to get right, and the first draft of it got neither.
+
+    1. FIDELITY. Real `os.walk` re-reads `dirs` after yielding, which is the
+       only reason an in-place `dirs.sort()` is observable at all. A stand-in
+       yielding a fixed sequence of tuples would make every test below
+       vacuous, because the sort would have nothing to influence.
+
+    2. BOTH SIDES MUST BE CONTROLLED. The first version compared a "reversed"
+       walk against the REAL one -- and on this filesystem `.venastine/`
+       enumerates as skills, agents, which is already reverse-alphabetical.
+       The two orders coincided, the comparison was of a list against itself,
+       and removing `dirs.sort()` from production left it green. So the two
+       walks compared here are both synthetic and differ by construction.
+    """
+    def walk(top):
+        entries = sorted(os.scandir(top), key=lambda e: e.name)
+        dirs = [e.name for e in entries if e.is_dir()]
+        files = [e.name for e in entries if not e.is_dir()]
+        dirs.sort(reverse=(order == "desc"))
+        yield top, dirs, files
+        for name in list(dirs):          # the order the CALLER left it in
+            yield from walk(os.path.join(top, name))
+    return walk
+
+
+@pytest.fixture
+def _two_subdirs(tmp_path):
+    """Two sibling subdirectories, each with a file, so descent order changes
+    the order paths enter the hash. One subdirectory cannot show this -- and
+    the common .venastine/ layout (agents/, skills/) has two."""
+    return _make_project(tmp_path, {
+        "agents/reviewer.md": "agent body",
+        "skills/crypto.md": "skill body",
+        "settings.json": "{}",
+    })
+
+
+def _digest_with(walk, project, monkeypatch):
+    monkeypatch.setattr(workspace_trust.os, "walk", walk)
+    try:
+        return workspace_trust._content_hash(str(project))
+    finally:
+        monkeypatch.undo()
+
+
+def test_descent_order_does_not_change_the_digest(_two_subdirs, monkeypatch):
+    """Two walks over the same tree, differing only in the order they hand
+    over subdirectories, must produce the same digest. Removing
+    `dirs.sort()` from `_content_hash` fails this."""
+    ascending = _digest_with(_walk_in("asc"), _two_subdirs, monkeypatch)
+    descending = _digest_with(_walk_in("desc"), _two_subdirs, monkeypatch)
+
+    assert ascending == descending, (
+        "The .venastine/ content hash depends on the order os.walk happens to "
+        "descend into subdirectories. The same unchanged project then hashes "
+        "differently between runs and re-prompts for trust that was already "
+        "granted -- correction (1) in _content_hash's docstring.")
+
+
+def test_the_two_walk_doubles_really_do_differ(_two_subdirs):
+    """Guards the guard. If the two stand-ins ever stopped differing -- or
+    stopped honouring the caller's in-place sort -- the test above would pass
+    for the wrong reason and silently protect nothing. That is not
+    hypothetical: it is what the first version of this test did."""
+    root = workspace_trust.venastine_dir(str(_two_subdirs))
+
+    asc = [os.path.basename(d) for d, _, _ in _walk_in("asc")(root)]
+    desc = [os.path.basename(d) for d, _, _ in _walk_in("desc")(root)]
+    assert asc[1:] == ["agents", "skills"]
+    assert desc[1:] == ["skills", "agents"]
+
+    # ... and that production's sort is what collapses the difference.
+    sorted_desc = []
+    for dirpath, dirs, _files in _walk_in("desc")(root):
+        dirs.sort()                       # what the production code does
+        sorted_desc.append(os.path.basename(dirpath))
+    assert sorted_desc == asc
+
+
+def test_descent_order_does_not_change_the_trust_prompt_listing(
+        _two_subdirs, monkeypatch):
+    """`content_files` carries the identical `dirs.sort()`, and it is what the
+    D17 trust prompt lists. CLAUDE.md's rule is to grep every other call site
+    sharing a root cause; this is that site.
+
+    A reordered listing is cosmetic where a reordered digest is not -- but it
+    is the same one-line guard, and it is the text a user reads to decide
+    whether to trust a project.
+    """
+    def listing(walk):
+        monkeypatch.setattr(workspace_trust.os, "walk", walk)
+        try:
+            return workspace_trust.content_files(str(_two_subdirs))
+        finally:
+            monkeypatch.undo()
+
+    ascending = listing(_walk_in("asc"))
+    assert listing(_walk_in("desc")) == ascending
+
+    # Not `sorted(...)`. The listing is sorted WITHIN each directory and
+    # walk-ordered ACROSS them, so the root's own files come first and
+    # "settings.json" precedes "agents/reviewer.md" -- lexicographically
+    # backwards, and correct. What must be stable is the directory order.
+    assert ascending == ["settings.json", "agents/reviewer.md", "skills/crypto.md"]
