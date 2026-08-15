@@ -718,8 +718,17 @@ class RunAgentLoop:
                             "%s returned a malformed notice; dropping it: %r",
                             call.name, notice)
 
-                yield LoopEvent(tool_result={"id": call.id, "result": result})
+                # Persist BEFORE emitting (#42). A generator only advances
+                # while someone iterates it, so emitting first made the row
+                # depend on a consumer continuing to read -- and an
+                # abandoned generator left the `tool_use` D20 already wrote
+                # with no matching `tool_result`, which is M4's pairing
+                # broken from the other side and an unresumable thread.
+                # Same rule §22 gives _Progress.checkpoint() for trace
+                # lines. The event carries nothing the persist needs, so
+                # the order is free.
                 memory.add_tool_result(call.id, result)
+                yield LoopEvent(tool_result={"id": call.id, "result": result})
 
             # The mid-turn valve (M3). A single turn can add far more than
             # any buffer covers -- MAX_READ_CHARS alone is ~12.5k tokens

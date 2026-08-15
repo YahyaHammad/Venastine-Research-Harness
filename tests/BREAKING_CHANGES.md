@@ -1009,3 +1009,250 @@ the collected total against the number quoted in `README.md`, `CLAUDE.md` and
 `ARCHITECTURE.md`. It **skips** on a narrowed invocation, so a green
 `pytest tests/test_ensemble_guard.py` says nothing about it. Run the full suite
 before committing, and update all three quotes together.
+
+---
+
+## §16 — the first fix batch from Audit Pass 1 (2026-08-15)
+
+Nine audit findings, all closed by adding tests rather than changing production code. Every
+row below was a mutation that left **all 1406 tests green** before this batch; each is now
+pinned by the named test. If you are reverting one of these tests, the mutation in its row is
+what stops being caught.
+
+**These tests were each driven against their own mutation before landing.** That is the
+standard the batch was held to, and two of them failed it on the first attempt — see the two
+"standing" notes at the end, which are the more useful half of this section.
+
+### New files
+
+| File | Tests | What it pins |
+|---|---|---|
+| `test_fake_storage_mirror.py` | 16 | `FakeStorage._reconstruct` / `_split_at` against `storage._to_neutral` / `storage._split_at` (#123) |
+| `test_prompt_tier_boundary.py` | 11 | K6 as a rule: a pass prompt is invariant under every session tier (#146) |
+| `test_sdk_conformance.py` | 4 | the real pinned SDKs, offline — google-genai fields, the thinking_budget pin note, httpx's redirect default, and #35 as a strict xfail (#143) |
+| `test_fetch_url.py` | 18 | `fetch_url`'s whole surface, which no test had ever executed (#120, #58) |
+
+### What breaks them
+
+| Change | Symptom | Why the guard exists |
+|---|---|---|
+| Change `storage._to_neutral`'s reconstruction without changing `FakeStorage._reconstruct` identically (or vice versa) | `test_fake_storage_mirror.py::TestReconstructionMirrorsProduction` fails, naming the role that diverged | CLAUDE.md's "verify against production, not the test double" was a convention nothing checked. Both are pure functions, so the check is direct |
+| Make `_split_at` return `len(rows)` for a watermark it cannot find, on **either** side | `test_an_unknown_watermark_is_zero_on_both_sides` | The 0 is what shows the whole thread rather than hiding a prefix on the strength of an id that could not be resolved |
+| `return Claim(**raw)` in `_claim_from_json` | 8 tests in `test_orchestrator.py`, including the end-to-end path — the canned Pass 2 payload carries a `confidence` key for exactly this | Nothing outside the allowlist appeared in any canned payload, so the filter was never exercised |
+| Widen or narrow `_CLAIM_INPUT_FIELDS` | `test_every_allowlisted_field_still_arrives`'s exact-contents assertion | The previous worked example (`asserted_by_candidates`) was moved INTO the allowlist by §10's revisit, so two documents described filtering with a field that was no longer filtered |
+| Remove `dirs.sort()` from `_content_hash` | `test_descent_order_does_not_change_the_digest` | An unchanged `.venastine/` hashing differently re-prompts for trust already granted, and repeated unexplained trust prompts are what train someone to approve without reading |
+| Remove `dirs.sort()` from `content_files` | `test_descent_order_does_not_change_the_trust_prompt_listing` + `test_content_files_sorted_and_relative` | Same one-line guard at the site that produces the text a user reads to decide whether to trust a project |
+| Append any tier inside `prompts.system_prompts.with_catalogs()` | `test_no_tier_canary_reaches_any_pass_prompt[<tier>]` names the tier; `test_with_catalogs_itself_carries_no_session_tier` names the function | K6/M13/M19/J11 each pinned ONE tier. Appending the project's `CONTEXT.md` inside reached all ten research passes with 1406 green |
+| Replace `list_threads`' SQL `WHERE` with a Python filter | `test_list_threads_filters_by_kind_in_sql` — it now reads the statements the driver executes, not the set returned | The returned set is identical either way, so the test was named for a mechanism it could not observe |
+| Delete `self._cancel_manager()` from `connect_all`'s except block | `test_connect_timeout_cancels_the_manager_task` — via `_done`, which the except block does not touch | `_task is None` and `clients == {}` are set by the other two statements; they record the release, they do not cause it |
+| Remove `fetch_url`'s scheme check or its `is_domain_blocked` call | 7 and 1 tests in `test_fetch_url.py`, each asserting the request never left the process | Both are live and ungated: advertised in plain chat and in all ten research passes |
+| Drop the `+ os.sep` from `_is_within_workspace` | `TestSiblingDirectoryPrefix` | `/workspace-evil` is judged inside `/workspace`, turning a PROMPT into an auto-approval. Dormant behind the global deny, which is why it needs a test |
+| Narrow `_is_readable_doc`'s `.env` prefix test to `==`, or its any-segment check to `parts[0]` | `test_read_refuses_env_files_with_a_suffix` / `test_read_refuses_a_denied_segment_at_any_depth` | The pre-existing tests used `.env` exactly and put `.venastine` first, so both narrowings kept them green |
+| Fix #35 or #53 | The strict `xfail` for each turns into `[XPASS(strict)] … FAILED` | Deliberate. A strict xfail tells whoever fixes the bug to delete the marker, instead of leaving a green xpass nobody reads |
+
+### Standing: a test that fails for the wrong reason is indistinguishable from one that works
+
+Two of this batch's tests passed their first driving for reasons unrelated to what they were
+named for. Both were found only by asking *why* the result looked right.
+
+- **`test_sdk_conformance.py`'s #35 arm** reported `xfail` because real `anthropic` does
+  `from httpx import URL, Proxy, Timeout, …` at import time, and `real_package("anthropic")`
+  left the fake `httpx` in place — so it died with `ImportError` before reaching
+  `ModelCapabilities`. **Reaching a real package past a fake means unfaking its dependencies
+  too.** Fixed by `real_package("anthropic", "httpx")`.
+- **`test_workspace_trust.py`'s first descent-order test** compared a "reversed" walk against
+  the real one — and this filesystem enumerates `.venastine/` as `skills, agents`, which is
+  already reverse-alphabetical. Two identical orders, compared. **When a test's input is
+  "whatever the environment happens to do", control BOTH sides.** Both walks are now
+  synthetic, and `test_the_two_walk_doubles_really_do_differ` asserts they differ.
+
+The general form, which `test_pilot_wait.py` already carries for the pilot helpers: when a
+test's whole job is to fail on a specific defect, the defect has to be applied and the failure
+read — and the *reason* for the failure checked, not just its presence.
+
+### Standing: "collect problems, assert none" passes loudest when it sees nothing
+
+`test_sdk_conformance.py` has two checks of that shape, and both now assert they can see their
+subject first — the AST walk found ≥6 classes and ≥10 keywords; `ThinkingConfig` exposes some
+`model_fields` at all. An empty collection satisfies "no problems" and an absent field
+satisfies `not in`, so either would have gone quietly vacuous at exactly the moment the thing
+it inspects stopped being readable.
+
+### Standing: the fake `httpx` now carries state
+
+It gained `_queued` and `_requests` for #120, driven through `tests/conftest.py`'s `http`
+fixture, which clears both before and after every test. Reaching into `httpx._queued` directly
+from a test leaks a queued response into the next one. The default answer with an empty queue
+is unchanged (`_Response(text="", url=url)`), so every pre-existing caller is unaffected.
+
+---
+
+## §17 — the second fix batch from Audit Pass 1 (2026-08-15)
+
+The first batch added tests only. **This one changes production code** — three files, closing
+two S0s and two S1s. Every fix was driven against its own mutation before being called done;
+the mutation driver is recorded per row below.
+
+| Change | Issues | Files |
+|---|---|---|
+| Persist the tool-result row before emitting its event | #42 | `core/loop.py` |
+| Drop empty assistant turns above the provider branch split | #13, #36 | `core/client.py` |
+| Treat a symlinked project tier root as absent | #18 | `core/config_loader.py` |
+
+Suite 1468 → **1488**.
+
+### What breaks these
+
+| If production code changes like this… | …this fails | Why it matters |
+|---|---|---|
+| Move `memory.add_tool_result()` back after the `yield` | `test_an_abandoned_generator_still_persisted_the_tool_result` + `test_the_assistant_tool_use_was_persisted_too` | D20 already wrote the `tool_use`; the orphaned pair is an unresumable thread, and the failure surfaces on a later resume as a provider error naming none of this |
+| Move `tool_call_start` after its dispatch | `test_the_tool_call_start_event_still_precedes_the_dispatch` | The *correct* ordering, pinned so #42's fix is not over-applied. There is nothing to persist at that point |
+| Delete the `_is_empty_assistant_turn` pre-filter | 6 tests, including `test_messages_google_empty_assistant_turn_skipped`, which predates the fix | Google's local guard is gone, so the pre-existing test now holds the shared rule — that is the point of moving it |
+| Key `_is_empty_assistant_turn` on empty text alone | 6 tests, including the pre-existing `test_messages_openai_assistant_with_null_text` and two Google tool-result tests | A tool-call-only turn has no text. Dropping it takes the `tool_use` with it and orphans the `tool_result` — #42's defect, reached from the translation side |
+| Re-add a local empty-turn guard to any one branch | Nothing, and that is the hazard | Two rules that can disagree is the state #13/#36 were filed from. `test_no_provider_emits_a_message_for_an_empty_assistant_turn` is parametrised over all three so a fourth branch inherits the property |
+| Drop `os.path.islink` from `_tier_dirs`' project entry | 3 tests in `test_config_loader.py` + `test_the_loader_reads_no_file_the_trust_listing_omits` | Project content loads unhashed, unlisted, and mutable after one grant — and the payload is system-prompt instructions |
+| Apply that symlink check to the harness or user tier too | `test_a_symlinked_user_tier_root_still_loads` | Nothing hashes those directories, so it is not a trust question; symlinking `~/.config/venastine/` into a dotfiles repo is legitimate |
+| Make `os.walk` follow links in `workspace_trust` | `test_a_symlinked_tier_root_is_invisible_to_both_the_hash_and_the_listing` | Not a regression — a prompt. That test pins the *current* asymmetry, so following links becomes a deliberate change made with the cycle and realpath guards it needs, and #18's loader guard can then be reconsidered |
+
+### Standing: an invariant of the form `A ⊆ B` decays into a tautology
+
+`test_the_loader_reads_no_file_the_trust_listing_omits` asserts `read <= listed`, which is
+trivially true when `read` is empty — so it would pass loudest if `_md_files` stopped finding
+anything at all. `test_that_invariant_can_actually_fail` is the mutation run as a test: it
+rebuilds the pre-#18 unguarded path, asserts it finds something, and asserts that something
+escapes the listing. Delete it and the invariant above still passes forever.
+
+This is the same failure mode as the previous batch's "collect problems, assert none", and the
+third shape of it recorded here. Subset, emptiness and non-membership assertions are all
+satisfied by an absent subject.
+
+### Standing: the producer-side fix is what closes the class
+
+#13 was filed against the OpenAI branch and was live — it killed a real Pass 2. Applying its
+suggested fix exactly as written would have left **the default provider** dying differently
+(#36), and Google correct only by accident of which provider was under debug when the hazard
+was first met. One filter above the split fixed all three and pre-fixes the fourth. That is
+CLAUDE.md's *fix at the producer, not the consumer* rule meeting a case where the consumers
+were three provider branches rather than two call sites.
+
+---
+
+## §18 — #52, the S0 in the math tools (2026-08-15)
+
+`safe_parse`'s stated guarantee — "`__builtins__` blanked, injection-tested" — was false in both
+halves, and arbitrary code executed through the real `registry.dispatch` on six tools that are
+advertised and ungated in every research pass. Replaced with an **allowlist at the token
+boundary**: `_reject_unsafe_names`, first in `_TRANSFORMATIONS`.
+
+Suite 1488 → **1576**. The single injection test became 26 payloads, a 37-case legitimacy
+battery, and four closure tests.
+
+### The token filter was wrong, and the bypass is the point
+
+The first version of this fix rejected dunder and non-allowlisted NAME **tokens**. It was
+bypassed within the hour of shipping:
+
+```
+f"{sympify('__import__(chr(111)+chr(115)).getpid()')}"   ->  the pid, and base64 imported
+"{0.__class__.__bases__}".format(pi)                     ->  dunder attributes
+sin(pi).func.mro()                                       ->  classes, no underscore anywhere
+```
+
+On Python 3.11 an f-string is a **single `STRING` token** (PEP 701 split it into `FSTRING_*`
+tokens only in 3.12), so a NAME filter cannot see inside one — while the code within evaluates
+with `_SAFE_GLOBALS` in scope, `sympify` included. **A token stream is not the language**, and
+which constructs the tokenizer hides is a property of the Python version, not of this code.
+
+The guard is now `_validate_ast`: `parse_expr` split into `stringify_expr` → *check* →
+`eval_expr`, validating the AST of exactly the string that will be evaluated against a closed
+allowlist of 39 node types out of Python's 118.
+
+### What breaks it
+
+| If production code changes like this… | …this fails | Why it matters |
+|---|---|---|
+| Add `ast.Attribute` to `_ALLOWED_NODES` | `test_the_dangerous_node_types_are_refused[Attribute]` + 6 payloads | Attribute traversal IS mechanism 2, and is also how `str.format`, `.mro()` and every bound-method route is reached |
+| Add `ast.JoinedStr` / `FormattedValue` | same test, + 4 payloads | The bypass that killed the token filter |
+| Add `Lambda`, a comprehension, `Starred`, `Dict`, `Set`, `NamedExpr` | same test, parametrised per node | Each is a construct that would have to be argued harmless instead of refused |
+| Widen `_ALLOWED_NODES` generally | `test_the_node_allowlist_is_closed_and_small` | Closure is the property. Coverage is not |
+| Allowlist any evaluating name | `test_no_permitted_name_can_evaluate_a_string` | Mechanism 1 |
+| Allowlist a module name | `test_no_module_object_is_permitted` | It caught `evalf`, which is a **module** in `_SAFE_GLOBALS`, not the method — allowlisted by mistake |
+| Go back to `parse_expr()` | 30+ payloads | The check only exists because the two halves are called separately |
+| Narrow `_ALLOWED_NAMES` to nothing | 34 legitimacy tests | **Every attack test still passes.** The legitimacy battery is the only thing that sees this |
+
+That last row is why the legitimacy battery exists, and it is #47's lesson applied: an allowlist
+needs a test asserting that real producers satisfy it.
+
+### Mechanism 4: a string literal reaching a function that sympifies it
+
+Found by **auditing the allowlist's own source** for calls to `eval`/`exec`/`sympify`, not by
+guessing at payloads. Seven permitted names do it — `factor`, `cancel`, `together`, `apart`,
+`roots`, `degree`, `nsolve` — and a string literal handed to any of them re-enters the parser
+with SymPy's default globals, real builtins included:
+
+```
+factor(" __import__(chr(111)+chr(115)).getpid() ")   ->  the pid
+```
+
+The leading space is the whole trick: the guard's dunder tripwire matched *prefix and suffix*,
+so one space walked past it. Prefix-matching a payload is the same category of mistake as
+`chr(111)+chr(115)` defeating a search for the literal `"os"`.
+
+`stringify_expr` gives a string argument to exactly two calls — `Symbol('x')` and
+`Float('1.5')` — so `_STRING_ARG_CONSTRUCTORS` licenses those two positions and every other
+string literal is refused. **This closes the class without knowing which functions sympify**,
+which is the difference between a closure and a filter. Adding a name to
+`_STRING_ARG_CONSTRUCTORS` means arguing that the constructor does not sympify what it is
+handed.
+
+### Standing: assert the GUARD refused, not that something raised
+
+An earlier version of the battery asserted `pytest.raises(MathParseError)`. Under a
+guard-runs-last mutation **all 68 tests stayed green** — `external.gmpy.os` dies with an
+`AttributeError` anyway, `split_symbols` having already shredded `external` into
+`e*x*t*e*r*n*a*l`. The payload was refused; the guard was not what refused it. The battery now
+asserts the guard's own message.
+
+Third time this session that the "fails for the wrong reason" rule has caught something, and the
+first time it caught something in a test written *after* the rule was recorded.
+
+### The output backstop, and why it is a deny rather than an allowlist
+
+`_reject_escaped_value` is the only check on what `safe_parse` RETURNS. It refuses a module, a
+plain function or method, or a class from outside SymPy, recursing through returned containers
+(`solve` returns a list, `roots` a dict, so an escaped object can arrive nested).
+
+It is deliberately a **deny of the escape signature**, not an allowlist of return types: its job
+is to catch an escape nobody anticipated, and an allowlist can only catch escapes whose shape was
+already imagined — which four of this issue's five mechanisms were not.
+
+| If production code changes like this… | …this fails |
+|---|---|
+| Drop the `_reject_escaped_value(result)` call | `test_the_backstop_is_actually_wired_into_safe_parse` |
+| Let modules through | `test_the_backstop_refuses_a_module` |
+| Let any class through | `test_the_backstop_refuses_a_non_sympy_class` |
+| Stop recursing into containers | `test_the_backstop_looks_inside_containers` |
+| Widen `_STRING_ARG_CONSTRUCTORS` | 11 payload tests |
+| Drop the string rule | 10 payload tests |
+
+`test_the_backstop_allows_every_legitimate_return_shape` is the discriminator: a backstop that
+refuses everything passes all four of the negative tests above.
+
+### 117 of 213: the allowlist is not "just maths"
+
+The source audit that found mechanism 4 could read **15** of the 229 resolvable allowlisted
+names; the other 214 are C extensions. The blackbox probe covers all of them, and the answer is
+**117 evaluate a string handed to them** — not 7.
+
+That number is the argument for the string rule being load-bearing rather than defence in depth.
+`Symbol` and `Float`, the two licensed positions, are not among the 117, and
+`test_the_licensed_string_constructors_do_not_evaluate_their_argument` is the obligation the
+licensing decision rests on. `test_the_probe_can_detect_an_evaluator` guards it, because that
+test asserts a negative and would pass perfectly if the probe stopped working.
+
+### Not claimed
+
+The battery covers the two filed mechanisms and 14 payloads, and the allowlist fails closed. It
+is **not** a proof that no escape exists: the 231 permitted callables were not individually
+audited for evaluation behaviour. #57 (no wall-clock bound on math tools) is untouched and
+remains open — a token filter bounds what can be *named*, not how long it runs.
