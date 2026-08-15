@@ -1144,44 +1144,55 @@ halves, and arbitrary code executed through the real `registry.dispatch` on six 
 advertised and ungated in every research pass. Replaced with an **allowlist at the token
 boundary**: `_reject_unsafe_names`, first in `_TRANSFORMATIONS`.
 
-Suite 1488 → **1542**. The single injection test became 14 payloads plus a 37-case legitimacy
-battery.
+Suite 1488 → **1576**. The single injection test became 26 payloads, a 37-case legitimacy
+battery, and four closure tests.
+
+### The token filter was wrong, and the bypass is the point
+
+The first version of this fix rejected dunder and non-allowlisted NAME **tokens**. It was
+bypassed within the hour of shipping:
+
+```
+f"{sympify('__import__(chr(111)+chr(115)).getpid()')}"   ->  the pid, and base64 imported
+"{0.__class__.__bases__}".format(pi)                     ->  dunder attributes
+sin(pi).func.mro()                                       ->  classes, no underscore anywhere
+```
+
+On Python 3.11 an f-string is a **single `STRING` token** (PEP 701 split it into `FSTRING_*`
+tokens only in 3.12), so a NAME filter cannot see inside one — while the code within evaluates
+with `_SAFE_GLOBALS` in scope, `sympify` included. **A token stream is not the language**, and
+which constructs the tokenizer hides is a property of the Python version, not of this code.
+
+The guard is now `_validate_ast`: `parse_expr` split into `stringify_expr` → *check* →
+`eval_expr`, validating the AST of exactly the string that will be evaluated against a closed
+allowlist of 39 node types out of Python's 118.
 
 ### What breaks it
 
 | If production code changes like this… | …this fails | Why it matters |
 |---|---|---|
-| Drop `_reject_unsafe_names` from `_TRANSFORMATIONS` | 15 tests | Both #52 mechanisms reopen |
-| Drop the allowlist rule, keep the dunder rule | 12 | Stops attribute traversal, misses parser re-entry — the shape of a partial fix |
-| Drop the dunder rule, keep the allowlist | 3 | The mirror image. `().__class__…` needs no name lookup |
-| Move the guard to the END of the pipeline | 2 (the submodule routes) | See the standing note below — this is the subtle one |
-| Widen `_ALLOWED_NAMES` to everything | 12 | The "widen it until the complaints stop" failure mode |
-| Narrow `_ALLOWED_NAMES` to nothing | 34 | The opposite failure, which **every attack test still passes**. The legitimacy battery is the only thing that sees it |
+| Add `ast.Attribute` to `_ALLOWED_NODES` | `test_the_dangerous_node_types_are_refused[Attribute]` + 6 payloads | Attribute traversal IS mechanism 2, and is also how `str.format`, `.mro()` and every bound-method route is reached |
+| Add `ast.JoinedStr` / `FormattedValue` | same test, + 4 payloads | The bypass that killed the token filter |
+| Add `Lambda`, a comprehension, `Starred`, `Dict`, `Set`, `NamedExpr` | same test, parametrised per node | Each is a construct that would have to be argued harmless instead of refused |
+| Widen `_ALLOWED_NODES` generally | `test_the_node_allowlist_is_closed_and_small` | Closure is the property. Coverage is not |
+| Allowlist any evaluating name | `test_no_permitted_name_can_evaluate_a_string` | Mechanism 1 |
+| Allowlist a module name | `test_no_module_object_is_permitted` | It caught `evalf`, which is a **module** in `_SAFE_GLOBALS`, not the method — allowlisted by mistake |
+| Go back to `parse_expr()` | 30+ payloads | The check only exists because the two halves are called separately |
+| Narrow `_ALLOWED_NAMES` to nothing | 34 legitimacy tests | **Every attack test still passes.** The legitimacy battery is the only thing that sees this |
 
-That last row is the reason the legitimacy battery exists, and it is #47's lesson applied: an
-allowlist needs a test asserting that real producers satisfy it.
+That last row is why the legitimacy battery exists, and it is #47's lesson applied: an allowlist
+needs a test asserting that real producers satisfy it.
 
 ### Standing: assert the GUARD refused, not that something raised
 
-The first version of the battery asserted `pytest.raises(MathParseError)`. Under the
-guard-runs-last mutation **all 68 tests stayed green** — because `external.gmpy.os` dies with an
+An earlier version of the battery asserted `pytest.raises(MathParseError)`. Under a
+guard-runs-last mutation **all 68 tests stayed green** — `external.gmpy.os` dies with an
 `AttributeError` anyway, `split_symbols` having already shredded `external` into
-`e*x*t*e*r*n*a*l`. The payload was refused; the guard was not what refused it.
+`e*x*t*e*r*n*a*l`. The payload was refused; the guard was not what refused it. The battery now
+asserts the guard's own message.
 
-So the battery asserts the guard's own message. This is the third time this session that the
-"fails for the wrong reason" rule has caught something, and the first time it caught it in a
-test written *after* the rule was recorded — which is the argument for writing these notes down
-rather than remembering them.
-
-### Two things about `safe_parse` that are true and easy to misread
-
-- **`_SAFE_GLOBALS` still contains 26 submodule objects** with plain-attribute routes to `os`,
-  `subprocess`, `sys` and `builtins`. They are unreachable *today* only because `auto_symbol`
-  rewrites non-callable names into Symbols — an undocumented SymPy implementation detail. The
-  allowlist names them directly so nothing depends on it. Do not "simplify" `_SAFE_GLOBALS`
-  construction on the assumption that modules are harmless.
-- **The blanked `__builtins__` is kept**, and is not what makes this safe. Removing it would
-  re-open the one payload the original test covered, for no gain.
+Third time this session that the "fails for the wrong reason" rule has caught something, and the
+first time it caught something in a test written *after* the rule was recorded.
 
 ### Not claimed
 

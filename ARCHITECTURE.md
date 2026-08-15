@@ -47,7 +47,7 @@ Venastine Research Harness/
 ├── pytest.ini                      # testpaths=tests, --strict-markers
 ├── DEVLOG.md                       # implementation notes for built ROADMAP sections -- see §0
 │
-├── tests/                          # 1542 tests, all offline, ~25s (first run ~7s for matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
+├── tests/                          # 1576 tests, all offline, ~25s (first run ~7s for matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
 │   ├── conftest.py                 # fixtures: make_model_response, make_stream_from_response, make_stream_sequence, FakeStorage, ...
 │   ├── BREAKING_CHANGES.md         # what-breaks-it / symptom / fix per area
 │   ├── test_cli.py                 # 20 tests -- ROADMAP §1 thread_id passthrough + UUID validation + §14 parser defaults/resolution/trust flow
@@ -1203,12 +1203,22 @@ Two independent mechanisms, neither reachable by pruning a namespace:
 1. **Parser re-entry.** `_SAFE_GLOBALS` is `{n: getattr(sympy, n) for n in dir(sympy)}`, so `sympify`, `parse_expr`, `var`, `S`, `lambdify` and `init_printing` are in scope *by construction*. `sympify`'s inner `parse_expr` builds its own globals via `exec('from sympy import *', d)`, and Python inserts real `__builtins__` into any globals dict passed to `exec`/`eval` that lacks them — so the outer blanking never applies to the inner parse. `chr(111)+chr(115)` also defeats any string-matching defence.
 2. **Attribute traversal.** `().__class__.__bases__[0].__subclasses__()` is attribute access on a literal — no name lookup, so no namespace change can stop it.
 
-The guard is now `_reject_unsafe_names`, the **first** entry in `_TRANSFORMATIONS`: it refuses any dunder NAME token, and any NAME token that is in `_SAFE_GLOBALS` but not in `_ALLOWED_NAMES` (231 mathematical names of the 927 exposed). A name that is *not* in `_SAFE_GLOBALS` is deliberately untouched — becoming a Symbol is the parser's purpose.
+**A third mechanism, and the reason the guard is not a token filter.** The first fix rejected dunder and non-allowlisted NAME *tokens*. It was bypassed within the hour:
 
-Three properties worth keeping:
-- **The allowlist is closed**, so new SymPy names are refused rather than exposed. That is the whole reason it is not a denylist of known-bad names.
-- **Position is load-bearing.** Run last, the guard still catches the callables (`auto_symbol` leaves those as NAME tokens) but *not* the submodule routes — `external.gmpy.os` is instead shredded into `e*x*t*e*r*n*a*l` by `split_symbols`, which is a coincidence rather than a defence. The battery asserts the guard's own message for exactly this reason.
-- **`_SAFE_GLOBALS` still contains 26 submodule objects** (`external`, `parsing`, `printing`, …) that reach `os`, `subprocess`, `sys` and `builtins` by plain attribute access. They are unreachable today only because `auto_symbol` rewrites non-callable names into Symbols — an undocumented SymPy implementation detail. The allowlist covers those names directly so nothing depends on it.
+```
+f"{sympify('__import__(chr(111)+chr(115)).getpid()')}"   ->  the pid
+"{0.__class__.__bases__}".format(pi)                     ->  dunder attributes
+sin(pi).func.mro()                                       ->  classes, no underscore anywhere
+```
+
+On Python 3.11 an f-string is a **single `STRING` token** — PEP 701 split it into `FSTRING_*` tokens only in 3.12 — so a NAME-token filter cannot see inside one, while the code within is evaluated with `_SAFE_GLOBALS` in scope. `str.format` reaches attributes through its own mini-language, and `.func.mro()` shows the dunder rule never covered non-dunder traversal either. The general statement: **a token stream is not the language**, and which constructs the tokenizer hides is a property of the Python version, not of this code — so a token filter cannot be argued sound.
+
+**The guard is `_validate_ast`.** `parse_expr` is `stringify_expr` (apply transformations, emit code) followed by `eval_expr` (eval it), so `safe_parse` calls the two halves itself and validates in between — after `2x` has become `Integer(2)*Symbol('x')`, and before anything runs. It checks the AST of **exactly the string that will be evaluated** against a closed allowlist of 39 node types out of Python's 118 concrete ones, plus a name rule (`_ALLOWED_NAMES`, or the caller's `symbols=`).
+
+- **`ast.Attribute` is absent, and it is the load-bearing omission.** Attribute access *is* mechanism 2 — `().__class__.__bases__[0].__subclasses__()` needs no name lookup at all — and it is equally how `str.format`, `.mro()` and every bound-method route is reached. No transformation emits an attribute for a legitimate expression; the functional forms (`diff(f, x)`, not `f.diff(x)`) are what the tools take.
+- **Closure is the property, not coverage.** `JoinedStr`, `FormattedValue`, `Lambda`, the four comprehensions, `NamedExpr`, `Starred`, `Dict`, `Set`, `IfExp`, `Await`, `Yield` are refused for being **unlisted**, not for being recognised. A construct a future Python adds is refused on arrival. `test_the_node_allowlist_is_closed_and_small` and `test_the_dangerous_node_types_are_refused` are the artifacts to re-run on a Python upgrade.
+- **`_SAFE_GLOBALS` still contains 26 submodule objects** (`external`, `parsing`, `printing`, …) reaching `os`, `subprocess`, `sys` and `builtins` by *plain* attribute access. They are unreachable today only because `auto_symbol` rewrites non-callable names into Symbols — an undocumented SymPy detail. Attribute is refused outright and no module is in the name allowlist, so nothing depends on it. (`evalf` is a **module** in `_SAFE_GLOBALS`, not the method; it was allowlisted by mistake once and `test_no_module_object_is_permitted` caught it.)
+- **String operands to a `BinOp` are refused** — `"%s" % pi` is old-style formatting wearing a `BinOp`. It cannot escape, since `%` only calls `str()` on an already-allowlisted operand, but every reachable construct is one that must be *argued* harmless rather than simply refused.
 
 The single-payload test (`__import__('os').system(...)`) is kept, and was itself an instance of the pattern: it passed because `auto_symbol` turned the bare `__import__` into a Symbol, not because `__builtins__` was empty. It is now one of fourteen, beside a 37-case legitimacy battery — an allowlist with no legitimacy battery is one bad entry away from silently breaking the tools it protects.
 

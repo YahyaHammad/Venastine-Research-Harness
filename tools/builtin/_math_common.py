@@ -26,10 +26,26 @@ this module's original premise and it was wrong in two independent ways:
      all -- only attribute access on a literal -- and yields hundreds of
      live classes. No namespace pruning can stop that.
 
-So the guard is an ALLOWLIST at the token boundary (`_reject_unsafe_names`
-below) rather than a denylist in the namespace. It runs as the FIRST
-transformation, before `auto_symbol` rewrites anything, so it sees the
-names the caller actually wrote.
+A THIRD mechanism killed the first fix, and is why the guard looks the
+way it does. That fix filtered NAME *tokens* against an allowlist. It was
+bypassed within the hour:
+
+    f"{sympify('__import__(chr(111)+chr(115)).getpid()')}"   -> the pid
+
+On Python 3.11 an f-string is a SINGLE `STRING` token -- PEP 701 only
+split it into `FSTRING_*` tokens in 3.12 -- so a NAME-token filter is
+structurally blind to everything inside one, while the code inside is
+evaluated with `_SAFE_GLOBALS` in scope, `sympify` included. `str.format`
+reaches dunder attributes the same way, through its own mini-language.
+
+The lesson generalises past f-strings: **a token stream is not the
+language**, and which constructs the tokenizer hides is a property of the
+Python version rather than of this code.
+
+So the guard is `_validate_ast`, an allowlist over AST NODE TYPES applied
+to exactly the string that will be evaluated -- see the long comment
+above it. `parse_expr` is `stringify_expr` followed by `eval_expr`, and
+the check sits between them.
 
 One thing NOT to rely on: today the 26 submodule objects in
 `_SAFE_GLOBALS` (`external.gmpy.os`, `printing.gtk.subprocess`,
@@ -37,19 +53,20 @@ One thing NOT to rely on: today the 26 submodule objects in
 `auto_symbol` leaves a name alone only when it is a Basic, a type, or
 callable -- and a module is none of the three, so it is rewritten to
 `Symbol('external')`. That is an undocumented SymPy implementation detail
-protecting a real hole. The allowlist covers those names directly, so the
-protection does not depend on it.
+protecting a real hole. Attribute access is refused outright and the name
+allowlist excludes every module, so nothing depends on it.
 """
 
 from __future__ import annotations
 
-from tokenize import NAME
+import ast
 from typing import Any, Optional
 
 import sympy
 from sympy.parsing.sympy_parser import (
-    parse_expr,
+    eval_expr,
     standard_transformations,
+    stringify_expr,
     implicit_multiplication_application,
     convert_equals_signs,
 )
@@ -114,51 +131,124 @@ _ALLOWED_NAMES = frozenset("""
     transpose det trace adjugate
     Function Lambda Piecewise Max Min Heaviside DiracDelta KroneckerDelta
     Point Point2D Point3D Line Segment Ray Circle Ellipse Polygon Triangle
-    N evalf nsimplify
+    N nsimplify
 """.split())
 
 
-def _reject_unsafe_names(tokens, local_dict, global_dict):
-    """First transformation in the pipeline: refuse the payload class.
-
-    Runs BEFORE `standard_transformations`, so it sees the names the
-    caller wrote rather than what `auto_symbol` rewrote them into. A name
-    that is NOT in `_SAFE_GLOBALS` is left alone deliberately -- becoming
-    a Symbol is exactly what an unknown name in a math expression should
-    do, and it is the parser's whole purpose.
-
-    Two rules, one per mechanism in #52:
-
-      1. No dunder, anywhere. `().__class__.__bases__[0].__subclasses__()`
-         is attribute access on a literal, so it needs no name lookup at
-         all and no namespace change can reach it.
-      2. No global name outside `_ALLOWED_NAMES`. This is what closes
-         `sympify` re-entry, and it closes `lambdify`, `S`, `var`,
-         `init_printing` and the submodule routes at the same time,
-         because it never enumerated them.
-    """
-    for toknum, tokval in tokens:
-        if toknum != NAME:
-            continue
-        if tokval.startswith("__") or tokval.endswith("__"):
-            raise MathParseError(
-                f"'{tokval}' is not allowed in a math expression")
-        if tokval in _SAFE_GLOBALS and tokval not in _ALLOWED_NAMES:
-            raise MathParseError(
-                f"'{tokval}' is not a permitted function or constant. "
-                f"Use a mathematical function, or a plain name for a "
-                f"variable.")
-    return tokens
-
-
-# _reject_unsafe_names FIRST -- see its docstring.
 # implicit_multiplication_application lets "2x" parse as "2*x".
 # convert_equals_signs lets "x**2 - 4 = 0" parse into an Eq(...) object
 # instead of raising a syntax error on the bare "=".
-_TRANSFORMATIONS = (_reject_unsafe_names,) + standard_transformations + (
+_TRANSFORMATIONS = standard_transformations + (
     implicit_multiplication_application,
     convert_equals_signs,
 )
+
+
+# ---------------------------------------------------------------------------
+# ---- The guard: an AST allowlist over the code that will be EVALUATED ------
+# ---------------------------------------------------------------------------
+#
+# WHY NOT A TOKEN FILTER. The first attempt at #52 rejected dunder and
+# non-allowlisted NAME *tokens*. It was bypassed within the hour:
+#
+#     f"{sympify('__import__(chr(111)+chr(115)).getpid()')}"   -> the pid
+#
+# On Python 3.11 an f-string is a SINGLE `STRING` token (PEP 701 only
+# split it into `FSTRING_*` tokens in 3.12), so a NAME-token filter is
+# structurally blind to everything inside one -- and the code inside is
+# evaluated with `_SAFE_GLOBALS` in scope, `sympify` included.
+# `"{0.__class__.__bases__}".format(pi)` reaches dunder attributes the
+# same way, through `str.format`'s own mini-language.
+#
+# The lesson generalises past f-strings: a token stream is not the
+# language. Any construct whose contents the tokenizer does not expose as
+# tokens is invisible to a token filter, and "which constructs are those"
+# is a property of the Python version, not of this code. That is not
+# something a filter can be argued sound against.
+#
+# So the guard validates the ABSTRACT SYNTAX TREE of exactly the string
+# that gets evaluated. `parse_expr` is `stringify_expr` (apply the
+# transformations, emit code) followed by `eval_expr` (eval it), so
+# splitting it open puts the check between those two steps -- after
+# "2x" has become `Integer(2)*Symbol('x')`, and before anything runs.
+#
+# What that buys, and it is the whole point: the allowed set is CLOSED
+# over node types. A construct nobody thought of -- an f-string, a walrus,
+# a comprehension, a lambda, a generator, whatever a future Python adds --
+# is refused because it is not on the list, not because someone
+# remembered it.
+
+_ALLOWED_NODES = (
+    ast.Expression,
+    ast.BinOp, ast.UnaryOp, ast.BoolOp, ast.Compare,
+    ast.Call, ast.keyword,
+    ast.Name, ast.Load,
+    ast.Constant,
+    ast.Tuple, ast.List,
+    ast.Subscript, ast.Slice,
+    # operators
+    ast.Add, ast.Sub, ast.Mult, ast.Div, ast.FloorDiv, ast.Mod, ast.Pow,
+    ast.LShift, ast.RShift, ast.BitOr, ast.BitXor, ast.BitAnd, ast.MatMult,
+    ast.UAdd, ast.USub, ast.Not, ast.Invert,
+    ast.And, ast.Or,
+    ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE,
+)
+
+# `ast.Attribute` is deliberately ABSENT, and it is the single most
+# load-bearing omission. Attribute access IS #52's mechanism 2 --
+# `().__class__.__bases__[0].__subclasses__()` needs no name lookup at
+# all -- and it is also how `str.format` and every bound-method route is
+# reached. No transformation emits an attribute for a legitimate
+# expression, so nothing needs it: the functional forms (`diff(f, x)`
+# rather than `f.diff(x)`) are what the tools take anyway.
+
+
+def _validate_ast(code: str, local_dict: dict) -> None:
+    """Refuse anything outside the closed node allowlist. Raises
+    MathParseError; returns None when the expression is acceptable."""
+    try:
+        tree = ast.parse(code, mode="eval")
+    except SyntaxError as e:
+        raise MathParseError(f"Could not parse expression: {e}") from e
+
+    for node in ast.walk(tree):
+        if not isinstance(node, _ALLOWED_NODES):
+            raise MathParseError(
+                f"{type(node).__name__} is not allowed in a math "
+                f"expression")
+
+        # Every name is resolved against _SAFE_GLOBALS at eval time, so
+        # every name must be one we chose. Unknown names never reach here
+        # -- auto_symbol has already rewritten them to Symbol('name') --
+        # except the ones the CALLER declared via `symbols=`, which is
+        # what local_dict holds.
+        if isinstance(node, ast.Name):
+            if node.id not in _ALLOWED_NAMES and node.id not in local_dict:
+                raise MathParseError(
+                    f"'{node.id}' is not a permitted function or "
+                    f"constant. Use a mathematical function, or a plain "
+                    f"name for a variable.")
+
+        # Belt and braces: a string constant cannot execute anything on
+        # its own now that Attribute and JoinedStr are gone, but a dunder
+        # in one is never legitimate here and is a useful tripwire.
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            if node.value.startswith("__") or node.value.endswith("__"):
+                raise MathParseError(
+                    "dunder names are not allowed in a math expression")
+
+        # `"%s" % x` is old-style string formatting wearing a BinOp. It
+        # cannot escape -- % only ever calls str()/repr() on its operand,
+        # and the operand can only be something already allowlisted --
+        # but every construct left reachable is a thing that has to be
+        # ARGUED harmless rather than simply refused, so it goes. String
+        # constants themselves must stay: `auto_symbol` emits
+        # `Symbol('x')` for every free variable in every expression.
+        if isinstance(node, ast.BinOp) and any(
+                isinstance(side, ast.Constant) and isinstance(side.value, str)
+                for side in (node.left, node.right)):
+            raise MathParseError(
+                "string operands are not allowed in a math expression")
 
 
 def safe_parse(expr_str: str, symbols: Optional[list[str]] = None):
@@ -172,12 +262,13 @@ def safe_parse(expr_str: str, symbols: Optional[list[str]] = None):
     """
     local_dict = {name: sympy.Symbol(name) for name in (symbols or [])}
     try:
-        return parse_expr(
-            expr_str,
-            local_dict=local_dict,
-            global_dict=_SAFE_GLOBALS,
-            transformations=_TRANSFORMATIONS,
-        )
+        # parse_expr() split open, so the guard can sit between the two
+        # halves -- see _validate_ast. `evaluate=False` is not used
+        # anywhere here, which is the only other thing parse_expr does.
+        code = stringify_expr(expr_str, local_dict, _SAFE_GLOBALS,
+                              _TRANSFORMATIONS)
+        _validate_ast(code, local_dict)
+        return eval_expr(code, local_dict, _SAFE_GLOBALS)
     except MathParseError:
         # A refusal from _reject_unsafe_names already says which name was
         # refused and what to do instead. Re-wrapping it in "Could not

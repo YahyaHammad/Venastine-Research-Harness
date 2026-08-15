@@ -45,7 +45,8 @@ import pytest
 import sympy
 from sympy import S, sqrt, pi, Rational, Symbol, simplify, sympify
 
-from tools.builtin._math_common import safe_parse, MathParseError
+from tools.builtin._math_common import (
+    safe_parse, MathParseError, _ALLOWED_NODES, _ALLOWED_NAMES, _SAFE_GLOBALS)
 
 import tools.builtin.symbolic_math as symbolic_math
 import tools.builtin.linear_algebra as linear_algebra
@@ -102,6 +103,32 @@ INJECTION_PAYLOADS = [
     ("module route to os", "external.gmpy.os.getpid()"),
     ("module route to subprocess", "printing.gtk.subprocess"),
     ("module route to the parser", "parsing.sympy_parser.parse_expr"),
+    # --- mechanism 3: constructs the TOKEN filter could not see.
+    # The first fix for #52 filtered NAME tokens and was bypassed within
+    # the hour by an f-string, which on Python 3.11 is a SINGLE STRING
+    # token (PEP 701 split it up only in 3.12). The code inside was
+    # evaluated with _SAFE_GLOBALS in scope, sympify included, and
+    # `f"{sympify('__import__(chr(111)+chr(115)).getpid()')}"` returned
+    # the pid. `str.format`'s mini-language reached dunder attributes the
+    # same way. This is why the guard validates the AST of the code that
+    # will actually be evaluated rather than the token stream.
+    ("f-string re-entry",
+     "f\"{sympify('__import__(chr(111)+chr(115)).getpid()')}\""),
+    ("f-string, nested quotes", "f'{sympify(\"1+1\")}'"),
+    ("f-string in a format spec", 'f"{pi:{sympify(1)}}"'),
+    ("rf-string", 'rf"{sympify(1)}"'),
+    ("str.format to a dunder", '"{0.__class__.__bases__}".format(pi)'),
+    ("str.format_map", '"{a.__class__}".format_map(pi)'),
+    ("percent formatting", '"%s" % pi'),
+    ("lambda", "(lambda: sympify(1))()"),
+    ("set literal", "{sympify(1)}"),
+    ("starred call", "Max(*[1, 2])"),
+    ("yield", "(yield 1)"),
+    # --- non-dunder attribute traversal. `.func` is a CLASS, and
+    # `.mro()` walks to `object` without a single underscore, so the
+    # dunder rule alone never covered this.
+    ("non-dunder .func.mro()", "sin(pi).func.mro()"),
+    ("method on a str literal", '"abc".encode'),
 ]
 
 
@@ -135,10 +162,103 @@ def test_safe_parse_refuses_the_injection_payload_class(label, payload):
 
     message = str(excinfo.value)
     assert ("not a permitted function or constant" in message
-            or "is not allowed in a math expression" in message), (
+            or "not allowed in a math expression" in message), (
         f"{label!r} was rejected, but not BY THE GUARD -- it failed with "
         f"{message!r}. Something else happens to refuse this payload "
         f"today; the guard must be what does.")
+
+
+# ---------------------------------------------------------------------------
+# ---- The closure argument, made checkable ---------------------------------
+# ---------------------------------------------------------------------------
+#
+# "No escape exists" is not provable by listing payloads -- that is what
+# the single-payload version tried, and what the token filter tried after
+# it. What IS checkable is closure: the guard admits a fixed set of AST
+# node types, and everything else is refused for being absent from the
+# list rather than for being recognised as bad.
+#
+# These three tests are the artifact to re-run on a Python upgrade. A new
+# release that adds a node type (3.12 added the f-string nodes; 3.8 added
+# NamedExpr) lands in the refused set automatically, and the first test
+# says so out loud.
+
+def test_the_node_allowlist_is_closed_and_small():
+    """The allowed set must stay a small, enumerated fraction of what
+    Python defines. If someone widens it to make an expression work, this
+    is the test that makes the widening visible."""
+    import ast
+
+    concrete = {
+        n for n in vars(ast).values()
+        if isinstance(n, type) and issubclass(n, ast.AST)
+        and n.__name__ not in {
+            "AST", "expr", "stmt", "mod", "operator", "unaryop", "boolop",
+            "cmpop", "expr_context", "slice", "type_ignore", "pattern",
+            "excepthandler"}
+    }
+    allowed = set(_ALLOWED_NODES) & concrete
+
+    assert len(allowed) < len(concrete) / 2, (
+        f"the guard now admits {len(allowed)} of {len(concrete)} node "
+        "types. It is meant to be a small closed set; widening it is how "
+        "a construct nobody considered becomes reachable.")
+
+
+@pytest.mark.parametrize("node_name", [
+    "Attribute",        # mechanism 2, and every str.format/method route
+    "JoinedStr",        # f-strings -- the token filter's blind spot
+    "FormattedValue",
+    "Lambda",
+    "ListComp", "SetComp", "DictComp", "GeneratorExp",
+    "NamedExpr",        # walrus
+    "Starred",
+    "Await", "Yield",
+    "Dict", "Set",
+    "Import", "ImportFrom", "Assign", "IfExp",
+])
+def test_the_dangerous_node_types_are_refused(node_name):
+    """Named individually so that admitting one is a red test with the
+    node's name on it, rather than a silent change in a tuple.
+
+    `Attribute` is the load-bearing one: attribute access IS #52's second
+    mechanism, and no namespace pruning can reach it.
+    """
+    import ast
+
+    node = getattr(ast, node_name)
+    assert node not in _ALLOWED_NODES
+
+
+def test_no_permitted_name_can_evaluate_a_string():
+    """The name half of the closure. `_SAFE_GLOBALS` exposes 900-odd
+    names because it is built from `dir(sympy)`; the guard permits a
+    couple of hundred. None of the ones that turn a string back into code
+    may be among them -- that is #52's first mechanism."""
+    evaluators = {"sympify", "parse_expr", "var", "S", "lambdify",
+                  "init_printing", "preview", "parse_latex",
+                  "parse_mathematica", "interactive_traversal"}
+
+    assert not (evaluators & _ALLOWED_NAMES), (
+        f"{sorted(evaluators & _ALLOWED_NAMES)} can turn a string back "
+        "into code, and are permitted")
+
+
+def test_no_module_object_is_permitted():
+    """The submodule routes (`external.gmpy.os`, `printing.gtk.
+    subprocess`, `parsing.sympy_parser.builtins`) reach the stdlib by
+    PLAIN attribute access -- no dunder anywhere. Attribute is refused
+    outright so they are unreachable twice over, but a module in the name
+    allowlist would still be a mistake worth catching here."""
+    import types
+
+    modules = {n for n, v in _SAFE_GLOBALS.items()
+               if isinstance(v, types.ModuleType)}
+    assert modules, ("no sympy submodules found in _SAFE_GLOBALS -- this "
+                     "test can no longer see the thing it checks")
+    assert not (modules & _ALLOWED_NAMES), (
+        f"module objects are permitted by name: "
+        f"{sorted(modules & _ALLOWED_NAMES)}")
 
 
 def test_an_error_result_is_not_evidence_the_payload_failed(monkeypatch):
