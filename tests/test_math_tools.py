@@ -129,6 +129,29 @@ INJECTION_PAYLOADS = [
     # dunder rule alone never covered this.
     ("non-dunder .func.mro()", "sin(pi).func.mro()"),
     ("method on a str literal", '"abc".encode'),
+    # --- mechanism 4: a STRING LITERAL reaching a function that
+    # sympifies its own argument. Found by auditing the allowlist's
+    # source for calls to eval/exec/sympify rather than by guessing:
+    # seven of the permitted names do it. Handing one a string re-enters
+    # the parser with SymPy's default globals -- real builtins included.
+    #
+    # The leading space is the whole trick. An earlier version of the
+    # guard tripped only on a string that STARTED OR ENDED with a
+    # dunder, so one space walked past it -- the same category of
+    # mistake as `chr(111)+chr(115)` defeating a search for "os".
+    ("factor sympifies its arg",
+     'factor(" __import__(chr(111)+chr(115)).getpid()")'),
+    ("cancel sympifies its arg",
+     'cancel(" __import__(chr(111)+chr(115)).getpid()")'),
+    ("together sympifies its arg",
+     'together(" __import__(chr(111)+chr(115)).getpid()")'),
+    ("apart sympifies its arg",
+     'apart(" __import__(chr(111)+chr(115)).getpid()")'),
+    ("roots sympifies its arg",
+     'roots(" __import__(chr(111)+chr(115)).getpid()")'),
+    ("degree sympifies its arg",
+     'degree(" __import__(chr(111)+chr(115)).getpid()")'),
+    ("a bare string operand", '"%s" % pi'),
 ]
 
 
@@ -534,3 +557,61 @@ def test_probability_stats_describe_mean_of_1_to_5():
     assert "result" in result
     assert isinstance(result["result"], dict)
     assert result["result"]["mean"] == 3
+
+
+def test_string_literals_are_licensed_only_where_the_parser_emits_them():
+    """The string rule, stated as the closure it is.
+
+    `stringify_expr` gives a string argument to exactly two calls --
+    `Symbol('x')` for every free variable and `Float('1.5')` for every
+    non-integer literal. Everything else is refused, which is what closes
+    mechanism 4 without needing to know WHICH functions sympify their
+    arguments. Widening this set means arguing that the new constructor
+    does not sympify what it is handed.
+    """
+    from tools.builtin._math_common import _STRING_ARG_CONSTRUCTORS
+
+    assert _STRING_ARG_CONSTRUCTORS == {"Symbol", "Float"}
+
+    # Both must genuinely still work, or every expression breaks.
+    safe_parse("x + 1")          # -> Symbol('x') + Integer(1)
+    safe_parse("1.5*y")          # -> Float('1.5') * Symbol('y')
+
+
+def test_a_symbol_name_may_be_an_arbitrary_string_and_is_inert():
+    """`Symbol` is licensed, so `Symbol(" anything ")` parses. Recorded
+    rather than treated as a leak: a Symbol's name is a label, it is
+    never evaluated, and refusing odd names would mean validating
+    identifiers for no security gain.
+
+    Pinned so that if `Symbol` ever gains string-evaluating behaviour,
+    the licensing decision is revisited deliberately.
+    """
+    from sympy import Symbol
+
+    out = safe_parse('Symbol(" __import__(chr(111)) ")')
+    assert isinstance(out, Symbol)
+    assert out.name == " __import__(chr(111)) "
+
+
+def test_no_allowlisted_name_evaluates_a_string_it_can_be_handed():
+    """The audit, as a test.
+
+    Seven allowlisted functions call `sympify()` internally. That is fine
+    -- their arguments are already SymPy objects by the time the parser
+    calls them -- and it is ONLY fine because no string can reach them.
+    This asserts the two halves together: the sympifying names are still
+    permitted (so this test is not vacuous), and a string cannot be
+    passed to one.
+    """
+    sympifying = {"factor", "cancel", "together", "apart", "roots",
+                  "degree", "nsolve"}
+    assert sympifying <= _ALLOWED_NAMES, (
+        "these are permitted names; if they were removed this test stops "
+        "testing anything")
+
+    for name in sorted(sympifying):
+        with pytest.raises(MathParseError) as excinfo:
+            safe_parse(f'{name}(" 1+1")')
+        assert "string literals are not allowed" in str(excinfo.value), (
+            f"a string literal reached {name}(), which sympifies it")

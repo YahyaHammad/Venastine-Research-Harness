@@ -1183,6 +1183,28 @@ allowlist of 39 node types out of Python's 118.
 That last row is why the legitimacy battery exists, and it is #47's lesson applied: an allowlist
 needs a test asserting that real producers satisfy it.
 
+### Mechanism 4: a string literal reaching a function that sympifies it
+
+Found by **auditing the allowlist's own source** for calls to `eval`/`exec`/`sympify`, not by
+guessing at payloads. Seven permitted names do it — `factor`, `cancel`, `together`, `apart`,
+`roots`, `degree`, `nsolve` — and a string literal handed to any of them re-enters the parser
+with SymPy's default globals, real builtins included:
+
+```
+factor(" __import__(chr(111)+chr(115)).getpid() ")   ->  the pid
+```
+
+The leading space is the whole trick: the guard's dunder tripwire matched *prefix and suffix*,
+so one space walked past it. Prefix-matching a payload is the same category of mistake as
+`chr(111)+chr(115)` defeating a search for the literal `"os"`.
+
+`stringify_expr` gives a string argument to exactly two calls — `Symbol('x')` and
+`Float('1.5')` — so `_STRING_ARG_CONSTRUCTORS` licenses those two positions and every other
+string literal is refused. **This closes the class without knowing which functions sympify**,
+which is the difference between a closure and a filter. Adding a name to
+`_STRING_ARG_CONSTRUCTORS` means arguing that the constructor does not sympify what it is
+handed.
+
 ### Standing: assert the GUARD refused, not that something raised
 
 An earlier version of the battery asserted `pytest.raises(MathParseError)`. Under a

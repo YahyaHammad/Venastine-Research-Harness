@@ -203,6 +203,12 @@ _ALLOWED_NODES = (
 # rather than `f.diff(x)`) are what the tools take anyway.
 
 
+# The only two calls `stringify_expr` gives a string argument to. Kept
+# minimal on purpose: each entry is a callable that must be argued not to
+# sympify what it is handed.
+_STRING_ARG_CONSTRUCTORS = frozenset({"Symbol", "Float"})
+
+
 def _validate_ast(code: str, local_dict: dict) -> None:
     """Refuse anything outside the closed node allowlist. Raises
     MathParseError; returns None when the expression is acceptable."""
@@ -229,26 +235,43 @@ def _validate_ast(code: str, local_dict: dict) -> None:
                     f"constant. Use a mathematical function, or a plain "
                     f"name for a variable.")
 
-        # Belt and braces: a string constant cannot execute anything on
-        # its own now that Attribute and JoinedStr are gone, but a dunder
-        # in one is never legitimate here and is a useful tripwire.
-        if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            if node.value.startswith("__") or node.value.endswith("__"):
-                raise MathParseError(
-                    "dunder names are not allowed in a math expression")
+    # A STRING may appear only where the transformations put one.
+    #
+    # Seven allowlisted functions call `sympify()` on their own arguments
+    # -- `factor`, `cancel`, `together`, `apart`, `roots`, `degree`,
+    # `nsolve` -- which was found by auditing the allowlist's source
+    # rather than by guessing. Handing any of them a string literal
+    # re-enters the parser with SymPy's own default globals, real
+    # builtins included, and that is #52's mechanism 1 through a side
+    # door:
+    #
+    #     factor(" __import__(chr(111)+chr(115)).getpid() ")   -> the pid
+    #
+    # The leading space matters: an earlier version of this guard only
+    # tripped on a string that *started or ended* with a dunder, so one
+    # space defeated it. Prefix matching on a payload is the same
+    # category of mistake as `chr(111)+chr(115)` defeating a search for
+    # the literal "os".
+    #
+    # `stringify_expr` emits string arguments in exactly two places --
+    # `Symbol('x')` for every free variable and `Float('1.5')` for every
+    # non-integer literal -- so licensing those two and refusing every
+    # other string keeps the property closed rather than filtered. This
+    # also removes `"%s" % pi` and every other string-valued construct
+    # without needing a rule per construct.
+    licensed = set()
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id in _STRING_ARG_CONSTRUCTORS):
+            for arg in node.args:
+                if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                    licensed.add(id(arg))
 
-        # `"%s" % x` is old-style string formatting wearing a BinOp. It
-        # cannot escape -- % only ever calls str()/repr() on its operand,
-        # and the operand can only be something already allowlisted --
-        # but every construct left reachable is a thing that has to be
-        # ARGUED harmless rather than simply refused, so it goes. String
-        # constants themselves must stay: `auto_symbol` emits
-        # `Symbol('x')` for every free variable in every expression.
-        if isinstance(node, ast.BinOp) and any(
-                isinstance(side, ast.Constant) and isinstance(side.value, str)
-                for side in (node.left, node.right)):
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                and id(node) not in licensed):
             raise MathParseError(
-                "string operands are not allowed in a math expression")
+                "string literals are not allowed in a math expression")
 
 
 def safe_parse(expr_str: str, symbols: Optional[list[str]] = None):
