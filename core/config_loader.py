@@ -306,8 +306,39 @@ def _tier_dirs(kind: str, project_path: str, trusted: bool) -> list:
     dirs = [("harness", os.path.join(HARNESS_ROOT, kind, "builtin"))]
     dirs.append(("user", os.path.join(_user_config_dir(), kind)))
     if trusted:
-        dirs.append(("project", os.path.join(
-            workspace_trust.venastine_dir(project_path), kind)))
+        project_dir = os.path.join(
+            workspace_trust.venastine_dir(project_path), kind)
+        # #18. A SYMLINK at the project tier root escapes the D17 hash.
+        # `os.walk` follows the path handed to it as `top` but not
+        # symlinked subdirectories, and the two sides of the trust
+        # boundary start from different places: workspace_trust walks from
+        # `.venastine`, so a symlinked `skills/` is a subdirectory it will
+        # not descend, while _md_files walks from `.venastine/skills`, so
+        # it IS the top and gets followed. Directory names never enter the
+        # hash either, so the link contributes nothing -- not even its own
+        # name. The pointed-to definitions therefore load as project-tier
+        # agents/skills while being absent from the trust prompt's listing
+        # AND from the hash, so their bodies can be rewritten freely after
+        # one grant and `is_trusted()` keeps returning True.
+        #
+        # Treated as ABSENT rather than loaded-and-warned, matching the
+        # module's posture for untrusted content generally. The payload
+        # here is not data but instructions: a project-tier body becomes
+        # system-prompt content for the user's sessions.
+        #
+        # Scoped to the PROJECT tier deliberately. Harness and user
+        # directories are not hashed by anything, so a symlink in them is
+        # not a trust question -- and symlinking `~/.config/venastine/`
+        # into a dotfiles repo is a legitimate thing an operator does to
+        # their own config.
+        if os.path.islink(project_dir):
+            logger.warning(
+                "Ignoring project %s directory %s: it is a symlink, and "
+                "symlinked tier roots are invisible to the workspace-trust "
+                "content hash (see issue #18). Move the definitions inside "
+                ".venastine/ to load them.", kind, project_dir)
+        else:
+            dirs.append(("project", project_dir))
     return dirs
 
 

@@ -351,3 +351,136 @@ def test_descent_order_does_not_change_the_trust_prompt_listing(
     # "settings.json" precedes "agents/reviewer.md" -- lexicographically
     # backwards, and correct. What must be stable is the directory order.
     assert ascending == ["settings.json", "agents/reviewer.md", "skills/crypto.md"]
+
+
+# ---------------------------------------------------------------------------
+# ---- #18: the hash must cover exactly what the loader will read ------------
+# ---------------------------------------------------------------------------
+#
+# The property that actually failed. `content_files()` (the trust prompt's
+# listing) and `_content_hash()` (the gate) are two independent traversals
+# of "the files under .venastine/", and `config_loader._md_files` is a
+# THIRD, rooted one level deeper. When the third disagreed with the first
+# two, project content loaded unhashed and unlisted.
+#
+# The fix makes the loader refuse the layout the hash cannot see, so the
+# three agree again. These tests assert the agreement rather than the
+# mechanism, so they survive whichever way a later change restores it --
+# including the deeper fix the issue prefers, where content_files() and
+# _content_hash() stop being two walks.
+
+
+def _granted(tmp_path, files, links=None, name="proj"):
+    """A project with `files` under .venastine/, plus optional
+    `.venastine/<name> -> target` directory symlinks, with trust granted."""
+    proj = _make_project(tmp_path, files, name=name)
+    for rel, target in (links or {}).items():
+        try:
+            (proj / ".venastine" / rel).symlink_to(
+                target, target_is_directory=True)
+        except (OSError, NotImplementedError):    # pragma: no cover
+            pytest.skip("platform does not support directory symlinks")
+    workspace_trust.grant_trust(str(proj))
+    return proj
+
+
+def test_a_symlinked_tier_root_is_invisible_to_both_the_hash_and_the_listing(
+        tmp_path):
+    """The escape itself, stated as the trust module sees it.
+
+    This is NOT the fix -- `os.walk` still will not descend a symlinked
+    subdirectory, and making it do so is the more intrusive option the
+    issue weighs. What changed is that the LOADER no longer reads what
+    this cannot see. Pinned as current behaviour so that a later change to
+    follow links is a deliberate one, taken with the cycle and realpath
+    guards it needs.
+    """
+    outside = tmp_path / "outside" / "skills"
+    outside.mkdir(parents=True)
+    (outside / "evil.md").write_text("Body v1.", encoding="utf-8")
+
+    proj = _granted(tmp_path, {"settings.json": "{}"},
+                    links={"skills": outside})
+
+    assert workspace_trust.content_files(str(proj)) == ["settings.json"]
+
+    before = workspace_trust.is_trusted(str(proj))
+    (outside / "evil.md").write_text("Body v2 CHANGED.", encoding="utf-8")
+    after = workspace_trust.is_trusted(str(proj))
+
+    assert before is True and after is True, (
+        "rewriting the symlink target changed the trust verdict; if the "
+        "hash now covers linked content, #18's loader guard can be "
+        "reconsidered -- see the issue's option 2")
+
+
+def test_the_loader_reads_no_file_the_trust_listing_omits(tmp_path,
+                                                          monkeypatch):
+    """THE INVARIANT, and the one worth keeping however #18 is fixed.
+
+    Every file the loader would read as project tier must appear in the
+    listing the trust prompt showed the user. D29's premise is that the
+    prompt shows what is being consented to; a file the loader reads and
+    the prompt never named breaks that at the moment the design stops to
+    ask.
+    """
+    from core import config_loader
+
+    outside = tmp_path / "outside" / "skills"
+    outside.mkdir(parents=True)
+    (outside / "evil.md").write_text(
+        "---\nname: evil\ndescription: d\n---\n\nBody.\n", encoding="utf-8")
+
+    proj = _granted(tmp_path, {
+        "settings.json": "{}",
+        "skills/real.md": "---\nname: real\ndescription: d\n---\n\nBody.\n",
+    }, links={"agents": outside})
+
+    listed = set(workspace_trust.content_files(str(proj)))
+    venastine = workspace_trust.venastine_dir(str(proj))
+
+    read = set()
+    for kind in ("agents", "skills"):
+        for tier, directory in config_loader._tier_dirs(kind, str(proj), True):
+            if tier != "project" or not os.path.isdir(directory):
+                continue
+            for path, _category in config_loader._md_files(directory, True):
+                read.add(os.path.relpath(path, venastine).replace(os.sep, "/"))
+
+    assert read <= listed, (
+        f"the loader reads {sorted(read - listed)}, which the trust prompt "
+        "never listed and the hash does not cover (#18)")
+
+
+def test_that_invariant_can_actually_fail(tmp_path, monkeypatch):
+    """Guards the guard. `read <= listed` is trivially true when `read` is
+    empty, so the check above would pass loudest if `_md_files` stopped
+    finding anything at all.
+
+    Restoring the pre-fix behaviour -- a `_tier_dirs` that hands back the
+    symlinked project root -- must make it fail. This is the mutation, run
+    as a test, because the invariant is the kind that decays into a tautology
+    without anyone noticing.
+    """
+    from core import config_loader
+
+    outside = tmp_path / "outside" / "skills"
+    outside.mkdir(parents=True)
+    (outside / "evil.md").write_text(
+        "---\nname: evil\ndescription: d\n---\n\nBody.\n", encoding="utf-8")
+
+    proj = _granted(tmp_path, {"settings.json": "{}"},
+                    links={"skills": outside})
+
+    listed = set(workspace_trust.content_files(str(proj)))
+    venastine = workspace_trust.venastine_dir(str(proj))
+
+    # The pre-#18 _tier_dirs: append the project root unconditionally.
+    unguarded = os.path.join(venastine, "skills")
+    read = {os.path.relpath(p, venastine).replace(os.sep, "/")
+            for p, _c in config_loader._md_files(unguarded, True)}
+
+    assert read, "the fixture stopped producing a readable skill"
+    assert not read <= listed, (
+        "the pre-fix layout no longer escapes the listing, so the "
+        "invariant test above is no longer discriminating anything")

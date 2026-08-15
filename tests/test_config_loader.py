@@ -844,3 +844,122 @@ class TestTodoPosition:
         config_loader.initialize(str(_redirect_roots["project"]))
 
         assert "todo_position" not in config_loader.get_settings()["tui"]
+
+
+# ---------------------------------------------------------------------------
+# ---- #18: a symlinked tier root must not load ------------------------------
+# ---------------------------------------------------------------------------
+#
+# `os.walk` follows the path handed to it as `top` but not symlinked
+# SUBdirectories, and the two sides of the trust boundary start from
+# different places -- workspace_trust walks from `.venastine`, _md_files
+# from `.venastine/<kind>`. So a symlink at a tier root was followed by the
+# loader and invisible to the hash, and D17's guarantee ("changed content
+# after trust was granted produces a different hash") did not hold for
+# anything behind it.
+#
+# Git stores symlinks natively (mode 120000), so this materialises on
+# clone -- which is the exact delivery mechanism D17's own comment names:
+# "content that arrived with a directory they cloned".
+
+
+def _symlink_tier(project, kind, target):
+    """Make `.venastine/<kind>` a symlink to `target`, or skip if the
+    platform will not create one (Windows without core.symlinks)."""
+    venastine = project / ".venastine"
+    venastine.mkdir(parents=True, exist_ok=True)
+    link = venastine / kind
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except (OSError, NotImplementedError):        # pragma: no cover
+        pytest.skip("platform does not support directory symlinks")
+    return link
+
+
+def test_a_symlinked_project_skills_root_does_not_load(_redirect_roots):
+    """#18. The skill body behind the link became system-prompt content
+    for the user's sessions while being absent from the trust prompt's
+    listing AND from the hash -- so it could be rewritten freely after one
+    grant, forever, with no re-prompt."""
+    outside = _redirect_roots["tmp"] / "outside"
+    _write_skill(outside, "outside-skill", body="Body v1.")
+    _symlink_tier(_redirect_roots["project"], "skills", outside / "skills")
+    workspace_trust.grant_trust(str(_redirect_roots["project"]))
+
+    config_loader.initialize(str(_redirect_roots["project"]))
+
+    assert config_loader.get_skill("outside-skill") is None, (
+        "a skill behind a symlinked tier root loaded as project tier, but "
+        "the trust hash never covered it (#18)")
+
+
+def test_a_symlinked_project_agents_root_does_not_load(_redirect_roots):
+    """The other tier root `_tier_dirs` names. Both were reachable; a fix
+    for one is not a fix for the class."""
+    outside = _redirect_roots["tmp"] / "outside"
+    _write_agent(outside, "outside-agent")
+    _symlink_tier(_redirect_roots["project"], "agents", outside / "agents")
+    workspace_trust.grant_trust(str(_redirect_roots["project"]))
+
+    config_loader.initialize(str(_redirect_roots["project"]))
+
+    assert config_loader.get_agent("outside-agent") is None
+
+
+def test_a_real_project_skills_directory_still_loads(_redirect_roots):
+    """The control. A guard that refuses every project tier also passes the
+    two tests above, so this is what makes them discriminate -- and it is
+    the same directory layout, differing only in being real."""
+    _write_skill(_redirect_roots["project"] / ".venastine", "real-skill")
+    workspace_trust.grant_trust(str(_redirect_roots["project"]))
+
+    config_loader.initialize(str(_redirect_roots["project"]))
+
+    assert config_loader.get_skill("real-skill") is not None
+
+
+def test_a_symlinked_user_tier_root_still_loads(_redirect_roots):
+    """Scope control: the guard is on the PROJECT tier only.
+
+    Nothing hashes the user config directory, so a symlink there is not a
+    trust question -- and symlinking `~/.config/venastine/` into a dotfiles
+    repo is a legitimate thing an operator does with their own config.
+    Refusing it would break that for no security benefit, which is why the
+    check is not simply applied to every tier in the loop.
+    """
+    outside = _redirect_roots["tmp"] / "dotfiles"
+    _write_skill(outside, "dotfile-skill")
+    user_dir = _redirect_roots["user"]
+    user_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        (user_dir / "skills").symlink_to(outside / "skills",
+                                         target_is_directory=True)
+    except (OSError, NotImplementedError):        # pragma: no cover
+        pytest.skip("platform does not support directory symlinks")
+
+    config_loader.initialize(str(_redirect_roots["project"]))
+
+    assert config_loader.get_skill("dotfile-skill") is not None
+
+
+def test_the_symlinked_tier_is_reported_not_silently_dropped(
+        _redirect_roots, caplog):
+    """Absent, but not unexplained. Someone who deliberately arranged that
+    layout gets told why their skills vanished, and someone who did not
+    gets a line naming the mechanism."""
+    import logging
+
+    outside = _redirect_roots["tmp"] / "outside"
+    _write_skill(outside, "outside-skill")
+    _symlink_tier(_redirect_roots["project"], "skills", outside / "skills")
+    workspace_trust.grant_trust(str(_redirect_roots["project"]))
+
+    with caplog.at_level(logging.WARNING, logger="core.config_loader"):
+        config_loader.initialize(str(_redirect_roots["project"]))
+
+    # getMessage(), not .message: the latter is set by a Formatter, and
+    # this project's own rule is that detail lives in the interpolated
+    # message rather than in extra={} -- so the args must be applied.
+    assert any("symlink" in r.getMessage().lower() and "skills" in r.getMessage()
+               for r in caplog.records), (
+        "the tier was dropped with nothing said about it")
