@@ -1084,3 +1084,53 @@ It gained `_queued` and `_requests` for #120, driven through `tests/conftest.py`
 fixture, which clears both before and after every test. Reaching into `httpx._queued` directly
 from a test leaks a queued response into the next one. The default answer with an empty queue
 is unchanged (`_Response(text="", url=url)`), so every pre-existing caller is unaffected.
+
+---
+
+## §17 — the second fix batch from Audit Pass 1 (2026-08-15)
+
+The first batch added tests only. **This one changes production code** — three files, closing
+two S0s and two S1s. Every fix was driven against its own mutation before being called done;
+the mutation driver is recorded per row below.
+
+| Change | Issues | Files |
+|---|---|---|
+| Persist the tool-result row before emitting its event | #42 | `core/loop.py` |
+| Drop empty assistant turns above the provider branch split | #13, #36 | `core/client.py` |
+| Treat a symlinked project tier root as absent | #18 | `core/config_loader.py` |
+
+Suite 1468 → **1488**.
+
+### What breaks these
+
+| If production code changes like this… | …this fails | Why it matters |
+|---|---|---|
+| Move `memory.add_tool_result()` back after the `yield` | `test_an_abandoned_generator_still_persisted_the_tool_result` + `test_the_assistant_tool_use_was_persisted_too` | D20 already wrote the `tool_use`; the orphaned pair is an unresumable thread, and the failure surfaces on a later resume as a provider error naming none of this |
+| Move `tool_call_start` after its dispatch | `test_the_tool_call_start_event_still_precedes_the_dispatch` | The *correct* ordering, pinned so #42's fix is not over-applied. There is nothing to persist at that point |
+| Delete the `_is_empty_assistant_turn` pre-filter | 6 tests, including `test_messages_google_empty_assistant_turn_skipped`, which predates the fix | Google's local guard is gone, so the pre-existing test now holds the shared rule — that is the point of moving it |
+| Key `_is_empty_assistant_turn` on empty text alone | 6 tests, including the pre-existing `test_messages_openai_assistant_with_null_text` and two Google tool-result tests | A tool-call-only turn has no text. Dropping it takes the `tool_use` with it and orphans the `tool_result` — #42's defect, reached from the translation side |
+| Re-add a local empty-turn guard to any one branch | Nothing, and that is the hazard | Two rules that can disagree is the state #13/#36 were filed from. `test_no_provider_emits_a_message_for_an_empty_assistant_turn` is parametrised over all three so a fourth branch inherits the property |
+| Drop `os.path.islink` from `_tier_dirs`' project entry | 3 tests in `test_config_loader.py` + `test_the_loader_reads_no_file_the_trust_listing_omits` | Project content loads unhashed, unlisted, and mutable after one grant — and the payload is system-prompt instructions |
+| Apply that symlink check to the harness or user tier too | `test_a_symlinked_user_tier_root_still_loads` | Nothing hashes those directories, so it is not a trust question; symlinking `~/.config/venastine/` into a dotfiles repo is legitimate |
+| Make `os.walk` follow links in `workspace_trust` | `test_a_symlinked_tier_root_is_invisible_to_both_the_hash_and_the_listing` | Not a regression — a prompt. That test pins the *current* asymmetry, so following links becomes a deliberate change made with the cycle and realpath guards it needs, and #18's loader guard can then be reconsidered |
+
+### Standing: an invariant of the form `A ⊆ B` decays into a tautology
+
+`test_the_loader_reads_no_file_the_trust_listing_omits` asserts `read <= listed`, which is
+trivially true when `read` is empty — so it would pass loudest if `_md_files` stopped finding
+anything at all. `test_that_invariant_can_actually_fail` is the mutation run as a test: it
+rebuilds the pre-#18 unguarded path, asserts it finds something, and asserts that something
+escapes the listing. Delete it and the invariant above still passes forever.
+
+This is the same failure mode as the previous batch's "collect problems, assert none", and the
+third shape of it recorded here. Subset, emptiness and non-membership assertions are all
+satisfied by an absent subject.
+
+### Standing: the producer-side fix is what closes the class
+
+#13 was filed against the OpenAI branch and was live — it killed a real Pass 2. Applying its
+suggested fix exactly as written would have left **the default provider** dying differently
+(#36), and Google correct only by accident of which provider was under debug when the hazard
+was first met. One filter above the split fixed all three and pre-fixes the fourth. That is
+CLAUDE.md's *fix at the producer, not the consumer* rule meeting a case where the consumers
+were three provider branches rather than two call sites.

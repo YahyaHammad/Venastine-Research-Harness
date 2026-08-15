@@ -28,7 +28,7 @@ python main.py --init --research-project           # §24: skip the type questio
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 1468 tests, offline, ~25s (first run ~30s: matplotlib font cache)
+pytest                                            # 1488 tests, offline, ~25s (first run ~30s: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -85,6 +85,8 @@ A from-scratch agentic harness (no LangChain). Two modes — regular tool-using 
 Three stop conditions, all in `_run()`: no tool calls (`complete`), `max_steps` exhausted (`max_steps_reached`), cumulative input+output tokens ≥ `max_total_tokens` (`token_budget_exceeded`). `stop_reason` and `thread_id` are set by `_run()`/the wrappers, never by `call_model()`.
 
 **D20 — persist before branch.** `memory.add_assistant_message(response)` runs immediately after the call returns, *before* any stop-condition branching. Moving it into a conditional silently drops plain-text final answers and budget-truncated responses from the persisted thread, and breaks the §3 JSON-retry path. This has been reintroduced once already; `test_streaming_loop.py` AC6 fails if it happens again.
+
+**Persist before EMIT, too (#42).** `memory.add_tool_result()` runs *before* the `tool_result` event is yielded — the same rule §22 gives `_Progress.checkpoint()`, and for the same reason: a generator only advances while someone iterates it, so emitting first makes durability depend on a UI continuing to read. It shipped the other way round. Because D20 has already written the assistant turn carrying the `tool_use` block, an abandoned generator left a `tool_use` with no matching `tool_result` — M4's pairing broken from the other side, and a thread that cannot be resumed. The tool *ran*; only the record was lost. `tool_call_start` stays before its dispatch, correctly: nothing is persisted there.
 
 **"Headless" means unable to ask, not "not a TUI."** `_run()` hides approval-gated tools when there is neither a `permission_channel` nor an `approval_provider` (§25 broadened this from the channel alone). A research pass in attended mode can ask, so its gated tools are advertised.
 
@@ -164,6 +166,8 @@ Provider wire formats exist in **exactly two functions**: `_tools_for_provider()
 Anthropic, OpenAI-compatible (any `is_v1_compatible` provider), and Google are all fully implemented. The load-bearing differences (system prompt placement, tool-result batching, `assistant` vs `model` role, `max_tokens` vs `max_completion_tokens` vs `max_output_tokens`, response parsing) are enumerated in ARCHITECTURE.md §4.7.
 
 **D21 — streaming must not silently degrade token accounting.** `supports_stream_usage` is read from `providers.json`; the Google and OpenAI streaming branches *raise* if the flag is set but the stream ends with zero usage. A silently-zero budget disables the budget stop condition. Do not soften this to a `getattr(..., 0)` default.
+
+**The empty assistant turn is dropped ABOVE the branch split (#13, #36).** A turn with neither text nor tool calls — a safety filter, a truncation, an empty pass response — is persisted by D20 and so reaches translation on every resume. It used to produce three different results from one neutral input: `content: null` on OpenAI (#13, which killed a live Pass 2), `content: []` on Anthropic (#36, on the *default* provider), and a skip on Google — guarded only because Google was the provider being debugged when it surfaced. `_is_empty_assistant_turn` now filters once at the top of `_messages_for_provider`, so a fourth branch inherits the fix instead of re-deriving it, and Google's local `if parts:` is gone. **Both halves must be empty**: a tool-call-only turn legitimately has no text, and a guard keyed on text alone drops the `tool_use` and orphans the `tool_result` after it. Dropping the turn can leave two consecutive `user` messages, which is the shape Google's branch has always produced here.
 
 ### Research pipeline (`core/reasoning/`)
 
@@ -675,6 +679,8 @@ the CLI has no command layer).
 `core/config_loader.py` discovers `.md` agents/skills across three tiers — harness (`<root>/{agents,skills}/builtin/`) → project (`.venastine/`, trust-gated) → user (`~/.config/venastine/`) — parses line-anchored YAML frontmatter, and merges `settings.json` (unknown keys **raise**). `core/workspace_trust.py` owns only the D17 trust store (resolved path + sorted-walk content hash); `main.py` owns the prompting UX.
 
 Load-bearing: untrusted project content is **absent**, not loaded-and-disabled. Trust-store and user-config paths resolve at call time, not import time (tests redirect them). Provider/model precedence is CLI > `settings.json` > `config.py`, which only works because argparse defaults are `None` (`main.resolve_runtime_defaults`).
+
+**A symlinked PROJECT tier root is treated as absent (#18).** `os.walk` follows the path handed to it as `top` but not symlinked subdirectories, and the two sides of the trust boundary start from different places: `workspace_trust` walks from `.venastine`, so `skills/` is a subdirectory it will not descend, while `_md_files` walks from `.venastine/skills`, so it *is* the top and gets followed. Directory names never enter the hash either, so the link contributed nothing — not even its own name. Behind it, definitions loaded as project tier while being absent from the trust prompt's listing **and** from the hash, so their bodies could be rewritten freely after one grant with `is_trusted()` still returning `True`. The payload is instructions, not data: a project-tier body becomes system-prompt content. Git stores symlinks natively, so this arrives on clone — D17's own stated threat. The guard is scoped to the **project** tier deliberately; nothing hashes the harness or user directories, and symlinking `~/.config/venastine/` into a dotfiles repo is legitimate. The invariant to keep however this is later refined: **the loader must read no file the trust listing omits** (`test_workspace_trust.py`). The deeper fix — making `content_files()` and `_content_hash()` one traversal rather than two that must agree — is still open.
 
 Progressive disclosure: system prompts list skills as name + one-line description only; full bodies enter context solely via the `load_skill` tool result. Assembly lives in one place — `prompts/system_prompts.py`'s `with_skill_catalog()` / `pass_prompt()` — so the catalog can't diverge between an attempt and its JSON retry.
 
