@@ -277,3 +277,49 @@ class TestRegistryIntegration:
             approval_callback=lambda name, params: True,
         )
         assert "error" in result  # file not found, but NOT ToolCallDenied
+
+
+# ---------------------------------------------------------------------------
+# ---- The workspace boundary is a PATH boundary (issue #58, guard 3) -------
+# ---------------------------------------------------------------------------
+
+class TestSiblingDirectoryPrefix:
+    """`_is_within_workspace` ends with `startswith(WORKSPACE_ROOT + os.sep)`,
+    and the `+ os.sep` is the whole guard. Dropping it -- leaving a bare
+    `startswith(WORKSPACE_ROOT)` -- left all 1406 tests green, because the
+    existing tests cover `..` traversal and symlinks but not the sibling
+    prefix: `/…/workspace-evil/loot.txt` starts with `/…/workspace`.
+
+    The consequence is not a denial, it is the opposite. `_file_approval_check`
+    returns True (ask the user) for anything outside the workspace; a path
+    judged INSIDE falls through to the ToolApprovals boolean, which for
+    `read` is False. So the mutation turns a prompt into an auto-approval.
+
+    DORMANT, NOT DEAD. `read`/`write`/`edit` are globally denied (#21), so
+    `_file_approval_check` does not run in the default configuration. That is
+    exactly why the guard needs a test: it is the kind that has to be right
+    before anyone flips those booleans, and nothing would have told them.
+    """
+
+    def _sibling(self):
+        return file_ops.WORKSPACE_ROOT + "-evil"
+
+    def test_a_sibling_directory_sharing_the_prefix_is_outside(self):
+        assert file_ops._is_within_workspace(
+            os.path.join(self._sibling(), "loot.txt")) is False
+
+    def test_the_workspace_root_itself_is_inside(self):
+        """The equality arm. A guard that answered False for everything
+        would satisfy the test above without protecting anything."""
+        assert file_ops._is_within_workspace(file_ops.WORKSPACE_ROOT) is True
+
+    def test_a_real_child_is_inside(self):
+        assert file_ops._is_within_workspace(
+            os.path.join(file_ops.WORKSPACE_ROOT, "notes.txt")) is True
+
+    def test_a_sibling_path_still_requires_approval(self):
+        """The property that actually matters, at the layer that decides:
+        a path outside the workspace must ASK, whatever ToolApprovals says
+        for the tool."""
+        assert file_ops._file_approval_check(
+            "read", {"path": os.path.join(self._sibling(), "loot.txt")}) is True

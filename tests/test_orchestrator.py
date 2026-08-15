@@ -24,10 +24,16 @@ entry point orchestrator's `_run_pass` calls. Any change to:
       updating the canned mock payload.
       -> FIX: extend _canned_pass_responses[pass_id] for the affected pass.
   (3) `_claim_from_json`'s allowlist `_CLAIM_INPUT_FIELDS` in
-      orchestrator.py -- if it grows (e.g. adding "asserted_by_candidates"
-      per ROADMAP §10), the Pass 2 mock payload can still contain extra
-      fields (they'll be filtered out), but if a required field is added,
-      the mock must include it.
+      orchestrator.py -- the Pass 2 mock payload can contain extra fields
+      (they'll be filtered out; C1 carries "confidence" for exactly that
+      reason, issue #123), but if a REQUIRED field is added, the mock must
+      include it.
+      -- The worked example here used to be "asserted_by_candidates". ROADMAP
+         §10's revisit moved that field INTO the allowlist, so the example
+         stopped demonstrating filtering and nothing noticed. Whatever key
+         this names must be one the allowlist does NOT contain, and
+         TestClaimFromJsonFiltersUnknownFields asserts the allowlist's exact
+         contents so that a change here cannot go unnoticed again.
   (4) ROADMAP §3 (JSON-retry) refactored `_run_pass` into
       `_run_pass_with_json_retry`. THIS TEST STILL PATCHES
       `RunAgentLoop.run_deep_research_mode` (the function the helper calls
@@ -138,10 +144,24 @@ def _clean_pipeline_payloads():
             "post-quantum cryptography."
         ),
         # Pass 2 - claim extraction (JSON list)
+        #
+        # C1 carries "confidence", a key that is NOT in _CLAIM_INPUT_FIELDS
+        # (issue #123). Until it was added, no canned payload anywhere in the
+        # suite carried a field outside the allowlist, so replacing
+        # `_claim_from_json`'s two lines with `Claim(**raw)` left all 1406
+        # tests green -- while two documents described the filtering as a
+        # live fact a maintainer could rely on. This is the end-to-end pin;
+        # TestClaimFromJsonFiltersUnknownFields pins the function directly.
+        #
+        # It must stay a key the allowlist does NOT contain. The old worked
+        # example was "asserted_by_candidates", which §10's revisit moved
+        # INTO the allowlist -- so the example stopped demonstrating
+        # filtering and nobody noticed.
         "Pass 2": json.dumps([
             {
                 "id": "C1", "text": "Shor's algorithm can factor large integers.", "type": "factual",
                 "entities": ["Shor's algorithm", "integer"], "source_span": "0:30",
+                "confidence": 0.9,
             },
             {
                 "id": "C2", "text": "This threatens RSA.",
@@ -1129,3 +1149,73 @@ def test_pipeline_non_ensemble_mode_single_pass_1(mocker):
     for claim in run.claims:
         assert "consistency_score" not in claim.score_breakdown
         assert claim.asserted_by_candidates == []
+
+
+# ---------------------------------------------------------------------------
+# ---- Issue #123: _claim_from_json's allowlist ------------------------------
+# ---------------------------------------------------------------------------
+
+class TestClaimFromJsonFiltersUnknownFields:
+    """`_claim_from_json` is the one thing standing between a Pass 2 model
+    response and `Claim.__init__`, and its filter had no test: replacing
+
+        filtered = {k: v for k, v in raw.items() if k in _CLAIM_INPUT_FIELDS}
+        return Claim(**filtered)
+
+    with `return Claim(**raw)` left all 1406 tests green, because no canned
+    payload in the suite carried a field outside the allowlist. Two
+    documents meanwhile described the filtering as a live fact -- both using
+    `asserted_by_candidates` as the example, which §10's revisit moved INTO
+    the allowlist, so the worked example had stopped demonstrating the
+    behaviour it was written for.
+
+    A model writes this JSON. An extra key is not a hypothetical.
+    """
+
+    def test_an_unknown_key_is_dropped_rather_than_crashing(self):
+        from core.reasoning.orchestrator import _claim_from_json
+
+        claim = _claim_from_json({
+            "id": "C1", "text": "a claim", "type": "factual",
+            "entities": [], "source_span": "",
+            "confidence": 0.9,            # not in _CLAIM_INPUT_FIELDS
+            "notes": "model chatter",     # nor this
+        })
+        assert claim.id == "C1"
+        assert not hasattr(claim, "confidence")
+        assert not hasattr(claim, "notes")
+
+    def test_every_allowlisted_field_still_arrives(self):
+        """The filter must not be a whitelist that has drifted narrower than
+        Claim's own inputs -- that failure is silent in the other direction,
+        dropping data the model correctly supplied."""
+        from core.reasoning.orchestrator import _CLAIM_INPUT_FIELDS, _claim_from_json
+
+        claim = _claim_from_json({
+            "id": "C9", "text": "t", "type": "speculative",
+            "entities": ["e"], "source_span": "1:2",
+            "asserted_by_candidates": [1, 3],
+        })
+        assert claim.id == "C9"
+        assert claim.text == "t"
+        assert claim.type == "speculative"
+        assert claim.entities == ["e"]
+        assert claim.source_span == "1:2"
+        assert claim.asserted_by_candidates == [1, 3]
+        assert _CLAIM_INPUT_FIELDS == {
+            "id", "text", "type", "entities", "source_span",
+            "asserted_by_candidates",
+        }, ("The allowlist changed. Update this test AND the worked examples "
+            "in tests/BREAKING_CHANGES.md and this file's banner -- the last "
+            "time it grew, both documents kept naming a field that had just "
+            "become allowed (issue #123).")
+
+    def test_a_genuinely_missing_required_field_still_raises(self):
+        """The filter drops unknown keys; it does not paper over a payload
+        that is missing something Claim requires. This is the half the
+        docstring promises and the half a `Claim(**raw)` mutation keeps, so
+        it is what distinguishes the filter from no filter at all."""
+        from core.reasoning.orchestrator import _claim_from_json
+
+        with pytest.raises(TypeError):
+            _claim_from_json({"id": "C1", "entities": []})   # no text, no type

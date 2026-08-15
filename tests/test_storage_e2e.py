@@ -51,6 +51,7 @@ below swaps it back out, points `config.DB_PATH` at tmp_path, reloads
 reloaded module -- then puts all of it back.
 """
 
+import contextlib
 import os
 import sys
 
@@ -510,21 +511,80 @@ def test_forgetting_an_unknown_id_reports_rather_than_raises(real_storage):
 # fake and the code agree, not that either is right -- and §27's whole point
 # is a WHERE clause that must not have to load every row to filter.
 
+@contextlib.contextmanager
+def _captured_sql(engine):
+    """Every statement the driver is actually asked to execute.
+
+    Issue #29: the set a call RETURNS cannot distinguish a SQL filter from a
+    Python one -- they are equal by construction. So the observation has to
+    be the statement itself, and SQLAlchemy's before_cursor_execute is the
+    seam that already exists for it. No production change.
+    """
+    from sqlalchemy import event
+
+    statements = []
+
+    def record(conn, cursor, statement, parameters, context, executemany):
+        statements.append(statement)
+
+    event.listen(engine, "before_cursor_execute", record)
+    try:
+        yield statements
+    finally:
+        event.remove(engine, "before_cursor_execute", record)
+
+
+def _thread_selects(statements):
+    return [s for s in statements
+            if s.lstrip().lower().startswith("select")
+            and "conversationthread" in s.lower()]
+
+
 def test_list_threads_filters_by_kind_in_sql(real_storage):
     """AC2 against the real query. The fake mirrors this filter, but T1
     chose a column over an extra_data key precisely so the database does the
-    work, and only real SQL can show that it does."""
+    work, and only real SQL can show that it does.
+
+    THIS TEST USED TO ASSERT ON THE RETURNED SET, which a Python-side filter
+    satisfies identically -- so it was named for a mechanism it could not
+    observe, and replacing the WHERE with a list comprehension left all 1406
+    tests green (issue #29). The set assertions are kept, because AC2 is
+    also about behaviour; the statement assertions are what pin T1.
+    """
     chat = real_storage.create_thread()
     pass_thread = real_storage.create_thread(kind="research_pass")
     subagent = real_storage.create_thread(kind="subagent")
 
-    listed = {row["id"] for row in real_storage.list_threads()}
-    everything = {row["id"] for row in real_storage.list_threads(kind=None)}
+    with _captured_sql(real_storage.engine) as statements:
+        listed = {row["id"] for row in real_storage.list_threads()}
+    filtered_sql = _thread_selects(statements)
 
+    with _captured_sql(real_storage.engine) as statements:
+        everything = {row["id"] for row in real_storage.list_threads(kind=None)}
+    unfiltered_sql = _thread_selects(statements)
+
+    # --- behaviour (AC2), unchanged
     assert chat in listed
     assert pass_thread not in listed
     assert subagent not in listed
     assert {chat, pass_thread, subagent} <= everything
+
+    # --- the MECHANISM T1 bought: the database does the filtering
+    assert filtered_sql, "no SELECT over conversationthread was executed at all"
+    assert any("where" in s.lower() and "kind" in s.lower() for s in filtered_sql), (
+        "list_threads() fetched conversationthread rows with no WHERE on "
+        "kind, so the filtering is happening in Python. T1 chose a COLUMN "
+        "over an extra_data key precisely so it would not -- and the picker "
+        "query runs against a database gaining ~10 threads per research "
+        f"run. Statements: {filtered_sql}")
+
+    # ... and kind=None genuinely asks for everything, rather than filtering
+    # to a wildcard. The pair is what makes the assertion above discriminate
+    # rather than just observe that the word "kind" appears somewhere.
+    assert unfiltered_sql, "no SELECT over conversationthread was executed at all"
+    assert not any("where" in s.lower() and "kind" in s.lower()
+                   for s in unfiltered_sql), (
+        f"list_threads(kind=None) still filtered on kind: {unfiltered_sql}")
 
 
 def test_a_row_carries_the_first_user_message(real_storage):

@@ -449,22 +449,69 @@ def _build_fake_sqlmodel_module():
 # ---------------------------------------------------------------------------
 
 def _build_fake_httpx_module():
+    """The offline stand-in for httpx.
+
+    EXTENDED FOR ISSUE #120. It used to be `get(url, **kwargs) -> _Response(
+    text="")` and nothing else: no `.url`, no `.history`, no `.headers`, no
+    way to queue a response. That is a second-order reason `fetch_url` had no
+    tests at all -- **a redirect could not be represented in it**, so #53
+    (the blocklist is checked pre-flight only, and the tool reports the URL
+    it asked for rather than the one that answered) was not merely untested
+    but untestable.
+
+    What is added is deliberately only what a redirect needs to be
+    expressible plus a way to queue outcomes. `_Response` still defaults to
+    exactly what it returned before, so every existing caller is unaffected.
+
+    Tests drive it through `queue_http_responses()` in tests/conftest.py
+    rather than reaching in here.
+    """
     mod = types.ModuleType("httpx")
 
     class _HTTPError(Exception):
         pass
 
     class _Response:
-        def __init__(self, text="", status_code=200):
+        def __init__(self, text="", status_code=200, url=None, headers=None,
+                     history=()):
             self.text = text
             self.status_code = status_code
+            # The URL that ANSWERED. Real httpx sets this to the final hop
+            # after following redirects, which is the whole distinction #53
+            # turns on -- fetch_url reports `parsed.url`, the one it asked
+            # for, so a redirected fetch is reported under the requesting
+            # domain.
+            self.url = url
+            self.headers = dict(headers or {})
+            # The hops that were followed, oldest first, exactly as real
+            # httpx orders them. Empty for a direct answer.
+            self.history = list(history)
 
         def raise_for_status(self):
+            # Real httpx raises for 4xx/5xx only -- 3xx is NOT an error, which
+            # is one of the four facts behind the arXiv 301 incident and the
+            # reason ET.fromstring("") saw an empty body rather than a raise.
             if self.status_code >= 400:
                 raise _HTTPError(f"HTTP {self.status_code}")
 
+    # Queued outcomes, oldest first. An entry is either a _Response or an
+    # exception INSTANCE to raise -- both are things a caller must handle,
+    # and a fake that can only succeed cannot exercise the error path.
+    mod._queued = []
+    mod._requests = []          # every (url, kwargs) the code under test sent
+
     def _get(url, **kwargs):
-        return _Response(text="")
+        mod._requests.append((url, kwargs))
+        if not mod._queued:
+            # Unchanged default, so this stays a drop-in for every existing
+            # caller that never queued anything.
+            return _Response(text="", url=url)
+        outcome = mod._queued.pop(0)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        if outcome.url is None:
+            outcome.url = url
+        return outcome
 
     mod.HTTPError = _HTTPError
     mod.get = _get

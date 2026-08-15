@@ -1,0 +1,63 @@
+# Issue #11 -- nothing ran the test suite automatically.
+#
+# The suite is fully offline by design (the root conftest.py stubs six SDK
+# packages into sys.modules at import time), so this needs no secrets, no
+# network at test time, and no services. It is `pip install` + `pytest`.
+#
+# Two things a fresh clone needs that a working copy already has, both
+# documented in CLAUDE.md and both easy to lose in CI:
+#
+#   * providers.json. Gitignored, template at providers.json.example.
+#     api_initialization() needs the provider ENTRY to exist even though the
+#     key inside it stays empty -- without it, tests in
+#     test_loop_stop_conditions, test_loop_tool_dispatch and test_agents fail
+#     with `ValueError: Unknown provider: ANTHROPIC`. "Offline, no API keys"
+#     is true; "no config file" is not.
+#   * Python 3.11. mcp_client/client.py uses asyncio.timeout, which is 3.11+.
+#     Issue #144 records that no packaging artifact declares this; until one
+#     does, the version lives here and nowhere else, so this comment is the
+#     only place it is written down.
+#
+# `-m integration` is deliberately NOT run: pytest.ini already excludes it
+# from the default invocation, and it currently fails for an unrelated reason
+# (issue #10 -- the child-process detector greps a truncated `ps` line). Add
+# it here when #10 closes.
+
+name: tests
+
+on:
+  push:
+  pull_request:
+
+# A second push to the same branch makes the first run's result irrelevant.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Provide providers.json
+        run: cp providers.json.example providers.json
+
+      # `python -m pytest`, not a bare `pytest`: CLAUDE.md records that a
+      # pytest on PATH from a separate tool install runs in its own
+      # environment and sees none of the project's dependencies.
+      - name: Run the suite
+        run: python -m pytest -q
