@@ -1009,3 +1009,78 @@ the collected total against the number quoted in `README.md`, `CLAUDE.md` and
 `ARCHITECTURE.md`. It **skips** on a narrowed invocation, so a green
 `pytest tests/test_ensemble_guard.py` says nothing about it. Run the full suite
 before committing, and update all three quotes together.
+
+---
+
+## §16 — the first fix batch from Audit Pass 1 (2026-08-15)
+
+Nine audit findings, all closed by adding tests rather than changing production code. Every
+row below was a mutation that left **all 1406 tests green** before this batch; each is now
+pinned by the named test. If you are reverting one of these tests, the mutation in its row is
+what stops being caught.
+
+**These tests were each driven against their own mutation before landing.** That is the
+standard the batch was held to, and two of them failed it on the first attempt — see the two
+"standing" notes at the end, which are the more useful half of this section.
+
+### New files
+
+| File | Tests | What it pins |
+|---|---|---|
+| `test_fake_storage_mirror.py` | 16 | `FakeStorage._reconstruct` / `_split_at` against `storage._to_neutral` / `storage._split_at` (#123) |
+| `test_prompt_tier_boundary.py` | 11 | K6 as a rule: a pass prompt is invariant under every session tier (#146) |
+| `test_sdk_conformance.py` | 4 | the real pinned SDKs, offline — google-genai fields, the thinking_budget pin note, httpx's redirect default, and #35 as a strict xfail (#143) |
+| `test_fetch_url.py` | 18 | `fetch_url`'s whole surface, which no test had ever executed (#120, #58) |
+
+### What breaks them
+
+| Change | Symptom | Why the guard exists |
+|---|---|---|
+| Change `storage._to_neutral`'s reconstruction without changing `FakeStorage._reconstruct` identically (or vice versa) | `test_fake_storage_mirror.py::TestReconstructionMirrorsProduction` fails, naming the role that diverged | CLAUDE.md's "verify against production, not the test double" was a convention nothing checked. Both are pure functions, so the check is direct |
+| Make `_split_at` return `len(rows)` for a watermark it cannot find, on **either** side | `test_an_unknown_watermark_is_zero_on_both_sides` | The 0 is what shows the whole thread rather than hiding a prefix on the strength of an id that could not be resolved |
+| `return Claim(**raw)` in `_claim_from_json` | 8 tests in `test_orchestrator.py`, including the end-to-end path — the canned Pass 2 payload carries a `confidence` key for exactly this | Nothing outside the allowlist appeared in any canned payload, so the filter was never exercised |
+| Widen or narrow `_CLAIM_INPUT_FIELDS` | `test_every_allowlisted_field_still_arrives`'s exact-contents assertion | The previous worked example (`asserted_by_candidates`) was moved INTO the allowlist by §10's revisit, so two documents described filtering with a field that was no longer filtered |
+| Remove `dirs.sort()` from `_content_hash` | `test_descent_order_does_not_change_the_digest` | An unchanged `.venastine/` hashing differently re-prompts for trust already granted, and repeated unexplained trust prompts are what train someone to approve without reading |
+| Remove `dirs.sort()` from `content_files` | `test_descent_order_does_not_change_the_trust_prompt_listing` + `test_content_files_sorted_and_relative` | Same one-line guard at the site that produces the text a user reads to decide whether to trust a project |
+| Append any tier inside `prompts.system_prompts.with_catalogs()` | `test_no_tier_canary_reaches_any_pass_prompt[<tier>]` names the tier; `test_with_catalogs_itself_carries_no_session_tier` names the function | K6/M13/M19/J11 each pinned ONE tier. Appending the project's `CONTEXT.md` inside reached all ten research passes with 1406 green |
+| Replace `list_threads`' SQL `WHERE` with a Python filter | `test_list_threads_filters_by_kind_in_sql` — it now reads the statements the driver executes, not the set returned | The returned set is identical either way, so the test was named for a mechanism it could not observe |
+| Delete `self._cancel_manager()` from `connect_all`'s except block | `test_connect_timeout_cancels_the_manager_task` — via `_done`, which the except block does not touch | `_task is None` and `clients == {}` are set by the other two statements; they record the release, they do not cause it |
+| Remove `fetch_url`'s scheme check or its `is_domain_blocked` call | 7 and 1 tests in `test_fetch_url.py`, each asserting the request never left the process | Both are live and ungated: advertised in plain chat and in all ten research passes |
+| Drop the `+ os.sep` from `_is_within_workspace` | `TestSiblingDirectoryPrefix` | `/workspace-evil` is judged inside `/workspace`, turning a PROMPT into an auto-approval. Dormant behind the global deny, which is why it needs a test |
+| Narrow `_is_readable_doc`'s `.env` prefix test to `==`, or its any-segment check to `parts[0]` | `test_read_refuses_env_files_with_a_suffix` / `test_read_refuses_a_denied_segment_at_any_depth` | The pre-existing tests used `.env` exactly and put `.venastine` first, so both narrowings kept them green |
+| Fix #35 or #53 | The strict `xfail` for each turns into `[XPASS(strict)] … FAILED` | Deliberate. A strict xfail tells whoever fixes the bug to delete the marker, instead of leaving a green xpass nobody reads |
+
+### Standing: a test that fails for the wrong reason is indistinguishable from one that works
+
+Two of this batch's tests passed their first driving for reasons unrelated to what they were
+named for. Both were found only by asking *why* the result looked right.
+
+- **`test_sdk_conformance.py`'s #35 arm** reported `xfail` because real `anthropic` does
+  `from httpx import URL, Proxy, Timeout, …` at import time, and `real_package("anthropic")`
+  left the fake `httpx` in place — so it died with `ImportError` before reaching
+  `ModelCapabilities`. **Reaching a real package past a fake means unfaking its dependencies
+  too.** Fixed by `real_package("anthropic", "httpx")`.
+- **`test_workspace_trust.py`'s first descent-order test** compared a "reversed" walk against
+  the real one — and this filesystem enumerates `.venastine/` as `skills, agents`, which is
+  already reverse-alphabetical. Two identical orders, compared. **When a test's input is
+  "whatever the environment happens to do", control BOTH sides.** Both walks are now
+  synthetic, and `test_the_two_walk_doubles_really_do_differ` asserts they differ.
+
+The general form, which `test_pilot_wait.py` already carries for the pilot helpers: when a
+test's whole job is to fail on a specific defect, the defect has to be applied and the failure
+read — and the *reason* for the failure checked, not just its presence.
+
+### Standing: "collect problems, assert none" passes loudest when it sees nothing
+
+`test_sdk_conformance.py` has two checks of that shape, and both now assert they can see their
+subject first — the AST walk found ≥6 classes and ≥10 keywords; `ThinkingConfig` exposes some
+`model_fields` at all. An empty collection satisfies "no problems" and an absent field
+satisfies `not in`, so either would have gone quietly vacuous at exactly the moment the thing
+it inspects stopped being readable.
+
+### Standing: the fake `httpx` now carries state
+
+It gained `_queued` and `_requests` for #120, driven through `tests/conftest.py`'s `http`
+fixture, which clears both before and after every test. Reaching into `httpx._queued` directly
+from a test leaks a queued response into the next one. The default answer with an empty queue
+is unchanged (`_Response(text="", url=url)`), so every pre-existing caller is unaffected.
