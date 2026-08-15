@@ -441,3 +441,98 @@ def test_a_reachable_tool_is_still_prompted_for(mocker):
     ))
 
     assert [e for e in events if e.permission_request is not None]
+
+
+# ---------------------------------------------------------------------------
+# ---- #42: persist-before-emit for tool results -----------------------------
+# ---------------------------------------------------------------------------
+
+def _drive_until_tool_result(memory, mocker):
+    """Start a real `_run()` generator and stop it on the tool_result event.
+
+    `gen.close()` is what CPython does when a generator is dropped, which is
+    the abandonment §22 designs for: *"GeneratorExit is not an Exception, so
+    a consumer that stops iterating is recorded as abandoned rather than
+    failed."* Reached in the TUI when `_pump`'s `except BaseException` exits
+    the loop, and on the pipeline path when a PipelineEvent consumer stops.
+    """
+    with_tool = make_model_response(
+        text="Let me check. ",
+        tool_calls=[{"id": "t1", "name": "get_time", "input": {}}])
+    done = make_model_response(text="It is noon.")
+    mocker.patch("core.loop.call_model_stream",
+                 side_effect=make_stream_sequence(with_tool, done))
+    mocker.patch("core.loop.registry.dispatch", return_value={"result": "ok"})
+
+    gen = RunAgentLoop._run(**_run_kwargs(memory))
+    for event in gen:
+        if event.tool_result is not None:
+            gen.close()
+            break
+    else:                                     # pragma: no cover - guard
+        raise AssertionError("no tool_result event was ever yielded")
+    return gen
+
+
+def test_an_abandoned_generator_still_persisted_the_tool_result(mocker):
+    """#42. The event used to be yielded BEFORE `add_tool_result`, so a
+    consumer that stopped at that event left the row unwritten.
+
+    D20 has already persisted the assistant turn carrying the `tool_use`
+    block, unconditionally, 176 lines earlier -- so the thread was left
+    holding a `tool_use` with no matching `tool_result`. That is M4's shape
+    from the other side: *"a tool_result with no preceding tool_use is an
+    HTTP 400 on Anthropic -- a hard wire error, not a degraded answer."*
+
+    The tool RAN. This was never a lost call, only a lost record of one.
+    """
+    memory = _FakeMemory()
+    _drive_until_tool_result(memory, mocker)
+
+    assert memory.tool_results == [("t1", {"result": "ok"})], (
+        "the generator was abandoned on the tool_result event and the row "
+        "was never written, so the thread now holds a tool_use with no "
+        "matching tool_result and cannot be resumed (#42)")
+
+
+def test_the_assistant_tool_use_was_persisted_too(mocker):
+    """Guards the guard, and states the pairing the fix is about.
+
+    Without this, the test above would still pass if D20's unconditional
+    `add_assistant_message` regressed -- there would be no `tool_use` to
+    orphan, so nothing to detect. The property is that the archive holds
+    BOTH halves of the pair, not that it holds either one.
+    """
+    memory = _FakeMemory()
+    _drive_until_tool_result(memory, mocker)
+
+    assert len(memory.assistant_messages) == 1, "D20's persist-before-branch"
+    assert memory.assistant_messages[0].tool_calls, "the tool_use half"
+    assert memory.tool_results, "the tool_result half"
+
+
+def test_the_tool_call_start_event_still_precedes_the_dispatch(mocker):
+    """The ordering that is CORRECT as it stands, pinned so the fix above is
+    not over-applied.
+
+    `tool_call_start` is emitted before the tool runs and must stay there:
+    there is nothing to persist yet, and a consumer showing "calling X..."
+    depends on arriving first. Only the RESULT has a row behind it.
+    """
+    memory = _FakeMemory()
+    order = []
+
+    with_tool = make_model_response(
+        text="", tool_calls=[{"id": "t1", "name": "get_time", "input": {}}])
+    done = make_model_response(text="done")
+    mocker.patch("core.loop.call_model_stream",
+                 side_effect=make_stream_sequence(with_tool, done))
+    mocker.patch("core.loop.registry.dispatch",
+                 side_effect=lambda *a, **k: (order.append("dispatch"),
+                                              {"result": "ok"})[1])
+
+    for event in RunAgentLoop._run(**_run_kwargs(memory)):
+        if event.tool_call_start is not None:
+            order.append("tool_call_start")
+
+    assert order == ["tool_call_start", "dispatch"]
