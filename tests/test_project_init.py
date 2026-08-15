@@ -179,6 +179,46 @@ class TestTheScopedTools:
             (project / name).write_text(body, encoding="utf-8")
             assert "error" in project_docs.read_run({"path": name})
 
+    def test_read_refuses_env_files_with_a_suffix(self, project):
+        """Issue #58. `_is_readable_doc` tests `name.startswith(".env")`, not
+        equality, and the existing credential test only uses `.env` exactly --
+        so narrowing it to `==` would keep that test green while exposing
+        `.env.local`, `.env.production` and every other conventional variant.
+        The `.txt` one matters most: its extension is in _DOC_EXTENSIONS, so
+        the prefix rule is the ONLY thing refusing it."""
+        for name in (".env.local", ".env.production", ".env.txt"):
+            (project / name).write_text("GITHUB_TOKEN=ghp_1\n", encoding="utf-8")
+            result = project_docs.read_run({"path": name})
+            assert "error" in result, f"{name} was readable"
+            assert "ghp_1" not in str(result)
+
+    def test_read_refuses_a_denied_segment_at_any_depth(self, project):
+        """Issue #58. `_DENIED_SEGMENTS` is checked against EVERY path
+        segment, and the existing test only puts `.venastine` first -- so a
+        check that looked at `parts[0]` alone would stay green while a
+        document nested under a denied directory became readable."""
+        nested = project / "docs" / ".venastine"
+        nested.mkdir(parents=True)
+        (nested / "notes.md").write_text("# private\n", encoding="utf-8")
+        assert "error" in project_docs.read_run(
+            {"path": "docs/.venastine/notes.md"})
+
+        deep = project / "sub" / "node_modules" / "pkg"
+        deep.mkdir(parents=True)
+        (deep / "README.md").write_text("# vendored\n", encoding="utf-8")
+        assert "error" in project_docs.read_run(
+            {"path": "sub/node_modules/pkg/README.md"})
+
+    def test_read_still_allows_an_ordinary_nested_document(self, project):
+        """Discriminates the two above from a rule that refuses everything
+        nested."""
+        docs = project / "docs" / "design"
+        docs.mkdir(parents=True)
+        (docs / "NOTES.md").write_text("# fine\n", encoding="utf-8")
+        result = project_docs.read_run({"path": "docs/design/NOTES.md"})
+        assert "error" not in result
+        assert "# fine" in result["content"]
+
     def test_read_refuses_inside_venastine(self, project):
         venastine = project / ".venastine"
         venastine.mkdir()

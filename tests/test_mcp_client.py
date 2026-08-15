@@ -477,9 +477,27 @@ def test_connect_timeout_cancels_the_manager_task(monkeypatch):
     with pytest.raises(Exception):
         c.connect_all(timeout=1.0)
 
-    # The manager was cancelled and released, not left running.
+    # -- the BOOKKEEPING. These two were the whole test (issue #61), and
+    # they are set by the other two statements in the same except block --
+    # `self._task = None` RECORDS that the task was released, it does not
+    # CAUSE it. Deleting `self._cancel_manager()` and keeping the rest left
+    # all 1406 tests green, so the test named for the cancellation could not
+    # observe it.
     assert c._task is None
     assert c.clients == {}
+
+    # -- the CANCELLATION itself. `_done` is set in the manager's `finally`,
+    # and the except block does not touch it -- so it is True only if the
+    # task actually unwound. With the cancel gone, `_shutdown_loop()` stops
+    # the loop while the manager is still parked inside its
+    # `async with AsyncExitStack()`, the stack never unwinds, `_done` is
+    # never set, and this fails. That is the documented failure mode
+    # verbatim: a manager holding every child process already spawned, which
+    # nothing can close because disconnect_all() waits on `_done`.
+    assert c._done is not None and c._done.is_set(), (
+        "the manager task was abandoned rather than cancelled: it is still "
+        "parked mid-connect holding any subprocess it had already spawned, "
+        "and disconnect_all() waits on the _done it will never set")
 
     # And shutting down afterwards is a no-op rather than a second hang.
     c.disconnect_all(timeout=5.0)

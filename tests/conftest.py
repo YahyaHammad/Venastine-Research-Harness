@@ -772,3 +772,65 @@ def fake_storage(monkeypatch):
     storage = FakeStorage()
     install_fake_storage(monkeypatch.setattr, storage)
     return storage
+
+
+# ---------------------------------------------------------------------------
+# ---- Driving the fake httpx (issue #120) ----------------------------------
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def http(monkeypatch):
+    """Queue outcomes for the fake `httpx.get`, and read back what was sent.
+
+    The root conftest's httpx stand-in gained a queue for issue #120 -- until
+    then it could only answer `_Response(text="")`, which is why `fetch_url`
+    had no tests and why #53's redirect case was untestable rather than
+    merely untested.
+
+    Usage:
+
+        http.respond(text="hello", url="https://example.com/final")
+        http.fail(httpx.HTTPError("boom"))
+        ...
+        assert http.requests[0][0] == "https://example.com/start"
+
+    The queue is drained and reset for every test, so a queued response that
+    goes unused cannot leak into the next one.
+    """
+    import httpx
+
+    class _Driver:
+        Response = httpx.Response
+        HTTPError = httpx.HTTPError
+
+        def respond(self, text="", status_code=200, url=None, headers=None,
+                    history=()):
+            """Queue one successful answer. `history` is the redirect chain
+            real httpx would have followed, oldest first; `url` is the hop
+            that actually answered."""
+            httpx._queued.append(httpx.Response(
+                text=text, status_code=status_code, url=url,
+                headers=headers, history=history))
+
+        def redirected(self, final_url, text="", via=("301",)):
+            """Queue the answer a FOLLOWED redirect produces: the body and
+            final URL of the last hop, with the earlier ones in `.history`.
+            This is the shape #53 is about."""
+            httpx._queued.append(httpx.Response(
+                text=text, status_code=200, url=final_url,
+                history=[httpx.Response(status_code=int(code)) for code in via]))
+
+        def fail(self, exc):
+            httpx._queued.append(exc)
+
+        @property
+        def requests(self):
+            return list(httpx._requests)
+
+    httpx._queued.clear()
+    httpx._requests.clear()
+    try:
+        yield _Driver()
+    finally:
+        httpx._queued.clear()
+        httpx._requests.clear()
