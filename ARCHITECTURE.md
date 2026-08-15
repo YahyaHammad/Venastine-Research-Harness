@@ -47,7 +47,7 @@ Venastine Research Harness/
 ├── pytest.ini                      # testpaths=tests, --strict-markers
 ├── DEVLOG.md                       # implementation notes for built ROADMAP sections -- see §0
 │
-├── tests/                          # 1488 tests, all offline, ~25s (first run ~7s for matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
+├── tests/                          # 1542 tests, all offline, ~25s (first run ~7s for matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
 │   ├── conftest.py                 # fixtures: make_model_response, make_stream_from_response, make_stream_sequence, FakeStorage, ...
 │   ├── BREAKING_CHANGES.md         # what-breaks-it / symptom / fix per area
 │   ├── test_cli.py                 # 20 tests -- ROADMAP §1 thread_id passthrough + UUID validation + §14 parser defaults/resolution/trust flow
@@ -1195,7 +1195,22 @@ Validated by **shape only** — provider names and API keys are not checked (E6)
 | `write_project_doc` | `project_docs.py` | Working | ROADMAP_v2 §24: a document NAME from a fixed allowlist, no path parameter, approval-gated |
 | `shell` | `shell.py` | Working | Shell execution via sandbox module; inert fast-path; Docker default, subprocess fallback |
 
-All math tools share `_math_common.py`'s `safe_parse()` — a SymPy expression parser with `__builtins__` explicitly blanked, verified via test to actually block a real injection payload, not just assumed safe. Any new math-adjacent tool should use this, not its own `eval`/`sympify` call.
+All math tools share `_math_common.py`'s `safe_parse()`. Any new math-adjacent tool should use this, not its own `eval`/`sympify` call.
+
+**What `safe_parse` actually guarantees, and what it used to claim (#52).** This paragraph previously read "a SymPy expression parser with `__builtins__` explicitly blanked, verified via test to actually block a real injection payload, not just assumed safe." Both claims failed. Arbitrary code executed through the real `registry.dispatch` on all six tools, which are `permission=True, approval=False` — advertised and callable with no prompt in plain chat and in all ten research passes, on expression strings the model wrote while reading third-party pages.
+
+Two independent mechanisms, neither reachable by pruning a namespace:
+1. **Parser re-entry.** `_SAFE_GLOBALS` is `{n: getattr(sympy, n) for n in dir(sympy)}`, so `sympify`, `parse_expr`, `var`, `S`, `lambdify` and `init_printing` are in scope *by construction*. `sympify`'s inner `parse_expr` builds its own globals via `exec('from sympy import *', d)`, and Python inserts real `__builtins__` into any globals dict passed to `exec`/`eval` that lacks them — so the outer blanking never applies to the inner parse. `chr(111)+chr(115)` also defeats any string-matching defence.
+2. **Attribute traversal.** `().__class__.__bases__[0].__subclasses__()` is attribute access on a literal — no name lookup, so no namespace change can stop it.
+
+The guard is now `_reject_unsafe_names`, the **first** entry in `_TRANSFORMATIONS`: it refuses any dunder NAME token, and any NAME token that is in `_SAFE_GLOBALS` but not in `_ALLOWED_NAMES` (231 mathematical names of the 927 exposed). A name that is *not* in `_SAFE_GLOBALS` is deliberately untouched — becoming a Symbol is the parser's purpose.
+
+Three properties worth keeping:
+- **The allowlist is closed**, so new SymPy names are refused rather than exposed. That is the whole reason it is not a denylist of known-bad names.
+- **Position is load-bearing.** Run last, the guard still catches the callables (`auto_symbol` leaves those as NAME tokens) but *not* the submodule routes — `external.gmpy.os` is instead shredded into `e*x*t*e*r*n*a*l` by `split_symbols`, which is a coincidence rather than a defence. The battery asserts the guard's own message for exactly this reason.
+- **`_SAFE_GLOBALS` still contains 26 submodule objects** (`external`, `parsing`, `printing`, …) that reach `os`, `subprocess`, `sys` and `builtins` by plain attribute access. They are unreachable today only because `auto_symbol` rewrites non-callable names into Symbols — an undocumented SymPy implementation detail. The allowlist covers those names directly so nothing depends on it.
+
+The single-payload test (`__import__('os').system(...)`) is kept, and was itself an instance of the pattern: it passed because `auto_symbol` turned the bare `__import__` into a Symbol, not because `__builtins__` was empty. It is now one of fourteen, beside a 37-case legitimacy battery — an allowlist with no legitimacy battery is one bad entry away from silently breaking the tools it protects.
 
 ## 11. Known gotchas — real bugs found during development, not hypothetical
 

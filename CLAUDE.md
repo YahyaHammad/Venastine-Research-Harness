@@ -28,7 +28,7 @@ python main.py --init --research-project           # §24: skip the type questio
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 1488 tests, offline, ~25s (first run ~30s: matplotlib font cache)
+pytest                                            # 1542 tests, offline, ~25s (first run ~30s: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -702,7 +702,9 @@ A tool that should not always be *offered* (as opposed to not allowed) supplies 
 
 **Log detail must be in the message, not in `extra={}`.** The default formatter renders `%(message)s` only, so every field passed via `extra=` was silently dropped — fifteen consecutive `fetch_url failed` lines with no URL and no reason, and an `arxiv_search attempt failed` that hid a scheme change for three retries. Interpolate instead (`logger.warning("fetch_url failed for %s: %s", url, e)`). This matters more since the TUI routes WARNING+ into the transcript.
 
-**Math tools** all share `_math_common.py`'s `safe_parse()` (`__builtins__` blanked, injection-tested). Never use raw `eval`/`sympify` in a new one. Their tests assert **symbolic equivalence** (`sympy.simplify(actual - expected) == 0`), not string equality — SymPy's `str()` drifts across versions.
+**Math tools** all share `_math_common.py`'s `safe_parse()`. Never use raw `eval`/`sympify` in a new one. Their tests assert **symbolic equivalence** (`sympy.simplify(actual - expected) == 0`), not string equality — SymPy's `str()` drifts across versions.
+
+**`safe_parse` is an ALLOWLIST at the token boundary, not a blanked namespace (#52).** This file used to say "`__builtins__` blanked, injection-tested"; both halves were false. Blanking cannot work — `_SAFE_GLOBALS` is built from `dir(sympy)`, so SymPy's own `sympify`/`parse_expr`/`var`/`S`/`lambdify` are in scope by construction, and `sympify`'s inner parse gets **real** builtins back because Python inserts them into any globals dict handed to `exec`/`eval` that lacks them; separately, `().__class__.__bases__[0].__subclasses__()` needs no name lookup at all, so no namespace pruning reaches it. And "injection-tested" was one payload that was blocked by `auto_symbol` Symbol-izing the bare name `__import__`, for a reason unrelated to the defence it was named for. `_reject_unsafe_names` now runs as the **first** transformation and refuses (a) any dunder token and (b) any global name outside `_ALLOWED_NAMES`. The allowlist is **closed**, which is the point: a future SymPy that adds an evaluating callable is refused by default rather than newly exposed. Position is load-bearing and test-pinned — moved to the end of the pipeline, the module routes (`external.gmpy.os`) get caught by `split_symbols` shredding the name instead of by the guard, which is a coincidence, not a defence. Widening `_ALLOWED_NAMES` is a decision about a *kind* of thing; anything that parses, evaluates, compiles, renders or executes stays out.
 
 ### Testing
 

@@ -19,11 +19,26 @@ EXPECTATION EXPRESSION STRATEGY (decided in planning):
   equality for the simple ones, and keep string-equivalence for cases
   where there's a single canonical form (e.g. an integer scalar).
 
-ALSO INCLUDED: the safe_parse injection-blocking regression case.
-  ARCHITECTURE.md §10: "_math_common.py's safe_parse ... verified via
-  test to actually block a real injection payload, not just assumed
-  safe." This was tested once during development; this asserts it stays
-  blocked.
+ALSO INCLUDED: the safe_parse injection battery (#52).
+
+  This was ONE payload -- `__import__('os').system(...)` -- and its
+  docstring claimed the property was "verified via test to actually
+  block a real injection payload, not just assumed safe", which
+  ARCHITECTURE.md §10 and CLAUDE.md both repeated.
+
+  That payload is blocked, but for a reason unrelated to the defence it
+  was named for: `auto_symbol` rewrites the bare name `__import__` into
+  `Symbol('__import__')`, which then fails as a Symbol call. Blanking
+  `__builtins__` never entered into it. Two payloads that do not look up
+  a bare builtin name -- `sympify("...")` re-entry, and attribute
+  traversal from a literal -- executed arbitrary code inside the harness
+  process, driven through the real `registry.dispatch`.
+
+  One payload standing in for a security property. The battery below is
+  what replaces it, and it asserts BOTH directions: that the payload
+  class is refused, and that ordinary mathematics still parses -- an
+  allowlist with no legitimacy battery is one bad entry away from
+  breaking the tools it protects, silently.
 """
 
 import pytest
@@ -45,26 +60,189 @@ import tools.builtin.probability_stats as probability_stats
 # ===========================================================================
 
 def test_safe_parse_blocks_dunder_import_injection():
-    """ARCHITECTURE.md §10: the safe_parse parser builds a namespace with
-    `__builtins__` explicitly blanked, so an expression containing a
-    real attack string like __import__('os').system('echo pwned') must
-    raise MathParseError and must NOT execute the payload.
+    """The ORIGINAL single payload, kept.
 
-    This is the regression test for that property. If safe_parse ever
-    starts accepting this expression (e.g. someone "simplifies" the
-    blanked-__builtins__ globals back into the parser), this test fails
-    -- potentially SECURITY-CRITICAL, not a flaky test.
+    It is still a payload that must be refused -- it simply never tested
+    what it claimed, since `auto_symbol` turns the bare name
+    `__import__` into a Symbol before the blanked `__builtins__` is
+    consulted. Kept so that #52's fix is not mistaken for a replacement
+    of the case, and so the battery below reads as an addition to a
+    property rather than a substitution of one.
     """
     payload = "__import__('os').system('echo pwned_in_test')"
     with pytest.raises(MathParseError):
         safe_parse(payload)
 
-    # Defense in depth: actually verify the side effect didn't run
-    # (the test should fail anyway via MathParseError above, but if
-    # safe_parse ever silently swallowed the parse error and let the
-    # expression execute, this is the secondary catch).
-    # (There's no clean way to check "echo didn't run" directly here --
-    # the assertion is that safe_parse itself raised first.)
+
+# The two mechanisms from #52, each with the variants that defeat the
+# obvious partial fixes. Benign payloads throughout: a module object,
+# getpid(), uname().sysname, a subclass list. Nothing that writes,
+# deletes, or reaches the network -- these run on every developer's
+# machine and in CI.
+INJECTION_PAYLOADS = [
+    # --- mechanism 1: re-entering a parser that builds its own globals.
+    # exec/eval insert REAL __builtins__ into any globals dict lacking
+    # them, so the inner parse has __import__ and chr regardless of what
+    # the outer namespace blanked.
+    ("sympify re-entry", 'sympify("__import__(chr(111)+chr(115))")'),
+    ("sympify + call", 'sympify("__import__(chr(111)+chr(115)).getpid()")'),
+    ("parse_expr direct", 'parse_expr("1+1")'),
+    ("S sympifies too", 'S("__import__(chr(111)+chr(115))")'),
+    ("var", 'var("x")'),
+    ("lambdify compiles", "lambdify(x, x)"),
+    ("init_printing", "init_printing()"),
+    # --- mechanism 2: attribute traversal, which needs no name lookup
+    # at all and so cannot be stopped by pruning any namespace.
+    ("subclasses from a literal", "().__class__.__bases__[0].__subclasses__()"),
+    ("globals via a dunder", "solve.__globals__"),
+    ("class of an int", "(1).__class__"),
+    # --- the submodule routes. Unreachable today only because
+    # auto_symbol rewrites non-callable names into Symbols; the
+    # allowlist covers them so that protection is not load-bearing.
+    ("module route to os", "external.gmpy.os.getpid()"),
+    ("module route to subprocess", "printing.gtk.subprocess"),
+    ("module route to the parser", "parsing.sympy_parser.parse_expr"),
+]
+
+
+@pytest.mark.parametrize("label,payload",
+                         INJECTION_PAYLOADS,
+                         ids=[p[0] for p in INJECTION_PAYLOADS])
+def test_safe_parse_refuses_the_injection_payload_class(label, payload):
+    """#52. Each of these either executed code or reached a route to it.
+
+    Parametrised rather than asserted in a loop so a failure names the
+    payload that got through, and so adding a payload is one line -- the
+    thing that did not happen for the whole life of the single-payload
+    version.
+
+    THE ASSERTION IS ON THE GUARD'S OWN MESSAGE, not merely on
+    `MathParseError`. Several of these payloads fail anyway for reasons
+    that have nothing to do with the guard -- `external.gmpy.os` dies
+    with an `AttributeError` because `split_symbols` has already shredded
+    `external` into `e*x*t*e*r*n*a*l` -- and a bare `pytest.raises`
+    cannot tell that apart from a refusal. It was measured: with the
+    guard moved to the END of the transformation pipeline, a bare
+    `raises` left all 68 tests green while the module routes were being
+    caught by an accident of `auto_symbol` rather than by the guard.
+
+    That is this suite's own standing rule -- a test that fails for the
+    wrong reason is indistinguishable from one that works -- and it is
+    what makes the guard's POSITION load-bearing and testable.
+    """
+    with pytest.raises(MathParseError) as excinfo:
+        safe_parse(payload)
+
+    message = str(excinfo.value)
+    assert ("not a permitted function or constant" in message
+            or "is not allowed in a math expression" in message), (
+        f"{label!r} was rejected, but not BY THE GUARD -- it failed with "
+        f"{message!r}. Something else happens to refuse this payload "
+        f"today; the guard must be what does.")
+
+
+def test_an_error_result_is_not_evidence_the_payload_failed(monkeypatch):
+    """The property that makes this class hard to spot in a transcript.
+
+    Where the return value is not sympify-able, the tool reports
+    `{'error': 'Computation failed: ...'}` while the import or call has
+    ALREADY happened. So a refusal has to be observable as an absence of
+    the side effect, not as an error string.
+
+    `base64` is a stdlib module nothing else in this suite imports, used
+    here only as a witness that an import did or did not occur.
+    """
+    import sys
+
+    monkeypatch.delitem(sys.modules, "base64", raising=False)
+    chars = "+".join(f"chr({ord(c)})" for c in "base64")
+    with pytest.raises(MathParseError):
+        safe_parse(f'sympify("__import__({chars})")')
+
+    assert "base64" not in sys.modules, (
+        "the payload was refused, but the import had already run -- the "
+        "refusal is happening after evaluation rather than before it")
+
+
+# The other direction. An allowlist that refuses everything passes every
+# test above, so this is what makes them discriminate -- and it is the
+# lesson #47 recorded: an allowlist needs a test asserting that real
+# producers satisfy it.
+LEGITIMATE_EXPRESSIONS = [
+    "x**2 - 4", "2x + 1", "sin(x)**2 + cos(x)**2", "sqrt(16)",
+    "integrate(x**2, x)", "diff(sin(x), x)", "limit(sin(x)/x, x, 0)",
+    "Matrix([[1, 2], [3, 4]])", "exp(I*pi) + 1", "factorial(5)",
+    "x**2 - 4 = 0", "log(E)", "Sum(k, (k, 1, 10))", "gamma(5)",
+    "besselj(0, x)", "Rational(1, 3)", "Abs(-5)", "floor(3.7)",
+    "binomial(10, 3)", "erf(x)", "Piecewise((x, x > 0), (0, True))",
+    "solve(x**2 - 4, x)", "zeta(2)", "LambertW(x)", "Max(1, 2, 3)",
+    "And(p, Or(q, Not(r)))", "Eq(x, 5)", "atan2(1, 1)", "gcd(12, 18)",
+    "fibonacci(10)", "isprime(7)", "Interval(0, 1)", "conjugate(2 + 3*I)",
+    "oo", "pi/2", "Point(1, 2)", "Circle(Point(0, 0), 5)",
+]
+
+
+@pytest.mark.parametrize("expr", LEGITIMATE_EXPRESSIONS)
+def test_ordinary_mathematics_still_parses(expr):
+    """Every one of these is something a model may reasonably write into
+    one of the six tools' expression fields.
+
+    A name refused here is a usability regression the model has to work
+    around at runtime, and it would otherwise surface as a tool error in
+    a research pass rather than as a red test.
+    """
+    safe_parse(expr)
+
+
+def test_an_unknown_name_still_becomes_a_symbol():
+    """The allowlist must not turn undefined names into refusals.
+
+    Auto-converting an unknown name into a Symbol is the parser's whole
+    purpose -- `z * 2` is a legitimate expression in a variable nobody
+    declared. The guard only ever consults names that are IN
+    `_SAFE_GLOBALS`, and this is what pins that distinction.
+    """
+    from sympy import Symbol
+
+    assert safe_parse("z * 2") == Symbol("z") * 2
+    assert safe_parse("q + r").free_symbols == {Symbol("q"), Symbol("r")}
+
+
+def test_a_multi_letter_unknown_name_is_split_not_refused():
+    """A surprise met while writing the test above, pinned where it will
+    be found: `wibble * 2` parses as `2*b**2*e*i*l*w`.
+
+    That is `split_symbols`, which `implicit_multiplication_application`
+    carries so that `2xy` means `2*x*y` -- it is what makes the tools
+    accept informal algebra, and it is UNRELATED to #52's allowlist
+    (verified identical before and after the fix). The thing that matters
+    here is that a multi-letter name is not REFUSED; callers who need the
+    name kept whole pass it via `symbols=`, which is what that parameter
+    is for.
+    """
+    from sympy import Symbol
+
+    assert safe_parse("wibble * 2") == 2 * Symbol("b")**2 * Symbol("e") \
+        * Symbol("i") * Symbol("l") * Symbol("w")
+    assert safe_parse("wibble * 2", symbols=["wibble"]) == 2 * Symbol("wibble")
+
+
+def test_the_refusal_names_what_was_refused():
+    """The model has to recover from this at runtime, in a headless pass
+    with nobody watching, so the message has to say which name failed --
+    not merely that the expression did.
+
+    It also must NOT echo the whole payload back: safe_parse's generic
+    wrapper prefixes "Could not parse expression '<payload>'", and a
+    refusal deliberately bypasses that.
+    """
+    with pytest.raises(MathParseError) as excinfo:
+        safe_parse('sympify("1+1")')
+
+    message = str(excinfo.value)
+    assert "sympify" in message
+    assert "not a permitted" in message
+    assert "Could not parse expression" not in message
 
 
 def test_safe_parse_accepts_normal_expressions():

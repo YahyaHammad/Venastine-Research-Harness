@@ -1134,3 +1134,58 @@ suggested fix exactly as written would have left **the default provider** dying 
 was first met. One filter above the split fixed all three and pre-fixes the fourth. That is
 CLAUDE.md's *fix at the producer, not the consumer* rule meeting a case where the consumers
 were three provider branches rather than two call sites.
+
+---
+
+## §18 — #52, the S0 in the math tools (2026-08-15)
+
+`safe_parse`'s stated guarantee — "`__builtins__` blanked, injection-tested" — was false in both
+halves, and arbitrary code executed through the real `registry.dispatch` on six tools that are
+advertised and ungated in every research pass. Replaced with an **allowlist at the token
+boundary**: `_reject_unsafe_names`, first in `_TRANSFORMATIONS`.
+
+Suite 1488 → **1542**. The single injection test became 14 payloads plus a 37-case legitimacy
+battery.
+
+### What breaks it
+
+| If production code changes like this… | …this fails | Why it matters |
+|---|---|---|
+| Drop `_reject_unsafe_names` from `_TRANSFORMATIONS` | 15 tests | Both #52 mechanisms reopen |
+| Drop the allowlist rule, keep the dunder rule | 12 | Stops attribute traversal, misses parser re-entry — the shape of a partial fix |
+| Drop the dunder rule, keep the allowlist | 3 | The mirror image. `().__class__…` needs no name lookup |
+| Move the guard to the END of the pipeline | 2 (the submodule routes) | See the standing note below — this is the subtle one |
+| Widen `_ALLOWED_NAMES` to everything | 12 | The "widen it until the complaints stop" failure mode |
+| Narrow `_ALLOWED_NAMES` to nothing | 34 | The opposite failure, which **every attack test still passes**. The legitimacy battery is the only thing that sees it |
+
+That last row is the reason the legitimacy battery exists, and it is #47's lesson applied: an
+allowlist needs a test asserting that real producers satisfy it.
+
+### Standing: assert the GUARD refused, not that something raised
+
+The first version of the battery asserted `pytest.raises(MathParseError)`. Under the
+guard-runs-last mutation **all 68 tests stayed green** — because `external.gmpy.os` dies with an
+`AttributeError` anyway, `split_symbols` having already shredded `external` into
+`e*x*t*e*r*n*a*l`. The payload was refused; the guard was not what refused it.
+
+So the battery asserts the guard's own message. This is the third time this session that the
+"fails for the wrong reason" rule has caught something, and the first time it caught it in a
+test written *after* the rule was recorded — which is the argument for writing these notes down
+rather than remembering them.
+
+### Two things about `safe_parse` that are true and easy to misread
+
+- **`_SAFE_GLOBALS` still contains 26 submodule objects** with plain-attribute routes to `os`,
+  `subprocess`, `sys` and `builtins`. They are unreachable *today* only because `auto_symbol`
+  rewrites non-callable names into Symbols — an undocumented SymPy implementation detail. The
+  allowlist names them directly so nothing depends on it. Do not "simplify" `_SAFE_GLOBALS`
+  construction on the assumption that modules are harmless.
+- **The blanked `__builtins__` is kept**, and is not what makes this safe. Removing it would
+  re-open the one payload the original test covered, for no gain.
+
+### Not claimed
+
+The battery covers the two filed mechanisms and 14 payloads, and the allowlist fails closed. It
+is **not** a proof that no escape exists: the 231 permitted callables were not individually
+audited for evaluation behaviour. #57 (no wall-clock bound on math tools) is untouched and
+remains open — a token filter bounds what can be *named*, not how long it runs.
