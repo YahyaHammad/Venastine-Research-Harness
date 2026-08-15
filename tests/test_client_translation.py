@@ -608,3 +608,100 @@ def test_call_model_omits_temperature_when_none():
     client3 = SimpleNamespace(models=models3)
     call_model(client3, "GOOGLE", "m", [], "sys", [])
     assert models3.last_call["config"].temperature is None
+
+
+# ---------------------------------------------------------------------------
+# ---- The empty assistant turn (#13, #36) -----------------------------------
+# ---------------------------------------------------------------------------
+#
+# One neutral input, three branches, three behaviours -- only one of them
+# guarded, and guarded locally by whichever provider happened to be under
+# debug. #13 is the live evidence (Pass 2 died on "content field is a
+# required field"); #36 is the same defect on ANTHROPIC, the default
+# provider, which #13's suggested fix did not reach.
+#
+# The neutral shape is exactly what `storage._to_neutral` reconstructs for
+# an assistant row persisted with text="" and no tool calls -- i.e. what
+# D20 writes when the model returns nothing at all.
+
+EMPTY_TURN_HISTORY = [
+    {"role": "user", "content": "Hello"},
+    {"role": "assistant", "text": "", "tool_calls": []},
+    {"role": "user", "content": "Again"},
+]
+
+
+def test_messages_anthropic_empty_assistant_turn_skipped():
+    """#36. This used to emit `{"role": "assistant", "content": []}`, which
+    the Messages API rejects -- the counterpart of the Google test above,
+    which is the one that existed."""
+    out = _messages_for_provider("ANTHROPIC", EMPTY_TURN_HISTORY)
+
+    assert [m["role"] for m in out] == ["user", "user"]
+    assert not any(m["content"] == [] for m in out), (
+        "an assistant turn with no text and no tool calls reached the wire "
+        "as an empty content array (#36)")
+
+
+def test_messages_openai_empty_assistant_turn_skipped():
+    """#13. This used to emit `{"role": "assistant", "content": null}` with
+    no `tool_calls` key -- an assistant message carrying nothing at all."""
+    out = _messages_for_provider("OPENAI", EMPTY_TURN_HISTORY)
+
+    assert [m["role"] for m in out] == ["user", "user"]
+    assert not any(m.get("content") is None and "tool_calls" not in m
+                   for m in out), (
+        "an assistant turn with no text and no tool calls reached the wire "
+        "as content=None with nothing else on it (#13)")
+
+
+@pytest.mark.parametrize("provider", ["ANTHROPIC", "OPENAI", "GOOGLE"])
+def test_no_provider_emits_a_message_for_an_empty_assistant_turn(provider):
+    """THE PROPERTY, stated once for all three rather than three times.
+
+    What failed here was not any single branch -- it was that one neutral
+    input produced three different results, so fixing the branch you were
+    debugging left the others. Asserting the count across providers is what
+    makes a fourth branch inherit the guarantee instead of re-deriving it.
+    """
+    out = _messages_for_provider(provider, EMPTY_TURN_HISTORY)
+    assert len(out) == 2, (
+        f"{provider} emitted {len(out)} messages for a history whose only "
+        "assistant turn was empty; the empty turn must be dropped")
+
+
+@pytest.mark.parametrize("provider", ["ANTHROPIC", "OPENAI", "GOOGLE"])
+def test_an_empty_text_WITH_tool_calls_is_kept_on_every_provider(provider):
+    """The discriminating control, and the fix constraint #36 found by
+    mutation.
+
+    A tool-call-only turn legitimately has no text -- it is what every
+    tool-using turn looks like when the model says nothing before calling.
+    A guard keyed on empty text ALONE would drop it, taking the `tool_use`
+    with it and orphaning the `tool_result` that follows. Without this
+    test, the over-broad guard passes everything above.
+    """
+    out = _messages_for_provider(provider, [
+        {"role": "user", "content": "Hi"},
+        {"role": "assistant", "text": "",
+         "tool_calls": [{"id": "t1", "name": "get_time", "input": {}}]},
+    ])
+    assert len(out) == 2, "the tool-call-only assistant turn was dropped"
+
+
+def test_a_whitespace_only_assistant_turn_with_no_tool_calls_is_dropped():
+    """Boundary: `""` and a turn the model filled with nothing but a space
+    are the same thing to a provider, but only the first is falsy...
+
+    ...and in fact a whitespace string is TRUTHY, so this turn is KEPT.
+    Recorded as current behaviour rather than asserted as desirable: the
+    guard tests `msg.get("text")`, so " " counts as text on every branch
+    consistently. Pinned so a later change to strip whitespace is a
+    deliberate decision with a test to update, not a silent drift.
+    """
+    out = _messages_for_provider("ANTHROPIC", [
+        {"role": "user", "content": "Hi"},
+        {"role": "assistant", "text": "   ", "tool_calls": []},
+    ])
+    assert len(out) == 2
+    assert out[1]["content"] == [{"type": "text", "text": "   "}]

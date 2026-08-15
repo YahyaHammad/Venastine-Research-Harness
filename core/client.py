@@ -162,7 +162,45 @@ def _is_tool_result_message(msg: dict) -> bool:
     )
 
 
+def _is_empty_assistant_turn(msg: dict) -> bool:
+    """An assistant turn carrying neither text nor tool calls (#13, #36).
+
+    Produced when the model returns nothing at all -- a safety filter, a
+    truncation, an empty pass response. `core/loop.py` persists it because
+    D20 requires the assistant turn to be written before any stop-condition
+    branching, so it reaches translation on every resume of that thread.
+
+    It is meaningless on every provider, and each branch used to mangle it
+    differently from the same neutral input:
+
+        OPENAI:    {"role": "assistant", "content": null}   <- #13
+        ANTHROPIC: {"role": "assistant", "content": []}     <- #36
+        GOOGLE:    skipped entirely                         <- guarded
+
+    Only Google was guarded, and only because Google was the provider being
+    debugged when it surfaced. Dropping it above the branch split is
+    CLAUDE.md's *fix at the producer, not the consumer*: all three branches
+    become correct at once, and so does the next one.
+
+    Requiring BOTH halves to be empty is load-bearing. An empty text WITH
+    tool calls is legitimate on the OpenAI schema -- a tool-call-only turn
+    -- and `test_messages_openai_assistant_with_null_text` covers it, so a
+    guard keyed on text alone breaks a valid case.
+    """
+    return (msg.get("role") == "assistant"
+            and not msg.get("text")
+            and not msg.get("tool_calls"))
+
+
 def _messages_for_provider(provider_name: str, neutral_messages: list[dict]) -> list:
+    # One rule, above the split (#13, #36). Note this can leave two
+    # consecutive user turns -- which is the shape Google's branch has
+    # always produced here, and which
+    # `test_messages_google_empty_assistant_turn_skipped` has always
+    # asserted.
+    neutral_messages = [m for m in neutral_messages
+                        if not _is_empty_assistant_turn(m)]
+
     if provider_name == "GOOGLE":
         # Build a {tool_call_id: function_name} lookup from assistant
         # messages so we can populate FunctionResponse.name (required by
@@ -195,11 +233,11 @@ def _messages_for_provider(provider_name: str, neutral_messages: list[dict]) -> 
                             id=tc["id"],
                         )
                     ))
-                # Google rejects Content with empty parts; skip empty
-                # assistant turns (e.g. safety-filtered responses that
-                # produced no text and no tool calls).
-                if parts:
-                    translated.append(genai_types.Content(role="model", parts=parts))
+                # Google rejects Content with empty parts. The turn that
+                # produced them is now dropped above the branch split, so
+                # this branch no longer needs its own guard -- one rule
+                # rather than two that can disagree (#36).
+                translated.append(genai_types.Content(role="model", parts=parts))
 
             elif role == "tool":
                 name = call_id_to_name.get(msg["tool_call_id"])
