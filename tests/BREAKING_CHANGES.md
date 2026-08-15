@@ -1216,6 +1216,40 @@ asserts the guard's own message.
 Third time this session that the "fails for the wrong reason" rule has caught something, and the
 first time it caught something in a test written *after* the rule was recorded.
 
+### The output backstop, and why it is a deny rather than an allowlist
+
+`_reject_escaped_value` is the only check on what `safe_parse` RETURNS. It refuses a module, a
+plain function or method, or a class from outside SymPy, recursing through returned containers
+(`solve` returns a list, `roots` a dict, so an escaped object can arrive nested).
+
+It is deliberately a **deny of the escape signature**, not an allowlist of return types: its job
+is to catch an escape nobody anticipated, and an allowlist can only catch escapes whose shape was
+already imagined — which four of this issue's five mechanisms were not.
+
+| If production code changes like this… | …this fails |
+|---|---|
+| Drop the `_reject_escaped_value(result)` call | `test_the_backstop_is_actually_wired_into_safe_parse` |
+| Let modules through | `test_the_backstop_refuses_a_module` |
+| Let any class through | `test_the_backstop_refuses_a_non_sympy_class` |
+| Stop recursing into containers | `test_the_backstop_looks_inside_containers` |
+| Widen `_STRING_ARG_CONSTRUCTORS` | 11 payload tests |
+| Drop the string rule | 10 payload tests |
+
+`test_the_backstop_allows_every_legitimate_return_shape` is the discriminator: a backstop that
+refuses everything passes all four of the negative tests above.
+
+### 117 of 213: the allowlist is not "just maths"
+
+The source audit that found mechanism 4 could read **15** of the 229 resolvable allowlisted
+names; the other 214 are C extensions. The blackbox probe covers all of them, and the answer is
+**117 evaluate a string handed to them** — not 7.
+
+That number is the argument for the string rule being load-bearing rather than defence in depth.
+`Symbol` and `Float`, the two licensed positions, are not among the 117, and
+`test_the_licensed_string_constructors_do_not_evaluate_their_argument` is the obligation the
+licensing decision rests on. `test_the_probe_can_detect_an_evaluator` guards it, because that
+test asserts a negative and would pass perfectly if the probe stopped working.
+
 ### Not claimed
 
 The battery covers the two filed mechanisms and 14 payloads, and the allowlist fails closed. It

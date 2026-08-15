@@ -41,6 +41,8 @@ ALSO INCLUDED: the safe_parse injection battery (#52).
   breaking the tools it protects, silently.
 """
 
+import sys
+
 import pytest
 import sympy
 from sympy import S, sqrt, pi, Rational, Symbol, simplify, sympify
@@ -615,3 +617,241 @@ def test_no_allowlisted_name_evaluates_a_string_it_can_be_handed():
             safe_parse(f'{name}(" 1+1")')
         assert "string literals are not allowed" in str(excinfo.value), (
             f"a string literal reached {name}(), which sympifies it")
+
+
+# ===========================================================================
+# ---- (1) The output backstop ----------------------------------------------
+# ===========================================================================
+#
+# Every other guard is an allowlist over the INPUT. This is the only check
+# on the OUTPUT, and it is deliberately a DENY of the escape signature
+# rather than an allowlist of return types: its job is to catch an escape
+# nobody anticipated, at the moment it succeeds. An allowlist of return
+# types can only catch escapes whose shape was already imagined -- which
+# is the failure mode this whole issue is a record of.
+#
+# The signature: a math expression evaluates to a VALUE. It never
+# evaluates to a module, a plain function, or a class from outside SymPy.
+# Those are precisely what #52's escapes produced or reached for --
+# `<module 'os'>`, `__subclasses__`, a bound method's `__globals__`.
+
+def test_the_backstop_refuses_a_module():
+    from tools.builtin._math_common import _reject_escaped_value
+    import os
+
+    with pytest.raises(MathParseError, match="module"):
+        _reject_escaped_value(os)
+
+
+def test_the_backstop_refuses_a_non_sympy_class():
+    from tools.builtin._math_common import _reject_escaped_value
+
+    with pytest.raises(MathParseError, match="not a SymPy type"):
+        _reject_escaped_value(type)
+    with pytest.raises(MathParseError, match="not a SymPy type"):
+        _reject_escaped_value(dict)
+
+
+def test_the_backstop_refuses_functions_and_methods():
+    from tools.builtin._math_common import _reject_escaped_value
+
+    with pytest.raises(MathParseError, match="function or method"):
+        _reject_escaped_value(len)
+    with pytest.raises(MathParseError, match="function or method"):
+        _reject_escaped_value("".join)
+
+
+def test_the_backstop_looks_inside_containers():
+    """`solve()` returns a list and `roots()` returns a dict, so an
+    escaped object could arrive nested rather than at the top level. It
+    would be a strange kind of guard that checked only the outermost
+    value of a function whose normal return type is a container."""
+    from tools.builtin._math_common import _reject_escaped_value
+    import os
+
+    for container in ([os], (os,), {os}, {"k": os}, {os: 1}, [[[os]]]):
+        with pytest.raises(MathParseError):
+            _reject_escaped_value(container)
+
+
+def test_the_backstop_allows_every_legitimate_return_shape():
+    """The discriminating half. A backstop that refuses everything passes
+    all four tests above.
+
+    These are the concrete top-level types the legitimacy battery
+    actually produces -- including the three that are NOT `Basic`:
+    a mutable Matrix, a `list` from `solve`, a `dict` from `roots`, and a
+    plain `bool` from `isprime`.
+    """
+    from tools.builtin._math_common import _reject_escaped_value
+
+    for expr in ("x**2 - 4", "Matrix([[1, 2], [3, 4]])", "solve(x**2 - 4, x)",
+                 "roots(x**2 - 1)", "isprime(7)", "divisors(12)", "oo",
+                 "Interval(0, 1)", "1.5", "Point(1, 2)"):
+        _reject_escaped_value(safe_parse(expr))   # must not raise
+
+
+def test_a_sympy_class_is_a_legitimate_value():
+    """`sin` is a `FunctionClass` and `Function('f')` is a class too --
+    both subclass `Basic`, which is exactly what separates them from
+    `type` or `os`. Refusing all classes would be simpler and would
+    break both."""
+    from tools.builtin._math_common import _reject_escaped_value
+
+    _reject_escaped_value(safe_parse("sin"))
+    # Constructed directly, not parsed: see the test below for why
+    # `Function('f')` is not reachable through safe_parse.
+    _reject_escaped_value(sympy.Function("f"))
+
+
+def test_function_with_a_string_name_is_refused_by_the_string_rule():
+    """A deliberate, recorded cost of licensing only `Symbol` and
+    `Float`.
+
+    `Function('f')` is a legitimate SymPy expression and is refused,
+    because its string argument sits in an unlicensed position. Adding
+    `Function` to `_STRING_ARG_CONSTRUCTORS` would be safe on the pinned
+    version -- the blackbox probe below shows it is not among the 117
+    callables that evaluate a string -- but it is not needed by any of
+    the six tools, and every licensed position is one more thing that has
+    to be re-argued when SymPy changes.
+
+    Pinned so that the day someone needs it, the trade is visible rather
+    than rediscovered.
+    """
+    with pytest.raises(MathParseError, match="string literals"):
+        safe_parse("Function('f')")
+
+
+def test_the_backstop_is_actually_wired_into_safe_parse(monkeypatch):
+    """Guards against the check existing but never being called -- which
+    is the failure mode #58 catalogued for four other security guards in
+    this package, each of which could be deleted with the suite green."""
+    import tools.builtin._math_common as mc
+
+    called = []
+    monkeypatch.setattr(mc, "_reject_escaped_value",
+                        lambda v, _depth=0: called.append(v))
+    mc.safe_parse("x + 1")
+
+    assert called, "safe_parse returned without consulting the backstop"
+
+
+# ===========================================================================
+# ---- (2) The blackbox audit of the allowlist ------------------------------
+# ===========================================================================
+#
+# The source audit that found mechanism 4 could read only 15 of the 229
+# resolvable allowlisted names -- the other 214 are C extensions with no
+# retrievable source. This is the blackbox version, which covers all of
+# them: hand each callable a string and see whether it evaluates it.
+#
+# The measured answer is 117 of 213, not the 7 the source audit found. So
+# the string-licensing rule is not a nicety; it is what stands between the
+# model and a hundred-odd evaluators.
+
+_WITNESS_MODULE = "colorsys"      # stdlib, harmless, not used by this project
+_EVAL_PROBE = (" __import__("
+               + "+".join(f"chr({ord(c)})" for c in _WITNESS_MODULE) + ") ")
+
+
+def _evaluates_its_string_argument(fn) -> bool:
+    """True if `fn(payload)` sympified the payload, observed by whether a
+    module got imported as a side effect.
+
+    A witness import is used rather than a return value because most of
+    these raise AFTER sympifying -- which is the whole reason an error
+    result is not evidence that a payload failed.
+    """
+    import signal
+    import warnings
+
+    sys.modules.pop(_WITNESS_MODULE, None)
+    previous = signal.signal(signal.SIGALRM, _raise_timeout)
+    signal.alarm(2)
+    try:
+        # Handing 213 SymPy callables a nonsense argument provokes
+        # deprecation warnings that say nothing about this test.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            fn(_EVAL_PROBE)
+    except BaseException:
+        pass
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+    imported = _WITNESS_MODULE in sys.modules
+    sys.modules.pop(_WITNESS_MODULE, None)
+    return imported
+
+
+class _ProbeTimeout(Exception):
+    pass
+
+
+def _raise_timeout(_signum, _frame):
+    raise _ProbeTimeout()
+
+
+@pytest.mark.skipif(not hasattr(__import__("signal"), "SIGALRM"),
+                    reason="probe needs SIGALRM to bound a hanging callable")
+def test_the_licensed_string_constructors_do_not_evaluate_their_argument():
+    """THE OBLIGATION the licensing decision rests on.
+
+    `Symbol` and `Float` are the only two calls permitted to receive a
+    string literal. If either sympified what it was handed, mechanism 4
+    would be open through the very positions that were licensed to keep
+    ordinary algebra working.
+    """
+    from tools.builtin._math_common import _STRING_ARG_CONSTRUCTORS
+
+    for name in sorted(_STRING_ARG_CONSTRUCTORS):
+        fn = _SAFE_GLOBALS[name]
+        assert not _evaluates_its_string_argument(fn), (
+            f"{name}() evaluates a string argument, and it is licensed to "
+            f"receive one -- mechanism 4 is open through it")
+
+
+@pytest.mark.skipif(not hasattr(__import__("signal"), "SIGALRM"),
+                    reason="probe needs SIGALRM to bound a hanging callable")
+def test_the_probe_can_detect_an_evaluator():
+    """Guards the guard. The test above asserts a NEGATIVE, so it passes
+    perfectly if the probe silently stopped working -- if the witness
+    module became permanently imported, or the payload stopped being
+    valid.
+
+    `factor` is one of the seven the source audit caught red-handed, so
+    it is the control that proves the probe still sees what it is for.
+    """
+    assert _evaluates_its_string_argument(_SAFE_GLOBALS["factor"]), (
+        "the probe no longer detects a known string-evaluating callable, "
+        "so the test above is asserting nothing")
+
+
+@pytest.mark.skipif(not hasattr(__import__("signal"), "SIGALRM"),
+                    reason="probe needs SIGALRM to bound a hanging callable")
+def test_most_of_the_allowlist_evaluates_strings_which_is_why_they_cannot_get_one():
+    """The measurement, kept as a test so the number cannot quietly drift.
+
+    117 of 213 on the pinned SymPy. The exact figure is not the point and
+    is not asserted; what is asserted is that it is a LARGE fraction --
+    because the argument "the allowlist is safe because its members are
+    just maths" is false, and this is the evidence. The string rule is
+    load-bearing, not defence in depth.
+    """
+    callables = [(n, _SAFE_GLOBALS[n]) for n in sorted(_ALLOWED_NAMES)
+                 if callable(_SAFE_GLOBALS.get(n))]
+    assert len(callables) > 150, "the allowlist shrank; re-check this test"
+
+    evaluators = [n for n, fn in callables
+                  if _evaluates_its_string_argument(fn)]
+
+    assert len(evaluators) > 50, (
+        f"only {len(evaluators)} allowlisted callables evaluate a string "
+        "argument. If SymPy really stopped sympifying arguments this is "
+        "good news, but verify it rather than relaxing the string rule.")
+
+    from tools.builtin._math_common import _STRING_ARG_CONSTRUCTORS
+    assert not (set(evaluators) & _STRING_ARG_CONSTRUCTORS), (
+        f"{sorted(set(evaluators) & _STRING_ARG_CONSTRUCTORS)} both "
+        "evaluate strings AND are licensed to receive them")

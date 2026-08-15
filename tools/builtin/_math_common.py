@@ -60,6 +60,7 @@ allowlist excludes every module, so nothing depends on it.
 from __future__ import annotations
 
 import ast
+import types
 from typing import Any, Optional
 
 import sympy
@@ -274,6 +275,57 @@ def _validate_ast(code: str, local_dict: dict) -> None:
                 "string literals are not allowed in a math expression")
 
 
+def _reject_escaped_value(value: Any, _depth: int = 0) -> None:
+    """Backstop: refuse a RESULT that is not a mathematical value.
+
+    Every guard above this one is an allowlist over the *input*. This is
+    the one check on the *output*, and it is deliberately a DENY of the
+    escape signature rather than an allowlist: its job is to catch an
+    escape nobody anticipated, at the moment it succeeds, and an
+    allowlist of return types can only catch escapes whose shape was
+    already imagined.
+
+    The signature is simple. A math expression evaluates to a VALUE -- a
+    number, an expression tree, a matrix, a list of solutions. It never
+    evaluates to a module, to a plain function, or to a class from
+    outside SymPy. Those are what every escape in #52 produced or reached
+    for: `<module 'os'>`, `__subclasses__`, a bound method's `__globals__`.
+
+    SymPy's own classes ARE allowed: `sin` is a `FunctionClass`, and
+    `Function('f')` legitimately evaluates to a class. Both are subclasses
+    of `Basic`, which is what separates them from `type` or `os`.
+    """
+    if _depth > 6:
+        return                      # deep enough; containers are shallow here
+
+    if isinstance(value, types.ModuleType):
+        raise MathParseError(
+            "expression evaluated to a module, which is never a "
+            "mathematical value")
+
+    if isinstance(value, type):
+        if not issubclass(value, (sympy.Basic, sympy.matrices.MatrixBase)):
+            raise MathParseError(
+                f"expression evaluated to the class {value.__name__!r}, "
+                f"which is not a SymPy type")
+        return
+
+    if isinstance(value, (types.FunctionType, types.BuiltinFunctionType,
+                          types.MethodType, types.BuiltinMethodType,
+                          types.MethodWrapperType, types.ModuleType)):
+        raise MathParseError(
+            "expression evaluated to a function or method, which is "
+            "never a mathematical value")
+
+    if isinstance(value, dict):
+        for k, v in value.items():
+            _reject_escaped_value(k, _depth + 1)
+            _reject_escaped_value(v, _depth + 1)
+    elif isinstance(value, (list, tuple, set, frozenset)):
+        for item in value:
+            _reject_escaped_value(item, _depth + 1)
+
+
 def safe_parse(expr_str: str, symbols: Optional[list[str]] = None):
     """
     Parses a math expression string into a SymPy object without exposing
@@ -291,7 +343,9 @@ def safe_parse(expr_str: str, symbols: Optional[list[str]] = None):
         code = stringify_expr(expr_str, local_dict, _SAFE_GLOBALS,
                               _TRANSFORMATIONS)
         _validate_ast(code, local_dict)
-        return eval_expr(code, local_dict, _SAFE_GLOBALS)
+        result = eval_expr(code, local_dict, _SAFE_GLOBALS)
+        _reject_escaped_value(result)
+        return result
     except MathParseError:
         # A refusal from _reject_unsafe_names already says which name was
         # refused and what to do instead. Re-wrapping it in "Could not
