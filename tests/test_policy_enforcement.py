@@ -357,6 +357,70 @@ class TestCheckOutputPolicy:
 
 
 # ===========================================================================
+# ---- #47: the key allowlist is gone ---------------------------------------
+# ===========================================================================
+
+SECRET = "sk-ant-abc123def456ghi789jkl012mno345pqr678stu901"
+
+
+class TestEveryKeyIsScanned:
+    """#47. The four tests above this one enumerate the OLD allowlist
+    against itself -- `test_redacts_content_key`, `_result_key`,
+    `_stdout_key`, `_stderr_key`. Every one passed while the output of the
+    two tools whose content is entirely third-party text went unredacted,
+    because no test ever asked whether a REAL tool's return shape was
+    covered by the set.
+
+    That is this project's "verify against production, not the test
+    double" rule, with the allowlist standing in for the double.
+    """
+
+    def test_the_search_tools_result_key_is_scanned(self):
+        """`results`, plural. web_search and arxiv_search both return it;
+        the allowlist held `result`, singular. Membership was tested with
+        exact `in`, so one letter was the whole defect.
+        """
+        out = check_output_policy("web_search", {
+            "results": [{"title": "Leaked config",
+                         "url": "https://example.com/p",
+                         "snippet": f"the api key is {SECRET}"}],
+            "result_count": 1,
+        })
+        assert SECRET not in str(out)
+        assert "REDACTED" in str(out)
+
+    def test_a_key_no_allowlist_would_have_guessed_is_scanned(self):
+        """The property, stated so it cannot regress into a longer list:
+        a tool's text is scanned because it is text, not because someone
+        remembered to name its key.
+        """
+        out = check_output_policy("some_future_tool",
+                                  {"transcript": f"authorization: {SECRET}"})
+        assert SECRET not in str(out)
+
+    def test_every_registered_tool_would_be_covered_whatever_it_returns(self):
+        """The generalised version, and the one that closes the class
+        rather than the instance. Under an allowlist this test could only
+        have been written as a list of key names to keep in sync -- which
+        is the thing that fell out of sync.
+        """
+        from tools.registry import registry
+
+        for name in sorted(registry._tools):
+            out = check_output_policy(name, {"any_key_at_all": SECRET})
+            assert SECRET not in str(out), name
+
+    def test_keys_themselves_are_still_left_alone(self):
+        """The asymmetry with check_input_policy is deliberate and
+        predates #47: rewriting a result's KEYS would change the shape a
+        tool's consumer sees. Widening the VALUE scan must not quietly
+        widen this too.
+        """
+        out = check_output_policy("t", {SECRET: "value"})
+        assert SECRET in out, "a result key was rewritten"
+
+
+# ===========================================================================
 # ---- Registry integration -------------------------------------------------
 # ===========================================================================
 

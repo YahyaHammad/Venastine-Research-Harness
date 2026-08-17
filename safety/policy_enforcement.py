@@ -274,17 +274,30 @@ def param_digest(params) -> str:
 # ---- Shared scan traversal ------------------------------------------------
 # ---------------------------------------------------------------------------
 
-# Keys in tool result dicts that carry text content which might contain
-# leaked secrets. Scanned by check_output_policy after every tool call.
+# THERE IS NO KEY ALLOWLIST ANY MORE (#47). There used to be:
 #
-# "error" is here because failure text is not harness-authored. An MCP
-# server reports a failed call IN BAND, and _normalize() puts that text --
-# written by third-party code, and often quoting the credential that was
-# rejected ("invalid key: sk-...") -- under this key. Scanning only the
-# success keys left the one channel most likely to carry someone else's
-# string as the one channel nothing scanned, and it reaches model context,
-# the TUI transcript and the persisted MessageLog alike.
-_SCANNED_KEYS = ("content", "result", "stdout", "stderr", "error")
+#     _SCANNED_KEYS = ("content", "result", "stdout", "stderr", "error")
+#
+# and `check_output_policy` tested exact membership. Both search tools
+# return their payload under `results` -- plural -- which is not `result`,
+# so the output of the two tools whose content is ENTIRELY third-party
+# text was the output nothing redacted. Verified end to end: a planted
+# key survived into the persisted archive and into what the model was
+# sent the next turn.
+#
+# The allowlist grew correctly each time someone noticed a gap ("error"
+# was added because an MCP server reports a failed call in band, often
+# quoting the credential that was rejected), and that is the problem: it
+# re-created the defect for every tool added after it, and it did so
+# SILENTLY. mcp_client/client.py's _normalize was written to satisfy this
+# set deliberately, treating membership as a guarantee -- so the contract
+# was real and known, and the two oldest built-ins never satisfied it.
+#
+# Scanning every key is the producer-side fix this project's own
+# convention names ("a per-case branch added to a normalizer usually
+# means the fix belongs one layer down"). A tool that returns text now
+# has that text scanned because it is text, not because someone
+# remembered to name its key.
 
 
 # How deep to descend into nested values. Bounded so a pathological or
@@ -367,14 +380,20 @@ def check_output_policy(tool_name: str, result: dict) -> dict:
     Called once, centrally, by registry.dispatch() after every tool
     call — not something individual tool files call themselves.
     Mutates *result* in place and returns it.
+
+    EVERY value is scanned, not an allowlist of keys (#47) — see the
+    note above `_walk`. `scan_keys=False` still, so a result's dict KEYS
+    are left alone: rewriting them would change the shape a tool's
+    consumer sees, and a tool result's keys are harness- or
+    server-declared names rather than free text. That asymmetry with
+    `check_input_policy` is deliberate and predates this change.
     """
-    for key in _SCANNED_KEYS:
-        if key in result:
-            result[key] = _walk(
-                result[key],
-                redact_secrets,
-                lambda: "[REDACTED: nested beyond scan depth]",
-            )
+    for key in list(result):
+        result[key] = _walk(
+            result[key],
+            redact_secrets,
+            lambda: "[REDACTED: nested beyond scan depth]",
+        )
     return result
 
 
