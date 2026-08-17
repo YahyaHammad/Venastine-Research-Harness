@@ -47,7 +47,7 @@ Venastine Research Harness/
 ├── pytest.ini                      # testpaths=tests, --strict-markers
 ├── DEVLOG.md                       # implementation notes for built ROADMAP sections -- see §0
 │
-├── tests/                          # 1612 tests, all offline, ~25-45s depending on the machine (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
+├── tests/                          # 1613 tests, all offline, ~25-45s depending on the machine (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
 │   ├── conftest.py                 # fixtures: make_model_response, make_stream_from_response, make_stream_sequence, FakeStorage, ...
 │   ├── BREAKING_CHANGES.md         # what-breaks-it / symptom / fix per area
 │   ├── test_cli.py                 # 20 tests -- ROADMAP §1 thread_id passthrough + UUID validation + §14 parser defaults/resolution/trust flow
@@ -70,7 +70,7 @@ Venastine Research Harness/
 │   ├── test_loop_tool_dispatch.py  # 7 tests -- _run tool-dispatch branches
 │   ├── test_json_retry.py          # 9 tests -- ROADMAP §3 malformed-JSON recovery (incl. crux test)
 │   ├── test_pipeline_storage.py    # 9 tests -- ROADMAP §5 create/update/load_pipeline_run + inner-failure caplog
-│   ├── test_file_ops.py            # 35 tests -- ROADMAP §6 path resolution, approval, read/write/edit, registry
+│   ├── test_file_ops.py            # 36 tests -- ROADMAP §6 path resolution, approval, read/write/edit, registry
 │   ├── test_shell.py               # 45 tests -- ROADMAP §7 sandbox routing, inert/network classification, approval, backend internals
 │   ├── test_policy_enforcement.py  # 44 tests -- ROADMAP §8 secret redaction, domain blocking, output policy, registry integration
 │   ├── test_critic_routing.py      # 2 tests -- ROADMAP §11 critic-model routing (3a/3b/6c to critic, rest to main)

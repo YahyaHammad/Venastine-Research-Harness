@@ -1378,7 +1378,36 @@ produced it. `TECHNICAL_DEBT.md` item 7 pre-registered exactly that trigger — 
 and tree entries are still by hand… **if those two start drifting the same way, extend this
 file's check**" — and both had drifted.
 
-Suite 1605 → **1612**.
+Suite 1605 → **1613**.
+
+### Standing: moving a dependency out of `requirements.txt` can break a test that never uses it
+
+**This batch broke CI and the local suite stayed green.** Moving `markitdown` to an optional
+extra was the point of #144's third item — its only consumer is `file_ops._read_rich`, behind
+`read`, which is globally denied and cannot be re-enabled at runtime, and the import is lazy.
+Nothing in production can reach it.
+
+But `tests/test_file_ops.py` does `patch("markitdown.MarkItDown", ...)`, and **`mock.patch`
+with a string target IMPORTS the module to resolve it.** So the test needed the package
+installed for a reason unrelated to anything it asserts: it substitutes a `MagicMock` and never
+touches the real library. On a developer machine markitdown was still installed from before, so
+the suite passed; on a runner doing a fresh `pip install -r requirements.txt` it failed with
+`ModuleNotFoundError`, and it was the ONLY failure — the job reported nothing but `exit code 1`.
+
+Two rules out of it:
+
+1. **When a package leaves `requirements.txt`, grep the suite for its name — including string
+   patch targets**, which no import-graph check will find.
+2. **A green local suite does not mean a green fresh install.** Reproduced with
+   `docker run python:3.11-slim` over a `git archive` of HEAD: pre-fix **1 failed, exit 1**;
+   post-fix **1611 passed, exit 0**. That container is also the only way the eleven tests which
+   `skipif` on Windows (symlinks, SIGALRM) get run at all — all eleven pass on Linux.
+
+The fix is a stub in the root `conftest.py` beside the six SDK fakes, which is what that
+mechanism exists for. Its `convert` RAISES rather than returning something plausible, so
+anything reaching it unpatched fails loudly instead of receiving a fake conversion. `_read_rich`
+also now turns the missing extra into a message naming `pip install -e ".[documents]"`, since a
+bare `ModuleNotFoundError` names a package the user never asked for.
 
 ### The four new assertions in `test_docs_consistency.py`
 
