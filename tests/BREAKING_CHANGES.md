@@ -1256,3 +1256,98 @@ The battery covers the two filed mechanisms and 14 payloads, and the allowlist f
 is **not** a proof that no escape exists: the 231 permitted callables were not individually
 audited for evaluation behaviour. #57 (no wall-clock bound on math tools) is untouched and
 remains open — a token filter bounds what can be *named*, not how long it runs.
+
+---
+
+## §19 — the third fix batch from Audit Pass 1 (2026-08-17)
+
+The S0 tier is clear, so this batch takes the two **S1**s that were ready to build: both carried
+a fix already applied as a mutation and verified green, and neither needed a design decision
+first. The three remaining S1s do — #57 (parameter bounds vs a watchdog at `dispatch`), #76 (a
+shape-validation layer across eight passes), #100 (a control that could not be made green,
+because the chat tests supply their lines by patching `builtins.input`).
+
+| Change | Issue | Files |
+|---|---|---|
+| Count the retry ROUND, not the revision; scope the in-loop re-tiering to the batch | #74 | `core/reasoning/orchestrator.py`, `core/reasoning/confidence_scoring.py` |
+| Make the pinned span whole — a pinned `tool_use` brings back the row that answers it | #88 | `storage.py`, `tests/conftest.py` |
+
+Suite 1576 → **1605**. (The intervening count was 1597; three documents quote it, and
+`test_docs_consistency` is what makes that mechanical.)
+
+### #74 — the loop's only bound was data the model supplies
+
+`retry_count` was incremented only inside the loop over Pass 6a's response, so a flagged claim
+6a did not **name** could never reach D2's cap — and `while flagged:` had no other bound. 6a is
+one batched call across every flagged claim, which is exactly the shape a model drops an item
+from, and an omission, an empty list and an unknown id are indistinguishable at that lookup:
+the claim resolves to `None` and the `if claim:` skips in silence.
+
+Counting the round makes the cap bound the loop by construction. Because `flagged` only ever
+shrinks, every claim still in it exhausts on the same round — which is also what makes the
+issue's second defect unreachable through the loop.
+
+| If production code changes like this… | …this fails | Why it matters |
+|---|---|---|
+| Move the increment back inside `for rev in revisions:` | `test_a_claim_pass_6a_omits_still_exhausts_its_retries` + `test_a_pass_6a_response_naming_nothing_still_exhausts_the_loop` | The bound becomes the model's cooperation again: two model calls per round, each on `RESEARCH_PASS_TOKEN_BUDGET`, with no ceiling but a rate limit |
+| **Add** the per-round increment while leaving the per-revision one | `test_pipeline_6a6c_retry_loop_continues_until_max_retries_then_fallback` | A named claim then counts twice and exhausts in half the rounds. This is the issue's own withdrawn control — its red was the mutation's arithmetic, not the fix's cost |
+| Drop `claims=flagged` from the in-loop `run_confidence_tiering` | `test_a_retry_round_does_not_re_tier_a_claim_outside_its_batch` | A claim finished at D1 or D2 is recomputed from unchanged score data while the annotation `_apply_fallback` wrote stays — so it ships as (say) LOW beside a note saying it could not be verified. Pass 6b leaves both alone, because `if claim.annotation is None` is false |
+| Resolve 6a's revisions with `run.claim_by_id` instead of within `flagged` | Nothing today | A revision naming a claim outside the batch lands on one already finished, carrying a `retry_count` this round did not increment — so the `retry` event reports a stale attempt. Recorded rather than pinned: no canned payload produces it, and validating that a pass answered about what it was asked is #76 |
+
+**The three new tests are bounded by the mock, deliberately.** With the fix reverted the loop
+does not fail, it never terminates — so each payload supplies exactly `MAX_PIPELINE_RETRIES`
+rounds and `_build_pass_mock` raises when the loop asks for one more. The pipeline's `except`
+re-raises, so the red arrives as a failure rather than as a hung suite. The tracker's rule: a
+probe that would hang is worth writing, one that hangs is not.
+
+### #88 — the derived view has two span boundaries and only one is turn-aligned
+
+M4 is stated over the checkpoint watermark. The **pinned set** is the other boundary, and it can
+never be turn-aligned: `pin` is dispatched from inside a turn, D20 has already persisted the
+assistant message carrying the `tool_use` for `pin` itself, and the answering `tool` row is
+written after dispatch returns — so it is never pinned. While the pin is in the uncompacted tail
+this is invisible. The first compaction whose watermark passes the pinned region puts an
+unanswered `tool_use` in the view: an HTTP 400 on Anthropic, durable (the checkpoint is a
+persisted row, there is no unpin, and nothing removes a checkpoint), and misattributed — the
+user sees a provider error with no visible connection to a `pin` several turns earlier.
+
+| If production code changes like this… | …this fails | Why it matters |
+|---|---|---|
+| Revert `storage.pinned_through` to returning the pinned rows alone | `test_a_pinned_tool_call_brings_back_the_result_that_answers_it` + `test_a_pinned_pin_call_leaves_no_unanswered_tool_use_in_the_view` | The thread becomes permanently unsendable, and every later call and every resume rebuilds the same view |
+| Revert **only** `FakeStorage.pinned_through` | `test_a_pinned_tool_call_comes_back_with_the_result_that_answers_it` | #123's shape, closed rather than repeated: the fake's mirror is now load-bearing, not merely documented as one |
+| Re-add every unpinned tool row in the span rather than the needed ones | that test + the two pre-existing M9 tests | Puts back the results compaction just summarized, which is the context the feature exists to shrink |
+| Fix it in `_derived_view` or in `pin_last` instead | Nothing — a design note | Consumer-side is this project's canonical bug shape and would hide from the model a call it made; stopping `pin_last` at the last complete turn changes what "pin the last N turns" means and leaves any other non-turn-aligned pinned set open |
+
+**The end-to-end test needs a REAL compaction**, which is why it is in `test_storage_e2e.py`:
+the two boundaries coincide until a checkpoint exists. Same reason that file had to exist for
+M11. It asserts its preconditions beside the claim — that a fold happened, that the watermark
+passed the pinned turn, and that the pinned assistant row is in the view — because without the
+last one the real assertion holds vacuously.
+
+### Standing: three backstops in `pinned_through` survive, and the code now says so
+
+`have`, the `set()` dedupe and the `role == "tool"` filter were each deleted separately against
+the full suite and **each survived**. What actually keeps the result duplicate-free is the
+`not m["pinned"]` filter — a pinned tool row is already in `keep` and cannot be re-added — and
+reaching any of the three needs two rows sharing one `tool_call_id`, or a non-tool row carrying
+one. Neither has a producer: `add_tool_result` writes exactly one row per call, and
+`add_user_message` passes no `tool_call_id`.
+
+Kept rather than trimmed, because what they guard is a *duplicate* `tool_result` — the same wire
+error from the other direction as the one the function exists to prevent, which is the wrong
+place to trade a free backstop for a reachability argument. The measurement is recorded in the
+code so no later reader has to re-derive it, which is the difference between this and the
+comments unit 10 and unit 12 had to re-measure.
+
+Two of the new tests were then named for what they discriminate rather than for the guard they
+appear to sit on: `test_an_already_pinned_tool_result_is_not_added_twice` stays green with
+`have` deleted. That is #61's shape — a test observing an effect adjacent to its cause — caught
+before filing rather than after.
+
+### Why the M9 test could not see this
+
+`test_a_pinned_row_inside_the_covered_span_comes_back_verbatim` pins `rows[1]`, an assistant row
+whose `tool_calls` is `[]`. **The one thing a pinned assistant row carries in production is the
+one thing that fixture leaves empty**, because `pin` is itself a tool. Removing the re-inclusion
+entirely *was* pinned; what had no test was the interaction between the two boundaries — and
+neither M4 nor M9 mentions the other.
