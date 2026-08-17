@@ -1481,3 +1481,127 @@ the same argument this document makes about every other hand-maintained duplicat
 
 **Consequence:** Claude Code auto-injects `CLAUDE.md`, so it now injects a pointer rather than
 84 KB. The context is an explicit read instead of an automatic one.
+
+---
+
+## §21 — the fifth fix batch: the URL and output policy boundary (2026-08-18)
+
+Eight issues. Five of them are one question asked at three depths — **may this URL be
+requested** — and they are one batch because fixing any of them alone rewrites the others.
+#54's own report says so: *"the two fixes want the same manual-redirect loop, so they are
+cheaper done together."*
+
+| Change | Issue | Files |
+|---|---|---|
+| One normaliser, suffix matching | #48 | `safety/policy_enforcement.py` |
+| `is_url_permitted` — scheme + domain + non-public address | #54 | `safety/policy_enforcement.py`, `tools/builtin/web_search.py` |
+| Manual redirect loop, checked before every hop; report the URL that answered | #53 | `tools/builtin/fetch_url.py` |
+| Scan every key of a tool result, not an allowlist | #47 | `safety/policy_enforcement.py`, `mcp_client/client.py` |
+| Redact in the log formatter | #132 | `logging_setup.py`, `tools/registry.py` |
+| `providers.json` and the trust store created 0600 | #19 | `credentials.py`, `core/workspace_trust.py` |
+| Anthropic capabilities read as attributes | #35 | `core/client.py` |
+| Contain every UI-thread persistence call | #104 | `tui/app.py` |
+
+Suite 1613 → **1667**.
+
+### What breaks these
+
+| If production code changes like this… | …this fails | Why it matters |
+|---|---|---|
+| Drop the trailing-dot strip in `_hostname` | `test_a_trailing_dot_does_not_bypass_either_branch` | `evil.com.` is a legal FQDN naming the same host, and it defeated *both* branches |
+| Match exactly instead of by suffix | `test_a_subdomain_of_a_blocked_domain_is_blocked` | One prepended label leaves the blocklist |
+| Match by bare string suffix instead of by label | `test_the_suffix_match_is_label_wise_not_string_wise` | `notevil.com` starts being blocked — over-blocking a domain nobody listed |
+| Stop stripping the port on the bare-domain branch | `test_a_port_does_not_bypass_the_bare_domain_branch` | The two branches disagree again, which is what made #48 an inconsistency rather than a limitation |
+| Remove the `is_global` check | `test_non_public_addresses_are_refused` (8 cases) | The metadata endpoint returns role credentials into model context and the persisted `MessageLog` |
+| Check only the first resolved address, or require all of them | `test_any_non_public_answer_refuses_not_just_the_first` | A name answering with one public and one private address is the rebinding shape; both readings let it through |
+| Pass `resolve=True` from `web_search` | `test_filtering_results_issues_no_dns` | A DNS lookup per search hit, ten hits a call, inside ten passes — nothing *fails*, it just gets slow |
+| Check only the first hop | `test_a_redirect_to_a_blocked_domain_is_refused` + the real-httpx twin | One 302 walks past the control, and the blocked host has already served its body |
+| Report `parsed.url` instead of the final URL | `test_the_reported_url_is_the_one_that_ANSWERED` + its real-httpx twin | Provenance: a redirect silently rewrites what a claim is grounded in, and `output_writer` builds `sources/` from it |
+| Reinstate the `_SCANNED_KEYS` allowlist | 3 tests in `TestEveryKeyIsScanned` | `results` is not `result`; the two tools whose content is entirely third-party text go unredacted |
+| Redact the result but not the log record | `test_a_secret_in_a_TRACEBACK_does_not_reach_the_file` | Same string, two sinks, one redacted |
+| Remove `tui/app.py`'s replay containment | `test_a_replay_failure_while_resuming_does_not_kill_the_tui` | The app dies having just cleared the screen and written "Resumed thread `<uuid>`." |
+| Move the memory load below the transcript reset | `test_a_failure_opening_the_thread_leaves_the_session_on_the_old_one` | Ordering *is* the fix there, not the `try` block |
+| Leave `_busy` set when a turn fails to start | `test_a_storage_failure_starting_a_turn_does_not_kill_the_tui` | The shell refuses every later turn with "Still working" for a turn that never started |
+| Write `providers.json` with a bare `open()` | `test_a_permissive_umask_does_not_widen_it` — **on POSIX only** | See the standing note below |
+
+### Standing: a skip reads as a surviving mutation, and this batch proved it
+
+§20 recorded this one batch ago — *"a narrowed invocation makes a session-dependent check
+SKIP, and a skip reads as a survivor"* — and #19 is the same class from the other direction.
+Its four mode assertions `skipif` off POSIX, because POSIX mode bits do not exist on Windows
+and `os.open`'s mode only sets the read-only flag there.
+
+**On the development machine, mutating `0o600` to `0o644` left the suite green.** The
+mutation was only measurable in `python:3.11-slim`, where all four run:
+
+```
+control                                    9 passed
+_SECRET_FILE_MODE = 0o644                  2 failed   (420 != 384)
+bare open(path, "w")                       2 failed   (438 != 384)
+trust store bare open()                    1 failed
+```
+
+**The rule: a guard whose test can skip is not verified until the mutation runs where the
+test does.** The container is part of this batch's verification, not a formality.
+
+### Standing: the mutation harness is itself a place a mutation can silently not apply
+
+Two mutations in this batch reported a result that was not the result.
+
+1. **A `\n` needle against a CRLF file matches nothing**, and a no-op edit reads as a
+   survivor. `tui/app.py` is CRLF while most of the tree is LF. The harness now normalises
+   the needle to the file's own line ending and asserts the bytes changed before running
+   anything.
+2. **A syntactically invalid mutation reports RED for the wrong reason.** Replacing `try:`
+   with `if True:` left a dangling `except`, so pytest reported a *collection error* — and
+   "1 error" in a summary reads like a kill. The replay guard is now mutated by removing the
+   whole block, with `py_compile` run first, so a red is a real failure.
+
+Both are instances of the rule this document already states: **a test that fails for the
+wrong reason is indistinguishable from one that works** — arriving, twice, inside the tool
+built to enforce it.
+
+### Recorded, not closed: three limitations the tests cannot see
+
+- **DNS rebinding.** `is_url_permitted` resolves, then httpx resolves again independently.
+  Closing it means connecting to the pinned IP with the host in a `Host:` header, which on
+  HTTPS fights SNI and certificate verification — a subtly wrong implementation there is a
+  worse hole than this one. Stated in the function's docstring.
+- **`os.open`-with-mode versus `open()`-then-`chmod`.** Mutating the fix to the second form
+  stays **green**, and it should: the file ends up 0600 either way. What `os.open` buys is
+  the absence of a window in which the key is on disk world-readable, and no offline test can
+  observe a race. Measured and recorded so the next reader does not delete the `os.open` as
+  ceremony.
+- **A pre-existing 0644 file keeps its mode** through `O_TRUNC`. Repairing one is a
+  migration; the scope here is "new writes are safe". Pinned by a test that says so.
+
+### Why eight green tests could not see #35
+
+`test_client_effort.py` built its doubles as nested dicts — `capabilities={"effort":
+{"high": {"supported": True}}}` — the same wrong shape `core/client.py` assumed. Production
+and the double agreed with each other and both disagreed with the SDK, so the capability
+query **could never succeed in production and could never fail in the suite**.
+
+Fixing only the code would have left that intact. The doubles are rebuilt attribute-shaped,
+and `test_sdk_conformance.py` gained a test driving `_effort_levels` against capability
+objects built from the **real pinned types** — the test the dict-shaped doubles could not be.
+The general rule, which this project already states about `FakeStorage`: **anything a test
+doubles, something has to check against the real thing.**
+
+### The two strict xfails are gone
+
+Both said, in their own reasons, that fixing the issue would turn them XPASS and that the
+marker should then be deleted. Both did.
+
+- `test_a_redirect_to_a_blocked_domain_is_refused` (#53) — now a real test, joined by a twin
+  driving **real httpx** through a `MockTransport`. The fake httpx is this project's model of
+  httpx, and #53 exists because the old code's model of httpx was wrong; a fake written to
+  match the new code cannot be evidence that the new code matches httpx.
+- `test_the_anthropic_capability_read_matches_the_pinned_types` (#35) — **inverted** rather
+  than deleted. It now asserts the chain the fixed code relies on.
+
+`tests/conftest.py`'s `http` driver gained `redirect()` and lost `redirected()`: the old
+helper queued the answer a *followed* redirect produces, which is a shape `fetch_url` no
+longer receives. A fixture that can only express the old shape quietly stops testing the code
+under test. The root `conftest.py`'s fake `_Response` gained `is_redirect` and `next_request`,
+both mirroring real httpx's documented rule rather than a rule invented here.

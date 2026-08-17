@@ -3693,3 +3693,171 @@ control and is a hazard for text.
   the chat tests supply their lines by patching `builtins.input`.
 - **README's "pinning a message is thread-scoped and undoable"** is D26's false
   premise, owned by open issue #89 and left to it.
+
+---
+
+## Audit Pass 1 — fix batch 5, the URL and output policy boundary (2026-08-18)
+
+Eight issues, four of them S2 security. Full per-change tables in
+`tests/BREAKING_CHANGES.md` §21; what belongs here is why these eight were
+one batch and what was decided.
+
+### The selection rule, which was the actual question asked
+
+The brief was: high severity, low blast radius, and — the part that shaped
+everything — **nothing that would have to be rewritten later by another open
+issue.** That last constraint is what picked the batch, because it turns
+"which issues are cheap" into "which issues are *coupled*", and the answer
+was written in the issue bodies already. #54's report says it outright:
+
+> the two fixes want the same manual-redirect loop, so they are cheaper done
+> together
+
+#48 wants a normaliser inside `is_domain_blocked`. #54 wants an address
+guard beside it. #53 wants both consulted on **every redirect hop**. Fix any
+one alone and the next one rewrites it: a post-hoc history check for #53
+does not fix #54 at all, and a normalised `is_domain_blocked` becomes an
+inner call the moment `is_url_permitted` exists. So they are one function,
+built once.
+
+The same triage produced a list of groups **not** taken, recorded in the
+plan so the next round does not split them: #133 + #67 (two functions answer
+"what may be granted" and disagree), #37 + #38 + #39 (deciding whether the
+dead call path is deleted must precede adding containment to it), #75 + #78
+(both are `score_breakdown` integrity), #68 + #69.
+
+### Decisions taken with the owner
+
+| Question | Answer |
+|---|---|
+| Redirect posture | **Check before each hop.** `follow_redirects=False`, validate, then issue. A blocked or internal host is never contacted |
+| SSRF depth | Resolve and reject non-global. **IP pinning rejected** — on HTTPS it fights SNI and certificate verification, and a subtly wrong implementation there is a worse hole than the rebinding window it closes |
+| The rebinding window | **Recorded, not closed.** Written into the function's docstring rather than left implied |
+| A config escape hatch for internal hosts | **Not built** — deferred to ROADMAP_v3. `is_url_permitted` takes a parameter that a later allowlist attaches to, but no plumbing was added for it |
+| Blocklist matching | **Suffix**, reversing a documented carve-out. Behaviour change: an existing list starts matching more |
+| `web_search` | Same checker, `resolve=False` |
+| #47 / #132 | **Producer fix for both** — scan every value; redact in the log formatter |
+| #104 scope | **Sweep every UI-thread persistence call**, not the two the issue names |
+
+**Reversing the subdomain carve-out is the one that deserves its own line.**
+`is_domain_blocked`'s docstring said *"block `evil.com` explicitly if you
+also want `sub.evil.com`"*, which asks a maintainer to enumerate an infinite
+set. It was a documented choice rather than a reasoned one, and a blocklist
+an attacker leaves by prepending one label is close to decorative. Matching
+a suffix can only ever block *more* than the author wrote down, and the
+list's whole purpose is refusal — so over-blocking is the safe direction to
+be wrong in. The label-wise match (`notevil.com` must not match `evil.com`)
+has its own test, because a bare `endswith` passes every other test in the
+class.
+
+### What the mutation pass found that the build did not
+
+Eleven guards, mutated one at a time. Nine went red on a test named for
+them on the first attempt. The other three are the interesting ones.
+
+**One guard was genuinely unpinned.** Flipping `resolve=False` to
+`resolve=True` at `web_search`'s call site left the whole suite green.
+`test_resolve_false_issues_no_lookup` pins the *parameter*; nothing pinned
+the *argument*. That is #61's shape — a test sitting beside the thing it is
+meant to discriminate rather than on it — and the failure it misses is
+silent, since nothing breaks when `web_search` starts resolving. It just
+pays a DNS round trip per hit, ten hits a call, inside ten passes. Four
+tests were added and the mutation now dies.
+
+**Two mutations reported a result that was not the result**, both inside
+the harness built to prevent exactly that:
+
+1. A `\n` needle against a **CRLF** file matched nothing. `tui/app.py` is
+   CRLF while most of the tree is LF, so the "mutation" was a no-op and read
+   as a survivor.
+2. Replacing `try:` with `if True:` left a dangling `except`, so pytest
+   reported a **collection error** — and "1 error" in a summary reads like a
+   kill.
+
+The harness now normalises the needle to the file's own line ending, asserts
+the bytes changed, and `py_compile`s the mutated file before running
+anything. *A test that fails for the wrong reason is indistinguishable from
+one that works*, arriving twice inside the tool that enforces it.
+
+### #19 could not be verified on the machine it was written on
+
+Its four mode assertions `skipif` off POSIX — mode bits do not exist on
+Windows, and `os.open`'s mode there only sets the read-only flag. So
+mutating `0o600` to `0o644` left the local suite **green**, which is §20's
+own lesson from the other direction: *a skip reads as a surviving mutation.*
+
+Verified in `python:3.11-slim`, where all four run: control 9 passed;
+`0o644` → 2 failed; bare `open()` → 2 failed; trust store bare `open()` →
+1 failed. **A guard whose test can skip is not verified until the mutation
+runs where the test does.**
+
+One mutation there stayed green *and should have*: replacing `os.open(...,
+0o600)` with `open()` followed by `os.chmod`. The file ends up 0600 either
+way. What `os.open` buys is the absence of a window in which the key is on
+disk world-readable, and no offline test can observe a race — so the
+measurement is recorded rather than the code being "simplified" later by
+someone who re-runs the mutation and sees green.
+
+### #35: the doubles were built to the same wrong shape as the code
+
+The Anthropic effort query read `capabilities["effort"]` where the pinned
+SDK defines pydantic models. The `TypeError` was caught by the branch's own
+`except`, so every lookup silently fell back to the static table — for the
+whole life of the feature. Eight tests covered that path and all eight were
+green, because `test_client_effort.py` built its capability doubles as
+nested dicts: **production and the double agreed with each other and both
+disagreed with the SDK.**
+
+That makes the fix three things rather than one — read attributes, rebuild
+the doubles, and add a test driving `_effort_levels` against objects
+constructed from the *real pinned types*. Only the third one closes the
+class. It is in `test_sdk_conformance.py`, which exists for exactly this,
+and it is the test the dict-shaped doubles could not be.
+
+Both strict xfails in the suite are now gone. #53's became a real test;
+#35's was **inverted** rather than deleted, so it now asserts the chain the
+fixed code depends on.
+
+### The fake httpx is not evidence about httpx
+
+`fetch_url`'s per-hop behaviour is pinned twice: once against the fake
+(which gained `is_redirect` and `next_request`, mirroring real httpx's
+documented rule) and once against **real httpx 0.28.1 through a
+`MockTransport`**, the way #53's and #54's reports drove it.
+
+The reason is not thoroughness. The fake is this project's model of httpx,
+and #53 exists *because* the old code's model of httpx was wrong — so a fake
+written to match the new code cannot be evidence that the new code matches
+httpx. Both assert the **hop list**, not just that an error came back: a
+post-hoc check also produces an error, and the whole posture question is
+whether the request was issued.
+
+### Tests
+
+- `test_policy_enforcement.py` 44 → 74. Normalisation, label-wise suffix
+  matching, the address guard (eight non-public cases lifted verbatim from
+  #54's report), the resolving path with `getaddrinfo` faked, `web_search`'s
+  call site, and the whole-dict scan.
+- `test_fetch_url.py` 18 → 23, and its docstring's prediction held: it said
+  a test asserting *"a blocked domain is refused"* would survive this work
+  where one asserting *"the blocklist is consulted before the request"*
+  would not. Every existing test survived unchanged except the two that were
+  records of the old behaviour, and one of those is inverted rather than
+  deleted.
+- `test_logging_setup.py` 4 → 7, asserting against the **file on disk**.
+  `caplog` attaches its own handler with its own formatter, so it would
+  report the record this formatter never touched.
+- `test_tui.py` 43 → 49, asserting `app.is_running` rather than that an
+  error was shown — a test that only checks the message passes against a
+  version that reports the failure and then dies.
+- `tests/test_credentials.py` is **new**. `credentials.py` had no test file
+  at all, in the module that writes every provider key to disk.
+
+### Not fixed
+
+- **DNS rebinding** and the `os.open` race window: recorded above.
+- **A pre-existing 0644 `providers.json` keeps its mode.** Repairing one is
+  a migration; the scope here is "new writes are safe", pinned by a test
+  that says so out loud.
+- **#57, #76, #100** — the three remaining S1s, each blocked on a decision.
+- **#91 item 2** — `effective_compaction`'s unbuilt provenance promise.
