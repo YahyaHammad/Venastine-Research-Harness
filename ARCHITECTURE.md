@@ -50,11 +50,11 @@ Venastine Research Harness/
 ├── CLAUDE.md / QWEN.md             # pointers to AGENTS.md, so a harness that auto-loads one of those names finds the context instead of a second copy of it
 ├── DEVLOG.md                       # implementation notes for built ROADMAP sections -- see §0
 │
-├── tests/                          # 1613 tests, all offline, ~25-45s depending on the machine (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
+├── tests/                          # 1640 tests, all offline, ~25-45s depending on the machine (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
 │   ├── conftest.py                 # fixtures: make_model_response, make_stream_from_response, make_stream_sequence, FakeStorage, ...
 │   ├── BREAKING_CHANGES.md         # what-breaks-it / symptom / fix per area
 │   ├── test_cli.py                 # 20 tests -- ROADMAP §1 thread_id passthrough + UUID validation + §14 parser defaults/resolution/trust flow
-│   ├── test_fetch_url.py           # 18 tests -- audit #120/#58: fetch_url's whole surface, which no test had ever executed. #53 ships here as a strict xfail
+│   ├── test_fetch_url.py           # 23 tests -- audit #120/#58: fetch_url's whole surface, which no test had ever executed. #53/#54's per-hop policy check, twice: once on the fake httpx and once on REAL httpx through a MockTransport
 │   ├── test_e2e.py                 # 5 tests -- e2e chat (multi-turn + tool use), research mode, error handling ×3
 │   ├── test_logging_setup.py       # 4 tests -- configure_logging fallback on bad log path
 │   ├── test_output_writer.py       # 6 tests -- ROADMAP §12 artifact file layout, contents, chart PNG, None guard, tier counts
@@ -75,7 +75,7 @@ Venastine Research Harness/
 │   ├── test_pipeline_storage.py    # 9 tests -- ROADMAP §5 create/update/load_pipeline_run + inner-failure caplog
 │   ├── test_file_ops.py            # 36 tests -- ROADMAP §6 path resolution, approval, read/write/edit, registry
 │   ├── test_shell.py               # 45 tests -- ROADMAP §7 sandbox routing, inert/network classification, approval, backend internals
-│   ├── test_policy_enforcement.py  # 44 tests -- ROADMAP §8 secret redaction, domain blocking, output policy, registry integration
+│   ├── test_policy_enforcement.py  # 66 tests -- ROADMAP §8 secret redaction, domain blocking (#48 normalisation + suffix match), is_url_permitted's address guard (#54), output policy, registry integration
 │   ├── test_critic_routing.py      # 2 tests -- ROADMAP §11 critic-model routing (3a/3b/6c to critic, rest to main)
 │   ├── test_permission_context.py  # 21 tests -- ROADMAP_v2 §15 AC1-AC7 (stricter wins, mcp default, redaction survives, D24, unregister) + schemas filtering
 │   ├── test_agents.py              # 40 tests -- ROADMAP_v2 §18 AC1-AC3 (intersection, depth, manager surface), dispatch injection, headless filter + warning, goal mode, catalog, D24, TUI commands

@@ -494,6 +494,34 @@ def _build_fake_httpx_module():
             if self.status_code >= 400:
                 raise _HTTPError(f"HTTP {self.status_code}")
 
+        # ADDED FOR #53/#54. fetch_url now follows redirects BY HAND, so it
+        # reads these two on every response. Both mirror real httpx's rule
+        # rather than a rule invented here:
+        #
+        #   is_redirect   = a 3xx status AND a Location header. A 3xx with
+        #                   no Location is not followable, and httpx says so.
+        #   next_request  = the hop to issue next. Real httpx populates it
+        #                   when follow_redirects=False precisely so a
+        #                   caller can follow manually, which is what
+        #                   fetch_url does now.
+        #
+        # Deliberately thin. The tests that actually PIN the per-hop policy
+        # check drive REAL httpx through a MockTransport (see
+        # test_fetch_url.py) -- a fake written to match the new code cannot
+        # be evidence that the new code matches httpx.
+        @property
+        def is_redirect(self):
+            return 300 <= self.status_code < 400 and "location" in {
+                k.lower() for k in self.headers}
+
+        @property
+        def next_request(self):
+            if not self.is_redirect:
+                return None
+            location = next(v for k, v in self.headers.items()
+                            if k.lower() == "location")
+            return types.SimpleNamespace(url=location)
+
     # Queued outcomes, oldest first. An entry is either a _Response or an
     # exception INSTANCE to raise -- both are things a caller must handle,
     # and a fake that can only succeed cannot exercise the error path.

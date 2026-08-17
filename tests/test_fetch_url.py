@@ -45,11 +45,23 @@ BLOCKED = "https://blocked.example/page"
 def _blocklist(monkeypatch):
     """One known-blocked domain, injected at the policy layer rather than
     by editing config, so these tests do not depend on what
-    BLOCKED_DOMAINS happens to ship with."""
+    BLOCKED_DOMAINS happens to ship with.
+
+    CHANGED BY #53/#54. This used to also stub `fetch_url.is_domain_blocked`
+    -- the tool imported it directly. It now calls `is_url_permitted`, and
+    the REAL one runs here: stubbing the checker would leave the composition
+    these two issues are about untested in the file that owns it.
+
+    What is stubbed instead is DNS. `is_url_permitted` resolves, and a
+    resolving test suite is neither offline nor deterministic, so
+    getaddrinfo answers with one public address for every name. Tests that
+    care about a NON-public answer override it themselves.
+    """
     import safety.policy_enforcement as policy
     monkeypatch.setattr(policy, "BLOCKED_DOMAINS", {"blocked.example"})
-    monkeypatch.setattr(fetch_url, "is_domain_blocked",
-                        lambda url: "blocked.example" in url)
+    monkeypatch.setattr(
+        policy.socket, "getaddrinfo",
+        lambda host, port, *a, **kw: [(None, None, None, "", ("93.184.216.34", 0))])
 
 
 # ---------------------------------------------------------------------------
@@ -167,44 +179,170 @@ def test_the_request_carries_a_timeout(http):
 
 
 # ---------------------------------------------------------------------------
-# ---- #53, recorded rather than pinned --------------------------------------
+# ---- #53 and #54, now pinned -----------------------------------------------
 # ---------------------------------------------------------------------------
+#
+# The xfail that used to sit here is gone. It read: "when #53 is fixed this
+# starts passing, which fails the suite and says to delete the marker." It
+# did, and this is that deletion.
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Issue #53: fetch_url passes follow_redirects=True but consults "
-           "is_domain_blocked only on the URL it was GIVEN, so a redirect to "
-           "a blocked domain is fetched and returned -- and the result "
-           "reports the requesting URL rather than the one that answered. "
-           "STRICT: when #53 is fixed this starts passing, which fails the "
-           "suite and says to delete the marker.")
 def test_a_redirect_to_a_blocked_domain_is_refused(http):
     """The case that was untestable before the fake httpx could represent a
-    redirect at all (#120) -- which is a large part of why #53 went
-    unnoticed until an audit read the code.
+    redirect at all (#120) -- a large part of why #53 went unnoticed until
+    an audit read the code.
 
-    A harmless-looking URL 301s to a blocked domain. Real httpx follows it
-    because `follow_redirects=True`; nothing re-checks the hops or the final
-    URL, so the blocked page's body comes back.
+    A harmless-looking URL 301s to a blocked domain. The refusal must arrive
+    BEFORE the second hop is issued, which is the half `assert "error" in
+    result` alone would not catch: a post-hoc check also produces an error,
+    after the blocked host has already served the request.
     """
-    http.redirected(final_url=BLOCKED, text="content from the blocked host")
+    http.redirect(to=BLOCKED)
+    http.respond(text="content from the blocked host")
     result = fetch_url.run({"url": "https://harmless.example/r"})
 
-    assert "error" in result, (
-        "a redirect landed on a blocked domain and the body was returned")
+    assert "error" in result
     assert "content from the blocked host" not in str(result)
+    assert [r[0] for r in http.requests] == ["https://harmless.example/r"], (
+        "the blocked hop was requested; the check has to run before each "
+        "request, not against the history afterwards")
 
 
-def test_the_reported_url_is_the_one_that_was_requested(http):
-    """Not an endorsement -- a record of current behaviour, so #53's fix has
-    something to change deliberately rather than by accident.
-
-    `result["url"]` is `parsed.url`, the URL asked for, even when a redirect
-    means a different host answered. A consumer reading provenance off this
-    field gets the requesting domain.
+def test_a_redirect_to_a_private_address_is_refused(http):
+    """#54 composed with #53, which is the pair's sharpest case: a perfectly
+    ordinary public URL that redirects to the cloud metadata endpoint needs
+    no suspicious argument at all, so neither the blocklist nor §25 R5's
+    argument scan has anything to object to.
     """
-    http.redirected(final_url="https://elsewhere.example/final", text="body")
+    http.redirect(to="http://169.254.169.254/latest/meta-data/")
+    http.respond(text="ROLE CREDENTIALS")
     result = fetch_url.run({"url": "https://harmless.example/r"})
 
-    assert result["url"] == "https://harmless.example/r"
+    assert "error" in result
+    assert "ROLE CREDENTIALS" not in str(result)
+    assert [r[0] for r in http.requests] == ["https://harmless.example/r"]
+
+
+def test_the_reported_url_is_the_one_that_ANSWERED(http):
+    """INVERTED by #53. This test used to assert the opposite, as a record
+    of current behaviour so the fix would change it deliberately rather than
+    by accident. This is that deliberate change.
+
+    Provenance, not decoration: the grounding passes attribute fetched text
+    to this field and output_writer builds each run's sources/ directory
+    from it, so reporting the requested URL let a redirect chain silently
+    rewrite what a claim was grounded in.
+    """
+    http.redirect(to="https://elsewhere.example/final")
+    http.respond(text="body")
+    result = fetch_url.run({"url": "https://harmless.example/r"})
+
+    assert result["url"] == "https://elsewhere.example/final"
+    assert result["content"] == "body"
+
+
+def test_a_redirect_chain_is_bounded(http):
+    """A loop is a hang, and this tool is callable by ten unattended passes.
+    httpx's own bound does not apply once redirects are followed by hand.
+    """
+    for _ in range(fetch_url.MAX_REDIRECTS + 3):
+        http.redirect(to="https://loop.example/next")
+    result = fetch_url.run({"url": "https://loop.example/start"})
+
+    assert "error" in result
+    assert "redirect" in result["error"].lower()
+    assert len(http.requests) == fetch_url.MAX_REDIRECTS
+
+
+def test_a_direct_private_address_is_refused_and_never_requested(http):
+    """#54's base case, without a redirect. Every one of these was ACCEPTED
+    and a request issued before this batch.
+    """
+    for url in ("http://127.0.0.1:8080/admin",
+                "http://169.254.169.254/latest/meta-data/",
+                "http://10.0.0.1/internal",
+                "http://[::1]:8080/"):
+        result = fetch_url.run({"url": url})
+        assert "error" in result, url
+    assert http.requests == []
+
+
+# ---------------------------------------------------------------------------
+# ---- The same two properties, against REAL httpx ---------------------------
+# ---------------------------------------------------------------------------
+#
+# The fake httpx above is written by this project, so its `is_redirect` and
+# `next_request` are this project's model of httpx -- and #53 exists because
+# the old code's model of httpx was wrong. A fake cannot be evidence that
+# the new code reads real redirects correctly.
+#
+# These drive REAL httpx (pinned httpx==0.28.1) through a MockTransport, the
+# way #53's and #54's reports did. No network: MockTransport answers from a
+# handler. This is the `test_memory_write_through.py` pattern -- swap the
+# fake for the real thing where the real thing is the subject.
+
+@pytest.fixture
+def real_httpx(monkeypatch):
+    """Put the genuine httpx module in front of fetch_url for one test."""
+    import importlib
+    import sys
+
+    fake = sys.modules["httpx"]
+    del sys.modules["httpx"]
+    try:
+        real = importlib.import_module("httpx")
+    except ImportError:                                   # pragma: no cover
+        sys.modules["httpx"] = fake
+        pytest.skip("real httpx not installed")
+    monkeypatch.setattr(fetch_url, "httpx", real)
+    try:
+        yield real
+    finally:
+        sys.modules["httpx"] = fake
+
+
+def _transport(real, routes):
+    """MockTransport answering from `routes`, recording every URL asked for."""
+    seen = []
+
+    def handler(request):
+        seen.append(str(request.url))
+        status, headers, body = routes.get(str(request.url), (200, {}, "ok"))
+        return real.Response(status, headers=headers, text=body)
+
+    return real.MockTransport(handler), seen
+
+
+def test_real_httpx_a_redirect_to_a_blocked_domain_is_never_requested(
+        real_httpx, monkeypatch):
+    transport, seen = _transport(real_httpx, {
+        "https://harmless.example/r": (302, {"location": BLOCKED}, ""),
+        BLOCKED: (200, {}, "EXPLOIT PAYLOAD BODY"),
+    })
+    monkeypatch.setattr(
+        real_httpx, "get",
+        lambda url, **kw: real_httpx.Client(transport=transport, **kw).get(url))
+
+    result = fetch_url.run({"url": "https://harmless.example/r"})
+
+    assert seen == ["https://harmless.example/r"], (
+        f"the blocked hop was contacted: {seen}")
+    assert "error" in result
+    assert "EXPLOIT PAYLOAD BODY" not in str(result)
+
+
+def test_real_httpx_reports_the_url_that_answered(real_httpx, monkeypatch):
+    transport, seen = _transport(real_httpx, {
+        "https://harmless.example/r":
+            (302, {"location": "https://elsewhere.example/final"}, ""),
+        "https://elsewhere.example/final": (200, {}, "body"),
+    })
+    monkeypatch.setattr(
+        real_httpx, "get",
+        lambda url, **kw: real_httpx.Client(transport=transport, **kw).get(url))
+
+    result = fetch_url.run({"url": "https://harmless.example/r"})
+
+    assert seen == ["https://harmless.example/r",
+                    "https://elsewhere.example/final"]
+    assert result["url"] == "https://elsewhere.example/final"
     assert result["content"] == "body"

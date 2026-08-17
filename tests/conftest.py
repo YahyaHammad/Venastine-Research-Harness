@@ -828,13 +828,20 @@ def http(monkeypatch):
                 text=text, status_code=status_code, url=url,
                 headers=headers, history=history))
 
-        def redirected(self, final_url, text="", via=("301",)):
-            """Queue the answer a FOLLOWED redirect produces: the body and
-            final URL of the last hop, with the earlier ones in `.history`.
-            This is the shape #53 is about."""
+        def redirect(self, to, status_code=301):
+            """Queue ONE redirect hop -- a 3xx carrying a Location header,
+            which is what a caller sees with follow_redirects=False.
+
+            REPLACED `redirected()` when #53 was fixed. That helper queued
+            the answer a FOLLOWED redirect produces (final body, final URL,
+            earlier hops in `.history`), because fetch_url used to pass
+            follow_redirects=True and never saw a 3xx at all. It now follows
+            by hand, so the shape it actually receives is this one, and a
+            fixture that can only express the old shape would quietly stop
+            testing the code under test.
+            """
             httpx._queued.append(httpx.Response(
-                text=text, status_code=200, url=final_url,
-                history=[httpx.Response(status_code=int(code)) for code in via]))
+                status_code=status_code, headers={"location": to}))
 
         def fail(self, exc):
             httpx._queued.append(exc)
