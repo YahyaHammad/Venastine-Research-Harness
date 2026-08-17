@@ -166,11 +166,27 @@ def test_google_gate_inspects_the_sdk_class(monkeypatch, fields, expected):
 # ---------------------------------------------------------------------------
 
 def _anthropic_client_reporting(levels: dict):
+    """A capabilities object shaped like the SDK's, i.e. ATTRIBUTES (#35).
+
+    This helper used to build nested DICTS -- `capabilities={"effort":
+    {"high": {"supported": True}}}` -- which is the same wrong mental
+    model core/client.py held. That is the entire reason #35 survived:
+    the production code and every test double agreed with each other and
+    both disagreed with the SDK, so the query could never succeed in
+    production and could never fail in the suite.
+
+    A level the model does not offer is None here, not supported=False,
+    because `xhigh` is Optional on the pinned `EffortCapability` and that
+    is what a real absent level looks like.
+    """
+    effort = SimpleNamespace(**{
+        name: (SimpleNamespace(supported=levels[name]) if name in levels
+               else None)
+        for name in ("low", "medium", "high", "xhigh", "max")
+    })
     return SimpleNamespace(models=SimpleNamespace(
         retrieve=lambda model: SimpleNamespace(
-            capabilities={"effort": {k: {"supported": v} for k, v in levels.items()}}
-        )
-    ))
+            capabilities=SimpleNamespace(effort=effort))))
 
 
 def test_anthropic_levels_come_from_the_api_not_a_table():
@@ -195,7 +211,8 @@ def test_anthropic_query_is_cached_per_model():
 
     def retrieve(model):
         calls.append(model)
-        return SimpleNamespace(capabilities={"effort": {"high": {"supported": True}}})
+        return SimpleNamespace(capabilities=SimpleNamespace(
+            effort=SimpleNamespace(high=SimpleNamespace(supported=True))))
 
     client = SimpleNamespace(models=SimpleNamespace(retrieve=retrieve))
     effort_levels_for_model(client, "ANTHROPIC", "m")
@@ -241,7 +258,8 @@ def test_non_anthropic_uses_the_table_without_querying():
 def _capable_client(*levels):
     return SimpleNamespace(models=SimpleNamespace(
         retrieve=lambda model: SimpleNamespace(
-            capabilities={"effort": {lv: {"supported": True} for lv in levels}})))
+            capabilities=SimpleNamespace(effort=SimpleNamespace(
+                **{lv: SimpleNamespace(supported=True) for lv in levels})))))
 
 
 def _failing_client(exc=RuntimeError("network down")):
@@ -305,7 +323,8 @@ def test_a_successful_lookup_is_still_cached():
 
     def retrieve(model):
         calls.append(model)
-        return SimpleNamespace(capabilities={"effort": {"high": {"supported": True}}})
+        return SimpleNamespace(capabilities=SimpleNamespace(
+            effort=SimpleNamespace(high=SimpleNamespace(supported=True))))
 
     client = SimpleNamespace(models=SimpleNamespace(retrieve=retrieve))
     effort_levels_for_model(client, "ANTHROPIC", "m")

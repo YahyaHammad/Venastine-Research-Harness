@@ -133,10 +133,24 @@ def _save_trust_store(store: dict) -> None:
     on Windows. A truncate-then-write leaves the store empty for the
     length of the write, and permanently damaged if the process dies
     inside it -- for a file whose whole job is remembering a security
-    decision."""
+    decision.
+
+    0600 on the TEMP FILE, not on the destination (#19). os.replace
+    carries the source file's mode across, so setting it afterwards would
+    be both a no-op and a lie; setting it on the destination beforehand
+    is worse, since replace overwrites that too.
+
+    This store holds no secret, so the exposure it closes is only "which
+    projects this user has trusted, and their content hashes" --
+    information disclosure, not a breach. It was never group- or
+    other-WRITABLE, so no one could forge a trust entry. Done for
+    consistency with credentials.py rather than because this file is the
+    dangerous one.
+    """
     path = _trust_store_path()
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = f"{path}.tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
         json.dump(store, f, indent=2)
     os.replace(tmp, path)

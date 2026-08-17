@@ -11,9 +11,40 @@ def load_provider_data() -> dict:
         return json.load(file)
 
 
+# 0600 -- owner read/write, nobody else. This file holds every LLM
+# provider's API key in cleartext, and a bare open(path, "w") left its
+# protection to the process umask: 0644 under the common default, i.e.
+# readable by every other account on the machine (#19).
+#
+# The blast radius of a credential file is not the file; it is the paid
+# API account behind it. Every comparable tool treats one as 0600
+# (~/.aws/credentials, ~/.docker/config.json, ~/.ssh/id_*), and OpenSSH
+# goes further and REFUSES a group-readable private key.
+_SECRET_FILE_MODE = 0o600
+
+
+def _write_secret_json(path: str, data: dict) -> None:
+    """Write JSON to a file created 0600, never world-readable even briefly.
+
+    os.open with the mode, NOT open() followed by os.chmod. A post-write
+    chmod leaves a window in which the key is on disk with the umask's
+    permissions -- short, but it is exactly the window an attacker with
+    local read access is waiting for, and closing it costs one line.
+
+    WINDOWS: POSIX mode bits do not apply, and os.open's mode argument
+    only controls the read-only flag there. This is a no-op on Windows
+    rather than a wrong-op; the file's protection comes from the ACL on
+    the user profile directory instead. The tests skip accordingly, and
+    the CI container is where the assertion actually runs.
+    """
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+                 _SECRET_FILE_MODE)
+    with os.fdopen(fd, "w", encoding="utf-8") as file:
+        json.dump(data, file, indent=2)
+
+
 def _write_provider_data(provider_data: dict) -> None:
-    with open(LLM_PROVIDERS_FILE, "w", encoding="utf-8") as file:
-        json.dump(provider_data, file, indent=2)
+    _write_secret_json(LLM_PROVIDERS_FILE, provider_data)
 
 
 def save_credentials(

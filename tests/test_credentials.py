@@ -1,0 +1,194 @@
+"""
+test_credentials.py
+
+Issue #19. `credentials.py` had NO test file at all -- `save_credentials`
+appeared nowhere under `tests/`, in the module that writes every LLM
+provider's API key to disk in cleartext.
+
+The defect it was filed for: `_write_provider_data` used a bare
+`open(path, "w")`, so the file's protection was whatever the process
+umask happened to give it. Measured at 0644 under the common default,
+i.e. readable by every other account on the machine. The absence of an
+explicit mode is the defect; a user with `umask 077` was already safe,
+by accident of environment rather than by any property of the code.
+
+WHY THE MODE ASSERTIONS SKIP ON WINDOWS. POSIX permission bits do not
+exist there, and `os.open`'s mode argument only controls the read-only
+flag. Skipping is honest: the property genuinely does not hold on this
+platform, and asserting it would either fail or be quietly meaningless.
+The behaviour that DOES hold everywhere -- that the file is created,
+that a round trip preserves the data -- is asserted unconditionally, so
+this file is not empty on the platform it is usually developed on. Same
+shape as the symlink and SIGALRM skips elsewhere in the suite; the CI
+container is where the mode assertions actually execute.
+"""
+
+import json
+import os
+import stat
+
+import pytest
+
+import credentials
+
+posix_only = pytest.mark.skipif(
+    os.name != "posix",
+    reason="POSIX mode bits do not apply on this platform (os.open's mode "
+           "only controls the read-only flag on Windows)")
+
+
+@pytest.fixture(autouse=True)
+def _in_tmp(tmp_path, monkeypatch):
+    """Point the module at a temp file. LLM_PROVIDERS_FILE is a bare
+    relative name, so without this every test would write providers.json
+    into whatever directory pytest was launched from -- and that file is
+    gitignored precisely because it holds real keys."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(credentials, "LLM_PROVIDERS_FILE", "providers.json")
+    return tmp_path
+
+
+def _mode(path) -> int:
+    return stat.S_IMODE(os.stat(path).st_mode)
+
+
+# ---------------------------------------------------------------------------
+# ---- The mode (#19) --------------------------------------------------------
+# ---------------------------------------------------------------------------
+
+@posix_only
+def test_the_credentials_file_is_not_readable_by_anyone_else(_in_tmp):
+    """The finding, stated as the property rather than as the number: no
+    group or other bit, however permissive the umask is."""
+    credentials.save_credentials("ANTHROPIC", "sk-ant-secret-value")
+
+    mode = _mode(_in_tmp / "providers.json")
+    assert not mode & stat.S_IRGRP, f"group-readable: {oct(mode)}"
+    assert not mode & stat.S_IROTH, f"other-readable: {oct(mode)}"
+    assert not mode & stat.S_IWGRP, f"group-writable: {oct(mode)}"
+    assert not mode & stat.S_IWOTH, f"other-writable: {oct(mode)}"
+
+
+@posix_only
+def test_a_permissive_umask_does_not_widen_it(_in_tmp):
+    """The whole point. Under the old code this file's protection WAS the
+    umask; the test that discriminates the fix from the defect is the one
+    that makes the umask as permissive as possible and checks the mode
+    anyway.
+
+    Without this, `open(path, "w")` passes every other test in this file
+    on a developer machine whose umask happens to be 077.
+    """
+    old = os.umask(0)
+    try:
+        credentials.save_credentials("ANTHROPIC", "sk-ant-secret-value")
+    finally:
+        os.umask(old)
+
+    assert _mode(_in_tmp / "providers.json") == 0o600
+
+
+@posix_only
+def test_rewriting_an_existing_file_keeps_the_mode(_in_tmp):
+    """save_credentials is called again whenever a key is changed or a
+    provider added, and O_TRUNC on an existing file does NOT reset its
+    mode -- so a file that was created 0644 before this fix stays 0644.
+
+    Recorded as behaviour rather than fixed: repairing a pre-existing
+    file's mode is a migration, and the honest scope here is "new writes
+    are safe". A user who ran an older version should check the file.
+    """
+    (_in_tmp / "providers.json").write_text("{}", encoding="utf-8")
+    os.chmod(_in_tmp / "providers.json", 0o644)
+
+    credentials.save_credentials("ANTHROPIC", "sk-ant-secret-value")
+
+    assert _mode(_in_tmp / "providers.json") == 0o644, (
+        "if this now reports 0o600, the fix grew a migration -- update "
+        "this test and say so in the docstring rather than deleting it")
+
+
+# ---------------------------------------------------------------------------
+# ---- That it still does its job --------------------------------------------
+# ---------------------------------------------------------------------------
+
+def test_a_saved_credential_round_trips(_in_tmp):
+    """The discriminating half. A writer that produced an empty file, or
+    no file, would satisfy every mode assertion above."""
+    credentials.save_credentials("ANTHROPIC", "sk-ant-secret-value")
+
+    data = credentials.load_provider_data()
+    assert data["ANTHROPIC"]["API_KEY"] == "sk-ant-secret-value"
+
+
+def test_the_file_is_valid_json_on_disk(_in_tmp):
+    """os.fdopen is a different write path from open(); this asserts the
+    bytes actually landed rather than trusting the loader that wrote
+    them."""
+    credentials.save_credentials("OPENAI", "sk-openai-value",
+                                 api_url="https://api.example/v1")
+
+    on_disk = json.loads((_in_tmp / "providers.json").read_text(encoding="utf-8"))
+    assert on_disk["OPENAI"]["API_KEY"] == "sk-openai-value"
+
+
+def test_saving_a_second_provider_preserves_the_first(_in_tmp):
+    """O_TRUNC rewrites the whole file, so the read-modify-write in
+    save_credentials is load-bearing -- dropping it would silently lose
+    every other provider's key on the next save."""
+    credentials.save_credentials("ANTHROPIC", "sk-ant-one")
+    credentials.save_credentials("OPENAI", "sk-openai-two")
+
+    data = credentials.load_provider_data()
+    assert data["ANTHROPIC"]["API_KEY"] == "sk-ant-one"
+    assert data["OPENAI"]["API_KEY"] == "sk-openai-two"
+
+
+def test_load_returns_empty_when_there_is_no_file(_in_tmp):
+    assert credentials.load_provider_data() == {}
+
+
+# ---------------------------------------------------------------------------
+# ---- The trust store, same treatment ---------------------------------------
+# ---------------------------------------------------------------------------
+
+@posix_only
+def test_the_trust_store_is_not_world_readable(tmp_path, monkeypatch):
+    """Holds no secret -- the exposure is only which projects this user
+    trusted and their content hashes. Done for consistency; it was never
+    group- or other-WRITABLE, so no one could forge a trust entry.
+
+    The mode goes on the TEMP file: `os.replace` carries the source's
+    mode across, so setting it on the destination would be overwritten
+    and setting it afterwards would be a second window.
+    """
+    from core import workspace_trust
+
+    store = tmp_path / "trusted_projects.json"
+    monkeypatch.setattr(workspace_trust, "_trust_store_path",
+                        lambda: str(store))
+
+    old = os.umask(0)
+    try:
+        workspace_trust._save_trust_store({"/some/path": "abc123"})
+    finally:
+        os.umask(old)
+
+    assert _mode(store) == 0o600
+    assert json.loads(store.read_text(encoding="utf-8")) == {"/some/path": "abc123"}
+
+
+def test_the_trust_store_write_is_still_atomic(tmp_path, monkeypatch):
+    """The property the temp-file dance exists for, which the mode change
+    must not disturb: no `.tmp` is left behind, and the destination is
+    complete."""
+    from core import workspace_trust
+
+    store = tmp_path / "trusted_projects.json"
+    monkeypatch.setattr(workspace_trust, "_trust_store_path",
+                        lambda: str(store))
+
+    workspace_trust._save_trust_store({"/a": "1"})
+
+    assert store.exists()
+    assert not (tmp_path / "trusted_projects.json.tmp").exists()

@@ -1094,3 +1094,180 @@ async def test_grill_me_runs_in_the_current_thread(mocker, tmp_path, fake_storag
             "/grill-me never ran"
 
     assert continue_conv.call_args.kwargs["thread_id"] == expected
+
+
+# ===========================================================================
+# ---- #104: a storage failure must not take the shell down ------------------
+# ===========================================================================
+#
+# §27 gave both shells ONE replay function and one rule about what a failure
+# there means. main.py implements it -- `main._print_replay` has a documented
+# `except Exception`, and unit 13's mutation batch pins it (M21). tui/app.py
+# did not, and it is the shell where the consequence is losing the session
+# rather than losing a screenful.
+#
+# Every call below runs on the UI THREAD, inside a screen-dismiss callback or
+# a message handler, so an uncaught exception does not fail the command -- it
+# reaches Textual's message pump and tears the app down.
+#
+# Not hypothetical: app.db is one SQLite file and nothing stops a CLI research
+# run and a TUI session sharing it, so `database is locked` on a read needs
+# nothing to be wrong with the data. `storage._to_neutral` also calls
+# json.loads unguarded, while its sibling `_first_user_messages` guards the
+# identical call -- so the picker's PREVIEW is safe while selecting the row it
+# previewed was not.
+#
+# The assertion is `app.is_running`, not "an error was shown". A test that
+# only checked the message passes against a version that reports the failure
+# and then dies.
+
+from datetime import datetime
+from uuid import uuid4
+
+from tui.screens import ThreadPickerScreen
+
+
+def _one_thread(thread_id):
+    return [{"id": str(thread_id), "created_at": datetime(2026, 1, 1, 12, 0),
+             "preview": "hello"}]
+
+
+async def _open_picker_and_choose(pilot, app, thread_id):
+    app.action_pick_thread()
+    assert await settle(pilot, lambda: isinstance(app.screen,
+                                                  ThreadPickerScreen)), \
+        "the picker never opened"
+    app.screen.dismiss(thread_id)
+    await settle(pilot, lambda: not isinstance(app.screen,
+                                               ThreadPickerScreen))
+
+
+@pytest.mark.asyncio
+async def test_a_replay_failure_while_resuming_does_not_kill_the_tui(mocker):
+    """The CLI's `test_a_replay_failure_does_not_stop_the_session`, in the
+    other shell. The thread is loaded and usable whether or not it can be
+    drawn.
+
+    The old sequence was: clear the transcript, write "Resumed thread
+    <uuid>.", then die -- so the user was left with a torn-down TUI and the
+    thread they picked still in the picker next launch.
+    """
+    thread_id = uuid4()
+    mocker.patch("tui.app.storage.list_threads",
+                 return_value=_one_thread(thread_id))
+    mocker.patch("tui.app.ConversationMemory")
+    mocker.patch("tui.app.replay_entries",
+                 side_effect=RuntimeError("archive read failed"))
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        await _open_picker_and_choose(pilot, app, thread_id)
+        running = app.is_running
+
+    assert running, "a replay failure took the whole app down"
+
+
+@pytest.mark.asyncio
+async def test_a_replay_failure_still_leaves_the_thread_switched(mocker):
+    """Contained, not swallowed: the failure is a DISPLAY failure, so the
+    resume itself must still have happened. A guard that also skipped the
+    memory swap would pass the test above while quietly making resume a
+    no-op."""
+    thread_id = uuid4()
+    mocker.patch("tui.app.storage.list_threads",
+                 return_value=_one_thread(thread_id))
+    memory = mocker.patch("tui.app.ConversationMemory")
+    mocker.patch("tui.app.replay_entries",
+                 side_effect=RuntimeError("archive read failed"))
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        await _open_picker_and_choose(pilot, app, thread_id)
+        switched = app._memory is memory.return_value
+
+    assert switched, "the thread was not opened at all"
+
+
+@pytest.mark.asyncio
+async def test_a_failure_opening_the_thread_leaves_the_session_on_the_old_one(
+        mocker):
+    """The other half, and the reason the two reads are ordered as they
+    are. If the thread cannot be LOADED there is nothing to switch to, so
+    the switch must not happen -- which is only true while that read stays
+    above the transcript reset.
+    """
+    thread_id = uuid4()
+    mocker.patch("tui.app.storage.list_threads",
+                 return_value=_one_thread(thread_id))
+    mocker.patch("tui.app.ConversationMemory",
+                 side_effect=RuntimeError("database is locked"))
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        before = app._memory
+        await _open_picker_and_choose(pilot, app, thread_id)
+        running, after = app.is_running, app._memory
+
+    assert running, "a failed thread open took the whole app down"
+    assert after is before, "the session switched to a thread it could not open"
+
+
+@pytest.mark.asyncio
+async def test_a_failure_listing_threads_does_not_kill_the_tui(mocker):
+    """Before the picker even opens, and on the UI thread."""
+    mocker.patch("tui.app.storage.list_threads",
+                 side_effect=RuntimeError("database is locked"))
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        app.action_pick_thread()
+        await pump(pilot, 3)
+        running, screen = app.is_running, app.screen
+
+    assert running, "a failed thread listing took the whole app down"
+    assert not isinstance(screen, ThreadPickerScreen), \
+        "a picker opened over a listing that failed"
+
+
+@pytest.mark.asyncio
+async def test_a_storage_failure_in_the_claims_view_does_not_kill_the_tui(
+        mocker):
+    """`_stored_claims` caught ValueError only -- a malformed uuid or an
+    unknown run -- so a STORAGE-level failure reached the message pump from
+    a read-only command whose worst honest outcome is "I could not show you
+    that run".
+    """
+    mocker.patch("core.reasoning.pipeline_storage.load_pipeline_run",
+                 side_effect=RuntimeError("database is locked"))
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        app.show_claims(str(uuid4()))
+        await pump(pilot, 3)
+        running = app.is_running
+
+    assert running, "a storage failure in /claims took the whole app down"
+
+
+@pytest.mark.asyncio
+async def test_a_storage_failure_starting_a_turn_does_not_kill_the_tui(mocker):
+    """The FIRST touch of `self.memory` on the UI thread, which is also
+    where the lazy ConversationMemory() is constructed and its thread row
+    written.
+
+    Asserts `_busy` was released as well: it is set before this read, and
+    leaving it True wedges the shell into refusing every later turn with
+    "Still working" for a turn that never started.
+    """
+    mocker.patch("tui.app.ConversationMemory",
+                 side_effect=RuntimeError("database is locked"))
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        app.query_one("#prompt").value = "hello"
+        await pilot.press("enter")
+        await pump(pilot, 3)
+        running, busy = app.is_running, app._busy
+
+    assert running, "a storage failure starting a turn took the whole app down"
+    assert not busy, "the shell was left refusing every later turn"
