@@ -127,9 +127,19 @@ def _normalize(result) -> dict:
     understands for ToolCallDenied and disallowed tools. No new error
     channel, no special-casing in the loop.
 
-    Keys are 'content' and 'result' deliberately: both are already in
-    safety/policy_enforcement.py's _SCANNED_KEYS, so MCP output is
-    secret-redacted by the existing layer with no change to it.
+    Keys are 'content' and 'result' deliberately, though NOT for the
+    reason this comment used to give. It said both were in
+    safety/policy_enforcement.py's `_SCANNED_KEYS`, so MCP output was
+    secret-redacted by the existing layer with no change to it. That set
+    no longer exists (#47): check_output_policy scans every value, so any
+    key would now be covered. Choosing these two is about matching the
+    shape every other handler returns (D23), not about clearing a
+    redaction bar.
+
+    Worth keeping as a caution rather than deleting: this docstring is
+    the evidence that authors DID read the allowlist as a contract and
+    write to it. Two older built-ins returned `results` and never
+    satisfied it, which is the defect #47 records.
 
     v2 renamed these fields to snake_case (.content/.structured_content/
     .is_error); §17's sketch reads the v1 camelCase spellings and would

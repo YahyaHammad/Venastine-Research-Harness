@@ -170,7 +170,8 @@ The rule that falls out of this: **inability to ask is never treated as permissi
 Symmetric, and applied centrally to every tool in every mode rather than by tools that opted in:
 
 - **Arguments are refused, not rewritten.** If a tool call carries something matching a credential pattern or a URL on the blocked-domain list, the call is refused. Silently rewriting an argument would run the tool with parameters neither you nor the model chose, and then report success.
-- **Results are redacted.** Anything key-shaped in a tool's output becomes `[REDACTED]` before it reaches the model, the transcript or the database. This recurses through nested structures — third-party MCP servers return arbitrary JSON, and that was once the one path nothing scanned.
+- **Results are redacted.** Anything key-shaped in a tool's output becomes `[REDACTED]` before it reaches the model, the transcript, the database **or the log file**. This recurses through nested structures — third-party MCP servers return arbitrary JSON, and that was once the one path nothing scanned — and it covers *every* key of a result, not a list of expected ones, because the two search tools returned theirs under a key the list did not name. The log was a fourth sink and an unlisted exception rather than an accepted one: a failing tool's traceback carries the request that produced it, which for an HTTP client is a URL with the key in its query string.
+- **URLs are checked before every request, including redirects.** `fetch_url` follows redirects by hand and re-checks each hop, so a public URL that redirects to a blocked domain or into your private network is refused *before* the request is issued. Addresses that are not publicly routable — loopback, private ranges, link-local, and the cloud metadata endpoint at `169.254.169.254` — are refused outright. The blocklist matches subdomains. **Known limitation:** the address check resolves and then hands the URL to the HTTP client, which resolves again, so a host whose DNS changes between the two is not covered.
 - **The scan fails closed.** Traversal is depth-bounded so a hostile structure cannot exhaust the stack, and hitting that bound redacts rather than passing the value through. A bound that emits unchecked data is just a documented bypass.
 - **Refusal reasons never quote the secret.** Explaining that a credential leaked, by printing it, would leak it into model context, the transcript and the database.
 - **Tool arguments are redacted before they are truncated** for display — truncating first can cut a key below the length its pattern needs to match, which turns a display feature into a disclosure.
@@ -291,7 +292,7 @@ Precedence for provider and model is CLI flag > `settings.json` > `config.py`.
 
 **Remaining:** nothing in either roadmap, and §10's revisit is now closed. TECHNICAL_DEBT.md items 9 and 10 are open, and two live checks are recorded against §10 (see DEVLOG) that cannot be settled offline: the default `temperature` on OpenAI and Google, and whether OpenAI's reasoning models belong in `config.MODELS_REJECTING_SAMPLING_PARAMS`.
 
-Run the test suite with `pytest` — 1613 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
+Run the test suite with `pytest` — 1667 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
 
 ## Documentation
 

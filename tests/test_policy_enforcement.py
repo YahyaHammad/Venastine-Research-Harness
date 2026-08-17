@@ -15,6 +15,7 @@ from safety.policy_enforcement import (
     check_input_policy,
     check_output_policy,
     is_domain_blocked,
+    is_url_permitted,
     redact_secrets,
 )
 
@@ -103,14 +104,241 @@ class TestIsDomainBlocked:
         monkeypatch.setattr("safety.policy_enforcement.BLOCKED_DOMAINS", set())
         assert is_domain_blocked("https://anything.com") is False
 
-    def test_subdomain_not_matched(self, monkeypatch):
-        """Blocking evil.com does NOT block sub.evil.com."""
+    def test_a_subdomain_of_a_blocked_domain_is_blocked(self, monkeypatch):
+        """#48. REVERSES the old `test_subdomain_not_matched`.
+
+        That test pinned the docstring's carve-out -- blocking evil.com
+        left sub.evil.com reachable -- and pinning it is what made the
+        hole look deliberate. One prepended label is not a threshold an
+        attacker notices.
+        """
         monkeypatch.setattr("safety.policy_enforcement.BLOCKED_DOMAINS", {"evil.com"})
-        assert is_domain_blocked("https://sub.evil.com/page") is False
+        assert is_domain_blocked("https://sub.evil.com/page") is True
+        assert is_domain_blocked("https://deep.sub.evil.com/page") is True
+
+    def test_the_suffix_match_is_label_wise_not_string_wise(self, monkeypatch):
+        """The guard on the guard: `notevil.com` must not match `evil.com`.
+
+        A bare `host.endswith(blocked)` passes every other test in this
+        class and blocks an unrelated domain the operator never listed.
+        """
+        monkeypatch.setattr("safety.policy_enforcement.BLOCKED_DOMAINS", {"evil.com"})
+        assert is_domain_blocked("https://notevil.com/page") is False
+        assert is_domain_blocked("https://xevil.com/page") is False
 
     def test_case_insensitive(self, monkeypatch):
         monkeypatch.setattr("safety.policy_enforcement.BLOCKED_DOMAINS", {"evil.com"})
         assert is_domain_blocked("https://EVIL.COM/page") is True
+
+    def test_a_trailing_dot_does_not_bypass_either_branch(self, monkeypatch):
+        """#48's primary finding. `evil.com.` is a legal FQDN naming the
+        same host, urlparse keeps the dot, and it defeated BOTH branches.
+        """
+        monkeypatch.setattr("safety.policy_enforcement.BLOCKED_DOMAINS", {"evil.com"})
+        assert is_domain_blocked("https://evil.com./page") is True
+        assert is_domain_blocked("evil.com.") is True
+        assert is_domain_blocked("https://sub.evil.com./page") is True
+
+    def test_a_port_does_not_bypass_the_bare_domain_branch(self, monkeypatch):
+        """#48's second finding, and the reason it was an inconsistency
+        rather than a uniform limitation: the URL branch stripped the
+        port via .hostname and the bare-domain branch never did.
+        """
+        monkeypatch.setattr("safety.policy_enforcement.BLOCKED_DOMAINS", {"evil.com"})
+        assert is_domain_blocked("evil.com:443") is True
+        assert is_domain_blocked("evil.com:443/x") is True
+        assert is_domain_blocked("https://evil.com:443/x") is True
+
+    def test_userinfo_does_not_bypass_the_bare_domain_branch(self, monkeypatch):
+        monkeypatch.setattr("safety.policy_enforcement.BLOCKED_DOMAINS", {"evil.com"})
+        assert is_domain_blocked("user@evil.com") is True
+        assert is_domain_blocked("https://user@evil.com/x") is True
+
+    def test_a_blocklist_entry_is_normalised_too(self, monkeypatch):
+        """The list is hand-maintained, so an entry can carry the same
+        trailing dot or capitalisation the URL branch normalises away.
+        """
+        monkeypatch.setattr("safety.policy_enforcement.BLOCKED_DOMAINS", {"EVIL.com."})
+        assert is_domain_blocked("https://evil.com/page") is True
+        assert is_domain_blocked("https://sub.evil.com/page") is True
+
+
+# ===========================================================================
+# ---- is_url_permitted -----------------------------------------------------
+# ===========================================================================
+
+class TestIsUrlPermitted:
+    """#54, and the composition that made #53 and #48 one batch.
+
+    Every address here is an IP LITERAL, so these run with no DNS and no
+    network -- `resolve` never fires. The resolving path gets its own
+    class below, with getaddrinfo faked.
+    """
+
+    def test_the_scheme_gate_still_holds(self):
+        for url in ("file:///etc/passwd", "gopher://x/", "ftp://x/", "javascript:x"):
+            assert is_url_permitted(url) is not None, url
+
+    def test_an_ordinary_public_url_is_permitted(self, monkeypatch):
+        monkeypatch.setattr("safety.policy_enforcement.BLOCKED_DOMAINS", set())
+        assert is_url_permitted("https://93.184.216.34/page") is None
+
+    def test_the_blocklist_still_applies(self, monkeypatch):
+        monkeypatch.setattr("safety.policy_enforcement.BLOCKED_DOMAINS", {"evil.com"})
+        assert is_url_permitted("https://sub.evil.com/x", resolve=False) is not None
+
+    @pytest.mark.parametrize("url", [
+        # Lifted verbatim from #54's report -- every one of these was
+        # ACCEPTED and a request was issued.
+        "http://127.0.0.1:8080/admin",
+        "http://169.254.169.254/latest/meta-data/iam/security-credentials/",
+        "http://10.0.0.1/internal",
+        "http://192.168.1.1/",
+        "http://[::1]:8080/",
+        "http://0.0.0.0:9000/",
+        "http://172.16.0.1/",
+        "http://[fe80::1]/",
+    ])
+    def test_non_public_addresses_are_refused(self, url, monkeypatch):
+        """The metadata endpoint is the one that matters most: on a cloud
+        instance with IMDSv1 it returns role credentials into model
+        context and the persisted MessageLog.
+        """
+        monkeypatch.setattr("safety.policy_enforcement.BLOCKED_DOMAINS", set())
+        refusal = is_url_permitted(url)
+        assert refusal is not None, f"{url} was permitted"
+        assert "non-public" in refusal
+
+    def test_a_literal_address_is_checked_even_without_resolution(self, monkeypatch):
+        """resolve=False takes a NAME on trust; it does not take an IP on
+        trust. web_search's cheap path must still drop a result pointing
+        straight at the metadata endpoint.
+        """
+        monkeypatch.setattr("safety.policy_enforcement.BLOCKED_DOMAINS", set())
+        assert is_url_permitted("http://169.254.169.254/", resolve=False) is not None
+
+    def test_resolve_false_issues_no_lookup(self, monkeypatch):
+        """The whole reason the parameter exists. If this regresses,
+        web_search pays a DNS round trip per search hit and nothing fails
+        -- it just gets slow, which is the kind of regression nobody
+        attributes.
+        """
+        monkeypatch.setattr("safety.policy_enforcement.BLOCKED_DOMAINS", set())
+
+        def _boom(*a, **kw):
+            raise AssertionError("getaddrinfo called with resolve=False")
+
+        monkeypatch.setattr("safety.policy_enforcement.socket.getaddrinfo", _boom)
+        assert is_url_permitted("https://example.com/page", resolve=False) is None
+
+
+class TestWebSearchUsesTheSameChecker:
+    """The SECOND caller. Added because a mutation found it unpinned.
+
+    Flipping `resolve=False` to `resolve=True` at web_search.py's call
+    site left the whole suite green: `test_resolve_false_issues_no_lookup`
+    above pins the PARAMETER, and nothing pinned the ARGUMENT. That is a
+    test asserting a mechanism next to the thing it is meant to
+    discriminate -- #61's shape -- and the failure it misses is silent:
+    web_search would simply start paying a DNS round trip per search hit,
+    which nobody attributes to a policy change.
+    """
+
+    def _hit(self, url):
+        return [{"href": url, "title": "t", "body": "b"}]
+
+    def test_a_result_pointing_at_a_private_address_is_dropped(self, monkeypatch):
+        """The cheap path still checks IP LITERALS. A result naming the
+        metadata endpoint is dropped here rather than offered to the model
+        and then refused by fetch_url."""
+        from tools.builtin import web_search
+
+        monkeypatch.setattr("safety.policy_enforcement.BLOCKED_DOMAINS", set())
+        out = web_search._normalize(self._hit("http://169.254.169.254/latest/"))
+        assert out == []
+
+    def test_a_blocked_domain_result_is_dropped(self, monkeypatch):
+        from tools.builtin import web_search
+
+        monkeypatch.setattr("safety.policy_enforcement.BLOCKED_DOMAINS",
+                            {"evil.com"})
+        assert web_search._normalize(self._hit("https://sub.evil.com/x")) == []
+
+    def test_an_ordinary_result_survives(self, monkeypatch):
+        """Discriminates the two above from a filter that drops everything."""
+        from tools.builtin import web_search
+
+        monkeypatch.setattr("safety.policy_enforcement.BLOCKED_DOMAINS", set())
+        out = web_search._normalize(self._hit("https://example.com/page"))
+        assert len(out) == 1
+
+    def test_filtering_results_issues_no_dns(self, monkeypatch):
+        """The mutation-killer, and the reason `resolve` exists.
+
+        web_search FILTERS results; it does not fetch them. A lookup per
+        hit is real latency for a check whose only failure mode is showing
+        the model a URL fetch_url will refuse anyway -- and DDGS returns
+        up to ten hits per call, inside ten research passes.
+        """
+        from tools.builtin import web_search
+
+        monkeypatch.setattr("safety.policy_enforcement.BLOCKED_DOMAINS", set())
+
+        def _boom(*a, **kw):
+            raise AssertionError(
+                "web_search resolved DNS while filtering results; its call "
+                "to is_url_permitted must pass resolve=False")
+
+        monkeypatch.setattr("safety.policy_enforcement.socket.getaddrinfo",
+                            _boom)
+        assert len(web_search._normalize(self._hit("https://example.com/p"))) == 1
+
+
+class TestIsUrlPermittedResolution:
+    """The resolving path, with getaddrinfo faked -- no network."""
+
+    @staticmethod
+    def _fake_getaddrinfo(monkeypatch, *addresses):
+        monkeypatch.setattr(
+            "safety.policy_enforcement.socket.getaddrinfo",
+            lambda host, port, *a, **kw: [
+                (None, None, None, "", (addr, 0)) for addr in addresses
+            ],
+        )
+
+    def test_a_name_resolving_to_a_private_address_is_refused(self, monkeypatch):
+        monkeypatch.setattr("safety.policy_enforcement.BLOCKED_DOMAINS", set())
+        self._fake_getaddrinfo(monkeypatch, "10.0.0.7")
+        assert is_url_permitted("https://internal.example/x") is not None
+
+    def test_any_non_public_answer_refuses_not_just_the_first(self, monkeypatch):
+        """ANY, not all, and not the first. A name answering with one
+        public and one private address is the rebinding shape; taking
+        addresses[0] or requiring unanimity both let it through, and both
+        pass every other test in this class.
+        """
+        monkeypatch.setattr("safety.policy_enforcement.BLOCKED_DOMAINS", set())
+        self._fake_getaddrinfo(monkeypatch, "93.184.216.34", "127.0.0.1")
+        assert is_url_permitted("https://rebind.example/x") is not None
+
+    def test_a_public_name_is_permitted(self, monkeypatch):
+        monkeypatch.setattr("safety.policy_enforcement.BLOCKED_DOMAINS", set())
+        self._fake_getaddrinfo(monkeypatch, "93.184.216.34")
+        assert is_url_permitted("https://example.com/x") is None
+
+    def test_an_unresolvable_host_fails_closed(self, monkeypatch):
+        """A name we cannot clear is not a name we allow. httpx would
+        fail on it a moment later anyway, so refusing costs nothing --
+        and it keeps "unchecked" from ever meaning "allowed".
+        """
+        import socket as _socket
+
+        monkeypatch.setattr("safety.policy_enforcement.BLOCKED_DOMAINS", set())
+        monkeypatch.setattr(
+            "safety.policy_enforcement.socket.getaddrinfo",
+            lambda *a, **kw: (_ for _ in ()).throw(_socket.gaierror("no such host")),
+        )
+        assert is_url_permitted("https://nope.invalid/x") is not None
 
 
 # ===========================================================================
@@ -188,6 +416,70 @@ class TestCheckOutputPolicy:
             inner = inner["next"]
         inner["v"] = "sk-ant-abc123def456ghi789jkl012mno345pqr678stu901"
         check_output_policy("test_tool", {"result": nested})  # must not raise
+
+
+# ===========================================================================
+# ---- #47: the key allowlist is gone ---------------------------------------
+# ===========================================================================
+
+SECRET = "sk-ant-abc123def456ghi789jkl012mno345pqr678stu901"
+
+
+class TestEveryKeyIsScanned:
+    """#47. The four tests above this one enumerate the OLD allowlist
+    against itself -- `test_redacts_content_key`, `_result_key`,
+    `_stdout_key`, `_stderr_key`. Every one passed while the output of the
+    two tools whose content is entirely third-party text went unredacted,
+    because no test ever asked whether a REAL tool's return shape was
+    covered by the set.
+
+    That is this project's "verify against production, not the test
+    double" rule, with the allowlist standing in for the double.
+    """
+
+    def test_the_search_tools_result_key_is_scanned(self):
+        """`results`, plural. web_search and arxiv_search both return it;
+        the allowlist held `result`, singular. Membership was tested with
+        exact `in`, so one letter was the whole defect.
+        """
+        out = check_output_policy("web_search", {
+            "results": [{"title": "Leaked config",
+                         "url": "https://example.com/p",
+                         "snippet": f"the api key is {SECRET}"}],
+            "result_count": 1,
+        })
+        assert SECRET not in str(out)
+        assert "REDACTED" in str(out)
+
+    def test_a_key_no_allowlist_would_have_guessed_is_scanned(self):
+        """The property, stated so it cannot regress into a longer list:
+        a tool's text is scanned because it is text, not because someone
+        remembered to name its key.
+        """
+        out = check_output_policy("some_future_tool",
+                                  {"transcript": f"authorization: {SECRET}"})
+        assert SECRET not in str(out)
+
+    def test_every_registered_tool_would_be_covered_whatever_it_returns(self):
+        """The generalised version, and the one that closes the class
+        rather than the instance. Under an allowlist this test could only
+        have been written as a list of key names to keep in sync -- which
+        is the thing that fell out of sync.
+        """
+        from tools.registry import registry
+
+        for name in sorted(registry._tools):
+            out = check_output_policy(name, {"any_key_at_all": SECRET})
+            assert SECRET not in str(out), name
+
+    def test_keys_themselves_are_still_left_alone(self):
+        """The asymmetry with check_input_policy is deliberate and
+        predates #47: rewriting a result's KEYS would change the shape a
+        tool's consumer sees. Widening the VALUE scan must not quietly
+        widen this too.
+        """
+        out = check_output_policy("t", {SECRET: "value"})
+        assert SECRET in out, "a result key was rewritten"
 
 
 # ===========================================================================

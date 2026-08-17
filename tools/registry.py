@@ -385,6 +385,15 @@ class ToolRegistry:
             # logger.exception, not warning: the traceback is how a real
             # bug in a handler stays findable now that it no longer
             # crashes the process. The MODEL sees only the message.
+            #
+            # This line fires BEFORE check_output_policy below, and for a
+            # long time that meant the unredacted message and traceback
+            # were on disk while the result the model saw was clean --
+            # the exact threat the comment below describes, bypassed for
+            # the one sink it did not name (#132). The log is redacted at
+            # the FORMATTER now (logging_setup._RedactingFormatter), so
+            # this ordering is no longer load-bearing and no call site
+            # has to remember.
             logger.exception("Tool %s raised; returning it as an error "
                              "result.", tool_name)
             result = {"error": f"{tool_name} failed: {e}"}
@@ -398,6 +407,10 @@ class ToolRegistry:
         # an HTTP client that means a URL with an API key in the query
         # string. Redacting only the success path would make a failing
         # tool the way secrets escape.
+        #
+        # Scans EVERY value now, not an allowlist of keys (#47): the two
+        # search tools return `results` and were never covered by the set
+        # that held `result`.
         result = check_output_policy(tool_name, result)
         return result
 

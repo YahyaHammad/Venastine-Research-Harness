@@ -12,7 +12,7 @@ from typing import Optional
 from pydantic import BaseModel, Field, field_validator
 from ddgs import DDGS
 
-from safety.policy_enforcement import is_domain_blocked
+from safety.policy_enforcement import is_url_permitted
 
 logger = logging.getLogger(__name__)
 
@@ -102,7 +102,13 @@ def _normalize(raw: list[dict]) -> list[SearchResult]:
     out: list[SearchResult] = []
     for r in raw:
         url = r.get("href", "")
-        if is_domain_blocked(url):
+        # `resolve=False` on purpose. This filters results; it does not
+        # fetch them, and a DNS lookup per hit is real latency for a check
+        # whose only failure mode is showing the model a URL that fetch_url
+        # will refuse anyway. An IP LITERAL is still checked -- a result
+        # pointing straight at 169.254.169.254 is dropped here rather than
+        # offered and then denied (#54).
+        if is_url_permitted(url, resolve=False):
             continue
 
         snippet = (r.get("body") or "")[:MAX_SNIPPET_CHARS]

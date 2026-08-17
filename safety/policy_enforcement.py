@@ -8,8 +8,11 @@ calls check_output_policy() on every tool result, regardless of which
 tool produced it.
 
 Three responsibilities:
-1. Centralized blocked-domain list — web_search.py and fetch_url.py
-   import is_domain_blocked() to reject URLs from harmful domains.
+1. Centralized URL policy — is_url_permitted() answers "may this URL be
+   requested at all", composing the blocked-domain list with a
+   non-public-address guard. web_search.py and fetch_url.py both call
+   it, so a URL cannot be permitted for one and refused by the other.
+   is_domain_blocked() remains the domain half on its own.
 2. Secret redaction — defense-in-depth: if a tool's output accidentally
    contains something that looks like a leaked API key, it is replaced
    with [REDACTED] before the content reaches storage or the model.
@@ -25,8 +28,10 @@ interpret. Neither makes the other redundant.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import re
+import socket
 from urllib.parse import urlparse
 
 # ---------------------------------------------------------------------------
@@ -48,24 +53,142 @@ BLOCKED_DOMAINS: set[str] = {
 }
 
 
+def _hostname(url: str) -> str:
+    """The host of a full URL or a bare domain, normalised for comparison.
+
+    ONE normaliser, because the two branches below had drifted apart and
+    the difference was a bypass (#48). `.hostname` already lowercases,
+    strips the port and strips userinfo; the bare-domain branch did none
+    of that except by accident, so `exploit-db.com:443` passed it while
+    the URL form of the same host was caught.
+
+    The trailing dot defeated BOTH branches. `exploit-db.com.` is a legal,
+    resolvable FQDN naming exactly the same host, `urlparse` keeps the
+    dot, and no amount of lowercasing makes the strings equal. Stripped
+    here rather than at each call site, since every caller compares.
+    """
+    if "://" in url:
+        try:
+            host = urlparse(url).hostname or ""
+        except Exception:
+            host = url
+    else:
+        # Strip path, then userinfo, then port -- the three things
+        # .hostname does for the URL branch and this one used not to.
+        host = url.split("/")[0]
+        host = host.rpartition("@")[2]
+        if host.startswith("["):                    # [::1]:8080
+            host = host.partition("]")[0].lstrip("[")
+        else:
+            host = host.partition(":")[0]
+    return host.lower().rstrip(".")
+
+
 def is_domain_blocked(url: str) -> bool:
-    """Return True if the URL's domain is in BLOCKED_DOMAINS.
+    """Return True if the URL's host is in, or under, BLOCKED_DOMAINS.
 
     Handles full URLs (https://example.com/path) and bare domains
-    (example.com). Subdomains are NOT matched — block ``evil.com``
-    explicitly if you also want ``sub.evil.com`` blocked.
+    (example.com), through one normaliser -- see `_hostname`.
+
+    Subdomains ARE matched: blocking ``evil.com`` also blocks
+    ``sub.evil.com``. This reverses a documented carve-out, and the
+    reversal is the point. A blocklist an attacker leaves by prepending
+    one label is close to decorative, and the old docstring's advice
+    ("block ``evil.com`` explicitly if you also want ``sub.evil.com``")
+    asked a maintainer to enumerate an infinite set. Matching a suffix
+    can only ever block MORE than the list's author wrote down, and this
+    list's whole purpose is refusal, so over-blocking is the safe
+    direction to be wrong in.
+
+    The match is label-wise (`host == blocked` or `host` ends with
+    `"." + blocked`), never a bare string suffix: `notevil.com` must not
+    match `evil.com`.
     """
     if not BLOCKED_DOMAINS:
         return False
-    # If it looks like a URL, parse it; otherwise treat as bare domain
-    if "://" in url:
+    host = _hostname(url)
+    return any(host == blocked or host.endswith("." + blocked)
+               for blocked in (b.lower().rstrip(".") for b in BLOCKED_DOMAINS))
+
+
+def is_url_permitted(url: str, resolve: bool = True) -> str | None:
+    """Refusal reason for a URL, or None if it may be requested.
+
+    ONE checker, two callers -- `fetch_url` before every hop it issues,
+    and `web_search` over the results it is about to hand the model. They
+    were asking different questions about the same policy, which is how
+    #53 and #54 stayed open while #48 looked like the whole of it.
+
+    Three gates, cheapest first:
+
+    1. Scheme. http/https only. Moved here from fetch_url so the answer
+       does not depend on which caller asked.
+    2. `is_domain_blocked`.
+    3. Address. Rejects anything that is not a GLOBAL address --
+       loopback, private, link-local, reserved and multicast in one
+       predicate. `169.254.169.254` is the one that matters most: on a
+       cloud instance with IMDSv1 it returns role credentials, and the
+       route to it is a fetched page saying "for full details see
+       <that URL>" to a grounding pass that obliges.
+
+    `resolve=False` answers from the literal text only -- an IP literal
+    is still checked, a NAME is taken on trust. That is for `web_search`,
+    which filters results rather than fetching them: a DNS lookup per
+    search hit is real latency for a check whose failure mode is "the
+    model is shown a URL that fetch_url will refuse anyway". The caller
+    that actually opens a socket always resolves.
+
+    KNOWN LIMITATION -- DNS rebinding. When we resolve, httpx then
+    resolves again independently, so a host whose records change between
+    this check and the connect can still be reached. Closing it means
+    connecting to the pinned IP and passing the original host in a
+    `Host:` header, which on HTTPS fights SNI and certificate
+    verification -- a subtly wrong implementation there is a worse hole
+    than this one. Recorded rather than silently accepted; the attacker
+    needs control of DNS for a host the model was already induced to
+    fetch.
+    """
+    if not (url.startswith("http://") or url.startswith("https://")):
+        return "URL must start with http:// or https://"
+
+    if is_domain_blocked(url):
+        return f"Domain is blocked by policy: {url}"
+
+    host = _hostname(url)
+    if not host:
+        return f"URL has no host: {url}"
+
+    try:
+        literal = ipaddress.ip_address(host)
+    except ValueError:
+        literal = None
+
+    if literal is not None:
+        addresses = [literal]
+    elif resolve:
         try:
-            domain = urlparse(url).hostname or ""
-        except Exception:
-            domain = url
+            addresses = [
+                ipaddress.ip_address(info[4][0])
+                for info in socket.getaddrinfo(host, None)
+            ]
+        except (socket.gaierror, ValueError) as e:
+            # Fail CLOSED. A name we cannot resolve is one we cannot
+            # clear, and httpx would only fail on it a moment later --
+            # refusing here costs nothing and keeps "unchecked" from
+            # ever meaning "allowed".
+            return f"Could not resolve host for policy check: {host} ({e})"
     else:
-        domain = url.split("/")[0]  # strip path from bare domain
-    return domain.lower() in BLOCKED_DOMAINS
+        addresses = []
+
+    # ANY, not all. A name resolving to one public and one private
+    # address is the rebinding shape, and taking the first answer or
+    # requiring unanimity would both let it through.
+    for address in addresses:
+        if not address.is_global:
+            return (f"URL resolves to a non-public address, which this "
+                    f"harness will not fetch: {host} -> {address}")
+
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -151,17 +274,30 @@ def param_digest(params) -> str:
 # ---- Shared scan traversal ------------------------------------------------
 # ---------------------------------------------------------------------------
 
-# Keys in tool result dicts that carry text content which might contain
-# leaked secrets. Scanned by check_output_policy after every tool call.
+# THERE IS NO KEY ALLOWLIST ANY MORE (#47). There used to be:
 #
-# "error" is here because failure text is not harness-authored. An MCP
-# server reports a failed call IN BAND, and _normalize() puts that text --
-# written by third-party code, and often quoting the credential that was
-# rejected ("invalid key: sk-...") -- under this key. Scanning only the
-# success keys left the one channel most likely to carry someone else's
-# string as the one channel nothing scanned, and it reaches model context,
-# the TUI transcript and the persisted MessageLog alike.
-_SCANNED_KEYS = ("content", "result", "stdout", "stderr", "error")
+#     _SCANNED_KEYS = ("content", "result", "stdout", "stderr", "error")
+#
+# and `check_output_policy` tested exact membership. Both search tools
+# return their payload under `results` -- plural -- which is not `result`,
+# so the output of the two tools whose content is ENTIRELY third-party
+# text was the output nothing redacted. Verified end to end: a planted
+# key survived into the persisted archive and into what the model was
+# sent the next turn.
+#
+# The allowlist grew correctly each time someone noticed a gap ("error"
+# was added because an MCP server reports a failed call in band, often
+# quoting the credential that was rejected), and that is the problem: it
+# re-created the defect for every tool added after it, and it did so
+# SILENTLY. mcp_client/client.py's _normalize was written to satisfy this
+# set deliberately, treating membership as a guarantee -- so the contract
+# was real and known, and the two oldest built-ins never satisfied it.
+#
+# Scanning every key is the producer-side fix this project's own
+# convention names ("a per-case branch added to a normalizer usually
+# means the fix belongs one layer down"). A tool that returns text now
+# has that text scanned because it is text, not because someone
+# remembered to name its key.
 
 
 # How deep to descend into nested values. Bounded so a pathological or
@@ -244,14 +380,20 @@ def check_output_policy(tool_name: str, result: dict) -> dict:
     Called once, centrally, by registry.dispatch() after every tool
     call — not something individual tool files call themselves.
     Mutates *result* in place and returns it.
+
+    EVERY value is scanned, not an allowlist of keys (#47) — see the
+    note above `_walk`. `scan_keys=False` still, so a result's dict KEYS
+    are left alone: rewriting them would change the shape a tool's
+    consumer sees, and a tool result's keys are harness- or
+    server-declared names rather than free text. That asymmetry with
+    `check_input_policy` is deliberate and predates this change.
     """
-    for key in _SCANNED_KEYS:
-        if key in result:
-            result[key] = _walk(
-                result[key],
-                redact_secrets,
-                lambda: "[REDACTED: nested beyond scan depth]",
-            )
+    for key in list(result):
+        result[key] = _walk(
+            result[key],
+            redact_secrets,
+            lambda: "[REDACTED: nested beyond scan depth]",
+        )
     return result
 
 

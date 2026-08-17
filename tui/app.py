@@ -502,7 +502,23 @@ class VenastineApp(App):
     def run_agent_turn(self, user_input: str) -> None:
         self._busy = True
         self._transcript.write_user(user_input)
-        self.memory.add_user_message(user_input)
+        # #104. FIRST touch of `self.memory` on the UI thread, so it is
+        # also where the lazy ConversationMemory() gets constructed and
+        # its ConversationThread row written. Both the construction and
+        # the append are storage, and an uncaught failure here reaches the
+        # message pump rather than failing the turn.
+        #
+        # `_busy` is reset on the way out: it was set two lines up, and
+        # leaving it True on a failure wedges the shell into refusing
+        # every later turn with "Still working" for a turn that never
+        # started.
+        try:
+            self.memory.add_user_message(user_input)
+        except Exception as e:                              # noqa: BLE001
+            self._busy = False
+            self._transcript.write_error(
+                f"Could not start the turn: {e}")
+            return
 
         # §18: a session-scoped active agent supplies the system prompt,
         # the ToolContext, and model/provider/max_steps overrides. With
@@ -597,7 +613,15 @@ class VenastineApp(App):
         result lands so the next streaming turn sees it too."""
         self._busy = True
         self._raven.state = ravens.THINKING
-        thread_id = self.memory.thread_id
+        # #104, same shape as run_agent_turn: this can be the first touch
+        # of `self.memory`, and it runs on the UI thread.
+        try:
+            thread_id = self.memory.thread_id
+        except Exception as e:                              # noqa: BLE001
+            self._busy = False
+            self._raven.state = ravens.IDLE
+            self._transcript.write_error(f"Could not open the thread: {e}")
+            return
         model, provider = self.model, self.provider_name
         # K1 holds for one-shot turns too (review §19-20 f22 decision):
         # an activated skill governs the /grill-me turn in the same
@@ -638,7 +662,19 @@ class VenastineApp(App):
             return
         # Reload so the grill exchange is in the live history for the
         # next streaming turn.
-        self.memory = ConversationMemory(thread_id=self.memory.thread_id)
+        #
+        # #104. A message handler, so it runs on the UI thread. The
+        # failure this contains is not fatal to the session in any sense:
+        # the exchange is already PERSISTED (continue_conversation wrote
+        # it), so all a failed reload costs is that the next streaming
+        # turn will not see it in live history. Reported, not raised.
+        try:
+            self.memory = ConversationMemory(thread_id=self.memory.thread_id)
+        except Exception as e:                              # noqa: BLE001
+            self._transcript.write_error(
+                f"Could not reload the thread after the one-shot: {e}. The "
+                f"exchange is saved; this session's next turn may not see "
+                f"it in context.")
         # write_answer, not write(): a one-shot answer is a model answer,
         # and rendering it as a bare row left it unlabelled, uncoloured,
         # outside the entry log and therefore invisible to /copy.
@@ -1097,13 +1133,40 @@ class VenastineApp(App):
             self._transcript.write_error(
                 "Still working — wait for this turn to finish.")
             return
-        threads = storage.list_threads()
+        # #104. Every storage read from here down runs on the UI THREAD,
+        # inside a screen-dismiss callback, so an uncaught exception does
+        # not fail the command -- it reaches the message pump and takes
+        # the app down, losing the session. `main._print_replay` has
+        # carried this rule since §27 ("the thread is loaded and usable
+        # whether or not it can be drawn") and unit 13's mutation batch
+        # pins it; the TUI is the shell where the consequence is worse and
+        # it was the shell without the guard.
+        #
+        # Reachable without anything being wrong with the data: app.db is
+        # one SQLite file and nothing stops a CLI research run and a TUI
+        # session sharing it, so `database is locked` on a read needs no
+        # corruption at all.
+        try:
+            threads = storage.list_threads()
+        except Exception as e:                              # noqa: BLE001
+            self._transcript.write_error(f"Could not list threads: {e}")
+            return
 
         def chosen(thread_id) -> None:
             if thread_id is None:
                 return
             resolved = thread_id if isinstance(thread_id, UUID) else UUID(str(thread_id))
-            self.memory = ConversationMemory(thread_id=resolved)
+            # BEFORE anything is torn down, deliberately. A failure here
+            # means the switch does not happen at all and the session
+            # continues on the thread it was already on -- which is only
+            # true while this read stays above the reset below.
+            try:
+                memory = ConversationMemory(thread_id=resolved)
+            except Exception as e:                          # noqa: BLE001
+                self._transcript.write_error(
+                    f"Could not open thread {resolved}: {e}")
+                return
+            self.memory = memory
             # The banner is per-thread state; without this it kept showing
             # the PREVIOUS thread's objective, misrepresenting what
             # governs the session. /goal was the only path that refreshed.
@@ -1127,7 +1190,27 @@ class VenastineApp(App):
             # while a stale one is wrong.
             self._transcript.reset()
             self._transcript.write_system(f"Resumed thread {resolved}.")
-            entries = replay_entries(resolved)
+            # The DISPLAY half, and it is contained rather than fatal --
+            # §27's rule, which main.py has and this did not. The thread
+            # is already loaded and usable at this point; a replay that
+            # raises would turn a cosmetic problem into "resuming is
+            # broken", and it raises AFTER the reset above, so the app
+            # died having just cleared the screen and written "Resumed
+            # thread <uuid>."
+            #
+            # Read after the reset, not before: a failure here leaves an
+            # empty transcript plus an error, which is honest. Reading
+            # first would leave the PREVIOUS thread's transcript on screen
+            # under the new thread's id, and a stale panel is wrong where
+            # a blank one is merely unhelpful.
+            try:
+                entries = replay_entries(resolved)
+            except Exception as e:                          # noqa: BLE001
+                self._transcript.write_error(
+                    f"Could not replay this thread: {e}. The thread is "
+                    f"open and usable — only its history could not be "
+                    f"drawn.")
+                return
             for role, text in entries:
                 if role == "user":
                     self._transcript.write_user(text)
@@ -1186,6 +1269,14 @@ class VenastineApp(App):
             # database; load_pipeline_run raises ValueError for the latter
             # by its own documented convention.
             self._transcript.write_error(f"/claims: {e}")
+            return None, "", False
+        except Exception as e:                              # noqa: BLE001
+            # #104, one command along and the same shape: catching only
+            # ValueError meant a STORAGE-level failure -- a locked
+            # database, an unreadable row -- reached the message pump and
+            # took the app down, from a read-only command whose worst
+            # honest outcome is "I could not show you that run".
+            self._transcript.write_error(f"/claims: could not load run: {e}")
             return None, "", False
         return (record["claims"],
                 f"Claims — run {run_id} ({record['status']})",

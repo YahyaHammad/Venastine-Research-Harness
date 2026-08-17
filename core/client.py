@@ -465,12 +465,30 @@ def _effort_levels(client, provider_name: str, model: str) -> tuple:
         return [], True
     if provider_name == "ANTHROPIC":
         try:
+            # ATTRIBUTES, not subscripts (#35). This read used to be
+            # `capabilities["effort"]` with `effort.get(name)` and
+            # `isinstance(..., dict)`. On the exactly-pinned SDK those are
+            # pydantic models -- ModelCapabilities, EffortCapability,
+            # CapabilitySupport -- supporting neither [] nor .get(), so the
+            # TypeError was caught below, query_failed was set, and the
+            # query FELL BACK EVERY SINGLE TIME. Not "failed sometimes":
+            # it could not succeed. All three dict spellings were wrong,
+            # so correcting the subscript alone would have failed one line
+            # further down.
+            #
+            # No dict/attribute dual path on purpose. A defensive default
+            # is only safe where absence is impossible, requirements.txt
+            # pins anthropic exactly, and test_sdk_conformance.py exists
+            # to go red when the pinned shape moves -- which is a better
+            # signal than a fallback that silently keeps guessing.
             capabilities = client.models.retrieve(model).capabilities
-            effort = capabilities["effort"]
+            effort = capabilities.effort
             levels = [
                 name for name in ("low", "medium", "high", "xhigh", "max")
-                if isinstance(effort.get(name), dict)
-                and effort[name].get("supported")
+                # getattr, because `xhigh` is Optional on the pinned type
+                # and a model that does not offer a level reports None
+                # rather than supported=False.
+                if getattr(getattr(effort, name, None), "supported", False)
             ]
         except Exception as e:
             # Network failure, an SDK too old to expose capabilities, or a

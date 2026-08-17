@@ -20,6 +20,11 @@ import os
 import sys
 from logging.handlers import RotatingFileHandler
 
+# Top-level, not inside format(): this runs on every log record, and
+# safety/policy_enforcement.py is a leaf (stdlib imports only, nothing
+# from this project), so there is no cycle to dodge.
+from safety.policy_enforcement import redact_secrets
+
 __all__ = ["configure_logging"]
 
 _DEFAULT_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
@@ -34,6 +39,41 @@ _DEFAULT_LEVEL = "INFO"
 # needed; there is no project-wide reason to surface them as config yet.
 _DEFAULT_MAX_BYTES = 1_000_000
 _DEFAULT_BACKUP_COUNT = 3
+
+
+class _RedactingFormatter(logging.Formatter):
+    """Secret redaction on the LOG, which was the fourth sink (#132).
+
+    README enumerates three: "before it reaches the model, the transcript
+    or the database". The log is a fourth, and it was never an
+    acknowledged exception -- just an unlisted one.
+
+    `registry.dispatch()` states this exact threat in the comment above
+    its redaction call: "an exception message routinely carries the
+    request that produced it, and for an HTTP client that means a URL
+    with an API key in the query string. Redacting only the success path
+    would make a failing tool the way secrets escape." It then calls
+    `logger.exception(...)` THIRTEEN LINES EARLIER, so the unredacted
+    message and traceback were already on disk by the time
+    check_output_policy saw the result. Same string, two sinks, one
+    redacted.
+
+    A FORMATTER, not a logging.Filter, and that is load-bearing.
+    `logger.exception` renders the traceback at format time, from
+    `record.exc_info` -- and the traceback is precisely what carries the
+    upstream URL. A filter rewriting `record.msg` never sees it.
+    Formatting the record first and redacting the finished string covers
+    the message, the arguments and the traceback in one pass.
+
+    Fixed here rather than at dispatch's call site because dispatch is
+    not the only site: `fetch_url` logs a warning naming the URL it
+    failed on, and any future `logger.*` inherits this for free. Fixing
+    the one site the issue measured would have left the class open --
+    the same producer-vs-consumer argument #47 makes one file over.
+    """
+
+    def format(self, record):
+        return redact_secrets(super().format(record))
 
 
 def _resolve_level(level):
@@ -91,7 +131,7 @@ def configure_logging(
         nothing that matters is only in a file.
     """
     resolved_level = _resolve_level(level)
-    formatter = logging.Formatter(_DEFAULT_FORMAT, datefmt=_DEFAULT_DATEFMT)
+    formatter = _RedactingFormatter(_DEFAULT_FORMAT, datefmt=_DEFAULT_DATEFMT)
 
     root = logging.getLogger()
     root.setLevel(resolved_level)

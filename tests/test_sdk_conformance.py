@@ -157,39 +157,109 @@ def test_the_thinking_budget_guard_still_describes_the_pin():
 # ---- anthropic -------------------------------------------------------------
 # ---------------------------------------------------------------------------
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Issue #35: core/client.py reads model capabilities as a dict, but "
-           "the pinned SDK defines pydantic models supporting neither [] nor "
-           ".get(), so the effort query can never succeed and every lookup "
-           "silently falls back to the static table. STRICT on purpose: when "
-           "#35 is fixed this test starts PASSING, which fails the suite and "
-           "tells you to delete this marker rather than leaving a green xpass "
-           "nobody reads.")
 def test_the_anthropic_capability_read_matches_the_pinned_types():
-    """#35, re-derived from the dependency side and confirmed.
+    """#35, FIXED -- and this test is inverted rather than deleted.
 
-    `ModelCapabilities` has neither `__getitem__` nor `.get`, and attribute
-    access returns the five levels as `EffortCapability` objects. So the data
-    is all present on the pinned SDK -- this is a dict-versus-attribute
-    mistake, not a missing capability.
+    It used to be a strict xfail asserting `ModelCapabilities` supported
+    `[]` or `.get()`, because core/client.py used both and neither
+    existed. Its own reason said "when #35 is fixed this starts passing,
+    which fails the suite and tells you to delete this marker". The
+    marker is gone; the test now asserts what the fixed code actually
+    relies on, which is the thing a future SDK bump can break.
+
+    The chain is `ModelCapabilities.effort` -> `EffortCapability.<level>`
+    -> `CapabilitySupport.supported`, all pydantic attributes. `xhigh` is
+    Optional on the pinned type, so a model that does not offer a level
+    reports None rather than supported=False -- which is why the
+    production read uses getattr with a default rather than direct
+    attribute access.
     """
     # `httpx` too, not just `anthropic`: the SDK does
     # `from httpx import URL, Proxy, Timeout, ...` at import time, and the
     # conftest's fake httpx has none of those. Unfaking only `anthropic`
     # makes this test die with `ImportError: cannot import name 'URL'`
-    # BEFORE it reaches ModelCapabilities -- so it still reports xfail, for
-    # a reason that has nothing to do with #35. A test that fails for the
-    # wrong reason is indistinguishable from one that works, which is the
-    # defect this whole file exists to close.
+    # BEFORE it reaches ModelCapabilities -- so it would fail for a reason
+    # that has nothing to do with #35. A test that fails for the wrong
+    # reason is indistinguishable from one that works, which is the defect
+    # this whole file exists to close.
     with real_package("anthropic", "httpx"):
+        from anthropic.types.capability_support import CapabilitySupport
+        from anthropic.types.effort_capability import EffortCapability
         from anthropic.types.model_capabilities import ModelCapabilities
-        subscriptable = hasattr(ModelCapabilities, "__getitem__")
-        gettable = hasattr(ModelCapabilities, "get")
-    assert subscriptable or gettable, (
-        "anthropic's ModelCapabilities supports neither [] nor .get(), but "
-        "core/client.py uses both, so the effort-capability query cannot "
-        "succeed and always falls back to the static table (#35)")
+
+        assert "effort" in ModelCapabilities.model_fields, (
+            "anthropic's ModelCapabilities no longer has an `effort` field; "
+            "core/client.py reads capabilities.effort (#35)")
+
+        missing = [name for name in ("low", "medium", "high", "xhigh", "max")
+                   if name not in EffortCapability.model_fields]
+        assert not missing, (
+            f"anthropic's EffortCapability no longer carries {missing}; "
+            f"core/client.py asks for exactly these five level names (#35)")
+
+        assert "supported" in CapabilitySupport.model_fields, (
+            "anthropic's CapabilitySupport no longer has `.supported`; that "
+            "is the boolean core/client.py reads per level (#35)")
+
+    # The failure this replaces: if the SDK ever goes BACK to dicts, the
+    # attribute read starts returning nothing rather than raising, and the
+    # query silently falls back to the static table again -- exactly the
+    # invisible state #35 lived in for its whole life.
+    assert not hasattr(ModelCapabilities, "get"), (
+        "ModelCapabilities grew a .get(); if it is dict-like again, "
+        "re-check core/client.py's attribute read before trusting it")
+
+
+def test_the_effort_query_succeeds_against_REAL_sdk_objects():
+    """The test that would have CAUGHT #35, and the reason it did not
+    exist.
+
+    test_client_effort.py's doubles were built as nested dicts --
+    `capabilities={"effort": {"high": {"supported": True}}}` -- the same
+    wrong shape core/client.py assumed. Production and the double agreed
+    with each other and both disagreed with the SDK, so the query could
+    never succeed in production and could never fail in the suite. Eight
+    tests covered this code path and all eight were green throughout.
+
+    This one hands `_effort_levels` capability objects built from the
+    REAL pinned types, so the double cannot drift from the SDK again
+    without a red test. It is in this file rather than beside those eight
+    because `real_package` lives here and because that is precisely what
+    this file is for.
+    """
+    from types import SimpleNamespace
+
+    import core.client as client_module
+
+    with real_package("anthropic", "httpx"):
+        from anthropic.types.capability_support import CapabilitySupport
+        from anthropic.types.effort_capability import EffortCapability
+
+        effort = EffortCapability(
+            low=CapabilitySupport(supported=True),
+            medium=CapabilitySupport(supported=True),
+            high=CapabilitySupport(supported=True),
+            max=CapabilitySupport(supported=False),
+            xhigh=None,                     # Optional: an absent level
+            supported=True,
+        )
+
+        client = SimpleNamespace(models=SimpleNamespace(
+            retrieve=lambda model: SimpleNamespace(
+                capabilities=SimpleNamespace(effort=effort))))
+
+        client_module._effort_levels_cache.clear()
+        try:
+            levels, authoritative = client_module._effort_levels(
+                client, "ANTHROPIC", "claude-real-types")
+        finally:
+            client_module._effort_levels_cache.clear()
+
+    assert levels == ["low", "medium", "high"], (
+        f"reading real SDK capability objects produced {levels}")
+    assert authoritative, (
+        "the query fell back to the static table against REAL SDK objects, "
+        "which is #35 exactly: it cannot succeed, and nothing says so")
 
 
 # ---------------------------------------------------------------------------
