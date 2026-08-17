@@ -3,7 +3,7 @@ test_fake_storage_mirror.py
 
 Issue #123. `tests/conftest.py`'s `FakeStorage` carries two reads whose
 docstrings say, in capitals, that they mirror `storage.py` -- and nothing
-compared them to `storage.py`. CLAUDE.md states the same thing as a project
+compared them to `storage.py`. AGENTS.md states the same thing as a project
 convention:
 
     Verify against production code, not the test double. ... If you change
@@ -129,7 +129,7 @@ class TestReconstructionMirrorsProduction:
         assert fake == real, (
             f"FakeStorage._reconstruct and storage._to_neutral disagree for a "
             f"{logical['role']!r} row.\n  production: {real}\n  fake:       {fake}\n"
-            "The fake's docstring says it mirrors storage.py; CLAUDE.md makes "
+            "The fake's docstring says it mirrors storage.py; AGENTS.md makes "
             "that a project convention. Change both or neither.")
 
     def test_a_whole_thread_reconstructs_identically(self):

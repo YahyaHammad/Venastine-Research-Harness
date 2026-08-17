@@ -12,12 +12,25 @@ worth understanding, not a flaky mock to patch over.
 
 ## 1. `test_orchestrator.py` — the most fragile mock in the suite
 
-This file mocks `RunAgentLoop.run_deep_research_mode` keyed by `pass_id`
+This file mocks `RunAgentLoop.stream_deep_research_mode` keyed by `pass_id`
 strings ("Pass 0", "Pass 3a", "Final synthesis", ...). The orchestrator
-calls `_run_pass(pass_id, ...)`, which in turn calls
-`run_deep_research_mode(pass_id=pass_id, ...)`. Mocks intercept at the
-`run_deep_research_mode` boundary, NOT `_run_pass`, so anything that
-refactors `_run_pass`'s *internals* doesn't break this test.
+calls `_run_pass(pass_id, ...)`, which since §26 ITERATES
+`stream_deep_research_mode(pass_id=pass_id, ...)` rather than calling
+`run_deep_research_mode`. Mocks intercept at that boundary, NOT `_run_pass`,
+so anything that refactors `_run_pass`'s *internals* doesn't break this test.
+
+**Every patch goes through `tests/conftest.py`'s `pass_stream`**, which wraps
+a plain pass-mock into a generator. That indirection is the point: a double
+patched on the old name **stops intercepting silently** — `mocker.patch.object`
+on a real attribute still succeeds, the real loop runs, reaches a provider,
+and the test fails somewhere unrelated. §22's twelve-doubles trap, one layer
+down. Repoint `pass_stream` if the boundary moves again; do not open-code a
+double at each of the fifteen sites.
+
+This section and `test_orchestrator.py`'s banner both named
+`run_deep_research_mode` for two sections after §26 moved it — i.e. the two
+documents whose entire job is to keep this mock repointable were handing a
+maintainer the name that springs the trap (audit #122).
 
 ### What breaks it
 
@@ -28,8 +41,9 @@ refactors `_run_pass`'s *internals* doesn't break this test.
 | Widen or narrow `_CLAIM_INPUT_FIELDS` itself | `TestClaimFromJsonFiltersUnknownFields::test_every_allowlisted_field_still_arrives` fails on its exact-contents assertion | Update that assertion, and check the worked example in the row above is still a key the allowlist does **not** contain. This row exists because the previous example was `asserted_by_candidates`, which §10's revisit moved *into* the allowlist — so both this file and `test_orchestrator.py`'s banner spent a section describing filtering with an example that was no longer filtered (issue #123) |
 | Add a new pass between existing passes | `AssertionError` on pass-order assertion (the `call_log == expected_order` check) | Add the new pass_id to `_canned_pass_responses` (with its expected JSON shape), insert into the expected pass order list in tests |
 | Change the Trace line *format* (e.g. `Pass 0: plan produced (X entities)` → `Pass 0 produced X-entities`) | The `test_pipeline_trace_contains_expected_lines_in_order` test uses `startswith()` against prefix strings like `"Pass 0:"` | Update the `expected_pass_starts` list in that one test to match the new format |
-| Refactor `_run_pass` → `_run_pass_with_json_retry` (ROADMAP §3) | Should NOT break this test, since the mock is on `run_deep_research_mode` not `_run_pass` | If the refactor changes which ENTRYPOINT the orchestrator calls (e.g. starts calling `_run()` directly per ROADMAP §3's "alternative"), the mock target needs to change |
-| Add a new kwarg to `RunAgentLoop.run_deep_research_mode` (e.g. `temperature=None` per ROADMAP §10) | `TypeError: side_effect() got an unexpected keyword argument 'temperature'` | The `_build_pass_mock` side_effect already accepts `**kwargs` to swallow these, so this should NOT break. If it does, re-audit that signature. |
+| Refactor `_run_pass` → `_run_pass_with_json_retry` (ROADMAP §3) | Should NOT break this test, since the mock is on `stream_deep_research_mode` not `_run_pass` | If the refactor changes which ENTRYPOINT the orchestrator calls, repoint `conftest.pass_stream` |
+| Move the orchestrator's inner call off `stream_deep_research_mode` again | **Nothing raises.** The patch still applies, the interception is lost, and the failure lands somewhere unrelated with a real provider call behind it | Repoint `conftest.pass_stream`'s target. This is the §26 case, and it is why the helper exists rather than fifteen open-coded doubles |
+| Add a new kwarg to `RunAgentLoop.stream_deep_research_mode` (e.g. `temperature=None` per ROADMAP §10) | `TypeError: side_effect() got an unexpected keyword argument 'temperature'` | The `_build_pass_mock` side_effect already accepts `**kwargs` to swallow these, so this should NOT break. If it does, re-audit that signature. |
 
 ### The expected update pattern after ROADMAP §3 (Malformed-JSON recovery)
 
@@ -606,7 +620,7 @@ this, because a convention is what produced five copies.
 
 ### Three standing notes from this pass
 
-**`tests/test_compaction_e2e.py` is the only test running real `ConversationMemory`
+**`tests/test_storage_e2e.py` is the only test running real `ConversationMemory`
 against real `storage.py` on real SQLite.** Its fixture is module-scoped and that is
 not a performance choice: declaring a SQLModel table registers it on
 `SQLModel.metadata`, so importing `storage` twice against real sqlmodel raises "Table
@@ -674,7 +688,7 @@ notes above still applies and is the reason it is one file.
 | Emit a `trace_line` per call site rather than per un-emitted line | `test_every_trace_line_is_emitted_exactly_once_and_in_order` | A re-emitted line is a duplicate in the transcript; a skipped one reached the database and never reached the user |
 | Return the run any way other than the terminal event | `test_the_generator_and_the_wrapper_produce_the_same_run` | The wrapper would still work and a streaming consumer would silently get nothing |
 | Make `run_deep_research_pipeline` the generator | `test_the_public_function_still_returns_a_finished_run`, and ~15 direct-call sites across `test_orchestrator.py`, `test_critic_routing.py`, `test_ensemble_guard.py`, `test_pipeline_storage.py`, `test_granted_calls_artifact.py` | P3/AC1. The whole point of keeping the name synchronous |
-| Add a seventh field to `LoopEvent` | `test_loop_event_did_not_grow_a_seventh_field` | P1/AC4. §23's events are a decision to make, not a field to add quietly |
+| Add an eighth field to `LoopEvent` (it has seven) | `test_loop_event_did_not_grow_an_eighth_field` | P1/AC4. §23's events are a decision to make, not a field to add quietly |
 | Drop `on_pipeline_event_message`, or stop forwarding in `_forwarding` | `test_ac2_the_tui_renders_pass_boundaries_and_tiers_as_they_happen` | AC2. The panel and transcript are fed exclusively by events — nothing else could have produced a tier for a claim the canned run never had |
 | Re-add the `run.trace` dump to `on_research_finished` (or the CLI's `--- Trace ---` block) | `test_the_finished_run_does_not_reprint_the_trace` | Every line already arrived as an event; both prints the whole run twice, and the second copy reads like a different artifact |
 | Count `claim_tiered` events instead of keying by claim id | `test_a_re_tiered_claim_is_not_counted_twice` | 6c re-tiers the same claim once per retry round, so the tally would exceed the claim count and keep climbing |
@@ -792,7 +806,7 @@ Do not open-code it — fifteen bespoke wrappers is how they drift.
 | Emit `_stage("D2")` inside the per-claim loop | `test_d2_is_announced_once_per_round_not_once_per_claim` | D2 is one decision applied to every exhausted claim; per-claim emission makes a round that exhausted six claims read as six stages. The fixture exhausts TWO claims — with one, the two behaviours are indistinguishable |
 | Add a `step` kind and infer it from the event stream | — (no test; it is an absence) | `_run()` has no step marker. Within a step it yields start/result in pairs; between steps it yields nothing unless the model streamed text. See the note in `core/reasoning/events.py` |
 | Forward `token_delta` text into `PipelineEvent.text` | `test_streamed_text_becomes_volume_never_content` | Seven of the ten passes emit raw JSON; only the volume escapes |
-| Give `LoopEvent` a seventh field for any of this | `test_pipeline_events.py`'s P1 pin | `PipelineEvent` is the type that grows. That is what its `kind` discriminator is for |
+| Give `LoopEvent` an eighth field for any of this | `test_pipeline_events.py`'s P1 pin | `PipelineEvent` is the type that grows. That is what its `kind` discriminator is for |
 
 ### The TUI half
 
@@ -1005,7 +1019,7 @@ sets it raise, since unknown keys raise by design.
 ### Standing: the doc-count guard fires on every added test
 
 `test_docs_consistency.py::test_the_documented_count_is_the_real_one` compares
-the collected total against the number quoted in `README.md`, `CLAUDE.md` and
+the collected total against the number quoted in `README.md`, `AGENTS.md` and
 `ARCHITECTURE.md`. It **skips** on a narrowed invocation, so a green
 `pytest tests/test_ensemble_guard.py` says nothing about it. Run the full suite
 before committing, and update all three quotes together.
@@ -1036,7 +1050,7 @@ standard the batch was held to, and two of them failed it on the first attempt �
 
 | Change | Symptom | Why the guard exists |
 |---|---|---|
-| Change `storage._to_neutral`'s reconstruction without changing `FakeStorage._reconstruct` identically (or vice versa) | `test_fake_storage_mirror.py::TestReconstructionMirrorsProduction` fails, naming the role that diverged | CLAUDE.md's "verify against production, not the test double" was a convention nothing checked. Both are pure functions, so the check is direct |
+| Change `storage._to_neutral`'s reconstruction without changing `FakeStorage._reconstruct` identically (or vice versa) | `test_fake_storage_mirror.py::TestReconstructionMirrorsProduction` fails, naming the role that diverged | AGENTS.md's "verify against production, not the test double" was a convention nothing checked. Both are pure functions, so the check is direct |
 | Make `_split_at` return `len(rows)` for a watermark it cannot find, on **either** side | `test_an_unknown_watermark_is_zero_on_both_sides` | The 0 is what shows the whole thread rather than hiding a prefix on the strength of an id that could not be resolved |
 | `return Claim(**raw)` in `_claim_from_json` | 8 tests in `test_orchestrator.py`, including the end-to-end path — the canned Pass 2 payload carries a `confidence` key for exactly this | Nothing outside the allowlist appeared in any canned payload, so the filter was never exercised |
 | Widen or narrow `_CLAIM_INPUT_FIELDS` | `test_every_allowlisted_field_still_arrives`'s exact-contents assertion | The previous worked example (`asserted_by_candidates`) was moved INTO the allowlist by §10's revisit, so two documents described filtering with a field that was no longer filtered |
@@ -1132,7 +1146,7 @@ satisfied by an absent subject.
 suggested fix exactly as written would have left **the default provider** dying differently
 (#36), and Google correct only by accident of which provider was under debug when the hazard
 was first met. One filter above the split fixed all three and pre-fixes the fourth. That is
-CLAUDE.md's *fix at the producer, not the consumer* rule meeting a case where the consumers
+AGENTS.md's *fix at the producer, not the consumer* rule meeting a case where the consumers
 were three provider branches rather than two call sites.
 
 ---
@@ -1351,3 +1365,119 @@ whose `tool_calls` is `[]`. **The one thing a pinned assistant row carries in pr
 one thing that fixture leaves empty**, because `pin` is itself a tool. Removing the re-inclusion
 entirely *was* pinned; what had no test was the interaction between the two boundaries — and
 neither M4 nor M9 mentions the other.
+
+---
+
+## §20 — the fourth fix batch: the docs-drift tier (2026-08-17)
+
+Seventeen issues. Almost all of it is prose, and the one sentence that explains the whole
+batch is unit 16's: **the claims that drift are the ones somebody had to count by hand.**
+
+So this batch corrects the current round *and* mechanises four of the counting habits that
+produced it. `TECHNICAL_DEBT.md` item 7 pre-registered exactly that trigger — "BUILT markers
+and tree entries are still by hand… **if those two start drifting the same way, extend this
+file's check**" — and both had drifted.
+
+Suite 1605 → **1613**.
+
+### Standing: moving a dependency out of `requirements.txt` can break a test that never uses it
+
+**This batch broke CI and the local suite stayed green.** Moving `markitdown` to an optional
+extra was the point of #144's third item — its only consumer is `file_ops._read_rich`, behind
+`read`, which is globally denied and cannot be re-enabled at runtime, and the import is lazy.
+Nothing in production can reach it.
+
+But `tests/test_file_ops.py` does `patch("markitdown.MarkItDown", ...)`, and **`mock.patch`
+with a string target IMPORTS the module to resolve it.** So the test needed the package
+installed for a reason unrelated to anything it asserts: it substitutes a `MagicMock` and never
+touches the real library. On a developer machine markitdown was still installed from before, so
+the suite passed; on a runner doing a fresh `pip install -r requirements.txt` it failed with
+`ModuleNotFoundError`, and it was the ONLY failure — the job reported nothing but `exit code 1`.
+
+Two rules out of it:
+
+1. **When a package leaves `requirements.txt`, grep the suite for its name — including string
+   patch targets**, which no import-graph check will find.
+2. **A green local suite does not mean a green fresh install.** Reproduced with
+   `docker run python:3.11-slim` over a `git archive` of HEAD: pre-fix **1 failed, exit 1**;
+   post-fix **1611 passed, exit 0**. That container is also the only way the eleven tests which
+   `skipif` on Windows (symlinks, SIGALRM) get run at all — all eleven pass on Linux.
+
+The fix is a stub in the root `conftest.py` beside the six SDK fakes, which is what that
+mechanism exists for. Its `convert` RAISES rather than returning something plausible, so
+anything reaching it unpatched fails loudly instead of receiving a fake conversion. `_read_rich`
+also now turns the missing extra into a message naming `pip install -e ".[documents]"`, since a
+bare `ModuleNotFoundError` names a package the user never asked for.
+
+### The four new assertions in `test_docs_consistency.py`
+
+| If a document drifts like this… | …this fails |
+|---|---|
+| A per-file count in ARCHITECTURE's tree goes wrong | `test_the_tree_states_a_correct_count_for_every_collected_test_file` |
+| A test file lands with no tree entry | the same test — **strict** in both directions |
+| A tree entry names a file that was renamed away | `test_no_tree_entry_names_a_test_file_that_does_not_exist` |
+| A ROADMAP_v2 index entry loses its status marker | `test_every_roadmap_v2_index_entry_carries_a_status_marker` |
+| A registered tool never reaches README's approval table | `test_every_registered_tool_appears_in_readmes_approval_table` |
+| ARCHITECTURE's registry counts go stale | `test_architecture_states_the_real_registry_counts` |
+
+Seven mutations, all RED on the check named for them. The rule for what belongs in that file
+is unchanged and is now written into its docstring: **a claim earns a check by having already
+drifted, and only if the truth is something the suite can compute.** Every one of them
+compares a document against a live value — the collected session, the registry, the
+permission dataclasses — never against another hand-written number.
+
+### Standing: two of the seven mutations survived the first run, for two different reasons
+
+Both are the vacuity class this file exists for, and both generalise:
+
+1. **A narrowed invocation makes a session-dependent check SKIP, and a skip reads as a
+   survivor.** The driver ran `pytest tests/test_docs_consistency.py` — which *is* narrowed,
+   so the two checks that need `request.session.items` never executed. TECHNICAL_DEBT 6's own
+   note ("one class of vacuity a revert check cannot catch is a test that SKIPS") arriving
+   inside a mutation driver. **Mutation-check a session-dependent test against the full
+   suite.**
+2. **A character window is not a structure.** The README check read
+   `readme[start:start + 2000]`, which swallowed the explanatory paragraphs below the table —
+   and those name `write_project_doc` in backticks too, so deleting it from the table left
+   the check green. It now walks the table rows and stops at the first line that is not one.
+
+### Standing: PowerShell's `Get-Content`/`Set-Content` round-trip corrupts UTF-8
+
+Updating the aggregate count with `(Get-Content $f -Raw) -replace ... | Set-Content -Encoding utf8`
+**double-encoded three documents** — PS 5.1 reads a BOM-less UTF-8 file as cp1252, so every
+`—` and `§` became mojibake, and a BOM was added. Reversible (`decode utf-8 → encode cp1252`)
+because the damage is uniform across a whole-file rewrite, but the lesson is the rule:
+**do file rewriting in Python with explicit `encoding="utf-8"`, or with the editor.** This is
+the same family as the `2>&1` NativeCommandError note — PowerShell is fine for git and
+process control and is a hazard for text.
+
+### The corrections, all re-measured rather than copied
+
+The issue bodies predate batches 2 and 3, and every figure in them had moved:
+
+| | audit said | measured now |
+|---|---|---|
+| Wrong per-file counts | 11 | **18** (`test_math_tools` 14 → 123 after #52's battery; `test_orchestrator` 11 → 23 after batch 3) |
+| Test files with no tree entry | 8 | **7** |
+| Test files | 54 / 58 | **65** |
+| Registered / advertised tools | 16 / 12 | **22 / 16**, 13 callable headless |
+| Tests failing without `providers.json` | 11 across 3 files | **12 across 4** |
+| `read_project_doc`'s reach | "the project's own README" | **40 files, ~1.1 MB, depths 0-3** |
+
+### Two behaviour changes
+
+| Change | …this fails if reverted | Why |
+|---|---|---|
+| Anthropic's streaming branch honours `supports_stream_usage` (#40) | `test_stream_anthropic_d21_raises_on_zero_usage_when_flag_true` | The default provider was outside D21, with the `getattr(..., 0)` default AGENTS.md forbids by name. An SDK field rename would have zeroed the budget silently |
+| …and honours it rather than always raising | `test_stream_anthropic_honours_the_flag_rather_than_always_raising` | The flag now means one thing on all three providers. Without this second test, that claim has nothing behind it |
+| `config.APICredentials` deleted (#23) | nothing — it was dead | Its comment told the reader to store an env var's *name* as their API key, which is not what `credentials.save_credentials` does with the value |
+
+### `CLAUDE.md` is now `AGENTS.md`
+
+`CLAUDE.md` and `QWEN.md` are pointers to it. QWEN.md was a second,
+independently-maintained context file with five claims false about the present code, and its
+staleness warning lived in the file its reader does not open. One copy, several filenames —
+the same argument this document makes about every other hand-maintained duplicate.
+
+**Consequence:** Claude Code auto-injects `CLAUDE.md`, so it now injects a pointer rather than
+84 KB. The context is an explicit read instead of an automatic one.

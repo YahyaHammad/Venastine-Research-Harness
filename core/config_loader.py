@@ -396,9 +396,25 @@ def _discover(kind: str, project_path: str, trusted: bool) -> dict:
                         tier, kind, defn.name, tier,
                     )
                 else:
-                    # Cross-tier (project over user) is the documented D8
-                    # order, and same-tier is alphabetical-first-wins --
-                    # but neither is guessable from the outside, so say so.
+                    # Cross-tier, USER beats project for agents and skills:
+                    # _tier_dirs returns [harness, user, project] and this
+                    # loop is first-wins. That is D29, not D8 -- D8 is where
+                    # definitions are discovered, D29 is the §17 inversion
+                    # that put user ahead of project, because "project" does
+                    # not mean "more specific", it means "it arrived with a
+                    # directory you cloned". (This comment said the opposite
+                    # and cited D8; it was pre-D29 text that survived the
+                    # change. See audit #20 -- the warning below was always
+                    # right, because it names the winner dynamically.)
+                    #
+                    # settings.json deliberately goes the OTHER way,
+                    # project-over-user, at _load_merged_settings -- because
+                    # the trust prompt shows its values verbatim. Two
+                    # opposite rules in one module is exactly what a comment
+                    # here should disambiguate.
+                    #
+                    # Same-tier is alphabetical-first-wins. None of this is
+                    # guessable from the outside, so say so:
                     # Silently shadowing a definition is how someone spends
                     # an afternoon editing a file that is never loaded.
                     logger.warning(

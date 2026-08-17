@@ -77,6 +77,58 @@ def test_stream_anthropic_text_and_tool_use(monkeypatch):
     assert resp.usage == {"input_tokens": 11, "output_tokens": 7}
 
 
+def test_stream_anthropic_d21_raises_on_zero_usage_when_flag_true(monkeypatch):
+    """#40. This branch was exempt from D21 until audit #40: it never read
+    `supports_stream_usage`, on the reasoning that get_final_message()
+    always carries usage.
+
+    That is very likely true for anthropic==0.116.0, and is exactly the kind
+    of assumption D21 exists because nobody can verify it from inside. The
+    branch also used `getattr(usage_obj, "input_tokens", 0)` -- the softened
+    form AGENTS.md forbids by name -- so on the DEFAULT provider an SDK field
+    rename would have zeroed the budget silently, disabling both the budget
+    stop condition and §21's compaction trigger. That is the mcp v1->v2
+    failure mode, and #35 is this file's live example of it.
+    """
+    monkeypatch.setattr(
+        "core.client.load_provider_data",
+        lambda: {"ANTHROPIC": {"supports_stream_usage": True}},
+    )
+    # A final message whose usage fields are absent -- the shape a field
+    # rename produces, and the one the getattr defaults used to swallow.
+    final_message = SimpleNamespace(
+        content=[SimpleNamespace(type="text", text="hi")],
+        usage=SimpleNamespace(),
+    )
+    client = _FakeAnthropicClient(["hi"], final_message)
+
+    with pytest.raises(RuntimeError, match="without usage"):
+        collect_response(call_model_stream(client, "ANTHROPIC", "m", [], "sys", []))
+
+
+def test_stream_anthropic_honours_the_flag_rather_than_always_raising(monkeypatch):
+    """The other half, and the reason the fix honours the flag instead of
+    raising unconditionally: `supports_stream_usage` now means ONE thing on
+    all three providers.
+
+    providers.json.example ships it true for ANTHROPIC, so the default
+    posture is the checked one -- but a proxy that genuinely omits usage can
+    opt out rather than being unable to run.
+    """
+    monkeypatch.setattr(
+        "core.client.load_provider_data",
+        lambda: {"ANTHROPIC": {"supports_stream_usage": False}},
+    )
+    final_message = SimpleNamespace(
+        content=[SimpleNamespace(type="text", text="hi")],
+        usage=SimpleNamespace(),
+    )
+    client = _FakeAnthropicClient(["hi"], final_message)
+
+    resp = collect_response(call_model_stream(client, "ANTHROPIC", "m", [], "sys", []))
+    assert resp.usage == {"input_tokens": 0, "output_tokens": 0}
+
+
 # ---------------------------------------------------------------------------
 # ---- Google ---------------------------------------------------------------
 # ---------------------------------------------------------------------------

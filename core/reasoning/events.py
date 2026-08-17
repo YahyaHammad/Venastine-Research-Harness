@@ -113,8 +113,9 @@ class PipelineEvent:
 
     This type GROWS with its kinds, which is what P1 chose it for. The
     contrast is LoopEvent, whose "exactly one field is populated" rule
-    lives in a docstring -- so a seventh field there would silently widen a
-    convention nothing checks, and a test fails if one appears. Here the
+    lives in a docstring -- so an EIGHTH field there (it has seven: six
+    payload fields plus stop_reason) would silently widen a convention
+    nothing checks, and a test fails if one appears. Here the
     discriminator is in the data, so a reader of `kind` cannot be wrong
     about which fields to trust.
     """

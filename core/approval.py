@@ -103,6 +103,13 @@ class RunAuthorization:
     # one run. Lives here rather than in module state or a per-pass return
     # value for the same reason the budget does: the bundle is already
     # shared by reference, and what the authorization was SPENT ON is
-    # authorization state. The orchestrator copies it onto the PipelineRun
-    # at the end, where write_run_artifacts can serialise it.
+    # authorization state. The orchestrator points PipelineRun.granted_calls
+    # at THIS SAME LIST at the start of the run, so the trail is on the run
+    # at every §5 checkpoint and on the failure path.
+    #
+    # Not a copy taken at the end -- this comment used to say it was, which
+    # is the design §25 rejected and the opposite of what the code does
+    # (audit #83). Copying at the end would lose the trail on exactly the
+    # runs most worth auditing; unit 9 mutated the share into `list(...)`
+    # and it went red.
     granted_calls: list = field(default_factory=list)

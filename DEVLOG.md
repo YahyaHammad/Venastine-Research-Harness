@@ -1669,7 +1669,7 @@ baked in: `run_deep_research_mode` as the first attempt and
 `pass_prompt(pass_id)` as the prompt to continue under. The reviewer is
 agent-shaped and starts through `run_agent_conversation`. Copying twenty
 lines would have put two copies of the corrective wording, the attempt
-arithmetic and the trace format in one codebase — the shape CLAUDE.md
+arithmetic and the trace format in one codebase — the shape AGENTS.md
 names by name. The shared loop takes an already-obtained response;
 each caller starts its own first attempt. Two new tests pin what a
 re-inlining would undo: continuing under the *caller's* prompt (hardcoding
@@ -1752,10 +1752,10 @@ high-level themes and remaining-by-design debt in `TECHNICAL_DEBT.md`):
 
 - **Containment policy unified (f1).** The build stated opposite policies:
   review.py's prose said an optional stage must not lose a completed run;
-  CLAUDE.md said reviewer failures land on `status='failed'`. Owner chose
+  AGENTS.md said reviewer failures land on `status='failed'`. Owner chose
   containment: a transient reviewer failure (provider error, unrecoverable
   JSON) is a traced skip and the run completes, like the missing-agent
-  branch. CLAUDE.md's invariant rewritten to the single policy. A failure
+  branch. AGENTS.md's invariant rewritten to the single policy. A failure
   that escapes the stage itself still lands on the failed path, and is now
   pinned by a test that composes the raising stage with the pipeline's
   `except` (f16) — the old direct-call form could never see a containment
@@ -1843,7 +1843,7 @@ All of those stand. Three things did not.
 ## The re-synthesis path did the opposite of the policy it had just unified
 
 `f1` settled that an optional stage must not flip a finished ten-pass run
-to `status='failed'`, and rewrote CLAUDE.md to say so. The re-synthesis
+to `status='failed'`, and rewrote AGENTS.md to say so. The re-synthesis
 path then restored the claims and **re-raised**, failing a run whose ten
 passes all succeeded and whose first report was intact. Code and doc were
 back in disagreement one layer below where `f1` fixed them.
@@ -2014,7 +2014,7 @@ of use rather than at startup, and invisibly on a machine with a fresh database.
 
 ## Two duplications the section exposed
 
-Both are the shape CLAUDE.md's canonical bug story warns about, and both were fixed
+Both are the shape AGENTS.md's canonical bug story warns about, and both were fixed
 at the producer rather than at the call site that happened to break.
 
 **The FakeStorage patch list existed twice** — once in the `fake_storage` fixture and
@@ -2147,7 +2147,8 @@ the caller-side check only covers the one caller that exists today.
 The e2e gap is the real finding. Everything in §21a was tested at the unit level
 against fakes, and the defect lived exactly in the relationship between two real
 components — the derived view and the archive — which no fake represented and no unit
-test spanned. `tests/test_compaction_e2e.py` is the first test in this project to run
+test spanned. `tests/test_storage_e2e.py` (named `test_compaction_e2e.py` at the time)
+is the first test in this project to run
 real `ConversationMemory` against real `storage.py` on real SQLite, and it found the
 bug on its second assertion.
 
@@ -2325,7 +2326,7 @@ cannot reintroduce either quietly.
 
 `ResearchProgress._render()` shadowed `Widget._render()`, and the symptom was the entire
 app failing to lay out with `'NoneType' object has no attribute 'get_height'` — nowhere
-near the widget in the traceback. Renamed `_redraw`, and noted in CLAUDE.md because the
+near the widget in the traceback. Renamed `_redraw`, and noted in AGENTS.md because the
 next widget with a private redraw helper will reach for the same name.
 
 ## Deviations from the spec
@@ -3320,7 +3321,7 @@ Five findings, in the order they landed. Two of them changed what got built.
 
 2. **The guard was incomplete where it mattered.**
    `MODELS_REJECTING_SAMPLING_PARAMS` lists only Anthropic names, but OpenAI's
-   own reasoning models restrict `temperature` the same way — and CLAUDE.md's
+   own reasoning models restrict `temperature` the same way — and AGENTS.md's
    example command is `--provider OPENAI --model gpt-5.1`. So the guard built to
    stop exactly this failure likely never fired for the OpenAI model the docs
    suggest. Also recorded as needing a live check; moot for ensemble mode now.
@@ -3390,7 +3391,7 @@ So diversity comes from a **roster of different models** (E1), which is finding
 A penalty rather than a re-weighting means the non-ensemble formula is
 *literally* unchanged, so §10's "byte-for-byte identical" acceptance criterion is
 true by construction instead of by arithmetic coincidence. It also collapses four
-formula arms to two, which puts CLAUDE.md's "the cap applies before the
+formula arms to two, which puts AGENTS.md's "the cap applies before the
 assumption penalty" invariant — a real bug once — in one place instead of two
 that can drift.
 

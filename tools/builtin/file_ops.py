@@ -112,8 +112,24 @@ READ_TOOL_SCHEMA = {
 
 
 def _read_rich(resolved_path: str) -> str:
-    """Convert a rich-format file to markdown via markitdown."""
-    from markitdown import MarkItDown
+    """Convert a rich-format file to markdown via markitdown.
+
+    markitdown is an OPTIONAL extra since #144: this function is its only
+    consumer, it sits behind `read`, and `read` is globally denied and
+    cannot be re-enabled at runtime -- so a default install carries neither
+    it nor its eleven transitive distributions. Anyone who reaches here has
+    enabled `read` in config.py, and the bare ModuleNotFoundError would name
+    a package they never asked for and cannot place.
+    """
+    try:
+        from markitdown import MarkItDown
+    except ImportError as e:
+        raise RuntimeError(
+            f"Reading {os.path.basename(resolved_path)} needs the optional "
+            f"`markitdown` dependency, which a default install does not "
+            f"carry (it serves only this path, behind the globally-denied "
+            f"`read` tool). Install it with: pip install -e \".[documents]\""
+        ) from e
     md = MarkItDown()
     result = md.convert(resolved_path)
     return result.text_content

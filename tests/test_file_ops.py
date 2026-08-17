@@ -11,6 +11,7 @@ can't create real PDFs/DOCX in a test fixture.
 """
 
 import os
+import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -151,6 +152,17 @@ class TestReadTool:
         assert "Not a regular file" in result["error"]
 
     def test_read_rich_format_uses_markitdown(self, workspace):
+        """Patches `markitdown.MarkItDown`, which `mock.patch` resolves by
+        IMPORTING the module -- so this needed the package installed for a
+        reason unrelated to what it asserts.
+
+        markitdown became an optional extra in #144, and this test then
+        failed on CI while staying green locally, where the package happened
+        to still be installed. The root conftest now stubs it like the other
+        six SDKs, so the target resolves everywhere and the assertion is
+        unchanged: file_ops calls MarkItDown().convert() and reads
+        .text_content.
+        """
         _write(workspace, "doc.pdf", "fake pdf bytes")
         mock_md = MagicMock()
         mock_md.convert.return_value = MagicMock(text_content="# Converted\n\nMarkdown content.")
@@ -158,6 +170,21 @@ class TestReadTool:
             result = file_ops.read_run({"path": "doc.pdf"})
         assert result["content"] == "# Converted\n\nMarkdown content."
         mock_md.convert.assert_called_once()
+
+    def test_read_rich_format_without_the_optional_extra_says_which_one(self, workspace):
+        """#144 made markitdown optional, so the reachable failure is now
+        "it is not installed" -- and a bare ModuleNotFoundError names a
+        package the user never asked for and cannot place.
+
+        Reached only by someone who has enabled `read` in config.py, since
+        the tool is globally denied. dispatch() would contain the raise into
+        an {"error": ...} result either way; what this pins is that the
+        message names the extra that fixes it.
+        """
+        _write(workspace, "doc.pdf", "fake pdf bytes")
+        with patch.dict(sys.modules, {"markitdown": None}):
+            with pytest.raises(RuntimeError, match=r"\[documents\]"):
+                file_ops._read_rich(os.path.join(workspace, "doc.pdf"))
 
     def test_read_offset_beyond_file_returns_empty(self, workspace):
         _write(workspace, "short.txt", "only line")

@@ -207,13 +207,19 @@ class TestTheEventTypeDecision:
         assert PipelineEvent is not LoopEvent
         assert not issubclass(PipelineEvent, LoopEvent)
 
-    def test_loop_event_did_not_grow_a_seventh_field(self):
+    def test_loop_event_did_not_grow_an_eighth_field(self):
         """The mutation-sighted half of AC4. §22 adds ~7 event kinds and
         §23 adds more; P1's rejected option was to put them on LoopEvent,
         whose "exactly one field is populated" convention lives in a
         docstring rather than in the type. If a §22 or §23 event ever
         lands here, this goes red and the decision gets re-made
         deliberately rather than by accretion.
+
+        Named for the EIGHTH field: LoopEvent already has seven, six payload
+        fields plus stop_reason. This was called "..._a_seventh_field" while
+        asserting a seven-name set (audit #128) -- the assertion was always
+        right and only the name was off by one, but a test name is the first
+        thing a reader trusts.
         """
         assert set(LoopEvent.__dataclass_fields__) == {
             "token_delta", "tool_call_start", "tool_result",

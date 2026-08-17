@@ -28,16 +28,28 @@ class Claim:
     response by Pass 2. Every later pass mutates fields on this same
     object rather than creating parallel data structures keyed by id.
 
-    SERIALIZATION NOTE: every claim-serialization call site in this
-    codebase (orchestrator.py passes 3a/3b/5/6a/6c/final synthesis,
-    pipeline_storage.update_pipeline_run, and
-    output_writer.write_run_artifacts) uses the shallow `vars(c)`.
-    That is correct only while every field below stays JSON-native
-    (str / list / dict / float / int / None). If a nested-dataclass field
-    is EVER added here, ALL of those `vars(c)` sites must migrate to
-    `dataclasses.asdict(c)` TOGETHER, not piecemeal -- hardening just one
-    site would leave the rest exposed and create two different
+    SERIALIZATION NOTE: EVERY `vars(c)` IN THE TREE serializes this object
+    shallowly. That is correct only while every field below stays
+    JSON-native (str / list / dict / float / int / None). If a
+    nested-dataclass field is EVER added here, ALL of those sites must
+    migrate to `dataclasses.asdict(c)` TOGETHER, not piecemeal -- hardening
+    just one leaves the rest exposed and creates two different
     serialization mechanisms for the same object in the same codebase.
+
+        grep -rn 'vars(c' --include='*.py' .
+
+    Deliberately a GREP rather than a list. This note used to enumerate
+    three sites -- orchestrator.py's passes, pipeline_storage and
+    output_writer -- and §26 added two more in tui/app.py (show_claims and
+    /copy claims) that fell out of it, and out of AGENTS.md's copy of the
+    same list (audit #108). The TUI's failure would have been quieter than
+    the persistence ones, since ClaimsScreen renders a repr into a cell and
+    `json.dumps(..., default=str)` stringifies rather than raising -- which
+    is precisely the "two different serialization mechanisms" outcome this
+    note exists to prevent, arriving through the door the note did not
+    cover. An enumeration that says ALL has to be complete to mean
+    anything, and a new consumer in a new section will keep falling out of
+    one.
     """
 
     id: str

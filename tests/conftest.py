@@ -420,7 +420,7 @@ class FakeMemory:
         This fake has no archive, so it counts its own message list --
         which is only equivalent because a fake thread never carries a
         checkpoint summary. A test that needs the real arithmetic wants
-        tests/test_compaction_e2e.py, which runs against real storage."""
+        tests/test_storage_e2e.py, which runs against real storage."""
         return sum(1 for m in self._next_messages
                    if m.get("role") == "user") - 1
 

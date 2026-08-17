@@ -543,6 +543,37 @@ def _build_fake_ddgs_module():
     return mod
 
 
+def _build_fake_markitdown_module():
+    """markitdown is an OPTIONAL extra since #144 -- its only consumer is
+    `file_ops._read_rich`, behind `read`, which is globally denied -- so
+    `pip install -r requirements.txt` does not provide it.
+
+    `tests/test_file_ops.py` patches `markitdown.MarkItDown`, and
+    `mock.patch` with a string target IMPORTS the module to resolve it. So
+    the test needed the package installed for a reason unrelated to what it
+    asserts: it replaces `MarkItDown` with a MagicMock and never touches the
+    real library. That is exactly the case these fakes exist for, and CI
+    found it -- the suite was green on a machine where markitdown happened
+    to still be installed.
+
+    `convert` RAISES rather than returning something plausible. Nothing
+    should reach it unpatched, and a loud failure naming the stub beats a
+    fake conversion that reads as a real one.
+    """
+    mod = types.ModuleType("markitdown")
+
+    class _MarkItDown:
+        def convert(self, *args, **kwargs):
+            raise RuntimeError(
+                "conftest's offline markitdown stub was called unpatched. "
+                "Patch markitdown.MarkItDown, or install the real package "
+                "with `pip install -e \".[documents]\"`."
+            )
+
+    mod.MarkItDown = _MarkItDown
+    return mod
+
+
 # ---------------------------------------------------------------------------
 # ---- Install the fakes ---------------------------------------------------
 # ---------------------------------------------------------------------------
@@ -563,6 +594,7 @@ def _install_fake_sdks():
     sys.modules["sqlmodel"] = _build_fake_sqlmodel_module()
     sys.modules["httpx"] = _build_fake_httpx_module()
     sys.modules["ddgs"] = _build_fake_ddgs_module()
+    sys.modules["markitdown"] = _build_fake_markitdown_module()
     _INSTALLED = True
 
 

@@ -179,7 +179,7 @@ class ConversationMemory:
         compaction.compactable_span(). Counting the view was §21a's shipped
         defect: the floor came out several turns too low, the computed
         watermark went BACKWARDS, and the second automatic compaction of a
-        thread un-compacted it. See tests/test_compaction_e2e.py.
+        thread un-compacted it. See tests/test_storage_e2e.py.
 
         Lives here rather than in core/loop.py because this is the file
         that owns the thread's persistence -- the loop imports no storage

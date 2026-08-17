@@ -162,7 +162,7 @@ def test_the_valve_asks_the_memory_for_the_current_turn_floor(mocker, compacted)
     against a FakeMemory with no archive, so it could not tell view space
     from archive space -- and §21a's shipped defect was exactly that
     confusion. The arithmetic itself now lives in
-    tests/test_compaction_e2e.py, against real storage across four
+    tests/test_storage_e2e.py, against real storage across four
     compactions, which is the only place it can be checked honestly.
     """
     memory = FakeMemory()

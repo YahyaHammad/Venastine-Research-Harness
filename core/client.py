@@ -179,7 +179,7 @@ def _is_empty_assistant_turn(msg: dict) -> bool:
 
     Only Google was guarded, and only because Google was the provider being
     debugged when it surfaced. Dropping it above the branch split is
-    CLAUDE.md's *fix at the producer, not the consumer*: all three branches
+    AGENTS.md's *fix at the producer, not the consumer*: all three branches
     become correct at once, and so does the next one.
 
     Requiring BOTH halves to be empty is load-bearing. An empty text WITH
@@ -723,9 +723,12 @@ def call_model_stream(
     sampling = _sampling_kwargs(provider_name, model, temperature)
     thinking = _thinking_for_provider(provider_name, effort)
 
-    # Read once so every branch applies the same D21 usage-or-raise rule.
-    # Anthropic always reports usage on its final message, so the flag only
-    # gates the Google and OpenAI-compatible branches below.
+    # Read once so every branch applies the same D21 usage-or-raise rule --
+    # all three of them, since audit #40. This comment used to claim that in
+    # its first sentence and take it back in the second ("the flag only gates
+    # the Google and OpenAI-compatible branches"), which left the one
+    # provider whose example config ships the flag `true` as the one provider
+    # where setting it did nothing.
     provider_data = load_provider_data()
     supports_stream_usage = provider_data.get(provider_name, {}).get(
         "supports_stream_usage", False
@@ -758,6 +761,29 @@ def call_model_stream(
                 "input_tokens": getattr(usage_obj, "input_tokens", 0) if usage_obj else 0,
                 "output_tokens": getattr(usage_obj, "output_tokens", 0) if usage_obj else 0,
             }
+
+        # D21 parity with the other two branches (audit #40). This branch
+        # used to be exempt on the reasoning that get_final_message() always
+        # carries usage -- which is very likely right for anthropic==0.116.0,
+        # and is exactly the kind of assumption D21 exists because nobody can
+        # verify from inside. The getattr defaults above are the softened
+        # form D21's own note forbids, so on the DEFAULT provider an SDK
+        # field rename would have zeroed the budget silently, disabling both
+        # the budget stop condition and §21's compaction trigger. That is the
+        # mcp v1->v2 failure mode, and #35 is this file's live example of it.
+        #
+        # Honouring the flag rather than always raising keeps it meaning ONE
+        # thing on all three providers, which is the coherence #40 is about;
+        # providers.json.example ships it true for ANTHROPIC, so the default
+        # posture is the checked one, and a proxy that genuinely omits usage
+        # can still opt out instead of being unable to run.
+        if supports_stream_usage and usage["input_tokens"] == 0 and usage["output_tokens"] == 0:
+            raise RuntimeError(
+                f"Streaming call to {provider_name} completed without usage "
+                f"data despite supports_stream_usage=True. The stream may "
+                f"have been interrupted before the final usage chunk."
+            )
+
         yield StreamToken(final_response=ModelResponse(
             text=text, tool_calls=calls, usage=usage,
         ))

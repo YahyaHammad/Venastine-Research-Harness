@@ -704,9 +704,14 @@ class VenastineApp(App):
         permission dismissal path must put a boolean on the channel --
         but listed only the modal's own paths. Exiting is a dismissal
         too, and it was the uncovered one: the worker blocks in
-        Queue.get() with no timeout, Textual cannot interrupt a thread
-        blocked there, and it runs thread workers on NON-daemon executor
-        threads. So quitting with a prompt open left App.run() unable to
+        Queue.get() for up to ATTENDED_APPROVAL_TIMEOUT_S -- 600s, long
+        enough that a quit would read as a hang -- Textual cannot
+        interrupt a thread blocked there, and it runs thread workers on
+        NON-daemon executor threads. (This said "with no timeout", which
+        was true when written and stopped being true when _blocking_modal
+        acquired one; the conclusion is unchanged, and it is the sentence
+        someone would rely on when deciding whether this release is still
+        load-bearing -- audit #108.) So quitting with a prompt open left App.run() unable to
         return and the interpreter unable to exit -- a hang, not an error.
         """
         channel = self._permission_channel
@@ -1340,12 +1345,18 @@ def _cmd_effort(app: VenastineApp, args: str) -> None:
 def _cmd_research(app: VenastineApp, args: str) -> None:
     """Run the deep-research pipeline on a query, off the UI thread.
 
-    Coarse by construction: run_deep_research_pipeline() is synchronous
-    and returns only its finished PipelineRun, so nothing escapes while
-    it runs -- each pass is drained through run_to_completion() inside
-    the orchestrator. Live pass-by-pass progress needs the pipeline to
-    emit events, which is §22. The worker keeps the app responsive and
-    the raven animating; the trace and report land when it returns.
+    LIVE, not coarse. _start_research ITERATES
+    stream_deep_research_pipeline() and forwards each PipelineEvent, so
+    pass boundaries, trace lines, claim tiers and retry rounds arrive as
+    they happen. The worker keeps the app responsive and the raven
+    animating.
+
+    This docstring described the pre-§22 world in the present tense until
+    audit #108 -- "coarse by construction ... the trace and report land
+    when it returns" -- while _start_research 190 lines below said the
+    opposite and explained why: run_deep_research_pipeline would still
+    work, but the DRAINER is exactly what throws every intermediate event
+    away, which is what made this view coarse for two sections.
 
     §25: --grant [names] takes the same values as the CLI flag and goes
     through the same parser, so the two shells cannot offer different

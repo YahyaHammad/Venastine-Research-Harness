@@ -1,0 +1,64 @@
+# Issue #144 -- requirements.txt was the whole of what this project said
+# about how to install it, and it is the one packaging format that cannot
+# express a Python floor or an optional group.
+#
+# Python 3.11 is a hard requirement, not a preference: mcp_client/client.py
+# uses asyncio.timeout (3.11+), and 27 sites use runtime `X | Y` annotations
+# (3.10+). On 3.10 a user got `AttributeError: module 'asyncio' has no
+# attribute 'timeout'` from inside the MCP connect path, AFTER
+# `pip install -r requirements.txt` reported success. requires-python turns
+# that into a refusal at install time.
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "venastine-research-harness"
+version = "0.1.0"
+description = "A from-scratch agentic harness: tool-using chat plus a ten-pass self-critiquing research pipeline."
+readme = "README.md"
+requires-python = ">=3.11"
+
+# ONE dependency list, and it stays in requirements.txt -- the file that
+# already carries the D22 rationale comments explaining why `textual` and
+# `mcp` are upper-bounded. Inlining the list here would create a second
+# hand-maintained copy of the same fact, which is the shape #144 was filed
+# about in the first place ("a hand-maintained list is only as complete as
+# the file it lives in"). setuptools strips comments and blank lines.
+dynamic = ["dependencies"]
+
+[project.optional-dependencies]
+# markitdown's only consumer is tools/builtin/file_ops.py, which implements
+# read/write/edit -- all three globally denied, and per S24 they cannot be
+# re-enabled at runtime at all (is_tool_allowed reads config.ToolPermissions
+# directly, settings.json has no permissions section, and D14 forbids a
+# ToolContext widening anything). The import is lazy, so a default install
+# never reaches it. It brought 11 transitive distributions, 5 of them for
+# markitdown alone.
+#
+# protobuf moves with it rather than staying in the default set: nothing in
+# the repo imports it, and the only installed distribution requiring it is
+# onnxruntime, which arrives through markitdown. Left behind it would pin a
+# transitive dependency of a package no longer installed by default.
+documents = ["markitdown==0.1.6", "protobuf==7.35.1"]
+
+# Optional in the code too, and documented as such at
+# core/reasoning/output_writer.py:185 -- the PDF path is guarded by
+# `except ImportError: return`. Declared here so the group has a name;
+# neither was ever in requirements.txt.
+pdf = ["markdown", "weasyprint"]
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }
+
+[tool.setuptools]
+# DECLARATIVE ONLY -- this project is run from a checkout, not installed.
+# `pip install .` would otherwise put `config`, `main`, `storage` and
+# `conftest` into site-packages as top-level names, where they collide with
+# anything. Empty lists mean `pip install -e .` resolves the dependencies
+# and enforces the Python floor without installing a single module, which
+# is exactly what is wanted here. README's `pip install -r requirements.txt`
+# remains the documented install path.
+packages = []
+py-modules = []

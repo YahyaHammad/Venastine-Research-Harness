@@ -16,7 +16,7 @@ The pilot is REAL throughout, never a double. The helper's whole contract
 is about how it drives `Pilot.pause`, and a fake pause with a plausible
 sleep in it would be a model of the thing whose behaviour was the bug --
 exactly the "verify against production code, not the test double" rule in
-CLAUDE.md, with `pause` in the production role.
+AGENTS.md, with `pause` in the production role.
 """
 
 import asyncio
