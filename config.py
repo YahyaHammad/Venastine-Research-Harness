@@ -420,10 +420,13 @@ COMPACTION_PIPELINE_BACKSTOP_TOKENS = 20_000
 
 # The backstop's source, and M1's remaining use for a window table.
 #
-# Deliberately NOT a per-provider API query: APICredentials lists thirteen
-# providers, most reaching the same OpenAI-compatible path, and there is no
-# uniform endpoint exposing context length across them -- thirteen adapters
-# to avoid a fallback constant they would all still need. A static table is
+# Deliberately NOT a per-provider API query: providers.json.example ships a
+# roster of fifteen, most reaching the same OpenAI-compatible path, and there
+# is no uniform endpoint exposing context length across them -- fifteen
+# adapters to avoid a fallback constant they would all still need. (This
+# said "APICredentials lists thirteen providers"; the class was dead and the
+# number was wrong in both directions -- audit #23. The argument is
+# unchanged, since fifteen adapters is as unreasonable as thirteen.) A static table is
 # honest about being incomplete, and under M1 an incomplete entry costs
 # much less than it would have: the working-set trigger does not consult
 # this at all.
@@ -450,12 +453,18 @@ MODEL_CONTEXT_WINDOWS: dict[str, int] = {
 DEFAULT_CONTEXT_WINDOW = 128_000
 
 
-@dataclass
-class APICredentials:
-    provider_name: str # Pick one of the following (ensure correct spelling & capitalization) {OPENAI, ANTHROPIC, GOOGLE, OPENROUTER, DEEPSEEK, GROK, MISTRAL, GROQ, TOGETHERAI, PERPLEXITY, FIREWORKS, QWEN, Z.AI, COHERE]
-    api_key: str # Add your api key to the system environment variables then insert the name of the variable you created between the double quotations 
-    
-    # api_url: str
+# APICredentials was here and is deleted (audit #23). It was dead -- nothing
+# constructed it, imported it or type-hinted against it -- and its guidance
+# contradicted the mechanism that is real: it told the reader to put the key
+# in an environment variable and write the VARIABLE'S NAME here, while
+# credentials.save_credentials stores the key value directly in
+# providers.json. Anyone following it ended up with the literal string
+# "MY_KEY_VAR" as their API key.
+#
+# Credentials flow through credentials.py (providers.json) and env_secrets.py
+# (.env) -- the deliberate two-mechanism split D19 describes, which
+# env_secrets.py documents at length on the other side. The provider roster
+# lives in providers.json.example, beside the file it describes.
 
 
 @dataclass
