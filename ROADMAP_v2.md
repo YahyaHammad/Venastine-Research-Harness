@@ -65,17 +65,17 @@ Every decision below was made through a structured clarification cycle with the 
 
 ## Index
 
-- 13. Streaming refactor — generator/yield loop + `LoopEvent` types
-- 14. File syntax + config loader — YAML frontmatter + `.md` discovery + workspace trust
-- 15. Permission system refactor — context-aware permissions ("stricter wins") + dynamic tool registration
-- 16. TUI — Textual app + widgets + slash commands + streaming integration
-- 17. MCP client — stdio + HTTP/SSE + `mcp.json` + async bridge + workspace trust
-- 18. Agent system — agent `.md` format + manager + subagent tool + per-agent scoping + intersection rule
+- 13. Streaming refactor — generator/yield loop + `LoopEvent` types **(BUILT)**
+- 14. File syntax + config loader — YAML frontmatter + `.md` discovery + workspace trust **(BUILT)**
+- 15. Permission system refactor — context-aware permissions ("stricter wins") + dynamic tool registration **(BUILT)**
+- 16. TUI — Textual app + widgets + slash commands + streaming integration **(BUILT)**
+- 17. MCP client — stdio + HTTP/SSE + `mcp.json` + async bridge + workspace trust **(BUILT)**
+- 18. Agent system — agent `.md` format + manager + subagent tool + per-agent scoping + intersection rule **(BUILT)**
 - 19. Skill system — skill `.md` format + manager + activation + default skills **(BUILT)**
 - 20. Subagent reviewing — opt-in post-pipeline review with consented correction **(BUILT)**
 - 21. Memory system — compaction, archive, thread-scoped pinning, user/project memory **(BUILT: §21a + §21b + §21c)**
 - 22. Pipeline observability — orchestrator events + the live research view **(added during §16; BUILT)**
-- 23. Interactive tools — question tool, todo list, and the response channel they share **(added during §16; slice 1 BUILT — the channel, its three consumers, and §18's deferred per-tool sign-off. The two tools are slice 2)**
+- 23. Interactive tools — question tool, todo list, and the response channel they share **(added during §16; BUILT — slice 1 was the channel, its three consumers and §18's deferred per-tool sign-off; slice 2 shipped `ask_user` and `todo_write`, covered by `test_question_tool.py` and `test_todo.py`)**
 - 24. `/init` — generate the project's documentation set **(added during §16; BUILT)**
 - 25. Authorized tool use in the research pipeline **(BUILT)**
 - 26. Research legibility — pass internals, code stages, the claims view, colour, copy **(added after §22's first live run; BUILT)**

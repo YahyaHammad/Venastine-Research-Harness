@@ -75,7 +75,7 @@ Pass 6b  Annotate        attach tier labels to claim text (templated, no model)
 Final    Synthesise      the report, written from the tiered claims
 ```
 
-**Five of those stages make no model call at all.** Pass 4, Pass 6b, D0, D1, D2 and the merge are ordinary Python. That is the point: the step that decides how confident to be is a formula you can read, not a judgement call the model gets to make about its own work.
+**Six of those stages make no model call at all.** Pass 4, Pass 6b, D0, D1, D2 and the merge are ordinary Python. That is the point: the step that decides how confident to be is a formula you can read, not a judgement call the model gets to make about its own work.
 
 ### Confidence tiers
 
@@ -149,9 +149,13 @@ Because approval ORs, an override can only ever *add* a prompt. There is no way 
 
 | | |
 |---|---|
-| No approval | `web_search`, `fetch_url`, `arxiv_search`, `get_time`, the six maths tools, `load_skill`, `pin` |
-| Depends on the call | `read`, `write`, `edit` — decided per path |
-| Always | `shell`, `spawn_subagent`, `remember`, and **every MCP tool** |
+| No approval | `web_search`, `fetch_url`, `arxiv_search`, `get_time`, the six maths tools (`symbolic_math`, `linear_algebra`, `probability_stats`, `discrete_math`, `logic`, `geometry`), `load_skill`, `pin`, `ask_user`, `todo_write`, `read_project_doc` |
+| Depends on the call | `read`, `write`, `edit` — decided per path, and all three are denied by default anyway |
+| Always | `shell`, `spawn_subagent`, `remember`, `write_project_doc`, and **every MCP tool** |
+
+Every registered tool appears in that table, and a test asserts it (audit #125): `ToolPermissions` and `ToolApprovals` are plain dataclasses, so "did the table keep up with the registry" is a question the suite can answer instead of a reader. `write_project_doc` is the one the omission mattered for — it is what `/init` uses to write documents into a repository, and §24's I1 gives it a fixed allowlist of document *names* with no path parameter precisely because it is dangerous enough to constrain.
+
+`ask_user` is ungated for a reason worth stating, since a table of default approvals is exactly where it belongs: an approval-gated tool is not *advertised* where nothing can ask, so gating the tool whose entire job is asking would make it invisible rather than deniable.
 
 `pin` and `remember` sit either side of the line that matters: pinning a message is thread-scoped and undoable, while remembering something outlives the conversation and silently shapes ones you have not started yet.
 
@@ -287,7 +291,7 @@ Precedence for provider and model is CLI flag > `settings.json` > `config.py`.
 
 **Remaining:** nothing in either roadmap, and §10's revisit is now closed. TECHNICAL_DEBT.md items 9 and 10 are open, and two live checks are recorded against §10 (see DEVLOG) that cannot be settled offline: the default `temperature` on OpenAI and Google, and whether OpenAI's reasoning models belong in `config.MODELS_REJECTING_SAMPLING_PARAMS`.
 
-Run the test suite with `pytest` — 1605 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
+Run the test suite with `pytest` — 1610 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
 
 ## Documentation
 
