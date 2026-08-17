@@ -121,6 +121,34 @@ vs a real `__init__.py`; f8 missing **(BUILT)** marker).
   than the counts it was policing. If those two start drifting the same
   way, extend this file's check rather than adding a new practice to
   remember.
+- **THE TRIGGER FIRED (2026-08-17), and the entry was right to name it in
+  advance.** Both categories drifted, exactly as written: audit #121 found
+  eleven of ARCHITECTURE's fifty-three per-file counts wrong and eight test
+  files with no entry at all, and #129 found six ROADMAP_v2 index entries
+  with no marker — §13–§18, every one built, because the convention arrived
+  at §19 and was never backfilled — plus §23 stating its two tools were
+  unbuilt while 98 tests exercised them.
+
+  By the time the fix ran, two more batches had moved the numbers again:
+  **18** counts wrong, `test_math_tools.py` claiming 14 against 123. That
+  is the entry's own point, measured — a hand-maintained number does not
+  drift once and stop.
+
+  Extended rather than replaced, as instructed. Four assertions now live in
+  `tests/test_docs_consistency.py`: per-file counts (strict in both
+  directions, plus an entry naming a file that no longer exists), `(BUILT)`
+  markers, README's approval table against `ToolPermissions`/`ToolApprovals`,
+  and ARCHITECTURE's registry counts. The narrowness rule is unchanged and
+  is now in that file's docstring: **a claim earns a check by having already
+  drifted, and only if the truth is something the suite can compute.**
+
+  What this leaves open is the class the entry could not have predicted:
+  #16, #17 and #147 are three ways the *decision record's index* disagrees
+  with itself (four decisions living only in `DEVLOG.md`, two prefixes
+  carrying two numbering schemes each, and a `C` family cited in six
+  production files and defined nowhere). Those are ids rather than counts,
+  and #147 argues for one mechanical check over all three. Not done here —
+  it needs a namespace decision first.
 
 ## 8. `test_tui.py::_settle` budgets pumps, not time (**closed 2026-08-07**)
 

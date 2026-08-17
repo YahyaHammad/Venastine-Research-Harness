@@ -1365,3 +1365,90 @@ whose `tool_calls` is `[]`. **The one thing a pinned assistant row carries in pr
 one thing that fixture leaves empty**, because `pin` is itself a tool. Removing the re-inclusion
 entirely *was* pinned; what had no test was the interaction between the two boundaries — and
 neither M4 nor M9 mentions the other.
+
+---
+
+## §20 — the fourth fix batch: the docs-drift tier (2026-08-17)
+
+Seventeen issues. Almost all of it is prose, and the one sentence that explains the whole
+batch is unit 16's: **the claims that drift are the ones somebody had to count by hand.**
+
+So this batch corrects the current round *and* mechanises four of the counting habits that
+produced it. `TECHNICAL_DEBT.md` item 7 pre-registered exactly that trigger — "BUILT markers
+and tree entries are still by hand… **if those two start drifting the same way, extend this
+file's check**" — and both had drifted.
+
+Suite 1605 → **1612**.
+
+### The four new assertions in `test_docs_consistency.py`
+
+| If a document drifts like this… | …this fails |
+|---|---|
+| A per-file count in ARCHITECTURE's tree goes wrong | `test_the_tree_states_a_correct_count_for_every_collected_test_file` |
+| A test file lands with no tree entry | the same test — **strict** in both directions |
+| A tree entry names a file that was renamed away | `test_no_tree_entry_names_a_test_file_that_does_not_exist` |
+| A ROADMAP_v2 index entry loses its status marker | `test_every_roadmap_v2_index_entry_carries_a_status_marker` |
+| A registered tool never reaches README's approval table | `test_every_registered_tool_appears_in_readmes_approval_table` |
+| ARCHITECTURE's registry counts go stale | `test_architecture_states_the_real_registry_counts` |
+
+Seven mutations, all RED on the check named for them. The rule for what belongs in that file
+is unchanged and is now written into its docstring: **a claim earns a check by having already
+drifted, and only if the truth is something the suite can compute.** Every one of them
+compares a document against a live value — the collected session, the registry, the
+permission dataclasses — never against another hand-written number.
+
+### Standing: two of the seven mutations survived the first run, for two different reasons
+
+Both are the vacuity class this file exists for, and both generalise:
+
+1. **A narrowed invocation makes a session-dependent check SKIP, and a skip reads as a
+   survivor.** The driver ran `pytest tests/test_docs_consistency.py` — which *is* narrowed,
+   so the two checks that need `request.session.items` never executed. TECHNICAL_DEBT 6's own
+   note ("one class of vacuity a revert check cannot catch is a test that SKIPS") arriving
+   inside a mutation driver. **Mutation-check a session-dependent test against the full
+   suite.**
+2. **A character window is not a structure.** The README check read
+   `readme[start:start + 2000]`, which swallowed the explanatory paragraphs below the table —
+   and those name `write_project_doc` in backticks too, so deleting it from the table left
+   the check green. It now walks the table rows and stops at the first line that is not one.
+
+### Standing: PowerShell's `Get-Content`/`Set-Content` round-trip corrupts UTF-8
+
+Updating the aggregate count with `(Get-Content $f -Raw) -replace ... | Set-Content -Encoding utf8`
+**double-encoded three documents** — PS 5.1 reads a BOM-less UTF-8 file as cp1252, so every
+`—` and `§` became mojibake, and a BOM was added. Reversible (`decode utf-8 → encode cp1252`)
+because the damage is uniform across a whole-file rewrite, but the lesson is the rule:
+**do file rewriting in Python with explicit `encoding="utf-8"`, or with the editor.** This is
+the same family as the `2>&1` NativeCommandError note — PowerShell is fine for git and
+process control and is a hazard for text.
+
+### The corrections, all re-measured rather than copied
+
+The issue bodies predate batches 2 and 3, and every figure in them had moved:
+
+| | audit said | measured now |
+|---|---|---|
+| Wrong per-file counts | 11 | **18** (`test_math_tools` 14 → 123 after #52's battery; `test_orchestrator` 11 → 23 after batch 3) |
+| Test files with no tree entry | 8 | **7** |
+| Test files | 54 / 58 | **65** |
+| Registered / advertised tools | 16 / 12 | **22 / 16**, 13 callable headless |
+| Tests failing without `providers.json` | 11 across 3 files | **12 across 4** |
+| `read_project_doc`'s reach | "the project's own README" | **40 files, ~1.1 MB, depths 0-3** |
+
+### Two behaviour changes
+
+| Change | …this fails if reverted | Why |
+|---|---|---|
+| Anthropic's streaming branch honours `supports_stream_usage` (#40) | `test_stream_anthropic_d21_raises_on_zero_usage_when_flag_true` | The default provider was outside D21, with the `getattr(..., 0)` default AGENTS.md forbids by name. An SDK field rename would have zeroed the budget silently |
+| …and honours it rather than always raising | `test_stream_anthropic_honours_the_flag_rather_than_always_raising` | The flag now means one thing on all three providers. Without this second test, that claim has nothing behind it |
+| `config.APICredentials` deleted (#23) | nothing — it was dead | Its comment told the reader to store an env var's *name* as their API key, which is not what `credentials.save_credentials` does with the value |
+
+### `CLAUDE.md` is now `AGENTS.md`
+
+`CLAUDE.md` and `QWEN.md` are pointers to it. QWEN.md was a second,
+independently-maintained context file with five claims false about the present code, and its
+staleness warning lived in the file its reader does not open. One copy, several filenames —
+the same argument this document makes about every other hand-maintained duplicate.
+
+**Consequence:** Claude Code auto-injects `CLAUDE.md`, so it now injects a pointer rather than
+84 KB. The context is an explicit read instead of an automatic one.
