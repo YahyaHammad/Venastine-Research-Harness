@@ -3476,3 +3476,220 @@ outcome, because neither can be settled offline and neither blocks the redesign.
 three models decline is arguably a signal to *check it* rather than to deduct
 0.05 — but D2 and 6c make zero LLM calls by design, and re-routing them is a
 rearchitecture. Worth a future section, not a change smuggled into this one.
+
+---
+
+## Audit Pass 1 — fix batches 3 and 4 (2026-08-17)
+
+Not a ROADMAP section. Audit Pass 1 (tracker #15) was twenty-two units of
+systematic reading that filed 109 findings and, by its own rule, **fixed
+nothing**: *"findings are documented here as issues. Nothing is fixed during
+this pass."* The fix batches are how those findings come back.
+
+Batches 1 and 2, and #52 — the S0 in the math tools — are recorded in
+`tests/BREAKING_CHANGES.md` §16–§18. This entry covers **batch 3** (the two S1s
+that were ready to build) and **batch 4** (the docs-drift tier), plus the CI
+break batch 4 caused. The per-change what-breaks-it tables are in
+BREAKING_CHANGES §19 and §20; what belongs here is what was *decided*, and why.
+
+### The rule that governed both batches: re-measure, never inherit
+
+Every number in every issue body was measured again before it was written down.
+The issues predate batches 2 and 3, and the tracker's own tenth dedup rule says
+an inherited measurement is a claim like any other.
+
+That was not a formality. **Almost every figure had moved**, and two had moved
+by an order of magnitude — `test_math_tools.py` from a claimed 14 tests to 123
+after #52's legitimacy battery, `test_orchestrator.py` from 11 to 23 after batch
+3 itself. The audit counted eleven wrong per-file counts in ARCHITECTURE's tree;
+two batches later it was eighteen. The full before/after table is in
+BREAKING_CHANGES §20.
+
+The generalisable half: **an audit finding is a measurement with a timestamp on
+it.** Fixing one months later without re-measuring writes a second wrong number
+over the first, and the fix looks like diligence.
+
+### Batch 3 — two S1s, and both defects lived *between* two correct things
+
+Neither was a broken function. In both, every rule involved was implemented
+exactly, and the defect was in the composition — which is also why the existing
+tests could not see either.
+
+**#74 — the loop's only bound was data the model supplies.** D2 compares
+`Claim.retry_count` against `MAX_PIPELINE_RETRIES`, and `while flagged:` has no
+other bound. The counter was incremented once per revision Pass 6a *returned*,
+so a claim 6a never named could not reach the cap. Pass 6a is one batched call
+across every flagged claim — exactly the shape a model drops an item from — and
+an omission, an empty list and an unknown id are indistinguishable at that
+lookup: the claim resolves to `None` and `if claim:` skips in silence. The cap
+was real code, on the right field, in the right place, and reachable only *with
+the model's cooperation*.
+
+Counting the **round** rather than the response makes the bound a property of
+the loop. Because `flagged` only ever shrinks, every claim in it exhausts on the
+same round.
+
+**#88 — the derived view has two span boundaries and only one is turn-aligned.**
+M4 makes the compaction fold boundary a turn start. The pinned set is the other
+boundary and can never be turn-aligned: `pin` is dispatched from inside a turn,
+D20 has already persisted the assistant message carrying `pin`'s own `tool_use`,
+and the answering `tool` row is written after dispatch returns — so it is never
+pinned. Invisible while the pin sits in the uncompacted tail; the first
+compaction whose watermark passes it puts an unanswered `tool_use` in the view.
+That is an HTTP 400 on Anthropic, **durable** (the checkpoint is a persisted
+row, there is no unpin, nothing removes a checkpoint) and misattributed — the
+user sees a provider error with no visible connection to a `pin` several turns
+earlier.
+
+M4 and M9 are each implemented exactly and **neither names the other**. The
+lesson worth keeping: when two invariants constrain the same sequence, the thing
+to test is the sequence, not each invariant.
+
+Fixed at the producer, `storage.pinned_through`, so both shells and
+`FakeStorage` inherit it — consumer-side is this project's canonical bug shape.
+
+### The three surviving mutations that were kept rather than trimmed
+
+`have`, the `set()` dedupe and the `role == "tool"` filter in `pinned_through`
+were each deleted separately against the full suite, and each survived. What
+keeps the result duplicate-free is the `not m["pinned"]` filter, and reaching
+any of the three needs two rows sharing one `tool_call_id` — which has no
+producer today.
+
+They were kept, because what they guard is a *duplicate* `tool_result`: the same
+wire error from the other direction as the one the function exists to prevent,
+which is the wrong place to trade a free backstop for a reachability argument.
+**The measurement went into the code comment**, so no later reader re-derives
+it — the difference between this and the comments audit units 10 and 12 had to
+re-measure from scratch.
+
+Two of the new tests were then renamed for what they *discriminate* rather than
+for the guard they appear to sit beside, because
+`test_an_already_pinned_tool_result_is_not_added_twice` stays green with `have`
+deleted. That is #61's shape — a test observing an effect adjacent to its
+cause — caught before filing rather than after.
+
+### Batch 4 — seventeen issues, and a trigger that had already fired
+
+#20, #21, #23, #33, #40, #83, #91, #97, #108, #121, #122, #125, #126, #127,
+#128, #129, #144. Almost all prose. Unit 16 found the sentence that explains the
+whole tier: **the claims that drift are the ones somebody had to count by hand.**
+
+So the batch corrected the current round *and* mechanised four of the counting
+habits that produced it. That was not a new idea — `TECHNICAL_DEBT.md` item 7
+had pre-registered the exact condition:
+
+> BUILT markers and tree entries are still by hand… **if those two start
+> drifting the same way, extend this file's check rather than adding a new
+> practice to remember.**
+
+Both had drifted, so `tests/test_docs_consistency.py` grew from 3 tests to 8.
+The rule for what belongs in it is unchanged and now lives in its docstring: **a
+claim earns a check by having already drifted, and only if the truth is
+something the suite can compute.** Every check compares a document against a
+live value — the collected session, the registry, the permission dataclasses —
+never against another hand-written number.
+
+### Questions asked, and the answers that were followed
+
+Per §0's pattern. Every one of these was a decision, not an inference.
+
+| Question | Answer |
+|---|---|
+| `pyproject.toml` shape | **Metadata only.** `dynamic = ["dependencies"]` reads `requirements.txt`, so there is still exactly one dependency list. `packages = []` / `py-modules = []` — the project runs from a checkout, and installing would put `config`, `main` and `conftest` into site-packages |
+| The second agent-context file | **Rename `CLAUDE.md` → `AGENTS.md`**; `CLAUDE.md` and `QWEN.md` become pointers. One copy, several filenames, so a harness optimised for a particular name does not spend tokens looking for it |
+| Reach of the rename | **Everything** — all 33 references, including `DEVLOG.md` and `BREAKING_CHANGES.md` |
+| Which facts to mechanise | **All four**: per-file counts (#121), `(BUILT)` markers (#129), README's approval table (#125), ARCHITECTURE's registry counts (#126) |
+| #121 strictness | **Strict** — a test file with no tree entry fails, not just a wrong count |
+| #40's shape | Anthropic **honours** `supports_stream_usage` like Google and OpenAI, rather than always raising |
+| #97 item 2's shape | **Correct the doc** — `INIT_MAX_STEPS` is the fallback; the agent file's `max_steps` wins |
+
+**The consequence of the rename, stated because it changes how a session
+starts:** Claude Code auto-injects `CLAUDE.md`, so it now injects a pointer
+rather than 84 KB. The context became an explicit read instead of an automatic
+one. The pointer's imperative is what carries it.
+
+### What batch 4 broke, and how it was diagnosed
+
+**The batch broke CI while the local suite stayed green.** Moving `markitdown`
+to an optional extra was #144's third item and is correct on its own terms — its
+only consumer is `file_ops._read_rich`, behind `read`, which is globally denied
+and cannot be re-enabled at runtime, and the import is lazy.
+
+But `tests/test_file_ops.py` does `patch("markitdown.MarkItDown", …)`, and
+**`mock.patch` with a string target imports the module to resolve it.** The test
+needed the package installed for a reason unrelated to anything it asserts: it
+substitutes a `MagicMock` and never touches the real library. Locally the
+package was still installed from before; on a runner doing a fresh
+`pip install -r requirements.txt` it was the suite's *only* failure, so the job
+reported nothing but `exit code 1`.
+
+The repository's token could not reach the Actions or PR APIs (403), so the
+runner was **rebuilt rather than reasoned about**: `docker run python:3.11-slim`
+over a `git archive` of HEAD, fresh install, `providers.json` from the example,
+`python -m pytest -q`. Pre-fix **1 failed, 1609 passed, exit 1**; post-fix
+**1611 passed, exit 0**. That container is also the only place the eleven tests
+which `skipif` on Windows (the symlink cases, three SIGALRM probes) run at all —
+all eleven pass on Linux, which is what established markitdown as the sole
+cause rather than the first of several.
+
+Two rules out of it, both in BREAKING_CHANGES §20: **grep the suite for a
+departing package's name, not just its imports** — no import-graph tool finds a
+dependency that exists only inside a patch string — and **a green local suite is
+not a green fresh install.**
+
+It is also the first time CI (#11) demonstrably earned its place: the workflow
+caught a real regression that 1612 local tests missed, on a platform the
+project is not developed on.
+
+### Two mutations survived the first run, for two different reasons
+
+Both are the vacuity class, and both generalise:
+
+1. **A narrowed invocation makes a session-dependent check SKIP, and a skip
+   reads as a survivor.** The mutation driver ran
+   `pytest tests/test_docs_consistency.py`, which *is* narrowed, so the two
+   checks needing `request.session.items` never executed. That is TECHNICAL_DEBT
+   6's own note — "one class of vacuity a revert check cannot catch is a test
+   that SKIPS" — arriving inside a mutation driver. Mutation-check a
+   session-dependent test against the **full** suite.
+2. **A character window is not a structure.** The README check read
+   `readme[start:start + 2000]`, which swallowed the explanatory paragraphs
+   below the table — and those name `write_project_doc` in backticks too, so
+   deleting it from the table left the check green. It now walks table rows and
+   stops at the first line that is not one.
+
+### Verified outside the suite
+
+- `pip install --dry-run .` against the new `pyproject.toml`, proving
+  `dynamic = {file = ["requirements.txt"]}` actually resolves rather than
+  assuming it would.
+- `python main.py --help` and `pytest --collect-only` after `markitdown` and
+  `protobuf` left the default install — nothing imports either at startup.
+- The full containerised CI reproduction above, twice.
+
+### A tooling hazard worth the line
+
+Updating the aggregate test count with
+`(Get-Content $f -Raw) -replace … | Set-Content -Encoding utf8` **double-encoded
+three documents.** PowerShell 5.1 reads a BOM-less UTF-8 file as cp1252, so
+every `—` and `§` became mojibake and a BOM was added. Reversible, because the
+damage is uniform across a whole-file rewrite — but the rule is: **rewrite files
+in Python with an explicit `encoding="utf-8"`, or with the editor.** Same family
+as the `2>&1` NativeCommandError note. PowerShell is fine for git and process
+control and is a hazard for text.
+
+### Not fixed, and why
+
+- **#91 item 2.** `effective_compaction`'s docstring promises provenance the
+  function does not return — D27's third implementation note, unbuilt. Build it
+  or stop promising it; that is a decision, not a correction. Recorded, not
+  guessed.
+- **#16 / #17 / #147** — the decision-record trio. #17's namespace choice
+  governs what the other two do, so it is its own round.
+- **#57 / #76 / #100** — the three remaining S1s, each blocked on a design
+  decision: parameter bounds versus a watchdog at `dispatch`; a shape-validation
+  layer across eight passes; and a control that could not be made green, because
+  the chat tests supply their lines by patching `builtins.input`.
+- **README's "pinning a message is thread-scoped and undoable"** is D26's false
+  premise, owned by open issue #89 and left to it.
