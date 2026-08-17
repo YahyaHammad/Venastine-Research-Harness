@@ -28,7 +28,7 @@ python main.py --init --research-project           # §24: skip the type questio
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 1597 tests, offline, ~25s (first run ~30s: matplotlib font cache)
+pytest                                            # 1605 tests, offline, ~25s (first run ~30s: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -179,6 +179,8 @@ Invariants that look like simplification opportunities but are not:
 - **Pass 4, D0, D1, D2, and Pass 6b make zero LLM calls.** Thresholds, routing, retry caps, dedup, and annotation are pure Python. Adding a model call to any of them is a rearchitecture, not a fix.
 - **The scoring formula caps before subtracting the assumption penalty**, not after. Cap-after was a real bug, caught by a test comparing a flagged and unflagged claim landing on the same tier.
 - **Pass 6c does not re-run Pass 5.** Assumption-flagged claims exhaust retries and fall to UNVERIFIED. Known design gap, not a bug.
+- **The 6a/6c loop counts the ROUND, not the revision** (#74). `retry_count` is incremented for every claim still in `flagged` after Pass 6a returns; the per-revision write sets `revision_text` only. Incrementing inside the loop over 6a's response — which is how it shipped — makes D2's cap reachable only with the model's cooperation, and 6a is one batched call across every flagged claim, exactly the shape a model drops an item from. A claim it omits then never exhausts and `while flagged:` has no bound at all. Do not *add* a per-round increment beside the per-revision one; it must replace it, or a named claim counts twice. And because `flagged` only ever shrinks, every claim in it exhausts on the same round — which is what keeps a fallback from being undone by a later one.
+- **The loop's re-tiering is scoped to its own batch** (`run_confidence_tiering(..., claims=flagged)`). Pass 4 re-tiers everything; a retry round must not, or a claim already finished at D1 or D2 is recomputed from unchanged score data while `_apply_fallback`'s annotation stays — so it ships as LOW beside a note saying it could not be verified, and Pass 6b leaves both alone because `if claim.annotation is None` is false.
 - **§20's review runs AFTER final synthesis, and the report it regenerates is NOT re-reviewed.** The regress is cut deliberately — reviewing the corrected report would need its own consent pass, and so on. Do not "fix" this. The stage is inside the pipeline's `try`, but a transient REVIEWER failure (provider error, unrecoverable JSON) is contained like the missing-agent branch: traced skip, run completes — an optional stage must not flip a finished ten-pass run to `status='failed'`. A failed re-synthesis after accepted corrections is contained the same way and for the same reason: the deferred commit restores the pre-review claims (so the record never carries corrected claims beside a stale report), the trace says the corrections did *not* land, and **the run still completes**. Only a failure that escapes the stage itself — a bug, not a transient provider error — reaches the pipeline's `except` and records `status='failed'`. Both halves are test-pinned; changing one without the other puts the code and this paragraph back into disagreement, which is what the §19–§20 review found here.
 - **`_synthesis_input` is a function, not a string built once.** §20 re-runs synthesis after an accepted correction; reusing the earlier string regenerates the report from the UNCORRECTED claims, so the report changes for no reason while the correction silently goes nowhere.
 - **`vars(c)` serializes `Claim` at every site** (orchestrator passes 3a/3b/5/6a/6c/final synthesis, `pipeline_storage.update_pipeline_run`, `output_writer.write_run_artifacts`). Adding a nested-dataclass field to `Claim` requires migrating *all* of them to `dataclasses.asdict(c)` in one change.
@@ -276,6 +278,16 @@ what makes an early, frequent trigger safe.
 - **Pinned rows inside the covered span are re-added verbatim** (M9). One watermark
   cannot say "everything through K except these", so without this the message a user
   explicitly asked to keep is the one that disappears.
+- **M4's rule reaches the PINNED boundary too, and `pinned_through` is where** (#88).
+  The derived view has two span boundaries and only the watermark is turn-aligned. The
+  pinned set never can be: `pin` is a tool, D20 persists the assistant turn carrying its
+  own `tool_use` before dispatch, and the answering row is written after dispatch returns
+  — so it is never pinned. Once a watermark passes the pinned region the view carries an
+  unanswered `tool_use`, which is the same HTTP 400 M4 exists to prevent, arriving through
+  the boundary M4 does not mention. Fixed at the producer; `_derived_view` dropping
+  unanswered calls would be consumer-side and would hide from the model a call it made.
+  M4 and M9 are each implemented exactly and neither names the other — the composition is
+  what nobody wrote down.
 - **A research pass compacts only at a hard backstop** (M6), near the real context
   window. Routine compaction in an unattended pass would spend on a judgment call
   nobody is watching.

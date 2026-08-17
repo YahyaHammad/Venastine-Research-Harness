@@ -156,6 +156,35 @@ def test_a_pinned_row_inside_the_covered_span_comes_back_verbatim(fake_storage):
         "role": "assistant", "text": "first answer", "tool_calls": []}
 
 
+def test_a_pinned_tool_call_comes_back_with_the_result_that_answers_it(fake_storage):
+    """#88, through the derived view. The test above pins rows[1], an
+    assistant row whose `tool_calls` is `[]` -- and the one thing a pinned
+    assistant row carries in production is a tool_call, because `pin` is
+    itself a tool and D20 persists the turn carrying its own tool_use before
+    the tool runs. Rows 2 and 3 are that shape; row 4 is the answering row,
+    written after dispatch returns and therefore never pinned.
+
+    M4 says a fold boundary can never separate the two because a
+    tool_result with no preceding tool_use is a hard wire error. The pinned
+    set is the second boundary, and it needs the same rule.
+    """
+    memory = ConversationMemory()
+    _two_turns(memory)
+    rows = _rows(fake_storage, memory)
+    fake_storage.set_pinned([rows[2]["id"], rows[3]["id"]])
+    fake_storage.save_checkpoint(memory.thread_id, "Summary.", rows[5]["id"])
+
+    resumed = ConversationMemory(thread_id=memory.thread_id)
+
+    called = {call["id"] for m in resumed.messages if m["role"] == "assistant"
+              for call in m.get("tool_calls", [])}
+    assert "tc1" in called, "the pinned assistant row is not in the view"
+
+    answered = {m["tool_call_id"] for m in resumed.messages if m["role"] == "tool"}
+    assert not (called - answered), (
+        f"unanswered tool_use in the derived view: {called - answered}")
+
+
 def test_apply_checkpoint_rebuilds_the_view_in_place(fake_storage):
     """Mid-turn compaction. Re-reading rather than splicing keeps the
     assembly rules in one place, so a compaction that happens during a

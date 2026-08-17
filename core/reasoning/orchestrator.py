@@ -995,11 +995,34 @@ def stream_deep_research_pipeline(
                 for c in flagged
             ])
             revisions = _parse_json_response((yield from _run_pass_with_json_retry("Pass 6a", pass6a_input, model, provider_name, run.trace, authorization=authorization, pass_threads=run.pass_threads)))
+
+            # COUNT THE ROUND, NOT THE REVISION. The increment used to live
+            # inside the loop below, so only a claim Pass 6a NAMED counted --
+            # and 6a is one batched call across every flagged claim, which is
+            # exactly the shape a model drops an item from. A claim it omitted
+            # could never reach D2's cap, so `while flagged:` had no bound at
+            # all: two model calls per round, for ever, each on
+            # RESEARCH_PASS_TOKEN_BUDGET. An omission, an empty list and an
+            # unknown id are indistinguishable here -- the lookup returns None
+            # and the `if claim:` skips in silence -- which is why the bound
+            # cannot be data the model supplies.
+            #
+            # Counting the round makes D2's cap bound the loop by
+            # construction, and since `flagged` only ever shrinks, every claim
+            # still in it exhausts on the same round.
+            for claim in flagged:
+                claim.retry_count += 1
+
             for rev in revisions:
-                claim = run.claim_by_id(rev["claim_id"])
+                # Resolved WITHIN the batch, first-wins like
+                # PipelineRun.claim_by_id: 6a was only asked about `flagged`,
+                # and a revision naming a claim outside it would land on one
+                # already finished -- while carrying a retry_count this round
+                # did not increment, so the event below would report a stale
+                # attempt number.
+                claim = next((c for c in flagged if c.id == rev["claim_id"]), None)
                 if claim:
                     claim.revision_text = rev["revised_text"]
-                    claim.retry_count += 1
                     # §22's "which claim, which attempt" -- emitted from the
                     # claim retry loop, which is the retry the section means.
                     # A JSON-parse retry is a different thing and reaches the
@@ -1013,7 +1036,11 @@ def stream_deep_research_pipeline(
             revalidation = _parse_json_response((yield from _run_pass_with_json_retry("Pass 6c", pass6c_input, critic_model, critic_provider, run.trace, authorization=authorization, pass_threads=run.pass_threads)))
             _apply_grounding(run.claims, revalidation.get("grounding", []))
             _apply_critic(run.claims, revalidation.get("critic", []))
-            run_confidence_tiering(run, ensemble_n=effective_n)  # Pass 4's function again -- code, not a call
+            # Pass 4's function again -- code, not a call. Scoped to THIS
+            # round's batch: 6c is only asked about `flagged`, and re-tiering
+            # the whole run once per round recomputes claims that are already
+            # finished, from score data those rounds did not change.
+            run_confidence_tiering(run, ensemble_n=effective_n, claims=flagged)
             yield from _tier_events(run)
 
             still_flagged = [c for c in flagged if c.confidence_tier in FLAGGED_TIERS]

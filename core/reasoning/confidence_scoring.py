@@ -150,11 +150,29 @@ def build_coverage_gap_entries(completeness: dict) -> list[dict]:
     return [{"gap": gap, "tier": "UNVERIFIED_COVERAGE"} for gap in completeness.get("gaps", [])]
 
 
-def run_confidence_tiering(run: PipelineRun, ensemble_n: int = 0) -> None:
+def run_confidence_tiering(
+    run: PipelineRun, ensemble_n: int = 0,
+    claims: list[Claim] | None = None,
+) -> None:
     """The actual Pass 4 entry point the orchestrator calls. Mutates
-    every claim in place; zero LLM calls. Pass ensemble_n > 0 to use
-    the ensemble formula variant (ROADMAP §10)."""
-    for claim in run.claims:
+    the claims in place; zero LLM calls. Pass ensemble_n > 0 to use
+    the ensemble formula variant (ROADMAP §10).
+
+    `claims` narrows WHICH claims are re-tiered, and defaults to all of
+    them -- which is Pass 4 itself, where every claim is in play. The
+    6a/6c loop passes its current batch instead: it calls this once per
+    round, and re-tiering the whole run there recomputes claims that are
+    already finished. A claim D2 had exhausted got its tier restored from
+    unchanged score data while the fallback annotation _apply_fallback
+    wrote stayed put, so it shipped as (say) LOW beside a note saying it
+    could not be verified -- and a claim D1 never flagged could be
+    re-tiered by any round that touched its grounding.
+
+    `run.coverage_gaps` is rebuilt either way: it is a pure function of
+    run.completeness, which does not change across the loop, so the
+    narrowed call leaves it exactly as the full one would.
+    """
+    for claim in (run.claims if claims is None else claims):
         tier, breakdown = score_claim(claim, ensemble_n=ensemble_n)
         claim.confidence_tier = tier
         claim.score_breakdown = breakdown

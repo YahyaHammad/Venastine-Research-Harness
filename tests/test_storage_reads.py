@@ -146,6 +146,66 @@ def test_a_pin_after_the_watermark_is_not_re_added(thread):
     assert storage.pinned_through(THREAD_ID, thread[5]["id"]) == []
 
 
+def test_a_pinned_tool_call_brings_back_the_result_that_answers_it(thread):
+    """#88. Rows 2 and 3 are the shape a real pin ALWAYS has, and the only
+    one it can have: `pin` is dispatched from inside a turn, D20 has already
+    persisted the assistant message carrying the tool_use, and the answering
+    tool row is written after dispatch returns -- so it is never pinned.
+
+    Without the re-inclusion the view carries a tool_use with no
+    tool_result, which is an HTTP 400 on Anthropic. M9 re-adds the pinned
+    rows; M4's rule that a boundary never separates the two has to reach
+    this second boundary as well.
+    """
+    thread[2]["pinned"] = True   # the turn start
+    thread[3]["pinned"] = True   # assistant, carrying tool_call tc1
+    # thread[4] -- the tool result -- is NOT pinned, exactly as production
+    # leaves it.
+
+    kept = storage.pinned_through(THREAD_ID, thread[5]["id"])
+
+    assert [k["role"] for k in kept] == ["user", "assistant", "tool"], (
+        f"the tool row answering tc1 must come back with the pinned span; "
+        f"got {[k['role'] for k in kept]}"
+    )
+    assert kept[2] == {"role": "tool", "tool_call_id": "tc1",
+                       "content": "search results"}
+
+    called = {c["id"] for k in kept for c in k.get("tool_calls", [])}
+    answered = {k["tool_call_id"] for k in kept if k["role"] == "tool"}
+    assert called == answered, f"unanswered tool_use: {called - answered}"
+
+
+def test_an_already_pinned_tool_result_is_not_added_twice(thread):
+    """A duplicate tool_result is the same wire error from the other
+    direction, so the OUTPUT contract is what this pins.
+
+    Not the `have` guard, despite appearances: deleting `have` leaves this
+    green, because the re-inclusion only considers rows that are NOT pinned
+    and this row is. Named for the property rather than for the line, since
+    a test named after a guard it cannot discriminate is #61's shape.
+    """
+    thread[3]["pinned"] = True
+    thread[4]["pinned"] = True
+
+    kept = storage.pinned_through(THREAD_ID, thread[5]["id"])
+
+    assert [k["role"] for k in kept] == ["assistant", "tool"]
+
+
+def test_an_unrelated_tool_result_is_not_pulled_into_the_pinned_span(thread):
+    """Only the calls the PINNED rows actually made. Re-adding every tool
+    row in the span would put back the results compaction just summarized,
+    which is the context this feature exists to shrink -- and that is the
+    wrong implementation this discriminates, rather than any one guard
+    inside the right one."""
+    thread[1]["pinned"] = True   # an assistant row with no tool_calls
+
+    kept = storage.pinned_through(THREAD_ID, thread[5]["id"])
+
+    assert kept == [{"role": "assistant", "text": "first answer", "tool_calls": []}]
+
+
 def test_chaining_summarizes_only_what_followed_the_last_checkpoint(thread):
     """M2's chain strategy. Passing both bounds is what makes it cheap --
     rederive passes no lower bound and re-reads the whole span."""
