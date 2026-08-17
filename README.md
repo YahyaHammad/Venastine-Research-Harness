@@ -13,9 +13,13 @@ The design premise is that a model's own confidence is not evidence. Everything 
 
 ## Setup
 
+**Python 3.11 or newer.** `mcp_client/client.py` uses `asyncio.timeout`, which is 3.11+, and 27 sites use runtime `X | Y` annotations (3.10+). `pyproject.toml` declares the floor, so `pip install -e .` refuses an older interpreter rather than failing later from inside the MCP connect path.
+
 ```bash
 pip install -r requirements.txt
 ```
+
+`markitdown` is an optional extra (`pip install -e ".[documents]"`) — its only consumer is behind `read`/`write`/`edit`, which are denied by default and cannot be enabled at runtime. The PDF export path is likewise optional: `pip install -e ".[pdf]"`.
 
 ### Two credential stores, deliberately separate
 

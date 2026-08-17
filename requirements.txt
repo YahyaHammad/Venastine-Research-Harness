@@ -1,9 +1,16 @@
+# The Python floor is 3.11 (mcp_client/client.py uses asyncio.timeout).
+# requirements.txt cannot express that; pyproject.toml's requires-python
+# can, and reads THIS file for the list below via dynamic dependencies --
+# so there is one dependency list, not two. See issue #144.
+#
+# markitdown and protobuf moved to pyproject's `documents` extra: their
+# only reachable consumer is behind read/write/edit, which are globally
+# denied. `pip install -e ".[documents]"` brings them back.
+
 anthropic==0.116.0
 ddgs==9.14.4
 httpx==0.28.1
-markitdown==0.1.6
 openai==2.45.0
-protobuf==7.35.1
 # NOTE (ROADMAP_v2 §16): this pin has no ThinkingConfig.thinking_budget --
 # that field arrived in a later release. core/client.py checks for it at
 # runtime and reports no effort levels on GOOGLE rather than sending a
@@ -19,6 +26,14 @@ pyyaml==6.0.3
 # ROADMAP_v2 §16 TUI. Upper-bounded per D22 -- the mcp lesson was that an
 # unpinned dependency mid-major-version-transition migrates you by accident.
 textual>=1.0,<2.0
+
+# Imported DIRECTLY at tui/widgets.py:8-9 (`rich.syntax.Syntax`,
+# `rich.text.Text`) and previously undeclared -- present only because
+# textual, mcp and httpx all happen to require it, so its major version was
+# chosen by whatever textual's own range resolved to. Upper-bounded per D22
+# for D22's own reason, and this was the one package the project imported
+# without declaring, i.e. the one place such a migration would be silent.
+rich>=13,<16
 
 # ROADMAP_v2 §17 MCP client. Upper-bounded per D22 -- and D22 exists
 # BECAUSE of this package: it was mid-major-version transition when §17

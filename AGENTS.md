@@ -13,6 +13,10 @@ below. One copy, several filenames.
 ## Commands
 
 ```bash
+# Python 3.11+ (mcp_client/client.py uses asyncio.timeout). pyproject.toml
+# declares requires-python and reads its dependency list FROM requirements.txt
+# via `dynamic`, so there is one list, not two. markitdown and protobuf are in
+# the `documents` extra, not the default install (#144).
 pip install -r requirements.txt
 
 python main.py                                    # chat mode, new thread

@@ -7,3 +7,10 @@ logs/
 providers.json
 .qwen/
 output/
+
+# Build residue. pyproject.toml (#144) is metadata-only -- nothing here is
+# meant to be built or installed -- but any `pip install`, metadata read or
+# dry run against it still drops these.
+*.egg-info/
+build/
+dist/

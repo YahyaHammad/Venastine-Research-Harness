@@ -14,9 +14,8 @@
 #     with `ValueError: Unknown provider: ANTHROPIC`. "Offline, no API keys"
 #     is true; "no config file" is not.
 #   * Python 3.11. mcp_client/client.py uses asyncio.timeout, which is 3.11+.
-#     Issue #144 records that no packaging artifact declares this; until one
-#     does, the version lives here and nowhere else, so this comment is the
-#     only place it is written down.
+#     Declared in pyproject.toml's requires-python since #144 -- the pin below
+#     matches it rather than being the only record of it.
 #
 # `-m integration` is deliberately NOT run: pytest.ini already excludes it
 # from the default invocation, and it currently fails for an unrelated reason
