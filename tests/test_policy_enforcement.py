@@ -232,6 +232,68 @@ class TestIsUrlPermitted:
         assert is_url_permitted("https://example.com/page", resolve=False) is None
 
 
+class TestWebSearchUsesTheSameChecker:
+    """The SECOND caller. Added because a mutation found it unpinned.
+
+    Flipping `resolve=False` to `resolve=True` at web_search.py's call
+    site left the whole suite green: `test_resolve_false_issues_no_lookup`
+    above pins the PARAMETER, and nothing pinned the ARGUMENT. That is a
+    test asserting a mechanism next to the thing it is meant to
+    discriminate -- #61's shape -- and the failure it misses is silent:
+    web_search would simply start paying a DNS round trip per search hit,
+    which nobody attributes to a policy change.
+    """
+
+    def _hit(self, url):
+        return [{"href": url, "title": "t", "body": "b"}]
+
+    def test_a_result_pointing_at_a_private_address_is_dropped(self, monkeypatch):
+        """The cheap path still checks IP LITERALS. A result naming the
+        metadata endpoint is dropped here rather than offered to the model
+        and then refused by fetch_url."""
+        from tools.builtin import web_search
+
+        monkeypatch.setattr("safety.policy_enforcement.BLOCKED_DOMAINS", set())
+        out = web_search._normalize(self._hit("http://169.254.169.254/latest/"))
+        assert out == []
+
+    def test_a_blocked_domain_result_is_dropped(self, monkeypatch):
+        from tools.builtin import web_search
+
+        monkeypatch.setattr("safety.policy_enforcement.BLOCKED_DOMAINS",
+                            {"evil.com"})
+        assert web_search._normalize(self._hit("https://sub.evil.com/x")) == []
+
+    def test_an_ordinary_result_survives(self, monkeypatch):
+        """Discriminates the two above from a filter that drops everything."""
+        from tools.builtin import web_search
+
+        monkeypatch.setattr("safety.policy_enforcement.BLOCKED_DOMAINS", set())
+        out = web_search._normalize(self._hit("https://example.com/page"))
+        assert len(out) == 1
+
+    def test_filtering_results_issues_no_dns(self, monkeypatch):
+        """The mutation-killer, and the reason `resolve` exists.
+
+        web_search FILTERS results; it does not fetch them. A lookup per
+        hit is real latency for a check whose only failure mode is showing
+        the model a URL fetch_url will refuse anyway -- and DDGS returns
+        up to ten hits per call, inside ten research passes.
+        """
+        from tools.builtin import web_search
+
+        monkeypatch.setattr("safety.policy_enforcement.BLOCKED_DOMAINS", set())
+
+        def _boom(*a, **kw):
+            raise AssertionError(
+                "web_search resolved DNS while filtering results; its call "
+                "to is_url_permitted must pass resolve=False")
+
+        monkeypatch.setattr("safety.policy_enforcement.socket.getaddrinfo",
+                            _boom)
+        assert len(web_search._normalize(self._hit("https://example.com/p"))) == 1
+
+
 class TestIsUrlPermittedResolution:
     """The resolving path, with getaddrinfo faked -- no network."""
 
