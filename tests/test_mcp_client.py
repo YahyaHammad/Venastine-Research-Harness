@@ -12,7 +12,7 @@ It matters here more than usual. What §17 owns is almost entirely the
 bridge: a background thread, one event loop, an exit stack with task
 affinity, and timeout interaction between two layers. A fake session
 would prove the fake and the bridge agree, which is exactly the trap
-CLAUDE.md names ("verify against production, not the test double") -- and
+AGENTS.md names ("verify against production, not the test double") -- and
 the cancel-scope bug that shaped this design is invisible to any fake,
 because it lives in anyio's real cancel scopes.
 

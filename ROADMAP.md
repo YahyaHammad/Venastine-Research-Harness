@@ -845,7 +845,7 @@ Implemented against `google-genai==1.0.0` with all SDK shapes verified by inspec
 > meant — varied by provider with no way for Pass 4 to know. **Needs a live check**; it
 > cannot be settled offline. Separately, `MODELS_REJECTING_SAMPLING_PARAMS` lists only
 > Anthropic names while OpenAI's own reasoning models restrict `temperature` the same way,
-> so the guard likely did not fire for `gpt-5.1` — the model CLAUDE.md's example command
+> so the guard likely did not fire for `gpt-5.1` — the model AGENTS.md's example command
 > names. Also needs a live check; both are moot for ensemble mode now.
 >
 > **What shipped is not what this note proposed.** It proposed prompt-level framing

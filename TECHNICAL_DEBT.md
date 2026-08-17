@@ -28,12 +28,12 @@ only until the shells' last step.
 ## 2. Failure-containment policy was split across documents
 
 review.py's prose said an optional stage must not lose a completed run;
-CLAUDE.md said reviewer failures land on `status='failed'`. Both halves of
+AGENTS.md said reviewer failures land on `status='failed'`. Both halves of
 the changeset stated opposite policies (f1).
 
 - **Fixed:** transient reviewer failures (provider error, unrecoverable
   JSON) are contained like the missing-agent branch — traced skip, run
-  completes; CLAUDE.md rewritten to one policy. Deferred commit (f4) keeps
+  completes; AGENTS.md rewritten to one policy. Deferred commit (f4) keeps
   a failed re-synthesis from persisting corrected claims beside a stale
   report.
 - **Remaining:** a failure that escapes the stage itself (a bug, not a
@@ -328,7 +328,7 @@ provider.* Nothing in a 1400-test offline suite could have caught it.
 
 **(b) `config.MODELS_REJECTING_SAMPLING_PARAMS` lists only Anthropic names.**
 OpenAI's own reasoning models restrict `temperature` the same way, and
-CLAUDE.md's example command is `--provider OPENAI --model gpt-5.1`. So §16's
+AGENTS.md's example command is `--provider OPENAI --model gpt-5.1`. So §16's
 guard — added specifically to stop a sampling parameter reaching a model that
 rejects it — likely never fired for the OpenAI model the docs suggest.
 
@@ -358,7 +358,7 @@ either extend the set or record that it was checked and is right.
   it does not have — the reviewer was just the first one anyone noticed.
   `with_catalogs` now takes the context and suppresses each catalog whose
   tool is unreachable; the per-caller flag is gone. This was the
-  fix-at-the-consumer shape CLAUDE.md names by name, and it is worth
+  fix-at-the-consumer shape AGENTS.md names by name, and it is worth
   reading as the recurring lesson rather than a one-off: a per-case opt-out
   added to a shared assembly point usually means the condition belongs
   inside it.

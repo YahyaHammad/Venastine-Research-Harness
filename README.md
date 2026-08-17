@@ -289,6 +289,7 @@ Run the test suite with `pytest` — 1605 tests, fully offline, no API keys need
 
 This file is the user-facing one. For working on the code:
 
+- **[AGENTS.md](./AGENTS.md)** — the agent-context file, and the place to start. `CLAUDE.md` and `QWEN.md` are pointers to it so a tool looking for a particular filename finds one without the guidance being duplicated.
 - **[ARCHITECTURE.md](./ARCHITECTURE.md)** — file-by-file contracts, what belongs where, and the known gotchas. Read before changing anything non-trivial, especially around persistence (`database.py` / `storage.py` / `core/memory.py` are three distinct and easily confused responsibilities).
 - **[ROADMAP.md](./ROADMAP.md)** and **[ROADMAP_v2.md](./ROADMAP_v2.md)** — implementation specs plus the locked Design Decisions Record that most of the reasoning above traces back to.
 - **[DEVLOG.md](./DEVLOG.md)** — what was followed, what was deviated from, and why.

@@ -329,7 +329,7 @@ def test_the_two_walk_doubles_really_do_differ(_two_subdirs):
 def test_descent_order_does_not_change_the_trust_prompt_listing(
         _two_subdirs, monkeypatch):
     """`content_files` carries the identical `dirs.sort()`, and it is what the
-    D17 trust prompt lists. CLAUDE.md's rule is to grep every other call site
+    D17 trust prompt lists. AGENTS.md's rule is to grep every other call site
     sharing a root cause; this is that site.
 
     A reordered listing is cosmetic where a reordered digest is not -- but it

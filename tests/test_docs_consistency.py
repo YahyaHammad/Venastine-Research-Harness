@@ -35,7 +35,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # those and compare two unrelated numbers forever.
 DOC_PATTERNS = {
     "README.md": r"pytest` — (\d+) tests, fully offline",
-    "CLAUDE.md": r"# (\d+) tests, offline",
+    "AGENTS.md": r"# (\d+) tests, offline",
     "ARCHITECTURE.md": r"# (\d+) tests, all offline",
 }
 
@@ -128,6 +128,6 @@ def test_the_documented_count_is_the_real_one(request):
 
     assert documented == actual, (
         f"The docs say {documented} tests; this run collected {actual}. "
-        f"Update README.md, CLAUDE.md and ARCHITECTURE.md -- the count is "
+        f"Update README.md, AGENTS.md and ARCHITECTURE.md -- the count is "
         f"quoted in all three."
     )

@@ -24,7 +24,7 @@ ALSO INCLUDED: the safe_parse injection battery (#52).
   This was ONE payload -- `__import__('os').system(...)` -- and its
   docstring claimed the property was "verified via test to actually
   block a real injection payload, not just assumed safe", which
-  ARCHITECTURE.md §10 and CLAUDE.md both repeated.
+  ARCHITECTURE.md §10 and AGENTS.md both repeated.
 
   That payload is blocked, but for a reason unrelated to the defence it
   was named for: `auto_symbol` rewrites the bare name `__import__` into

@@ -1005,7 +1005,7 @@ sets it raise, since unknown keys raise by design.
 ### Standing: the doc-count guard fires on every added test
 
 `test_docs_consistency.py::test_the_documented_count_is_the_real_one` compares
-the collected total against the number quoted in `README.md`, `CLAUDE.md` and
+the collected total against the number quoted in `README.md`, `AGENTS.md` and
 `ARCHITECTURE.md`. It **skips** on a narrowed invocation, so a green
 `pytest tests/test_ensemble_guard.py` says nothing about it. Run the full suite
 before committing, and update all three quotes together.
@@ -1036,7 +1036,7 @@ standard the batch was held to, and two of them failed it on the first attempt �
 
 | Change | Symptom | Why the guard exists |
 |---|---|---|
-| Change `storage._to_neutral`'s reconstruction without changing `FakeStorage._reconstruct` identically (or vice versa) | `test_fake_storage_mirror.py::TestReconstructionMirrorsProduction` fails, naming the role that diverged | CLAUDE.md's "verify against production, not the test double" was a convention nothing checked. Both are pure functions, so the check is direct |
+| Change `storage._to_neutral`'s reconstruction without changing `FakeStorage._reconstruct` identically (or vice versa) | `test_fake_storage_mirror.py::TestReconstructionMirrorsProduction` fails, naming the role that diverged | AGENTS.md's "verify against production, not the test double" was a convention nothing checked. Both are pure functions, so the check is direct |
 | Make `_split_at` return `len(rows)` for a watermark it cannot find, on **either** side | `test_an_unknown_watermark_is_zero_on_both_sides` | The 0 is what shows the whole thread rather than hiding a prefix on the strength of an id that could not be resolved |
 | `return Claim(**raw)` in `_claim_from_json` | 8 tests in `test_orchestrator.py`, including the end-to-end path — the canned Pass 2 payload carries a `confidence` key for exactly this | Nothing outside the allowlist appeared in any canned payload, so the filter was never exercised |
 | Widen or narrow `_CLAIM_INPUT_FIELDS` | `test_every_allowlisted_field_still_arrives`'s exact-contents assertion | The previous worked example (`asserted_by_candidates`) was moved INTO the allowlist by §10's revisit, so two documents described filtering with a field that was no longer filtered |
@@ -1132,7 +1132,7 @@ satisfied by an absent subject.
 suggested fix exactly as written would have left **the default provider** dying differently
 (#36), and Google correct only by accident of which provider was under debug when the hazard
 was first met. One filter above the split fixed all three and pre-fixes the fourth. That is
-CLAUDE.md's *fix at the producer, not the consumer* rule meeting a case where the consumers
+AGENTS.md's *fix at the producer, not the consumer* rule meeting a case where the consumers
 were three provider branches rather than two call sites.
 
 ---

@@ -199,7 +199,7 @@ def test_the_anthropic_capability_read_matches_the_pinned_types():
 def test_httpx_get_does_not_follow_redirects_by_default():
     """The arXiv 301 incident, pinned.
 
-    CLAUDE.md records it as having SHIPPED: arXiv began 301-redirecting,
+    AGENTS.md records it as having SHIPPED: arXiv began 301-redirecting,
     httpx does not follow redirects by default, `raise_for_status()` ignores
     3xx, and `ET.fromstring("")` on the empty body raised -- three retries,
     then an exception that flipped a finished ten-pass research run to

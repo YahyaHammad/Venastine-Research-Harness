@@ -179,7 +179,7 @@ def _is_empty_assistant_turn(msg: dict) -> bool:
 
     Only Google was guarded, and only because Google was the provider being
     debugged when it surfaced. Dropping it above the branch split is
-    CLAUDE.md's *fix at the producer, not the consumer*: all three branches
+    AGENTS.md's *fix at the producer, not the consumer*: all three branches
     become correct at once, and so does the next one.
 
     Requiring BOTH halves to be empty is load-bearing. An empty text WITH
