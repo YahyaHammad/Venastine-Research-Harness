@@ -349,6 +349,171 @@ def test_pipeline_6a6c_retry_loop_continues_until_max_retries_then_fallback(mock
     )
 
 
+def _two_claims_stuck_through_retry_payloads(six_a_rounds: list):
+    """Like _one_claim_stuck_through_retry_payloads, but TWO claims land in
+    FLAGGED_TIERS -- which is what lets a Pass 6a response name a subset of
+    the batch (#74). C1 is factual and grounded (HIGH, never flagged); C2 and
+    C4 are speculative with two assumption flags each (0.65 cap - 0.30
+    penalty = 0.35 -> LOW).
+
+    `six_a_rounds` is supplied by the caller because it is the whole
+    variable under test. 6c answers nothing, so both stay flagged.
+    """
+    max_retries = config.MAX_PIPELINE_RETRIES
+    return {
+        "Pass 0": json.dumps({"key_entities_or_subjects": ["x"], "outline": ["point"]}),
+        "Pass 1": "A is supported by X. B seems likely. D also seems likely.",
+        "Pass 2": json.dumps([
+            {"id": "C1", "text": "A is supported by X.", "type": "factual",
+             "entities": ["X"], "source_span": ""},
+            {"id": "C2", "text": "B seems likely.", "type": "speculative",
+             "entities": ["B"], "source_span": ""},
+            {"id": "C4", "text": "D also seems likely.", "type": "speculative",
+             "entities": ["D"], "source_span": ""},
+        ]),
+        "Pass 3a": json.dumps([
+            {"claim_id": "C1", "sources": [], "status": "grounded"},
+        ]),
+        "Pass 3b": json.dumps([
+            {"claim_id": "C1", "fallacies": [], "contradictions": [], "severity": 0.0},
+        ]),
+        "Pass 3c": json.dumps({"coverage_score": 0.9, "gaps": []}),
+        "Pass 5": json.dumps({"per_claim_flags": {
+            "C2": ["unsupported claim", "circular reasoning"],
+            "C4": ["unsupported claim", "circular reasoning"],
+        }}),
+        "Pass 6a": six_a_rounds,
+        "Pass 6c": [json.dumps({"grounding": [], "critic": []})
+                    for _ in range(max_retries)],
+        "Final synthesis": "A is well-supported; B and D remain uncertain.",
+    }
+
+
+# ---------------------------------------------------------------------------
+# ---- #74: the 6a/6c loop's bound must not be data the model supplies -------
+# ---------------------------------------------------------------------------
+#
+# These three are BOUNDED BY THE MOCK, deliberately. With the fix reverted the
+# loop does not fail, it never terminates -- so each payload supplies exactly
+# MAX_PIPELINE_RETRIES rounds and _build_pass_mock raises when the loop asks
+# for one more. Reaching that AssertionError IS the red; the pipeline's except
+# re-raises, so it arrives as a failure rather than as a hung suite. This is
+# the issue's own probe discipline: a probe that would hang is worth writing,
+# one that hangs is not.
+
+def test_a_claim_pass_6a_omits_still_exhausts_its_retries(mocker):
+    """#74 defect 1. retry_count used to be incremented only inside the loop
+    over Pass 6a's response, so a flagged claim 6a did not NAME could never
+    reach D2's cap -- and `while flagged:` had no other bound. 6a is one
+    batched call across every flagged claim, which is exactly the shape a
+    model drops an item from.
+
+    C2 is revised every round; C4 is never mentioned. Both must exhaust.
+    """
+    max_retries = config.MAX_PIPELINE_RETRIES
+    payloads = _two_claims_stuck_through_retry_payloads([
+        json.dumps([{"claim_id": "C2", "revised_text": f"Revision {i + 1}"}])
+        for i in range(max_retries)
+    ])
+    call_log = []
+    mocker.patch.object(
+        RunAgentLoop, "stream_deep_research_mode",
+        side_effect=pass_stream(_build_pass_mock(call_log, payloads)),
+    )
+
+    run = run_deep_research_pipeline(
+        user_query="test query", model="claude-test", provider_name="ANTHROPIC",
+    )
+
+    c4 = run.claim_by_id("C4")
+    assert c4.retry_count == max_retries, (
+        f"C4 was flagged for every round and never named by Pass 6a; it must "
+        f"still reach D2's cap. retry_count={c4.retry_count}"
+    )
+    assert c4.confidence_tier == "UNVERIFIED"
+    assert "Could not be adequately verified" in c4.annotation
+    # Never revised, so the fallback keeps the original text.
+    assert c4.revision_text is None
+    assert c4.final_text == c4.text
+
+    # The named claim is unaffected -- the round counts for it too, and it
+    # must not count TWICE. A first attempt at this fix ADDED the per-round
+    # increment while leaving the per-revision one, and a named claim then
+    # exhausted in half the rounds.
+    c2 = run.claim_by_id("C2")
+    assert c2.retry_count == max_retries
+    assert c2.revision_text == f"Revision {max_retries}"
+
+    # Both exhaust on the SAME round, because `flagged` only ever shrinks.
+    assert call_log.count("Pass 6a") == max_retries
+    assert call_log.count("Pass 6c") == max_retries
+
+
+def test_a_pass_6a_response_naming_nothing_still_exhausts_the_loop(mocker):
+    """#74 defect 1, the degenerate case. An empty list, a claim id that does
+    not exist and an omitted claim are indistinguishable to the loop: the
+    lookup returns None and the `if claim:` skips in silence. Only the round
+    can bound it."""
+    max_retries = config.MAX_PIPELINE_RETRIES
+    payloads = _one_claim_stuck_through_retry_payloads()
+    payloads["Pass 6a"] = [json.dumps([]) for _ in range(max_retries)]
+    call_log = []
+    mocker.patch.object(
+        RunAgentLoop, "stream_deep_research_mode",
+        side_effect=pass_stream(_build_pass_mock(call_log, payloads)),
+    )
+
+    run = run_deep_research_pipeline(
+        user_query="test query", model="claude-test", provider_name="ANTHROPIC",
+    )
+
+    c2 = run.claim_by_id("C2")
+    assert c2.retry_count == max_retries
+    assert c2.confidence_tier == "UNVERIFIED"
+    assert c2.revision_text is None
+    assert call_log.count("Pass 6a") == max_retries
+
+
+def test_a_retry_round_does_not_re_tier_a_claim_outside_its_batch(mocker):
+    """#74 defect 2. run_confidence_tiering() re-tiered the WHOLE run once
+    per round, so a 6c response naming a claim outside the current batch
+    could recompute one that was already finished -- and Pass 6b then leaves
+    the result alone, because `if claim.annotation is None` is false.
+
+    C1 is clean at D1 and never enters the batch. 6c names it anyway, as
+    ungrounded, which for a factual claim is an immediate UNVERIFIED. Scoped
+    to the batch, C1 keeps the tier D1 gave it.
+
+    Only the TIER is asserted. 6c's payload still reaches C1's grounding
+    fields, because nothing validates that a pass answered about what it was
+    asked -- that is #76, and it has a different fix site.
+    """
+    max_retries = config.MAX_PIPELINE_RETRIES
+    payloads = _one_claim_stuck_through_retry_payloads()
+    payloads["Pass 6c"] = [
+        json.dumps({
+            "grounding": [{"claim_id": "C1", "sources": [], "status": "ungrounded"}],
+            "critic": [],
+        })
+        for _ in range(max_retries)
+    ]
+    mocker.patch.object(
+        RunAgentLoop, "stream_deep_research_mode",
+        side_effect=pass_stream(_build_pass_mock([], payloads)),
+    )
+
+    run = run_deep_research_pipeline(
+        user_query="test query", model="claude-test", provider_name="ANTHROPIC",
+    )
+
+    c1 = run.claim_by_id("C1")
+    assert c1.confidence_tier == "HIGH", (
+        f"C1 was never flagged, so no retry round should re-tier it; "
+        f"got {c1.confidence_tier}"
+    )
+    assert c1.annotation == "[HIGH]"
+
+
 def test_parse_json_response_strips_code_fences():
     """_parse_json_response handles both bare JSON and JSON wrapped in a
     ``` code fence (optionally with a `json` language tag)."""
