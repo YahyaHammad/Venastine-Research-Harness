@@ -131,6 +131,15 @@ class _Resp:
         self.tool_calls = list(tool_calls)
 
 
+class _ToolCall:
+    """The three attributes add_assistant_message reads off a ModelResponse's
+    tool calls before persisting them in the neutral shape."""
+    def __init__(self, id, name, input):
+        self.id = id
+        self.name = name
+        self.input = input
+
+
 @pytest.fixture
 def compactor(mocker):
     """The compactor agent, stubbed at the model call. Returns a short
@@ -218,6 +227,75 @@ def test_compaction_makes_progress_every_time_it_runs(real_storage, compactor):
         assert size < len(archive), (
             f"round {round_index} left a view of {size} against an archive "
             f"of {len(archive)} -- compaction did not reduce anything")
+
+
+def test_a_pinned_pin_call_leaves_no_unanswered_tool_use_in_the_view(
+        real_storage, compactor):
+    """#88. The derived view has TWO span boundaries and only the checkpoint
+    watermark is turn-aligned (M4). The pinned set is not, and cannot be:
+    `pin` is dispatched from inside a turn, so the write order below is the
+    only order a pin can have.
+
+    Needs a REAL compaction, which is why it is in this file and not in
+    test_memory_compaction.py: the two boundaries coincide until a
+    checkpoint exists, so an uncompacted thread cannot show the defect.
+    Nothing caught it because the M9 test pins an assistant row whose
+    `tool_calls` is `[]` -- the one thing a pinned assistant row carries in
+    production is the one thing that fixture leaves empty.
+    """
+    from core import compaction
+    from core.memory import SUMMARY_PREFIX, ConversationMemory
+
+    memory = ConversationMemory()
+    _add_turns(memory, 3, "before")
+
+    # The pin turn, in the loop's own write order.
+    memory.add_user_message("keep this one " + "x" * 200)
+    #   D20 -- the assistant turn is persisted BEFORE any branching, so the
+    #   tool_use for `pin` itself is already on disk when the tool runs.
+    memory.add_assistant_message(
+        _Resp("Pinning that.", [_ToolCall("call-pin", "pin", {"last_n": 1})]))
+    #   ...the tool runs, and pins the turn start plus everything that
+    #   exists AT THAT MOMENT.
+    pinned_rows = memory.pin_last(1)
+    assert pinned_rows == 2, (
+        f"expected the turn start and the assistant row to be pinned, and "
+        f"the tool result not to exist yet; got {pinned_rows} rows")
+    #   ...and only now is the answering row written, so it is never pinned.
+    memory.add_tool_result("call-pin", {"result": "Pinned the last 1 turn(s)."})
+
+    _add_turns(memory, 4, "after")
+
+    notice = compaction.compact(
+        memory, "claude-sonnet-5", "ANTHROPIC",
+        current_turn_start=memory.completed_turns(), overrides=OVERRIDES)
+    assert notice is not None, "nothing compacted -- the two boundaries never diverged"
+
+    # Preconditions, asserted beside the claim they support: a real fold
+    # happened, it covered the pinned turn, and the pinned assistant row is
+    # actually in the view. Without the last one `called` would be empty and
+    # the real assertion below would hold vacuously.
+    view = memory.messages
+    assert view[0]["content"].startswith(SUMMARY_PREFIX)
+    row_ids = [r["id"] for r in real_storage._ordered_rows(memory.thread_id)]
+    checkpoint = real_storage.latest_checkpoint(memory.thread_id)
+    pin_row = next(i for i, r in enumerate(
+        real_storage._ordered_rows(memory.thread_id))
+        if r["role"] == "assistant" and "call-pin" in r["content"])
+    assert row_ids.index(checkpoint.covers_up_to_message_id) > pin_row, (
+        "the watermark did not pass the pinned turn, so this thread cannot "
+        "show the defect")
+
+    called = {call["id"] for m in view if m["role"] == "assistant"
+              for call in m.get("tool_calls", [])}
+    assert "call-pin" in called, "the pinned assistant row is not in the view"
+
+    answered = {m["tool_call_id"] for m in view if m["role"] == "tool"}
+    assert not (called - answered), (
+        f"unanswered tool_use in the view: {called - answered}. A "
+        f"tool_result with no preceding tool_use is an HTTP 400 on "
+        f"Anthropic, on a thread that was working a moment ago."
+    )
 
 
 def test_the_archive_survives_three_compactions_intact(real_storage, compactor):

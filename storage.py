@@ -456,9 +456,58 @@ def pinned_through(thread_id: UUID, message_id: Optional[UUID]) -> List[dict]:
 
     Empty when nothing in the span is pinned, which is every thread until
     someone calls pin().
+
+    THE PINNED SPAN IS MADE WHOLE HERE, which is M4's rule applied to the
+    second boundary. The derived view has two of them and only the
+    checkpoint watermark is turn-aligned: `pin` is dispatched from inside a
+    turn, so the set it writes always ends mid-turn. D20 has already
+    persisted the assistant message carrying the `tool_use` for `pin`
+    itself, and the answering `tool` row is written after dispatch returns
+    -- so it is never pinned. While the pin is still in the uncompacted
+    tail this is invisible, because the tail carries both rows. The first
+    compaction whose watermark passes the pinned region activates it: the
+    assistant row comes back with an unanswered `tool_use`, its result
+    having gone into the summary text instead, and a `tool_result` with no
+    preceding `tool_use` is an HTTP 400 on Anthropic -- on a thread that
+    was working a moment ago, with no visible connection to a `pin` several
+    turns earlier. Durable, too: the checkpoint is a persisted row, so
+    every later call and every resume rebuilds the same unsendable view.
+
+    Fixed at the PRODUCER, where a pinned span becomes view content.
+    Stopping pin_last at the last complete turn would change what "pin the
+    last N turns" means and leave any other non-turn-aligned pinned set
+    open; dropping unanswered tool_calls in _derived_view is consumer-side
+    -- this project's canonical bug shape -- and would hide from the model
+    a call it actually made.
     """
     rows = _ordered_rows(thread_id)
-    return [_to_neutral(m) for m in rows[:_split_at(rows, message_id)] if m["pinned"]]
+    span = rows[:_split_at(rows, message_id)]
+    neutral = [_to_neutral(m) for m in span]
+
+    keep = [i for i, m in enumerate(span) if m["pinned"]]
+    # `have`, the set() below and the role check are all BACKSTOPS, and the
+    # measurement says so: each was deleted separately against the full
+    # suite and each survived. What actually keeps the result duplicate-free
+    # is the `not m["pinned"]` filter -- a pinned tool row is already in
+    # `keep` and can never be re-added -- and reaching any of the three
+    # needs two rows sharing one tool_call_id, or a non-tool row carrying
+    # one, neither of which has a producer: add_tool_result writes exactly
+    # one row per call, and add_user_message passes no tool_call_id.
+    #
+    # Kept rather than trimmed, and the reasoning recorded rather than
+    # asserted: the failure they guard against is a duplicate tool_result,
+    # which is the same wire error from the other direction as the one this
+    # function exists to prevent. That is the wrong place to trade a free
+    # backstop for a reachability argument.
+    have = {neutral[i].get("tool_call_id") for i in keep}
+    need = {call["id"] for i in keep
+            for call in (neutral[i].get("tool_calls") or [])
+            if call["id"] not in have}
+    keep += [i for i, m in enumerate(span)
+             if not m["pinned"] and m["role"] == "tool"
+             and neutral[i].get("tool_call_id") in need]
+
+    return [neutral[i] for i in sorted(set(keep))]
 
 
 def history_through(

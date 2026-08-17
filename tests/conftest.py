@@ -575,9 +575,25 @@ class FakeStorage:
         return self._reconstruct(self._messages_by_thread.get(thread_id, []))
 
     def pinned_through(self, thread_id, message_id):
+        """Mirrors real storage.py's pinned_through, INCLUDING the
+        tool-result re-inclusion that makes the pinned span whole (#88).
+        A fake that returns the pinned rows alone cannot represent the
+        orphaned tool_use that fix exists to prevent, and a test passing
+        against it would prove only that the fake and the code agree."""
         rows = self._messages_by_thread.get(thread_id, [])
-        return self._reconstruct(
-            [r for r in rows[:self._split_at(rows, message_id)] if r["pinned"]])
+        span = rows[:self._split_at(rows, message_id)]
+        neutral = self._reconstruct(span)
+
+        keep = [i for i, r in enumerate(span) if r["pinned"]]
+        have = {neutral[i].get("tool_call_id") for i in keep}
+        need = {call["id"] for i in keep
+                for call in (neutral[i].get("tool_calls") or [])
+                if call["id"] not in have}
+        keep += [i for i, r in enumerate(span)
+                 if not r["pinned"] and r["role"] == "tool"
+                 and neutral[i].get("tool_call_id") in need]
+
+        return [neutral[i] for i in sorted(set(keep))]
 
     def history_through(self, thread_id, message_id, after_message_id=None):
         rows = self._messages_by_thread.get(thread_id, [])
