@@ -2147,7 +2147,8 @@ the caller-side check only covers the one caller that exists today.
 The e2e gap is the real finding. Everything in §21a was tested at the unit level
 against fakes, and the defect lived exactly in the relationship between two real
 components — the derived view and the archive — which no fake represented and no unit
-test spanned. `tests/test_compaction_e2e.py` is the first test in this project to run
+test spanned. `tests/test_storage_e2e.py` (named `test_compaction_e2e.py` at the time)
+is the first test in this project to run
 real `ConversationMemory` against real `storage.py` on real SQLite, and it found the
 bug on its second assertion.
 

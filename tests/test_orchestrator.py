@@ -13,9 +13,17 @@ Full deep-research pipeline run, with every model call mocked. Verifies:
 
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ FRAGILE MOCK CONTRACT ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 This file is the SINGLE MOST FRAGILE TEST IN THE SUITE. The mocks queue
-canned responses for `RunAgentLoop.run_deep_research_mode` keyed by
-pass_id (e.g. "Pass 0", "Pass 1", "Pass 3a"), since that's the public
-entry point orchestrator's `_run_pass` calls. Any change to:
+canned responses for `RunAgentLoop.stream_deep_research_mode` keyed by
+pass_id (e.g. "Pass 0", "Pass 1", "Pass 3a"), since §26 repointed
+`_run_pass` to ITERATE that generator rather than call
+`run_deep_research_mode`. Every patch here goes through
+`tests/conftest.py`'s `pass_stream` helper, which wraps a plain
+pass-mock into a generator -- and it exists because a double patched on
+the OLD name **stops intercepting silently**: the real loop runs,
+reaches a provider, and the test fails somewhere unrelated.
+
+That is the trap this banner exists to prevent, and until audit #122
+this banner named the sprung version of it. Any change to:
 
   (1) the pass_id strings ("Pass 0", "Pass 3a", "Final synthesis", ...),
       -> BREAKS the mock lookup. Fix: update _ canned_pass_responses keys.
@@ -34,19 +42,22 @@ entry point orchestrator's `_run_pass` calls. Any change to:
          this names must be one the allowlist does NOT contain, and
          TestClaimFromJsonFiltersUnknownFields asserts the allowlist's exact
          contents so that a change here cannot go unnoticed again.
-  (4) ROADMAP §3 (JSON-retry) refactored `_run_pass` into
-      `_run_pass_with_json_retry`. THIS TEST STILL PATCHES
-      `RunAgentLoop.run_deep_research_mode` (the function the helper calls
-      for its INITIAL attempt), NOT `_run_pass` or `_run_pass_with_json_retry`.
-      -- The refactor's retry path calls `RunAgentLoop.continue_conversation`
-         when the initial response fails to parse as JSON. Existing tests
-         queue valid JSON, so the retry path never fires; this test still
-         asserts only on the happy-path call order.
-      -> IF a future change makes the orchestrator call `_run()` directly
-         (skipping `run_deep_research_mode`), this fixture's mock needs
-         to switch from `RunAgentLoop.run_deep_research_mode` to
-         `RunAgentLoop._run`. See tests/BREAKING_CHANGES.md for the
-         expected mock-update pattern.
+  (4) WHICH BOUNDARY THE DOUBLE SITS ON. ROADMAP §3 (JSON-retry) split
+      `_run_pass` into `_run_pass_with_json_retry`, and §26 repointed the
+      inner call again. THIS TEST PATCHES
+      `RunAgentLoop.stream_deep_research_mode`, NOT `_run_pass`,
+      `_run_pass_with_json_retry` or `run_deep_research_mode`.
+      -- The retry path calls `RunAgentLoop.continue_conversation` when the
+         initial response fails to parse as JSON. Existing tests queue valid
+         JSON, so the retry path never fires; this test asserts only on the
+         happy-path call order.
+      -> IF the orchestrator's inner call moves again, repoint
+         `conftest.pass_stream`'s callers rather than open-coding a double
+         at each of the fifteen sites -- that indirection is the whole
+         reason the helper exists. See tests/BREAKING_CHANGES.md.
+      -> A double on a name `_run_pass` no longer calls raises NOTHING. It
+         is `mocker.patch.object` on a real attribute, so the patch itself
+         succeeds and only the interception is lost.
   (5) Roadmap §5 pipeline persistence: run_deep_research_pipeline()
       calls create_pipeline_run() up front, a data-only
       update_pipeline_run(run.run_id, run) checkpoint after EVERY

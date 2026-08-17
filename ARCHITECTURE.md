@@ -92,7 +92,7 @@ Venastine Research Harness/
 │   ├── test_prompt_tier_boundary.py # 11 tests -- audit #146: K6 as a RULE. A pass prompt is invariant under every session tier, parametrised over a canary table so a tier added later is covered
 │   ├── test_fake_storage_mirror.py # 16 tests -- audit #123: FakeStorage._reconstruct / _split_at compared against storage._to_neutral / _split_at, which two docstrings and AGENTS.md claimed and nothing checked
 │   ├── test_schema_migration.py   # 18 tests -- ROADMAP_v2 §21a M7: database.ensure_columns() adds a declared column to a table already on disk, driven against stdlib sqlite3 rather than the fake sqlmodel
-│   ├── test_storage_reads.py      # 15 tests -- ROADMAP_v2 §21a the watermark and pinned reads the derived view is assembled from (M4/M9, AC1/AC2)
+│   ├── test_storage_reads.py      # 15 tests -- ROADMAP_v2 §21a the watermark and pinned reads that the derived view is assembled from (M4/M9, AC1/AC2), plus #88's tool-result re-inclusion
 │   ├── test_memory_compaction.py  # 18 tests -- ROADMAP_v2 §21a the derived view (M8/M9) and pin_last's ordinal-to-id mapping
 │   ├── test_compaction.py         # 39 tests -- ROADMAP_v2 §21a the trigger (M1/M6), the three fold floors (M4/M5), the compactor run (M2) and D27's settings validation
 │   ├── test_loop_compaction.py    # 13 tests -- ROADMAP_v2 §21a where the trigger is evaluated (M3) and how notices reach each shell
@@ -921,9 +921,23 @@ that grows a codebase can gain an `ARCHITECTURE.md` without being re-classified 
 **`read_project_doc`'s narrow set is load-bearing, not tidiness.** A registered tool with
 permission `True` is advertised to EVERY run — the initializer's `allowed_tools` narrows
 *that agent*, not plain chat and not a research pass. Restricting it to documentation and
-manifests (and denying `.venastine/`, `.env*` and `providers.json`) means the most a
-prompt-injected pass gains through it is the project's own README. Widening it to source
-files would quietly turn it into `read` with no approval gate.
+manifests (and denying `.venastine/`, `.env*` and `providers.json`) keeps it out of source
+files — widening it to those would quietly turn it into `read` with no approval gate.
+
+**What it does reach is larger than "the project's own README", which is what this paragraph
+used to say (audit #97).** The tool takes a *path*, resolves it anywhere under the project,
+and admits `.md` / `.markdown` / `.rst` / `.txt` plus ten named build files. Measured against
+the real tool on this repository: **40 files, ~1.1 MB, at depths 0 through 3.** In a
+documentation-heavy project that is on the order of a megabyte, not a page. I2's scope is not
+violated — the decision says "documentation, not text files", and documentation is what
+shipped — but the sentence quantifying it was understated, which is the one direction a
+security bound should not be wrong in.
+
+Worth naming separately, because it does not follow from the extension list: when the resolved
+project *is* the harness directory, which is how `python main.py` is normally run, the readable
+set includes **every agent and skill body** under `agents/builtin/` and `skills/builtin/`.
+Those are prompts rather than credentials, so it is a note rather than a breach — but a
+prompt-injected pass can read the system prompt of every agent it might later be asked to spawn.
 
 **One consent, covering a named list.** `write_project_doc` is approval-gated, so a naive
 implementation prompts eight times for one command — the shape of consent that gets

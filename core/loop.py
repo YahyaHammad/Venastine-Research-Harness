@@ -736,11 +736,20 @@ class RunAgentLoop:
             # the next turn boundary would let a tool-heavy turn run the
             # thread into the provider's hard limit.
             #
-            # Safe by construction rather than by timing: `turn_start`
-            # makes the current turn unfoldable, so this can only ever
+            # Safe by construction rather than by timing: the current-turn
+            # floor makes the current turn unfoldable, so this can only ever
             # summarize exchanges that were already complete when the turn
             # began. That is what made a mid-turn trigger acceptable at
             # all.
+            #
+            # The floor is `memory.completed_turns()`, asked inside
+            # _maybe_compact. This comment used to name a `turn_start`
+            # variable recorded at the top of the turn (audit #91); it moved
+            # because archive-space turn counting is time-invariant WITHIN a
+            # turn -- a completed turn cannot become incomplete -- so asking
+            # lazily gives the same answer and keeps a storage read off every
+            # turn nowhere near the threshold. See core/compaction.py's note
+            # on why it is computed there rather than passed down.
             yield from _maybe_compact(
                 memory, model, provider_name, notices, compaction_mode)
 

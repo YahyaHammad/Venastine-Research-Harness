@@ -12,12 +12,25 @@ worth understanding, not a flaky mock to patch over.
 
 ## 1. `test_orchestrator.py` — the most fragile mock in the suite
 
-This file mocks `RunAgentLoop.run_deep_research_mode` keyed by `pass_id`
+This file mocks `RunAgentLoop.stream_deep_research_mode` keyed by `pass_id`
 strings ("Pass 0", "Pass 3a", "Final synthesis", ...). The orchestrator
-calls `_run_pass(pass_id, ...)`, which in turn calls
-`run_deep_research_mode(pass_id=pass_id, ...)`. Mocks intercept at the
-`run_deep_research_mode` boundary, NOT `_run_pass`, so anything that
-refactors `_run_pass`'s *internals* doesn't break this test.
+calls `_run_pass(pass_id, ...)`, which since §26 ITERATES
+`stream_deep_research_mode(pass_id=pass_id, ...)` rather than calling
+`run_deep_research_mode`. Mocks intercept at that boundary, NOT `_run_pass`,
+so anything that refactors `_run_pass`'s *internals* doesn't break this test.
+
+**Every patch goes through `tests/conftest.py`'s `pass_stream`**, which wraps
+a plain pass-mock into a generator. That indirection is the point: a double
+patched on the old name **stops intercepting silently** — `mocker.patch.object`
+on a real attribute still succeeds, the real loop runs, reaches a provider,
+and the test fails somewhere unrelated. §22's twelve-doubles trap, one layer
+down. Repoint `pass_stream` if the boundary moves again; do not open-code a
+double at each of the fifteen sites.
+
+This section and `test_orchestrator.py`'s banner both named
+`run_deep_research_mode` for two sections after §26 moved it — i.e. the two
+documents whose entire job is to keep this mock repointable were handing a
+maintainer the name that springs the trap (audit #122).
 
 ### What breaks it
 
@@ -28,8 +41,9 @@ refactors `_run_pass`'s *internals* doesn't break this test.
 | Widen or narrow `_CLAIM_INPUT_FIELDS` itself | `TestClaimFromJsonFiltersUnknownFields::test_every_allowlisted_field_still_arrives` fails on its exact-contents assertion | Update that assertion, and check the worked example in the row above is still a key the allowlist does **not** contain. This row exists because the previous example was `asserted_by_candidates`, which §10's revisit moved *into* the allowlist — so both this file and `test_orchestrator.py`'s banner spent a section describing filtering with an example that was no longer filtered (issue #123) |
 | Add a new pass between existing passes | `AssertionError` on pass-order assertion (the `call_log == expected_order` check) | Add the new pass_id to `_canned_pass_responses` (with its expected JSON shape), insert into the expected pass order list in tests |
 | Change the Trace line *format* (e.g. `Pass 0: plan produced (X entities)` → `Pass 0 produced X-entities`) | The `test_pipeline_trace_contains_expected_lines_in_order` test uses `startswith()` against prefix strings like `"Pass 0:"` | Update the `expected_pass_starts` list in that one test to match the new format |
-| Refactor `_run_pass` → `_run_pass_with_json_retry` (ROADMAP §3) | Should NOT break this test, since the mock is on `run_deep_research_mode` not `_run_pass` | If the refactor changes which ENTRYPOINT the orchestrator calls (e.g. starts calling `_run()` directly per ROADMAP §3's "alternative"), the mock target needs to change |
-| Add a new kwarg to `RunAgentLoop.run_deep_research_mode` (e.g. `temperature=None` per ROADMAP §10) | `TypeError: side_effect() got an unexpected keyword argument 'temperature'` | The `_build_pass_mock` side_effect already accepts `**kwargs` to swallow these, so this should NOT break. If it does, re-audit that signature. |
+| Refactor `_run_pass` → `_run_pass_with_json_retry` (ROADMAP §3) | Should NOT break this test, since the mock is on `stream_deep_research_mode` not `_run_pass` | If the refactor changes which ENTRYPOINT the orchestrator calls, repoint `conftest.pass_stream` |
+| Move the orchestrator's inner call off `stream_deep_research_mode` again | **Nothing raises.** The patch still applies, the interception is lost, and the failure lands somewhere unrelated with a real provider call behind it | Repoint `conftest.pass_stream`'s target. This is the §26 case, and it is why the helper exists rather than fifteen open-coded doubles |
+| Add a new kwarg to `RunAgentLoop.stream_deep_research_mode` (e.g. `temperature=None` per ROADMAP §10) | `TypeError: side_effect() got an unexpected keyword argument 'temperature'` | The `_build_pass_mock` side_effect already accepts `**kwargs` to swallow these, so this should NOT break. If it does, re-audit that signature. |
 
 ### The expected update pattern after ROADMAP §3 (Malformed-JSON recovery)
 
@@ -606,7 +620,7 @@ this, because a convention is what produced five copies.
 
 ### Three standing notes from this pass
 
-**`tests/test_compaction_e2e.py` is the only test running real `ConversationMemory`
+**`tests/test_storage_e2e.py` is the only test running real `ConversationMemory`
 against real `storage.py` on real SQLite.** Its fixture is module-scoped and that is
 not a performance choice: declaring a SQLModel table registers it on
 `SQLModel.metadata`, so importing `storage` twice against real sqlmodel raises "Table
@@ -674,7 +688,7 @@ notes above still applies and is the reason it is one file.
 | Emit a `trace_line` per call site rather than per un-emitted line | `test_every_trace_line_is_emitted_exactly_once_and_in_order` | A re-emitted line is a duplicate in the transcript; a skipped one reached the database and never reached the user |
 | Return the run any way other than the terminal event | `test_the_generator_and_the_wrapper_produce_the_same_run` | The wrapper would still work and a streaming consumer would silently get nothing |
 | Make `run_deep_research_pipeline` the generator | `test_the_public_function_still_returns_a_finished_run`, and ~15 direct-call sites across `test_orchestrator.py`, `test_critic_routing.py`, `test_ensemble_guard.py`, `test_pipeline_storage.py`, `test_granted_calls_artifact.py` | P3/AC1. The whole point of keeping the name synchronous |
-| Add a seventh field to `LoopEvent` | `test_loop_event_did_not_grow_a_seventh_field` | P1/AC4. §23's events are a decision to make, not a field to add quietly |
+| Add an eighth field to `LoopEvent` (it has seven) | `test_loop_event_did_not_grow_an_eighth_field` | P1/AC4. §23's events are a decision to make, not a field to add quietly |
 | Drop `on_pipeline_event_message`, or stop forwarding in `_forwarding` | `test_ac2_the_tui_renders_pass_boundaries_and_tiers_as_they_happen` | AC2. The panel and transcript are fed exclusively by events — nothing else could have produced a tier for a claim the canned run never had |
 | Re-add the `run.trace` dump to `on_research_finished` (or the CLI's `--- Trace ---` block) | `test_the_finished_run_does_not_reprint_the_trace` | Every line already arrived as an event; both prints the whole run twice, and the second copy reads like a different artifact |
 | Count `claim_tiered` events instead of keying by claim id | `test_a_re_tiered_claim_is_not_counted_twice` | 6c re-tiers the same claim once per retry round, so the tally would exceed the claim count and keep climbing |
@@ -792,7 +806,7 @@ Do not open-code it — fifteen bespoke wrappers is how they drift.
 | Emit `_stage("D2")` inside the per-claim loop | `test_d2_is_announced_once_per_round_not_once_per_claim` | D2 is one decision applied to every exhausted claim; per-claim emission makes a round that exhausted six claims read as six stages. The fixture exhausts TWO claims — with one, the two behaviours are indistinguishable |
 | Add a `step` kind and infer it from the event stream | — (no test; it is an absence) | `_run()` has no step marker. Within a step it yields start/result in pairs; between steps it yields nothing unless the model streamed text. See the note in `core/reasoning/events.py` |
 | Forward `token_delta` text into `PipelineEvent.text` | `test_streamed_text_becomes_volume_never_content` | Seven of the ten passes emit raw JSON; only the volume escapes |
-| Give `LoopEvent` a seventh field for any of this | `test_pipeline_events.py`'s P1 pin | `PipelineEvent` is the type that grows. That is what its `kind` discriminator is for |
+| Give `LoopEvent` an eighth field for any of this | `test_pipeline_events.py`'s P1 pin | `PipelineEvent` is the type that grows. That is what its `kind` discriminator is for |
 
 ### The TUI half
 

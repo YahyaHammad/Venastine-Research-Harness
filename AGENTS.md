@@ -49,7 +49,7 @@ pytest -m integration                             # opt-in; spawns a real stdio 
 
 Test dependencies (`pytest`, `pytest-mock`, `pytest-asyncio`) are now listed in `requirements.txt` — they had been missing since §14, which is why older docs warn about it.
 
-**A fresh clone needs `cp providers.json.example providers.json` before `pytest`.** The file is gitignored, and 11 tests (`test_loop_stop_conditions`, `test_loop_tool_dispatch`, one in `test_agents`) fail with `ValueError: Unknown provider: ANTHROPIC` without it — `api_initialization()` needs the provider ENTRY to exist, even though the key inside it stays empty. "Offline, no API keys" is true; "no config file" is not. Also note `python3 -m pytest`: a `pytest` on PATH from a separate tool install runs in its own environment and sees none of the project's dependencies.
+**A fresh clone needs `cp providers.json.example providers.json` before `pytest`.** The file is gitignored, and **12 tests across four files** fail with `ValueError: Unknown provider: ANTHROPIC` without it — 7 in `test_loop_tool_dispatch`, 3 in `test_loop_stop_conditions`, 1 in `test_agents` and 1 in `test_thread_legibility` (measured by moving the file aside and running the suite; the note used to say 11 across three, missing the §27 test written after it — audit #128) — `api_initialization()` needs the provider ENTRY to exist, even though the key inside it stays empty. "Offline, no API keys" is true; "no config file" is not. Also note `python3 -m pytest`: a `pytest` on PATH from a separate tool install runs in its own environment and sees none of the project's dependencies.
 
 MCP servers are a *third* config file again — `mcp.json`, user-level or `.venastine/`-level. Not `.env`, not `providers.json`, not `settings.json`.
 
@@ -69,7 +69,9 @@ Read these before changing anything non-trivial — they carry design decisions 
 
 A from-scratch agentic harness (no LangChain). Two modes — regular tool-using chat, and a ten-pass self-critiquing research pipeline — share the *same* primitives: `core/loop.py` (control flow), `core/client.py` (one model call), `tools/registry.py` (dispatch). The pipeline is not a separate codebase; it is the same loop configured differently.
 
-**Synchronous throughout. No async anywhere.**
+**Synchronous throughout, except the MCP bridge and the Textual event loop.**
+
+That qualifier is load-bearing, not pedantry (audit #128). This file used to say "No async anywhere", and `mcp_client/client.py` has four `async def`s, imports `anyio`, runs a dedicated event-loop thread and bridges into it with `run_coroutine_threadsafe` — which the MCP section below documents at length and calls **required**. An absolute stated here plus four `async def`s in one file reads as a violation to clean up, and that section exists precisely because someone already tried moving those enter/exit calls across a task boundary.
 
 ### The layers, and the boundaries that matter
 
@@ -195,12 +197,12 @@ Invariants that look like simplification opportunities but are not:
 - **The loop's re-tiering is scoped to its own batch** (`run_confidence_tiering(..., claims=flagged)`). Pass 4 re-tiers everything; a retry round must not, or a claim already finished at D1 or D2 is recomputed from unchanged score data while `_apply_fallback`'s annotation stays — so it ships as LOW beside a note saying it could not be verified, and Pass 6b leaves both alone because `if claim.annotation is None` is false.
 - **§20's review runs AFTER final synthesis, and the report it regenerates is NOT re-reviewed.** The regress is cut deliberately — reviewing the corrected report would need its own consent pass, and so on. Do not "fix" this. The stage is inside the pipeline's `try`, but a transient REVIEWER failure (provider error, unrecoverable JSON) is contained like the missing-agent branch: traced skip, run completes — an optional stage must not flip a finished ten-pass run to `status='failed'`. A failed re-synthesis after accepted corrections is contained the same way and for the same reason: the deferred commit restores the pre-review claims (so the record never carries corrected claims beside a stale report), the trace says the corrections did *not* land, and **the run still completes**. Only a failure that escapes the stage itself — a bug, not a transient provider error — reaches the pipeline's `except` and records `status='failed'`. Both halves are test-pinned; changing one without the other puts the code and this paragraph back into disagreement, which is what the §19–§20 review found here.
 - **`_synthesis_input` is a function, not a string built once.** §20 re-runs synthesis after an accepted correction; reusing the earlier string regenerates the report from the UNCORRECTED claims, so the report changes for no reason while the correction silently goes nowhere.
-- **`vars(c)` serializes `Claim` at every site** (orchestrator passes 3a/3b/5/6a/6c/final synthesis, `pipeline_storage.update_pipeline_run`, `output_writer.write_run_artifacts`). Adding a nested-dataclass field to `Claim` requires migrating *all* of them to `dataclasses.asdict(c)` in one change.
+- **`vars(c)` serializes `Claim` at every site** — find them with `grep -rn 'vars(c' --include='*.py' .`, not from a list. Adding a nested-dataclass field to `Claim` requires migrating *all* of them to `dataclasses.asdict(c)` in one change. This bullet used to enumerate three (orchestrator's passes, `pipeline_storage.update_pipeline_run`, `output_writer.write_run_artifacts`) and §26 added two more in `tui/app.py` that fell out of both this list and `base.py`'s (audit #108) — an enumeration that says *all* has to be complete to mean anything.
 - **`update_pipeline_run(status=...)` defaults to `None`, not `"running"`** — so a data-only checkpoint can't reset a `complete`/`failed` row.
 - **The pipeline is a GENERATOR, and the public name is not it** (§22). `stream_deep_research_pipeline()` yields `PipelineEvent`s; `run_pipeline_to_completion()` drains; `run_deep_research_pipeline()` is the drainer applied to the generator and is unchanged for every caller. Same shape as `_run()` / `run_to_completion()`, for the same reason. A shell that wants live progress iterates; everything else keeps calling the wrapper.
 - **`_Progress.checkpoint()` is the only place a trace line is recorded** (§22). It persists, then yields every line appended since it last ran — so §5's per-pass persistence and the events are DERIVED from `run.trace` rather than emitted beside it. This is what finally made "a checkpoint after every trace line" true: `review.py` writes fifteen lines and checkpointed after none, and `json_retry.py` appends straight to the list. Both are now carried without either module changing, which is also why a JSON-parse retry needs no event kind. Persist-before-emit is deliberate: a generator only advances while someone iterates it, so emitting first would make durability depend on a UI continuing to read.
 - **An abandoned pipeline generator leaves `status='running'`** (§22). `GeneratorExit` is not an `Exception`, so a consumer that stops iterating is recorded as abandoned rather than failed — and the persist-before-emit ordering is what keeps the checkpoints it already took.
-- **A pass's `LoopEvent`s are TRANSLATED, not propagated** (§22 P2 as amended by §26), and `PipelineEvent` is a separate, kind-discriminated type from `LoopEvent` (§22 P1) — adding §22's or §26's kinds to that flat six-field bag is the thing the decision rejected, and `test_pipeline_events.py` fails if `LoopEvent` grows a seventh field. §22 kept a pass opaque on the premise that its internals were not worth seeing; the first real ten-pass run disproved that, so `_run_pass` now iterates `RunAgentLoop.stream_deep_research_mode()` and converts a chosen subset into pipeline kinds. A consumer still sees exactly one event type — that is what P1/P2 were protecting, and it still holds.
+- **A pass's `LoopEvent`s are TRANSLATED, not propagated** (§22 P2 as amended by §26), and `PipelineEvent` is a separate, kind-discriminated type from `LoopEvent` (§22 P1) — adding §22's or §26's kinds to that flat bag is the thing the decision rejected, and `test_pipeline_events.py` fails if `LoopEvent` grows an EIGHTH field. (It has seven: six payload fields plus `stop_reason`. This paragraph said "six-field bag" and "a seventh field" in consecutive clauses — counting payloads once and fields once — which audit #128 caught as a wording defect with no gap behind it: the test asserts the exact seven-name set, so any addition goes red.) §22 kept a pass opaque on the premise that its internals were not worth seeing; the first real ten-pass run disproved that, so `_run_pass` now iterates `RunAgentLoop.stream_deep_research_mode()` and converts a chosen subset into pipeline kinds. A consumer still sees exactly one event type — that is what P1/P2 were protecting, and it still holds.
 - **A truncated pass is detected AT the pass.** `_check_not_truncated()` reads
   `stop_reason`: truncated with text traces and continues, truncated with no text
   raises naming the pass and the reason. A stop condition returns the last
@@ -359,9 +361,15 @@ parsed since §14 with no consumer at all — this is its first.
   passes write durable memories — exactly what D26's consequence 1 forbids.
 - **Removal is by id, never by substring** (M15). A substring matching two memories
   would have to pick one, and picking silently deletes what the user did not name.
-- **CLI chat now has an `ApprovalProvider`** (M16), so `shell`, `spawn_subagent` and
-  every MCP tool are advertised and promptable there, not just `remember`. `None` on a
-  non-tty, so piped runs stay headless.
+- **CLI chat now has an `ApprovalProvider`** (M16), so `spawn_subagent` and every MCP
+  tool are advertised and promptable there, not just `remember`. `None` on a
+  non-tty, so piped runs stay headless. **Not `shell`** — this sentence used to list
+  it (audit #21), and `shell` is globally denied like `read`/`write`/`edit`:
+  `is_tool_allowed` reads `config.ToolPermissions()` directly and returns before any
+  context or approval logic, D14 forbids widening, and `settings.json` has no
+  `permissions` section. Its `ToolApprovals.shell = True` is unreachable by
+  construction, and so is all 436 lines of `security/sandbox.py` plus `config.py`'s
+  whole sandbox block, until someone edits `config.py`.
 
 ### Thread summaries and cross-thread references (`§21c`)
 
@@ -646,9 +654,15 @@ the CLI has no command layer).
 - **The readable set is documentation, not "text files", and that is
   load-bearing.** A registered tool with permission `True` is advertised to EVERY
   run — the initializer's `allowed_tools` narrows *that agent*, not plain chat or
-  a research pass. Keeping the set narrow means the most a prompt-injected pass
-  gains is the project's own README. `.venastine/`, `.env*` and `providers.json`
-  are denied outright.
+  a research pass. `.venastine/`, `.env*` and `providers.json` are denied outright,
+  and source files are out of scope entirely — widening to those turns it into
+  `read` with no gate. But the set is not small: the tool takes a PATH, resolves
+  anywhere under the project, and admits `.md`/`.markdown`/`.rst`/`.txt` plus ten
+  named build files, which on this repository is **40 files and ~1.1 MB at depths
+  0-3**, including every agent and skill body under `agents/builtin/` and
+  `skills/builtin/`. ARCHITECTURE.md used to say the most a prompt-injected pass
+  gains is the README (audit #97); understating a security bound is the one
+  direction that costs something.
 - **`CONTEXT.md` is the hub and the only document in `.venastine/`** (I9). The
   rest are ordinary committed root files it links out to, so the one file every
   agent reads is also the map of the ones it does not.
@@ -690,6 +704,15 @@ the CLI has no command layer).
   `RESEARCH_PASS_TOKEN_BUDGET`'s reason (TECHNICAL_DEBT item 9's meter re-counts
   the whole prompt every step), `INIT_READ_CHARS` well below `MAX_READ_CHARS`, and
   `INIT_MAX_STEPS` because neither of those bounds the *number* of reads.
+  I7 states three config bounds and two of them are read from `config`; the third
+  is a FALLBACK. `generator._run_initializer` passes
+  `agent.max_steps or config.INIT_MAX_STEPS`, and `agents/builtin/initializer.md`
+  declares `max_steps: 12`, so the agent file wins and the constant is never
+  consulted. Both are 12, which is why nothing behaves differently and why the
+  claim read as true (audit #97). That `or` is the general rule that an agent may
+  narrow its own run — `compactor.md` relies on it too with `max_steps: 1` — so
+  the doc is what was wrong, not the code. Changing `config.INIT_MAX_STEPS` alone
+  does nothing.
 - **The initializer is a SIXTH thread source.** §27 found the compactor as the
   fifth; this run is labelled `thread_kind=THREAD_KIND_SUBAGENT` for the same
   reason.
@@ -714,7 +737,9 @@ Progressive disclosure: system prompts list skills as name + one-line descriptio
 
 **Fix at the producer, not the consumer.** The project's canonical bug: `add_assistant_message()` persisted a redundant `"role"` key, was fixed with a read-side special case for `role == "assistant"`, and the identical bug in `add_tool_result()` survived because the fix lived one layer above where the divergence was produced. When you fix a shared root cause, grep every other call site sharing it. A per-case branch added to a normalizer/dispatcher usually means the fix belongs one layer down.
 
-**Verify against production code, not the test double.** `tests/conftest.py`'s `FakeStorage.get_session_history()` is a simplified model of `storage.py`'s reconstruction, not the real thing (it always includes `name`/`tool_call_id`; the real one includes them conditionally). A passing test proves the fake and the code agree — not that either is right. If you change `storage.py`'s reconstruction, change the fake identically.
+**Verify against production code, not the test double.** `tests/conftest.py`'s `FakeStorage` is a simplified model of `storage.py`, not the real thing — its `save_checkpoint` has none of the real one's watermark-advance guard, so a test that arranged a backwards checkpoint through the fake would see it applied, and `latest_checkpoint` is a dict lookup there rather than "newest row wins by timestamp". A passing test proves the fake and the code agree — not that either is right. If you change `storage.py`'s reconstruction, change the fake identically.
+
+That example is deliberately a *current* divergence. This paragraph used to cite the `name`/`tool_call_id` reconstruction, which the two have agreed on for some time (audit #33) — and a rule whose only evidence is stale gets read as boilerplate. The checkpoint divergence costs nothing today, because the guard is pinned against real SQLite in `test_storage_e2e.py` and the fake's `save_checkpoint` is only ever used to *arrange* a compacted view; that is exactly the state the old example was in before it stopped being a divergence at all. `test_fake_storage_mirror.py` (#123) now compares the reconstruction halves directly.
 
 **Never name a top-level file after a stdlib or installed package.** A root `logging.py` once silently shadowed stdlib `logging`; hence `logging_setup.py`.
 

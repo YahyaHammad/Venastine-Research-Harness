@@ -1484,7 +1484,7 @@ symptom is the whole app failing to lay out with `'NoneType' object has no attri
 1. Every existing caller of `run_deep_research_pipeline()` still receives a finished `PipelineRun`, unchanged, via the drainer. ✓
 2. A TUI consumer renders pass boundaries and claim tiers as they happen, without polling the database. ✓
 3. §5's per-pass persistence still fires on every trace line, and there is exactly one place a trace line is recorded. ✓
-4. The event-type decision above is made explicitly and recorded, before any event is added to `LoopEvent`. ✓ (P1, pinned by a test that fails if `LoopEvent` grows a seventh field)
+4. The event-type decision above is made explicitly and recorded, before any event is added to `LoopEvent`. ✓ (P1, pinned by a test that fails if `LoopEvent` grows an eighth field — it has seven)
 
 ---
 

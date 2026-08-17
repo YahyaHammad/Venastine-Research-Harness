@@ -240,8 +240,23 @@ def classify_legacy_pass_threads(connection) -> int:
     # stays because the guard is the INTENT -- a later edit that made the
     # upper bound lenient (`finished_at IS NULL OR ...`) would otherwise
     # relabel every conversation since an abandoned run, and that edit reads
-    # as a kindness. Verified by mutation: dropping BOTH turns three tests
-    # red, dropping either alone turns none.
+    # as a kindness.
+    #
+    # Measured by mutation, one at a time, against the full suite:
+    #
+    #   drop `finished_at IS NOT NULL` alone  ->  0 red
+    #   drop the upper bound alone            ->  4 red
+    #   drop both                             ->  4 red
+    #
+    # The four are all in test_thread_legibility.py::TestClassifyingLegacy-
+    # Threads. So the mechanism above is right and the coverage is the other
+    # way round from what this comment used to claim ("dropping BOTH turns
+    # three tests red, dropping either alone turns none" -- audit #83). The
+    # half with NO test is the `IS NOT NULL` guard, which is the half this
+    # comment exists to defend: `created_at <= NULL` is already not true, so
+    # test_an_unfinished_run_hides_nothing passes with it deleted. A reader
+    # told the upper bound was unprotected would conclude the opposite of
+    # the truth in both directions.
     cursor.execute(
         "UPDATE conversationthread SET kind = ? "
         " WHERE kind = ? AND EXISTS ("

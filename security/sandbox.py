@@ -85,14 +85,25 @@ def detect_shell() -> str:
 def is_docker_available() -> bool:
     """Probe whether the Docker daemon is reachable.
 
-    Cached for the process. §18's headless callability filter calls
-    approval_needed(name, {}) for every advertised tool on every schema
-    build, and shell's approval_check reaches this -- so an uncached
-    probe meant roughly two `docker info` subprocesses per _run() (about
-    twenty per research pipeline), each up to the 10s timeout when the
-    daemon is unresponsive. Docker's availability does not change
-    meaningfully inside one process; a wrong answer costs a restart,
-    while the uncached version cost a subprocess per schema build.
+    Cached for the process, and worth keeping cached -- but NOT for the
+    reason this docstring used to give (audit #21).
+
+    It said §18's headless callability filter reaches here via shell's
+    approval_check on every schema build, costing roughly two `docker
+    info` subprocesses per _run(). It cannot: `schemas()` and
+    `headless_hidden()` both call `_advertised()` FIRST, `_advertised`
+    calls `is_tool_allowed`, and `shell` is permission `False` -- so the
+    filter never reaches approval_needed for it. Measured by making this
+    probe raise on entry: a full `schemas(callable_only=True)` build
+    reached it ZERO times.
+
+    What the cache is actually for is `shell.run()` and
+    `_shell_approval_check`, which both call this on the path a user
+    takes after enabling `shell` in config.py. Docker's availability does
+    not change meaningfully inside one process; a wrong answer costs a
+    restart, and each uncached probe costs up to the 10s timeout when the
+    daemon is unresponsive. So the cache stays -- it matters the moment
+    the tool is enabled, which is the only moment anything here runs.
     """
     try:
         result = subprocess.run(

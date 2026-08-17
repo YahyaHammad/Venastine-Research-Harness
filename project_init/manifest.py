@@ -16,8 +16,13 @@ invites it to start reading the largest file first and exhaust INIT_MAX_STEPS
 inside one document.
 
 THE MANIFEST GOES IN THE USER MESSAGE, NOT THE SYSTEM PROMPT. §19's K6 has
-been violated three times (§21b's M13, §21c's M19) by appending a tier inside
-with_catalogs(), which feeds pass_prompt(). It does not apply here only
+been hit four times -- K6 itself, §21b's M13, §21c's M19 and §23's with_todos
+-- by appending a tier inside with_catalogs(), which feeds pass_prompt().
+(This said three; §23 slice 2 shipped before §24, so the fourth already
+existed when the sentence was written -- audit #97. Counting instances is
+the kind of claim that only stays right if someone increments it, and audit
+#146 has since turned K6 into a parametrised rule so a new tier is covered
+without anyone counting.) It does not apply here only
 because this is the TASK -- the same way _summarize passes segment_text as
 user_goal. Putting a project file listing in the system prompt would deliver
 it to all ten research passes.
