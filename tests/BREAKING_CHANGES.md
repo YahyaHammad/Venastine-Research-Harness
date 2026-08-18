@@ -2064,6 +2064,10 @@ The two totals agree: 1742 + 16 = 1757 + 1 = 1758 collected.
 Closes audit **#100** (S1), **#7** (S2), **#101** (S3), **#102** (S3) and **#141** (S4).
 ROADMAP_v2 **§29**, decisions **N1–N8**.
 
+> This file's section counter runs independently of ROADMAP_v2's, so this `§25` is the ninth fix
+> batch and the `§25` above is authorized tool use. §19–§23 already collide the same way. That is
+> audit **#17**'s overloaded-namespace family and is left alone here rather than renumbered mid-batch.
+
 ### The change that breaks a test, stated first
 
 **`builtins.input` is no longer a seam any test can use to drive the CLI.** `main.py` reads stdin
