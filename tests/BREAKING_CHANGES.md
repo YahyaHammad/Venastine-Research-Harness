@@ -1886,6 +1886,31 @@ recording** because each is a way a verification run lies:
   which is why every mutation in this project is EOL-normalised, byte-diffed, and
   `py_compile`d before pytest is allowed to run.
 
+### The mutation harness produced a FALSE RED, mirroring the false GREEN above
+
+`R13-enforcement-truthiness-instead-of-is-None` (`answered_by_name = signoff is None` ->
+`not signoff`) was reported RED and **actually survives the whole suite.** The harness passed
+a two-file test spec as a *single* argument, so pytest got `"tests/test_agents.py
+tests/test_grants.py"` as one path, errored, and the non-zero exit read as a kill.
+
+So both directions are now on record, from the same batch:
+
+| | cause | what it looks like |
+|---|---|---|
+| **false GREEN** | the needle never applied (LF vs CRLF) | a surviving mutant, i.e. a missing test |
+| **false RED** | pytest failed for a reason unrelated to the mutation | a covered guard, i.e. a test that does not exist |
+
+The false RED is the more dangerous of the two: a false GREEN sends you looking for a test you
+then write, while a false RED tells you to stop. **A mutation pass has to check that the
+failure it saw is the failure it expected**, not merely that the exit code was non-zero — the
+harness now splits the spec, drops `-x` so the killing test is visible in the tail, and every
+mutation carries the name of the test that should kill it so the two can be compared by eye.
+
+The surviving mutant was real and is now covered. `test_s1_signoff_is_remembered_per_agent_
+not_per_tool_name` answers the sign-off with a **non-empty** set, which is truthy either way,
+so it could never discriminate. `test_an_EMPTY_signoff_is_remembered_too` answers with
+`set()` — spawn the agent, grant it nothing — which is a real answer and is falsy.
+
 ### Note on §21's row for the headless denial string
 
 Any earlier row asserting the exact text `"requires approval and was not given"` still holds

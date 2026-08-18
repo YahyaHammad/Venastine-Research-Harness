@@ -683,6 +683,65 @@ def test_a_grant_cannot_smuggle_spawn_subagent_into_a_headless_run():
         None, granted={"spawn_subagent"})
 
 
+def test_an_EMPTY_signoff_is_remembered_too(mocker):
+    """The edge the memo's discriminator has to survive, and the one the
+    test below cannot reach because it answers with a NON-EMPTY set.
+
+    An empty sign-off is a real answer -- spawn the agent, grant it nothing
+    -- and `remember_signoff` stores it as `set()`, which is FALSY. The loop
+    decides whether an answer came from a name-level grant or from a
+    subject-keyed memo, because R13's grant policy governs only the first;
+    if that test is truthiness rather than `is None`, an empty memo is
+    misread as a name grant, `spawn_subagent` is GRANT_NEVER, and the same
+    agent is asked about twice in one turn.
+
+    Written after the mutation `answered_by_name = not signoff` SURVIVED the
+    whole suite. Its sibling below passed because a non-empty set is truthy
+    either way, which is exactly the kind of gap a mutation pass exists to
+    find and an assertion count does not.
+    """
+    from tests.conftest import FakeMemory as _Mem
+
+    spawns = make_model_response(text="", tool_calls=[
+        {"id": "s1", "name": "spawn_subagent",
+         "input": {"agent_name": "a", "task": "t"}},
+        {"id": "s2", "name": "spawn_subagent",
+         "input": {"agent_name": "a", "task": "t"}},
+    ])
+    seq = [spawns, make_model_response(text="done")]
+
+    def _stream(*a, **kw):
+        yield StreamToken(final_response=(
+            seq.pop(0) if seq else make_model_response(text="x")))
+
+    mocker.patch("core.loop.api_initialization", return_value=object())
+    mocker.patch("core.loop.effort_for", return_value=None)
+    mocker.patch("core.loop.call_model_stream", side_effect=_stream)
+    mocker.patch("core.loop.registry.dispatch", return_value={"result": "ok"})
+    mocker.patch(
+        "core.loop.registry.request_payload",
+        side_effect=lambda name, params, ctx: {
+            "subject": params.get("agent_name"),
+            "agent": params.get("agent_name"),
+            "candidates": ["mcp__probe__tool"]})
+    mocker.patch("core.loop.registry.request_kind",
+                 return_value="subagent_signoff")
+
+    # set(), not a name: "spawn it, grant it nothing". Distinct from None,
+    # which refuses the spawn outright and never reaches the memo.
+    answers = [set(), set()]
+    channel = ResponseChannel(
+        ask=lambda _r: answers.pop(0) if answers else None)
+    events = list(RunAgentLoop._run(
+        memory=_Mem(), system_prompt="s", provider_name="ANTHROPIC",
+        model="m", context=None, max_steps=2, response_channel=channel))
+
+    prompts = [e for e in events if e.permission_request is not None]
+    assert len(prompts) == 1, (
+        "an empty sign-off subset is a real answer and must be remembered; "
+        "it is falsy, so a truthiness test misreads it as a name grant")
+
+
 def test_s1_signoff_is_remembered_per_agent_not_per_tool_name(mocker):
     """§23 AC1b amends S1's scope, and this is the amendment.
 
