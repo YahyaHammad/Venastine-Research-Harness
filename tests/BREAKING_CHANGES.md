@@ -1805,6 +1805,43 @@ that shrinks a set turns every negative about it into a tautology" (batch 6). Th
 the same each time and it is not more tests: assert one layer further out than the defect can
 reach. Here that is the `tools` argument on the wire.
 
+### Verified on Linux
+
+`python:3.11-slim`, fresh `pip install -r requirements.txt`, `providers.json` from the
+example: **1698 passed, 0 skipped, 1 deselected.** The fifteen tests that `skipif` on Windows
+all run and pass there, so the headline count is measured where nothing skips. Four of the
+mutations were re-run in the container and all four went RED on the same tests.
+
+The wire measurement re-taken in the container:
+
+```
+--grant-tools X                granted on wire: True   (14 tools)
+--grant-tools X --attended     granted on wire: True   (17 tools)
+no flags                       granted on wire: False  (13 tools)
+```
+
+The run also emitted **two distinct headless notices**, which is `headless_hidden(granted=)`
+doing its job — the granted run's notice omits the tool the ungranted run's names:
+
+```
+not advertising remember, spawn_subagent, write_project_doc                    <- granted run
+not advertising mcp__demo__post, remember, spawn_subagent, write_project_doc   <- no flags
+```
+
+**Two container-only failures, both in the harness rather than the code, and both worth
+recording** because each is a way a verification run lies:
+
+- The wire measurement first died on `no such table: conversationthread`. A research pass
+  persists a thread, and a fresh container has no `app.db` — it had only ever worked on
+  Windows because a long-lived local database already had the table. That is verbatim the
+  gotcha ARCHITECTURE §11 records about `pipelinerunrecord`, met from the other side.
+- The `#159` config mutation reported a **false GREEN**: the needle was LF and `config.py` is
+  CRLF, so it never applied and the tests passed for the ordinary reason. Caught only because
+  the harness asserts the byte count changed after writing. **A mutation that fails to apply
+  is indistinguishable from a surviving mutant unless the application itself is checked** —
+  which is why every mutation in this project is EOL-normalised, byte-diffed, and
+  `py_compile`d before pytest is allowed to run.
+
 ### Note on §21's row for the headless denial string
 
 Any earlier row asserting the exact text `"requires approval and was not given"` still holds
