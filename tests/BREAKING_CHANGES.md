@@ -2055,3 +2055,112 @@ container is what found the combined assertion wrong.
 | outside the suite | `python main.py --help` exit 0 and `import tui.app` on both platforms; the `:ro` mount measured in a real container |
 
 The two totals agree: 1742 + 16 = 1757 + 1 = 1758 collected.
+
+
+---
+
+## §25 — the ninth fix batch: the CLI shell (2026-08-19)
+
+Closes audit **#100** (S1), **#7** (S2), **#101** (S3), **#102** (S3) and **#141** (S4).
+ROADMAP_v2 **§29**, decisions **N1–N8**.
+
+> This file's section counter runs independently of ROADMAP_v2's, so this `§25` is the ninth fix
+> batch and the `§25` above is authorized tool use. §19–§23 already collide the same way. That is
+> audit **#17**'s overloaded-namespace family and is left alone here rather than renumbered mid-batch.
+
+### The change that breaks a test, stated first
+
+**`builtins.input` is no longer a seam any test can use to drive the CLI.** `main.py` reads stdin
+through exactly one object now — that is the fix for #100 — so patching `input` reaches nothing.
+Six call sites across `test_e2e.py`, `test_memory_shells.py` and `test_shell_compaction.py` move to
+`tests/conftest.py`'s new `cli_stdin` fixture:
+
+```python
+mocker.patch("builtins.input", side_effect=["hello", EOFError()])   # before
+cli_stdin("hello")                                                  # after
+```
+
+`FakeStdinReader` records `prompts` and `timeouts`, so a test can assert on what the user was asked
+and whether the question carried a deadline at all.
+
+### What breaks
+
+| What | Before | After | Why |
+|---|---|---|---|
+| `_StdinReader.ask(prompt, timeout)` | timeout required | `timeout=None` optional, meaning **wait forever** | N2. A caller relying on the positional gets no deadline instead of one |
+| `_StdinReader` | one method | `+ readline(prompt)`, `_EOF`, `_eof`, `_start`, `_ended` | N1/N3 |
+| `build_attended_provider(honour_run_scope)` | — | `+ timeout=` | N2. The default is a **sentinel**, resolved in the body, so `conftest`'s `shrink_approval_timeout` keeps working |
+| `_prompt_review_decision(reader, finding, round)` | — | `+ timeout=` | Same, for the channel that calls it |
+| the channel returned by `build_attended_provider` | — | `+ .rendered_kinds` | Read by the parity test; nothing in production branches on it |
+| `main.py` | no `main()` | `main(argv=None) -> int` | N7. `if __name__` is now two lines |
+| `main.py --no-review` in chat | accepted, ignored | **`parser.error`, exit 2** | N8. A script passing it unconditionally starts failing |
+| `main.py --review` in chat | accepted, ignored | **`parser.error`, exit 2** | N8 |
+| `--help`, a typo'd flag | created `app.db` + `logs/` | create nothing | N6 |
+| `--memories` / `--summary` / `--init` | ran the legacy sweep | skip it | N6. None of them shows the thread picker the sweep exists for |
+| CLI `--init` prompts | hand-written, `input()`, blocked forever | the response channel, still blocking | N5/N2. Wording changes slightly; the affordances do not |
+| `settings.json`, config | unchanged | unchanged | nothing here reads either |
+
+### Before and after, measured
+
+```
+#100, under a REAL pty -- the only place two blocked readers on one tty can be seen
+  before  (input)      APPROVAL_GOT='y\n'   CHAT_GOT never printed, child still running
+  after   (readline)   APPROVAL_GOT='y\n'   CHAT_GOT='the next question'
+  Ctrl+D  (readline)   CHAT_EOF             (N3)
+
+#7, does the CLI put the question to a human at all?
+  approval yes | subagent_signoff yes | question yes | review yes
+  confirm  NO -> yes        (silently decoded False before)
+  choice   NO -> yes        (silently decoded None before)
+
+#101, in a fresh empty directory
+  before  --help     -> app.db (77824 bytes) + logs/    exit 0
+  after   --help     -> nothing                          exit 0
+          --notaflag -> nothing                          exit 2
+```
+
+### The one thing that did NOT change, and was checked rather than asserted
+
+N2 moves the deadline from a constant read inside each handler to a property of the channel. It is
+meant to change nothing for the four run-backed prompts, so the rendered prompt strings were captured
+before and after and diffed. Identical, including `"  Allow? [y/N] (600s): "`. `QUESTION` rendered no
+deadline before and still does not.
+
+### Vacuity classes
+
+**A test whose seam the fix removes.** Six tests drove `run_chat` by patching `builtins.input`. After
+N1 they exercised a function nothing calls. They did not fail — they *hung*, because the reader was
+waiting on a queue nobody was filling, which is a worse failure than a red test and the reason the
+mutation harness now reports HANG as its own outcome.
+
+**A guard whose test targets the wrong line.** The first `N5-init-handed-a-channel-on-a-pipe`
+mutation deleted `channel = build_attended_provider(...) if interactive else None` and came back
+GREEN. Correctly: building a channel on a pipe is harmless, because what decides whether `generate`
+gets a consent route is `confirm=_confirm if interactive else None` at the **call**. A surviving
+mutant with a confident explanation is the one to distrust — §28's lesson, arriving again, and this
+time the explanation was mine.
+
+**A fixture that keeps passing and stops working.** `shrink_approval_timeout` documents "read at call
+time, so patching the module attribute is enough". A `timeout=config.ATTENDED_APPROVAL_TIMEOUT_S`
+default argument is evaluated at import and silently takes that away. Nothing goes red; the fixture
+simply stops shrinking anything, and the next unanswered prompt stalls the suite for ten minutes
+instead of failing it.
+
+### Mutation pass
+
+24 mutations, one green control, `git status --short` clean after restore. Two came back other than
+predicted and both mattered:
+
+| mutation | predicted | actual | what it taught |
+|---|---|---|---|
+| `--init` handed a channel on a pipe | RED | **GREEN** | It targeted the channel construction; the load-bearing guard is at the `generate()` call. Retargeted, then RED |
+| the pump's EOF publication | RED | **HANG** | A mutation that strands a reader does not fail the suite, it stops it. HANG is now a reported outcome, and counts as a kill only where RED was expected |
+
+### Platform note
+
+Windows has no `pty` module, so #100's probe — the only thing that can see two blocked readers on one
+terminal — runs **only** in the container. §21's rule applies exactly: this defect is not verified
+until the probe runs where a pty exists. What Windows *can* answer is whether N1 costs anything: a
+reader parked with no deadline is not woken by `_thread.interrupt_main()`, and neither is `input()`,
+and neither is `ask`'s timed wait; under a real console control event all three exit identically with
+`STATUS_CONTROL_C_EXIT`.

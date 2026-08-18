@@ -262,6 +262,68 @@ def shrink_approval_timeout():
     config.ATTENDED_APPROVAL_TIMEOUT_S = original
 
 
+class FakeStdinReader:
+    """Stands in for main._StdinReader (ROADMAP_v2 §29, N1).
+
+    THE seam for anything that types at the CLI. Patching
+    `builtins.input` used to be that seam and no longer is, because §29
+    routed every read in main.py through one reader -- which is the whole
+    point of the fix, and the reason #102 called the old arrangement a
+    fixture-level gap: a suite whose stdin is a capture object could not
+    tell a CLI that reads correctly from one that wedges after the first
+    tool call, since neither ever touched stdin.
+
+    `lines` are handed out in order. An exception class or instance in
+    the list is raised instead, and running out means EOF -- so a chat
+    test types what it wants and lets the loop exit on its own, exactly
+    as `side_effect=["hello", EOFError()]` used to.
+
+    Records `prompts` and `timeouts` so a test can assert on what the
+    user was actually asked, including whether the question carried a
+    deadline at all (N2).
+    """
+
+    def __init__(self, lines=()):
+        self.lines = list(lines)
+        self.prompts = []
+        self.timeouts = []
+
+    def _next(self):
+        if not self.lines:
+            raise EOFError
+        item = self.lines.pop(0)
+        if isinstance(item, BaseException):
+            raise item
+        if isinstance(item, type) and issubclass(item, BaseException):
+            raise item()
+        return item
+
+    def readline(self, prompt):
+        self.prompts.append(prompt)
+        return self._next()
+
+    def ask(self, prompt, timeout=None):
+        self.prompts.append(prompt)
+        self.timeouts.append(timeout)
+        try:
+            return self._next()
+        except EOFError:
+            # ask() answers "nobody answered" rather than raising: EOF at
+            # a gated prompt is not consent.
+            return None
+
+
+@pytest.fixture
+def cli_stdin(monkeypatch):
+    """Type lines at the CLI's one reader. Returns the FakeStdinReader."""
+    def _install(*lines):
+        import main
+        reader = FakeStdinReader(lines)
+        monkeypatch.setattr(main, "_stdin_reader", lambda: reader)
+        return reader
+    return _install
+
+
 @pytest.fixture(autouse=True)
 def clear_client_cache():
     """core.client caches SDK clients keyed by provider name. Reset

@@ -40,7 +40,7 @@ python main.py --init --research-project           # §24: skip the type questio
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 1758 tests, offline, ~25-45s by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 1818 tests, offline, ~25-45s by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -60,7 +60,7 @@ MCP servers are a *third* config file again — `mcp.json`, user-level or `.vena
 Read these before changing anything non-trivial — they carry design decisions that are locked, not defaults to re-derive.
 
 - **ARCHITECTURE.md** — what's built, file-by-file contracts ("what belongs here / what does NOT"), known gotchas (§11).
-- **ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **ROADMAP_v2.md** (§13–§28, all built) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I13 from §24, J1–J14 from §23 and G1–G7 from §28). Section and D-numbers are stable and cross-referenced everywhere.
+- **ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **ROADMAP_v2.md** (§13–§29, all built) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I13 from §24, J1–J14 from §23, G1–G7 from §28 and N1–N8 from §29). Section and D-numbers are stable and cross-referenced everywhere.
 - **DEVLOG.md** — per-section implementation notes: what was followed verbatim, what was deviated from (every deviation was an explicit user decision — do not silently override).
 - **tests/BREAKING_CHANGES.md** — what breaks each test when production code changes, the symptom, and the fix.
 - **CLAUDE.md / QWEN.md** — pointers to this file, nothing more. They exist so a harness that looks for one filename finds it without searching; the content has one copy.
@@ -380,6 +380,40 @@ parsed since §14 with no consumer at all — this is its first.
   `permissions` section. Its whole approval apparatus is unreachable by
   construction, and so is `security/sandbox.py` plus `config.py`'s sandbox block,
   until someone edits `config.py`.
+
+### §29 — the CLI shell (N1–N8)
+
+`main.py` reads stdin through **one** `_StdinReader`. There is no live `input()` in that module and a
+test enforces it: `input()` is a second reader on the descriptor the approval pump already owns, and
+that is audit #100 — after the first gated call the pump takes every line and chat blocks forever.
+
+Two methods, and the difference is a safety property rather than a preference:
+
+- `ask(prompt, timeout=None)` — the gated prompts. **Drains** stale input first, because a line typed
+  after a question timed out was answering *that* question.
+- `readline(prompt)` — the chat prompt and the one-shot startup prompts. **Keeps** type-ahead, blocks,
+  raises `EOFError` on Ctrl+D. Do not add a `drain=` flag; that puts the rule one keyword argument
+  away from being switched off at an approval.
+
+**The deadline belongs to the channel, not the kind.** `build_attended_provider(timeout=…)` decides
+it: run-backed builders pass `ATTENDED_APPROVAL_TIMEOUT_S`, `--init` passes `None`. The default is a
+`_DEFAULT_TIMEOUT` sentinel resolved in the body — a `timeout=config.ATTENDED_APPROVAL_TIMEOUT_S`
+default is evaluated at import and silently defeats `conftest`'s `shrink_approval_timeout`.
+
+**Every kind in `interaction.SAFE_DEFAULTS` must have a handler in `_ASK_HANDLERS`**, and a test
+enforces that in both shells. A missing branch is not a missing feature — it falls through to the
+kind's declining default, silently, while looking wired up (#7).
+
+**Nothing runs before `parse_args()`** except building the parser. `--help` and a typo'd flag must
+leave the filesystem untouched (#101). `_classify_legacy_threads()` runs below the early-exit
+commands: it exists for the thread picker, and none of them shows one.
+
+**Tests type at the CLI through `cli_stdin`**, not by patching `builtins.input` — that stopped being
+the seam, which is the fix working. `FakeStdinReader` records `prompts` and `timeouts`, so a test can
+assert what the user was asked and whether it carried a deadline.
+
+A mutation that strands a reader **hangs** the suite rather than failing it, since two read paths now
+have no deadline. The mutation harness reports HANG as its own outcome.
 
 ### The shell gate (`§28`, G1–G7)
 

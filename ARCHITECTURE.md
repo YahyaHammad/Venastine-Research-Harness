@@ -50,10 +50,10 @@ Venastine Research Harness/
 ├── CLAUDE.md / QWEN.md             # pointers to AGENTS.md, so a harness that auto-loads one of those names finds the context instead of a second copy of it
 ├── DEVLOG.md                       # implementation notes for built ROADMAP sections -- see §0
 │
-├── tests/                          # 1758 tests, all offline, ~25-45s depending on the machine (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
+├── tests/                          # 1818 tests, all offline, ~25-45s depending on the machine (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
 │   ├── conftest.py                 # fixtures: make_model_response, make_stream_from_response, make_stream_sequence, FakeStorage, ...
 │   ├── BREAKING_CHANGES.md         # what-breaks-it / symptom / fix per area
-│   ├── test_cli.py                 # 20 tests -- ROADMAP §1 thread_id passthrough + UUID validation + §14 parser defaults/resolution/trust flow
+│   ├── test_cli.py                 # 76 tests -- ROADMAP §1 thread_id passthrough + UUID validation + §14 parser defaults/resolution/trust flow + §29 N1-N8 the one stdin reader, N2's channel deadline, every request kind rendered, and the startup block main(argv) made reachable + #102's four declining defaults
 │   ├── test_fetch_url.py           # 23 tests -- audit #120/#58: fetch_url's whole surface, which no test had ever executed. #53/#54's per-hop policy check, twice: once on the fake httpx and once on REAL httpx through a MockTransport
 │   ├── test_e2e.py                 # 5 tests -- e2e chat (multi-turn + tool use), research mode, error handling ×3
 │   ├── test_logging_setup.py       # 7 tests -- configure_logging fallback on bad log path, stderr=False, and #132's redacting formatter (message, traceback, and a real dispatch)
@@ -114,7 +114,7 @@ Venastine Research Harness/
 │   ├── test_interaction.py        # 92 tests -- ROADMAP_v2 §23 J2-J7: core/interaction.py's decode, the declining default per kind, CHOICE and SUBAGENT_SIGNOFF validated against the request, and the strict review decoder
 │   ├── test_question_tool.py      # 41 tests -- ROADMAP_v2 §23 slice 2: ask_user through the injected response_channel, QUESTION's three-way answer, and both shells' renderers
 │   ├── test_todo.py               # 57 tests -- ROADMAP_v2 §23 slice 2: todo_write's whole-list write (J13), the notice forwarded and stripped (J10), and the panel reading its content from thread state
-│   ├── test_project_init.py       # 68 tests -- ROADMAP_v2 §24 I1-I13: the two narrow tools, the generated index, stubs vs invented content, one consent covering a named list, and the I6 trust re-grant
+│   ├── test_project_init.py       # 72 tests -- ROADMAP_v2 §24 I1-I13: the two narrow tools, the generated index, stubs vs invented content, one consent covering a named list, and the I6 trust re-grant + §29 N5 the CLI's --init down the response channel
 │   ├── test_truncated_pass.py     # 10 tests -- _check_not_truncated at the pass: truncated-with-text traces and continues, truncated-with-nothing raises naming the pass, and it runs BEFORE the JSON retry
 │   ├── test_tool_failure_containment.py # 12 tests -- dispatch() turning a raising handler into an {"error": ...} result, the two exceptions deliberately raised above it, and the error result still going through check_output_policy
 │   ├── test_pilot_wait.py         # 10 tests -- TECHNICAL_DEBT 8: settle's wall-clock deadline and its quiesce, pump's count-based form for negative assertions, and why a sixth copy of either fails here
@@ -1301,3 +1301,44 @@ The single-payload test (`__import__('os').system(...)`) is kept, and was itself
 - **A test's premise can be the thing you are changing** (§28). `test_ac3_context_false_does_not_suppress_tool_approval_check` pinned D14's ratchet with `rm -rf /`, and its docstring said it worked *because* `ToolApprovals.shell` defaulted `True` and returned before anything read the command. Flipping that default made `rm -rf /` genuinely contained, so the test would have gone on passing while asserting the override rather than the tool. **When a docstring names the config value it depends on, changing that value is a search key** — grep for the field, not just for the code you edited.
 - **An approval gate sees raw model output; the executor sees validated params** (§28). `registry.approval_needed` is handed the tool-call input verbatim, and `ShellParams` does not validate until `run()`, which is *after* approval. So `command.strip()` in the approval path was an `AttributeError` on `{"command": ["ls"]}` — escaping the check and then the loop. It had been unreachable only because a config default returned first. **Anything reachable from `approval_needed` must be total over arbitrary JSON**, not merely correct on well-formed input.
 - **`security/` imports `config` and the stdlib, and nothing else** (§28). The obvious reuse for "is this path inside the workspace" was `file_ops._is_within_workspace`, which would have been the first runtime `security/ → tools/` edge and inverted the layering. It also captures `WORKSPACE_ROOT` at **import** time, so it cannot follow a workspace a caller passes in — three lines written locally beat a shared helper that answers a slightly different question.
+
+- **A second reader on one stdin is invisible to the test suite, by construction.** pytest's stdin is
+  a capture object, and the chat tests supplied lines by patching `builtins.input`, so nothing ever
+  touched a real descriptor. No assertion in this repository could distinguish a CLI that reads
+  correctly from one that wedges after the first tool call (audit #100) — that is a fixture-level gap
+  rather than a missing assertion, and it is why §29's probe is a real pty in the Linux container
+  rather than a test. Windows has no `pty` module at all, so this defect is verified in exactly one
+  place.
+
+- **A timeout can be load-bearing without anyone having decided it was.** `_StdinReader`'s pump had
+  no error handling: a `sys.stdin` that raises killed the thread and published nothing. That was
+  survivable only because every read carried a 600s deadline, so a dead pump merely meant the
+  deadline fired. §29 (N1) added a read path with no deadline, and the same dead pump became a
+  permanent hang — found by the suite stopping rather than failing. When removing a timeout, look for
+  what it was quietly covering.
+
+- **A mutation that strands a reader HANGS the suite instead of failing it.** `tests/BREAKING_CHANGES`
+  §25 records the harness change: HANG is now a reported outcome and counts as a kill only where RED
+  was expected. Otherwise a hang for an unrelated reason reads as a successful mutation, which is the
+  false-RED class batch 7 already paid for once.
+
+- **A default argument is evaluated at import, which can silently disable a fixture.**
+  `tests/conftest.py`'s `shrink_approval_timeout` exists so an unanswered prompt fails the suite
+  instead of stalling it for ten minutes, and its docstring says "read at call time, so patching the
+  module attribute is enough". Writing `timeout=config.ATTENDED_APPROVAL_TIMEOUT_S` as a *default*
+  takes that away without turning anything red — the fixture keeps running and stops working. §29
+  (N2) uses a `_DEFAULT_TIMEOUT` sentinel resolved in the body, and a test states the contract.
+
+- **`interaction.SAFE_DEFAULTS` is the canonical registry of request kinds**, because `decode` raises
+  on anything absent from it. A shell that cannot render a kind falls through `ask` to `None`, which
+  decode turns into that kind's declining default — silently, on every run, while looking wired up
+  (audit #7: `CONFIRM` and `CHOICE` were in that state for two sections). Both shells are now checked
+  against that table, and the CLI's check is *behavioural*: it drives every kind and asserts a human
+  was actually asked, because a branch that returns without asking is exactly the defect.
+
+- **The tool that edits the docs is subject to the same EOL discipline as the tool that edits the
+  code.** §28's rule was about mutation needles; the counter-example one section later was a
+  count-syncing script that read three CRLF documents as text, wrote them with `newline=""`, and
+  converted the lot to LF — and whose blanket `\d+ tests` rule rewrote AGENTS.md's *historical*
+  "invisibly to 849 tests" into the current number, turning a description of a past bug into a false
+  claim. Anchor on the words around a number, work in bytes, and assert afterwards.

@@ -8,7 +8,8 @@ Interactive CLI entry point (ROADMAP §1). Two modes:
   $ python main.py --mode research "some query"       # deep-research pipeline
   $ python main.py --provider OPENAI --model gpt-5.1  # override defaults
 
-Chat mode runs an input()/print() loop with tool use. Ctrl+C or Ctrl+D
+Chat mode runs a read/print loop with tool use, reading through the one
+_StdinReader every prompt in this module shares (§29 N1). Ctrl+C or Ctrl+D
 to exit. The thread id is printed after the first response so it can be
 resumed later with --thread.
 
@@ -130,7 +131,12 @@ def run_chat(
             first_message = None
         else:
             try:
-                user_input = input("You: ").strip()
+                # §29 (N1). Audit #100: this was input(), a SECOND reader
+                # on the stdin the approval pump already owns, so from the
+                # first gated call onwards the pump took this line and
+                # input() blocked forever. EOFError still arrives here --
+                # readline() raises it on Ctrl+D exactly as input() did.
+                user_input = _stdin_reader().readline("You: ").strip()
             except (KeyboardInterrupt, EOFError):
                 print("\nExiting.")
                 break
@@ -265,46 +271,141 @@ def _attended_only(provider):
     return RunAuthorization(provider=provider)
 
 
+# N2's "unset", distinct from None because None is a real answer here:
+# it means "wait indefinitely". A plain
+# `timeout=config.ATTENDED_APPROVAL_TIMEOUT_S` default would be evaluated
+# at IMPORT, which silently defeats tests/conftest.py's
+# shrink_approval_timeout -- a fixture whose docstring says "read at call
+# time, so patching the module attribute is enough", and which exists so
+# an unanswered prompt fails the suite instead of stalling it for ten
+# minutes.
+_DEFAULT_TIMEOUT = object()
+
+
 class _StdinReader:
-    """One background thread reading stdin, so a prompt can time out.
+    """The ONE reader of stdin in this process (ROADMAP_v2 §29, N1).
 
     input() cannot be interrupted, and spawning a reader per prompt would
     leave several threads racing for the same stdin after the first
     timeout -- whichever won would answer the wrong question. One
     long-lived daemon reader with a queue keeps that single-threaded.
 
-    Stale input is dropped before each prompt: a line typed after a
-    question timed out was an answer to THAT question, and letting it fall
-    through would approve the next call on the strength of it.
+    §29 (N1) finishes that argument, because it used to stop one caller
+    short: **input() is a second reader too**. Audit #100 is what that
+    cost. After the first approval prompt the pump is parked in
+    sys.stdin.readline() forever, so it takes the next chat line and
+    run_chat's input() waits for one that will never arrive -- a silent
+    wedge on the default shell, indistinguishable from the model
+    thinking. Every stdin read in this module now comes through here.
+
+    TWO methods, because the two callers want different disciplines and
+    the difference is a safety property rather than a preference:
+
+        ask()       drains stale input first, and may expire.
+        readline()  keeps type-ahead, and blocks.
+
+    Stale input is dropped before each ask(): a line typed after a
+    question timed out was an answer to THAT question, and letting it
+    fall through would approve the next call on the strength of it.
+    readline() must NOT drain, for the mirror-image reason -- a line
+    typed while the model was streaming is an answer to the prompt about
+    to appear, which the terminal line-buffers and input() returned
+    immediately. A `drain=` flag would put that safety rule one keyword
+    argument away from being switched off at an approval prompt, which
+    is why these are two methods and not one.
     """
 
+    # N3. The end of stdin is invisible to a queue consumer: input()
+    # raised EOFError on Ctrl+D and run_chat caught it to exit, but a
+    # reader blocked on a queue only sees a pump that stopped putting
+    # things. So EOF is published twice -- as a sentinel, to wake anyone
+    # already waiting, and as a latch, because ask()'s drain would
+    # otherwise swallow the sentinel and strand the next reader forever.
+    _EOF = object()
+
     def __init__(self):
-        self._lines = __import__("queue").Queue()
+        import queue
+        import threading
+        self._lines = queue.Queue()
         self._thread = None
+        self._eof = threading.Event()
 
     def _pump(self):
-        for line in sys.stdin:
-            self._lines.put(line)
+        try:
+            for line in sys.stdin:
+                self._lines.put(line)
+        except Exception as e:
+            # A stdin that cannot be READ is, to everyone waiting here, a
+            # stdin that has ENDED -- and the difference has to be
+            # invisible, because the `finally` below is the only thing
+            # that unblocks them. Nothing needed this before §29: a dead
+            # pump merely meant ask()'s deadline fired, and every read had
+            # one. readline() has none (N2), so the same dead pump is a
+            # permanent hang instead. Found by the suite, whose captured
+            # stdin raises on the first read.
+            logger.debug("stdin reader stopped: %s", e)
+        finally:
+            self._eof.set()
+            self._lines.put(self._EOF)
 
-    def ask(self, prompt: str, timeout: float):
-        """Returns the typed line, or None if nobody answered in time."""
-        import queue as _queue
-
+    def _start(self) -> None:
         if self._thread is None:
             import threading
             self._thread = threading.Thread(target=self._pump, daemon=True)
             self._thread.start()
+
+    def _ended(self) -> bool:
+        """stdin is closed AND nothing typed before it closed is left."""
+        return self._eof.is_set() and self._lines.empty()
+
+    def ask(self, prompt: str, timeout: float | None = None):
+        """Returns the typed line, or None if nobody answered in time.
+
+        timeout=None waits indefinitely (N2). Whether a prompt may expire
+        belongs to the CHANNEL that asked -- there has to be a run to keep
+        moving for a deadline to mean anything -- rather than to the kind
+        of question. See build_attended_provider.
+        """
+        import queue as _queue
+
+        self._start()
         while True:                      # drop anything typed too late
             try:
                 self._lines.get_nowait()
             except _queue.Empty:
                 break
         print(prompt, end="", flush=True)
+        if self._ended():
+            # Nobody can answer, so waiting out a 600s deadline for an
+            # answer that cannot come is just a slower version of this.
+            print()
+            return None
         try:
-            return self._lines.get(timeout=timeout)
+            line = self._lines.get(timeout=timeout)
         except _queue.Empty:
             print()
             return None
+        if line is self._EOF:
+            print()
+            return None
+        return line
+
+    def readline(self, prompt: str) -> str:
+        """The chat prompt and the one-shot startup prompts.
+
+        input()'s contract, on the one reader: blocks with no deadline,
+        keeps whatever was typed ahead, strips the trailing newline, and
+        raises EOFError on Ctrl+D so run_chat's existing handler and
+        _ask's default-No path are unchanged.
+        """
+        self._start()
+        print(prompt, end="", flush=True)
+        if self._ended():
+            raise EOFError
+        line = self._lines.get()
+        if line is self._EOF:
+            raise EOFError
+        return line.rstrip("\r\n")
 
 
 _STDIN_READER: "_StdinReader | None" = None
@@ -322,7 +423,8 @@ def _stdin_reader() -> _StdinReader:
     return _STDIN_READER
 
 
-def build_attended_provider(honour_run_scope: bool = False):
+def build_attended_provider(honour_run_scope: bool = False,
+                            timeout=_DEFAULT_TIMEOUT):
     """A ResponseChannel that asks at the terminal (§25 R9, §23 AC1).
 
     ONE channel for every kind of question the CLI can be asked, replacing
@@ -338,10 +440,26 @@ def build_attended_provider(honour_run_scope: bool = False):
     True for CHAT (§21b M16), where the shortcut is exactly right: being
     asked about the same tool three times in one turn is the noise §18
     added grant_scope to remove.
+
+    `timeout` is §29's N2: the deadline belongs to the CHANNEL, not to
+    the kind of question. What decides whether a prompt may expire is
+    whether there is a RUN waiting on the answer -- so the two run-backed
+    builders pass ATTENDED_APPROVAL_TIMEOUT_S and are unchanged, while
+    --init builds one with timeout=None and its prompts wait as long as
+    the user needs. Reading the constant inside each handler instead
+    would let the KIND decide, which gets it wrong in both directions: a
+    startup prompt would expire on someone who stepped away, and a
+    mid-run CONFIRM would block the run forever -- #100's own defect,
+    in the batch that fixes #100.
     """
     from core import interaction
 
+    if timeout is _DEFAULT_TIMEOUT:
+        timeout = config.ATTENDED_APPROVAL_TIMEOUT_S
     reader = _stdin_reader()
+    # Rendered into the prompts, so one cannot promise a deadline it does
+    # not have. QUESTION never showed one and still does not.
+    clock = f" ({timeout}s)" if timeout else ""
 
     def _render_params(params: dict) -> None:
         import json as _json
@@ -357,9 +475,7 @@ def build_attended_provider(honour_run_scope: bool = False):
         if request.notice:
             print(f"  {request.notice}")
         _render_params(request.payload.get("params") or {})
-        answer = reader.ask(
-            f"  Allow? [y/N] ({config.ATTENDED_APPROVAL_TIMEOUT_S}s): ",
-            config.ATTENDED_APPROVAL_TIMEOUT_S)
+        answer = reader.ask(f"  Allow? [y/N]{clock}: ", timeout)
         if answer is None:
             print("  [no answer — denied; the run continues]")
             return False
@@ -395,7 +511,7 @@ def build_attended_provider(honour_run_scope: bool = False):
         how.append("'d' to discuss it instead")
         prompt = f"  {', or '.join(how)} (blank to skip): "
 
-        answer = reader.ask(prompt, config.ATTENDED_APPROVAL_TIMEOUT_S)
+        answer = reader.ask(prompt, timeout)
         if answer is None:
             print("  [no answer — the model will be told nobody replied]")
             return None
@@ -435,9 +551,7 @@ def build_attended_provider(honour_run_scope: bool = False):
         candidates = list(request.payload.get("candidates") or [])
         if not candidates:
             print(f"\n[subagent] {agent} needs no approval-gated tools.")
-            answer = reader.ask(
-                f"  Run it? [y/N] ({config.ATTENDED_APPROVAL_TIMEOUT_S}s): ",
-                config.ATTENDED_APPROVAL_TIMEOUT_S)
+            answer = reader.ask(f"  Run it? [y/N]{clock}: ", timeout)
             if answer and answer.strip().lower() in ("y", "yes"):
                 return set()
             print("  [the spawn was refused]")
@@ -446,9 +560,8 @@ def build_attended_provider(honour_run_scope: bool = False):
         for index, name in enumerate(candidates, 1):
             print(f"  {index}. {name}")
         answer = reader.ask(
-            "  Grant which? [numbers / 'all' / 'none' / blank to refuse] "
-            f"({config.ATTENDED_APPROVAL_TIMEOUT_S}s): ",
-            config.ATTENDED_APPROVAL_TIMEOUT_S)
+            "  Grant which? [numbers / 'all' / 'none' / blank to refuse]"
+            f"{clock}: ", timeout)
         if answer is None:
             print("  [no answer — the spawn was refused]")
             return None
@@ -467,25 +580,103 @@ def build_attended_provider(honour_run_scope: bool = False):
                 print(f"  [ignoring {piece!r} — not one of the numbers above]")
         return chosen
 
-    def ask(request):
-        if request.kind == interaction.APPROVAL:
-            return _approval(request)
-        if request.kind == interaction.SUBAGENT_SIGNOFF:
-            return _signoff(request)
-        if request.kind == interaction.QUESTION:
-            return _question(request)
-        if request.kind == interaction.REVIEW:
-            return _prompt_review_decision(
-                reader, request.payload.get("finding") or {},
-                request.payload.get("round", 0))
-        # An unrecognised kind is a bug in whoever built the Request, and
-        # interaction.decode raises on one. Returning None here lets that
-        # happen rather than inventing an answer for a question this shell
-        # does not know how to put.
+    def _confirm(request):
+        """A titled yes/no over a block of text the caller composed.
+
+        §29 (N4), audit #7. CONFIRM and APPROVAL both answer with a bool
+        and are still separate kinds, because the KIND is what tells a
+        shell how to render: an approval is a gated tool call with params,
+        this is prose someone wants signed off.
+        """
+        payload = request.payload
+        body = payload.get("body", "")
+        if body:
+            print(f"\n{body}")
+        answer = reader.ask(
+            f"  {payload.get('title', 'Proceed?')} [y/N]{clock}: ", timeout)
+        if answer is None:
+            print("  [no answer — nothing was done]")
+            return False
+        return answer.strip().lower() in ("y", "yes")
+
+    def _choice(request):
+        """Exactly one of the options offered, or nothing.
+
+        Renders from the payload the TUI already established rather than
+        from anything --init-shaped, so the two shells put the same
+        question. Three ways in, because the terminal should not be worse
+        at this than the modal: a number, a unique prefix (which is what
+        makes `s` mean software without anything hard-coding it), or a
+        bare Enter to take the suggestion.
+        """
+        payload = request.payload
+        options = [str(o) for o in (payload.get("options") or ())]
+        proposal = payload.get("proposal")
+        if payload.get("blank"):
+            print("\nThis folder is empty, so there is nothing to go on.")
+        elif proposal:
+            print(f"\nThis looks like a {proposal} project — "
+                  f"{payload.get('reason', 'no reason given')}.")
+        labels = " or ".join(f"[{o[:1]}]{o[1:]}" for o in options)
+        accepts = " (enter accepts the suggestion)" if proposal else ""
+        answer = reader.ask(f"  {labels}?{accepts}{clock}: ", timeout)
+        if answer is None:
+            print("  [no answer — nothing was chosen]")
+            return None
+        cleaned = answer.strip()
+        if not cleaned:
+            # None when there was no proposal, which decode reads as the
+            # declining default -- not as a pick made on the user's behalf.
+            return proposal
+        if cleaned.isdigit() and 1 <= int(cleaned) <= len(options):
+            return options[int(cleaned) - 1]
+        matched = [o for o in options
+                   if o.lower().startswith(cleaned.lower())]
+        if len(matched) == 1:
+            return matched[0]
+        print(f"  [{cleaned!r} is not one of: {', '.join(options)}]")
         return None
 
-    return interaction.ResponseChannel(
+    def _review(request):
+        return _prompt_review_decision(
+            reader, request.payload.get("finding") or {},
+            request.payload.get("round", 0), timeout)
+
+    # §29 (N4). A TABLE, not an if-chain, so the set of kinds this shell
+    # can render is a value a test can compare against
+    # interaction.SAFE_DEFAULTS -- which is already the canonical registry,
+    # since decode() raises on anything not in it.
+    #
+    # Audit #7 is what a missing branch costs: the kind falls through to
+    # None, decode turns that into the declining default, and the feature
+    # reports "the user did not answer" on every CLI run while looking
+    # perfectly wired up. CONFIRM and CHOICE sat in that state through two
+    # sections. A runtime warning would only fire once someone reached the
+    # branch, which is exactly the condition nobody noticed.
+    handlers = {
+        interaction.APPROVAL: _approval,
+        interaction.SUBAGENT_SIGNOFF: _signoff,
+        interaction.QUESTION: _question,
+        interaction.REVIEW: _review,
+        interaction.CONFIRM: _confirm,
+        interaction.CHOICE: _choice,
+    }
+
+    def ask(request):
+        handler = handlers.get(request.kind)
+        if handler is None:
+            # An unrecognised kind is a bug in whoever built the Request,
+            # and interaction.decode raises on one. Returning None here
+            # lets that happen rather than inventing an answer for a
+            # question this shell does not know how to put.
+            return None
+        return handler(request)
+
+    channel = interaction.ResponseChannel(
         ask=ask, honour_run_scope=honour_run_scope)
+    # Read by the parity test; nothing in production branches on it.
+    channel.rendered_kinds = frozenset(handlers)
+    return channel
 
 
 def run_memory_command(args) -> int:
@@ -568,6 +759,7 @@ def run_init_command(args, provider_name: str, model: str) -> int:
     there is no consent route, so `confirm` stays None and the generator
     reports what it WOULD write without writing it (I5/V6).
     """
+    from core import interaction
     from project_init import doc_sets
     from project_init.generator import InitError, generate
 
@@ -582,24 +774,31 @@ def run_init_command(args, provider_name: str, model: str) -> int:
 
     interactive = sys.stdin.isatty()
 
+    # §29 (N5). Down the same channel as every other CLI question, with
+    # the shared decoder instead of two guards written by hand here.
+    # §23 slice 1 said this was the design -- "generate()'s
+    # confirm/choose_kind parameters are unchanged, they are a
+    # shell-agnostic API the CLI implements too" -- and moved the TUI. The
+    # CLI is the half that was never moved, which is audit #7.
+    #
+    # timeout=None (N2) because there is no run waiting on the answer. A
+    # 600s deadline here would discard the answer of someone who stepped
+    # away mid-decision and came back, and there is nothing it would keep
+    # moving in the meantime.
+    channel = build_attended_provider(timeout=None) if interactive else None
+
     def _confirm(summary: str) -> bool:
-        print(f"\n{summary}")
-        return _ask("Write these files? [y/N]: ").strip().lower() in ("y", "yes")
+        return interaction.ask(channel, interaction.Request(
+            kind=interaction.CONFIRM,
+            payload={"title": "Write these files?", "body": summary,
+                     "confirm_label": "Write"}))
 
     def _choose_kind(proposal, reason, blank):
-        if blank:
-            print("\nThis folder is empty, so there is nothing to go on.")
-        elif proposal:
-            print(f"\nThis looks like a {proposal} project — {reason}.")
-        answer = _ask("Document set — [s]oftware or [r]esearch? "
-                      "(enter accepts the suggestion): ").strip().lower()
-        if not answer:
-            return proposal
-        if answer in ("s", "software"):
-            return doc_sets.SOFTWARE
-        if answer in ("r", "research"):
-            return doc_sets.RESEARCH
-        return None
+        return interaction.ask(channel, interaction.Request(
+            kind=interaction.CHOICE,
+            payload={"options": list(doc_sets.PROJECT_KINDS),
+                     "proposal": proposal, "reason": reason,
+                     "blank": blank}))
 
     try:
         notice = generate(
@@ -813,7 +1012,12 @@ def run_research(
 
 def build_parser() -> argparse.ArgumentParser:
     """Builds the CLI argument parser. Separated from main() so tests
-    can exercise argument parsing without side effects."""
+    can exercise argument parsing without side effects.
+
+    That was true of this function and false of everything around it
+    until §29 (N7): there WAS no main(), so the startup sequence this
+    sentence implies is testable sat under `if __name__` and no test
+    could reach any of it. See main()."""
     parser = argparse.ArgumentParser(
         description="Venastine Research Harness — interactive CLI",
     )
@@ -1034,14 +1238,22 @@ def resolve_review(args, settings: dict) -> bool:
     return bool(config.SUBAGENT_REVIEW)
 
 
-def _prompt_review_decision(reader, finding, round_index):
+def _prompt_review_decision(reader, finding, round_index,
+                            timeout=_DEFAULT_TIMEOUT):
     """Put one proposed correction to the terminal. (decision, notes).
 
     Extracted from build_review_consent so the review-only channel and the
     general one can share it -- §23's whole point is that there is one way
     to ask, and two copies of the prompt would be the same divergence one
     layer up.
+
+    `timeout` follows N2: the caller's channel owns the deadline. It
+    defaults to the attended one because both of this function's callers
+    are mid-run, and a review nobody is watching has to degrade rather
+    than wait.
     """
+    if timeout is _DEFAULT_TIMEOUT:
+        timeout = config.ATTENDED_APPROVAL_TIMEOUT_S
     kind = finding.get("kind")
     target = finding.get("claim_id") or "the report"
     print(f"\n[review] {kind} correction to {target} "
@@ -1051,10 +1263,10 @@ def _prompt_review_decision(reader, finding, round_index):
     if round_index:
         print(f"  (refinement {round_index} of "
               f"{config.MAX_REVIEW_REFINEMENTS})")
+    clock = f" ({timeout}s)" if timeout else ""
     answer = reader.ask(
         "  [a]ccept / [r]eject / [f] refine <note> / [!] reject the "
-        f"rest ({config.ATTENDED_APPROVAL_TIMEOUT_S}s): ",
-        config.ATTENDED_APPROVAL_TIMEOUT_S)
+        f"rest{clock}: ", timeout)
     if answer is None:
         # Same direction as an unanswered approval prompt: declining is
         # safe and continuing is useful, so walking away from a review
@@ -1112,15 +1324,21 @@ def build_review_consent():
 
 
 def _ask(prompt: str) -> str:
-    """input() that treats EOF as an empty answer.
+    """A blocking terminal read that treats EOF as an empty answer.
 
     Ctrl+D (Ctrl+Z on Windows) at a startup prompt raised EOFError out of
     a bare input(), giving a traceback where the default-No path was
     wanted. run_chat's loop already handles this; the one-shot startup
     prompts did not. Every caller here defaults to No, so "" declines.
+
+    §29 (N1): goes through the one reader rather than calling input().
+    Its callers all happen to run before the approval pump starts today,
+    so #100 could not reach them -- but that is an ordering coincidence
+    between setup_mcp and run_chat, not a property anyone stated, and it
+    would break the first time a startup prompt moved.
     """
     try:
-        return input(prompt)
+        return _stdin_reader().readline(prompt)
     except EOFError:
         print()
         return ""
@@ -1307,15 +1525,47 @@ def _classify_legacy_threads() -> None:
         connection.close()
 
 
-if __name__ == "__main__":
-    configure_logging()
-    create_db_and_tables()
-    # AFTER the schema exists: this reads the column create_db_and_tables
-    # has just ensured.
-    _classify_legacy_threads()
+def main(argv=None) -> int:
+    """The CLI, as a function (ROADMAP_v2 §29, N7). Returns an exit code.
 
+    Audit #102: everything below used to sit under `if __name__ ==
+    "__main__":`, so nothing in the startup sequence was importable --
+    not the four parser.error() validations, each carrying a comment
+    about a real bug it fixed; not the ordering of the early-exit
+    commands; not the `finally: teardown_mcp`, which is `finally` rather
+    than "at the end" for a reason worth a test. build_parser's docstring
+    already claimed it was "separated from main() so tests can exercise
+    argument parsing without side effects", naming a function that did
+    not exist.
+
+    SystemExit still propagates rather than being converted: parser.error
+    raises it with code 2, and run_research with code 1 on a failed
+    pipeline. This returns a code only where it decides one.
+    """
     parser = build_parser()
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+
+    # Below parse_args for #101's other half: this creates the log
+    # DIRECTORY, so --help left one behind too. Nothing above logs
+    # anything -- argparse reports its own errors on stderr and exits.
+    configure_logging()
+
+    # §29 (N6), audit #101. BELOW parse_args, which is where --help and a
+    # typo'd flag exit -- both of which used to create a 77 KB six-table
+    # SQLite database and a log directory in whatever directory they were
+    # run from, for output that touches no data at all. The file already
+    # made exactly this argument one level down, about MCP: "argument
+    # validation before connecting anything: parser.error() exits, and
+    # doing it after setup_mcp() would spawn stdio server subprocesses
+    # only to abandon them on the way out."
+    #
+    # Everything that SURVIVES parse_args does need the schema, contrary
+    # to #101's own text: --memories reads usermemory, --summary reads
+    # threadsummary, and --init runs a real model turn through
+    # RunAgentLoop.run_agent_conversation, which logs messages. So one
+    # relocation covers it, rather than an _ensure_storage() that a new
+    # path can forget to call.
+    create_db_and_tables()
 
     project_path = os.getcwd()
     settings = load_project_config(project_path, args.trust_project)
@@ -1325,20 +1575,20 @@ if __name__ == "__main__":
     # resolved project path -- and before any MCP setup, since neither
     # command runs a model or needs a tool.
     if args.memories or args.forget:
-        raise SystemExit(run_memory_command(args))
+        return run_memory_command(args)
 
     # §21c (M21). Beside the memory commands and for the same reasons: it
     # needs the resolved project path for nothing, but it DOES need the
     # resolved provider/model, and it runs no tool and needs no MCP server.
     if args.summary is not None:
-        raise SystemExit(run_summary_command(args, provider, model))
+        return run_summary_command(args, provider, model)
 
     # §24. Beside the others, and AFTER load_project_config for a reason the
     # rest do not share: the generator resolves its destination through
     # config_loader.get_project_path(), and reads the trust state that
     # initialize() has just settled.
     if args.init:
-        raise SystemExit(run_init_command(args, provider, model))
+        return run_init_command(args, provider, model)
 
     # Argument validation before connecting anything: parser.error() exits,
     # and doing it after setup_mcp() would spawn stdio server subprocesses
@@ -1357,16 +1607,32 @@ if __name__ == "__main__":
         parser.error(
             "--tui does not take a positional query; start the TUI and "
             "type your message, or drop --tui to send it directly.")
-    if (args.grant_tools is not None or args.attended is not None) \
-            and args.mode != "research":
+    if (args.grant_tools is not None or args.attended is not None
+            or args.review is not None) and args.mode != "research":
         # Chat is interactive by definition, so a pre-flight grant there
         # would be authorising up front what is about to be asked anyway --
         # and silently widening chat is not what a flag documented for
         # research should do. --tui lands here too (its mode is chat),
         # which is why the message names the in-TUI spelling.
+        #
+        # §29 (N8), audit #141: --review and --no-review are documented
+        # the same way -- --help renders both as "Research mode: ..." --
+        # and were not in this condition, so resolve_review() computed a
+        # value that run_chat has no parameter for and nothing was said.
+        # `is not None` covers both spellings: --no-review in chat is
+        # equally meaningless, and refusing one while tolerating the
+        # other makes the guard a special case instead of a rule.
         parser.error(
-            "--grant/--grant-tools/--attended apply to --mode research. "
-            "Inside the TUI, use /research --grant --attended <query>.")
+            "--grant/--grant-tools/--attended/--review apply to "
+            "--mode research. Inside the TUI, use "
+            "/research --grant --attended --review <query>.")
+
+    # §29 (N6). BELOW the early-exit commands, because this exists to keep
+    # the THREAD PICKER uncluttered and none of them shows one -- while
+    # #82 measured the sweep at 441ms on a 2000x2000 database, per launch.
+    # Still AFTER create_db_and_tables, which is what ensures the column
+    # it reads.
+    _classify_legacy_threads()
 
     mcp = setup_mcp(project_path)
     try:
@@ -1423,3 +1689,8 @@ if __name__ == "__main__":
         # failed pipeline, and Ctrl+C reaches here as KeyboardInterrupt.
         # Both are ordinary exits that must still reap child processes.
         teardown_mcp(mcp)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
