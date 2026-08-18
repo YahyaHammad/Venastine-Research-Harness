@@ -50,10 +50,10 @@ Venastine Research Harness/
 ├── CLAUDE.md / QWEN.md             # pointers to AGENTS.md, so a harness that auto-loads one of those names finds the context instead of a second copy of it
 ├── DEVLOG.md                       # implementation notes for built ROADMAP sections -- see §0
 │
-├── tests/                          # 1792 tests, all offline, ~25-45s depending on the machine (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
+├── tests/                          # 1805 tests, all offline, ~25-45s depending on the machine (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
 │   ├── conftest.py                 # fixtures: make_model_response, make_stream_from_response, make_stream_sequence, FakeStorage, ...
 │   ├── BREAKING_CHANGES.md         # what-breaks-it / symptom / fix per area
-│   ├── test_cli.py                 # 50 tests -- ROADMAP §1 thread_id passthrough + UUID validation + §14 parser defaults/resolution/trust flow + §29 N1-N4 the one stdin reader, N2's channel deadline, and every request kind rendered
+│   ├── test_cli.py                 # 63 tests -- ROADMAP §1 thread_id passthrough + UUID validation + §14 parser defaults/resolution/trust flow + §29 N1-N4 the one stdin reader, N2's channel deadline, and every request kind rendered
 │   ├── test_fetch_url.py           # 23 tests -- audit #120/#58: fetch_url's whole surface, which no test had ever executed. #53/#54's per-hop policy check, twice: once on the fake httpx and once on REAL httpx through a MockTransport
 │   ├── test_e2e.py                 # 5 tests -- e2e chat (multi-turn + tool use), research mode, error handling ×3
 │   ├── test_logging_setup.py       # 7 tests -- configure_logging fallback on bad log path, stderr=False, and #132's redacting formatter (message, traceback, and a real dispatch)

@@ -1012,7 +1012,12 @@ def run_research(
 
 def build_parser() -> argparse.ArgumentParser:
     """Builds the CLI argument parser. Separated from main() so tests
-    can exercise argument parsing without side effects."""
+    can exercise argument parsing without side effects.
+
+    That was true of this function and false of everything around it
+    until §29 (N7): there WAS no main(), so the startup sequence this
+    sentence implies is testable sat under `if __name__` and no test
+    could reach any of it. See main()."""
     parser = argparse.ArgumentParser(
         description="Venastine Research Harness — interactive CLI",
     )
@@ -1520,15 +1525,47 @@ def _classify_legacy_threads() -> None:
         connection.close()
 
 
-if __name__ == "__main__":
-    configure_logging()
-    create_db_and_tables()
-    # AFTER the schema exists: this reads the column create_db_and_tables
-    # has just ensured.
-    _classify_legacy_threads()
+def main(argv=None) -> int:
+    """The CLI, as a function (ROADMAP_v2 §29, N7). Returns an exit code.
 
+    Audit #102: everything below used to sit under `if __name__ ==
+    "__main__":`, so nothing in the startup sequence was importable --
+    not the four parser.error() validations, each carrying a comment
+    about a real bug it fixed; not the ordering of the early-exit
+    commands; not the `finally: teardown_mcp`, which is `finally` rather
+    than "at the end" for a reason worth a test. build_parser's docstring
+    already claimed it was "separated from main() so tests can exercise
+    argument parsing without side effects", naming a function that did
+    not exist.
+
+    SystemExit still propagates rather than being converted: parser.error
+    raises it with code 2, and run_research with code 1 on a failed
+    pipeline. This returns a code only where it decides one.
+    """
     parser = build_parser()
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+
+    # Below parse_args for #101's other half: this creates the log
+    # DIRECTORY, so --help left one behind too. Nothing above logs
+    # anything -- argparse reports its own errors on stderr and exits.
+    configure_logging()
+
+    # §29 (N6), audit #101. BELOW parse_args, which is where --help and a
+    # typo'd flag exit -- both of which used to create a 77 KB six-table
+    # SQLite database and a log directory in whatever directory they were
+    # run from, for output that touches no data at all. The file already
+    # made exactly this argument one level down, about MCP: "argument
+    # validation before connecting anything: parser.error() exits, and
+    # doing it after setup_mcp() would spawn stdio server subprocesses
+    # only to abandon them on the way out."
+    #
+    # Everything that SURVIVES parse_args does need the schema, contrary
+    # to #101's own text: --memories reads usermemory, --summary reads
+    # threadsummary, and --init runs a real model turn through
+    # RunAgentLoop.run_agent_conversation, which logs messages. So one
+    # relocation covers it, rather than an _ensure_storage() that a new
+    # path can forget to call.
+    create_db_and_tables()
 
     project_path = os.getcwd()
     settings = load_project_config(project_path, args.trust_project)
@@ -1538,20 +1575,20 @@ if __name__ == "__main__":
     # resolved project path -- and before any MCP setup, since neither
     # command runs a model or needs a tool.
     if args.memories or args.forget:
-        raise SystemExit(run_memory_command(args))
+        return run_memory_command(args)
 
     # §21c (M21). Beside the memory commands and for the same reasons: it
     # needs the resolved project path for nothing, but it DOES need the
     # resolved provider/model, and it runs no tool and needs no MCP server.
     if args.summary is not None:
-        raise SystemExit(run_summary_command(args, provider, model))
+        return run_summary_command(args, provider, model)
 
     # §24. Beside the others, and AFTER load_project_config for a reason the
     # rest do not share: the generator resolves its destination through
     # config_loader.get_project_path(), and reads the trust state that
     # initialize() has just settled.
     if args.init:
-        raise SystemExit(run_init_command(args, provider, model))
+        return run_init_command(args, provider, model)
 
     # Argument validation before connecting anything: parser.error() exits,
     # and doing it after setup_mcp() would spawn stdio server subprocesses
@@ -1570,16 +1607,32 @@ if __name__ == "__main__":
         parser.error(
             "--tui does not take a positional query; start the TUI and "
             "type your message, or drop --tui to send it directly.")
-    if (args.grant_tools is not None or args.attended is not None) \
-            and args.mode != "research":
+    if (args.grant_tools is not None or args.attended is not None
+            or args.review is not None) and args.mode != "research":
         # Chat is interactive by definition, so a pre-flight grant there
         # would be authorising up front what is about to be asked anyway --
         # and silently widening chat is not what a flag documented for
         # research should do. --tui lands here too (its mode is chat),
         # which is why the message names the in-TUI spelling.
+        #
+        # §29 (N8), audit #141: --review and --no-review are documented
+        # the same way -- --help renders both as "Research mode: ..." --
+        # and were not in this condition, so resolve_review() computed a
+        # value that run_chat has no parameter for and nothing was said.
+        # `is not None` covers both spellings: --no-review in chat is
+        # equally meaningless, and refusing one while tolerating the
+        # other makes the guard a special case instead of a rule.
         parser.error(
-            "--grant/--grant-tools/--attended apply to --mode research. "
-            "Inside the TUI, use /research --grant --attended <query>.")
+            "--grant/--grant-tools/--attended/--review apply to "
+            "--mode research. Inside the TUI, use "
+            "/research --grant --attended --review <query>.")
+
+    # §29 (N6). BELOW the early-exit commands, because this exists to keep
+    # the THREAD PICKER uncluttered and none of them shows one -- while
+    # #82 measured the sweep at 441ms on a 2000x2000 database, per launch.
+    # Still AFTER create_db_and_tables, which is what ensures the column
+    # it reads.
+    _classify_legacy_threads()
 
     mcp = setup_mcp(project_path)
     try:
@@ -1636,3 +1689,8 @@ if __name__ == "__main__":
         # failed pipeline, and Ctrl+C reaches here as KeyboardInterrupt.
         # Both are ordinary exits that must still reap child processes.
         teardown_mcp(mcp)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -777,3 +777,156 @@ class TestTheChoiceRenderer:
 
     def test_no_answer_chooses_nothing(self):
         assert self._answer(None) is None
+
+
+# ===========================================================================
+# ---- ROADMAP_v2 §29 (N6-N8): the startup block, now reachable ------------
+# ===========================================================================
+
+@pytest.fixture
+def startup(monkeypatch, tmp_path):
+    """Run main(argv) with every side effect stubbed, recording the order.
+
+    #102: all of this sat under `if __name__ == "__main__":`, so no test
+    could reach the four parser.error validations, the ordering of the
+    early-exit commands, or the `finally: teardown_mcp`. N7 is what makes
+    it callable; this is what calls it.
+    """
+    import main
+
+    order = []
+
+    def _record(name, result=None):
+        def _fn(*a, **k):
+            order.append(name)
+            return result
+        return _fn
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(main, "configure_logging", _record("configure_logging"))
+    monkeypatch.setattr(main, "create_db_and_tables", _record("create_db"))
+    monkeypatch.setattr(main, "_classify_legacy_threads", _record("sweep"))
+    monkeypatch.setattr(main, "load_project_config", lambda *a, **k: {})
+    monkeypatch.setattr(main, "resolve_runtime_defaults",
+                        lambda *a, **k: ("ANTHROPIC", "m"))
+    monkeypatch.setattr(main, "setup_mcp", _record("setup_mcp", None))
+    monkeypatch.setattr(main, "teardown_mcp", _record("teardown_mcp"))
+    monkeypatch.setattr(main, "run_chat", _record("run_chat"))
+    monkeypatch.setattr(main, "run_research", _record("run_research"))
+    monkeypatch.setattr(main, "run_memory_command", _record("memories", 0))
+    monkeypatch.setattr(main, "run_summary_command", _record("summary", 0))
+    monkeypatch.setattr(main, "run_init_command", _record("init", 0))
+    return order
+
+
+class TestStartupDoesNoWorkBeforeArgparse:
+    """Audit #101. `--help` created a 77 KB six-table SQLite database and
+    a log directory in whatever directory it was run from, for output
+    that touches no data at all."""
+
+    def test_help_creates_nothing(self, startup, capsys):
+        import main
+
+        with pytest.raises(SystemExit) as exit_info:
+            main.main(["--help"])
+        assert exit_info.value.code == 0
+        assert startup == [], f"--help did {startup}"
+
+    def test_a_typod_flag_creates_nothing(self, startup):
+        import main
+
+        with pytest.raises(SystemExit) as exit_info:
+            main.main(["--notaflag"])
+        assert exit_info.value.code == 2
+        assert startup == []
+
+    def test_a_real_run_still_gets_its_schema(self, startup):
+        """The control. #101's own text says --memories/--summary/--init
+        need no schema; all three do -- --memories reads usermemory,
+        --summary reads threadsummary, and --init runs a model turn that
+        logs messages. So this must not become "create it lazily"."""
+        import main
+
+        main.main([])
+        assert "create_db" in startup
+        assert startup.index("create_db") < startup.index("run_chat")
+
+    def test_the_early_exits_skip_the_legacy_sweep(self, startup):
+        """N6. The sweep exists to keep the THREAD PICKER uncluttered and
+        none of these shows one, while #82 measured it at 441ms on a
+        2000x2000 database -- per launch."""
+        import main
+
+        assert main.main(["--memories"]) == 0
+        assert "sweep" not in startup, startup
+
+    def test_a_session_still_gets_the_sweep(self, startup):
+        """The control for the one above: moving it must not delete it."""
+        import main
+
+        main.main([])
+        assert "sweep" in startup
+        assert startup.index("create_db") < startup.index("sweep"), (
+            "the sweep reads the column create_db_and_tables ensures")
+
+    def test_mcp_is_torn_down_even_when_the_run_raises(self, startup,
+                                                       monkeypatch):
+        """`finally`, not "at the end": run_research raises SystemExit(1)
+        on a failed pipeline and Ctrl+C arrives as KeyboardInterrupt.
+        Both are ordinary exits that must still reap child processes."""
+        import main
+
+        def _boom(*a, **k):
+            startup.append("run_chat")
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(main, "run_chat", _boom)
+        with pytest.raises(KeyboardInterrupt):
+            main.main([])
+        assert startup[-1] == "teardown_mcp"
+
+
+class TestTheModeValidations:
+    """Four parser.error calls, each carrying a comment about a real bug
+    it fixed, and none of them reachable by a test until N7."""
+
+    @staticmethod
+    def _refuses(argv, needle):
+        import main
+
+        with pytest.raises(SystemExit) as exit_info:
+            main.main(argv)
+        assert exit_info.value.code == 2
+        return needle
+
+    def test_tui_with_research_mode(self, startup, capsys):
+        self._refuses(["--tui", "--mode", "research"], "")
+        assert "use /research inside the TUI" in capsys.readouterr().err
+
+    def test_research_without_a_query(self, startup, capsys):
+        self._refuses(["--mode", "research"], "")
+        assert "requires a positional query" in capsys.readouterr().err
+
+    def test_tui_with_a_positional_query(self, startup, capsys):
+        self._refuses(["--tui", "hello"], "")
+        assert "does not take a positional query" in capsys.readouterr().err
+
+    @pytest.mark.parametrize("flag", ["--attended", "--review", "--no-review"])
+    def test_research_only_flags_are_refused_in_chat(self, flag, startup,
+                                                     capsys):
+        """N8, audit #141. --review and --no-review are documented exactly
+        like their three siblings -- --help renders both as "Research
+        mode: ..." -- and were not in the guard, so resolve_review()
+        computed a value run_chat has no parameter for and nothing was
+        said. Both spellings, because refusing one and tolerating the
+        other makes the guard a special case rather than a rule."""
+        self._refuses([flag, "hello"], "")
+        assert "apply to --mode research" in capsys.readouterr().err
+
+    def test_they_are_accepted_in_research_mode(self, startup):
+        """The control: a guard that refused them everywhere would pass
+        the test above and break the flag."""
+        import main
+
+        assert main.main(["--mode", "research", "--review", "q"]) == 0
+        assert "run_research" in startup
