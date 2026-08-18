@@ -4338,3 +4338,124 @@ decision, not an implication.
 
 Also deferred: `write` / `edit` / MCP capability profiles. The policy layer is generic so they
 extend additively; building them now would be speculative generality.
+
+
+---
+
+## Audit Pass 1 — fix batch 9, the CLI shell (2026-08-19)
+
+`fix/batch-9-cli-shell`, branched from batch 8. Closes **#100** (S1), **#7** (S2), **#101** (S3),
+**#102** (S3) and **#141** (S4). Full decision record in **ROADMAP_v2 §29 (N1–N8)**; what breaks, in
+`tests/BREAKING_CHANGES.md` §25. This entry is what building it taught.
+
+### The batch chose itself, and #102 is why
+
+Three S1s are open. #57 (no wall-clock bound on a tool call) and #76 (a pass's JSON applied without a
+shape check) each need a layer *designed* before it can be written, and each sits on the ten-pass hot
+path. #100 was the last one whose blast radius is a single file.
+
+It does not travel alone, and the connection is not that the four others are also in `main.py` — it
+is that **#102 names the thing that makes them unfixable-and-untestable together**: there was no
+`main()`. Everything from the four `parser.error` validations to `finally: teardown_mcp` sat under
+`if __name__`, and `build_parser`'s docstring had been claiming for sections that it was *"separated
+from `main()` so tests can exercise argument parsing without side effects"* — naming a function that
+did not exist. One extraction made #101 and #141 fixable, #102's largest gap closable, and the S1's
+own seam testable.
+
+### Two issue texts were wrong, and checking beat believing both times
+
+**#101 says `--memories` / `--summary` / `--init` need no schema.** All three do: `--memories` reads
+`usermemory`, `--summary` reads `threadsummary`, and `--init` runs a real model turn —
+`project_init/generator.py:128` calls `RunAgentLoop.run_agent_conversation`, which logs messages. So
+the fix is *smaller* than proposed: everything surviving `parse_args` needs the schema, which makes
+it one relocation instead of an `_ensure_storage()` scattered across call sites that a new path can
+forget.
+
+**#7 reads like it is asking for speculative code** — add `CONFIRM`/`CHOICE` branches nothing calls.
+It is not. `project_init/tui_commands.py:52` states the design outright: *"generate()'s
+confirm/choose_kind parameters are unchanged — they are a shell-agnostic API **the CLI implements
+too**. What moved is the plumbing beneath them: both now go down the same channel as every other
+question, so the fail-safe decoding is the shared one rather than a guard written by hand here."*
+§23 slice 1 moved the TUI and never moved the CLI. Migrating `--init` was finishing a migration, and
+it made the new branches live rather than dead.
+
+### The one design decision that changed under a question
+
+The plan gave `--init`'s prompts the attended 600s deadline, on the reasoning that ten minutes is
+generous. Asked whether that was right, the answer was no, and for a reason better than generosity:
+**what decides whether a prompt may expire is whether there is a run waiting on the answer**, not
+what is being asked. Letting the branch decide gets it wrong in both directions — a startup prompt
+would expire on someone who stepped away mid-decision, and a future mid-run `CONFIRM` from any other
+caller would block the run forever, which is #100's own defect arriving in the section that fixes
+#100. So the deadline became a property of the channel, and `--init` builds one without.
+
+### What the build found that the design did not
+
+**A timeout can be load-bearing without anyone having decided it was.** The pump — `for line in
+sys.stdin` on a daemon thread — had no error handling at all. Under pytest's capture, reading
+`sys.stdin` raises; the pump died, nothing published EOF, and every reader waited forever. The suite
+did not fail, it *hung*. This was survivable for as long as it existed only because every read
+carried a 600s deadline, so a dead pump merely meant the deadline fired. Taking the clock off one
+path is what turned a tolerated failure into a permanent one.
+
+**EOF has to be a latch, not just a sentinel.** Publishing a single `_EOF` object wakes whoever is
+blocked — and then `ask`'s stale-input drain eats it, and the next reader waits forever.
+`_confirm_user_level_servers` reads once per pending server, so a piped run with two of them reaches
+this. The queue says "something arrived"; only a latch says "nothing ever will again".
+
+**A default argument can silently disable a fixture.** `conftest`'s `shrink_approval_timeout` exists
+so an unanswered prompt fails the suite instead of stalling it for ten minutes, and its docstring
+says "read at call time, so patching the module attribute is enough". Writing
+`timeout=config.ATTENDED_APPROVAL_TIMEOUT_S` as a default evaluates it at **import**. Nothing goes
+red. The fixture keeps running and stops working. It needed a sentinel and a test that states the
+contract.
+
+### What the mutation pass found
+
+24 mutations. Two came back other than predicted, and as in §28 those were the two worth the run.
+
+**A surviving mutant whose explanation was mine.** Deleting `channel = build_attended_provider(...)
+if interactive else None` changed nothing. That is correct: building a channel on a pipe is harmless,
+because what decides whether `generate` receives a consent route is `confirm=_confirm if interactive
+else None` at the **call site**. The guard I had written a test for and the guard that does the work
+were two different lines. §28's lesson, one section later: *a surviving mutant with a confident
+explanation is the one to distrust, because the explanation is exactly as unverified as the guard.*
+
+**A kill that presents as a hang.** §29 removes the deadline from two read paths, so a mutation that
+strands a reader stops the suite rather than failing it. The harness now reports HANG as its own
+outcome and counts it as a kill only where RED was expected — otherwise a hang for an unrelated
+reason reads as a successful mutation, which is the false-RED class batch 7 already paid for once.
+
+### Verified where the defect actually lives
+
+#100 cannot be seen by pytest at all: the suite's stdin is a capture object, so no test can
+distinguish a CLI that reads correctly from one that wedges. That is #102's closing point, and it is
+a fixture-level gap rather than a missing assertion. The probe is a real pty, with the second read as
+the controlled variable — `input()` for the old path, `readline()` for the new, same shipped
+`_StdinReader`, same terminal, marker-synchronised so each line is typed only once a reader is
+waiting for it. Windows has no `pty` module, so this runs in the container only.
+
+What Windows *can* answer is whether N1 costs anything, and it needed measuring rather than assuming:
+a reader parked with no deadline is not woken by `_thread.interrupt_main()` — **and neither is
+`input()`**, and neither is `ask`'s long-standing timed wait. Under a real console control event all
+three exit identically with `STATUS_CONTROL_C_EXIT`. The plan had a bounded-poll fallback ready for a
+regression that does not exist.
+
+### A tooling mistake worth recording
+
+The script that re-syncs the documented test counts read the files as text and wrote them with
+`newline=""`, converting three CRLF documents to LF wholesale — and, separately, its blanket
+`\d+ tests` rule rewrote AGENTS.md's *historical* "invisibly to 849 tests" into the current count,
+turning a description of a past bug into a false claim. Both are now impossible: the script is
+byte-level throughout, anchors on the words around each number, and asserts no bare LF appeared.
+§28's EOL discipline was about needles; this was the same hazard one layer out, in the tool that
+edits the docs.
+
+### Deferred, deliberately
+
+**#57 and #76**, the two remaining S1s, each needing its own design pass. **#8**, the CLI
+slash-command layer — N1 is its enabling change, since a single-reader `run_chat` is what a command
+dispatcher reads through, but adding commands is its own section. And **a way for a gated prompt to
+extend its own deadline**: N2 makes "no deadline" expressible, which is what `--init` needed; letting
+a mid-run prompt ask for more time is a different feature and needs a decision about what an
+unattended run does with it.

@@ -1301,3 +1301,44 @@ The single-payload test (`__import__('os').system(...)`) is kept, and was itself
 - **A test's premise can be the thing you are changing** (§28). `test_ac3_context_false_does_not_suppress_tool_approval_check` pinned D14's ratchet with `rm -rf /`, and its docstring said it worked *because* `ToolApprovals.shell` defaulted `True` and returned before anything read the command. Flipping that default made `rm -rf /` genuinely contained, so the test would have gone on passing while asserting the override rather than the tool. **When a docstring names the config value it depends on, changing that value is a search key** — grep for the field, not just for the code you edited.
 - **An approval gate sees raw model output; the executor sees validated params** (§28). `registry.approval_needed` is handed the tool-call input verbatim, and `ShellParams` does not validate until `run()`, which is *after* approval. So `command.strip()` in the approval path was an `AttributeError` on `{"command": ["ls"]}` — escaping the check and then the loop. It had been unreachable only because a config default returned first. **Anything reachable from `approval_needed` must be total over arbitrary JSON**, not merely correct on well-formed input.
 - **`security/` imports `config` and the stdlib, and nothing else** (§28). The obvious reuse for "is this path inside the workspace" was `file_ops._is_within_workspace`, which would have been the first runtime `security/ → tools/` edge and inverted the layering. It also captures `WORKSPACE_ROOT` at **import** time, so it cannot follow a workspace a caller passes in — three lines written locally beat a shared helper that answers a slightly different question.
+
+- **A second reader on one stdin is invisible to the test suite, by construction.** pytest's stdin is
+  a capture object, and the chat tests supplied lines by patching `builtins.input`, so nothing ever
+  touched a real descriptor. No assertion in this repository could distinguish a CLI that reads
+  correctly from one that wedges after the first tool call (audit #100) — that is a fixture-level gap
+  rather than a missing assertion, and it is why §29's probe is a real pty in the Linux container
+  rather than a test. Windows has no `pty` module at all, so this defect is verified in exactly one
+  place.
+
+- **A timeout can be load-bearing without anyone having decided it was.** `_StdinReader`'s pump had
+  no error handling: a `sys.stdin` that raises killed the thread and published nothing. That was
+  survivable only because every read carried a 600s deadline, so a dead pump merely meant the
+  deadline fired. §29 (N1) added a read path with no deadline, and the same dead pump became a
+  permanent hang — found by the suite stopping rather than failing. When removing a timeout, look for
+  what it was quietly covering.
+
+- **A mutation that strands a reader HANGS the suite instead of failing it.** `tests/BREAKING_CHANGES`
+  §25 records the harness change: HANG is now a reported outcome and counts as a kill only where RED
+  was expected. Otherwise a hang for an unrelated reason reads as a successful mutation, which is the
+  false-RED class batch 7 already paid for once.
+
+- **A default argument is evaluated at import, which can silently disable a fixture.**
+  `tests/conftest.py`'s `shrink_approval_timeout` exists so an unanswered prompt fails the suite
+  instead of stalling it for ten minutes, and its docstring says "read at call time, so patching the
+  module attribute is enough". Writing `timeout=config.ATTENDED_APPROVAL_TIMEOUT_S` as a *default*
+  takes that away without turning anything red — the fixture keeps running and stops working. §29
+  (N2) uses a `_DEFAULT_TIMEOUT` sentinel resolved in the body, and a test states the contract.
+
+- **`interaction.SAFE_DEFAULTS` is the canonical registry of request kinds**, because `decode` raises
+  on anything absent from it. A shell that cannot render a kind falls through `ask` to `None`, which
+  decode turns into that kind's declining default — silently, on every run, while looking wired up
+  (audit #7: `CONFIRM` and `CHOICE` were in that state for two sections). Both shells are now checked
+  against that table, and the CLI's check is *behavioural*: it drives every kind and asserts a human
+  was actually asked, because a branch that returns without asking is exactly the defect.
+
+- **The tool that edits the docs is subject to the same EOL discipline as the tool that edits the
+  code.** §28's rule was about mutation needles; the counter-example one section later was a
+  count-syncing script that read three CRLF documents as text, wrote them with `newline=""`, and
+  converted the lot to LF — and whose blanket `\d+ tests` rule rewrote AGENTS.md's *historical*
+  "invisibly to 849 tests" into the current number, turning a description of a past bug into a false
+  claim. Anchor on the words around a number, work in bytes, and assert afterwards.

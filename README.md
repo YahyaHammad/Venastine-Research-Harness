@@ -316,6 +316,38 @@ Only `CONTEXT.md` is written for you in full; the rest arrive as skeletons with 
 
 `/copy` exists because Textual 1.0 cannot select text at all. Clipboard delivery uses an escape sequence that some multiplexers drop silently and **cannot be confirmed**, so `--file <path>` is the route that provably worked. Shift+drag usually bypasses the mouse capture and lets your terminal select natively.
 
+### The CLI reads stdin exactly once
+
+Chat mode, the approval prompts, the trust prompt, `--init` and the MCP acknowledgement all read
+through **one** object. That sounds like an implementation detail and is not: before it, an approval
+prompt started a background reader that never stopped, so from the first gated tool call onwards
+chat's own `input()` lost every line to it and blocked forever — silently, and looking exactly like
+the model thinking. Recovery was Ctrl+C and `--thread <id>`.
+
+Two disciplines, because the two kinds of prompt want opposite things:
+
+| | drains stale input | deadline |
+|---|---|---|
+| the gated prompts — approvals, sign-offs, questions, review | **yes** | from the channel |
+| the chat prompt and the startup prompts | no | none |
+
+The drain is a safety rule: a line typed after a question timed out was answering *that* question,
+and letting it fall through would approve the next call on the strength of it. The chat prompt must
+*not* drain, for the mirror-image reason — a line typed while the model was still streaming is an
+answer to the prompt about to appear, and the terminal has been buffering it for you.
+
+**A deadline belongs to a run, not to a question.** An approval asked during an attended research run
+expires after `ATTENDED_APPROVAL_TIMEOUT_S` (600s) and denies that call, because there is a run
+waiting on the answer and it has to keep moving. `--init`'s prompts have no run behind them, so they
+wait as long as you need — and they do not print a `(600s)` they would not honour.
+
+`--help` and a mistyped flag now do nothing at all. They used to create a 77 KB six-table SQLite
+database and a log directory in whichever directory you ran them from, before argparse had seen a
+single flag.
+
+`--review` and `--no-review` in chat mode are refused rather than ignored, matching
+`--grant`/`--grant-tools`/`--attended`. Inside the TUI, use `/research --review <query>`.
+
 ### Configuration files
 
 | File | Holds | Notes |

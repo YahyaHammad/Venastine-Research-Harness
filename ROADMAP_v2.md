@@ -81,6 +81,7 @@ Every decision below was made through a structured clarification cycle with the 
 - 26. Research legibility — pass internals, code stages, the claims view, colour, copy **(added after §22's first live run; BUILT)**
 - 27. Thread legibility — thread `kind`, chat-only picker, transcript replay on resume **(added after §26's first live session; BUILT)**
 - 28. The shell capability classifier — one classification for the approval gate and the executor, `SHELL_APPROVAL_MODE`, the `.venastine` read-only mount **(added by Audit Pass 1 fix batch 8 for #157; BUILT)**
+- 29. The CLI shell — one stdin reader, every request kind rendered, `main(argv)` and a startup order that does nothing before argparse **(added by Audit Pass 1 fix batch 9 for #100, #7, #101, #102, #141; BUILT)**
 - **Open Questions — None Remaining** (Rev. 3 — all decisions locked; verification items only)
 - **Why these calls, not just what they are** (Rev. 3 — the reasoning patterns behind several decisions above)
 
@@ -1893,6 +1894,113 @@ Also not built: a second enforcement point inside `_run_inert` (it cannot see wh
 approved, so it would break approved HOST_READ calls to re-block what the gate already handled), and
 `write` / `edit` / MCP profiles (the policy layer is generic so they extend additively; building them
 now would be speculative).
+
+
+## 29. The CLI shell — one reader, one channel, one entry point — BUILT
+
+**Problem (audit #100, S1).** `_StdinReader`'s docstring names the hazard, for the case it fixed:
+
+> `input()` cannot be interrupted, and **spawning a reader per prompt would leave several threads
+> racing for the same stdin** after the first timeout — whichever won would answer the wrong question.
+> One long-lived daemon reader with a queue keeps that single-threaded.
+
+It keeps the *reader* single-threaded. It does not stop `input()` from being a second reader, and
+§21b's M16 is what put both in one process: before it, CLI chat had no `ApprovalProvider`, so no pump
+thread was ever started in a session whose main loop reads stdin with `input()`.
+
+```
+run_chat            -> build_chat_authorization() -> build_attended_provider()
+                                                  -> _stdin_reader()   (thread not yet started)
+first gated call    -> reader.ask()   -> Thread(_pump).start()
+                                      -> `for line in sys.stdin` — runs forever, daemon
+next turn           -> run_chat's input("You: ")   <-- contends with the pump
+```
+
+The pump wins, takes the line, and `input()` waits for one that will never come. Silent, and
+indistinguishable from the model thinking. Live on the default path: `ToolApprovals.remember` and
+`spawn_subagent` both ship `True`.
+
+Four more issues live in the same file, and #102 names what connects them: **there was no `main()`**.
+Lines 1310–1425 sat under `if __name__ == "__main__":`, so nothing in the startup sequence was
+importable — while `build_parser`'s docstring claimed it had been *"separated from `main()` so tests
+can exercise argument parsing without side effects"*, naming a function that did not exist.
+
+### Design Decisions Record (N1–N8)
+
+| # | Decision | Rationale |
+|---|---|---|
+| N1 | **Every stdin read in `main.py` goes through the one `_StdinReader`.** It gains `readline(prompt)` — blocks, keeps type-ahead. `ask(prompt, timeout=None)` keeps the drain. `_ask` becomes a wrapper over `readline`. | Two methods, not a `drain=` flag. The drain is a *safety property* — "a line typed after a question timed out was answering THAT question" — and a keyword argument that switches it off is one call site away from being passed at an approval prompt. `readline` must **not** drain for the mirror-image reason: a line typed while the model was streaming is an answer to the prompt about to appear, which the terminal line-buffers and `input()` returned immediately. Draining it would trade a loud bug for a quiet one. The other `_ask` callers were safe only because `setup_mcp` happens to run before `run_chat` — an ordering coincidence between two functions, not a property anyone stated, and it breaks the first time a startup prompt moves. Pinned by a test that allows no live `input(` in the module. |
+| N2 | **The deadline belongs to the channel, not the kind.** `ask`'s timeout defaults to `None`; `build_attended_provider(..., timeout=…)` supplies it, and `--init` builds one with `timeout=None`. The `(600s)` suffix renders only when there is a deadline. | What decides whether a prompt may expire is whether there is a **run waiting on the answer**. Letting the branch decide gets it wrong in both directions: a startup prompt would expire on someone who stepped away mid-decision, and a future mid-run `CONFIRM` would block the run forever — #100's own defect, in the section that fixes #100. The default is a **sentinel**, not the config constant: a plain `timeout=config.ATTENDED_APPROVAL_TIMEOUT_S` default is evaluated at **import**, which silently defeats `conftest`'s `shrink_approval_timeout` and its stated "read at call time" contract — the fixture that makes an unanswered prompt fail the suite instead of stalling it for ten minutes. Verified by diffing the rendered prompt strings before and after: the four run-backed prompts are byte-identical. |
+| N3 | **EOF is published as a latch as well as a sentinel, and on the exception path too.** | Neither half was in the plan and both are load-bearing. `for line in sys.stdin` ending is invisible to a queue consumer, so Ctrl+D would have hung where `input()` raised `EOFError` — the fix for a wedge being a different wedge. It is a **latch** because `ask`'s drain would otherwise swallow a lone sentinel and strand every later reader, which `_confirm_user_level_servers` reaches: it reads once per pending server. And the pump must publish EOF when it **raises**: under pytest's capture, reading `sys.stdin` raises, the pump died, nothing published anything, and the suite hung. That was harmless before only because every read carried a deadline. |
+| N4 | **Kind dispatch is a `{kind: handler}` table, pinned against `interaction.SAFE_DEFAULTS`.** | Audit #7. A kind with no branch falls through `ask` to `None`, which `decode` turns into that kind's declining default — silently, on every CLI run, while looking wired up. `SAFE_DEFAULTS` is already the canonical registry, since `decode` raises on anything absent from it, so a seventh kind fails at CI. The parity test is **behavioural** rather than a set comparison: what makes a kind supported is that a human is actually put the question, and a branch that returns without asking is exactly the defect. A runtime `WARNING` would fire only once someone reached the branch — the condition that went unnoticed for two sections. |
+| N5 | **CLI `--init` goes down that channel — on a tty only.** On a pipe it still passes `confirm=None`. | Not new design: §23 slice 1 states it — *"generate()'s confirm/choose_kind parameters are unchanged, they are a shell-agnostic API **the CLI implements too**"* — and moved the TUI. The CLI was the half never moved, and kept two guards written by hand. It also makes N4's new branches live rather than reachable only from a test. The tty condition is the trap: `generate` reads `confirm=None` as *"report what you WOULD write without writing it"* (I5/V6), which is **not** the same answer as a channel that declines. The `CHOICE` renderer reads the payload the TUI already sends, so `s` means software by unique prefix rather than by hard-coding `/init`'s vocabulary into the channel, and a bare Enter still takes the suggestion because `proposal` is on the payload. |
+| N6 | **`create_db_and_tables()` and `configure_logging()` move below `parse_args()`; `_classify_legacy_threads()` moves below the early-exit commands.** | Audit #101. `--help` and a typo'd flag exit *inside* `parse_args`, and both created a 77 KB six-table SQLite database and a log directory in whatever directory they ran from. The file already made this argument one level down, about MCP: *"argument validation before connecting anything: `parser.error()` exits, and doing it after `setup_mcp()` would spawn stdio server subprocesses only to abandon them on the way out."* #101's own text is wrong about the rest, and the fix is smaller for it — it lists `--memories`/`--summary`/`--init` as needing no schema, but all three do, `--init` because it runs a real model turn that logs messages. So this is one relocation, not an `_ensure_storage()` a new path can forget to call. The sweep goes further down because it exists to keep the **thread picker** uncluttered and none of the early exits shows one, while #82 measured it at 441 ms on a 2000×2000 database, per launch. |
+| N7 | **`main(argv=None) -> int`.** | The enabling change #102 names. `SystemExit` still propagates rather than being converted — `parser.error` raises it with code 2 and `run_research` with code 1 — so this returns a code only where it decides one. |
+| N8 | **`--review` and `--no-review` join the research-only guard** (`args.review is not None`). | Audit #141. They are documented exactly like their three siblings — `--help` renders both as *"Research mode: …"* — and were not in the condition, so `resolve_review()` computed a value `run_chat` has no parameter for and nothing was said. The guard's own comment already covers them verbatim: *"silently widening chat is not what a flag documented for research should do."* Both spellings, because refusing one while tolerating the other makes the guard a special case instead of a rule. |
+
+### Measured, before and after
+
+```
+#100, under a real pty (Linux; Windows has no pty module)
+  before  (input)      APPROVAL_GOT='y\n'   CHAT_GOT never printed -- the read never returned
+  after   (readline)   APPROVAL_GOT='y\n'   CHAT_GOT='the next question'
+  Ctrl+D  (readline)   CHAT_EOF             -- N3: the exit route survives
+
+a real SIGINT into a wait with no deadline (Linux)
+  input()          [pre-N1]     KeyboardInterrupt after 0.40s
+  queue.get()      [post-N1]    KeyboardInterrupt after 0.40s
+  queue.get(t=30)  [ask]        KeyboardInterrupt after 0.40s
+
+#7, does the CLI put the question to a human?
+  kind               before          after
+  approval           yes             yes
+  subagent_signoff   yes             yes
+  question           yes             yes
+  review             yes             yes
+  confirm            NO, decoded False    yes
+  choice             NO, decoded None     yes
+
+#101, a fresh empty directory
+  before  python main.py --help    -> app.db (77824 bytes), logs/     exit 0
+  after   python main.py --help    -> nothing at all                  exit 0
+          python main.py --notaflag -> nothing at all                 exit 2
+
+N2, the four run-backed prompts: byte-identical (diff of the rendered strings is empty)
+```
+
+### What the build found that the design did not
+
+- **The pump had no error handling, and that stopped being survivable.** Under pytest's capture,
+  reading `sys.stdin` raises. The pump died, nothing published EOF, and `readline` waited forever —
+  the suite hung rather than failed. Before §29 every read carried a deadline, so a dead pump merely
+  meant the deadline fired. Taking the clock off one path turned a tolerated failure into a
+  permanent one, which is the general shape worth remembering: *a timeout can be load-bearing
+  without anyone having decided it was.*
+- **EOF has to be a latch, not just a sentinel.** `ask`'s drain consumes anything queued, including a
+  lone sentinel, so the reader after it blocks forever. `_confirm_user_level_servers` reads once per
+  pending server, so a piped run with two of them reaches this.
+- **A default argument evaluated at import silently defeated a fixture.** `conftest`'s
+  `shrink_approval_timeout` documents "read at call time, so patching the module attribute is
+  enough". Putting `config.ATTENDED_APPROVAL_TIMEOUT_S` in a default argument takes that away without
+  changing anything visible; the fixture keeps passing and stops doing its job.
+- **Ctrl+C on Windows is not a regression, and it took measuring to say so.** A reader parked with no
+  deadline is not woken by `_thread.interrupt_main()` — but neither is `input()`, and neither is
+  `ask`'s long-standing timed wait. Under a real console control event all three exit identically
+  with `STATUS_CONTROL_C_EXIT`. The plan had a poll-loop fallback ready for a regression that
+  measurement showed does not exist.
+- **`run_init_command` had no test at all**, which is why migrating it onto the channel broke
+  nothing.
+
+### Deliberately not in §29
+
+- **#57 and #76**, the two remaining S1s. Each needs a layer designed before it can be written — a
+  cross-platform tool wall clock, and a pipeline shape-validation policy that has to interact with
+  §3's retry.
+- **#8, the CLI slash-command layer.** N1 is the enabling change for it — a single-reader `run_chat`
+  is what a command dispatcher reads through — but adding commands is its own section.
+- **A way for a gated prompt to extend its own deadline.** N2 makes "no deadline" expressible, which
+  is what `--init` needed. A mid-run prompt that lets you ask for more time is a different feature and
+  needs a decision about what an unattended run does with it.
 
 ---
 
