@@ -311,67 +311,76 @@ class TestBackendInternals:
 # ===========================================================================
 
 class TestRunSandboxedRouting:
+    """§28: these pass a REAL directory rather than the literal "/tmp/ws"
+    they used to. run_sandboxed now creates its workspace (audit #50), so
+    a made-up path would be a filesystem side effect outside the repo --
+    on Windows the old literal produced a real C:/tmp/ws, which the suite
+    then left behind. tmp_path is per-test and torn down."""
 
-    def test_inert_uses_light_path(self, monkeypatch):
+    @pytest.fixture
+    def ws(self, tmp_path):
+        return str(tmp_path)
+
+    def test_inert_uses_light_path(self, monkeypatch, ws):
         monkeypatch.setattr(config, "INERT_COMMANDS", ["ls", "cat"])
         with patch("security.sandbox._run_inert") as mock_inert:
             mock_inert.return_value = {"stdout": "ok", "stderr": "", "return_code": 0}
-            result = run_sandboxed("ls -la", "/tmp/ws")
+            result = run_sandboxed("ls -la", ws)
         mock_inert.assert_called_once()
         assert result["stdout"] == "ok"
 
-    def test_non_inert_docker_available(self, monkeypatch):
+    def test_non_inert_docker_available(self, monkeypatch, ws):
         monkeypatch.setattr(config, "INERT_COMMANDS", ["ls"])
         with patch("security.sandbox.is_docker_available", return_value=True), \
              patch("security.sandbox._run_docker") as mock_docker:
             mock_docker.return_value = {"stdout": "docker", "stderr": "", "return_code": 0}
-            result = run_sandboxed("python script.py", "/tmp/ws")
+            result = run_sandboxed("python script.py", ws)
         mock_docker.assert_called_once()
         assert result["stdout"] == "docker"
 
-    def test_non_inert_no_docker_fallback_enabled(self, monkeypatch):
+    def test_non_inert_no_docker_fallback_enabled(self, monkeypatch, ws):
         monkeypatch.setattr(config, "INERT_COMMANDS", ["ls"])
         monkeypatch.setattr(config, "ALLOW_INSECURE_SANDBOX_FALLBACK", True)
         with patch("security.sandbox.is_docker_available", return_value=False), \
              patch("security.sandbox._run_subprocess_fallback") as mock_fb:
             mock_fb.return_value = {"stdout": "fb", "stderr": "", "return_code": 0}
-            result = run_sandboxed("python script.py", "/tmp/ws")
+            result = run_sandboxed("python script.py", ws)
         mock_fb.assert_called_once()
         assert result["stdout"] == "fb"
 
-    def test_non_inert_no_docker_fallback_disabled_raises(self, monkeypatch):
+    def test_non_inert_no_docker_fallback_disabled_raises(self, monkeypatch, ws):
         monkeypatch.setattr(config, "INERT_COMMANDS", ["ls"])
         monkeypatch.setattr(config, "ALLOW_INSECURE_SANDBOX_FALLBACK", False)
         with patch("security.sandbox.is_docker_available", return_value=False):
             with pytest.raises(SandboxUnavailable, match="Docker is not available"):
-                run_sandboxed("python script.py", "/tmp/ws")
+                run_sandboxed("python script.py", ws)
 
-    def test_docker_available_param_overrides_probe(self, monkeypatch):
+    def test_docker_available_param_overrides_probe(self, monkeypatch, ws):
         """When docker_available is passed explicitly, is_docker_available
         must NOT be called (TOCTOU fix)."""
         monkeypatch.setattr(config, "INERT_COMMANDS", ["ls"])
         with patch("security.sandbox.is_docker_available") as mock_probe, \
              patch("security.sandbox._run_docker") as mock_docker:
             mock_docker.return_value = {"stdout": "", "stderr": "", "return_code": 0}
-            run_sandboxed("python x.py", "/tmp/ws", docker_available=True)
+            run_sandboxed("python x.py", ws, docker_available=True)
         mock_probe.assert_not_called()
         mock_docker.assert_called_once()
 
-    def test_network_false_passed_to_docker(self, monkeypatch):
+    def test_network_false_passed_to_docker(self, monkeypatch, ws):
         monkeypatch.setattr(config, "INERT_COMMANDS", ["ls"])
         with patch("security.sandbox.is_docker_available", return_value=True), \
              patch("security.sandbox._run_docker") as mock_docker:
             mock_docker.return_value = {"stdout": "", "stderr": "", "return_code": 0}
-            run_sandboxed("python script.py", "/tmp/ws")
+            run_sandboxed("python script.py", ws)
         # network should be False for a non-network command
         assert mock_docker.call_args[0][3] is False or mock_docker.call_args[1].get("network") is False
 
-    def test_network_true_for_pip(self, monkeypatch):
+    def test_network_true_for_pip(self, monkeypatch, ws):
         monkeypatch.setattr(config, "INERT_COMMANDS", ["ls"])
         with patch("security.sandbox.is_docker_available", return_value=True), \
              patch("security.sandbox._run_docker") as mock_docker:
             mock_docker.return_value = {"stdout": "", "stderr": "", "return_code": 0}
-            run_sandboxed("pip install requests", "/tmp/ws")
+            run_sandboxed("pip install requests", ws)
         assert mock_docker.call_args[0][3] is True or mock_docker.call_args[1].get("network") is True
 
 

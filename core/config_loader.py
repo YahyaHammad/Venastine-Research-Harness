@@ -464,6 +464,28 @@ def _validate_settings(data, source: str) -> None:
                 f"passes call, and a project's settings.json beats the "
                 f"user's. Set config.ENSEMBLE_MODELS in config.py instead "
                 f"(same posture as CRITIC_MODEL).")
+        if key == "shell_approval_mode":
+            # ROADMAP_v2 §28 (G7), and the third application of R12's rule.
+            # Rejected BY NAME for the reason the other two are: the
+            # generic unknown-key message reads as an oversight someone
+            # should fix by adding support, and this omission IS the
+            # design.
+            #
+            # A project's settings.json beats the user's (D29), and it
+            # arrives with a directory you cloned. This key decides
+            # whether shell commands are asked about at all -- so
+            # supporting it would let a cloned repo set "never" and turn
+            # `cat ~/.aws/credentials` into an unprompted host read. D17's
+            # trust gate is not a substitute: the same prompt covers a
+            # README-shaped CONTEXT.md, and nobody reading it is deciding
+            # about their shell gate.
+            raise ValueError(
+                f"settings.json at {source}: shell_approval_mode is "
+                f"deliberately not supported -- it decides whether shell "
+                f"commands are approved at all, and a project's "
+                f"settings.json beats the user's. Set "
+                f"config.SHELL_APPROVAL_MODE in config.py instead (same "
+                f"posture as ensemble_models and research.granted_tools).")
         if key not in _KNOWN_SETTINGS:
             raise ValueError(f"settings.json at {source}: unknown key {key!r}")
         expected = _KNOWN_SETTINGS[key]

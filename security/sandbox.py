@@ -36,6 +36,12 @@ import uuid
 from typing import Callable, Optional
 
 import config
+from security.capability import (
+    CONTAINED,
+    UNAVAILABLE,
+    UNCONTAINED,
+    CommandProfile,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -172,6 +178,161 @@ def _needs_network(command: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# ---- Capability classification (ROADMAP_v2 §28) ---------------------------
+# ---------------------------------------------------------------------------
+
+# Tier LABELS. Nothing branches on these -- see CommandProfile.tier. They
+# exist so the approval prompt and the record can name what was decided.
+INERT = "INERT"                  # read-only, every argument inside the workspace
+HOST_READ = "HOST_READ"          # read-only, but an argument leaves the workspace
+SANDBOXED = "SANDBOXED"          # needs a real backend, no network
+SANDBOXED_NET = "SANDBOXED_NET"  # needs a real backend, and gets network
+UNKNOWN = "UNKNOWN"              # empty or unparseable
+
+
+def _within(root: str, token: str) -> bool:
+    """Whether *token*, read as a path relative to *root*, stays inside it.
+
+    Deliberately NOT tools.builtin.file_ops._is_within_workspace, for two
+    measured reasons. security/ imports nothing but config and the stdlib
+    at runtime -- reaching into tools/ from here would be the first edge
+    in that direction and inverts the layering. And file_ops captures
+    WORKSPACE_ROOT at IMPORT time, so it cannot follow a workspace that
+    the caller passed in, which is the only thing this needs to do.
+    """
+    root = os.path.realpath(root)
+    resolved = os.path.realpath(os.path.join(root, token))
+    return resolved == root or resolved.startswith(root + os.sep)
+
+
+def _escapes_workspace(command: str, workspace_dir: str) -> bool:
+    """Whether any argument of *command* reaches outside the workspace.
+
+    THIS FUNCTION DOES NOT PARSE, and that is the whole reason it is
+    trustworthy (G2). It does not know a flag from an operand, and it must
+    not learn: `_is_inert` is sound because it rejects every metacharacter
+    rather than understanding one, and a classifier that starts
+    interpreting shell syntax is a shell parser whose bugs auto-approve
+    things. So every token after the first is read as a path, and a flag
+    like `-la` passes only because it is RELATIVE and therefore lands
+    inside the workspace on its own -- not because anything recognised it
+    as a flag.
+
+    The `=` clause is the one place a token needs splitting: `--file=/etc/x`
+    is inside the workspace read whole (there is no such file, but the
+    join stays under the root) while the path it actually names is not.
+    Splitting on the first `=` and checking the tail costs nothing and
+    closes it. Everything else -- absolute paths, `..` escapes, drive
+    letters, UNC paths -- is caught by reading the token as it stands.
+
+    False positives are the designed error direction: `grep /etc/passwd
+    notes.txt` searches for a STRING that looks like a path, and it will
+    cost one approval prompt. That is the trade that keeps the rule from
+    needing to know what grep does.
+    """
+    for token in command.split()[1:]:
+        if not _within(workspace_dir, token):
+            return True
+        if "=" in token and not _within(workspace_dir, token.split("=", 1)[1]):
+            return True
+    return False
+
+
+def classify_command(command: str, workspace_dir: str) -> CommandProfile:
+    """Measure *command* into a capability set (ROADMAP_v2 §28, G1).
+
+    One classification, two consumers: `_shell_approval_check` reads it to
+    decide whether to ask, and `run_sandboxed` reads the same object to
+    decide how to run it. Before §28 those two asked `_is_inert`
+    separately and never compared answers, which is how a command could be
+    auto-approved as harmless and then executed on the host (#157).
+    """
+    # Totality is a REQUIREMENT here, not defensiveness. This runs inside
+    # registry.approval_needed(), which is handed the model's tool-call
+    # input verbatim -- ShellParams does not validate it until run(),
+    # which is after approval. So `command` can be a list, a dict, None,
+    # anything the model emitted. Before §28 this was unreachable only
+    # because ToolApprovals.shell defaulted True and returned before any
+    # of it; flipping that field (G3) made the raw value reach here, and
+    # `command.strip()` on a list is an AttributeError escaping the
+    # approval check and then the loop.
+    #
+    # UNKNOWN rather than a raise: the gate's job is to answer, and
+    # `measured=False` already means nobody may skip the human.
+    if not isinstance(command, str):
+        return CommandProfile(
+            tier=UNKNOWN, measured=False, escapes_workspace=True,
+            writes=True, network=False,
+            reason=f"command is {type(command).__name__}, not a string")
+
+    stripped = command.strip()
+    if not stripped:
+        return CommandProfile(
+            tier=UNKNOWN, measured=False, escapes_workspace=True,
+            writes=True, network=False, reason="empty command")
+
+    network = _needs_network(stripped)
+
+    if _is_inert(stripped):
+        # INERT_COMMANDS is a read-only list and _DANGEROUS_FLAGS guards
+        # the entries that have a writing mode, so writes=False here is a
+        # claim about the COMMAND. It says nothing about the arguments,
+        # which is what the next line is for.
+        if _escapes_workspace(stripped, workspace_dir):
+            return CommandProfile(
+                tier=HOST_READ, measured=True, escapes_workspace=True,
+                writes=False,
+                network=network,
+                reason=(f"reads {stripped.split()[0]!r} with an argument "
+                        f"outside the workspace, and inert commands run on "
+                        f"the host"))
+        return CommandProfile(
+            tier=INERT, measured=True, escapes_workspace=False,
+            writes=False,
+            network=network,
+            reason=(f"read-only {stripped.split()[0]!r}, every argument "
+                    f"inside the workspace"))
+
+    tier = SANDBOXED_NET if network else SANDBOXED
+    return CommandProfile(
+        tier=tier,
+        measured=True,
+        # Not consulted under CONTAINED, and under UNCONTAINED a non-inert
+        # command is asked about anyway because writes is True. Measured
+        # rather than assumed True so the record says something real.
+        escapes_workspace=_escapes_workspace(stripped, workspace_dir),
+        writes=True,
+        network=network,
+        reason=("needs network and a sandbox" if network
+                else "not a read-only command, so it needs a sandbox"))
+
+
+def containment_for(
+    profile: CommandProfile, docker_available: bool,
+) -> str:
+    """Which containment the backend that will actually run *profile*
+    provides -- the second half of what the gate needs.
+
+    This mirrors run_sandboxed()'s routing exactly and must keep doing so.
+    Note INERT and HOST_READ both map to UNCONTAINED: the inert light path
+    is a HOST subprocess, and calling it "inert" never made it contained.
+    Reading that tier as safe is what #157 was.
+
+    *docker_available* is required rather than probed here. Probing would
+    put subprocess IO inside a predicate, and it would move the probe out
+    from under the callers that pre-compute it for the TOCTOU thread --
+    the same reason run_sandboxed takes it instead of asking.
+    """
+    if profile.tier in (INERT, HOST_READ):
+        return UNCONTAINED
+    if docker_available:
+        return CONTAINED
+    if config.ALLOW_INSECURE_SANDBOX_FALLBACK:
+        return UNCONTAINED
+    return UNAVAILABLE
+
+
+# ---------------------------------------------------------------------------
 # ---- Environment scrubbing ------------------------------------------------
 # ---------------------------------------------------------------------------
 
@@ -244,6 +405,45 @@ def _run_inert(
 # ---------------------------------------------------------------------------
 
 
+def _venastine_readonly_mount(workspace_real: str) -> list[str]:
+    """A nested read-only bind for `.venastine/`, or nothing (§28 G6).
+
+    `.venastine/` holds CONTEXT.md, mcp.json and the project's agents and
+    skills -- content that is injected into system prompts and that names
+    commands the harness will spawn. D17 gates loading it behind a trust
+    hash; this stops a sandboxed command REWRITING it in between.
+    /workspace stays writable so builds still work; only the subtree is
+    read-only, which Docker resolves by mount depth.
+
+    Both halves of the condition do work, and neither is padding:
+
+      nested   `.venastine/` resolves from the PROJECT path while the
+               sandbox mounts AGENT_WORKSPACE, which defaults to
+               `./workspace` -- so in the default layout they are
+               SIBLINGS and Docker cannot reach `.venastine` at all. The
+               mount only means anything when someone has pointed the
+               workspace at a directory that contains one.
+
+      isdir    Docker CREATES a missing bind source, as a root-owned
+               directory on the HOST. And is_trusted() returns True when
+               `.venastine/` is absent but False once it exists with no
+               store entry -- so an unconditional mount would have
+               `docker run` conjure a `.venastine/` into the user's
+               project and then make the harness prompt them to trust it.
+
+    Known limits, since a half-understood control is worse than none:
+    this covers WRITES on the Docker path only. It does not cover reads,
+    the subprocess fallback (which mounts nothing), or the harness's own
+    `agents/builtin` when the workspace is the harness repo.
+    """
+    venastine = os.path.realpath(os.path.join(workspace_real, ".venastine"))
+    if not venastine.startswith(os.path.realpath(workspace_real) + os.sep):
+        return []
+    if not os.path.isdir(venastine):
+        return []
+    return ["-v", f"{venastine}:/workspace/.venastine:ro"]
+
+
 def _run_docker(
     command: str,
     workspace_dir: str,
@@ -271,6 +471,8 @@ def _run_docker(
     if not network:
         docker_args.append("--network")
         docker_args.append("none")
+
+    docker_args.extend(_venastine_readonly_mount(workspace_real))
 
     docker_args.extend(["-e", "PATH=/usr/bin:/bin:/usr/local/bin"])
     docker_args.append(config.SANDBOX_DOCKER_IMAGE)
@@ -398,6 +600,7 @@ def run_sandboxed(
     workspace_dir: str,
     shell_binary: Optional[str] = None,
     docker_available: Optional[bool] = None,
+    profile: Optional[CommandProfile] = None,
 ) -> dict:
     """Execute *command* through the appropriate sandbox backend.
 
@@ -411,12 +614,31 @@ def run_sandboxed(
     approval check) to avoid a TOCTOU gap where Docker status changes
     between the approval decision and execution.
 
+    *profile* is the same thing for the COMMAND: §28 has the approval
+    check classify once and hand the result here, so the call that runs
+    is the call that was approved. The two parameters stay separate on
+    purpose -- a profile says what the command wants, docker_available
+    says what the host can give, and merging them would make one of those
+    two questions unaskable.
+
     Returns ``{"stdout": str, "stderr": str, "return_code": int}``.
     """
     if shell_binary is None:
         shell_binary = detect_shell()
 
-    if _is_inert(command):
+    # Audit #50: nothing else in the codebase ever created WORKSPACE_DIR,
+    # so on a fresh clone it does not exist -- and subprocess raises
+    # FileNotFoundError for a missing CWD exactly as it does for a missing
+    # executable, so both backends reported "Command not found" / "Shell
+    # binary not found" while naming the directory in the same breath.
+    # Every other state path in the project is created by whoever needs
+    # it; this is the one that had three consumers and no creator.
+    os.makedirs(workspace_dir, exist_ok=True)
+
+    if profile is None:
+        profile = classify_command(command, workspace_dir)
+
+    if profile.tier in (INERT, HOST_READ):
         logger.debug("Inert command, using light path: %s", command[:80])
         return _run_inert(command, workspace_dir, shell_binary)
 
@@ -426,7 +648,7 @@ def run_sandboxed(
         docker_available = is_docker_available()
 
     if docker_available:
-        network = _needs_network(command)
+        network = profile.network
         logger.debug(
             "Docker path (network=%s): %s", network, command[:80],
         )
