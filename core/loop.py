@@ -42,6 +42,7 @@ from core.memory import ConversationMemory
 # of its three entry points is running -- and storage.create_thread is
 # where it is stored. Nothing in between learns what a kind means.
 from storage import THREAD_KIND_CHAT, THREAD_KIND_RESEARCH_PASS
+from tools.base import GRANT_NEVER
 from tools.context import ToolContext, RunInfo
 from tools.registry import registry, ToolCallDenied
 
@@ -260,6 +261,47 @@ def _authorization_kwargs(authorization) -> dict:
         "grant_budget": authorization.budget,
         "response_channel": authorization.provider,
     }
+
+
+def _denial_reason(tool_name: str, response_channel, context) -> str:
+    """Why a gated call was refused, in terms the model can act on (#158).
+
+    The loop already learned this lesson one branch over -- see the
+    reachability comment above the approval block: headless, "requires
+    approval and was not given" tells the model to retry WITH approval,
+    which is the one thing that cannot happen there. It retries, spends a
+    step against max_steps, and gets the same sentence back. That is the
+    fetch_url damage class, which §15\\D24 fixed for undeclared permissions
+    and left open on this axis.
+
+    THE DISTINCTION IS WHETHER THE ARGUMENTS CAUSED THE GATE, and it is
+    asked the same way schemas(callable_only=…) asks it -- with empty
+    params, through the one function both dispatch() and this loop already
+    share. A tool gated by NAME is uncallable in this run however it is
+    called, so the useful thing to say is "stop". A tool gated by THESE
+    PARAMS survived that filter and was advertised precisely because some
+    other call shape is callable, so the useful thing to say is "vary the
+    arguments" -- which is exactly the case #158 measured: `write` is
+    advertised in a headless pass and denied only for paths outside the
+    workspace.
+
+    No tool name and no notion of a path appears here. Which argument to
+    vary is the model's problem and the tool's schema already describes it;
+    putting "try a path inside the workspace" in this file is the thing
+    ToolSpec.grant_scope and request_kind exist to prevent.
+    """
+    if response_channel is not None:
+        # Somebody was asked and declined. Nothing to reframe -- the answer
+        # was a decision, not an absence, and telling the model the call
+        # was unavailable would misreport a person's "no" as a limitation.
+        return f"{tool_name} requires approval and was not given"
+    if registry.approval_needed(tool_name, {}, context):
+        return (f"{tool_name} requires approval and this run has no way to "
+                f"ask, so it is unavailable however it is called. Do not "
+                f"retry it.")
+    return (f"{tool_name} requires approval for these arguments and this "
+            f"run has no way to ask. It may not need approval with "
+            f"different arguments.")
 
 
 def _obtain_approval(response_channel, tool_name: str, params: dict,
@@ -488,10 +530,39 @@ class RunAgentLoop:
         # channel CAN ask, so hiding its gated tools would report a
         # limitation the run does not have. §23 made this one condition
         # again -- it was two while there were two routes.
+        #
+        # §25 R15: and "nothing can ask" is not "nothing has answered". A
+        # GRANT is an answer given before the call existed, so a granted
+        # tool is callable with no channel at all -- which is the whole
+        # point of `--grant-tools` on an unattended run. #156: this filter
+        # could not see the grant, so a grant-only run advertised exactly
+        # what an unflagged one did while the CLI printed that it had
+        # authorised something. The enforcement path below honoured the
+        # grant correctly; the model was simply never told the tool was
+        # there, so it never emitted the call.
+        #
+        # run_info IS BUILT ABOVE THIS, not below it as it was before R15.
+        # The schemas call now needs the grant, and the grant lives on
+        # run_info -- building it after would read the name before it is
+        # bound. Nothing else moved: it depends only on values already in
+        # scope here.
+        run_info = RunInfo(
+            model=model, provider_name=provider_name, effort=effort,
+            granted_tools=set(granted_tools or ()),
+            grant_budget=grant_budget)
         headless = response_channel is None
-        tool_schemas = registry.schemas(context, callable_only=headless)
+        # The BUDGET is deliberately not consulted here. Advertisement is
+        # decided once per step; R6 makes exhaustion fall back to asking
+        # (or, headless, to denying) at CALL time, which is a per-call
+        # answer. Hiding a tool mid-run when the ceiling ran out would
+        # change what the model can see between one step and the next for
+        # a reason it cannot observe, and the model would read that as the
+        # tool having ceased to exist.
+        tool_schemas = registry.schemas(
+            context, callable_only=headless, granted=run_info.granted_tools)
         if headless:
-            hidden = tuple(sorted(registry.headless_hidden(context)))
+            hidden = tuple(sorted(registry.headless_hidden(
+                context, granted=run_info.granted_tools)))
             if hidden and hidden not in _headless_notices_shown:
                 _headless_notices_shown.add(hidden)
                 logger.warning(
@@ -500,10 +571,6 @@ class RunAgentLoop:
                     "grant it.",
                     ", ".join(hidden),
                 )
-        run_info = RunInfo(
-            model=model, provider_name=provider_name, effort=effort,
-            granted_tools=set(granted_tools or ()),
-            grant_budget=grant_budget)
         total_tokens_used = 0
         # §25 audit trail. Attached to the response object below rather
         # than at each of the three return points, so a stop condition
@@ -630,9 +697,35 @@ class RunAgentLoop:
                 subject = request_payload.get("subject")
                 remembered, signoff = run_info.recall_signoff(
                     call.name, subject)
+                #   grant_policy on a NAME-LEVEL grant only -- R13's literal
+                #     claim is that approving the NAME never carries the
+                #     authority for a GRANT_NEVER tool, on either path, and
+                #     until now no path enforced it. Batch 6 declared the
+                #     policy and taught the two functions that decide what
+                #     may be OFFERED to read it; this is the reader that
+                #     decides whether a grant already in hand APPLIES.
+                #     `spawn_subagent` was covered only because R14's
+                #     subject condition happens to catch it; `remember`
+                #     carries no subject, so a grant naming it dispatched a
+                #     durable cross-session write with no prompt -- M17's
+                #     scenario through the one door R13 left unlocked.
+                #
+                #     IT MUST NOT REACH THE SIGN-OFF MEMO, and that is not a
+                #     nicety: `spawn_subagent` is GRANT_NEVER, so testing
+                #     the policy unconditionally here stops §23's memo
+                #     applying and the same agent is asked about twice in
+                #     one turn. R13 is about what approving a NAME buys; a
+                #     memo is an answer somebody gave about this subject,
+                #     which J8 and R14 govern instead. recall_signoff
+                #     already separates them by what it returns -- the memo
+                #     always carries a subset, the grant carries None.
+                answered_by_name = signoff is None
                 if (needs_approval
                         and remembered
                         and registry.grantable(call.name)
+                        and not (answered_by_name
+                                 and registry.grant_policy(call.name)
+                                 == GRANT_NEVER)
                         and (run_info.grant_budget is None
                              or run_info.grant_budget.take())):
                     needs_approval = False
@@ -653,9 +746,8 @@ class RunAgentLoop:
                         response_channel, call.name, call.input, notice,
                         request_payload)
                     if not approved:
-                        result = {
-                            "error": f"{call.name} requires approval and was not given",
-                        }
+                        result = {"error": _denial_reason(
+                            call.name, response_channel, context)}
                     else:
                         # §25 R11: run-scope is a shortcut for a chat turn,
                         # where re-asking about the same tool seconds later

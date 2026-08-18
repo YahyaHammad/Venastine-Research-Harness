@@ -1729,3 +1729,193 @@ first.
 decisions they record still hold — the arguments moved to the registrations, unchanged, and
 the rows in this section replace them. Kept rather than edited, per this file's convention:
 what a past batch measured is not rewritten by a later one.
+
+
+## §23 — the seventh fix batch: a grant the model can actually see (2026-08-18)
+
+Three issues, one mechanism: **what `schemas(callable_only=…)` advertises to a run that
+cannot ask.** #156 is the substantive one and it is §25's own founding defect, still
+standing on the path §25 was written for.
+
+| Change | Issue | Files |
+|---|---|---|
+| The advertisement filter reads the grant (`_answered_by_grant`) | #156 | `tools/registry.py` |
+| `run_info` moves above the schemas call; the grant is passed | #156 | `core/loop.py` |
+| A headless denial says whether the ARGUMENTS caused it | #158 | `core/loop.py` |
+| "A headless run cannot spawn at all" is tested, not emergent | #159 | `tests/test_agents.py` |
+
+Suite 1684 -> **1698**.
+
+### The measurement, before and after
+
+Through the real `run_deep_research_mode`, capturing the `tools` argument that reaches
+`call_model_stream` -- not a dispatch outcome, for the reason in the vacuity note below:
+
+```
+                            BEFORE                 AFTER
+--grant-tools X             False  (13 tools)      True   (14 tools)
+--grant-tools X --attended  True   (17 tools)      True   (17 tools)
+no flags                    False  (13 tools)      False  (13 tools)
+```
+
+A grant-only run sent the model **byte-identical tools to an unflagged run**, while the CLI
+printed `[grant] authorised for this run only: mcp__demo__post`. Enforcement was correct
+throughout; the model was never told the tool existed.
+
+### What breaks these
+
+| If production code changes like this... | ...this fails | Why it matters |
+|---|---|---|
+| `granted=` dropped at the `schemas()` call site | `test_a_granted_tool_is_advertised_with_no_channel` | This IS #156: `--grant-tools` silently does nothing on its own while reporting success |
+| `grantable()` re-check deleted from `_answered_by_grant` | `test_a_grant_naming_a_param_dependent_tool_advertises_nothing` | R2 at the filter -- a stale grant naming `shell` would advertise it |
+| The `grant_policy` check deleted from `_answered_by_grant` | `test_a_grant_cannot_smuggle_spawn_subagent_into_a_headless_run` | `spawn_subagent` has no `approval_check`, so `grantable()` alone lets it through -- and R14 then refuses a tool the model was shown, recreating advertised-and-uncallable one line down |
+| `headless_hidden` ignores `granted` | `test_a_granted_tool_is_not_reported_as_hidden` | The WARNING names a tool the model can actually call -- the invisibility problem it exists to prevent, wearing the opposite sign |
+| The budget made to retract advertisement | `test_the_budget_does_not_change_what_is_advertised` | R6's fallback is a *call-time* answer; hiding the tool mid-run means the fallback never runs and the model reads it as the tool ceasing to exist |
+| `run_info` moved back below `schemas()` | `NameError` across every test that drives `_run` | Build order is load-bearing now, and loudly so |
+| Denial always blames the name | `test_a_denial_caused_by_the_arguments_says_so` | The model is told to stop when varying one argument would work |
+| Denial always blames the arguments | `test_a_denial_caused_by_the_NAME_tells_the_model_to_stop` | The model retries a tool that is uncallable however it is called, spending the rest of `max_steps` |
+| `response_channel is not None` branch removed | `test_a_human_saying_no_is_not_reframed_as_a_limitation` | A person's "no" gets reported as "this run has no way to ask" -- a decision misattributed to the configuration |
+| Headless filter loosened to `!= GRANT_NEVER` | `test_a_signoff_only_tool_is_invisible_to_a_headless_run` + the relation test | `write_project_doc` becomes visible to an unattended run, which is the one thing `SIGNOFF_ONLY` was declared to prevent |
+| The loop's grant branch stops reading `grant_policy` | `test_a_GRANT_NEVER_tool_in_a_grant_is_still_asked_about` | A grant naming `remember` writes a durable cross-session memory with no prompt (M17's scenario) |
+| `answered_by_name = not signoff` instead of `is None` | `test_s1_signoff_is_remembered_per_agent_not_per_tool_name` | An EMPTY sign-off subset is falsy but is a real answer, so truthiness misreads a memo as a name grant and R13 then blocks it |
+| `ToolApprovals.spawn_subagent = False` | `test_a_headless_run_is_never_offered_spawn_subagent` | r3-1 recreated through config: a headless pass spawns a child that silently loses every gated tool |
+
+Ten mutations run, nine RED on a test named for each, plus a deliberate GREEN control. The
+config mutation was re-checked in isolation because `-x` had it killed by an unrelated test
+first: run alone, `test_a_headless_run_is_never_offered_spawn_subagent` fails and its control
+`test_a_run_that_can_ask_IS_offered_spawn_subagent` passes, so the mutation is discriminated
+rather than merely fatal.
+
+### Found reviewing this batch, before merge
+
+Two places ask a question `grant_policy` answers and neither consulted it. Neither is
+reachable — `candidates()`, `candidate_approvals()` and `parse_grant_spec` all refuse the
+names involved — so nothing shipped broken. "Unreachable" is a fact about today's callers;
+these are claims about the policy, and R14 was added on exactly that argument.
+
+**The headless advertisement filter was written `!= GRANT_NEVER`.** It is reached *only*
+when the run is headless, which is the unattended case `GRANT_SIGNOFF_ONLY` exists to
+exclude — so the looser test readmitted `write_project_doc` precisely where R13's argument
+was written against it, and disagreed with `candidates()`, which answers the same question.
+**That is #67/#133's own shape, reappearing inside the batch that generalised it.** Now
+`== GRANT_ANYWHERE`, with a test asserting the *relation* to `candidates()` rather than
+checking each — the same remedy #67 used, for the same reason.
+
+**The loop's grant branch never read the policy at all** (batch 6's gap, not this batch's).
+`spawn_subagent` was covered only because R14's subject condition happens to catch it;
+`remember` carries no subject, so a grant naming it dispatched unprompted:
+
+```
+before:  granted={'remember'}  prompts=0  dispatched=['remember']
+after :  granted={'remember'}  prompts=1  dispatched=['remember']   <- asked, then allowed
+```
+
+**The first attempt at that fix broke the sign-off memo**, and only
+`test_s1_signoff_is_remembered_per_agent_not_per_tool_name` caught it — a test named for the
+memo, not for the policy. Testing `grant_policy` unconditionally stops §23's memo applying,
+because `spawn_subagent` is `GRANT_NEVER`, so the same agent is asked about twice in one
+turn. **R13 is about what approving a NAME buys; a memo is an answer somebody gave about one
+subject, which J8 and R14 govern.** The two enforcement predicates therefore differ on
+purpose:
+
+| question | predicate | why |
+|---|---|---|
+| may a grant make this visible to a **headless** run? | `== GRANT_ANYWHERE` | headless *is* unattended, and `SIGNOFF_ONLY` excludes unattended |
+| does a name grant **apply** to this call? | `!= GRANT_NEVER` | a subagent holding a `SIGNOFF_ONLY` tool after a sign-off has a channel and must run it unprompted — that is what the sign-off bought |
+
+The discriminator is `signoff is None`, **not truthiness**: an empty sign-off subset is a
+real answer (spawn the agent with nothing granted) and is stored as `set()`, which is falsy.
+Both the distinction and the empty-set edge now have tests named for them.
+
+### A test that supplies the model's move cannot detect that the move was unavailable
+
+New vacuity class, and the reason a suite with **23 green grant tests** was evidence of
+nothing here. Every loop-level grant test passes a channel *and* builds the model's response
+itself:
+
+```python
+uses = make_model_response(text="", tool_calls=[
+    {"id": f"c{i}", "name": tool_name, "input": {"n": i}} ...
+```
+
+The tool call is injected *downstream of the filter that would have hidden it*. Those tests
+can observe what the loop does with a chosen tool; they cannot observe whether the tool was
+choosable. Where a test stands in for the model, it has authority over the model's options,
+and any assertion about what the model *could* do is then circular.
+
+This is the third distinct way this project has found a green suite to mean nothing, after
+"a test that PATCHES the wiring cannot see the wiring break" (§23's sign-off memo) and "a fix
+that shrinks a set turns every negative about it into a tautology" (batch 6). The remedy is
+the same each time and it is not more tests: assert one layer further out than the defect can
+reach. Here that is the `tools` argument on the wire.
+
+### Verified on Linux
+
+`python:3.11-slim`, fresh `pip install -r requirements.txt`, `providers.json` from the
+example: **1707 passed, 0 skipped, 1 deselected** (re-run after the pre-merge review). The fifteen tests that `skipif` on Windows
+all run and pass there, so the headline count is measured where nothing skips. The review's three new
+mutations were re-run there too, each RED on the test named for it -- and read by NAME
+in the output rather than inferred from an exit code, which is the false-RED lesson below.
+
+The wire measurement re-taken in the container:
+
+```
+--grant-tools X                granted on wire: True   (14 tools)
+--grant-tools X --attended     granted on wire: True   (17 tools)
+no flags                       granted on wire: False  (13 tools)
+```
+
+The run also emitted **two distinct headless notices**, which is `headless_hidden(granted=)`
+doing its job — the granted run's notice omits the tool the ungranted run's names:
+
+```
+not advertising remember, spawn_subagent, write_project_doc                    <- granted run
+not advertising mcp__demo__post, remember, spawn_subagent, write_project_doc   <- no flags
+```
+
+**Two container-only failures, both in the harness rather than the code, and both worth
+recording** because each is a way a verification run lies:
+
+- The wire measurement first died on `no such table: conversationthread`. A research pass
+  persists a thread, and a fresh container has no `app.db` — it had only ever worked on
+  Windows because a long-lived local database already had the table. That is verbatim the
+  gotcha ARCHITECTURE §11 records about `pipelinerunrecord`, met from the other side.
+- The `#159` config mutation reported a **false GREEN**: the needle was LF and `config.py` is
+  CRLF, so it never applied and the tests passed for the ordinary reason. Caught only because
+  the harness asserts the byte count changed after writing. **A mutation that fails to apply
+  is indistinguishable from a surviving mutant unless the application itself is checked** —
+  which is why every mutation in this project is EOL-normalised, byte-diffed, and
+  `py_compile`d before pytest is allowed to run.
+
+### The mutation harness produced a FALSE RED, mirroring the false GREEN above
+
+`R13-enforcement-truthiness-instead-of-is-None` (`answered_by_name = signoff is None` ->
+`not signoff`) was reported RED and **actually survives the whole suite.** The harness passed
+a two-file test spec as a *single* argument, so pytest got `"tests/test_agents.py
+tests/test_grants.py"` as one path, errored, and the non-zero exit read as a kill.
+
+So both directions are now on record, from the same batch:
+
+| | cause | what it looks like |
+|---|---|---|
+| **false GREEN** | the needle never applied (LF vs CRLF) | a surviving mutant, i.e. a missing test |
+| **false RED** | pytest failed for a reason unrelated to the mutation | a covered guard, i.e. a test that does not exist |
+
+The false RED is the more dangerous of the two: a false GREEN sends you looking for a test you
+then write, while a false RED tells you to stop. **A mutation pass has to check that the
+failure it saw is the failure it expected**, not merely that the exit code was non-zero — the
+harness now splits the spec, drops `-x` so the killing test is visible in the tail, and every
+mutation carries the name of the test that should kill it so the two can be compared by eye.
+
+The surviving mutant was real and is now covered. `test_s1_signoff_is_remembered_per_agent_
+not_per_tool_name` answers the sign-off with a **non-empty** set, which is truthy either way,
+so it could never discriminate. `test_an_EMPTY_signoff_is_remembered_too` answers with
+`set()` — spawn the agent, grant it nothing — which is a real answer and is falsy.
+
+### Note on §21's row for the headless denial string
+
+Any earlier row asserting the exact text `"requires approval and was not given"` still holds
+**only where a channel exists**. Headless, that string now differs by whether the tool was
+gated by name or by its arguments. The change is deliberate and the old wording was the
+defect: it told the model to retry with approval in the one situation where approval cannot
+be obtained.

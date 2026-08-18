@@ -159,11 +159,31 @@ Every registered tool appears in that table, and a test asserts it (audit #125):
 
 `pin` and `remember` sit either side of the line that matters: pinning a message is thread-scoped and undoable, while remembering something outlives the conversation and silently shapes ones you have not started yet.
 
+### `shell` is layered, and not every layer is an approval
+
+`shell` ships **disabled** (`ToolPermissions.shell = False`) and cannot be enabled at runtime, so none of this applies to a default install. If you do enable it, its approval answer is not one boolean — it is decided in order:
+
+1. `ToolApprovals.shell = True`, the shipped default → **every** command is asked about, and the rest of this list never runs.
+2. Otherwise, a command on the read-only allowlist (`ls`, `cat`, `grep`, …) with no shell metacharacters and no path-qualified binary is auto-approved and runs **on the host**, outside the sandbox.
+3. Otherwise, if Docker is available, it is auto-approved and runs in a container — workspace mounted read-write, network only if the command's first word is on the network allowlist (`curl`, `pip`, `git`, …).
+4. Otherwise the insecure-fallback flags decide, and both are off by default.
+
+**Two known limitations, tracked as [#157](https://github.com/YahyaHammad/Venastine-Research-Harness/issues/157) and not yet fixed.** Step 2 inspects only the first word, so `cat /root/.ssh/id_rsa` classifies as read-only and runs on the host — *read-only is not the same as harmless* when the output goes back into a model's context. And the approval decision never consults whether the command will get network access, which step 3 decides separately; so egress is settled after the question of whether to ask anyone.
+
+A tiered classifier that answers both questions from one classification — capability sets rather than a trust level, read by the approval check and the sandbox alike — is **designed and not built**. The design is recorded in DEVLOG and ROADMAP_v2 §25; it is not in the code, and nothing above depends on it.
+
 ### "Headless" means *unable to ask*, not "not a GUI"
 
 When nothing can put a question in front of a human, approval-gated tools are **hidden from the model entirely** rather than offered and then denied. This is not cosmetic. A tool that is advertised and always refused gets chosen again and again, and the only trace is a denial string buried in a tool result — that exact bug shipped once here, in which `fetch_url` was registered, documented as working, and denied on every call for its whole life. Registering a tool without declaring its permissions now raises at import time instead.
 
 The rule that falls out of this: **inability to ask is never treated as permission to proceed.**
+
+Two consequences, both easier to get wrong than they look:
+
+- **A grant is an answer, so a granted tool stays visible.** "Nothing can ask" is not "nothing has answered" — a pre-flight grant answered the question before the call existed. Getting this wrong is what made `--grant-tools` do nothing on its own for three sections (see below).
+- **A headless run cannot spawn a subagent at all**, because spawning is itself approval-gated. That is also why a spawned subagent *keeps* its gated tools: the only runs that can spawn have a human reachable, and the child inherits that route. It is not a separate permission — it falls out of this rule.
+
+When a gated call *is* refused because nothing could ask, the model is told which of the two reasons applies: the tool is unavailable however it is called, or it needs approval **for these arguments** and may not for others. "Requires approval and was not given" invites a retry that cannot succeed, and the model spends its remaining steps discovering that.
 
 ### Content policy, on the way in and on the way out
 
@@ -203,7 +223,8 @@ The limits are the interesting part:
 - **Every tool declares how far approving its *name* goes**, and both places that can pre-grant — an unattended run, and the sign-off when the model spawns a subagent — read the same declaration. They used to keep separate lists, which is how the sign-off ended up offering the two tools below.
 - **`spawn_subagent` and `remember` can never be pre-granted, anywhere.** Approving a spawn *is* the sign-off for the child's entire tool set, so pre-granting it would compound one yes into unbounded delegated authority. A memory outlives the run. An *attended* run can still approve either one live — a per-call human decision, which is what the gate is for.
 - **`write_project_doc` can be signed off for one turn, but never pre-granted to an unattended run.** It resolves a document *name* to a path and overwrites it with no diff and no second question, and one of the files it can write is the project context injected into later sessions. A human answering about one named agent for one turn is consent; one tick covering ten unattended passes that are reading fetched web pages is not.
-- **Running out of grant budget degrades to asking, not to failing.** One budget is shared across all ten passes.
+- **A grant makes the tool visible to the model, not just permitted.** These are two different things and the difference was a real bug: gated tools are normally withheld from a run that has no way to ask about them, and until recently the grant was not consulted when deciding that — so `--grant-tools` *on its own* authorised a tool and then sent the model the same list as an unflagged run, while printing that it had authorised something. It only worked alongside `--attended`, which is not the mode any of this is for. A stale grant still cannot widen anything: what may be pre-granted is re-checked against the tool's own declaration at the point the list is built.
+- **Running out of grant budget degrades to asking, not to failing.** One budget is shared across all ten passes, and it does not retract a tool mid-run — the ceiling changes *when* you get asked, never what the model can see.
 - **Grants are never persistable, and the setting is rejected by name** so nobody "fixes" the omission. A persisted *mode* can only ever add prompts; a persisted *grant list* could only ever remove them — and `settings.json` is the one config file where a project's values beat yours.
 
 ### MCP servers: allowed by default, trusted by default never
@@ -294,7 +315,16 @@ Precedence for provider and model is CLI flag > `settings.json` > `config.py`.
 
 **Remaining:** nothing in either roadmap, and §10's revisit is now closed. TECHNICAL_DEBT.md items 9 and 10 are open, and two live checks are recorded against §10 (see DEVLOG) that cannot be settled offline: the default `temperature` on OpenAI and Google, and whether OpenAI's reasoning models belong in `config.MODELS_REJECTING_SAMPLING_PARAMS`.
 
-Run the test suite with `pytest` — 1684 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
+**Not finished, though: an audit is open.** Both roadmaps being built is not the same as the
+code being clean, and saying only the first would be the "built and runs are different claims"
+mistake this project keeps recording against itself. Audit Pass 1 is tracked in GitHub issues —
+**104 open**, of which 4 are S1 and 18 are S2 — and is being worked in numbered fix batches
+(seven merged or pending so far, each recorded in `DEVLOG.md` and `tests/BREAKING_CHANGES.md`
+with what was measured and what would break the fix). The one an operator should know about is
+**#157**: `shell`'s auto-approval, described under *Security model* above, which matters only if
+you enable a tool that ships disabled.
+
+Run the test suite with `pytest` — 1707 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
 
 ## Documentation
 

@@ -115,9 +115,63 @@ class ToolRegistry:
             return False
         return True
 
+    def _answered_by_grant(self, tool_name: str, granted) -> bool:
+        """Whether a pre-flight grant has ALREADY answered this tool's
+        approval question (§25 R15).
+
+        `callable_only` below asks "can anything ask?". Since §25 that is
+        the wrong question by itself: a grant is an answer given early, so
+        the question is "can anything answer FOR THIS TOOL?" -- and a
+        granted tool is answerable with no channel at all. #156 is the gap
+        between those two sentences: `--grant-tools X` with no `--attended`
+        built a grant the enforcement path honoured and the advertisement
+        path never saw, so the model was never told the tool existed and
+        never emitted the call.
+
+        TWO checks, and both are RE-derived here rather than trusted from
+        the set -- the same discipline core/loop.py applies before honouring
+        a grant, because a stale or hand-built `RunInfo` must not widen what
+        is advertised any more than it can widen what is dispatched:
+
+          grantable()   R2. A tool deciding approval from its PARAMS was
+                        never consented to by name, so a grant naming one
+                        answers nothing.
+          grant_policy  R13, and it must be `== GRANT_ANYWHERE` rather than
+                        `!= GRANT_NEVER`. Both callers of this reach it only
+                        when the run is HEADLESS, and headless is precisely
+                        the unattended case GRANT_SIGNOFF_ONLY exists to
+                        exclude: R13 admits `write_project_doc` to the §18
+                        sign-off because a human is answering in the moment
+                        about one named agent, and refuses it to ten
+                        unattended passes on one launch-time tick. A
+                        headless run has no human answering in the moment,
+                        so the looser test would readmit it exactly where
+                        the argument was written against.
+
+        THIS IS THE SAME PREDICATE `candidates()` USES, and deliberately so.
+        That function decides what may be OFFERED to an unattended run and
+        this one decides what a grant then makes VISIBLE to it -- one
+        question, so one answer. Written `!= GRANT_NEVER` first, which let
+        `write_project_doc` through here while `candidates()` refused it:
+        #67/#133's own shape, reappearing inside the batch that generalised
+        it. Neither the CLI nor the TUI nor a subagent sign-off can put a
+        SIGNOFF_ONLY name into a headless grant today, so nothing was
+        reachable -- but "unreachable" is a fact about the callers, and this
+        is a claim about the policy.
+
+        Shared by schemas() and headless_hidden() rather than written out
+        twice -- those two must agree about what is hidden, and #67/#133
+        are what a shared mechanism with a duplicated policy costs.
+        """
+        return (bool(granted)
+                and tool_name in granted
+                and self.grantable(tool_name)
+                and self.grant_policy(tool_name) == GRANT_ANYWHERE)
+
     def schemas(
         self, context: Optional["ToolContext"] = None,
         callable_only: bool = False,
+        granted: Optional[set] = None,
     ) -> list[dict]:
         """What gets sent to the LLM's `tools` parameter each call.
 
@@ -141,27 +195,54 @@ class ToolRegistry:
             tools pass; approval-gated ones drop. The loop pairs this with
             a once-per-process WARNING naming what was hidden -- no quiet
             invisibility (the fetch_url lesson).
+          * granted (§25 R15) -- names a pre-flight grant already answered
+            for. Those stay advertised even with no channel, because the
+            approval question HAS an answer; see _answered_by_grant.
+
+        WHAT callable_only GUARANTEES, stated because the converse does not
+        hold and #158 is what assuming it costs: it means SOME call shape
+        is callable, not that every one is. The probe is
+        approval_needed(name, {}), and for a tool whose approval_check
+        reads the params -- read/write/edit on a path, shell on a command --
+        the empty dict is a call the model will never make. `write` resolves
+        an empty path inside the workspace, so it survives this filter and
+        is then denied per out-of-workspace call. That is deliberate (an
+        in-workspace write IS callable headless), but it means a survivor
+        of this filter is not a promise about any particular call.
         """
         out = []
         for name, spec in self._tools.items():
             if not self._advertised(name, spec, context):
                 continue
-            if callable_only and self.approval_needed(name, {}, context):
+            if (callable_only
+                    and self.approval_needed(name, {}, context)
+                    and not self._answered_by_grant(name, granted)):
                 continue
             out.append(spec.schema)
         return out
 
-    def headless_hidden(self, context: Optional["ToolContext"] = None) -> list[str]:
+    def headless_hidden(
+        self, context: Optional["ToolContext"] = None,
+        granted: Optional[set] = None,
+    ) -> list[str]:
         """Names that would be advertised with a response_channel but
         are dropped by schemas(callable_only=True) -- i.e. advertised yet
         uncallable headless. The loop logs exactly this list once, so a
         tool hidden by the headless filter is named and explained rather
         than silently absent (the trade this project keeps deciding
-        against)."""
+        against).
+
+        Takes `granted` for the same reason schemas() does, and it is not
+        cosmetic: this list is what the WARNING names. A granted tool that
+        is genuinely callable must not be reported as hidden, or the notice
+        whose whole purpose is to stop invisibility starts producing a
+        second kind of wrong answer.
+        """
         return [
             name for name, spec in self._tools.items()
             if self._advertised(name, spec, context)
             and self.approval_needed(name, {}, context)
+            and not self._answered_by_grant(name, granted)
         ]
 
     def approval_needed(
