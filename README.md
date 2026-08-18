@@ -159,11 +159,31 @@ Every registered tool appears in that table, and a test asserts it (audit #125):
 
 `pin` and `remember` sit either side of the line that matters: pinning a message is thread-scoped and undoable, while remembering something outlives the conversation and silently shapes ones you have not started yet.
 
+### `shell` is layered, and not every layer is an approval
+
+`shell` ships **disabled** (`ToolPermissions.shell = False`) and cannot be enabled at runtime, so none of this applies to a default install. If you do enable it, its approval answer is not one boolean — it is decided in order:
+
+1. `ToolApprovals.shell = True`, the shipped default → **every** command is asked about, and the rest of this list never runs.
+2. Otherwise, a command on the read-only allowlist (`ls`, `cat`, `grep`, …) with no shell metacharacters and no path-qualified binary is auto-approved and runs **on the host**, outside the sandbox.
+3. Otherwise, if Docker is available, it is auto-approved and runs in a container — workspace mounted read-write, network only if the command's first word is on the network allowlist (`curl`, `pip`, `git`, …).
+4. Otherwise the insecure-fallback flags decide, and both are off by default.
+
+**Two known limitations, tracked as [#157](https://github.com/YahyaHammad/Venastine-Research-Harness/issues/157) and not yet fixed.** Step 2 inspects only the first word, so `cat /root/.ssh/id_rsa` classifies as read-only and runs on the host — *read-only is not the same as harmless* when the output goes back into a model's context. And the approval decision never consults whether the command will get network access, which step 3 decides separately; so egress is settled after the question of whether to ask anyone.
+
+A tiered classifier that answers both questions from one classification — capability sets rather than a trust level, read by the approval check and the sandbox alike — is **designed and not built**. The design is recorded in DEVLOG and ROADMAP_v2 §25; it is not in the code, and nothing above depends on it.
+
 ### "Headless" means *unable to ask*, not "not a GUI"
 
 When nothing can put a question in front of a human, approval-gated tools are **hidden from the model entirely** rather than offered and then denied. This is not cosmetic. A tool that is advertised and always refused gets chosen again and again, and the only trace is a denial string buried in a tool result — that exact bug shipped once here, in which `fetch_url` was registered, documented as working, and denied on every call for its whole life. Registering a tool without declaring its permissions now raises at import time instead.
 
 The rule that falls out of this: **inability to ask is never treated as permission to proceed.**
+
+Two consequences, both easier to get wrong than they look:
+
+- **A grant is an answer, so a granted tool stays visible.** "Nothing can ask" is not "nothing has answered" — a pre-flight grant answered the question before the call existed. Getting this wrong is what made `--grant-tools` do nothing on its own for three sections (see below).
+- **A headless run cannot spawn a subagent at all**, because spawning is itself approval-gated. That is also why a spawned subagent *keeps* its gated tools: the only runs that can spawn have a human reachable, and the child inherits that route. It is not a separate permission — it falls out of this rule.
+
+When a gated call *is* refused because nothing could ask, the model is told which of the two reasons applies: the tool is unavailable however it is called, or it needs approval **for these arguments** and may not for others. "Requires approval and was not given" invites a retry that cannot succeed, and the model spends its remaining steps discovering that.
 
 ### Content policy, on the way in and on the way out
 
@@ -294,6 +314,15 @@ Precedence for provider and model is CLI flag > `settings.json` > `config.py`.
 **Built:** ROADMAP.md §1–§12 (§10's ensemble mode rebuilt by its revisit — diversity now comes from a roster of different models) and ROADMAP_v2.md §13 (streaming loop), §14 (config loader + workspace trust), §15 (permissions), §16 (TUI), §17 (MCP), §18 (agents), §19 (skills), §20 (post-pipeline review), §21a (compaction + `pin`), §21b (durable memory), §22 (live pipeline progress), §25 (authorised tool use in the pipeline), §26 (research legibility: per-pass tool calls, code-stage announcements, the claims view, role colour, `/copy`), §27 (thread legibility: transcript replay on resume, a conversations-only thread picker), §21c (session summaries and cross-thread referencing — §21 is now complete), §24 (`/init`), §23 (interactive tools: the response channel, per-tool subagent sign-off, `ask_user`, and the todo list).
 
 **Remaining:** nothing in either roadmap, and §10's revisit is now closed. TECHNICAL_DEBT.md items 9 and 10 are open, and two live checks are recorded against §10 (see DEVLOG) that cannot be settled offline: the default `temperature` on OpenAI and Google, and whether OpenAI's reasoning models belong in `config.MODELS_REJECTING_SAMPLING_PARAMS`.
+
+**Not finished, though: an audit is open.** Both roadmaps being built is not the same as the
+code being clean, and saying only the first would be the "built and runs are different claims"
+mistake this project keeps recording against itself. Audit Pass 1 is tracked in GitHub issues —
+**104 open**, of which 4 are S1 and 18 are S2 — and is being worked in numbered fix batches
+(seven merged or pending so far, each recorded in `DEVLOG.md` and `tests/BREAKING_CHANGES.md`
+with what was measured and what would break the fix). The one an operator should know about is
+**#157**: `shell`'s auto-approval, described under *Security model* above, which matters only if
+you enable a tool that ships disabled.
 
 Run the test suite with `pytest` — 1707 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
 
