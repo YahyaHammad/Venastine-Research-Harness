@@ -930,3 +930,194 @@ class TestTheModeValidations:
 
         assert main.main(["--mode", "research", "--review", "q"]) == 0
         assert "run_research" in startup
+
+
+# ===========================================================================
+# ---- Audit #102: the fail-safes and call sites nothing pinned -------------
+# ===========================================================================
+
+class TestTheDecliningDefaults:
+    """25 mutations against main.py left seven survivors. These are the
+    four that decide whether something happens when NOBODY ANSWERED --
+    the declining defaults the whole interaction design rests on, at the
+    one place a CLI user authorises tool execution.
+
+    The contrast is inside the same file: _prompt_review_decision's
+    identical rule IS pinned. §20's consent path got a test for its
+    timeout; §25's approval path, which governs whether a tool runs at
+    all, did not.
+    """
+
+    @staticmethod
+    def _ask(kind, payload, typed=None):
+        import unittest.mock as mock
+
+        import main
+        from core import interaction
+        from tests.conftest import FakeStdinReader
+
+        reader = FakeStdinReader([typed] if typed is not None else [])
+        with mock.patch.object(main, "_stdin_reader", return_value=reader):
+            channel = main.build_attended_provider()
+        return interaction.ask(
+            channel, interaction.Request(kind=kind, payload=payload))
+
+    def test_an_unanswered_approval_denies(self):
+        """Mutation: `if answer is None: return True`. Green on the whole
+        suite before this -- an unanswered approval prompt would RUN the
+        tool."""
+        from core import interaction
+
+        assert self._ask(interaction.APPROVAL, _PAYLOADS["approval"]) is False
+
+    def test_an_approval_is_granted_when_answered(self):
+        """The control. A test for the line above passes just as well
+        against a gate that denies everything."""
+        from core import interaction
+
+        assert self._ask(interaction.APPROVAL, _PAYLOADS["approval"],
+                         typed="y") is True
+
+    def test_a_blank_signoff_refuses_the_spawn(self):
+        """Mutation: `if not cleaned: return set()`. Green before this --
+        a blank sign-off would SPAWN the subagent with nothing granted
+        instead of refusing it. None and set() are different answers:
+        set() spawns, which is a legitimate choice a user can make, and
+        nobody made it."""
+        from core import interaction
+
+        assert self._ask(interaction.SUBAGENT_SIGNOFF,
+                         _PAYLOADS["subagent_signoff"], typed="") is None
+
+    def test_an_unanswered_signoff_refuses_the_spawn(self):
+        from core import interaction
+
+        assert self._ask(interaction.SUBAGENT_SIGNOFF,
+                         _PAYLOADS["subagent_signoff"]) is None
+
+    def test_none_grants_nothing_but_still_spawns(self):
+        """The control for the pair above, and the reason SAFE_DEFAULTS
+        distinguishes them at all."""
+        from core import interaction
+
+        assert self._ask(interaction.SUBAGENT_SIGNOFF,
+                         _PAYLOADS["subagent_signoff"],
+                         typed="none") == set()
+
+
+class TestAPipeDoesNotAcknowledgeAnMcpServer:
+    """#102's fourth survivor. Mutation: drop the non-tty
+    `approved.pop(...)`, and a piped run CONNECTS an unacknowledged
+    user-level MCP server. D31's skip is the branch that exists so the
+    prompt can legitimately be absent -- #60 is about what the prompt
+    says, this is about the run that never sees one."""
+
+    @staticmethod
+    def _pending(monkeypatch, interactive):
+        import main
+        from mcp_client import config as mcp_config
+
+        cfg = mcp_config.ServerConfig(
+            name="srv", tier="user", path="<test>", transport="stdio",
+            command="unused")
+        monkeypatch.setattr(mcp_config, "is_known", lambda c: False)
+        monkeypatch.setattr(main.sys.stdin, "isatty", lambda: interactive)
+        return main._confirm_user_level_servers({"srv": cfg})
+
+    def test_a_pipe_skips_it(self, monkeypatch, capsys):
+        assert self._pending(monkeypatch, interactive=False) == {}
+        assert "not an interactive session" in capsys.readouterr().err
+
+    def test_a_terminal_can_still_accept_it(self, monkeypatch, cli_stdin):
+        """The control: skipping unconditionally would pass the test
+        above and make user-level servers unusable."""
+        import main
+        from mcp_client import config as mcp_config
+
+        cli_stdin("y")
+        monkeypatch.setattr(mcp_config, "remember_server", lambda c: None)
+        assert set(self._pending(monkeypatch, interactive=True)) == {"srv"}
+
+    def test_a_terminal_can_decline_it(self, monkeypatch, cli_stdin):
+        import main
+
+        cli_stdin("n")
+        assert self._pending(monkeypatch, interactive=True) == {}
+
+
+class TestResumingAThreadReplaysItAtTheCallSite:
+    """#102: deleting `_print_replay(current_thread_id)` from run_chat
+    left all 1406 green, because the test named for the behaviour called
+    the RENDERER directly and --thread was never exercised.
+
+    tests/BREAKING_CHANGES.md already records this lesson, from §21b:
+    "a helper existing proves nothing if nobody calls it". Same
+    repository, one section later, in the file the rule is about.
+    """
+
+    def test_run_chat_replays_a_resumed_thread(self, mocker, capsys,
+                                               fake_storage, cli_stdin):
+        import main
+
+        mocker.patch.object(main, "replay_entries",
+                            return_value=[("user", "earlier question"),
+                                          ("assistant", "earlier answer")])
+        cli_stdin()                      # EOF immediately: no turn needed
+        main.run_chat(uuid4(), "ANTHROPIC", "m")
+
+        out = capsys.readouterr().out
+        assert "earlier question" in out
+        assert "end of 2 replayed entries" in out
+
+    def test_a_new_thread_replays_nothing(self, mocker, capsys,
+                                          fake_storage, cli_stdin):
+        """The control: calling it unconditionally would print
+        "(this thread has no messages yet)" at the top of every fresh
+        session."""
+        import main
+
+        replay = mocker.patch.object(main, "replay_entries", return_value=[])
+        cli_stdin()
+        main.run_chat(None, "ANTHROPIC", "m")
+        assert not replay.called
+
+
+class TestRunResearchRefusesAnIncompleteStream:
+    """#102: dropping the `if run is None` guard left the suite green.
+    Its comment names the contract it matches -- run_pipeline_to_completion
+    raises RuntimeError on the same condition -- and says carrying on
+    "would fail later on a None run instead"."""
+
+    def test_a_stream_with_no_run_complete_is_an_error(self, mocker, capsys):
+        import main
+
+        mocker.patch(
+            "core.reasoning.orchestrator.stream_deep_research_pipeline",
+            return_value=iter([]))
+
+        with pytest.raises(SystemExit) as exit_info:
+            main.run_research("q", "ANTHROPIC", "m")
+
+        assert exit_info.value.code == 1
+        assert "without yielding a run_complete" in capsys.readouterr().out
+
+
+class TestCtrlDAtAStartupPrompt:
+    """#102: `_ask` catching KeyboardInterrupt instead of EOFError left
+    the suite green. Its docstring names the bug it fixed -- "Ctrl+D at a
+    startup prompt raised EOFError out of a bare input(), giving a
+    traceback where the default-No path was wanted"."""
+
+    def test_eof_is_an_empty_answer(self, cli_stdin):
+        import main
+
+        cli_stdin()                      # nothing typed: straight to EOF
+        assert main._ask("Connect to it? [y/N]: ") == ""
+
+    def test_a_typed_line_still_comes_back(self, cli_stdin):
+        """The control: returning "" unconditionally would pass the test
+        above and make every startup prompt unanswerable."""
+        import main
+
+        cli_stdin("y")
+        assert main._ask("Connect to it? [y/N]: ") == "y"
