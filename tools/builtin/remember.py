@@ -20,7 +20,8 @@ Two consequences §21 names rather than leaves to be discovered:
     exactly where an injected "remember this" would be most dangerous and
     least noticed. §21b's CLI provider (M16) is what makes the tool
     reachable in the default shell, and nothing makes it reachable in the
-    pipeline -- see PIPELINE_UNGRANTABLE (M17).
+    pipeline -- its ToolSpec declares grant_policy=GRANT_NEVER (M17,
+    carried by R13), which also keeps it out of §18's subagent sign-off.
   * If the prompt turns out to fire too often, the answer is to make the
     write VISIBLE AND UNDOABLE, not to drop the gate. An approval prompt
     dismissed reflexively launders consent. `/forget` and `/memories` ship

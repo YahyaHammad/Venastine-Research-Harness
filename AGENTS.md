@@ -40,7 +40,7 @@ python main.py --init --research-project           # §24: skip the type questio
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 1667 tests, offline, ~25-45s by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 1684 tests, offline, ~25-45s by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -60,7 +60,7 @@ MCP servers are a *third* config file again — `mcp.json`, user-level or `.vena
 Read these before changing anything non-trivial — they carry design decisions that are locked, not defaults to re-derive.
 
 - **ARCHITECTURE.md** — what's built, file-by-file contracts ("what belongs here / what does NOT"), known gotchas (§11).
-- **ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **ROADMAP_v2.md** (§13–§27, all built) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R12 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I13 from §24 and J1–J14 from §23). Section and D-numbers are stable and cross-referenced everywhere.
+- **ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **ROADMAP_v2.md** (§13–§27, all built) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R14 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I13 from §24 and J1–J14 from §23). Section and D-numbers are stable and cross-referenced everywhere.
 - **DEVLOG.md** — per-section implementation notes: what was followed verbatim, what was deviated from (every deviation was an explicit user decision — do not silently override).
 - **tests/BREAKING_CHANGES.md** — what breaks each test when production code changes, the symptom, and the fix.
 - **CLAUDE.md / QWEN.md** — pointers to this file, nothing more. They exist so a harness that looks for one filename finds it without searching; the content has one copy.
@@ -225,7 +225,9 @@ Invariants that look like simplification opportunities but are not:
 The pipeline could not call any approval-gated tool in any shell — `run_deep_research_mode` had no way to receive a `permission_channel`, so every pass ran headless. Authorization is now **two independent axes**, not a mode: a grant set (possibly empty) and an `ApprovalProvider` (possibly absent). Both absent is the default and changes nothing.
 
 - **A grant covers only tools with no `approval_check`** (R2, `registry.grantable`). A per-call gate was never consented to by name. This *narrowed* §18's shipped sign-off at the shared mechanism — a signed-off subagent calling `shell` now prompts its parent.
-- **`spawn_subagent` is excluded from pipeline grants** (R4, `PIPELINE_UNGRANTABLE`): approving a spawn *is* the §18 sign-off, so pre-granting it unattended compounds one yes into unbounded delegated authority.
+- **`spawn_subagent` is excluded from *every* grant path** (R4, `grant_policy=GRANT_NEVER`): approving a spawn *is* the §18 sign-off, so pre-granting it compounds one yes into unbounded delegated authority. "Every" is R13's correction — the exclusion used to live in a frozenset in the pipeline's module, so the sign-off R4's argument is *about* went on offering it (#67).
+- **Grant policy is declared on the tool, and both callers read it** (R13). `GRANT_ANYWHERE` / `GRANT_SIGNOFF_ONLY` / `GRANT_NEVER`, required on every static registration and enforced at import by `assert_grant_policy_declared`. The pipeline accepts only `ANYWHERE`; the sign-off accepts anything but `NEVER`, so it is strictly looser and `write_project_doc` sits in the gap. A denylist defaulted an unknown tool to *grantable*, which is how `write_project_doc` became the entire `--grant` menu (#133).
+- **`candidates()` is empty on a default install, by design.** Every built-in is ungated, param-dependent, or excluded by policy; the population both grant paths serve is MCP tools, which are allowed-but-gated by default and carry no `approval_check`. R1's "the description is the whole of informed consent" was written about exactly them.
 - **`GrantBudget` exhaustion degrades to *asking*, not to failing.** One instance shared by reference across all ten passes; rebuilding per pass would multiply the ceiling by ten while reading as if it enforced one.
 - **`ApprovalProvider` exists because `run_to_completion()` discards the `permission_request` event.** A bare queue would block with nothing displayed. §23 should absorb it into the general response channel, not add a third mechanism.
 - **The grant list is never persistable; the mode is** (R12). A persisted mode can only add prompts; a persisted grant list could only remove them, and `settings.json` is the one config file where project tier beats user tier. `research.granted_tools` is rejected *by name* so nobody "fixes" the omission.
@@ -356,9 +358,14 @@ parsed since §14 with no consumer at all — this is its first.
 - **Injection is capped and says so** (M14). `MAX_INJECTED_MEMORIES`, newest first,
   with "showing the 50 most recent of 73" in the fragment the model reads — not only
   in a log, which reaches nobody mid-conversation.
-- **`remember` is in `PIPELINE_UNGRANTABLE`** (M17). It has no `approval_check`, so
-  §25's R2 would make it grantable and one `--grant remember` would let ten unattended
-  passes write durable memories — exactly what D26's consequence 1 forbids.
+- **`remember` declares `grant_policy=GRANT_NEVER`** (M17, carried by R13). It has no
+  `approval_check`, so §25's R2 would make it grantable and one `--grant remember` would
+  let ten unattended passes write durable memories — exactly what D26's consequence 1
+  forbids. It used to sit in a `PIPELINE_UNGRANTABLE` frozenset, which is where #67 found
+  the gap: D26's consequence 1 is about what a *subagent* can do and not only a pass, and
+  a set scoped to the pipeline's module never reached the §18 sign-off. `NEVER`, not
+  `SIGNOFF_ONLY` — a durable cross-session write is precisely the authority that outlives
+  the turn somebody was watching.
 - **Removal is by id, never by substring** (M15). A substring matching two memories
   would have to pick one, and picking silently deletes what the user did not name.
 - **CLI chat now has an `ApprovalProvider`** (M16), so `spawn_subagent` and every MCP

@@ -547,11 +547,14 @@ class ToolApprovals:
     # and any research run that is neither attended nor granting. The
     # once-per-run notice names it.
     #
-    # §25 R4 keeps it out of PIPELINE_UNGRANTABLE's reach deliberately: it
-    # can never be PRE-granted for a research run, because approving a
-    # spawn hands the child a whole gated set and one launch-time tick
-    # would compound into unbounded delegated authority across ten
-    # unattended passes. An ATTENDED run can still approve a spawn live,
+    # §25 R4 declares it GRANT_NEVER (R13, on the ToolSpec): it can never
+    # be PRE-granted, in a research run OR at §18's sign-off, because
+    # approving a spawn hands the child a whole gated set and one
+    # launch-time tick would compound into unbounded delegated authority
+    # across ten unattended passes. #67 is why "or at the sign-off" is in
+    # that sentence: R4's argument is ABOUT the sign-off, and the
+    # exclusion had never reached it. An ATTENDED run can still approve a
+    # spawn live,
     # which is a per-call human decision and exactly what the gate is for.
     # The child then runs headless with nothing granted, since
     # spawn_subagent forwards a grant only alongside a permission_channel.
@@ -573,8 +576,8 @@ class ToolApprovals:
     #
     # Consequence: unreachable on any headless path, which includes every
     # research pass. That is deliberate (§21's consequence 1) and is
-    # reinforced by PIPELINE_UNGRANTABLE, because a grant would otherwise
-    # route around it.
+    # reinforced by the tool's GRANT_NEVER policy (M17, carried by R13),
+    # because a grant would otherwise route around it.
     remember: bool = True
     # §24 (I2): no approval. Reading the project's own documentation, at the
     # user's explicit request, on the files the manifest already listed to
