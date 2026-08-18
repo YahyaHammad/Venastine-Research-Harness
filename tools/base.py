@@ -1,5 +1,20 @@
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Callable, Iterable, Optional
+
+
+# ROADMAP_v2 §25 (R13). How far approving a tool BY NAME goes -- the
+# question asked before any call exists, by the §18 subagent sign-off and
+# by the §25 pipeline grant.
+#
+# Three values rather than two booleans. Booleans can express "an
+# unattended pipeline run may pre-grant this, but a human answering in the
+# moment may not", which is incoherent -- the pipeline is strictly
+# stricter than the sign-off, so the answers form an order.
+GRANT_ANYWHERE = "anywhere"
+GRANT_SIGNOFF_ONLY = "signoff_only"
+GRANT_NEVER = "never"
+
+GRANT_POLICIES = frozenset({GRANT_ANYWHERE, GRANT_SIGNOFF_ONLY, GRANT_NEVER})
 
 
 @dataclass
@@ -59,3 +74,67 @@ class ToolSpec:
     # able to run without asking again. Keeps that knowledge in the tool
     # instead of teaching the TUI about agents.
     approval_notice: Optional[Callable[[dict, object], str]] = None
+    # ROADMAP_v2 §25 (R13). One of GRANT_ANYWHERE / GRANT_SIGNOFF_ONLY /
+    # GRANT_NEVER, above.
+    #
+    # DISTINCT from registry.grantable(), which is mechanical: does this
+    # tool decide approval from its PARAMS, in which case a name-level
+    # answer was never about the call that happens. This field is policy:
+    # given that consent by name is meaningful, is ONE TICK BEFORE ANY
+    # CALL EXISTS an acceptable answer, and does that depend on whether a
+    # human is present? Both callers check both.
+    #
+    # None means UNDECLARED, not a default. Omission has to be a
+    # detectable mistake rather than an inherited answer -- this field
+    # exists because the previous shape was a denylist in ONE consumer's
+    # module, so a tool registered after it was written was offered for a
+    # grant without anybody being asked. That is what happened to
+    # write_project_doc between §24 and #133.
+    #
+    # assert_grant_policy_declared() below makes omission fatal at import,
+    # the same trade D24 made for permissions.
+    grant_policy: Optional[str] = None
+
+
+def assert_grant_policy_declared(tools: Iterable[str], specs=None) -> None:
+    """R13: every statically registered tool must declare a grant policy,
+    and it must be one of the three defined values.
+
+    Raises rather than warning, for D24's reason: the failure this guards
+    against is invisible at runtime. A tool with no declaration resolves
+    to GRANT_NEVER (registry.grant_policy), so forgetting the field would
+    silently drop a tool out of both grant paths with nothing logged --
+    and a MISSPELLED value would do the same while looking answered,
+    which is worse. Both are caught here instead.
+
+    The precedent is `fetch_url` under D24: registered, documented as
+    working, and denied on every call for its entire life because nobody
+    added a field. The equivalent mistake here is quieter still, because
+    a tool that is never offered for a grant simply prompts per call --
+    correct-looking behaviour that hides an unanswered policy question.
+
+    Dynamically-named `mcp__*` tools are exempt by design; they are named
+    at connection time and can never carry a static declaration.
+    `mcp_client/registration.py` passes one explicitly anyway, so the
+    fallback is documentation rather than the live path.
+    """
+    specs = specs if specs is not None else tools
+    undeclared, invalid = [], []
+    for name in tools:
+        if name.startswith("mcp__"):
+            continue
+        spec = specs.get(name) if hasattr(specs, "get") else None
+        policy = getattr(spec, "grant_policy", None)
+        if policy is None:
+            undeclared.append(name)
+        elif policy not in GRANT_POLICIES:
+            invalid.append(f"{name}={policy!r}")
+    if undeclared or invalid:
+        raise RuntimeError(
+            "Tools are registered without a usable grant policy, so the "
+            "question of whether one tick before any call exists may "
+            "authorise them was never answered: "
+            f"undeclared={sorted(undeclared)} invalid={sorted(invalid)}. "
+            f"Set ToolSpec.grant_policy to one of {sorted(GRANT_POLICIES)} "
+            "(ROADMAP_v2 §25, R13)."
+        )

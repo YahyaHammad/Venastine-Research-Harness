@@ -518,7 +518,7 @@ def test_candidate_approvals_is_the_list_the_prompt_shows(_roots, _mcp_tool):
 
 
 def test_candidate_approvals_omits_tools_the_grant_cannot_cover(
-        _roots, monkeypatch):
+        _roots, _mcp_tool, monkeypatch):
     """§25 R2 narrows S1: a tool deciding approval from its PARAMS was
     never grantable by name, and the loop now enforces that. Listing it in
     the sign-off notice anyway would promise authority the grant does not
@@ -531,7 +531,14 @@ def test_candidate_approvals_omits_tools_the_grant_cannot_cover(
     permission is False -- so this models the only configuration in which
     the defect was reachable, which is also the one a user who wants shell
     would create. Patched via a factory, not setattr on the dataclass:
-    ToolPermissions() reads __init__ defaults bound at class creation."""
+    ToolPermissions() reads __init__ defaults bound at class creation.
+
+    `_mcp_tool` was added by #67's batch and is load-bearing: patching the
+    two config classes down to a single `shell` field leaves every other
+    built-in ungated, so candidate_approvals() was EMPTY here and the
+    exclusion below was true of every string ever written. That predates
+    R13 -- it is the same vacuity class, found by sweeping for it. The
+    positive assertion is what makes the negative one mean something."""
     monkeypatch.setattr(config, "ToolPermissions",
                         lambda: type("P", (), {"shell": True})())
     monkeypatch.setattr(config, "ToolApprovals",
@@ -544,7 +551,9 @@ def test_candidate_approvals_omits_tools_the_grant_cannot_cover(
 
     # It IS approval-gated and would be hidden headless...
     assert "shell" in registry.headless_hidden(child)
-    # ...but it is not something a name-level yes can cover.
+    # ...something else IS offered, so the next line is a subtraction...
+    assert "mcp__probe__tool" in manager.candidate_approvals(child)
+    # ...but shell is not something a name-level yes can cover.
     assert "shell" not in manager.candidate_approvals(child)
 
 

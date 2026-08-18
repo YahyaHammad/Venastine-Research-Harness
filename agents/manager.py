@@ -118,12 +118,30 @@ class AgentManager:
         is worse than not offering it. What the user reads and what the
         child receives have to be the same list; that is the whole
         substance of a sign-off, and this helper exists to keep them one.
+
+        §25 (R13) adds the second filter, and #67 is why it is here rather
+        than only in core/reasoning/authorization.py. Both functions
+        answer "what may be pre-granted", both were built from
+        headless_hidden + grantable, and only the pipeline's one then
+        subtracted an exclusion list -- which lived in the pipeline's
+        module where this one could not see it. So this list offered
+        `spawn_subagent` and `remember`, the two tools R4 and M17 exist to
+        keep out of a grant, and R4's argument is ABOUT this sign-off.
+        Now both read one per-tool declaration.
+
+        The LOOSE half of the pair: GRANT_SIGNOFF_ONLY passes here and is
+        refused by the pipeline. A human answering in the moment, about
+        one named agent, for one turn, is the consent write_project_doc's
+        notice was written for; ten unattended passes on one launch-time
+        tick is not.
         """
+        from tools.base import GRANT_NEVER
         from tools.registry import registry
 
         return sorted(
             name for name in registry.headless_hidden(child_context)
             if registry.grantable(name)
+            and registry.grant_policy(name) != GRANT_NEVER
         )
 
     @staticmethod

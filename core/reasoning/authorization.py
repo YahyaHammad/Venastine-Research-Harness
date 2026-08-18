@@ -22,32 +22,21 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-# Tools never offered for a pipeline grant, whatever the registry says
-# about their grantability (§25 R4).
+# What both shells say when nothing in this run can be granted (#106).
 #
-# spawn_subagent is grantable in the ordinary sense -- it has no
-# approval_check, so approving the NAME is meaningful consent. It is
-# excluded here because of what that consent then authorises: approving a
-# spawn IS the §18 subagent sign-off, handing the child its whole gated
-# set. Pre-granting it unattended compounds one launch-time yes into
-# unbounded delegated authority across ten passes, with the depth limit as
-# the only remaining bound.
+# One string, two callers, for the same reason the module exists: they
+# drifted, and the TUI's version was FALSE where it fired. It said "no
+# approval-gated tool is AVAILABLE to this run" when two were -- they
+# simply could not be pre-granted, which is a different sentence and the
+# only one either shell is in a position to make.
 #
-# Nothing is lost by excluding it: research passes have never been able to
-# delegate. The TUI chat path, where a human is watching and answers per
-# turn, is unaffected.
-PIPELINE_UNGRANTABLE = frozenset({
-    "spawn_subagent",
-    # ROADMAP_v2 §21b (M17). `remember` has no approval_check, so it is
-    # grantable by R2's rule and would appear in the picker -- and one
-    # --grant remember at launch would let ten unattended passes,
-    # reading attacker-controlled web pages, write durable
-    # cross-session memories. §21's D26 consequence 1 says research
-    # passes must not be able to do that, and R4's reasoning about one
-    # launch-time tick compounding into unbounded authority applies
-    # word for word.
-    "remember",
-})
+# This module already kept the two from offering different SETS. What it
+# had never been given is what they say about an empty one.
+NOTHING_TO_GRANT = (
+    "No approval-gated tool in this run can be granted up front, so there "
+    "is nothing to authorise. Gated tools are still asked about per call "
+    "wherever something can answer."
+)
 
 
 # "The flag was given with no value -- ask me which." A distinct object
@@ -67,7 +56,23 @@ def candidates(context=None) -> list[tuple[str, str]]:
         for a tool that never needed one.
       * registry.grantable -- a param-dependent gate was never consented
         to by name (R2).
-      * not PIPELINE_UNGRANTABLE -- this file's own policy (R4).
+      * grant_policy is GRANT_ANYWHERE (R13). This is the STRICT half of
+        the pair: a GRANT_SIGNOFF_ONLY tool may be pre-granted by a human
+        answering about one named agent for one turn, and may not be
+        pre-granted to ten unattended passes on one launch-time tick.
+
+    That third filter used to be a frozenset in this module, which is
+    exactly how #67 and #133 happened: agents/manager.py could not see it,
+    so the §18 sign-off and this function held different ideas of what a
+    grant covers, and a tool registered after the set was written
+    (write_project_doc, §24) joined the picker without anyone being asked.
+    The answer now lives on the tool and both callers read it.
+
+    On a default install this returns an EMPTY list, and that is correct
+    rather than a regression: every built-in is either ungated, param-
+    dependent, or excluded by policy. The population this exists for is
+    MCP tools -- allowed but approval-gated by default (§17 decision D),
+    no approval_check, and named at connection time.
 
     Descriptions come from the tool's own schema because they are the only
     signal available: MCP exposes no read-only/write metadata, so nothing
@@ -76,11 +81,13 @@ def candidates(context=None) -> list[tuple[str, str]]:
     informed consent here, which is also why the grant is per-tool (R1)
     rather than one yes covering the set.
     """
+    from tools.base import GRANT_ANYWHERE
     from tools.registry import registry
 
     out = []
     for name in sorted(registry.headless_hidden(context)):
-        if not registry.grantable(name) or name in PIPELINE_UNGRANTABLE:
+        if (not registry.grantable(name)
+                or registry.grant_policy(name) != GRANT_ANYWHERE):
             continue
         spec = registry._tools.get(name)
         description = ""

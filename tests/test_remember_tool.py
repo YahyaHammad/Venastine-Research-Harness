@@ -22,6 +22,26 @@ from tools.builtin import remember
 from tools.registry import registry
 
 
+@pytest.fixture
+def _something_is_offered():
+    """One tool that IS offered by both grant paths, so an exclusion test
+    is proved by subtraction rather than by an empty set (R13).
+
+    mcp__-prefixed because that is the population both paths actually
+    serve after R13: allowed but approval-gated by default (§17 decision
+    D), no approval_check, named at connection time."""
+    from tools.base import GRANT_ANYWHERE, ToolSpec
+
+    registry.register(ToolSpec(
+        "mcp__probe__offered",
+        {"name": "mcp__probe__offered", "description": "An offered tool."},
+        lambda p: {"result": "ok"}, grant_policy=GRANT_ANYWHERE))
+    try:
+        yield
+    finally:
+        registry.unregister("mcp__probe__offered")
+
+
 class _Memory:
     def __init__(self):
         from uuid import uuid4
@@ -55,14 +75,48 @@ def test_remember_requires_approval_and_pin_does_not():
     assert registry.approval_needed("pin", {}, None) is False
 
 
-def test_remember_cannot_be_granted_to_a_research_run():
+def test_remember_cannot_be_granted_to_a_research_run(_something_is_offered):
     """M17. `remember` has no approval_check, so R2's rule makes it
     grantable and it would appear in the picker -- one --grant remember at
     launch would let ten unattended passes, reading attacker-controlled web
     pages, write durable cross-session memories. §21's D26 consequence 1
-    says passes must not be able to do that."""
-    assert "remember" in authorization.PIPELINE_UNGRANTABLE
-    assert "remember" not in [name for name, _ in authorization.candidates()]
+    says passes must not be able to do that.
+
+    The fixture is the point, not scaffolding. R13 emptied candidates() on
+    a default install, and the second assertion below USED to read
+
+        assert "remember" not in [n for n, _ in authorization.candidates()]
+
+    with nothing registered -- which after that change is "remember not in
+    []", true of every string ever written and evidence of nothing. The
+    fixture puts a genuinely offered tool in the set so the exclusion is
+    proved by subtraction rather than by emptiness."""
+    from tools.base import GRANT_NEVER
+
+    offered = [name for name, _ in authorization.candidates()]
+
+    assert offered, "an empty picker makes the exclusion below vacuous"
+    assert registry.grant_policy("remember") == GRANT_NEVER
+    assert "remember" not in offered
+
+
+def test_remember_is_not_offered_to_a_subagent_signoff_either(
+        _something_is_offered):
+    """#67 + R13. M17's argument was never pipeline-specific, but the list
+    that carried it lived in the pipeline's module, so the §18 sign-off
+    offered `remember` to every spawned agent.
+
+    D26 consequence 1 is about what a SUBAGENT can do, not only a pass,
+    and a sign-off hands the child its set for the rest of the turn -- so
+    a durable cross-session write is exactly the authority that outlives
+    the turn somebody was watching. GRANT_NEVER, not GRANT_SIGNOFF_ONLY."""
+    from agents.manager import AgentManager
+    from tools.context import ToolContext
+
+    offered = AgentManager.candidate_approvals(ToolContext())
+
+    assert offered, "an empty sign-off list makes the exclusion vacuous"
+    assert "remember" not in offered
 
 
 def test_remember_is_hidden_where_nothing_can_approve_it():
