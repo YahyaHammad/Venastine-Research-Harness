@@ -1729,3 +1729,86 @@ first.
 decisions they record still hold — the arguments moved to the registrations, unchanged, and
 the rows in this section replace them. Kept rather than edited, per this file's convention:
 what a past batch measured is not rewritten by a later one.
+
+
+## §23 — the seventh fix batch: a grant the model can actually see (2026-08-18)
+
+Three issues, one mechanism: **what `schemas(callable_only=…)` advertises to a run that
+cannot ask.** #156 is the substantive one and it is §25's own founding defect, still
+standing on the path §25 was written for.
+
+| Change | Issue | Files |
+|---|---|---|
+| The advertisement filter reads the grant (`_answered_by_grant`) | #156 | `tools/registry.py` |
+| `run_info` moves above the schemas call; the grant is passed | #156 | `core/loop.py` |
+| A headless denial says whether the ARGUMENTS caused it | #158 | `core/loop.py` |
+| "A headless run cannot spawn at all" is tested, not emergent | #159 | `tests/test_agents.py` |
+
+Suite 1684 -> **1698**.
+
+### The measurement, before and after
+
+Through the real `run_deep_research_mode`, capturing the `tools` argument that reaches
+`call_model_stream` -- not a dispatch outcome, for the reason in the vacuity note below:
+
+```
+                            BEFORE                 AFTER
+--grant-tools X             False  (13 tools)      True   (14 tools)
+--grant-tools X --attended  True   (17 tools)      True   (17 tools)
+no flags                    False  (13 tools)      False  (13 tools)
+```
+
+A grant-only run sent the model **byte-identical tools to an unflagged run**, while the CLI
+printed `[grant] authorised for this run only: mcp__demo__post`. Enforcement was correct
+throughout; the model was never told the tool existed.
+
+### What breaks these
+
+| If production code changes like this... | ...this fails | Why it matters |
+|---|---|---|
+| `granted=` dropped at the `schemas()` call site | `test_a_granted_tool_is_advertised_with_no_channel` | This IS #156: `--grant-tools` silently does nothing on its own while reporting success |
+| `grantable()` re-check deleted from `_answered_by_grant` | `test_a_grant_naming_a_param_dependent_tool_advertises_nothing` | R2 at the filter -- a stale grant naming `shell` would advertise it |
+| `grant_policy != GRANT_NEVER` deleted from `_answered_by_grant` | `test_a_grant_cannot_smuggle_spawn_subagent_into_a_headless_run` | `spawn_subagent` has no `approval_check`, so `grantable()` alone lets it through -- and R14 then refuses a tool the model was shown, recreating advertised-and-uncallable one line down |
+| `headless_hidden` ignores `granted` | `test_a_granted_tool_is_not_reported_as_hidden` | The WARNING names a tool the model can actually call -- the invisibility problem it exists to prevent, wearing the opposite sign |
+| The budget made to retract advertisement | `test_the_budget_does_not_change_what_is_advertised` | R6's fallback is a *call-time* answer; hiding the tool mid-run means the fallback never runs and the model reads it as the tool ceasing to exist |
+| `run_info` moved back below `schemas()` | `NameError` across every test that drives `_run` | Build order is load-bearing now, and loudly so |
+| Denial always blames the name | `test_a_denial_caused_by_the_arguments_says_so` | The model is told to stop when varying one argument would work |
+| Denial always blames the arguments | `test_a_denial_caused_by_the_NAME_tells_the_model_to_stop` | The model retries a tool that is uncallable however it is called, spending the rest of `max_steps` |
+| `response_channel is not None` branch removed | `test_a_human_saying_no_is_not_reframed_as_a_limitation` | A person's "no" gets reported as "this run has no way to ask" -- a decision misattributed to the configuration |
+| `ToolApprovals.spawn_subagent = False` | `test_a_headless_run_is_never_offered_spawn_subagent` | r3-1 recreated through config: a headless pass spawns a child that silently loses every gated tool |
+
+Ten mutations run, nine RED on a test named for each, plus a deliberate GREEN control. The
+config mutation was re-checked in isolation because `-x` had it killed by an unrelated test
+first: run alone, `test_a_headless_run_is_never_offered_spawn_subagent` fails and its control
+`test_a_run_that_can_ask_IS_offered_spawn_subagent` passes, so the mutation is discriminated
+rather than merely fatal.
+
+### A test that supplies the model's move cannot detect that the move was unavailable
+
+New vacuity class, and the reason a suite with **23 green grant tests** was evidence of
+nothing here. Every loop-level grant test passes a channel *and* builds the model's response
+itself:
+
+```python
+uses = make_model_response(text="", tool_calls=[
+    {"id": f"c{i}", "name": tool_name, "input": {"n": i}} ...
+```
+
+The tool call is injected *downstream of the filter that would have hidden it*. Those tests
+can observe what the loop does with a chosen tool; they cannot observe whether the tool was
+choosable. Where a test stands in for the model, it has authority over the model's options,
+and any assertion about what the model *could* do is then circular.
+
+This is the third distinct way this project has found a green suite to mean nothing, after
+"a test that PATCHES the wiring cannot see the wiring break" (§23's sign-off memo) and "a fix
+that shrinks a set turns every negative about it into a tautology" (batch 6). The remedy is
+the same each time and it is not more tests: assert one layer further out than the defect can
+reach. Here that is the `tools` argument on the wire.
+
+### Note on §21's row for the headless denial string
+
+Any earlier row asserting the exact text `"requires approval and was not given"` still holds
+**only where a channel exists**. Headless, that string now differs by whether the tool was
+gated by name or by its arguments. The change is deliberate and the old wording was the
+defect: it told the model to retry with approval in the one situation where approval cannot
+be obtained.

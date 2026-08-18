@@ -1289,7 +1289,7 @@ able to use tools that require approval in general, how can we design that
 such that it doesn't completely compromise the security stance we've been
 holding?"*
 
-## What was decided (R1–R14)
+## What was decided (R1–R16)
 
 The full table lives in ROADMAP_v2 §25. The load-bearing shape: authorization
 is **two independent axes**, a grant set and an `ApprovalProvider`, not a
@@ -4047,3 +4047,118 @@ exactly how this shipped — both sets had tests, and both were green.
 - **#68 + #69**, **#37/#38/#39**, **#75 + #78**, **#16/#17/#147** — the
   groups batch 5 recorded, still deliberately un-split.
 - **#57, #76, #100** — the three remaining S1s, each blocked on a decision.
+
+
+## Audit Pass 1 — fix batch 7, a grant the model can see (2026-08-18)
+
+Three issues, one mechanism. Per-change tables in `tests/BREAKING_CHANGES.md`
+§23; what belongs here is how this was found, why the biggest finding had
+been invisible for three sections, and the two decisions it added.
+
+### It came out of a question, not the tracker
+
+The user asked whether the design around batch 6 was coherent: is a grant
+only ever for tools gated by *name* rather than per call, and can a headless
+subagent therefore never run something like `shell`? Two of those held. The
+third **inverted** — the channel *is* inherited by a spawned child
+(`subagent_tool.py:162`, r3-1's fix), so an approval prompt does surface from
+a subagent. The real property is stricter and was nowhere written down: a
+headless run cannot spawn *at all*.
+
+Checking the claims is what found #156, which is larger than the question:
+
+```
+                            BEFORE                 AFTER
+--grant-tools X             False  (13 tools)      True   (14 tools)
+--grant-tools X --attended  True   (17 tools)      True   (17 tools)
+no flags                    False  (13 tools)      False  (13 tools)
+```
+
+`--grant-tools` without `--attended` sent the model **byte-identical tools to
+an unflagged run** while the CLI printed `[grant] authorised for this run
+only`. Not a silent no-op: a security feature reporting that it had
+authorised something it had not.
+
+### It is §25's own founding defect, unfixed on §25's own path
+
+The section's problem statement names the mechanism exactly:
+
+> `run_deep_research_mode` had no `permission_channel` parameter, so `_run()`
+> always saw `None`, set `headless = True`, and `schemas(callable_only=True)`
+> dropped every gated tool.
+
+§25's fix supplied a provider through `--attended`, which clears `headless`.
+The **grant-only** path never did. So for the unattended ten-pass run — "one
+launch-time tick", the case the section argues about throughout — nothing had
+changed, and **AC2 was ticked and false there**. It held only in the mode
+§25 was not written for.
+
+The generalisable half is R15: `headless` asks *"can anything ask?"*, and
+since §25 the question is *"can anything answer for this tool?"* — because a
+pre-flight grant **is** an answer, given before the call existed. Two
+sentences that read alike, one defect wide.
+
+### The near-miss in the fix
+
+`grantable()` alone would have been wrong. `spawn_subagent` has no
+`approval_check`, so it *is* grantable by R2's mechanical rule; a stale grant
+naming it would then have been advertised, and R14 would have refused it at
+the approval step — advertised-and-uncallable, the exact damage class the
+batch exists to remove, recreated one line down. The filter reads R13's
+declared `grant_policy` as well. Batch 6 moved that declaration onto the tool
+so both grant paths could read it; this is the third caller, and it wanted the
+same answer.
+
+### Why a suite with 23 green grant tests proved nothing
+
+Every loop-level grant test passes a channel **and builds the model's
+response itself**, injecting the tool call downstream of the filter that
+would have hidden it. **A test that supplies the model's move cannot detect
+that the move was unavailable.** Those tests can observe what the loop does
+with a chosen tool; they cannot observe whether it was choosable.
+
+Third distinct instance of a green suite meaning nothing here, after §23's
+*"a test that PATCHES the wiring cannot see the wiring break"* and batch 6's
+*"a fix that shrinks a set turns every negative into a tautology"*. The
+remedy is the same each time and it is **not more tests**: assert one layer
+further out than the defect can reach. Here that is the `tools` argument on
+the wire.
+
+### The two smaller ones
+
+**#158** — the filter probes with empty params, which for a params-dependent
+tool is a call the model will never make, and it errs permissive. `write` is
+advertised headless (correctly — an in-workspace write *is* callable) and
+then denied for out-of-workspace paths with *"requires approval and was not
+given"*, telling the model to retry with approval, the one thing that cannot
+happen. The loop had already learned this at the reachability check one
+branch over; this is that reasoning on the axis it did not cover.
+
+**#159** — the invariant, now stated and tested with its control. One config
+flag (`ToolApprovals.spawn_subagent=False`) removed it with the suite green,
+and the one test in the area calls `subagent_tool.run` directly, pinning *"if
+it happens it is safe"* while nothing pinned *"it does not happen"*.
+
+### Deliberately not in this batch
+
+- **#157** — `shell` auto-approval is unbounded, and the safest-looking tier
+  is the hole: `run_sandboxed` checks `_is_inert` *before* Docker, so inert
+  commands run on the **host**, and `_is_inert` inspects only the first word
+  (`cat /root/.ssh/id_rsa` classifies inert and auto-approves). Separately
+  `_shell_approval_check` never calls `_needs_network`, so egress is decided
+  after the decision about whether to ask. Batch 8, designed with the user:
+  classify to a **capability set** rather than a linear tier list (`rm -rf
+  /workspace` and `curl https://x` are different harms, not more-or-less of
+  one), one classification read by both the approval check and the executor,
+  `SHELL_APPROVAL_MODE = always | tiered | never` shipping `tiered`, and
+  `.venastine/` mounted read-only — which lands on the boundary D17's trust
+  hash already defines rather than needing a curated path list.
+- **Model-based command judgement** — batch 9, opt-in. The ordering is what
+  makes it sound and is recorded as load-bearing: the deterministic
+  classifier runs first and anything compound resolves to UNKNOWN, so the
+  model never sees compound shell. It also needs a ceiling, because it would
+  be the **first layer in this harness that widens rather than tightens**,
+  and D14's ratchet has held everywhere else.
+- **#131**, **#70**, **#68 + #69**, **#37/#38/#39**, **#75 + #78**,
+  **#16/#17/#147**, **#57/#76/#100** — the groups batches 5 and 6 recorded,
+  still deliberately un-split.

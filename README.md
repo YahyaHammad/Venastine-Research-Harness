@@ -203,7 +203,8 @@ The limits are the interesting part:
 - **Every tool declares how far approving its *name* goes**, and both places that can pre-grant — an unattended run, and the sign-off when the model spawns a subagent — read the same declaration. They used to keep separate lists, which is how the sign-off ended up offering the two tools below.
 - **`spawn_subagent` and `remember` can never be pre-granted, anywhere.** Approving a spawn *is* the sign-off for the child's entire tool set, so pre-granting it would compound one yes into unbounded delegated authority. A memory outlives the run. An *attended* run can still approve either one live — a per-call human decision, which is what the gate is for.
 - **`write_project_doc` can be signed off for one turn, but never pre-granted to an unattended run.** It resolves a document *name* to a path and overwrites it with no diff and no second question, and one of the files it can write is the project context injected into later sessions. A human answering about one named agent for one turn is consent; one tick covering ten unattended passes that are reading fetched web pages is not.
-- **Running out of grant budget degrades to asking, not to failing.** One budget is shared across all ten passes.
+- **A grant makes the tool visible to the model, not just permitted.** These are two different things and the difference was a real bug: gated tools are normally withheld from a run that has no way to ask about them, and until recently the grant was not consulted when deciding that — so `--grant-tools` *on its own* authorised a tool and then sent the model the same list as an unflagged run, while printing that it had authorised something. It only worked alongside `--attended`, which is not the mode any of this is for. A stale grant still cannot widen anything: what may be pre-granted is re-checked against the tool's own declaration at the point the list is built.
+- **Running out of grant budget degrades to asking, not to failing.** One budget is shared across all ten passes, and it does not retract a tool mid-run — the ceiling changes *when* you get asked, never what the model can see.
 - **Grants are never persistable, and the setting is rejected by name** so nobody "fixes" the omission. A persisted *mode* can only ever add prompts; a persisted *grant list* could only ever remove them — and `settings.json` is the one config file where a project's values beat yours.
 
 ### MCP servers: allowed by default, trusted by default never
@@ -294,7 +295,7 @@ Precedence for provider and model is CLI flag > `settings.json` > `config.py`.
 
 **Remaining:** nothing in either roadmap, and §10's revisit is now closed. TECHNICAL_DEBT.md items 9 and 10 are open, and two live checks are recorded against §10 (see DEVLOG) that cannot be settled offline: the default `temperature` on OpenAI and Google, and whether OpenAI's reasoning models belong in `config.MODELS_REJECTING_SAMPLING_PARAMS`.
 
-Run the test suite with `pytest` — 1684 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
+Run the test suite with `pytest` — 1698 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
 
 ## Documentation
 
