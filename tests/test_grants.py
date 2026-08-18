@@ -306,3 +306,61 @@ class TestRunAuthorization:
 
     def test_run_info_defaults_to_no_budget(self):
         assert RunInfo(model="m", provider_name="p").grant_budget is None
+
+
+# ===========================================================================
+# ---- R14: a grant by name cannot answer a question about a subject --------
+# ===========================================================================
+
+class TestAGrantDoesNotAnswerForASubject:
+    """#67's second half. J8 rebuilt the memo around (tool, subject)
+    because approving a spawn of agent `a` had silently covered a later
+    spawn of `b`. The GRANT branch of the same function kept answering
+    both, because it never looked at the subject at all -- J8's pre-fix
+    behaviour, reached through the grant rather than the memo.
+
+    R13 makes spawn_subagent GRANT_NEVER, so nothing should reach these
+    paths in a shipped configuration. These pin the RULE rather than that
+    configuration: a hand-built or stale RunInfo, or any later tool that
+    carries a subject, gets the same answer."""
+
+    def test_a_named_grant_does_not_cover_a_subject_carrying_call(self):
+        """The measurement from #67, inverted into an assertion."""
+        info = RunInfo(model="m", provider_name="p",
+                       granted_tools={"spawn_subagent"})
+
+        for subject in ("agent-a", "agent-b", "anything-at-all"):
+            assert info.recall_signoff("spawn_subagent", subject) == (
+                False, None)
+
+    def test_a_named_grant_still_covers_a_call_with_no_subject(self):
+        """The other half, and why this is one condition rather than a
+        removal. Every tool but spawn_subagent memos under subject=None,
+        so a pipeline grant has to keep working exactly as it did -- a
+        change that fixed the first case by breaking this one would take
+        the whole §25 grant mechanism down with it."""
+        info = RunInfo(model="m", provider_name="p",
+                       granted_tools={"mcp__lib__search"})
+
+        assert info.recall_signoff("mcp__lib__search", None) == (True, None)
+
+    def test_the_KEYED_memo_still_answers_for_its_own_subject(self):
+        """J8 unchanged: the specific answer the user actually gave about
+        this subject wins, and says nothing about another one."""
+        info = RunInfo(model="m", provider_name="p")
+        info.remember_signoff("spawn_subagent", "agent-a", {"web_search"})
+
+        assert info.recall_signoff("spawn_subagent", "agent-a") == (
+            True, {"web_search"})
+        assert info.recall_signoff("spawn_subagent", "agent-b") == (False, None)
+
+    def test_the_memo_wins_over_a_grant_for_the_same_tool(self):
+        """A tool can appear in both, and the docstring's ordering claim
+        has to hold in the direction that matters: the subset the user
+        chose for THIS subject, not the blanket None a grant carries."""
+        info = RunInfo(model="m", provider_name="p",
+                       granted_tools={"spawn_subagent"})
+        info.remember_signoff("spawn_subagent", "agent-a", {"web_search"})
+
+        assert info.recall_signoff("spawn_subagent", "agent-a") == (
+            True, {"web_search"})
