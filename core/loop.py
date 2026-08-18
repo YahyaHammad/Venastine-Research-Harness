@@ -262,6 +262,47 @@ def _authorization_kwargs(authorization) -> dict:
     }
 
 
+def _denial_reason(tool_name: str, response_channel, context) -> str:
+    """Why a gated call was refused, in terms the model can act on (#158).
+
+    The loop already learned this lesson one branch over -- see the
+    reachability comment above the approval block: headless, "requires
+    approval and was not given" tells the model to retry WITH approval,
+    which is the one thing that cannot happen there. It retries, spends a
+    step against max_steps, and gets the same sentence back. That is the
+    fetch_url damage class, which §15\\D24 fixed for undeclared permissions
+    and left open on this axis.
+
+    THE DISTINCTION IS WHETHER THE ARGUMENTS CAUSED THE GATE, and it is
+    asked the same way schemas(callable_only=…) asks it -- with empty
+    params, through the one function both dispatch() and this loop already
+    share. A tool gated by NAME is uncallable in this run however it is
+    called, so the useful thing to say is "stop". A tool gated by THESE
+    PARAMS survived that filter and was advertised precisely because some
+    other call shape is callable, so the useful thing to say is "vary the
+    arguments" -- which is exactly the case #158 measured: `write` is
+    advertised in a headless pass and denied only for paths outside the
+    workspace.
+
+    No tool name and no notion of a path appears here. Which argument to
+    vary is the model's problem and the tool's schema already describes it;
+    putting "try a path inside the workspace" in this file is the thing
+    ToolSpec.grant_scope and request_kind exist to prevent.
+    """
+    if response_channel is not None:
+        # Somebody was asked and declined. Nothing to reframe -- the answer
+        # was a decision, not an absence, and telling the model the call
+        # was unavailable would misreport a person's "no" as a limitation.
+        return f"{tool_name} requires approval and was not given"
+    if registry.approval_needed(tool_name, {}, context):
+        return (f"{tool_name} requires approval and this run has no way to "
+                f"ask, so it is unavailable however it is called. Do not "
+                f"retry it.")
+    return (f"{tool_name} requires approval for these arguments and this "
+            f"run has no way to ask. It may not need approval with "
+            f"different arguments.")
+
+
 def _obtain_approval(response_channel, tool_name: str, params: dict,
                      notice, request_payload=None) -> tuple:
     """Ask the human about one gated call. Returns (approved, grant).
@@ -678,9 +719,8 @@ class RunAgentLoop:
                         response_channel, call.name, call.input, notice,
                         request_payload)
                     if not approved:
-                        result = {
-                            "error": f"{call.name} requires approval and was not given",
-                        }
+                        result = {"error": _denial_reason(
+                            call.name, response_channel, context)}
                     else:
                         # §25 R11: run-scope is a shortcut for a chat turn,
                         # where re-asking about the same tool seconds later

@@ -417,6 +417,109 @@ def test_an_unreachable_tool_is_not_prompted_for(mocker):
     assert "not available in this context" in results[0]["result"]["error"]
 
 
+# ---------------------------------------------------------------------------
+# ---- #158: a headless denial says whether the ARGUMENTS caused it ---------
+# ---------------------------------------------------------------------------
+#
+# The same lesson as the test above, on the axis it did not cover. That one
+# is about a tool policy refuses; these are about a tool whose approval gate
+# fired for THESE PARAMS. Headless, both used to report "requires approval
+# and was not given", which tells the model to retry with approval -- the one
+# thing that cannot happen -- so it retries, spends a step against max_steps,
+# and reads the same sentence back.
+
+@pytest.fixture
+def _paramwise_tool():
+    """A tool that is ungated for empty params and gated for these ones.
+
+    That combination is the whole subject: it is what survives
+    schemas(callable_only=True) -- which probes with `{}` -- and is then
+    denied on the call the model actually makes. `write` is the shipped
+    instance (an empty path resolves inside the workspace, an out-of-tree
+    one does not), and this stands in for it because `write` ships
+    permission False and would be refused at the reachability check above
+    before ever reaching approval.
+
+    set_dynamic_approval_default is what makes it ungated by name: an
+    mcp__ tool is approval-required by default (§17 decision D), and
+    without this the config gate alone would answer, making the test's
+    two branches indistinguishable.
+    """
+    from security.permissions import (
+        clear_dynamic_approval_defaults, set_dynamic_approval_default)
+    from tools.base import ToolSpec
+    from tools.registry import registry
+
+    registry.register(ToolSpec(
+        "mcp__probe__pathwise", {"name": "mcp__probe__pathwise"},
+        lambda p: {"result": "ok"},
+        approval_check=lambda name, params: bool(params.get("path"))))
+    set_dynamic_approval_default("mcp__probe__pathwise", False)
+    try:
+        yield
+    finally:
+        clear_dynamic_approval_defaults("mcp__probe__pathwise")
+        registry.unregister("mcp__probe__pathwise")
+
+
+def _headless_denial(tool_name, params, mocker, channel=None):
+    """The error string the model receives for one refused call."""
+    calls = make_model_response(
+        text="", tool_calls=[{"id": "t1", "name": tool_name, "input": params}])
+    mocker.patch("core.loop.call_model_stream",
+                 side_effect=make_stream_sequence(
+                     calls, make_model_response(text="fine")))
+    events = list(RunAgentLoop._run(
+        _FakeMemory(), "p", "ANTHROPIC", "m", None,
+        max_steps=2, response_channel=channel))
+    results = [e.tool_result for e in events if e.tool_result is not None]
+    return results[0]["result"]["error"]
+
+
+def test_a_denial_caused_by_the_arguments_says_so(_paramwise_tool, mocker):
+    """The actionable half. This tool IS callable headless with other
+    arguments -- that is why it was advertised -- so telling the model to
+    stop would be false, and telling it to seek approval is useless."""
+    error = _headless_denial("mcp__probe__pathwise", {"path": "/etc/shadow"},
+                             mocker)
+
+    assert "these arguments" in error
+    assert "different arguments" in error
+    assert "was not given" not in error, (
+        "the pre-#158 wording tells the model to retry with approval, which "
+        "is exactly what it cannot obtain here")
+
+
+def test_a_denial_caused_by_the_NAME_tells_the_model_to_stop(mocker):
+    """The other branch, and the one that must not say 'vary the
+    arguments': a tool gated by name is uncallable in this run however it
+    is called, so inviting a retry would spend the rest of max_steps."""
+    from tools.base import ToolSpec
+    from tools.registry import registry
+
+    registry.register(ToolSpec(
+        "mcp__probe__gated", {"name": "mcp__probe__gated"},
+        lambda p: {"result": "ok"}))
+    try:
+        error = _headless_denial("mcp__probe__gated", {"q": "x"}, mocker)
+    finally:
+        registry.unregister("mcp__probe__gated")
+
+    assert "however it is called" in error
+    assert "different arguments" not in error
+
+
+def test_a_human_saying_no_is_not_reframed_as_a_limitation(
+        _paramwise_tool, mocker):
+    """A channel means somebody was asked and declined. That is a decision,
+    not an absence, and reporting it as 'this run has no way to ask' would
+    misattribute a person's answer to the configuration."""
+    error = _headless_denial("mcp__probe__pathwise", {"path": "/etc/shadow"},
+                             mocker, channel=_answering_channel(False))
+
+    assert error == "mcp__probe__pathwise requires approval and was not given"
+
+
 def test_a_reachable_tool_is_still_prompted_for(mocker):
     """Control: the reachability check must not swallow real prompts."""
     from tools.context import ToolContext
