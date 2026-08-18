@@ -1852,9 +1852,10 @@ reach. Here that is the `tools` argument on the wire.
 ### Verified on Linux
 
 `python:3.11-slim`, fresh `pip install -r requirements.txt`, `providers.json` from the
-example: **1698 passed, 0 skipped, 1 deselected.** The fifteen tests that `skipif` on Windows
-all run and pass there, so the headline count is measured where nothing skips. Four of the
-mutations were re-run in the container and all four went RED on the same tests.
+example: **1707 passed, 0 skipped, 1 deselected** (re-run after the pre-merge review). The fifteen tests that `skipif` on Windows
+all run and pass there, so the headline count is measured where nothing skips. The review's three new
+mutations were re-run there too, each RED on the test named for it -- and read by NAME
+in the output rather than inferred from an exit code, which is the false-RED lesson below.
 
 The wire measurement re-taken in the container:
 
