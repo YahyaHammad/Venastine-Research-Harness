@@ -632,6 +632,25 @@ class TestTheModeIsTheGateAndTheFieldIsTheRatchet:
         with pytest.raises(ValueError, match="SHELL_APPROVAL_MODE"):
             validate_mode("nope", "config.SHELL_APPROVAL_MODE")
 
+    def test_the_shipped_default_is_tiered(self):
+        """Stated rather than left to an incidental pin. The mutation pass
+        found this value WAS already pinned -- by a §7 fallback test that
+        happens not to set the mode -- which is coverage by accident, and
+        would move the moment that test set it explicitly."""
+        import importlib
+        fresh = importlib.import_module("config")
+        assert fresh.SHELL_APPROVAL_MODE == "tiered"
+        assert fresh.SHELL_APPROVAL_MODES == ("always", "tiered", "never")
+
+    def test_the_shipped_approvals_field_is_the_ratchet_not_the_gate(self):
+        """§28 flipped this to False and the two must move together: with
+        it True the tool's check can never lower the answer, because
+        approval_needed ORs it with requires_approval and BOTH read this
+        field. A future edit setting it back True silently disables
+        `tiered` without disabling the setting."""
+        assert config.ToolApprovals().shell is False
+        assert config.ToolPermissions().shell is False
+
 
 class TestTheFallbackFlagsStillMeanWhatTheyMeant:
     """§28 replaced the ladder; it must not have quietly dropped the two
@@ -760,6 +779,29 @@ class TestTheVenastineMount:
         mounts = [argv[i + 1] for i, a in enumerate(argv) if a == "-v"]
         assert any(m.endswith(":/workspace") for m in mounts)
         assert any(m.endswith(":/workspace/.venastine:ro") for m in mounts)
+
+    def test_a_symlinked_venastine_pointing_out_of_the_workspace_is_refused(
+            self, tmp_path):
+        """What the `nested` half is actually for, found by a surviving
+        mutant: os.path.join always produces a nested path, so deleting
+        that guard changed nothing any other test could see -- until you
+        remember realpath resolves symlinks.
+
+        A `.venastine` symlinked at /etc would otherwise be bind-mounted
+        into the container at /workspace/.venastine. Read-only, so it
+        could not be modified, but it would put a directory the workspace
+        does not contain in front of a model that reads files. This is
+        the same escape §14 already found in the trust hash."""
+        workspace = tmp_path / "ws"
+        outside = tmp_path / "elsewhere"
+        workspace.mkdir()
+        outside.mkdir()
+        try:
+            (workspace / ".venastine").symlink_to(
+                outside, target_is_directory=True)
+        except (OSError, NotImplementedError):    # pragma: no cover
+            pytest.skip("platform does not support directory symlinks")
+        assert _venastine_readonly_mount(str(workspace)) == []
 
 
 class TestTheWorkspaceIsCreated:
