@@ -106,10 +106,31 @@ class RunInfo:
         (a pipeline grant names it, and a sign-off answered about one
         subject), and the specific answer is the one the user actually
         gave about this subject.
+
+        R14: a grant BY NAME may not answer a question that carries a
+        SUBJECT. J8 rebuilt the memo around (tool, subject) because
+        approving a spawn of agent `a` had silently covered a later spawn
+        of `b`; the grant branch below kept answering both, because it
+        never looked at the subject at all:
+
+            granted_tools={'spawn_subagent'}
+            recall_signoff('spawn_subagent', 'agent-a')  -> (True, None)
+            recall_signoff('spawn_subagent', 'agent-b')  -> (True, None)
+            recall_signoff('spawn_subagent', <anything>) -> (True, None)
+
+        -- J8's pre-fix behaviour, reached through the grant rather than
+        the memo. A name-level answer is about the TOOL; a subject-carrying
+        question is about one agent, and the two are not the same consent.
+
+        Belt and braces after R13 made spawn_subagent GRANT_NEVER, since
+        that is the only tool supplying a subject today: this holds for a
+        hand-built or stale RunInfo, and for any later tool that carries
+        one. `subject is None` for every other tool, so nothing else
+        changes behaviour.
         """
         key = (tool_name, subject)
         if key in self.signoffs:
             return True, self.signoffs[key]
-        if tool_name in self.granted_tools:
+        if subject is None and tool_name in self.granted_tools:
             return True, None
         return False, None

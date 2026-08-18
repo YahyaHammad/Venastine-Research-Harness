@@ -1605,3 +1605,127 @@ helper queued the answer a *followed* redirect produces, which is a shape `fetch
 longer receives. A fixture that can only express the old shape quietly stops testing the code
 under test. The root `conftest.py`'s fake `_Response` gained `is_redirect` and `next_request`,
 both mirroring real httpx's documented rule rather than a rule invented here.
+
+---
+
+## §22 — the sixth fix batch: one grant policy, declared per tool (2026-08-18)
+
+Three issues, two of them S2 security. #67 and #133 are one defect stated twice: **two
+functions answer "what may be pre-granted to a call that has not happened yet", and they
+disagree.** #106 is not a third choice — fixing #133 promotes it from config-dependent to
+certain, so leaving it out would ship a new bug in place of an old one.
+
+| Change | Issue | Files |
+|---|---|---|
+| `ToolSpec.grant_policy` + `assert_grant_policy_declared` | #133 | `tools/base.py`, `tools/registry.py`, `mcp_client/registration.py` |
+| Both grant paths read one declaration; `PIPELINE_UNGRANTABLE` deleted | #67, #133 | `core/reasoning/authorization.py`, `agents/manager.py` |
+| A grant by name does not answer a subject-carrying question | #67 | `tools/context.py` |
+| The attended provider survives an empty grant set; one shared message | #106 | `tui/app.py`, `main.py` |
+
+Suite 1652 → **1667**.
+
+### What breaks these
+
+| If production code changes like this… | …this fails | Why it matters |
+|---|---|---|
+| `write_project_doc` → `GRANT_ANYWHERE` | `test_write_project_doc_is_offered_to_a_human_but_not_to_the_pipeline` | The whole `--grant` menu becomes the one built-in that overwrites files in your repo, including `.venastine/CONTEXT.md`, which is injected into every opted-in agent |
+| `spawn_subagent` or `remember` → `GRANT_ANYWHERE` | `test_spawn_subagent_is_never_offered`, `test_remember_cannot_be_granted_to_a_research_run` | R4 and M17, and #67's point is that neither argument was ever pipeline-specific |
+| The pipeline filter loosened to `!= GRANT_NEVER` | 6 tests in `TestCandidates` | The pipeline stops being strictly stricter, which is the only thing the three-valued policy exists to express |
+| `candidate_approvals`' policy filter deleted | `test_remember_is_not_offered_to_a_subagent_signoff_either` | The §18 sign-off goes back to offering the two tools R4's own argument is about |
+| Undeclared non-MCP resolves to `GRANT_ANYWHERE` | `test_an_undeclared_anything_else_resolves_to_NEVER` | Fails open — the denylist shape this batch exists to remove |
+| Undeclared `mcp__*` resolves to `GRANT_NEVER` | `test_an_undeclared_mcp_tool_resolves_to_ANYWHERE` + the picker tests | MCP tools *are* the population both grant paths serve; closing them empties the feature |
+| `assert_grant_policy_declared` stops checking the VALUE | `test_a_MISSPELLED_policy_is_refused_too` | An unrecognised string is not `None`, so a presence-only check passes it and the tool silently leaves both paths while looking answered |
+| Drop `subject is None` from `recall_signoff` | `test_a_named_grant_does_not_cover_a_subject_carrying_call` | J8's pre-fix behaviour, reached through the grant rather than the memo: one tick lets the child spawn any agent |
+| Delete the `granted_tools` branch entirely | 8 tests across `TestTheLoopEnforcesGrantability` / `TestGrantBudget` | The other side of R14 — the §25 grant mechanism must keep working for every tool that has no subject |
+| TUI passes `None` when nothing is grantable | `test_attended_survives_grant_when_nothing_can_be_granted` | `--grant` silently turns `--attended` **off**, and the run proceeds looking supervised |
+| TUI manufactures a bundle when attended is off | `test_grant_alone_with_nothing_grantable_still_authorises_nothing` | The fix overshooting the other way, handing the pipeline a provider nobody asked for |
+| Either shell writes its own empty-answer message | `test_both_shells_say_the_same_thing_about_an_empty_answer` | They already drifted once, and the TUI's version was *false*: "no gated tool is available" when two were |
+
+### Behaviour change: `--grant` offers nothing on a default install
+
+`candidates()` now returns `[]` on a fresh clone. This is correct rather than a regression,
+and it is worth stating plainly because it looks like a feature going dark:
+
+```
+candidates(), default install       : []
+candidates(), one MCP tool connected: ['mcp__demo__post_message']
+```
+
+Every built-in is now ungated, param-dependent, or excluded by policy. The population both
+grant paths serve is **MCP tools** — allowed but approval-gated by default (§17 decision D),
+carrying no `approval_check`, named at connection time. R1's argument that a tool's own
+description *"is the whole of informed consent here, because MCP exposes no read-only/write
+metadata"* was written about exactly them, and `README.md`'s `--grant-tools` example was
+already `mcp__files__search`.
+
+### Standing: a fix that shrinks a set makes every negative about it a tautology
+
+This is a new entry in the vacuity catalogue, and it arrived from the *fix* rather than from
+the code under test. Excluding `write_project_doc` emptied `candidates()`, and
+
+```python
+assert "remember" not in [name for name, _ in authorization.candidates()]
+```
+
+in `test_remember_tool.py` — which has no fixture — becomes `"remember" not in []`, true of
+every string ever written. It would have stayed green forever.
+
+Sweeping for the class found one that **predates this batch**:
+`test_candidate_approvals_omits_tools_the_grant_cannot_cover` patches `ToolPermissions` and
+`ToolApprovals` down to a single `shell` field, which leaves every other built-in ungated —
+so `candidate_approvals()` was already empty there and `"shell" not in []` had never
+discriminated anything.
+
+Both now prove the exclusion by **subtraction from a populated set**, and
+`test_the_offered_set_is_not_empty` guards the rest of `TestCandidates` so a later change
+cannot quietly empty it and leave the file green. **The rule: whenever a change makes a set
+smaller, re-check every negative assertion about it. Green is not evidence they still
+discriminate.**
+
+### Recorded, not closed: the import assert's call site survives its mutation
+
+Deleting `assert_grant_policy_declared(registry._tools, registry._tools)` leaves the suite
+green. That is expected, and the project has already said so once — `test_pin_tool.py`'s
+D24 test notes that *"this passing at all is partly the import succeeding"*. The claim was
+**measured rather than assumed**, by mutating the guard and the mistake together:
+
+```
+control (untouched)                   GREEN: 51 passed
+assert deleted only                   GREEN: 51 passed        <- the survivor
+undeclared tool, assert INTACT        RED:   1 error   (RuntimeError at import)
+undeclared tool AND assert deleted    RED:   1 failed  (test_every_registered_tool_declares_one)
+```
+
+So the mistake the assert guards against — registering a tool with no declaration — is
+caught **either way**. `test_every_registered_tool_declares_one` scans the live registry, so
+the state is pinned independently of the call site. What the call adds is *when* the failure
+surfaces: a `RuntimeError` at import, before anything runs, rather than one named test
+failing later. No in-process test can observe that difference, which is why the mutation
+survives and why deleting the call as ceremony would still be wrong.
+
+Note the third row is itself the hazard §21 recorded: it reports as **"1 error"**, the shape
+that reads like a kill and usually is not. Here the error *is* the intended behaviour, which
+is the same ambiguity from the other side.
+
+### Two callers, and why the test asserts the RELATION
+
+The defect was that the two sets *disagreed*, so a test checking each one separately passes
+against a version where they drift apart again — which is precisely how this shipped, since
+both sets had tests and both were green.
+
+```
+pipeline ⊆ sign-off, and {grant_policy(t) for t in sign-off − pipeline} ⊆ {GRANT_SIGNOFF_ONLY}
+```
+
+The subset direction is the security claim (the unattended path can never offer more than
+the attended one) and the second clause is what stops the subset from being satisfied by
+accident — an empty pipeline set makes `⊆` trivially true, so the test asserts non-emptiness
+first.
+
+### Superseded rows above
+
+§25's row *"Remove `PIPELINE_UNGRANTABLE` / add `spawn_subagent` back"* and §21b's *"Remove
+`remember` from `PIPELINE_UNGRANTABLE`"* name a constant that no longer exists. The
+decisions they record still hold — the arguments moved to the registrations, unchanged, and
+the rows in this section replace them. Kept rather than edited, per this file's convention:
+what a past batch measured is not rewritten by a later one.

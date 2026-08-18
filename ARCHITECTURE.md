@@ -50,7 +50,7 @@ Venastine Research Harness/
 ├── CLAUDE.md / QWEN.md             # pointers to AGENTS.md, so a harness that auto-loads one of those names finds the context instead of a second copy of it
 ├── DEVLOG.md                       # implementation notes for built ROADMAP sections -- see §0
 │
-├── tests/                          # 1667 tests, all offline, ~25-45s depending on the machine (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
+├── tests/                          # 1684 tests, all offline, ~25-45s depending on the machine (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
 │   ├── conftest.py                 # fixtures: make_model_response, make_stream_from_response, make_stream_sequence, FakeStorage, ...
 │   ├── BREAKING_CHANGES.md         # what-breaks-it / symptom / fix per area
 │   ├── test_cli.py                 # 20 tests -- ROADMAP §1 thread_id passthrough + UUID validation + §14 parser defaults/resolution/trust flow
@@ -82,12 +82,12 @@ Venastine Research Harness/
 │   ├── test_agents.py              # 40 tests -- ROADMAP_v2 §18 AC1-AC3 (intersection, depth, manager surface), dispatch injection, headless filter + warning, goal mode, catalog, D24, TUI commands
 │   ├── test_client_effort.py       # 26 tests -- ROADMAP_v2 §16 effort levels: queried for Anthropic, table fallback, effort_for validation, cache behaviour
 │   ├── test_ensemble_guard.py      # 15 tests -- §10 revisit: refuse an ensemble roster that cannot disagree with itself
-│   ├── test_tui.py                 # 49 tests -- ROADMAP_v2 §16 AC1-AC3 (thread picker, permission round-trip, worker survives a raising tool) + §25 grant picker / attended modal + /model's provider/model switch
+│   ├── test_tui.py                 # 51 tests -- ROADMAP_v2 §16 AC1-AC3 (thread picker, permission round-trip, worker survives a raising tool) + §25 grant picker / attended modal + #106's two axes staying independent + /model's provider/model switch
 │   ├── test_mcp_config.py          # 26 tests -- ROADMAP_v2 §17 mcp.json discovery, tier precedence D29, unknown-key tolerance, strict flag parsing
 │   ├── test_mcp_client.py          # 30 tests -- ROADMAP_v2 §17 bridge, cancel-scope task affinity, v2 field names, normalization, teardown
-│   ├── test_grants.py              # 19 tests -- ROADMAP_v2 §25 R2/R6: grantability, the loop enforcing it, GrantBudget, the audit list
+│   ├── test_grants.py              # 23 tests -- ROADMAP_v2 §25 R2/R6/R14: grantability, the loop enforcing it, GrantBudget, the audit list, and that a grant by name does not answer a subject-carrying question
 │   ├── test_attended.py            # 17 tests -- ROADMAP_v2 §25 R9-R11: ApprovalProvider consulted, headless lifted, run-scope declined
-│   ├── test_research_authorization.py # 41 tests -- ROADMAP_v2 §25 R1/R3/R4/R12: candidates, grant-spec parsing, both shells' flags, settings precedence
+│   ├── test_research_authorization.py # 51 tests -- ROADMAP_v2 §25 R1/R3/R4/R12/R13: candidates, the per-tool grant policy and its import assert, the two grant paths asserted as a RELATION, grant-spec parsing, both shells' flags, settings precedence
 │   ├── test_granted_calls_artifact.py # 5 tests -- ROADMAP_v2 §25 audit artifact + R7 provenance framing in the universal preamble
 │   ├── test_review.py              # 87 tests -- ROADMAP_v2 §20 V1-V9: the reviewer agent, consent as data, the accept/reject/refine walk, both shells, 07_review.json, plus the 2026-08-04 hardening class (containment, deferred commit, sanitisation, shell lifecycle)
 │   ├── test_skills.py              # 37 tests -- ROADMAP_v2 §19 K1-K6: stateless manager, body pinning (incl. one-shot turns), precondition check (incl. registration), /skill, the pass-prompt boundary
@@ -104,7 +104,7 @@ Venastine Research Harness/
 │   ├── test_shell_compaction.py   # 17 tests -- ROADMAP_v2 §21a §21's visibility rule at both shells, and /compact
 │   ├── test_storage_e2e.py     # 23 tests -- ROADMAP_v2 §21a review: real ConversationMemory + real storage.py on real SQLite, compacting four times through the loop path. The only test at this level, and it found the shipped M11 defect
 │   ├── test_memories.py           # 13 tests -- ROADMAP_v2 §21b scope resolution, the injection cap (M14) and the opt-in rule (M13)
-│   ├── test_remember_tool.py      # 16 tests -- ROADMAP_v2 §21b D24/D26 declarations, the approval notice, M17's exclusion from pipeline grants
+│   ├── test_remember_tool.py      # 17 tests -- ROADMAP_v2 §21b D24/D26 declarations, the approval notice, M17's exclusion from BOTH grant paths (#67)
 │   ├── test_memory_injection.py   # 12 tests -- ROADMAP_v2 §21b the three placements and the with_catalogs boundary (M13/K6), plus AC5/AC6 end to end
 │   ├── test_memory_shells.py      # 16 tests -- ROADMAP_v2 §21b M16's CLI approval provider and M15's /memories, /forget
 │   ├── test_pipeline_events.py    # 20 tests -- ROADMAP_v2 §22 AC1-AC4: the drainer, the one trace writer (incl. review.py's and json_retry.py's lines), P1's recorded decision, the abandoned-run record, and the live TUI view
@@ -134,7 +134,7 @@ Venastine Research Harness/
 │   │
 │   └── reasoning/
 │       ├── base.py                # Claim / PipelineRun data model for the research pipeline (now carries run_id + §25 granted_calls + §20 subagent_reviews + §27 pass_threads)
-│       ├── authorization.py       # ROADMAP_v2 §25: the pipeline's grant POLICY -- candidates(), parse_grant_spec(), PIPELINE_UNGRANTABLE. Shared by both shells so they cannot drift
+│       ├── authorization.py       # ROADMAP_v2 §25: the pipeline's grant POLICY -- candidates(), parse_grant_spec(), NOTHING_TO_GRANT. Shared by both shells so they cannot drift. Per-tool exclusions live on ToolSpec.grant_policy (R13), which the §18 sign-off reads too
 │       ├── events.py              # §22: PipelineEvent -- kind-discriminated, SEPARATE from core/events.py's LoopEvent (P1). PIPELINE_EVENT_KINDS names all eleven kinds (§26 added stage / tool_call / tool_result / pass_activity)
 │       ├── confidence_scoring.py  # Pass 4 -- deterministic scoring, ZERO LLM calls
 │       ├── orchestrator.py        # sequences all 10 passes + D0/D1/D2 + _run_pass_with_json_retry + §5 per-pass checkpoints + §11 critic-model routing + §25 authorization passthrough + §20's _review_stage. §22: a GENERATOR (stream_deep_research_pipeline) with run_pipeline_to_completion draining it for the unchanged public entry point
@@ -1221,8 +1221,10 @@ Validated by **shape only** — provider names and API keys are not checked (E6)
 | `geometry` | `geometry.py` | Working | Points/lines/circles/polygons/triangles via SymPy |
 | `file_ops` | `file_ops.py` | Working | read/write/edit with path-dependent approval, markitdown for rich formats (an *optional* extra since #144 — `_read_rich` names `pip install -e ".[documents]"` when it is absent), line/char pagination. **Both `read` and `write` are denied by a global that nothing can flip at runtime — see §11** |
 | `read_project_doc` | `project_docs.py` | Working | ROADMAP_v2 §24: project documentation only, confined by realpath, no approval |
-| `write_project_doc` | `project_docs.py` | Working | ROADMAP_v2 §24: a document NAME from a fixed allowlist, no path parameter, approval-gated |
+| `write_project_doc` | `project_docs.py` | Working | ROADMAP_v2 §24: a document NAME from a fixed allowlist, no path parameter, approval-gated. `grant_policy=GRANT_SIGNOFF_ONLY` (R13) — the only tool in the gap between the two grant paths: a human may pre-grant it for one turn about one named agent, an unattended pipeline run may not (#133) |
 | `shell` | `shell.py` | Working | Shell execution via sandbox module; inert fast-path; Docker default, subprocess fallback |
+
+**Every registered tool declares `ToolSpec.grant_policy`** (R13): `GRANT_ANYWHERE`, `GRANT_SIGNOFF_ONLY` or `GRANT_NEVER`, answering *may approving this NAME, before any call exists, stand in for consent?* — a different question from `registry.grantable()`, which is mechanical (*does this tool decide from its params?*). Both grant paths check both. `spawn_subagent` and `remember` are `NEVER`, `write_project_doc` is `SIGNOFF_ONLY`, the four param-dependent tools are `NEVER`, everything else is `ANYWHERE`. Declared even on ungated tools on purpose: whether a tool is gated is *config*-dependent, so a policy inferred from today's gating would be answered by whoever edited `settings.json`. `assert_grant_policy_declared()` raises at import for an undeclared **or misspelled** value, in the same shape and for the same reason as D24's permission check.
 
 All math tools share `_math_common.py`'s `safe_parse()`. Any new math-adjacent tool should use this, not its own `eval`/`sympify` call.
 
@@ -1253,6 +1255,9 @@ The single-payload test (`__import__('os').system(...)`) is kept, and was itself
 
 ## 11. Known gotchas — real bugs found during development, not hypothetical
 
+- **Two functions answered one question, and only one of them subtracted the exclusions** (#67/#133). `candidate_approvals()` (§18 sign-off) and `candidates()` (§25 pipeline) were both `headless_hidden ∩ grantable`, and R2's stated purpose was that they could not drift — "one mechanism, so the two cannot drift into different ideas of what a grant covers". `grantable()` genuinely *was* one function. The exclusion list was a frozenset in the pipeline's module, invisible to the other caller, so the sign-off offered the two tools R4 and M17 exist to keep out of a grant — and R4's argument is *about* the sign-off. **The general shape: sharing the mechanism is not sharing the policy, and a shared helper can make two callers look unified while the thing that actually decides lives in one of them.** The test that pins it asserts the *relation* between the two sets, because asserting each separately passes against a version where they drift apart again.
+- **A denylist defaults an unknown entry to permitted, so it fails silently and on a schedule nobody controls** (#133). `PIPELINE_UNGRANTABLE` held two names; §24 registered `write_project_doc` afterwards; the list never learned about it, and the entire `--grant` menu became the one built-in that overwrites files in your repository. Nobody edited the policy file, which is exactly why nothing surfaced it. D24 had already settled this argument for permissions after `fetch_url` spent its whole life denied. The fix is the same trade: declare per tool, raise at import on omission — **and on a misspelled value**, which is the sharper half, because an unrecognised string is not `None`, so a presence-only check passes it and the tool then drops out of both paths while *looking* answered.
+- **A fix that shrinks a set turns every "x not in set" assertion about it into a tautology** (batch 6). Excluding `write_project_doc` made `candidates()` empty on a default install, and `test_remember_cannot_be_granted_to_a_research_run` had no fixture — so it would have kept passing while proving nothing. Sweeping for the class found one that *predated* the batch: `test_candidate_approvals_omits_tools_the_grant_cannot_cover` patches the config classes down to a single `shell` field, which left the list empty, so `"shell" not in []` had never discriminated anything. Both now prove the exclusion by subtraction from a populated set. **Whenever a change makes a set smaller, the negatives about it need re-checking — green is not evidence they still discriminate.**
 - **A root-level `logging.py` once shadowed Python's own `logging` stdlib module**, because the project root is on `sys.path` and any file doing `import logging` got the empty local file instead. Renamed to `logging_setup.py`. If a new top-level file is ever named after a stdlib or installed package, this exact failure mode recurs silently (no error at the shadowing point, just broken behavior wherever the real module was expected).
 - **`core/memory.py` once imported `from core.storage import ...` when the real file was `storage.py` at the project root.** Always verify actual file location before assuming a package-relative path.
 - **`tools/registry.py` at one point only registered 1 of 5 imported tools**, and separately had a dead/wrong import line (`import builtin.fetch_url as fetch_url`) alongside a correct one a few lines below. When adding a tool: import it, register it with `registry.register(ToolSpec(...))`, and confirm the registration line actually exists — importing a tool module is not the same as making it callable.

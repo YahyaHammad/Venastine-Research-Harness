@@ -22,7 +22,7 @@ core/client.py about MCP types.
 import logging
 
 from security import permissions
-from tools.base import ToolSpec
+from tools.base import GRANT_ANYWHERE, ToolSpec
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +126,16 @@ def register_all(client, registry) -> list:
                 name=name,
                 schema=schema_for(server_name, tool),
                 handler=_make_handler(client, server_name, tool.name),
+                # §25 R13. Stated here rather than left to
+                # registry.grant_policy's mcp__* fallback: this is the
+                # site that makes the decision, and MCP tools are the
+                # grant picker's real population -- R1's argument that
+                # the tool's own description is the whole of informed
+                # consent was written about exactly these, because MCP
+                # exposes no read-only/write metadata for anything to
+                # reason from. The fallback stays as documentation for
+                # any other dynamic registrant.
+                grant_policy=GRANT_ANYWHERE,
             ))
             _registered.setdefault(server_name, []).append(name)
             registered.append(name)

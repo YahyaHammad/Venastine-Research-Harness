@@ -1,8 +1,8 @@
 """
 test_research_authorization.py
 
-ROADMAP_v2 §25 decisions R1, R3 and R4 -- what the research pipeline may
-be authorised to use, and how the two shells ask.
+ROADMAP_v2 §25 decisions R1, R3, R4 and R13 -- what the research pipeline
+may be authorised to use, and how the two shells ask.
 
 The pipeline could not call ANY approval-gated tool before this, in any
 shell: run_deep_research_mode had no way to receive one, so _run() always
@@ -16,17 +16,31 @@ What is asserted here is deliberately split:
     cannot drift into offering different sets.
   * core/loop.py owns ENFORCEMENT, covered in test_grants.py.
   * the shells own only "how do I reach the human".
+
+R13 moved one piece of that policy again, and the reason is the split
+above being true of the SETS but not of the EXCLUSIONS. `grantable()` was
+genuinely shared, so both callers agreed on the mechanical question. The
+list of tools excluded on policy grounds lived in this module, where
+agents/manager.py could not read it -- so the §18 sign-off and the §25
+pipeline held different ideas of what a grant covers (#67), and a tool
+registered after the list was written joined the picker without anyone
+being asked (#133). The answer is now declared on the ToolSpec and both
+callers read it; what is asserted here is that they agree, and how they
+are allowed to differ.
 """
 
 import pytest
 
 from core.approval import RunAuthorization
 from core.reasoning.authorization import (
-    GRANT_PICKER, GrantSpecError, PIPELINE_UNGRANTABLE, candidates,
+    GRANT_PICKER, NOTHING_TO_GRANT, GrantSpecError, candidates,
     parse_grant_spec,
 )
 from tests.conftest import drain, pass_stream
-from tools.base import ToolSpec
+from tools.base import (
+    GRANT_ANYWHERE, GRANT_NEVER, GRANT_POLICIES, GRANT_SIGNOFF_ONLY, ToolSpec,
+    assert_grant_policy_declared,
+)
 from tools.registry import registry
 
 
@@ -34,15 +48,26 @@ from tools.registry import registry
 def offered_tools():
     """One grantable gated tool, one that decides per call, and the
     already-registered spawn_subagent -- the three cases candidates()
-    has to tell apart."""
+    has to tell apart.
+
+    R13 makes this fixture load-bearing rather than convenient. On a
+    default install candidates() is EMPTY -- every built-in is ungated,
+    param-dependent, or excluded by policy -- so every "x not in
+    candidates()" assertion in this file would pass against the empty set
+    without discriminating anything. Registering a tool that IS offered
+    is what keeps the negatives meaningful, and
+    test_the_offered_set_is_not_empty below pins that this fixture still
+    does its job.
+    """
     registry.register(ToolSpec(
         "mcp__lib__search", {"name": "mcp__lib__search",
                              "description": "Search the library.\nMore detail."},
-        lambda p: {"result": "ok"}))
+        lambda p: {"result": "ok"}, grant_policy=GRANT_ANYWHERE))
     registry.register(ToolSpec(
         "mcp__lib__percall", {"name": "mcp__lib__percall", "description": "x"},
         lambda p: {"result": "ok"},
-        approval_check=lambda name, params: True))
+        approval_check=lambda name, params: True,
+        grant_policy=GRANT_ANYWHERE))
     try:
         yield
     finally:
@@ -65,6 +90,18 @@ class TestCandidates:
         not carry."""
         assert "mcp__lib__percall" not in dict(candidates())
 
+    def test_the_offered_set_is_not_empty(self, offered_tools):
+        """Guards every NEGATIVE assertion in this class.
+
+        R13 emptied candidates() on a default install, so "x not in
+        candidates()" is satisfied by the empty set and proves nothing
+        about x. This test fails if the fixture ever stops populating the
+        set, which is the only thing keeping its siblings honest."""
+        assert dict(candidates()), (
+            "candidates() is empty, so every exclusion test in this class "
+            "is vacuously true"
+        )
+
     def test_spawn_subagent_is_never_offered(self, offered_tools):
         """R4. It IS grantable in the ordinary sense -- no approval_check,
         so approving the name is meaningful consent. It is excluded for
@@ -74,8 +111,57 @@ class TestCandidates:
         unattended passes."""
         assert registry.grantable("spawn_subagent") is True
         assert "spawn_subagent" in registry.headless_hidden(None)
+        assert "mcp__lib__search" in dict(candidates())   # not vacuous
         assert "spawn_subagent" not in dict(candidates())
-        assert "spawn_subagent" in PIPELINE_UNGRANTABLE
+        assert registry.grant_policy("spawn_subagent") == GRANT_NEVER
+
+    def test_write_project_doc_is_offered_to_a_human_but_not_to_the_pipeline(
+            self, offered_tools):
+        """#133 + R13, and the one place the two grant paths differ.
+
+        write_project_doc resolves 15 document names to paths and
+        overwrites them with no diff and no second question. One of them
+        is .venastine/CONTEXT.md, which config_loader injects into every
+        agent that opts in -- so a pipeline grant reaches M17's own
+        justification for excluding `remember` through a different tool.
+
+        It stays in the §18 sign-off, where a human answers about one
+        named agent for one turn and the tool's notice names the
+        destination and the size. The difference is argued from
+        ATTENDEDNESS, not from the tool, which is why one declaration
+        with three values expresses it and two booleans could not."""
+        from agents.manager import AgentManager
+        from tools.context import ToolContext
+
+        assert registry.grantable("write_project_doc") is True
+        assert registry.grant_policy("write_project_doc") == GRANT_SIGNOFF_ONLY
+        assert "write_project_doc" not in dict(candidates())
+        assert "write_project_doc" in AgentManager.candidate_approvals(
+            ToolContext())
+
+    def test_the_pipeline_offers_a_subset_of_what_the_signoff_does(
+            self, offered_tools):
+        """#67 stated as the relation it actually is.
+
+        Two functions answer "what may be pre-granted", and the defect was
+        that they DISAGREED -- the sign-off offered spawn_subagent and
+        remember, which the pipeline refused. Asserting each set
+        separately passes against a version where they drift apart again;
+        asserting the relation is what pins it.
+
+        The pipeline is strictly stricter, and the difference is exactly
+        the GRANT_SIGNOFF_ONLY tools -- never something one caller has
+        simply not heard of."""
+        from agents.manager import AgentManager
+        from tools.context import ToolContext
+
+        signoff = set(AgentManager.candidate_approvals(ToolContext()))
+        pipeline = {name for name, _ in candidates()}
+
+        assert pipeline, "an empty pipeline set makes the subset trivial"
+        assert pipeline <= signoff
+        assert {registry.grant_policy(n) for n in signoff - pipeline} <= {
+            GRANT_SIGNOFF_ONLY}
 
     def test_descriptions_come_from_the_schema_first_line(self, offered_tools):
         """The only signal available: MCP exposes no read-only/write
@@ -83,6 +169,87 @@ class TestCandidates:
         searches a library and another posts to a channel. Showing what the
         tool says it does is the whole of informed consent here."""
         assert dict(candidates())["mcp__lib__search"] == "Search the library."
+
+
+class TestTheDeclarationItself:
+    """R13. The shape of the answer, not the answer for any one tool.
+
+    #133's argument for changing the shape: a denylist defaults an unknown
+    tool to GRANTABLE, so the failure mode is silent and arrives with new
+    tools rather than with edits to the policy file. That is exactly what
+    happened -- §24 registered write_project_doc, §25's list was written
+    earlier and never learned about it, and the whole --grant menu became
+    the one built-in that overwrites files in your repository.
+
+    D24 settled this argument once already, for permissions."""
+
+    def test_every_registered_tool_declares_one(self):
+        """The check that makes omission impossible rather than unlikely.
+
+        Runs over the LIVE registry, so registering a tool without a
+        policy fails here even if someone deletes the import-time assert
+        -- two independent ways to notice, because the whole point is
+        that the mistake is otherwise invisible."""
+        for name, spec in registry._tools.items():
+            if name.startswith("mcp__"):
+                continue
+            assert spec.grant_policy in GRANT_POLICIES, (
+                f"{name} has no usable grant policy: {spec.grant_policy!r}")
+
+    def test_an_undeclared_tool_is_refused_at_import(self):
+        """D24's trade, one question over: raise rather than warn, because
+        the failure this guards against is invisible at runtime.
+
+        A tool with no declaration resolves to GRANT_NEVER, so forgetting
+        the field just means the tool prompts per call -- correct-looking
+        behaviour that hides an unanswered policy question. Nothing would
+        ever surface it."""
+        specs = {"web_search": ToolSpec("web_search", {}, lambda p: {},
+                                        grant_policy=GRANT_ANYWHERE),
+                 "newcomer": ToolSpec("newcomer", {}, lambda p: {})}
+
+        with pytest.raises(RuntimeError, match="newcomer"):
+            assert_grant_policy_declared(specs, specs)
+
+    def test_a_MISSPELLED_policy_is_refused_too(self):
+        """Sharper than the undeclared case, and the reason the check
+        validates the value rather than just its presence.
+
+        An unrecognised string is not None, so a presence-only check
+        passes it -- and it then compares unequal to GRANT_ANYWHERE and
+        unequal to GRANT_NEVER, silently dropping the tool from both grant
+        paths while LOOKING answered. Undeclared is a gap; misspelled is a
+        gap wearing an answer."""
+        specs = {"typo": ToolSpec("typo", {}, lambda p: {},
+                                  grant_policy="anywhere ")}
+
+        with pytest.raises(RuntimeError, match="invalid"):
+            assert_grant_policy_declared(specs, specs)
+
+    def test_mcp_tools_are_exempt(self):
+        """They are named at connection time and can never carry a static
+        declaration -- the same exemption D24 makes, for the same reason."""
+        specs = {"mcp__server__tool": ToolSpec("mcp__server__tool", {},
+                                               lambda p: {})}
+
+        assert_grant_policy_declared(specs, specs)  # must not raise
+
+    def test_an_undeclared_mcp_tool_resolves_to_ANYWHERE(self):
+        """The picker's real population. MCP tools are allowed but
+        approval-gated by default (§17 decision D) and have no
+        approval_check, so they are what both grant paths actually serve
+        -- and R1's argument that the tool's own description is the whole
+        of informed consent was written about exactly them, because MCP
+        exposes no read-only/write metadata for anything else to use."""
+        assert registry.grant_policy("mcp__never__registered") == GRANT_ANYWHERE
+
+    def test_an_undeclared_anything_else_resolves_to_NEVER(self):
+        """Fails CLOSED. The import assert makes this unreachable for
+        statically registered tools -- and it is the safe direction for
+        anyone it is reachable for, because the cost of being wrong is a
+        tool that prompts per call instead of one that is pre-granted
+        without the question being asked."""
+        assert registry.grant_policy("no_such_tool_anywhere") == GRANT_NEVER
 
 
 class TestParseGrantSpec:
@@ -332,6 +499,27 @@ class TestAttendedProviderSemantics:
         assert auth.granted_tools == {"mcp__lib__search"}
         assert auth.provider is not None
         assert auth.budget is not None
+
+    def test_both_shells_say_the_same_thing_about_an_empty_answer(
+            self, mocker, capsys):
+        """#106. This module's docstring says it exists so the two shells
+        "cannot drift into offering different SETS", and that held. What
+        it had never been given is what they SAY about an empty one -- so
+        they drifted there instead, and the TUI's version was false where
+        it fired: "no approval-gated tool is AVAILABLE to this run" when
+        two were, and were still hidden from all ten passes.
+
+        One constant, asserted through the CLI here and written to the
+        transcript by the TUI. The wording claim is part of it: the honest
+        sentence is about what can be GRANTED, which is the only question
+        candidates() answers."""
+        import main
+        mocker.patch("core.reasoning.authorization.candidates", return_value=[])
+
+        main.build_research_authorization(GRANT_PICKER, attended=True)
+
+        assert NOTHING_TO_GRANT in capsys.readouterr().err
+        assert "available" not in NOTHING_TO_GRANT.lower()
 
 
 # ===========================================================================

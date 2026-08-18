@@ -1331,7 +1331,7 @@ for chat and `False` for attended research, and the two must not converge — ch
 §18's per-run shortcut, attended research exists for per-call supervision. `None` on a
 non-tty, matching `build_review_consent`, so a piped run stays headless.
 
-**M17 — `remember` joins `PIPELINE_UNGRANTABLE`.** It has no `approval_check`, so
+**M17 — `remember` is never pre-grantable.** *(As built, it joined a `PIPELINE_UNGRANTABLE` frozenset; R13 moved the answer onto the ToolSpec as `grant_policy=GRANT_NEVER` and the frozenset is gone. #67 found that the frozenset had never reached §18's subagent sign-off, which D26's consequence 1 is equally about.)* It has no `approval_check`, so
 §25's R2 rule makes it grantable and it would have appeared in the research grant
 picker. One `--grant remember` at launch would let ten unattended passes — reading
 attacker-controlled web pages — write durable cross-session memories. That is exactly
@@ -1607,14 +1607,14 @@ Authorization is **two independent axes**, not a mode enum: a *grant set* (possi
 
 `core/approval.py` holds the data (`GrantBudget`, `ApprovalProvider`, `RunAuthorization`); `core/reasoning/authorization.py` holds the pipeline's policy and is shared by both shells; `core/loop.py` enforces; the shells build. The pipeline carries the bundle and interprets nothing.
 
-### Decisions record (R1–R12)
+### Decisions record (R1–R14)
 
 | # | Decision |
 |---|---|
 | **R1** | **Per-tool selection**, not all-or-nothing. Unlike §18's S1, the pre-flight prompt is a shell-side question before the run, not the boolean `permission_channel` — so a subset is expressible here. |
 | **R2** | **Only tools with no `approval_check` are name-grantable** (`registry.grantable`). A per-call gate was never consented to by name. **This narrows §18's shipped S1**, at the shared mechanism: a signed-off subagent calling `shell` now prompts its parent. |
 | **R3** | `--grant` / `--grant-tools` are **per-run flags, never persisted**; `/research` takes the same values through the same parser. |
-| **R4** | **`spawn_subagent` is excluded from pipeline grants** (`PIPELINE_UNGRANTABLE`). Approving a spawn *is* the §18 sign-off, so pre-granting it unattended compounds one yes into unbounded delegated authority across ten passes. |
+| **R4** | **`spawn_subagent` is excluded from pipeline grants.** Approving a spawn *is* the §18 sign-off, so pre-granting it unattended compounds one yes into unbounded delegated authority across ten passes. *(Carried by `ToolSpec.grant_policy` since R13; the `PIPELINE_UNGRANTABLE` frozenset this originally named is gone, and #67 found that the exclusion never reached the sign-off R4's own argument is about.)* |
 | **R5** | **Argument-side content policy at `dispatch()`**, all tools, all modes, **refusing** rather than redacting. |
 | **R6** | **`GrantBudget`**, `config.MAX_GRANTED_TOOL_CALLS = 150`, counting granted calls only. Exhaustion falls back to *asking*. One instance shared by reference across all passes. |
 | **R7** | **Provenance framing** in the universal pass preamble. Defence-in-depth, explicitly **not** counted as a control. |
@@ -1623,6 +1623,8 @@ Authorization is **two independent axes**, not a mode enum: a *grant set* (possi
 | **R10** | **Grants and attended compose.** Grants cover the boring set; anything ungranted asks instead of being denied. |
 | **R11** | **Attended providers set `honour_run_scope = False`** — a mode whose purpose is granularity must not let one yes cover later calls. |
 | **R12** | **The mode is persistable in `settings.json`; the grant list never is.** Asymmetric on purpose: a persisted mode can only ever ADD prompts, a persisted grant list only ever removes them — and `settings.json` is the one config file where project tier beats user tier. `research.granted_tools` is rejected *by name*. |
+| **R13** | **Grant policy is DECLARED ON THE TOOL, in three values, and both grant paths read it** (`ToolSpec.grant_policy`; `GRANT_ANYWHERE` / `GRANT_SIGNOFF_ONLY` / `GRANT_NEVER`). Added after #67 and #133, which are one defect: `grantable()` was genuinely shared by the §18 sign-off and the §25 pipeline, but the *exclusions* lived in a frozenset in the pipeline's module, so the two disagreed about what a grant covers and a tool registered after the list was written joined the picker unasked. Three values rather than two booleans because the pipeline is **strictly stricter** than the sign-off, so the answers form an order — booleans could express "unattended yes, attended no", which is incoherent. Declared for **every** statically registered tool, not only gated ones, because gating is config-dependent and the policy must not be. `assert_grant_policy_declared()` raises at import for an undeclared **or misspelled** value: D24's trade, one question over, and a denylist's default of *grantable* is the silent-failure shape D24 exists to refuse. |
+| **R14** | **A grant by name may not answer a question that carries a subject.** Extends J8, which keyed the sign-off memo by `(tool, subject)` after approving a spawn of agent `a` silently covered a later spawn of `b` — the *grant* branch of the same function went on answering for every subject, reaching J8's pre-fix behaviour by the other route. One condition (`subject is None`), local to `tools/context.py`: every tool but `spawn_subagent` memos under `None`, so the §25 grant mechanism is unchanged. Belt and braces after R13 made `spawn_subagent` `GRANT_NEVER`; it is a rule about grants rather than a restatement of one registration. |
 
 ### Why the pipeline needed its own answer
 

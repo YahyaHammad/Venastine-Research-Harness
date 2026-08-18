@@ -23,7 +23,10 @@ import inspect
 import logging
 from typing import Optional, TYPE_CHECKING
 
-from tools.base import ToolSpec
+from tools.base import (
+    GRANT_ANYWHERE, GRANT_NEVER, GRANT_SIGNOFF_ONLY, ToolSpec,
+    assert_grant_policy_declared,
+)
 from tools.builtin import (
     web_search, fetch_url, get_time, arxiv,
     symbolic_math, linear_algebra, probability_stats, discrete_math, logic, geometry,
@@ -255,6 +258,33 @@ class ToolRegistry:
         spec = self._tools.get(tool_name)
         return spec.request_kind if spec is not None else "approval"
 
+    def grant_policy(self, tool_name: str) -> str:
+        """How far approving this tool BY NAME goes (§25 R13).
+
+        Mechanism, not policy, in the same shape as grant_scope and
+        request_kind above: the two callers ask rather than each keeping
+        their own idea of which names are special. That is the whole
+        substance of #67 -- `grantable()` was genuinely shared while the
+        exclusion list lived in one caller's module, so the §18 sign-off
+        and the §25 pipeline held different ideas of what a grant covers.
+
+        An undeclared `mcp__*` tool is GRANT_ANYWHERE. Those names exist
+        only at connection time, they are the picker's real population,
+        and R1's argument -- the tool's own description is the whole of
+        informed consent, because MCP exposes no read-only/write metadata
+        -- was written about exactly them.
+
+        Anything else undeclared is GRANT_NEVER, failing closed.
+        assert_grant_policy_declared() makes that branch unreachable for
+        statically registered tools, exactly as D24's import check makes
+        _default_for_unknown_tool's unreachable for them.
+        """
+        spec = self._tools.get(tool_name)
+        declared = getattr(spec, "grant_policy", None)
+        if declared is not None:
+            return declared
+        return GRANT_ANYWHERE if tool_name.startswith("mcp__") else GRANT_NEVER
+
     def request_payload(
         self, tool_name: str, params: dict,
         context: Optional["ToolContext"] = None,
@@ -416,40 +446,69 @@ class ToolRegistry:
 
 
 registry = ToolRegistry()
-registry.register(ToolSpec("web_search", web_search.TOOL_SCHEMA, web_search.run))
-registry.register(ToolSpec("fetch_url", fetch_url.TOOL_SCHEMA, fetch_url.run))
-registry.register(ToolSpec("get_time", get_time.TOOL_SCHEMA, get_time.run))
-registry.register(ToolSpec("arxiv_search", arxiv.TOOL_SCHEMA, arxiv.run))
-registry.register(ToolSpec("symbolic_math", symbolic_math.TOOL_SCHEMA, symbolic_math.run))
-registry.register(ToolSpec("linear_algebra", linear_algebra.TOOL_SCHEMA, linear_algebra.run))
-registry.register(ToolSpec("probability_stats", probability_stats.TOOL_SCHEMA, probability_stats.run))
-registry.register(ToolSpec("discrete_math", discrete_math.TOOL_SCHEMA, discrete_math.run))
-registry.register(ToolSpec("logic", logic.TOOL_SCHEMA, logic.run))
-registry.register(ToolSpec("geometry", geometry.TOOL_SCHEMA, geometry.run))
-registry.register(ToolSpec("read", file_ops.READ_TOOL_SCHEMA, file_ops.read_run, approval_check=file_ops._file_approval_check))
-registry.register(ToolSpec("write", file_ops.WRITE_TOOL_SCHEMA, file_ops.write_run, approval_check=file_ops._file_approval_check))
-registry.register(ToolSpec("edit", file_ops.EDIT_TOOL_SCHEMA, file_ops.edit_run, approval_check=file_ops._file_approval_check))
-registry.register(ToolSpec("shell", shell.TOOL_SCHEMA, shell.run, approval_check=shell._shell_approval_check))
-registry.register(ToolSpec("load_skill", load_skill.TOOL_SCHEMA, load_skill.run, available_check=load_skill.has_skills))
-registry.register(ToolSpec("pin", pin.TOOL_SCHEMA, pin.run, available_check=pin.available))
+
+# R13: EVERY static registration declares a grant policy, including the
+# tools that are not approval-gated today and so never reach either grant
+# path. That is deliberate and is the reason the field is required rather
+# than inferred: whether a tool is gated is CONFIG-dependent (a user may
+# gate web_search in config.ToolApprovals), so a policy derived from
+# today's gating would be answered by whoever edited settings, not by
+# whoever registered the tool. Declaring it here keeps the answer
+# config-independent and next to the tool it is about.
+registry.register(ToolSpec("web_search", web_search.TOOL_SCHEMA, web_search.run, grant_policy=GRANT_ANYWHERE))
+registry.register(ToolSpec("fetch_url", fetch_url.TOOL_SCHEMA, fetch_url.run, grant_policy=GRANT_ANYWHERE))
+registry.register(ToolSpec("get_time", get_time.TOOL_SCHEMA, get_time.run, grant_policy=GRANT_ANYWHERE))
+registry.register(ToolSpec("arxiv_search", arxiv.TOOL_SCHEMA, arxiv.run, grant_policy=GRANT_ANYWHERE))
+registry.register(ToolSpec("symbolic_math", symbolic_math.TOOL_SCHEMA, symbolic_math.run, grant_policy=GRANT_ANYWHERE))
+registry.register(ToolSpec("linear_algebra", linear_algebra.TOOL_SCHEMA, linear_algebra.run, grant_policy=GRANT_ANYWHERE))
+registry.register(ToolSpec("probability_stats", probability_stats.TOOL_SCHEMA, probability_stats.run, grant_policy=GRANT_ANYWHERE))
+registry.register(ToolSpec("discrete_math", discrete_math.TOOL_SCHEMA, discrete_math.run, grant_policy=GRANT_ANYWHERE))
+registry.register(ToolSpec("logic", logic.TOOL_SCHEMA, logic.run, grant_policy=GRANT_ANYWHERE))
+registry.register(ToolSpec("geometry", geometry.TOOL_SCHEMA, geometry.run, grant_policy=GRANT_ANYWHERE))
+# The four param-dependent tools. grantable() already returns False for
+# them -- an approval_check means the answer depends on the path or the
+# command, so a name-level grant would authorise a call nobody saw -- and
+# the policy field says the same thing from the other side. Both are
+# checked at both call sites; neither is load-bearing alone.
+registry.register(ToolSpec("read", file_ops.READ_TOOL_SCHEMA, file_ops.read_run, approval_check=file_ops._file_approval_check, grant_policy=GRANT_NEVER))
+registry.register(ToolSpec("write", file_ops.WRITE_TOOL_SCHEMA, file_ops.write_run, approval_check=file_ops._file_approval_check, grant_policy=GRANT_NEVER))
+registry.register(ToolSpec("edit", file_ops.EDIT_TOOL_SCHEMA, file_ops.edit_run, approval_check=file_ops._file_approval_check, grant_policy=GRANT_NEVER))
+registry.register(ToolSpec("shell", shell.TOOL_SCHEMA, shell.run, approval_check=shell._shell_approval_check, grant_policy=GRANT_NEVER))
+registry.register(ToolSpec("load_skill", load_skill.TOOL_SCHEMA, load_skill.run, available_check=load_skill.has_skills, grant_policy=GRANT_ANYWHERE))
+registry.register(ToolSpec("pin", pin.TOOL_SCHEMA, pin.run, available_check=pin.available, grant_policy=GRANT_ANYWHERE))
 # §23 slice 2. No request_kind: this tool does NOT ask through the approval
 # bridge -- it is ungated (J12), so the bridge never fires for it. It names
 # `response_channel` in its handler signature and asks with it directly,
 # which is what _INJECTABLE_PARAMS was generalised for.
-registry.register(ToolSpec("ask_user", ask_user.TOOL_SCHEMA, ask_user.run))
+registry.register(ToolSpec("ask_user", ask_user.TOOL_SCHEMA, ask_user.run, grant_policy=GRANT_ANYWHERE))
 # §23 slice 2. Ungated and needs no channel (J9): it asks nobody, so a
 # headless research pass can keep a checklist. `memory` is injected by
 # signature inspection, as it is for `pin`.
-registry.register(ToolSpec("todo_write", todo.TOOL_SCHEMA, todo.run))
+registry.register(ToolSpec("todo_write", todo.TOOL_SCHEMA, todo.run, grant_policy=GRANT_ANYWHERE))
 registry.register(ToolSpec(
     "remember", remember.TOOL_SCHEMA, remember.run,
     available_check=remember.available,
     # D26 gates this in config.ToolApprovals; the notice is what makes
     # the gate worth having, since "remember wants to run" tells the
     # user nothing they can act on.
-    approval_notice=remember.approval_notice))
+    approval_notice=remember.approval_notice,
+    # ROADMAP_v2 §21b (M17), moved here from the pipeline's own module by
+    # R13 because the argument was never pipeline-specific. `remember`
+    # has no approval_check, so it is grantable by R2's mechanical rule
+    # and would appear in both grant paths -- and one --grant remember at
+    # launch would let ten unattended passes, reading attacker-controlled
+    # web pages, write durable cross-session memories. §21's D26
+    # consequence 1 says research passes must not be able to do that.
+    #
+    # NEVER rather than SIGNOFF_ONLY: D26 consequence 1 is about what a
+    # SUBAGENT can do, not only a pass, and the §18 sign-off hands the
+    # child its set for the rest of the turn. A durable cross-session
+    # write is exactly the authority that outlives the turn somebody was
+    # watching.
+    grant_policy=GRANT_NEVER))
 registry.register(ToolSpec(
-    "read_project_doc", project_docs.READ_TOOL_SCHEMA, project_docs.read_run))
+    "read_project_doc", project_docs.READ_TOOL_SCHEMA, project_docs.read_run,
+    grant_policy=GRANT_ANYWHERE))
 registry.register(ToolSpec(
     "write_project_doc", project_docs.WRITE_TOOL_SCHEMA, project_docs.write_run,
     # Gated in config.ToolApprovals; the notice names the destination and
@@ -457,7 +516,26 @@ registry.register(ToolSpec(
     # anyone can make. The content itself is not repeated here -- /init has
     # already shown it as a diff, and several kilobytes of markdown inside
     # a modal buries the one line that says which file changes.
-    approval_notice=project_docs.approval_notice))
+    approval_notice=project_docs.approval_notice,
+    # #133. SIGNOFF_ONLY is the one place the two paths differ, and the
+    # difference is argued from ATTENDEDNESS rather than from the tool.
+    #
+    # Against an unattended run: one --grant-tools write_project_doc
+    # authorises 15 document names, resolved to paths by the tool and
+    # overwritten in place, for the rest of a ten-pass run that is reading
+    # attacker-controlled web pages -- with no diff and no second
+    # question. One of them is .venastine/CONTEXT.md, which config_loader
+    # injects into every agent that opts in, so it reaches M17's own
+    # justification for excluding `remember` ("outlives the conversation
+    # and silently shapes ones you have not started yet") through a
+    # different tool.
+    #
+    # For the §18 sign-off it stays offered: a human is answering in the
+    # moment, about one named agent, for one turn, and the notice above
+    # names the destination and the size. That is the per-call consent a
+    # gate is for, which is also why --attended was never the mode at
+    # issue in #133.
+    grant_policy=GRANT_SIGNOFF_ONLY))
 registry.register(ToolSpec(
     "spawn_subagent", subagent_tool.TOOL_SCHEMA, subagent_tool.run,
     # §23 AC1b. Approving a spawn is not a yes/no any more: the request
@@ -470,6 +548,25 @@ registry.register(ToolSpec(
     # reuses the answer rather than re-asking.
     grant_scope="run",
     approval_notice=subagent_tool.approval_notice,
+    # ROADMAP_v2 §25 (R4), moved here from the pipeline's own module by
+    # R13. spawn_subagent is grantable in the ordinary sense -- it has no
+    # approval_check, so approving the NAME is meaningful consent. It is
+    # excluded for what that consent then authorises: approving a spawn IS
+    # the §18 subagent sign-off, handing the child its whole gated set.
+    #
+    # NEVER, not SIGNOFF_ONLY, and #67 is why. R4's argument is ABOUT the
+    # sign-off -- it names it as the thing pre-granting would duplicate --
+    # so a policy that excluded it from the pipeline while leaving it in
+    # the sign-off would exempt the one path the argument was written
+    # against. A ticked spawn_subagent lets the child spawn ANY agent with
+    # any task, unprompted, because the grant carries no subject; see
+    # R14's condition in tools/context.py recall_signoff.
+    #
+    # Nothing is lost: research passes have never been able to delegate,
+    # and in chat a spawn is still asked about per subject through the
+    # J8-keyed memo, which is the mechanism that actually shows the user
+    # which agent they are authorising.
+    grant_policy=GRANT_NEVER,
 ))
 
 # D24: fail loudly at import if any statically registered tool has no
@@ -479,3 +576,8 @@ registry.register(ToolSpec(
 # registrations above and before any dynamic mcp__* registration, which
 # is exactly the set the check is meant to cover.
 assert_permissions_declared(registry._tools)
+# R13, the same trade one question over: fail loudly at import if any
+# statically registered tool has no usable grant policy. Same placement
+# and same reason -- after the static registrations, before any dynamic
+# mcp__* one, which is exactly the set that can carry a declaration.
+assert_grant_policy_declared(registry._tools, registry._tools)

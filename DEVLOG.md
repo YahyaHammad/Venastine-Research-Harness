@@ -1289,7 +1289,7 @@ able to use tools that require approval in general, how can we design that
 such that it doesn't completely compromise the security stance we've been
 holding?"*
 
-## What was decided (R1–R12)
+## What was decided (R1–R14)
 
 The full table lives in ROADMAP_v2 §25. The load-bearing shape: authorization
 is **two independent axes**, a grant set and an `ApprovalProvider`, not a
@@ -3861,3 +3861,189 @@ whether the request was issued.
   that says so out loud.
 - **#57, #76, #100** — the three remaining S1s, each blocked on a decision.
 - **#91 item 2** — `effective_compaction`'s unbuilt provenance promise.
+
+---
+
+## Audit Pass 1 — fix batch 6, one grant policy (2026-08-18)
+
+Three issues, two of them S2 security. Full per-change tables in
+`tests/BREAKING_CHANGES.md` §22; what belongs here is why these three were
+one batch, and the two decisions they added to §25's record.
+
+### The selection rule again, and what it picked this time
+
+Same brief as batch 5: high severity, low blast radius, and nothing another
+open issue would force a rewrite of. Batch 5's triage had already named the
+group — #133 + #67, *"two functions answer 'what may be granted' and
+disagree"* — so the work here was checking whether that still held after
+three merged batches, and what fixing it drags in.
+
+It held exactly. Re-measured against `main` at `df90d33`:
+
+```
+§18 sign-off   candidate_approvals() -> remember, spawn_subagent, write_project_doc
+§25 pipeline   candidates()          -> write_project_doc
+
+offered by the sign-off, refused by the pipeline: remember, spawn_subagent
+```
+
+Both are `headless_hidden ∩ grantable`; only the pipeline's then subtracted
+`PIPELINE_UNGRANTABLE`, a frozenset in its own module that
+`agents/manager.py` could not see. **R2's stated purpose was that this could
+not happen** — *"one mechanism, so the two cannot drift into different ideas
+of what a grant covers."* And `grantable()` genuinely is one function. The
+lesson is narrower and more useful than "they drifted": **sharing the
+mechanism is not sharing the policy.** A shared helper can make two callers
+look unified while the thing that actually decides lives in one of them.
+
+### Why #106 came along
+
+Not a third pick. Excluding `write_project_doc` empties `candidates()` on a
+default install, and `tui/app.py`'s empty-set branch called
+`_start_research(app, query, None)` — dropping the `ApprovalProvider` along
+with the grant, when §25 defines them as two independent axes. So
+`--attended --grant` would have silently run unattended, on every fresh
+clone, as a *consequence of this batch*. #106's own reachability note says
+the branch does not fire in a default install; #133 is what makes it fire.
+
+Fixing #133 without #106 replaces a config-dependent bug with a certain one.
+That is the constraint the brief actually asks about, arriving from the
+direction nobody watches: not "will a later issue rewrite this fix" but
+"does this fix promote a later issue".
+
+### Decisions taken with the owner
+
+| Question | Answer |
+|---|---|
+| Policy shape | **Shared core + pipeline extension.** `spawn_subagent` and `remember` leave *both* paths; `write_project_doc` leaves only the pipeline. Each exclusion carries its own argument, written at the registration it now describes |
+| Mechanism | **Per-tool declaration + import assert (D24's shape)**, not a longer denylist |
+| Scope | **#133 + #67 + #106.** #131, #70, #68/#69 explicitly out |
+
+**Why three values and not two booleans.** Booleans can express "an
+unattended pipeline run may pre-grant this, but a human answering in the
+moment may not", which is incoherent. The pipeline is *strictly stricter*
+than the sign-off, so the answers form an order, and `GRANT_ANYWHERE ⊃
+GRANT_SIGNOFF_ONLY ⊃ GRANT_NEVER` says that in the type. `write_project_doc`
+is the only tool in the gap, and the difference is argued from
+**attendedness** rather than from the tool: ten unattended passes on one
+launch-time tick versus a human answering about one named agent for one
+turn.
+
+**Why a declaration and not a longer list.** A denylist defaults an unknown
+tool to *grantable*, so the failure is silent and arrives with new tools
+rather than with edits to the policy file. That is not incidental to #133 —
+it is its whole mechanism. §24 registered `write_project_doc`, §25's list
+was written earlier, nobody edited either file, and the entire `--grant`
+menu became the one built-in that overwrites files in your repository. D24
+settled this argument once already, for permissions, after `fetch_url` spent
+its whole life denied on every call because nobody added a field.
+
+The assert checks the **value**, not just its presence, and that half is
+sharper: an unrecognised string is not `None`, so a presence-only check
+passes it, and it then compares unequal to every policy and drops the tool
+out of both paths *while looking answered*.
+
+Declared on **every** static registration, including the sixteen tools that
+are not gated today. Whether a tool is gated is config-dependent — a user
+may gate `web_search` in `settings.json` — so a policy inferred from today's
+gating would be answered by whoever edited settings rather than by whoever
+registered the tool.
+
+### `--grant` now offers nothing on a fresh clone
+
+Worth stating plainly, because it looks like a feature going dark:
+
+```
+candidates(), default install       : []
+candidates(), one MCP tool connected: ['mcp__demo__post_message']
+```
+
+Every built-in is now ungated, param-dependent, or excluded by policy. The
+population both grant paths serve is MCP tools — allowed but approval-gated
+by default (§17 D), no `approval_check`, named at connection time. R1's
+argument that the tool's own description *"is the whole of informed consent
+here, because MCP exposes no read-only/write metadata"* was written about
+exactly them, `README`'s `--grant-tools` example was already an MCP tool,
+and `test_research_authorization.py`'s fixture already registered MCP tools
+to populate the set. The feature is not dark; it was pointed at the wrong
+population.
+
+### The vacuity the fix introduced, and the one it uncovered
+
+**Shrinking a set turns every negative assertion about it into a
+tautology.** This is a new entry in the catalogue and it arrived from the
+*fix* rather than from the code under test. `test_remember_tool.py`'s M17
+test had no fixture, so once `candidates()` returned `[]` its assertion
+became `"remember" not in []` — true of every string ever written, green
+forever.
+
+Sweeping for the class found one that **predates this batch**:
+`test_candidate_approvals_omits_tools_the_grant_cannot_cover` patches the
+two config classes down to a single `shell` field, which leaves every other
+built-in ungated, so `candidate_approvals()` was already empty and `"shell"
+not in []` had never discriminated anything.
+
+Both now prove the exclusion by subtraction from a populated set, and
+`test_the_offered_set_is_not_empty` guards the rest of the class. **Whenever
+a change makes a set smaller, re-check every negative about it.**
+
+### What the mutation pass measured
+
+Thirteen mutations plus a deliberate control. Twelve went red on a test
+named for them on the first attempt, and the control stayed green. One
+survived, and it was the interesting one.
+
+**The import assert's call site survives, and should.** Deleting
+`assert_grant_policy_declared(...)` leaves the suite green. Rather than
+assert that this was acceptable, it was measured — by mutating the guard and
+the mistake it guards against together:
+
+```
+control (untouched)                   GREEN: 51 passed
+assert deleted only                   GREEN: 51 passed        <- the survivor
+undeclared tool, assert INTACT        RED:   1 error   (RuntimeError at import)
+undeclared tool AND assert deleted    RED:   1 failed  (test_every_registered_tool_declares_one)
+```
+
+So the mistake is caught **either way**: `test_every_registered_tool_declares_one`
+scans the live registry, so the state is pinned independently of the call
+site. What the call adds is *when* the failure surfaces — at import, before
+anything runs, rather than as one named test failure later — and no
+in-process test can observe that difference. The same shape as batch 5's
+`os.open`-versus-`chmod` finding: recorded so the next reader does not
+delete the call as ceremony after re-running the mutation and seeing green.
+
+`test_pin_tool.py` had already said this about D24 in its own docstring —
+*"this passing at all is partly the import succeeding"* — so the precedent
+was written down before the measurement confirmed it.
+
+The third row is also §21's hazard from the other side: it reports as **"1
+error"**, the shape that reads like a kill and usually is not. Here the
+error *is* the intended behaviour.
+
+### Tests
+
+- `test_research_authorization.py` 40 → 50. `TestTheDeclarationItself` for
+  the mechanism, the two-set relation, and the shared empty-answer message.
+- `test_grants.py` +4, for R14, including the case that keeps the §25 grant
+  mechanism working for every tool with no subject — a fix for the first
+  case that broke that one would take the whole feature down.
+- `test_tui.py` +2, the #106 twin and its overshoot guard.
+- `test_remember_tool.py` +1, and its M17 test rebuilt against a populated
+  set.
+
+The relation test is the one worth keeping in mind: **asserting each set
+separately passes against a version where they drift apart again**, which is
+exactly how this shipped — both sets had tests, and both were green.
+
+### Not fixed
+
+- **#131** (S2 security, unbounded agent/skill descriptions in every
+  prompt). Independent of this work, no rewrite risk either way, and it
+  carries its own scope question the issue raises itself.
+- **#70** — only coupled under the "one list, both paths" reading that was
+  not chosen. Needs a `ToolSpec` pre-flight predicate, which is a new
+  mechanism rather than a reorder.
+- **#68 + #69**, **#37/#38/#39**, **#75 + #78**, **#16/#17/#147** — the
+  groups batch 5 recorded, still deliberately un-split.
+- **#57, #76, #100** — the three remaining S1s, each blocked on a decision.

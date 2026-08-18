@@ -59,7 +59,7 @@ from core.replay import last_assistant_text, replay_entries
 # Module scope, not inside _cmd_research: _split_research_flags needs the
 # sentinel too, and two shells comparing against two different object()
 # instances would look identical and behave differently.
-from core.reasoning.authorization import GRANT_PICKER
+from core.reasoning.authorization import GRANT_PICKER, NOTHING_TO_GRANT
 from prompts import system_prompts
 from tui import ravens, themes
 from tui.commands import SlashCommand, registry as commands
@@ -1479,10 +1479,24 @@ def _cmd_research(app: VenastineApp, args: str) -> None:
     offered = candidates()
     if grant_spec is GRANT_PICKER:
         if not offered:
-            app._transcript.write_system(
-                "No approval-gated tool is available to this run, so there "
-                "is nothing to authorise.")
-            _start_research(app, query, None)
+            # #106. TWO independent axes (§25): a grant set, possibly
+            # empty, and an ApprovalProvider, possibly absent. Passing
+            # None collapses them -- §25 documents None as the pre-§25
+            # status quo, "no grants, nobody to ask, every gated tool
+            # hidden from every pass" -- so adding --grant to an
+            # --attended run turned attended OFF.
+            #
+            # _authorization_for already returns None when attended is
+            # off, so the no-flags case is unchanged, and the sibling
+            # path below has always done exactly this.
+            #
+            # R13 made this branch the DEFAULT rather than a corner: with
+            # every built-in either ungated, param-dependent or excluded
+            # by policy, candidates() is empty until an MCP server
+            # connects. What was config-dependent is now what happens on
+            # a fresh clone.
+            app._transcript.write_system(NOTHING_TO_GRANT)
+            _start_research(app, query, _authorization_for(app, set()))
             return
 
         def _picked(selected) -> None:
