@@ -151,10 +151,13 @@ def auto_approved(profile: CommandProfile, containment: str) -> bool:
                    argument leaving the workspace (#157 hole 1), nothing
                    that might write, no network.
 
-      UNAVAILABLE  the call cannot run. Answering False means "do not
-                   ask", not "approved" -- the call still fails, with the
-                   backend's own error. Asking first would spend a human
-                   decision on an outcome that is already fixed.
+      UNAVAILABLE  the call cannot run, so it is not covered either.
+                   Note this is NOT "do not ask": False here means ASK,
+                   like every other False. A caller that would rather stay
+                   silent about a call which is going to fail regardless
+                   has to say so itself -- shell does, and the two
+                   polarities meeting is worth the one explicit branch
+                   rather than a second meaning smuggled into this return.
 
     `measured` gates all three. A call the classifier could not
     characterise must not be auto-approved by a containment argument,

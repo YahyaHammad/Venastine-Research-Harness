@@ -48,7 +48,7 @@ from pydantic import BaseModel, Field
 
 import config
 from security import capability
-from security.capability import UNCONTAINED, auto_approved
+from security.capability import UNAVAILABLE, UNCONTAINED, auto_approved
 from security.sandbox import (
     HOST_READ,
     INERT,
@@ -180,6 +180,15 @@ def _shell_approval_check(tool_name: str, params: dict) -> bool:
     if (profile.tier not in (INERT, HOST_READ)
             and containment == UNCONTAINED
             and config.AUTO_APPROVE_SANDBOX_FALLBACK):
+        return False
+
+    # No backend can run this, so there is nothing to approve. NOT the
+    # same as auto_approved() answering False, which means ASK -- the two
+    # polarities meet here and only here. run_sandboxed still raises
+    # SandboxUnavailable with the instructions; asking first would spend
+    # a human decision on an outcome that is already fixed, which is the
+    # burn-a-turn class, and it is what the pre-§28 check did too.
+    if containment == UNAVAILABLE:
         return False
 
     return not auto_approved(profile, containment)

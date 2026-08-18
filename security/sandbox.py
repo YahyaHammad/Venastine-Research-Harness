@@ -392,6 +392,16 @@ def _run_inert(
         }
     except FileNotFoundError as e:
         return {"stdout": "", "stderr": f"Command not found: {e}", "return_code": -1}
+    except OSError as e:
+        # Audit #50's other half. A bad CWD is FileNotFoundError on POSIX
+        # but NotADirectoryError (WinError 267) on Windows, which is an
+        # OSError and NOT a FileNotFoundError -- so on Windows it escaped
+        # this handler entirely and left the module as an unhandled
+        # exception. makedirs above removes the usual cause; this stops
+        # the next one (a permission error, a path that is a file) being
+        # reported as a crash instead of a result.
+        return {"stdout": "", "stderr": f"Could not run command: {e}",
+                "return_code": -1}
 
     return {
         "stdout": result.stdout[:config.MAX_READ_CHARS],
@@ -580,6 +590,14 @@ def _run_subprocess_fallback(
         return {
             "stdout": "",
             "stderr": f"Shell binary not found: {e}",
+            "return_code": -1,
+        }
+    except OSError as e:
+        # See _run_inert: on Windows a bad CWD is NotADirectoryError, not
+        # FileNotFoundError, and escaped as an unhandled exception.
+        return {
+            "stdout": "",
+            "stderr": f"Could not run command: {e}",
             "return_code": -1,
         }
 
