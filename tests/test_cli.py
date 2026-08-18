@@ -615,3 +615,165 @@ class TestTheDeadlineBelongsToTheChannel:
         channel, reader = self._channel()
         channel.ask(self._approval())
         assert reader.timeouts == [3]
+
+
+# ===========================================================================
+# ---- ROADMAP_v2 §29 (N4): every kind the decoder knows, rendered ----------
+# ===========================================================================
+
+# One representative payload per kind. Keyed off SAFE_DEFAULTS below, so a
+# seventh kind fails HERE too -- a test that silently skipped the new kind
+# would be the same hole one level up.
+_PAYLOADS = {
+    "approval": {"tool_name": "remember", "params": {"content": "x"}},
+    "subagent_signoff": {"agent": "scout", "candidates": ["remember"]},
+    "question": {"question": "which?", "options": ["red", "blue"]},
+    "review": {"finding": {"claim_id": "c1"}, "round": 1},
+    "confirm": {"title": "Write these files?", "body": "ARCHITECTURE.md"},
+    "choice": {"options": ["software", "research"], "proposal": "software",
+               "reason": "it has a pyproject.toml", "blank": False},
+}
+
+
+class TestEveryKindIsRendered:
+    """Audit #7. A kind with no branch falls through `ask` to None, which
+    decode turns into that kind's declining default -- so a feature built
+    on it reports "the user did not answer" on every CLI run while looking
+    perfectly wired up. CONFIRM and CHOICE sat in that state through two
+    sections, reachable only because /init supplied its own callbacks.
+    """
+
+    @staticmethod
+    def _channel(lines=()):
+        import unittest.mock as mock
+
+        import main
+        from tests.conftest import FakeStdinReader
+
+        reader = FakeStdinReader(lines)
+        with mock.patch.object(main, "_stdin_reader", return_value=reader):
+            channel = main.build_attended_provider()
+        return channel, reader
+
+    def test_the_payload_table_covers_every_kind(self):
+        """Guards the guard: a kind absent from _PAYLOADS could not be
+        checked by the test below, and its absence would look like
+        coverage."""
+        from core import interaction
+
+        assert set(_PAYLOADS) == set(interaction.SAFE_DEFAULTS)
+
+    @pytest.mark.parametrize("kind", sorted(_PAYLOADS))
+    def test_the_cli_actually_asks(self, kind):
+        """Behavioural, not a set comparison: what makes a kind supported
+        is that a human is put the question, and a branch that returns
+        without asking is exactly the defect."""
+        from core import interaction
+
+        channel, reader = self._channel()
+        channel.ask(interaction.Request(kind=kind, payload=_PAYLOADS[kind]))
+        assert reader.prompts, (
+            f"{kind!r} reached nobody -- it falls through to "
+            f"{interaction.SAFE_DEFAULTS[kind]!r} silently, which is #7")
+
+    def test_the_channel_declares_what_it_renders(self):
+        from core import interaction
+
+        channel, _ = self._channel()
+        assert channel.rendered_kinds == frozenset(interaction.SAFE_DEFAULTS)
+
+    def test_the_tui_renders_every_kind_too(self):
+        """§23's rule is that a new kind needs a branch in BOTH shells, and
+        the CLI is the half that was missing one. Checked against the
+        dispatch SOURCE rather than by driving modals, because the point
+        is that the branch exists at all."""
+        import inspect
+
+        from core import interaction
+        from tui.app import VenastineApp
+
+        source = inspect.getsource(VenastineApp._ask_blocking)
+        missing = [k for k in interaction.SAFE_DEFAULTS
+                   if f"interaction.{k.upper()}" not in source]
+        assert not missing, f"tui/app.py cannot render {missing}"
+
+
+class TestTheConfirmRenderer:
+
+    @staticmethod
+    def _answer(typed):
+        import unittest.mock as mock
+
+        import main
+        from core import interaction
+        from tests.conftest import FakeStdinReader
+
+        reader = FakeStdinReader([typed] if typed is not None else [])
+        with mock.patch.object(main, "_stdin_reader", return_value=reader):
+            channel = main.build_attended_provider()
+        return interaction.ask(channel, interaction.Request(
+            kind=interaction.CONFIRM, payload=_PAYLOADS["confirm"]))
+
+    def test_yes_confirms(self):
+        assert self._answer("y") is True
+
+    def test_anything_else_declines(self):
+        assert self._answer("maybe") is False
+
+    def test_no_answer_declines(self):
+        """The fail-safe, at the one place a CLI user authorises a write."""
+        assert self._answer(None) is False
+
+    def test_the_body_is_shown_before_the_question(self, capsys):
+        """Approval must be informed. A yes/no whose text never reached
+        the terminal is a button, not consent."""
+        self._answer("n")
+        assert "ARCHITECTURE.md" in capsys.readouterr().out
+
+
+class TestTheChoiceRenderer:
+    """Three ways in, because the terminal should not be worse at this
+    than the modal -- and `s` means software by unique prefix rather than
+    by anything hard-coding /init's vocabulary into the channel."""
+
+    @staticmethod
+    def _answer(typed, payload=None):
+        import unittest.mock as mock
+
+        import main
+        from core import interaction
+        from tests.conftest import FakeStdinReader
+
+        reader = FakeStdinReader([typed] if typed is not None else [])
+        with mock.patch.object(main, "_stdin_reader", return_value=reader):
+            channel = main.build_attended_provider()
+        return interaction.ask(channel, interaction.Request(
+            kind=interaction.CHOICE, payload=payload or _PAYLOADS["choice"]))
+
+    def test_a_number_picks_that_option(self):
+        assert self._answer("2") == "research"
+
+    def test_a_unique_prefix_picks_that_option(self):
+        assert self._answer("s") == "software"
+
+    def test_a_bare_enter_takes_the_suggestion(self):
+        """The affordance the pre-§29 CLI prompt advertised by name, kept
+        by reading `proposal` off the payload the TUI already sends."""
+        assert self._answer("") == "software"
+
+    def test_a_bare_enter_with_no_suggestion_chooses_nothing(self):
+        payload = dict(_PAYLOADS["choice"], proposal=None, blank=True)
+        assert self._answer("", payload) is None
+
+    def test_an_unmatched_answer_chooses_nothing(self):
+        """decode validates against the options that were OFFERED, so a
+        renderer inventing one would be answering a different question."""
+        assert self._answer("perl") is None
+
+    def test_an_ambiguous_prefix_chooses_nothing(self):
+        payload = dict(_PAYLOADS["choice"],
+                       options=["research", "reference"], proposal=None)
+        assert self._answer("re", payload) is None
+
+    def test_no_answer_chooses_nothing(self):
+        assert self._answer(None) is None

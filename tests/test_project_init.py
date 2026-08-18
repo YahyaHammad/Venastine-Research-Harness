@@ -23,6 +23,7 @@ and has to say so, or it fills the picker with threads nobody will resume.
 """
 
 import os
+from types import SimpleNamespace
 
 import pytest
 
@@ -845,3 +846,65 @@ async def test_an_unrecognised_kind_answer_cancels(project, fake_agent):
         assert any(role == "system" and "Cancelled" in text
                    for role, text in entries), entries
         assert not any(role == "error" for role, _text in entries), entries
+
+
+class TestTheCliInitGoesDownTheChannel:
+    """§29 (N5), audit #7. §23 slice 1 said generate()'s confirm and
+    choose_kind are "a shell-agnostic API the CLI implements too" and
+    moved the TUI onto the response channel. The CLI is the half that was
+    never moved, and kept two guards written by hand.
+    """
+
+    @staticmethod
+    def _run(monkeypatch, tmp_path, lines, interactive=True):
+        """Drive run_init_command, capturing what generate() was handed."""
+        import main
+        from project_init import generator
+        from tests.conftest import FakeStdinReader
+
+        seen = {}
+
+        def _fake_generate(**kwargs):
+            seen.update(kwargs)
+            return {"text": "did nothing", "written": []}
+
+        reader = FakeStdinReader(lines)
+        monkeypatch.setattr(main, "_stdin_reader", lambda: reader)
+        monkeypatch.setattr(generator, "generate", _fake_generate)
+        monkeypatch.setattr(main.sys.stdin, "isatty", lambda: interactive)
+
+        args = SimpleNamespace(research_project=False, software_project=False)
+        code = main.run_init_command(args, "ANTHROPIC", "m")
+        return code, seen, reader
+
+    def test_confirm_is_asked_through_the_channel(self, monkeypatch, tmp_path):
+        code, seen, reader = self._run(monkeypatch, tmp_path, ["y"])
+        assert code == 0
+        assert seen["confirm"]("ARCHITECTURE.md, CONTEXT.md") is True
+        assert reader.prompts, "nothing was ever put to the user"
+
+    def test_choose_kind_is_asked_through_the_channel(self, monkeypatch,
+                                                     tmp_path):
+        _, seen, _ = self._run(monkeypatch, tmp_path, ["research"])
+        assert seen["choose_kind"]("software", "it has a setup.py",
+                                   False) == "research"
+
+    def test_the_prompts_carry_no_deadline(self, monkeypatch, tmp_path):
+        """N2. There is no run waiting on this answer, so a deadline
+        would only discard the answer of someone who stepped away
+        mid-decision -- and it must not claim one it does not have."""
+        _, seen, reader = self._run(monkeypatch, tmp_path, ["y"])
+        seen["confirm"]("some files")
+        assert reader.timeouts == [None]
+        assert "s)" not in reader.prompts[0], reader.prompts[0]
+
+    def test_a_pipe_passes_no_confirm_route_at_all(self, monkeypatch,
+                                                   tmp_path):
+        """The trap in the migration. generate() reads confirm=None as
+        "report what you WOULD write without writing it" (I5/V6) -- which
+        is not the same answer as a channel that declines. Handing it a
+        channel on a pipe turns a dry run into a refusal.
+        """
+        _, seen, _ = self._run(monkeypatch, tmp_path, [], interactive=False)
+        assert seen["confirm"] is None
+        assert seen["choose_kind"] is None

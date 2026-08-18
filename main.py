@@ -580,25 +580,103 @@ def build_attended_provider(honour_run_scope: bool = False,
                 print(f"  [ignoring {piece!r} — not one of the numbers above]")
         return chosen
 
-    def ask(request):
-        if request.kind == interaction.APPROVAL:
-            return _approval(request)
-        if request.kind == interaction.SUBAGENT_SIGNOFF:
-            return _signoff(request)
-        if request.kind == interaction.QUESTION:
-            return _question(request)
-        if request.kind == interaction.REVIEW:
-            return _prompt_review_decision(
-                reader, request.payload.get("finding") or {},
-                request.payload.get("round", 0), timeout)
-        # An unrecognised kind is a bug in whoever built the Request, and
-        # interaction.decode raises on one. Returning None here lets that
-        # happen rather than inventing an answer for a question this shell
-        # does not know how to put.
+    def _confirm(request):
+        """A titled yes/no over a block of text the caller composed.
+
+        §29 (N4), audit #7. CONFIRM and APPROVAL both answer with a bool
+        and are still separate kinds, because the KIND is what tells a
+        shell how to render: an approval is a gated tool call with params,
+        this is prose someone wants signed off.
+        """
+        payload = request.payload
+        body = payload.get("body", "")
+        if body:
+            print(f"\n{body}")
+        answer = reader.ask(
+            f"  {payload.get('title', 'Proceed?')} [y/N]{clock}: ", timeout)
+        if answer is None:
+            print("  [no answer — nothing was done]")
+            return False
+        return answer.strip().lower() in ("y", "yes")
+
+    def _choice(request):
+        """Exactly one of the options offered, or nothing.
+
+        Renders from the payload the TUI already established rather than
+        from anything --init-shaped, so the two shells put the same
+        question. Three ways in, because the terminal should not be worse
+        at this than the modal: a number, a unique prefix (which is what
+        makes `s` mean software without anything hard-coding it), or a
+        bare Enter to take the suggestion.
+        """
+        payload = request.payload
+        options = [str(o) for o in (payload.get("options") or ())]
+        proposal = payload.get("proposal")
+        if payload.get("blank"):
+            print("\nThis folder is empty, so there is nothing to go on.")
+        elif proposal:
+            print(f"\nThis looks like a {proposal} project — "
+                  f"{payload.get('reason', 'no reason given')}.")
+        labels = " or ".join(f"[{o[:1]}]{o[1:]}" for o in options)
+        accepts = " (enter accepts the suggestion)" if proposal else ""
+        answer = reader.ask(f"  {labels}?{accepts}{clock}: ", timeout)
+        if answer is None:
+            print("  [no answer — nothing was chosen]")
+            return None
+        cleaned = answer.strip()
+        if not cleaned:
+            # None when there was no proposal, which decode reads as the
+            # declining default -- not as a pick made on the user's behalf.
+            return proposal
+        if cleaned.isdigit() and 1 <= int(cleaned) <= len(options):
+            return options[int(cleaned) - 1]
+        matched = [o for o in options
+                   if o.lower().startswith(cleaned.lower())]
+        if len(matched) == 1:
+            return matched[0]
+        print(f"  [{cleaned!r} is not one of: {', '.join(options)}]")
         return None
 
-    return interaction.ResponseChannel(
+    def _review(request):
+        return _prompt_review_decision(
+            reader, request.payload.get("finding") or {},
+            request.payload.get("round", 0), timeout)
+
+    # §29 (N4). A TABLE, not an if-chain, so the set of kinds this shell
+    # can render is a value a test can compare against
+    # interaction.SAFE_DEFAULTS -- which is already the canonical registry,
+    # since decode() raises on anything not in it.
+    #
+    # Audit #7 is what a missing branch costs: the kind falls through to
+    # None, decode turns that into the declining default, and the feature
+    # reports "the user did not answer" on every CLI run while looking
+    # perfectly wired up. CONFIRM and CHOICE sat in that state through two
+    # sections. A runtime warning would only fire once someone reached the
+    # branch, which is exactly the condition nobody noticed.
+    handlers = {
+        interaction.APPROVAL: _approval,
+        interaction.SUBAGENT_SIGNOFF: _signoff,
+        interaction.QUESTION: _question,
+        interaction.REVIEW: _review,
+        interaction.CONFIRM: _confirm,
+        interaction.CHOICE: _choice,
+    }
+
+    def ask(request):
+        handler = handlers.get(request.kind)
+        if handler is None:
+            # An unrecognised kind is a bug in whoever built the Request,
+            # and interaction.decode raises on one. Returning None here
+            # lets that happen rather than inventing an answer for a
+            # question this shell does not know how to put.
+            return None
+        return handler(request)
+
+    channel = interaction.ResponseChannel(
         ask=ask, honour_run_scope=honour_run_scope)
+    # Read by the parity test; nothing in production branches on it.
+    channel.rendered_kinds = frozenset(handlers)
+    return channel
 
 
 def run_memory_command(args) -> int:
@@ -681,6 +759,7 @@ def run_init_command(args, provider_name: str, model: str) -> int:
     there is no consent route, so `confirm` stays None and the generator
     reports what it WOULD write without writing it (I5/V6).
     """
+    from core import interaction
     from project_init import doc_sets
     from project_init.generator import InitError, generate
 
@@ -695,24 +774,31 @@ def run_init_command(args, provider_name: str, model: str) -> int:
 
     interactive = sys.stdin.isatty()
 
+    # §29 (N5). Down the same channel as every other CLI question, with
+    # the shared decoder instead of two guards written by hand here.
+    # §23 slice 1 said this was the design -- "generate()'s
+    # confirm/choose_kind parameters are unchanged, they are a
+    # shell-agnostic API the CLI implements too" -- and moved the TUI. The
+    # CLI is the half that was never moved, which is audit #7.
+    #
+    # timeout=None (N2) because there is no run waiting on the answer. A
+    # 600s deadline here would discard the answer of someone who stepped
+    # away mid-decision and came back, and there is nothing it would keep
+    # moving in the meantime.
+    channel = build_attended_provider(timeout=None) if interactive else None
+
     def _confirm(summary: str) -> bool:
-        print(f"\n{summary}")
-        return _ask("Write these files? [y/N]: ").strip().lower() in ("y", "yes")
+        return interaction.ask(channel, interaction.Request(
+            kind=interaction.CONFIRM,
+            payload={"title": "Write these files?", "body": summary,
+                     "confirm_label": "Write"}))
 
     def _choose_kind(proposal, reason, blank):
-        if blank:
-            print("\nThis folder is empty, so there is nothing to go on.")
-        elif proposal:
-            print(f"\nThis looks like a {proposal} project — {reason}.")
-        answer = _ask("Document set — [s]oftware or [r]esearch? "
-                      "(enter accepts the suggestion): ").strip().lower()
-        if not answer:
-            return proposal
-        if answer in ("s", "software"):
-            return doc_sets.SOFTWARE
-        if answer in ("r", "research"):
-            return doc_sets.RESEARCH
-        return None
+        return interaction.ask(channel, interaction.Request(
+            kind=interaction.CHOICE,
+            payload={"options": list(doc_sets.PROJECT_KINDS),
+                     "proposal": proposal, "reason": reason,
+                     "blank": blank}))
 
     try:
         notice = generate(
