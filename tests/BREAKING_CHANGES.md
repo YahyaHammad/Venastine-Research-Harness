@@ -2042,3 +2042,16 @@ statement about paths rather than a gap. `os.path.join` on POSIX reads `C:/Users
 relative directory named `C:`, so it stays inside the workspace — and it should, because it
 names nothing outside it there. The escape is real only where the syntax is. The Linux
 container is what found the combined assertion wrong.
+
+### Verification
+
+| | |
+|---|---|
+| Windows | **1742 passed, 16 skipped, 1 deselected** |
+| `python:3.11-slim` | **1757 passed, 1 skipped, 1 deselected** |
+| the one Linux skip | `test_a_windows_drive_and_a_unc_path_escape_on_windows`, by design — see the platform note above |
+| mutations | 14; 13 red on a test named for each, 1 green control, `git status --short` clean after restore |
+| the Linux-only mutation | `.venastine` nested guard: GREEN on Windows (its test skips), **RED in the container** |
+| outside the suite | `python main.py --help` exit 0 and `import tui.app` on both platforms; the `:ro` mount measured in a real container |
+
+The two totals agree: 1742 + 16 = 1757 + 1 = 1758 collected.
