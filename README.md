@@ -159,18 +159,39 @@ Every registered tool appears in that table, and a test asserts it (audit #125):
 
 `pin` and `remember` sit either side of the line that matters: pinning a message is thread-scoped and undoable, while remembering something outlives the conversation and silently shapes ones you have not started yet.
 
-### `shell` is layered, and not every layer is an approval
+### `shell` is classified, not just approved
 
-`shell` ships **disabled** (`ToolPermissions.shell = False`) and cannot be enabled at runtime, so none of this applies to a default install. If you do enable it, its approval answer is not one boolean — it is decided in order:
+`shell` ships **disabled** (`ToolPermissions.shell = False`) and cannot be enabled at runtime, so none of this applies to a default install. If you do enable it, the gate is `config.SHELL_APPROVAL_MODE`:
 
-1. `ToolApprovals.shell = True`, the shipped default → **every** command is asked about, and the rest of this list never runs.
-2. Otherwise, a command on the read-only allowlist (`ls`, `cat`, `grep`, …) with no shell metacharacters and no path-qualified binary is auto-approved and runs **on the host**, outside the sandbox.
-3. Otherwise, if Docker is available, it is auto-approved and runs in a container — workspace mounted read-write, network only if the command's first word is on the network allowlist (`curl`, `pip`, `git`, …).
-4. Otherwise the insecure-fallback flags decide, and both are off by default.
+| mode | behaviour |
+|---|---|
+| `always` | every command is asked about, whatever it does |
+| `tiered` | **shipped.** The classifier decides — see below |
+| `never` | nothing is ever asked about |
 
-**Two known limitations, tracked as [#157](https://github.com/YahyaHammad/Venastine-Research-Harness/issues/157) and not yet fixed.** Step 2 inspects only the first word, so `cat /root/.ssh/id_rsa` classifies as read-only and runs on the host — *read-only is not the same as harmless* when the output goes back into a model's context. And the approval decision never consults whether the command will get network access, which step 3 decides separately; so egress is settled after the question of whether to ask anyone.
+`ToolApprovals.shell` is **not** the gate; it is the ratchet. It ships `False`, and setting it `True` forces `always` regardless of the mode. An agent's `approval_overrides` reaches the same place with the same one-way power: these can tighten and never loosen. An unknown mode string raises at startup rather than falling back to a default — one direction of that default asks about everything and the other about nothing, and a typo cannot pick.
 
-A tiered classifier that answers both questions from one classification — capability sets rather than a trust level, read by the approval check and the sandbox alike — is **designed and not built**. The design is recorded in DEVLOG and ROADMAP_v2 §25; it is not in the code, and nothing above depends on it.
+Under `tiered`, each command is classified **once** into what it can do, and the same answer is read by the approval check and by the sandbox that runs it:
+
+| tier | what it is | where it runs | asked? |
+|---|---|---|---|
+| `INERT` | read-only command, every argument inside the workspace | host | no |
+| `HOST_READ` | read-only, but an argument reaches outside the workspace | host | **yes** |
+| `SANDBOXED` | anything else, no network | container | no, if Docker is confirmed up |
+| `SANDBOXED_NET` | its first word is on the network allowlist (`curl`, `pip`, `git`, …) | container, with network | **yes** |
+| `UNKNOWN` | could not be characterised at all | — | **yes** |
+
+The auto-approved set is narrower than the `read` tool's, which is already unprompted inside the workspace. A `SANDBOXED` command can do what `write` and `edit` can already do without asking — corrupt the workspace — bounded to 1 CPU, 1 GB, 200 processes, 60 seconds, no network and no host filesystem.
+
+**The argument rule does not parse, deliberately.** Every token after the first is read as a path and required to stay inside the workspace; a flag like `-la` passes only because it is *relative*, not because anything recognised it as a flag. Refusing to interpret shell syntax is what makes the check trustworthy — a classifier that parses is a shell parser, and a parser that is wrong auto-approves something dangerous. The cost is occasional false positives: `grep /etc/passwd notes.txt` searches for a string that looks like a path, and costs one prompt.
+
+**An approved host read still reads the host.** `cat /etc/shadow` is asked about; if you say yes, it runs on the host, because that is what you approved. Routing it into a container would answer a different question than the one you were asked.
+
+**`never` is the old unbounded behaviour, kept on purpose.** In that mode `cat ~/.aws/credentials` runs on the host, unprompted, and its output goes into the model's context. It is reachable by writing the word `never` — which is the fix for [#157](https://github.com/YahyaHammad/Venastine-Research-Harness/issues/157): previously you reached it by switching off a field that read like "stop nagging me".
+
+`shell_approval_mode` is **rejected** in `.venastine/settings.json`, by name and with a reason. A project's settings beat your own, and a cloned repository must not be able to set this. Set it in `config.py`.
+
+If your workspace contains a `.venastine/` directory, it is bind-mounted **read-only** inside the container, so a sandboxed command cannot rewrite the context and MCP definitions that feed later prompts. This covers writes on the Docker path only — not reads, and not the subprocess fallback.
 
 ### "Headless" means *unable to ask*, not "not a GUI"
 
@@ -311,20 +332,23 @@ Precedence for provider and model is CLI flag > `settings.json` > `config.py`.
 
 ## Status
 
-**Built:** ROADMAP.md §1–§12 (§10's ensemble mode rebuilt by its revisit — diversity now comes from a roster of different models) and ROADMAP_v2.md §13 (streaming loop), §14 (config loader + workspace trust), §15 (permissions), §16 (TUI), §17 (MCP), §18 (agents), §19 (skills), §20 (post-pipeline review), §21a (compaction + `pin`), §21b (durable memory), §22 (live pipeline progress), §25 (authorised tool use in the pipeline), §26 (research legibility: per-pass tool calls, code-stage announcements, the claims view, role colour, `/copy`), §27 (thread legibility: transcript replay on resume, a conversations-only thread picker), §21c (session summaries and cross-thread referencing — §21 is now complete), §24 (`/init`), §23 (interactive tools: the response channel, per-tool subagent sign-off, `ask_user`, and the todo list).
+**Built:** ROADMAP.md §1–§12 (§10's ensemble mode rebuilt by its revisit — diversity now comes from a roster of different models) and ROADMAP_v2.md §13 (streaming loop), §14 (config loader + workspace trust), §15 (permissions), §16 (TUI), §17 (MCP), §18 (agents), §19 (skills), §20 (post-pipeline review), §21a (compaction + `pin`), §21b (durable memory), §22 (live pipeline progress), §25 (authorised tool use in the pipeline), §26 (research legibility: per-pass tool calls, code-stage announcements, the claims view, role colour, `/copy`), §27 (thread legibility: transcript replay on resume, a conversations-only thread picker), §21c (session summaries and cross-thread referencing — §21 is now complete), §24 (`/init`), §23 (interactive tools: the response channel, per-tool subagent sign-off, `ask_user`, and the todo list), §28 (the shell capability classifier).
 
 **Remaining:** nothing in either roadmap, and §10's revisit is now closed. TECHNICAL_DEBT.md items 9 and 10 are open, and two live checks are recorded against §10 (see DEVLOG) that cannot be settled offline: the default `temperature` on OpenAI and Google, and whether OpenAI's reasoning models belong in `config.MODELS_REJECTING_SAMPLING_PARAMS`.
 
 **Not finished, though: an audit is open.** Both roadmaps being built is not the same as the
 code being clean, and saying only the first would be the "built and runs are different claims"
 mistake this project keeps recording against itself. Audit Pass 1 is tracked in GitHub issues —
-**104 open**, of which 4 are S1 and 18 are S2 — and is being worked in numbered fix batches
-(seven merged or pending so far, each recorded in `DEVLOG.md` and `tests/BREAKING_CHANGES.md`
-with what was measured and what would break the fix). The one an operator should know about is
-**#157**: `shell`'s auto-approval, described under *Security model* above, which matters only if
-you enable a tool that ships disabled.
+**102 open**, of which 3 are S1 and 18 are S2 — and is being worked in numbered fix batches
+(eight merged or pending so far, each recorded in `DEVLOG.md` and `tests/BREAKING_CHANGES.md`
+with what was measured and what would break the fix).
 
-Run the test suite with `pytest` — 1707 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
+**#157 — `shell`'s unbounded auto-approval — is closed** by batch 8 and ROADMAP_v2 §28; the
+classifier is described under *Security model* above. If you have a fork or a local `config.py`,
+note that `ToolApprovals.shell` now ships `False` and `SHELL_APPROVAL_MODE` is the gate — see
+`tests/BREAKING_CHANGES.md` §24.
+
+Run the test suite with `pytest` — 1758 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
 
 ## Documentation
 

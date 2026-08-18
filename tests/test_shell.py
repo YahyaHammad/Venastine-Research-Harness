@@ -524,7 +524,22 @@ class TestTheArgumentRuleNeverParses:
         assert _escapes_workspace("grep --file=/etc/x n.txt", _tiered) is True
         assert _asks("grep --file=/etc/x notes.txt") is True
 
-    def test_a_windows_drive_and_a_unc_path_both_escape(self, _tiered):
+    def test_a_posix_absolute_path_escapes_on_every_platform(self, _tiered):
+        assert _escapes_workspace("cat /etc/shadow", _tiered) is True
+        assert _escapes_workspace("cat /", _tiered) is True
+
+    @pytest.mark.skipif(platform.system() != "Windows",
+                        reason="drive letters and UNC paths are Windows path "
+                               "syntax; elsewhere they are ordinary relative "
+                               "names and land inside the workspace, which is "
+                               "the correct answer there")
+    def test_a_windows_drive_and_a_unc_path_escape_on_windows(self, _tiered):
+        """Platform-split rather than asserted everywhere, because the
+        Linux container proved the combined version wrong: os.path.join
+        on POSIX treats "C:/Users/x" as a relative directory named "C:",
+        so it stays inside the workspace -- and it SHOULD, since it names
+        nothing outside it there. The escape is real only where the
+        syntax is."""
         assert _escapes_workspace(
             "cat C:/Users/x/.aws/credentials", _tiered) is True
         assert _escapes_workspace(

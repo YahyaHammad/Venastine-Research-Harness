@@ -1919,3 +1919,126 @@ Any earlier row asserting the exact text `"requires approval and was not given"`
 gated by name or by its arguments. The change is deliberate and the old wording was the
 defect: it told the model to retry with approval in the one situation where approval cannot
 be obtained.
+
+
+---
+
+## §24 — the eighth fix batch: the shell capability classifier (2026-08-18)
+
+Closes audit **#157** (S1) and **#50** (S3). ROADMAP_v2 **§28**, decisions **G1–G7**.
+
+### The config change that breaks things, stated first
+
+**`ToolApprovals.shell` ships `False` instead of `True`, and `config.SHELL_APPROVAL_MODE` ships
+`"tiered"`.** These move together or neither means anything — see below. If you have a fork, a
+patch, or a test that reads `ToolApprovals().shell` expecting `True`, it is now wrong.
+
+`False` here does **not** mean "never ask". The gate is `SHELL_APPROVAL_MODE`. The field is the
+ratchet: setting it `True` still forces `always`, because `approval_needed` ORs the tool's own
+check with `requires_approval` and both read it. D14's one-way property is intact — a config or
+an agent override can still only tighten.
+
+### What breaks
+
+| What | Before | After | Why |
+|---|---|---|---|
+| `ToolApprovals().shell` | `True` | `False` | While it was `True` the tool's check could never lower the answer, so `tiered` was unreachable dead code (G3) |
+| `config.SHELL_APPROVAL_MODE` | did not exist | `"tiered"` | The gate. `always` / `tiered` / `never`; an unknown value **raises at import** |
+| `_shell_approval_check(name, params)` | five-step ladder, four steps dead | classify → decide | Same signature, same registration; the body is replaced |
+| `run_sandboxed(...)` | `(command, workspace_dir, shell_binary, docker_available)` | `+ profile=` | Optional. `None` classifies internally, so existing callers are unaffected |
+| `run_sandboxed(...)` | never touched the filesystem | `os.makedirs(workspace_dir, exist_ok=True)` | #50. **A test passing a fictional `workspace_dir` now creates it** — the suite's own routing tests passed `"/tmp/ws"` and left a real `C:\tmp\ws` behind until they moved to `tmp_path` |
+| `_run_inert` / `_run_subprocess_fallback` | caught `FileNotFoundError` | catch `OSError` too | #50's other half: a bad CWD is `NotADirectoryError` on Windows, which is **not** a `FileNotFoundError`, so it escaped the handler entirely |
+| `_run_docker` argv | one `-v` | sometimes two | A `:ro` bind for `.venastine`, only when it is nested in the workspace **and** already exists (G6) |
+| `settings.json` | `shell_approval_mode` → "unknown key" | rejected **by name** | G7, R12's rule on a third key |
+| `shell` `ToolSpec` | no `approval_notice` | `_shell_approval_notice` | The prompt now says *where* the command runs |
+| `classify_command(command, ws)` | — | total over any input | The gate is handed the model's raw tool input; `ShellParams` does not validate until `run()` |
+
+### Before and after, measured
+
+The defect first, because it is larger than #157 states. With `ToolApprovals.shell = False` and
+both fallback flags at their shipped values:
+
+```
+docker=True   -> set of answers from _shell_approval_check, every command shape: {False}
+docker=False  -> set of answers from _shell_approval_check, every command shape: {False}
+```
+
+No command reached a `True`. Step 4 was the only rung that could produce one, and it needs
+`ALLOW_INSECURE_SANDBOX_FALLBACK=True`, which does not ship. The five-layer policy was a
+pass-through for one boolean.
+
+Then the same commands through the real gate, measured on Linux in `python:3.11-slim`:
+
+```
+command                     BEFORE (asked?)      AFTER (tier / containment / asked?)
+cat /etc/shadow             False, on the HOST   HOST_READ      uncontained  True
+grep -r sk-ant /            False, on the HOST   HOST_READ      uncontained  True
+cat ~/.aws/credentials      False                SANDBOXED      contained    False
+curl https://a/?d=x         False, with egress   SANDBOXED_NET  contained    True
+pip install evil            False, with egress   SANDBOXED_NET  contained    True
+ls -la                      False                INERT          uncontained  False
+cat notes.txt               False                INERT          uncontained  False
+python x.py                 False                SANDBOXED      contained    False
+```
+
+`cat ~/.aws/credentials` reads oddly and is correct: `~` is a metacharacter, so the command was
+never inert, and in a container `~` is the container's home.
+
+### Exactly one thing got looser
+
+Read-only commands whose every argument resolves inside the workspace are auto-approved, where a
+pre-§28 user with `ToolApprovals.shell = True` was prompted. `ToolApprovals.read` is already
+`False`, so `read` on a workspace file was unprompted while `cat` on the same file prompted —
+that inconsistency is what went away. Everything else is unchanged or strictly tighter.
+
+`SHELL_APPROVAL_MODE = "never"` **is** the old loose configuration, kept on purpose. The fix is
+not that it became unreachable; it is that reaching it means writing the word `"never"` rather
+than switching off a field that reads like "stop nagging me".
+
+### Vacuity classes
+
+Nothing new this batch, but two known ones bit and are worth the record.
+
+**A check that passes because its input was empty.** `CommandProfile` originally had no
+`measured` field. A profile the classifier could not characterise answers `False` to every
+capability question, so the CONTAINED branch approved it *for having no network* — an
+unmeasurable command auto-approved by the containment argument. The field exists to make
+"we could not tell" unarguable, and it is where batch 9's "the model is not sure" has to land.
+
+**A test whose premise is the thing under change.**
+`test_ac3_context_false_does_not_suppress_tool_approval_check` pinned D14's ratchet using
+`rm -rf /` and a docstring that said it worked *because* `ToolApprovals.shell` defaulted `True`
+and step 1 returned before anything read the command. Flipping that field made `rm -rf /`
+genuinely contained, so the test would have been asserting the override rather than the tool.
+It now uses `cat /etc/shadow`, whose answer comes from the tool under every configuration and
+without probing Docker.
+
+### Mutation pass
+
+Fourteen mutations, thirteen red on a test named for each, one green control, `git status
+--short` clean after restore. Two came back other than predicted:
+
+| mutation | predicted | actual | what it taught |
+|---|---|---|---|
+| `.venastine` **nested** half deleted | GREEN — `os.path.join` always produces a nested path, so the guard looked unreachable | GREEN on Windows, **RED on Linux** | The reasoning was wrong: `realpath` resolves **symlinks**, so a `.venastine` symlinked at `/etc` escapes. Now killed by a test needing directory symlinks — which skips on Windows, so this guard is verified **only** in the container (§21's rule) |
+| `SHELL_APPROVAL_MODE` flipped to `"never"` | GREEN — nothing pins the shipped value | **RED** | It was pinned by accident, by a §7 fallback test that happens not to set the mode. Coverage by accident moves the moment that test sets it, so it now has a test that states it |
+
+### Verified outside the suite
+
+The `.venastine` mount's semantics are **measured in a real container**, not asserted from
+memory: `/workspace` writable, the subtree `EROFS`, `rm` and `mv` on the mountpoint refused with
+`EROFS` and `EBUSY`, reads unaffected, host copy byte-identical, and the container's write to
+`/workspace` visible on the host so builds still work.
+
+And the hazard the `isdir` half exists for is real: `docker run` with a missing bind source
+**creates it on the host**, and an empty `.venastine/` flips `is_trusted()` from `True` to
+`False` on its own. An unconditional mount would have conjured a directory into the user's
+project and then prompted them to trust it.
+
+### Platform note
+
+`test_a_windows_drive_and_a_unc_path_escape_on_windows` is skipped off Windows, and that is a
+statement about paths rather than a gap. `os.path.join` on POSIX reads `C:/Users/x` as a
+relative directory named `C:`, so it stays inside the workspace — and it should, because it
+names nothing outside it there. The escape is real only where the syntax is. The Linux
+container is what found the combined assertion wrong.
