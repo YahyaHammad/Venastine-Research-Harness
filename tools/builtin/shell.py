@@ -12,13 +12,22 @@ SANDBOX MODEL:
   (strong isolation) or the explicit subprocess fallback (weak
   isolation, requires ALLOW_INSECURE_SANDBOX_FALLBACK=True).
 
-APPROVAL MODEL:
-  The shell tool uses a layered approval check:
-  - If ToolApprovals.shell is True → always requires approval.
-  - If the command is inert → auto-approved (light path).
-  - If Docker is available → auto-approved (strong isolation).
-  - If the fallback is used and AUTO_APPROVE_SANDBOX_FALLBACK is False
-    → requires individual approval per run.
+APPROVAL MODEL (ROADMAP_v2 §28):
+  config.SHELL_APPROVAL_MODE is the gate -- "always", "tiered" or
+  "never" -- and ToolApprovals.shell is the RATCHET above it: True
+  forces "always", and can never loosen (D14).
+
+  Under "tiered", the command is classified ONCE
+  (security/sandbox.classify_command) into a capability set, and the
+  generic rule in security/capability.auto_approved decides. The same
+  profile is then handed to run_sandboxed, so the thing that was
+  approved is the thing that runs.
+
+  What this replaced: a five-step ladder whose bottom four steps could
+  only return False on the shipped config flags, making the whole check
+  a pass-through for ToolApprovals.shell. Audit #157 is what that cost
+  -- `cat ~/.aws/credentials` classified as "inert", ran on the HOST,
+  and was never asked about.
 
   TOCTOU safety: run() probes Docker once and passes the result to
   run_sandboxed(). If Docker was available during approval but is now
@@ -38,15 +47,29 @@ import logging
 from pydantic import BaseModel, Field
 
 import config
+from security import capability
+from security.capability import UNAVAILABLE, UNCONTAINED, auto_approved
 from security.sandbox import (
+    HOST_READ,
+    INERT,
     SandboxUnavailable,
     _is_inert,
+    classify_command,
+    containment_for,
     detect_shell,
     is_docker_available,
     run_sandboxed,
 )
 
 logger = logging.getLogger(__name__)
+
+# Validated at IMPORT, so a typo in a security setting is a startup
+# failure rather than a policy that quietly means something else. Same
+# posture as D24's assert_permissions_declared, applied to a value.
+# Re-checked per call as well, because a test or a runtime edit can
+# change it after this line has run.
+capability.validate_mode(config.SHELL_APPROVAL_MODE,
+                         "config.SHELL_APPROVAL_MODE")
 
 # Compute the shell name once at import time to avoid blocking on
 # subprocess probes every time the schema is accessed. On Windows this
@@ -96,31 +119,98 @@ TOOL_SCHEMA = {
 # ---------------------------------------------------------------------------
 
 
-def _shell_approval_check(tool_name: str, params: dict) -> bool:
-    """Layered approval policy for the shell tool.
+def _profile_and_containment(command: str):
+    """Classify *command* and work out what will contain it.
 
-    1. Base config approval (ToolApprovals.shell) → always ask.
-    2. Inert command → auto-approved (light path, no isolation concern).
-    3. Docker available → auto-approved (strong isolation).
-    4. Fallback + AUTO_APPROVE_SANDBOX_FALLBACK=False → ask per run.
-    5. Fallback + AUTO_APPROVE_SANDBOX_FALLBACK=True → auto-approved.
+    One helper for both the gate and the prompt so they cannot describe
+    the same call differently -- which is the failure #157 came from,
+    with `_is_inert` consulted twice for two different questions.
+    """
+    profile = classify_command(command, config.WORKSPACE_DIR)
+    # Docker is probed only when the answer depends on it. An inert
+    # command is UNCONTAINED either way, and the pre-§28 ladder had this
+    # ordering too -- its inert step returned before its Docker step, so
+    # `ls` never paid for a `docker info` that costs up to its 10s
+    # timeout when the daemon is unresponsive.
+    if profile.tier in (INERT, HOST_READ):
+        return profile, containment_for(profile, docker_available=False)
+    return profile, containment_for(profile, is_docker_available())
+
+
+def _shell_approval_check(tool_name: str, params: dict) -> bool:
+    """Whether this shell call needs a human to say yes (ROADMAP_v2 §28).
+
+    Reads top to bottom as the policy it is:
+
+      1. ToolApprovals.shell is the RATCHET. True forces "always",
+         whatever the mode says, so a config or an agent override can
+         still only tighten (D14).
+      2. The mode answers outright unless it is "tiered".
+      3. AUTO_APPROVE_SANDBOX_FALLBACK is applied HERE, visibly, rather
+         than passed into the generic rule to be honoured out of sight.
+         It is the user's own opt-in to an isolation level the harness
+         has already told them is weak.
+      4. Otherwise the capability rule decides.
+
+    The return is `not auto_approved(...)` -- this function answers "must
+    someone be asked", the rule answers "is this covered". Two names for
+    opposite polarities of one question, and inverting them by accident
+    is a silent auto-approve, so the negation stays on one line where it
+    can be read.
     """
     approvals = config.ToolApprovals()
     if getattr(approvals, tool_name, False):
         return True
 
-    command = params.get("command", "")
-
-    if _is_inert(command):
+    mode = capability.validate_mode(config.SHELL_APPROVAL_MODE,
+                                    "config.SHELL_APPROVAL_MODE")
+    if mode == capability.ALWAYS:
+        return True
+    if mode == capability.NEVER:
         return False
 
-    if is_docker_available():
+    profile, containment = _profile_and_containment(
+        params.get("command", ""))
+
+    # The pre-§28 steps 4 and 5, preserved exactly. For a non-inert tier,
+    # UNCONTAINED can only mean "Docker is down AND the insecure fallback
+    # is enabled" -- that is what containment_for computed -- so this
+    # reads the answer already in hand instead of re-deriving it from two
+    # more config reads and a second Docker probe.
+    if (profile.tier not in (INERT, HOST_READ)
+            and containment == UNCONTAINED
+            and config.AUTO_APPROVE_SANDBOX_FALLBACK):
         return False
 
-    if config.ALLOW_INSECURE_SANDBOX_FALLBACK:
-        return not config.AUTO_APPROVE_SANDBOX_FALLBACK
+    # No backend can run this, so there is nothing to approve. NOT the
+    # same as auto_approved() answering False, which means ASK -- the two
+    # polarities meet here and only here. run_sandboxed still raises
+    # SandboxUnavailable with the instructions; asking first would spend
+    # a human decision on an outcome that is already fixed, which is the
+    # burn-a-turn class, and it is what the pre-§28 check did too.
+    if containment == UNAVAILABLE:
+        return False
 
-    return False
+    return not auto_approved(profile, containment)
+
+
+def _shell_approval_notice(params: dict, _context=None) -> str:
+    """What the person answering the prompt is being asked to allow.
+
+    Wired through ToolSpec.approval_notice, which core/loop.py already
+    renders above the params. The command is right there in the params,
+    so what this adds is the part the command text does NOT show: where
+    it will run. "cat /etc/shadow" does not look like a host read until
+    someone tells you the inert path is a host subprocess.
+    """
+    profile, containment = _profile_and_containment(
+        params.get("command", ""))
+    where = {
+        "contained": "in a Docker container, workspace mounted at /workspace",
+        "uncontained": "on the HOST, with your own file access",
+        "unavailable": "nowhere -- no sandbox backend is available",
+    }.get(containment, containment)
+    return f"{profile.tier}: {profile.reason}. Runs {where}."
 
 
 # ---------------------------------------------------------------------------
@@ -163,6 +253,9 @@ def run(params: dict) -> dict:
             command=parsed.command,
             workspace_dir=config.WORKSPACE_DIR,
             docker_available=docker_up,
+            # §28: the SAME classification the approval check made, so
+            # routing cannot disagree with the decision to allow it.
+            profile=classify_command(parsed.command, config.WORKSPACE_DIR),
         )
     except SandboxUnavailable as e:
         return {"error": str(e)}

@@ -4202,3 +4202,139 @@ that edge now have tests named for them, since neither did.
 - **#131**, **#70**, **#68 + #69**, **#37/#38/#39**, **#75 + #78**,
   **#16/#17/#147**, **#57/#76/#100** — the groups batches 5 and 6 recorded,
   still deliberately un-split.
+
+
+---
+
+## Audit Pass 1 — fix batch 8, the shell capability classifier (2026-08-18)
+
+`fix/batch-8-shell-classifier`, branched from batch 7. Closes **#157** (S1) and **#50** (S3).
+Full decision record in **ROADMAP_v2 §28 (G1–G7)**; what breaks, in `tests/BREAKING_CHANGES.md`
+§24. This entry is what building it taught.
+
+### The defect was bigger and simpler than the issue said
+
+#157 described two holes. Measuring it for the plan found one sentence that covers both. With
+`ToolApprovals.shell = False`:
+
+```
+docker=True   -> set of answers from _shell_approval_check, across every command shape: {False}
+docker=False  -> same: {False}
+```
+
+`_shell_approval_check` documented a five-layer policy. Four of those layers are `False` sinks,
+and the only rung that can return `True` needs `ALLOW_INSECURE_SANDBOX_FALLBACK`, which does not
+ship. **It was a pass-through for one boolean wearing a policy's docstring.** So the harness had
+exactly two shell settings — ask about everything, or ask about nothing — and #157's holes are
+what the second one costs.
+
+That reframing is what made the batch tractable. The work is not "add checks to a policy"; it is
+"build the middle rung the docstring already claimed existed".
+
+### The one design change the plan got wrong, and it was the important one
+
+The locked plan said both *ship `tiered`* and *`ToolApprovals.shell` stays the master gate*.
+Those cannot both hold, and measuring is what showed it: `approval_needed` is
+
+```python
+tool_level or requires_approval(tool_name, params, context)
+```
+
+and **both terms read `ToolApprovals.shell`**. While it is `True` the tool's own check can never
+lower the answer, so `tiered` is unreachable dead code no matter how good the classifier is. The
+field had to flip to `False` and the mode had to become the gate.
+
+That is a real loosening for one population — someone who enables `shell` and touches nothing
+else — so it needed to be justified rather than absorbed. It is justified by one comparison:
+`ToolApprovals.read` is already `False`, so `read` on a workspace file is unprompted **today**
+while `cat` on the same file prompts. The auto-approved set is narrower than `read`'s: read-only
+command, no metacharacters, no path-qualified binary, every argument inside the workspace. G3
+removes an inconsistency rather than opening a door.
+
+### What the tests found that the reasoning did not
+
+**Three, and all three were the tests earning their keep.**
+
+*The gate sees raw model output.* `registry.approval_needed` is handed the tool-call input
+verbatim; `ShellParams` does not validate it until `run()`, which is after approval. A test
+that had been passing `{"command": ["ls"]}` for unrelated reasons crashed the whole loop —
+`command.strip()` on a list is an `AttributeError` escaping the approval check. This was
+unreachable *only* because the old field defaulted `True` and returned first, so flipping G3
+exposed it. Totality is now a stated requirement of `classify_command`, not defensiveness.
+
+*Polarity.* `auto_approved(profile, UNAVAILABLE)` returning `False` means **ASK**, like every
+other `False` — not "do not ask". The plan's rule table said "→ do not ask" and the docstring
+repeated it, but a generic predicate cannot carry two meanings in one return value. It needed an
+explicit branch in `_shell_approval_check`, and the docstring now says so at the point where the
+polarities meet. The batch's own test caught it; nothing in the design would have.
+
+*Hermeticity.* Adding `makedirs` to `run_sandboxed` (#50) turned the routing tests' fictional
+`"/tmp/ws"` into a real `C:\tmp\ws` the suite left behind. A directory nobody looked at, created
+by a fix, outside the repo — worth catching before it became a mystery.
+
+### What the mutation pass found
+
+Fourteen mutations, thirteen red on a test named for each. Two came back other than predicted,
+and both mattered more than the twelve that behaved.
+
+**A surviving mutant with a wrong explanation.** Deleting the `.venastine` mount's `nested` guard
+changed nothing. My reasoning: `os.path.join(ws, ".venastine")` always produces a path under
+`ws`, so the guard is unreachable. True — and irrelevant, because `realpath` resolves
+**symlinks**. A `.venastine` symlinked at `/etc` would be bind-mounted into the container at
+`/workspace/.venastine`; read-only, so it could not be modified, but it would put a directory the
+workspace does not contain in front of a model that reads files. This is the escape §14 already
+found once in the trust hash, arriving in a second place. The lesson is not "write more tests" —
+it is that **a surviving mutant with a confident explanation is the one to distrust**, because
+the explanation is exactly as unverified as the guard.
+
+Its test needs directory symlinks, so it skips on Windows. §21's rule applied literally: the
+guard was **not verified** until the mutation ran in `python:3.11-slim`, where it went red.
+
+**Coverage by accident.** Flipping the shipped `SHELL_APPROVAL_MODE` to `"never"` was predicted
+green — no test reads the shipped value, they all pin the mode through a fixture. It came back
+red, killed by a §7 fallback test that happens not to set the mode. That is a pin, but an
+incidental one: it would evaporate the moment that test set the mode explicitly, and nobody would
+notice. It now has a test that states it, plus one for `ToolApprovals.shell` being `False`, since
+those two must move together.
+
+### Verified in a real container rather than remembered
+
+The nested `:ro` mount's behaviour is the kind of claim it is easy to assert and easy to be wrong
+about, so it was measured: `/workspace` writable, a write to the subtree `EROFS`, `rm` and `mv`
+on the mountpoint refused with `EROFS` and `EBUSY`, reads unaffected, the host copy
+byte-identical, and the container's write to `/workspace` visible on the host so builds still
+work.
+
+And the hazard the `isdir` half exists for is real. `docker run` with a missing bind source
+**creates it on the host**. An empty `.venastine/` flips `is_trusted()` from `True` to `False` by
+itself, so the unconditional mount the plan originally locked would have had the sandbox conjure
+a directory into the user's project and then prompt them to trust it. Two lines of guard, and
+neither is padding.
+
+### The Linux container also found a wrong test
+
+`test_a_windows_drive_and_a_unc_path_both_escape` asserted that `C:/Users/x/.aws/credentials`
+escapes the workspace. It does — on Windows. On POSIX, `os.path.join` reads `C:/Users/x` as a
+relative directory named `C:`, so it stays inside, **and it should**, because it names nothing
+outside the workspace there. Split by platform, with the reason in the skip message.
+
+### Selection rule, unchanged
+
+High severity, low blast radius, no issue another open issue would force a rewrite of. #157 was
+the last S1 in the sandbox. #50 came with it because it is five lines in the same function and
+every workspace-scoped decision this batch adds lands on that directory — and writing its test
+found the half of #50 nobody had measured, that a bad CWD escapes the handler entirely on
+Windows.
+
+### Deferred, deliberately
+
+**Batch 9, model-based judgement.** Designed, not built, and one property is recorded in §28 now
+so this batch does not foreclose it: the deterministic classifier runs first and anything
+compound is `UNKNOWN`, so **the model never sees compound shell**. Routing complex commands to it
+later to reduce prompts collapses the injection argument entirely. It also needs a ceiling —
+"certain safe" must not authorise a host read — which would make it the **first layer in this
+harness that widens rather than tightens**, and D14's ratchet has held everywhere else. Named
+decision, not an implication.
+
+Also deferred: `write` / `edit` / MCP capability profiles. The policy layer is generic so they
+extend additively; building them now would be speculative generality.

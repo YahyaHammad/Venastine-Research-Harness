@@ -210,6 +210,30 @@ INIT_MAX_STEPS = 12
 SHELL_BINARY = os.environ.get("AGENT_SHELL", "")  # auto-detect if empty
 ALLOW_INSECURE_SANDBOX_FALLBACK = False  # explicitly enable subprocess fallback
 AUTO_APPROVE_SANDBOX_FALLBACK = False    # auto-approve fallback runs (no per-run prompt)
+
+# ROADMAP_v2 §28 (G3). WHICH shell commands need a human to say yes.
+#
+#   "always"  every command is asked about, whatever it does.
+#   "tiered"  the classifier decides -- see security/capability.py for the
+#             one rule, and security/sandbox.py:classify_command for how a
+#             command is measured against it.
+#   "never"   nothing is ever asked about.
+#
+# This is the gate. Before §28 the gate was ToolApprovals.shell, and
+# `_shell_approval_check` looked like a five-layer policy underneath it --
+# but four of those layers could only ever return False on the shipped
+# flags, so the whole thing was a pass-through for one boolean and the
+# harness had exactly two settings: ask about everything, or ask about
+# nothing. "tiered" is the rung that docstring already claimed existed.
+#
+# "never" is that second setting, preserved deliberately and now NAMED.
+# It is the pre-§28 `ToolApprovals.shell = False` behaviour exactly: an
+# inert command runs on the HOST with unrestricted arguments, so `cat
+# ~/.aws/credentials` returns your keys to the model. You reach that by
+# writing "never", not by switching off a field that reads like "stop
+# nagging me" -- which is the actual fix for audit #157.
+SHELL_APPROVAL_MODE = "tiered"
+SHELL_APPROVAL_MODES = ("always", "tiered", "never")
 SANDBOX_DOCKER_IMAGE = os.environ.get("AGENT_SANDBOX_IMAGE", "python:3.13-slim")
 SANDBOX_TIMEOUT_SECONDS = 60
 SANDBOX_MEMORY_MB = 1024
@@ -537,7 +561,18 @@ class ToolApprovals:
     read: bool = False
     write: bool = False
     edit: bool = False
-    shell: bool = True
+    # ROADMAP_v2 §28 (G3). False since §28, and False here does NOT mean
+    # "never ask" -- SHELL_APPROVAL_MODE is the gate, and it ships
+    # "tiered". This field is the RATCHET, and it still only tightens:
+    # approval_needed() ORs the tool's own check with requires_approval(),
+    # and requires_approval() reads this field, so setting it True forces
+    # "always" whatever the mode says. An agent's approval_overrides
+    # reaches the same OR and has the same one-way power (D14).
+    #
+    # It stays declared because D24 requires every registered tool to have
+    # a field in both dataclasses, and because the ratchet needs somewhere
+    # to live. Do not delete it and do not read it as the gate.
+    shell: bool = False
     load_skill: bool = False
     # Approving a spawn is the §18 subagent sign-off: it authorises the
     # child's whole approval-gated tool set for the rest of the turn, so

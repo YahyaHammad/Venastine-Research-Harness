@@ -40,7 +40,7 @@ python main.py --init --research-project           # §24: skip the type questio
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 1707 tests, offline, ~25-45s by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 1758 tests, offline, ~25-45s by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -60,7 +60,7 @@ MCP servers are a *third* config file again — `mcp.json`, user-level or `.vena
 Read these before changing anything non-trivial — they carry design decisions that are locked, not defaults to re-derive.
 
 - **ARCHITECTURE.md** — what's built, file-by-file contracts ("what belongs here / what does NOT"), known gotchas (§11).
-- **ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **ROADMAP_v2.md** (§13–§27, all built) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I13 from §24 and J1–J14 from §23). Section and D-numbers are stable and cross-referenced everywhere.
+- **ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **ROADMAP_v2.md** (§13–§28, all built) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I13 from §24, J1–J14 from §23 and G1–G7 from §28). Section and D-numbers are stable and cross-referenced everywhere.
 - **DEVLOG.md** — per-section implementation notes: what was followed verbatim, what was deviated from (every deviation was an explicit user decision — do not silently override).
 - **tests/BREAKING_CHANGES.md** — what breaks each test when production code changes, the symptom, and the fix.
 - **CLAUDE.md / QWEN.md** — pointers to this file, nothing more. They exist so a harness that looks for one filename finds it without searching; the content has one copy.
@@ -377,9 +377,38 @@ parsed since §14 with no consumer at all — this is its first.
   it (audit #21), and `shell` is globally denied like `read`/`write`/`edit`:
   `is_tool_allowed` reads `config.ToolPermissions()` directly and returns before any
   context or approval logic, D14 forbids widening, and `settings.json` has no
-  `permissions` section. Its `ToolApprovals.shell = True` is unreachable by
-  construction, and so is all 436 lines of `security/sandbox.py` plus `config.py`'s
-  whole sandbox block, until someone edits `config.py`.
+  `permissions` section. Its whole approval apparatus is unreachable by
+  construction, and so is `security/sandbox.py` plus `config.py`'s sandbox block,
+  until someone edits `config.py`.
+
+### The shell gate (`§28`, G1–G7)
+
+Read §28's record before touching `security/sandbox.py`, `security/capability.py` or
+`_shell_approval_check`. The four things most likely to be re-derived wrongly:
+
+- **`SHELL_APPROVAL_MODE` is the gate; `ToolApprovals.shell` is the ratchet** (G3). The
+  field ships `False` and that does NOT mean "never ask". It cannot be the gate:
+  `approval_needed` ORs the tool's check with `requires_approval` and **both** read it,
+  so `True` there makes the tool's check unable to lower the answer — which is why a
+  tiered mode was unreachable dead code until §28 flipped it. Setting it `True` still
+  forces `always`, so D14's one-way ratchet is intact. **Do not "fix" the default back.**
+- **The argument rule must never parse** (G2). Every token after the first is read as a
+  path; a flag passes only because it is relative. `_is_inert` is sound *because* it
+  rejects metacharacters rather than understanding them, and a classifier that learns
+  shell syntax is a shell parser whose bugs auto-approve. False positives are the
+  designed error direction.
+- **`profile.measured` gates every containment branch** (G5). A profile that could not be
+  characterised answers `False` to every capability question, so without it the
+  CONTAINED branch approves an unmeasurable command *for having no network*. It is also
+  where batch 9's "the model is not sure" has to land.
+- **`classify_command` must stay total.** `registry.approval_needed` is handed the
+  model's tool input verbatim; `ShellParams` does not validate until `run()`, which is
+  after approval. A non-string `command` used to be an `AttributeError` escaping the
+  approval check and then the loop.
+
+`shell_approval_mode` is rejected in `settings.json` **by name** (G7), the way R12
+rejects `research.granted_tools`: a project's settings beat the user's, and this key
+decides whether shell commands are asked about at all.
 
 ### Thread summaries and cross-thread references (`§21c`)
 

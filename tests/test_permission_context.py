@@ -147,17 +147,27 @@ def test_ac3_context_false_does_not_suppress_tool_approval_check(reg, monkeypatc
     if the tool's own check says so OR the config/context does, and a
     `False` entry is indistinguishable from the key being absent.
 
-    Uses the REAL shell approval_check via config defaults
-    (ToolApprovals.shell is True, which its step 1 returns on
-    immediately), so no Docker probe runs and the assertion does not
-    depend on the host."""
+    Uses the REAL shell approval_check via config defaults, and the
+    command matters. It used to be `rm -rf /`, which worked only because
+    ToolApprovals.shell defaulted True and step 1 returned before
+    anything looked at the command at all. §28 made SHELL_APPROVAL_MODE
+    the gate and flipped that field to False (G3), so `rm -rf /` is now
+    classified -- and a container with no network genuinely contains it,
+    so the TOOL no longer demands approval for it and this test would
+    have been asserting the override, not the tool.
+
+    `cat /etc/shadow` is the replacement because its answer comes from
+    the tool under every configuration: it is HOST_READ, which is
+    UNCONTAINED without consulting Docker, so no probe runs and the
+    assertion still does not depend on the host."""
     from tools.builtin import shell
 
     reg.register(ToolSpec("shell", {"name": "shell"}, _handler,
                           approval_check=shell._shell_approval_check))
 
     loosening = ToolContext(approval_overrides={"shell": False})
-    assert reg.approval_needed("shell", {"command": "rm -rf /"}, loosening) is True
+    assert reg.approval_needed(
+        "shell", {"command": "cat /etc/shadow"}, loosening) is True
 
     # And the call is genuinely blocked, not merely flagged. shell is
     # permission=False in the shipped config, so it has to be enabled
@@ -165,7 +175,8 @@ def test_ac3_context_false_does_not_suppress_tool_approval_check(reg, monkeypatc
     # nothing about approval at all.
     _patch_dataclass(monkeypatch, "ToolPermissions", shell=True)
     with pytest.raises(ToolCallDenied, match="requires approval"):
-        reg.dispatch("shell", {"command": "rm -rf /"}, context=loosening)
+        reg.dispatch("shell", {"command": "cat /etc/shadow"},
+                     context=loosening)
 
 
 def test_ac3_or_composition_with_a_synthetic_approval_check(reg, monkeypatch):

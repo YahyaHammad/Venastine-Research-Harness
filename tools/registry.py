@@ -554,7 +554,10 @@ registry.register(ToolSpec("geometry", geometry.TOOL_SCHEMA, geometry.run, grant
 registry.register(ToolSpec("read", file_ops.READ_TOOL_SCHEMA, file_ops.read_run, approval_check=file_ops._file_approval_check, grant_policy=GRANT_NEVER))
 registry.register(ToolSpec("write", file_ops.WRITE_TOOL_SCHEMA, file_ops.write_run, approval_check=file_ops._file_approval_check, grant_policy=GRANT_NEVER))
 registry.register(ToolSpec("edit", file_ops.EDIT_TOOL_SCHEMA, file_ops.edit_run, approval_check=file_ops._file_approval_check, grant_policy=GRANT_NEVER))
-registry.register(ToolSpec("shell", shell.TOOL_SCHEMA, shell.run, approval_check=shell._shell_approval_check, grant_policy=GRANT_NEVER))
+# §28: approval_notice carries the capability profile into the prompt.
+# The command text is already in the params; what it does not show is
+# WHERE it runs, and "cat /etc/shadow" does not look like a host read.
+registry.register(ToolSpec("shell", shell.TOOL_SCHEMA, shell.run, approval_check=shell._shell_approval_check, approval_notice=shell._shell_approval_notice, grant_policy=GRANT_NEVER))
 registry.register(ToolSpec("load_skill", load_skill.TOOL_SCHEMA, load_skill.run, available_check=load_skill.has_skills, grant_policy=GRANT_ANYWHERE))
 registry.register(ToolSpec("pin", pin.TOOL_SCHEMA, pin.run, available_check=pin.available, grant_policy=GRANT_ANYWHERE))
 # §23 slice 2. No request_kind: this tool does NOT ask through the approval
