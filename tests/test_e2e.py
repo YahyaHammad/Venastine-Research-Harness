@@ -28,7 +28,8 @@ from tests.conftest import make_model_response, make_stream_from_response
 # ---- Chat mode: multi-turn with tool use ----------------------------------
 # ===========================================================================
 
-def test_chat_mode_e2e_multi_turn_with_tool_use(mocker, capsys, fake_storage):
+def test_chat_mode_e2e_multi_turn_with_tool_use(mocker, capsys, fake_storage,
+                                                cli_stdin):
     """Full chat-mode wiring: argparse entry -> run_chat ->
     run_agent_conversation -> _run -> call_model (mocked) -> tool
     dispatch (mocked) -> response printed -> second turn resumes the
@@ -87,11 +88,8 @@ def test_chat_mode_e2e_multi_turn_with_tool_use(mocker, capsys, fake_storage):
         return_value={"result": "2026-07-27T12:00:00Z"},
     )
 
-    # --- Mock user input: two messages then EOF ---
-    mocker.patch(
-        "builtins.input",
-        side_effect=["What time is it?", "Thanks!", EOFError],
-    )
+    # --- Type two messages at the CLI's one reader, then let it EOF ---
+    cli_stdin("What time is it?", "Thanks!")
 
     # --- Suppress configure_logging filesystem side effects ---
     mocker.patch("main.configure_logging")
@@ -259,7 +257,7 @@ def test_research_mode_e2e_prints_report_and_trace(mocker, capsys):
 # ---- Audit fixes: error handling ------------------------------------------
 # ===========================================================================
 
-def test_chat_mode_survives_api_error(mocker, capsys, fake_storage):
+def test_chat_mode_survives_api_error(mocker, capsys, fake_storage, cli_stdin):
     """If run_agent_conversation raises (API key missing, network error,
     bad thread id), the chat loop must print the error and continue --
     NOT crash the interactive session. The user can retry or exit cleanly.
@@ -267,13 +265,10 @@ def test_chat_mode_survives_api_error(mocker, capsys, fake_storage):
     from core.loop import RunAgentLoop
 
     mocker.patch("main.configure_logging")
-    mocker.patch(
-        "builtins.input",
-        side_effect=["hello", EOFError],
-    )
+    cli_stdin("hello")
 
     # First call raises; the loop should catch it and continue to the
-    # next input() call (EOFError -> exit).
+    # next read (EOF -> exit).
     mocker.patch.object(
         RunAgentLoop, "run_agent_conversation",
         side_effect=RuntimeError("API key missing"),

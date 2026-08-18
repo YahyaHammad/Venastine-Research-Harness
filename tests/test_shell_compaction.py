@@ -30,7 +30,8 @@ from tui.app import VenastineApp, _cmd_compact, _parse_compact_args
 # ---- The CLI route ---------------------------------------------------------
 # ---------------------------------------------------------------------------
 
-def test_the_cli_prints_a_notice_carried_on_the_response(mocker, capsys):
+def test_the_cli_prints_a_notice_carried_on_the_response(mocker, capsys,
+                                                        cli_stdin):
     """run_to_completion() discards every non-final event, so this is the
     ONLY route the CLI has. Printed before the answer, because that is
     when it happened."""
@@ -44,7 +45,7 @@ def test_the_cli_prints_a_notice_carried_on_the_response(mocker, capsys):
                          "text": "12 earlier messages compacted"}]
     mocker.patch("main.RunAgentLoop.run_agent_conversation",
                  return_value=response)
-    mocker.patch("builtins.input", side_effect=["hello", EOFError()])
+    cli_stdin("hello")
 
     main.run_chat(None, "ANTHROPIC", "m")
 
@@ -53,7 +54,8 @@ def test_the_cli_prints_a_notice_carried_on_the_response(mocker, capsys):
     assert out.index("compacted") < out.index("the answer")
 
 
-def test_the_cli_prints_nothing_when_nothing_was_compacted(mocker, capsys):
+def test_the_cli_prints_nothing_when_nothing_was_compacted(mocker, capsys,
+                                                           cli_stdin):
     """The control. Most turns carry no notice, and a marker on every one
     would be noise that trains the reader past the real thing."""
     import main
@@ -65,7 +67,7 @@ def test_the_cli_prints_nothing_when_nothing_was_compacted(mocker, capsys):
     response.notices = []
     mocker.patch("main.RunAgentLoop.run_agent_conversation",
                  return_value=response)
-    mocker.patch("builtins.input", side_effect=["hello", EOFError()])
+    cli_stdin("hello")
 
     main.run_chat(None, "ANTHROPIC", "m")
 

@@ -10,6 +10,7 @@ parser defaults) is exercised.
 """
 
 import argparse
+import contextlib
 import sys
 from types import SimpleNamespace
 from uuid import UUID, uuid4
@@ -196,30 +197,33 @@ def test_trust_non_tty_skips_without_hanging(_untrusted_project, monkeypatch, ca
     assert "--trust-project" in capsys.readouterr().out
 
 
-def test_trust_prompt_shows_settings_contents(_untrusted_project, monkeypatch, capsys):
+def test_trust_prompt_shows_settings_contents(_untrusted_project, monkeypatch,
+                                             capsys, cli_stdin):
     """Approval must be informed: the prompt shows settings.json verbatim
     (a project's settings can pick the provider / multiply pipeline cost)."""
     from core import workspace_trust
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
-    monkeypatch.setattr("builtins.input", lambda _prompt="": "n")
+    cli_stdin("n")
     _ensure_workspace_trust(str(_untrusted_project), False)
     out = capsys.readouterr().out
     assert '"default_model": "m"' in out
     assert workspace_trust.is_trusted(str(_untrusted_project)) is False
 
 
-def test_trust_interactive_yes_grants(_untrusted_project, monkeypatch):
+def test_trust_interactive_yes_grants(_untrusted_project, monkeypatch,
+                                      cli_stdin):
     from core import workspace_trust
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
-    monkeypatch.setattr("builtins.input", lambda _prompt="": "y")
+    cli_stdin("y")
     _ensure_workspace_trust(str(_untrusted_project), False)
     assert workspace_trust.is_trusted(str(_untrusted_project)) is True
 
 
-def test_trust_interactive_no_skips(_untrusted_project, monkeypatch):
+def test_trust_interactive_no_skips(_untrusted_project, monkeypatch,
+                                    cli_stdin):
     from core import workspace_trust
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
-    monkeypatch.setattr("builtins.input", lambda _prompt="": "n")
+    cli_stdin("n")
     _ensure_workspace_trust(str(_untrusted_project), False)
     assert workspace_trust.is_trusted(str(_untrusted_project)) is False
 
@@ -435,3 +439,179 @@ def test_f5_successful_setup_returns_a_live_client(_mcp_setup, monkeypatch):
 
     assert client is _mcp_setup["created"][0]
     assert client.disconnected is False
+
+
+
+# ===========================================================================
+# ---- ROADMAP_v2 §29 (N1-N3): one reader for every stdin read --------------
+# ===========================================================================
+
+@contextlib.contextmanager
+def _reader_over(text):
+    """A _StdinReader whose pump reads `text` instead of the real stdin.
+
+    Drives the reader directly, because the thing under test is WHICH
+    object consumes a typed line -- and no assertion about what main()
+    printed can see that.
+    """
+    import io
+    import unittest.mock as mock
+
+    import main
+
+    reader = main._StdinReader()
+    with mock.patch.object(main.sys, "stdin", io.StringIO(text)):
+        reader._start()
+        reader._thread.join(timeout=5)
+        assert not reader._thread.is_alive(), "the pump never finished"
+        yield reader
+
+
+class TestOneReaderForEveryRead:
+    """Audit #100. The pump is a daemon parked in sys.stdin.readline()
+    from the first gated prompt onwards, so input() -- a SECOND reader on
+    the same descriptor -- lost every race and blocked forever."""
+
+    def test_the_chat_prompt_keeps_type_ahead(self):
+        """N1. A line typed while the model was streaming is an answer to
+        the prompt about to appear -- the terminal line-buffers it and
+        input() returned it immediately. readline() must NOT drain, or the
+        fix for a wedge silently eats the user's next message instead."""
+        with _reader_over("typed ahead\n") as reader:
+            assert reader.readline("You: ") == "typed ahead"
+
+    def test_a_gated_prompt_still_drops_stale_input(self):
+        """The mirror image, and #102's third unpinned survivor. A line
+        typed after a question timed out was answering THAT question;
+        letting it fall through would approve the next call on the
+        strength of it. ask() drains where readline() must not."""
+        with _reader_over("late answer\n") as reader:
+            assert reader.ask("  Allow? [y/N]: ", 0.05) is None
+
+    def test_ctrl_d_still_exits_chat(self):
+        """N3. input() raised EOFError on Ctrl+D and run_chat catches it
+        to exit. A reader blocked on a queue only sees a pump that
+        stopped putting things, so EOF has to be published or the fix for
+        #100's wedge is itself a wedge."""
+        with _reader_over("") as reader:
+            with pytest.raises(EOFError):
+                reader.readline("You: ")
+
+    def test_eof_is_a_latch_not_a_one_shot(self):
+        """_confirm_user_level_servers calls _ask once PER pending
+        server, so a piped run reads several times after EOF -- and
+        ask()'s drain would have swallowed a lone sentinel, stranding
+        every reader after the first."""
+        with _reader_over("") as reader:
+            assert reader.ask("first: ", 0.05) is None
+            with pytest.raises(EOFError):
+                reader.readline("second: ")
+            with pytest.raises(EOFError):
+                reader.readline("third: ")
+
+    def test_a_pump_that_raises_does_not_strand_its_readers(self):
+        """Found by the suite hanging on this batch. Under pytest's
+        capture, reading sys.stdin RAISES: the pump died and nothing
+        published EOF, so readline() waited forever. Harmless before §29
+        only because every read carried a 600s deadline -- readline() has
+        none (N2), so the same dead pump is permanent."""
+        import unittest.mock as mock
+
+        import main
+
+        class _Explodes:
+            def __iter__(self):
+                raise OSError("reading from stdin while output is captured")
+
+        reader = main._StdinReader()
+        with mock.patch.object(main.sys, "stdin", _Explodes()):
+            reader._start()
+            reader._thread.join(timeout=5)
+            assert not reader._thread.is_alive(), "the pump never finished"
+            with pytest.raises(EOFError):
+                reader.readline("You: ")
+            assert reader.ask("Allow? ", 0.05) is None
+
+    def test_main_makes_no_bare_input_call(self):
+        """The invariant N1 actually asserts, stated where it cannot rot.
+
+        #100 was reachable because ONE caller stayed on input(). The
+        others were safe only because setup_mcp happens to run before
+        run_chat -- an ordering coincidence between two functions rather
+        than a property anyone stated, and it would break the first time
+        a startup prompt moved. So: no live input() in this module.
+        """
+        import io
+        import re
+
+        import main
+
+        source = io.open(main.__file__, encoding="utf-8").read()
+        code = re.sub(r'"""[\s\S]*?"""', "", source)      # drop docstrings
+        code = "\n".join(line.split("#", 1)[0] for line in code.splitlines())
+        assert not re.search(r"(?<![\w.])input\s*\(", code), (
+            "a bare input() is a second reader on the stdin the approval "
+            "pump owns -- that is audit #100")
+
+
+class TestTheDeadlineBelongsToTheChannel:
+    """N2. What decides whether a prompt may expire is whether there is a
+    RUN waiting on the answer -- not what is being asked."""
+
+    @staticmethod
+    def _channel(timeout="default", lines=()):
+        import unittest.mock as mock
+
+        import main
+        from tests.conftest import FakeStdinReader
+
+        reader = FakeStdinReader(lines)
+        with mock.patch.object(main, "_stdin_reader", return_value=reader):
+            if timeout == "default":
+                channel = main.build_attended_provider()
+            else:
+                channel = main.build_attended_provider(timeout=timeout)
+        return channel, reader
+
+    @staticmethod
+    def _approval():
+        from core import interaction
+        return interaction.Request(
+            kind=interaction.APPROVAL,
+            payload={"tool_name": "remember", "params": {}})
+
+    def test_a_run_backed_channel_keeps_the_attended_deadline(self):
+        import config
+
+        channel, reader = self._channel()
+        channel.ask(self._approval())
+        assert reader.timeouts == [config.ATTENDED_APPROVAL_TIMEOUT_S]
+        assert f"({config.ATTENDED_APPROVAL_TIMEOUT_S}s)" in reader.prompts[0]
+
+    def test_a_channel_with_no_run_has_no_deadline(self):
+        """--init's channel. A startup prompt that expires loses the
+        answer of a user who stepped away and came back."""
+        channel, reader = self._channel(timeout=None)
+        channel.ask(self._approval())
+        assert reader.timeouts == [None]
+
+    def test_a_prompt_does_not_promise_a_deadline_it_lacks(self):
+        """The rendered '(600s)' is a claim about what happens if you say
+        nothing. A channel that will wait forever must not make it."""
+        channel, reader = self._channel(timeout=None)
+        channel.ask(self._approval())
+        assert "s)" not in reader.prompts[0], reader.prompts[0]
+
+    def test_the_deadline_is_read_at_call_time(self):
+        """conftest's shrink_approval_timeout says "read at call time, so
+        patching the module attribute is enough", and that autouse
+        fixture is what makes an unanswered prompt fail rather than stall
+        the suite for ten minutes. A plain
+        `timeout=config.ATTENDED_APPROVAL_TIMEOUT_S` default is evaluated
+        at IMPORT, which silently takes that away."""
+        import config
+
+        config.ATTENDED_APPROVAL_TIMEOUT_S = 3
+        channel, reader = self._channel()
+        channel.ask(self._approval())
+        assert reader.timeouts == [3]

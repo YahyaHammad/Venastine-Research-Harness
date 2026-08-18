@@ -8,7 +8,8 @@ Interactive CLI entry point (ROADMAP §1). Two modes:
   $ python main.py --mode research "some query"       # deep-research pipeline
   $ python main.py --provider OPENAI --model gpt-5.1  # override defaults
 
-Chat mode runs an input()/print() loop with tool use. Ctrl+C or Ctrl+D
+Chat mode runs a read/print loop with tool use, reading through the one
+_StdinReader every prompt in this module shares (§29 N1). Ctrl+C or Ctrl+D
 to exit. The thread id is printed after the first response so it can be
 resumed later with --thread.
 
@@ -130,7 +131,12 @@ def run_chat(
             first_message = None
         else:
             try:
-                user_input = input("You: ").strip()
+                # §29 (N1). Audit #100: this was input(), a SECOND reader
+                # on the stdin the approval pump already owns, so from the
+                # first gated call onwards the pump took this line and
+                # input() blocked forever. EOFError still arrives here --
+                # readline() raises it on Ctrl+D exactly as input() did.
+                user_input = _stdin_reader().readline("You: ").strip()
             except (KeyboardInterrupt, EOFError):
                 print("\nExiting.")
                 break
@@ -265,46 +271,141 @@ def _attended_only(provider):
     return RunAuthorization(provider=provider)
 
 
+# N2's "unset", distinct from None because None is a real answer here:
+# it means "wait indefinitely". A plain
+# `timeout=config.ATTENDED_APPROVAL_TIMEOUT_S` default would be evaluated
+# at IMPORT, which silently defeats tests/conftest.py's
+# shrink_approval_timeout -- a fixture whose docstring says "read at call
+# time, so patching the module attribute is enough", and which exists so
+# an unanswered prompt fails the suite instead of stalling it for ten
+# minutes.
+_DEFAULT_TIMEOUT = object()
+
+
 class _StdinReader:
-    """One background thread reading stdin, so a prompt can time out.
+    """The ONE reader of stdin in this process (ROADMAP_v2 §29, N1).
 
     input() cannot be interrupted, and spawning a reader per prompt would
     leave several threads racing for the same stdin after the first
     timeout -- whichever won would answer the wrong question. One
     long-lived daemon reader with a queue keeps that single-threaded.
 
-    Stale input is dropped before each prompt: a line typed after a
-    question timed out was an answer to THAT question, and letting it fall
-    through would approve the next call on the strength of it.
+    §29 (N1) finishes that argument, because it used to stop one caller
+    short: **input() is a second reader too**. Audit #100 is what that
+    cost. After the first approval prompt the pump is parked in
+    sys.stdin.readline() forever, so it takes the next chat line and
+    run_chat's input() waits for one that will never arrive -- a silent
+    wedge on the default shell, indistinguishable from the model
+    thinking. Every stdin read in this module now comes through here.
+
+    TWO methods, because the two callers want different disciplines and
+    the difference is a safety property rather than a preference:
+
+        ask()       drains stale input first, and may expire.
+        readline()  keeps type-ahead, and blocks.
+
+    Stale input is dropped before each ask(): a line typed after a
+    question timed out was an answer to THAT question, and letting it
+    fall through would approve the next call on the strength of it.
+    readline() must NOT drain, for the mirror-image reason -- a line
+    typed while the model was streaming is an answer to the prompt about
+    to appear, which the terminal line-buffers and input() returned
+    immediately. A `drain=` flag would put that safety rule one keyword
+    argument away from being switched off at an approval prompt, which
+    is why these are two methods and not one.
     """
 
+    # N3. The end of stdin is invisible to a queue consumer: input()
+    # raised EOFError on Ctrl+D and run_chat caught it to exit, but a
+    # reader blocked on a queue only sees a pump that stopped putting
+    # things. So EOF is published twice -- as a sentinel, to wake anyone
+    # already waiting, and as a latch, because ask()'s drain would
+    # otherwise swallow the sentinel and strand the next reader forever.
+    _EOF = object()
+
     def __init__(self):
-        self._lines = __import__("queue").Queue()
+        import queue
+        import threading
+        self._lines = queue.Queue()
         self._thread = None
+        self._eof = threading.Event()
 
     def _pump(self):
-        for line in sys.stdin:
-            self._lines.put(line)
+        try:
+            for line in sys.stdin:
+                self._lines.put(line)
+        except Exception as e:
+            # A stdin that cannot be READ is, to everyone waiting here, a
+            # stdin that has ENDED -- and the difference has to be
+            # invisible, because the `finally` below is the only thing
+            # that unblocks them. Nothing needed this before §29: a dead
+            # pump merely meant ask()'s deadline fired, and every read had
+            # one. readline() has none (N2), so the same dead pump is a
+            # permanent hang instead. Found by the suite, whose captured
+            # stdin raises on the first read.
+            logger.debug("stdin reader stopped: %s", e)
+        finally:
+            self._eof.set()
+            self._lines.put(self._EOF)
 
-    def ask(self, prompt: str, timeout: float):
-        """Returns the typed line, or None if nobody answered in time."""
-        import queue as _queue
-
+    def _start(self) -> None:
         if self._thread is None:
             import threading
             self._thread = threading.Thread(target=self._pump, daemon=True)
             self._thread.start()
+
+    def _ended(self) -> bool:
+        """stdin is closed AND nothing typed before it closed is left."""
+        return self._eof.is_set() and self._lines.empty()
+
+    def ask(self, prompt: str, timeout: float | None = None):
+        """Returns the typed line, or None if nobody answered in time.
+
+        timeout=None waits indefinitely (N2). Whether a prompt may expire
+        belongs to the CHANNEL that asked -- there has to be a run to keep
+        moving for a deadline to mean anything -- rather than to the kind
+        of question. See build_attended_provider.
+        """
+        import queue as _queue
+
+        self._start()
         while True:                      # drop anything typed too late
             try:
                 self._lines.get_nowait()
             except _queue.Empty:
                 break
         print(prompt, end="", flush=True)
+        if self._ended():
+            # Nobody can answer, so waiting out a 600s deadline for an
+            # answer that cannot come is just a slower version of this.
+            print()
+            return None
         try:
-            return self._lines.get(timeout=timeout)
+            line = self._lines.get(timeout=timeout)
         except _queue.Empty:
             print()
             return None
+        if line is self._EOF:
+            print()
+            return None
+        return line
+
+    def readline(self, prompt: str) -> str:
+        """The chat prompt and the one-shot startup prompts.
+
+        input()'s contract, on the one reader: blocks with no deadline,
+        keeps whatever was typed ahead, strips the trailing newline, and
+        raises EOFError on Ctrl+D so run_chat's existing handler and
+        _ask's default-No path are unchanged.
+        """
+        self._start()
+        print(prompt, end="", flush=True)
+        if self._ended():
+            raise EOFError
+        line = self._lines.get()
+        if line is self._EOF:
+            raise EOFError
+        return line.rstrip("\r\n")
 
 
 _STDIN_READER: "_StdinReader | None" = None
@@ -322,7 +423,8 @@ def _stdin_reader() -> _StdinReader:
     return _STDIN_READER
 
 
-def build_attended_provider(honour_run_scope: bool = False):
+def build_attended_provider(honour_run_scope: bool = False,
+                            timeout=_DEFAULT_TIMEOUT):
     """A ResponseChannel that asks at the terminal (§25 R9, §23 AC1).
 
     ONE channel for every kind of question the CLI can be asked, replacing
@@ -338,10 +440,26 @@ def build_attended_provider(honour_run_scope: bool = False):
     True for CHAT (§21b M16), where the shortcut is exactly right: being
     asked about the same tool three times in one turn is the noise §18
     added grant_scope to remove.
+
+    `timeout` is §29's N2: the deadline belongs to the CHANNEL, not to
+    the kind of question. What decides whether a prompt may expire is
+    whether there is a RUN waiting on the answer -- so the two run-backed
+    builders pass ATTENDED_APPROVAL_TIMEOUT_S and are unchanged, while
+    --init builds one with timeout=None and its prompts wait as long as
+    the user needs. Reading the constant inside each handler instead
+    would let the KIND decide, which gets it wrong in both directions: a
+    startup prompt would expire on someone who stepped away, and a
+    mid-run CONFIRM would block the run forever -- #100's own defect,
+    in the batch that fixes #100.
     """
     from core import interaction
 
+    if timeout is _DEFAULT_TIMEOUT:
+        timeout = config.ATTENDED_APPROVAL_TIMEOUT_S
     reader = _stdin_reader()
+    # Rendered into the prompts, so one cannot promise a deadline it does
+    # not have. QUESTION never showed one and still does not.
+    clock = f" ({timeout}s)" if timeout else ""
 
     def _render_params(params: dict) -> None:
         import json as _json
@@ -357,9 +475,7 @@ def build_attended_provider(honour_run_scope: bool = False):
         if request.notice:
             print(f"  {request.notice}")
         _render_params(request.payload.get("params") or {})
-        answer = reader.ask(
-            f"  Allow? [y/N] ({config.ATTENDED_APPROVAL_TIMEOUT_S}s): ",
-            config.ATTENDED_APPROVAL_TIMEOUT_S)
+        answer = reader.ask(f"  Allow? [y/N]{clock}: ", timeout)
         if answer is None:
             print("  [no answer — denied; the run continues]")
             return False
@@ -395,7 +511,7 @@ def build_attended_provider(honour_run_scope: bool = False):
         how.append("'d' to discuss it instead")
         prompt = f"  {', or '.join(how)} (blank to skip): "
 
-        answer = reader.ask(prompt, config.ATTENDED_APPROVAL_TIMEOUT_S)
+        answer = reader.ask(prompt, timeout)
         if answer is None:
             print("  [no answer — the model will be told nobody replied]")
             return None
@@ -435,9 +551,7 @@ def build_attended_provider(honour_run_scope: bool = False):
         candidates = list(request.payload.get("candidates") or [])
         if not candidates:
             print(f"\n[subagent] {agent} needs no approval-gated tools.")
-            answer = reader.ask(
-                f"  Run it? [y/N] ({config.ATTENDED_APPROVAL_TIMEOUT_S}s): ",
-                config.ATTENDED_APPROVAL_TIMEOUT_S)
+            answer = reader.ask(f"  Run it? [y/N]{clock}: ", timeout)
             if answer and answer.strip().lower() in ("y", "yes"):
                 return set()
             print("  [the spawn was refused]")
@@ -446,9 +560,8 @@ def build_attended_provider(honour_run_scope: bool = False):
         for index, name in enumerate(candidates, 1):
             print(f"  {index}. {name}")
         answer = reader.ask(
-            "  Grant which? [numbers / 'all' / 'none' / blank to refuse] "
-            f"({config.ATTENDED_APPROVAL_TIMEOUT_S}s): ",
-            config.ATTENDED_APPROVAL_TIMEOUT_S)
+            "  Grant which? [numbers / 'all' / 'none' / blank to refuse]"
+            f"{clock}: ", timeout)
         if answer is None:
             print("  [no answer — the spawn was refused]")
             return None
@@ -477,7 +590,7 @@ def build_attended_provider(honour_run_scope: bool = False):
         if request.kind == interaction.REVIEW:
             return _prompt_review_decision(
                 reader, request.payload.get("finding") or {},
-                request.payload.get("round", 0))
+                request.payload.get("round", 0), timeout)
         # An unrecognised kind is a bug in whoever built the Request, and
         # interaction.decode raises on one. Returning None here lets that
         # happen rather than inventing an answer for a question this shell
@@ -1034,14 +1147,22 @@ def resolve_review(args, settings: dict) -> bool:
     return bool(config.SUBAGENT_REVIEW)
 
 
-def _prompt_review_decision(reader, finding, round_index):
+def _prompt_review_decision(reader, finding, round_index,
+                            timeout=_DEFAULT_TIMEOUT):
     """Put one proposed correction to the terminal. (decision, notes).
 
     Extracted from build_review_consent so the review-only channel and the
     general one can share it -- §23's whole point is that there is one way
     to ask, and two copies of the prompt would be the same divergence one
     layer up.
+
+    `timeout` follows N2: the caller's channel owns the deadline. It
+    defaults to the attended one because both of this function's callers
+    are mid-run, and a review nobody is watching has to degrade rather
+    than wait.
     """
+    if timeout is _DEFAULT_TIMEOUT:
+        timeout = config.ATTENDED_APPROVAL_TIMEOUT_S
     kind = finding.get("kind")
     target = finding.get("claim_id") or "the report"
     print(f"\n[review] {kind} correction to {target} "
@@ -1051,10 +1172,10 @@ def _prompt_review_decision(reader, finding, round_index):
     if round_index:
         print(f"  (refinement {round_index} of "
               f"{config.MAX_REVIEW_REFINEMENTS})")
+    clock = f" ({timeout}s)" if timeout else ""
     answer = reader.ask(
         "  [a]ccept / [r]eject / [f] refine <note> / [!] reject the "
-        f"rest ({config.ATTENDED_APPROVAL_TIMEOUT_S}s): ",
-        config.ATTENDED_APPROVAL_TIMEOUT_S)
+        f"rest{clock}: ", timeout)
     if answer is None:
         # Same direction as an unanswered approval prompt: declining is
         # safe and continuing is useful, so walking away from a review
@@ -1112,15 +1233,21 @@ def build_review_consent():
 
 
 def _ask(prompt: str) -> str:
-    """input() that treats EOF as an empty answer.
+    """A blocking terminal read that treats EOF as an empty answer.
 
     Ctrl+D (Ctrl+Z on Windows) at a startup prompt raised EOFError out of
     a bare input(), giving a traceback where the default-No path was
     wanted. run_chat's loop already handles this; the one-shot startup
     prompts did not. Every caller here defaults to No, so "" declines.
+
+    §29 (N1): goes through the one reader rather than calling input().
+    Its callers all happen to run before the approval pump starts today,
+    so #100 could not reach them -- but that is an ordering coincidence
+    between setup_mcp and run_chat, not a property anyone stated, and it
+    would break the first time a startup prompt moved.
     """
     try:
-        return input(prompt)
+        return _stdin_reader().readline(prompt)
     except EOFError:
         print()
         return ""

@@ -78,7 +78,8 @@ def test_a_chat_session_grants_nothing(mocker):
     assert main.build_chat_authorization().granted_tools == set()
 
 
-def test_a_chat_turn_carries_the_authorization(mocker, fake_storage):
+def test_a_chat_turn_carries_the_authorization(mocker, fake_storage,
+                                              cli_stdin):
     """The CALL SITE. build_chat_authorization existing proves nothing if
     run_chat never passes it -- the §21b Part 4 lesson, applied before it
     could repeat."""
@@ -91,14 +92,14 @@ def test_a_chat_turn_carries_the_authorization(mocker, fake_storage):
             text="ok", stop_reason="complete", thread_id=None, notices=[])
 
     mocker.patch("main.RunAgentLoop.run_agent_conversation", side_effect=_run)
-    mocker.patch("builtins.input", side_effect=["hello", EOFError()])
+    cli_stdin("hello")
 
     main.run_chat(None, "ANTHROPIC", "m")
 
     assert captured["authorization"] is not None
 
 
-def test_a_piped_chat_turn_carries_none(mocker, fake_storage):
+def test_a_piped_chat_turn_carries_none(mocker, fake_storage, cli_stdin):
     """The control -- without it the test above passes against a build that
     always supplies a provider, which would silently give a piped run the
     ability to be 'asked' with nobody there."""
@@ -111,7 +112,7 @@ def test_a_piped_chat_turn_carries_none(mocker, fake_storage):
             text="ok", stop_reason="complete", thread_id=None, notices=[])
 
     mocker.patch("main.RunAgentLoop.run_agent_conversation", side_effect=_run)
-    mocker.patch("builtins.input", side_effect=["hello", EOFError()])
+    cli_stdin("hello")
 
     main.run_chat(None, "ANTHROPIC", "m")
 
