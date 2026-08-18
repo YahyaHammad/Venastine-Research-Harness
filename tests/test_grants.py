@@ -30,7 +30,7 @@ from core.client import StreamToken
 from core.loop import RunAgentLoop
 from core.reasoning.authorization import candidates
 from tools.base import GRANT_SIGNOFF_ONLY, ToolSpec
-from tools.context import RunInfo
+from tools.context import RunInfo, ToolContext
 from tools.registry import registry
 from tests.conftest import make_model_response
 
@@ -96,7 +96,7 @@ def gated_pair(mocker):
 
 
 def _drive(tool_name, *, granted=None, budget=None, channel=None,
-           calls=1, mocker=None, max_steps=2):
+           calls=1, mocker=None, max_steps=2, context=None):
     """Run one turn whose first response calls `tool_name` `calls` times.
 
     Returns (permission_request events, the final ModelResponse).
@@ -122,7 +122,7 @@ def _drive(tool_name, *, granted=None, budget=None, channel=None,
 
     events = list(RunAgentLoop._run(
         memory=_Mem(), system_prompt="s", provider_name="ANTHROPIC",
-        model="m", context=None, max_steps=max_steps,
+        model="m", context=context, max_steps=max_steps,
         response_channel=channel, granted_tools=granted,
         grant_budget=budget))
 
@@ -559,6 +559,38 @@ class TestGrantPolicyReachesEveryPlaceThatAsks:
                             channel=_AnswerChannel(), mocker=mocker)
         assert prompts == []
         assert registry._answered_by_grant("mcp__t__plain", {"mcp__t__plain"})
+
+    def test_a_grant_answers_an_approval_a_CONTEXT_imposed(self, mocker):
+        """A grant sits outside D14's one-way ratchet, on purpose, and the
+        two halves of this batch must agree about that.
+
+        `RunInfo.granted_tools`' docstring is explicit: a grant is
+        deliberately NOT an `approval_overrides` entry, "because those OR and
+        so can only ever tighten". It records that the user answered the
+        approval question early, whichever layer asked it. That has been
+        §25's behaviour at ENFORCEMENT since it shipped; what R15 changes is
+        that advertisement now says the same thing.
+
+        Pinned because it looks like a hole and is not, and because the
+        failure mode of "fixing" it is silent: the tool would be advertised
+        and then denied, which is the shape #156 exists to remove.
+        """
+        ctx = ToolContext(approval_overrides={"read_project_doc": True})
+        name, grant = "read_project_doc", {"read_project_doc"}
+
+        def visible(granted):
+            return name in {s["name"] for s in registry.schemas(
+                ctx, callable_only=True, granted=granted)}
+
+        # Without the grant the override does its job on both axes.
+        assert not visible(None)
+        assert len(_drive(name, channel=_AnswerChannel(), mocker=mocker,
+                          context=ctx)[0]) == 1
+
+        # With it, advertisement and enforcement agree the other way.
+        assert visible(grant)
+        assert _drive(name, granted=grant, channel=_AnswerChannel(),
+                      mocker=mocker, context=ctx)[0] == []
 
     def test_the_policy_does_not_reach_a_subject_keyed_signoff_memo(self):
         """The distinction the enforcement check turns on, named so the next
