@@ -105,6 +105,72 @@ async def test_research_attended_flag_gives_the_pipeline_a_provider(mocker):
 
 
 @pytest.mark.asyncio
+async def test_attended_survives_grant_when_nothing_can_be_granted(mocker):
+    """#106. §25 made authorization TWO independent axes -- a grant set,
+    possibly empty, and an ApprovalProvider, possibly absent. This branch
+    collapsed them: `_start_research(app, query, None)` dropped the
+    provider along with the grant, and §25 documents None as the pre-§25
+    status quo, "no grants, nobody to ask, every gated tool hidden from
+    every pass". So adding --grant to an --attended run turned attended
+    OFF, and the run proceeded looking supervised.
+
+    The twin of test_research_attended_flag_gives_the_pipeline_a_provider
+    above, with the same fixture, differing only by the flag. Asserted on
+    the bundle the PIPELINE receives, because the failure is silent
+    everywhere else -- nothing errors, the run just quietly stops being
+    attended.
+
+    R13 is why this is not a corner case any more. With every built-in
+    either ungated, param-dependent or excluded by policy, candidates()
+    is empty until an MCP server connects -- so `candidates` patched to
+    [] here is the DEFAULT install, not a contrived one."""
+    from tui.app import _cmd_research
+
+    mocker.patch("core.reasoning.authorization.candidates", return_value=[])
+    captured = {}
+    mocker.patch(
+        "core.reasoning.orchestrator.stream_deep_research_pipeline",
+        side_effect=lambda **kw: (captured.update(kw), _stub_events())[1])
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        _cmd_research(app, "--attended --grant what is entropy")
+        assert await settle(pilot, lambda: "authorization" in captured)
+
+    auth = captured["authorization"]
+    assert auth is not None, "--grant discarded the attended provider"
+    assert auth.provider is not None
+    assert auth.provider.honour_run_scope is False   # R11 still holds
+    assert auth.granted_tools == set()               # nothing WAS grantable
+    assert captured["user_query"] == "what is entropy"
+
+
+@pytest.mark.asyncio
+async def test_grant_alone_with_nothing_grantable_still_authorises_nothing(
+        mocker):
+    """The other side of #106's fix, so it cannot overshoot.
+
+    `_authorization_for` returns None when attended is off, and that must
+    survive: a bare --grant with nothing to grant is genuinely the
+    pre-§25 status quo, and manufacturing a bundle there would hand the
+    pipeline a provider nobody asked for."""
+    from tui.app import _cmd_research
+
+    mocker.patch("core.reasoning.authorization.candidates", return_value=[])
+    captured = {}
+    mocker.patch(
+        "core.reasoning.orchestrator.stream_deep_research_pipeline",
+        side_effect=lambda **kw: (captured.update(kw), _stub_events())[1])
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        _cmd_research(app, "--grant what is entropy")
+        assert await settle(pilot, lambda: "authorization" in captured)
+
+    assert captured["authorization"] is None
+
+
+@pytest.mark.asyncio
 async def test_research_attended_can_be_persisted_in_settings(mocker):
     """R12's asymmetry from the TUI side: the MODE comes out of
     settings.json, and a persisted mode can only ever ADD prompts."""

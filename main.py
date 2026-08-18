@@ -185,7 +185,9 @@ def build_research_authorization(grant_spec, attended: bool = False):
     absent from every run that did not ask for it.
     """
     from core.approval import GrantBudget, RunAuthorization
-    from core.reasoning.authorization import candidates, parse_grant_spec, GrantSpecError
+    from core.reasoning.authorization import (
+        NOTHING_TO_GRANT, candidates, parse_grant_spec, GrantSpecError,
+    )
 
     if grant_spec is None and not attended:
         return None
@@ -196,10 +198,13 @@ def build_research_authorization(grant_spec, attended: bool = False):
         # Attended mode is still worth building: `candidates()` lists only
         # what is GRANTABLE, and a provider can answer for the per-call
         # tools a grant could never cover.
+        #
+        # #106: the TUI collapsed the two axes here and said something
+        # false while doing it. The message is now one shared constant so
+        # they cannot say different things about the same empty answer --
+        # the module already kept them from offering different SETS.
         if grant_spec is not None:
-            print("[grant] no approval-gated tool can be granted in this "
-                  "run, so there is nothing to authorise up front.",
-                  file=sys.stderr)
+            print(f"[grant] {NOTHING_TO_GRANT}", file=sys.stderr)
         return _attended_only(provider)
 
     if grant_spec is None:
