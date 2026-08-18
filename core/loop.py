@@ -488,10 +488,39 @@ class RunAgentLoop:
         # channel CAN ask, so hiding its gated tools would report a
         # limitation the run does not have. §23 made this one condition
         # again -- it was two while there were two routes.
+        #
+        # §25 R15: and "nothing can ask" is not "nothing has answered". A
+        # GRANT is an answer given before the call existed, so a granted
+        # tool is callable with no channel at all -- which is the whole
+        # point of `--grant-tools` on an unattended run. #156: this filter
+        # could not see the grant, so a grant-only run advertised exactly
+        # what an unflagged one did while the CLI printed that it had
+        # authorised something. The enforcement path below honoured the
+        # grant correctly; the model was simply never told the tool was
+        # there, so it never emitted the call.
+        #
+        # run_info IS BUILT ABOVE THIS, not below it as it was before R15.
+        # The schemas call now needs the grant, and the grant lives on
+        # run_info -- building it after would read the name before it is
+        # bound. Nothing else moved: it depends only on values already in
+        # scope here.
+        run_info = RunInfo(
+            model=model, provider_name=provider_name, effort=effort,
+            granted_tools=set(granted_tools or ()),
+            grant_budget=grant_budget)
         headless = response_channel is None
-        tool_schemas = registry.schemas(context, callable_only=headless)
+        # The BUDGET is deliberately not consulted here. Advertisement is
+        # decided once per step; R6 makes exhaustion fall back to asking
+        # (or, headless, to denying) at CALL time, which is a per-call
+        # answer. Hiding a tool mid-run when the ceiling ran out would
+        # change what the model can see between one step and the next for
+        # a reason it cannot observe, and the model would read that as the
+        # tool having ceased to exist.
+        tool_schemas = registry.schemas(
+            context, callable_only=headless, granted=run_info.granted_tools)
         if headless:
-            hidden = tuple(sorted(registry.headless_hidden(context)))
+            hidden = tuple(sorted(registry.headless_hidden(
+                context, granted=run_info.granted_tools)))
             if hidden and hidden not in _headless_notices_shown:
                 _headless_notices_shown.add(hidden)
                 logger.warning(
@@ -500,10 +529,6 @@ class RunAgentLoop:
                     "grant it.",
                     ", ".join(hidden),
                 )
-        run_info = RunInfo(
-            model=model, provider_name=provider_name, effort=effort,
-            granted_tools=set(granted_tools or ()),
-            grant_budget=grant_budget)
         total_tokens_used = 0
         # §25 audit trail. Attached to the response object below rather
         # than at each of the three return points, so a stop condition

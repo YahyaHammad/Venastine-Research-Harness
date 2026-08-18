@@ -100,26 +100,33 @@ def _recording_provider(answers, honour_run_scope=True):
 # ===========================================================================
 
 class TestHeadlessIsAboutBeingUNABLEToAsk:
+    """R15 refines this class's premise rather than replacing it: hiding is
+    still about being unable to ask, but a GRANT is an answer given before
+    the call existed, so "unable to ask" stopped being the whole test. Both
+    spies below record the grant the filter receives as well as the flag, so
+    a change to what is passed cannot slip past a test that only watched one
+    argument -- which is how #156 survived a suite with 23 grant tests."""
 
     def test_a_gated_tool_is_hidden_with_no_way_to_ask(self, gated_tool, mocker):
         """The status quo, and the control for the test below."""
-        schemas = []
+        calls = []
         mocker.patch("core.loop.registry.schemas",
-                     side_effect=lambda ctx, callable_only=False:
-                         schemas.append(callable_only) or [])
+                     side_effect=lambda ctx, callable_only=False, granted=None:
+                         calls.append((callable_only, granted)) or [])
         _drive("mcp__a__gated", mocker=mocker)
-        assert schemas == [True], "headless filter did not run"
+        assert calls == [(True, set())], "headless filter did not run"
 
     def test_a_provider_means_the_tools_are_advertised(self, gated_tool, mocker):
         """A research pass with a provider CAN ask, so hiding its gated
         tools would report a limitation the run does not have."""
-        schemas = []
+        calls = []
         mocker.patch("core.loop.registry.schemas",
-                     side_effect=lambda ctx, callable_only=False:
-                         schemas.append(callable_only) or [])
+                     side_effect=lambda ctx, callable_only=False, granted=None:
+                         calls.append((callable_only, granted)) or [])
         provider, _ = _recording_provider([True])
         _drive("mcp__a__gated", provider=provider, mocker=mocker)
-        assert schemas == [False], "gated tools stayed hidden despite a provider"
+        assert calls == [(False, set())], (
+            "gated tools stayed hidden despite a provider")
 
 
 # ===========================================================================

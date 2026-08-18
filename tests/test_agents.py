@@ -634,6 +634,55 @@ def test_spawn_grants_nothing_when_there_is_no_channel(_roots, _mcp_tool,
     assert captured["granted_tools"] is None
 
 
+# ---------------------------------------------------------------------------
+# ---- #159: a headless run cannot spawn AT ALL -----------------------------
+# ---------------------------------------------------------------------------
+#
+# The test above calls subagent_tool.run() DIRECTLY, so it pins "if a
+# headless spawn happens, it is safe". Nothing pinned "it does not happen",
+# and that second property is what actually makes the headless child
+# unreachable: spawn_subagent is approval-gated with no approval_check, so it
+# lands in headless_hidden and is dropped from the schema list. Every run
+# that can spawn therefore has a channel, and subagent_tool.py forwards it.
+#
+# The property was derivable only by composing three separate facts, and one
+# config flag (ToolApprovals.spawn_subagent=False) removes it -- recreating
+# r3-1 through configuration rather than through the missing parameter, with
+# nothing in the suite failing. Both halves are now tested.
+
+def test_a_headless_run_is_never_offered_spawn_subagent():
+    """The invariant. r3-1's fix (forwarding the channel) is only half of
+    why a spawned child keeps its gated tools; this is the other half."""
+    headless = {s["name"] for s in registry.schemas(None, callable_only=True)}
+    assert "spawn_subagent" not in headless
+    assert "spawn_subagent" in registry.headless_hidden(None)
+
+
+def test_a_run_that_can_ask_IS_offered_spawn_subagent():
+    """Control. Without it the assertion above also passes against a
+    registry that stopped advertising spawn_subagent anywhere, which would
+    disable delegation entirely rather than confine it."""
+    assert "spawn_subagent" in {s["name"] for s in registry.schemas(None)}
+
+
+def test_a_grant_cannot_smuggle_spawn_subagent_into_a_headless_run():
+    """R15 opened one door and R13 keeps this one shut. spawn_subagent has
+    no approval_check, so grantable() says True and the new grant-aware
+    filter would advertise it -- except that _answered_by_grant also reads
+    grant_policy, which R13 set to GRANT_NEVER for exactly this authority.
+
+    A legitimate grant can never contain the name (candidates() and
+    candidate_approvals() both exclude it), so this is about a stale or
+    hand-built RunInfo. Advertising it would produce a tool the model can
+    see and R14 then refuses -- advertised and uncallable, the damage class
+    the rest of this batch removes."""
+    smuggled = registry.schemas(None, callable_only=True,
+                                granted={"spawn_subagent"})
+    assert "spawn_subagent" not in {s["name"] for s in smuggled}
+    assert "spawn_subagent" in registry.headless_hidden(
+        None, granted={"spawn_subagent"})
+
+
 def test_s1_signoff_is_remembered_per_agent_not_per_tool_name(mocker):
     """§23 AC1b amends S1's scope, and this is the amendment.
 

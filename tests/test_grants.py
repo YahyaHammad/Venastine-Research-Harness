@@ -364,3 +364,117 @@ class TestAGrantDoesNotAnswerForASubject:
 
         assert info.recall_signoff("spawn_subagent", "agent-a") == (
             True, {"web_search"})
+
+
+# ===========================================================================
+# ---- R15: the model has to be TOLD about a granted tool -------------------
+# ===========================================================================
+#
+# #156. Every test above this line asserts what the loop does once the model
+# has already chosen a granted tool -- and every one of them passes against
+# the version that never advertised it, because `_drive` BUILDS the model's
+# response itself:
+#
+#     uses = make_model_response(text="", tool_calls=[{"name": tool_name, ...}])
+#
+# The tool call is injected downstream of the filter that would have hidden
+# it. A TEST THAT SUPPLIES THE MODEL'S MOVE CANNOT DETECT THAT THE MOVE WAS
+# UNAVAILABLE. That is the whole reason a suite with 23 grant tests was green
+# while `--grant-tools` did nothing on its own, and it is why the tests below
+# assert on the `tools` argument that reaches call_model_stream instead.
+
+def _advertised(granted=None, channel=None, budget=None, *, mocker):
+    """The tool NAMES actually sent to the model on the first step.
+
+    Deliberately reads the wire argument rather than a registry call: the
+    defect was one layer of indirection wide -- registry.schemas() was
+    correct, and the loop asked it the wrong question -- so a test that
+    calls the registry itself reproduces the bug rather than catching it.
+    """
+    sent = []
+
+    def _stream(client, provider, model, messages, system_prompt, tools,
+                *a, **k):
+        sent.append([t["name"] for t in (tools or [])])
+        yield StreamToken(final_response=make_model_response(text="done"))
+
+    mocker.patch("core.loop.api_initialization", return_value=object())
+    mocker.patch("core.loop.effort_for", return_value=None)
+    mocker.patch("core.loop.call_model_stream", side_effect=_stream)
+
+    list(RunAgentLoop._run(
+        memory=_Mem(), system_prompt="s", provider_name="ANTHROPIC",
+        model="m", context=None, max_steps=1,
+        response_channel=channel, granted_tools=granted, grant_budget=budget))
+    return sent[0]
+
+
+class TestTheModelIsToldAboutAGrantedTool:
+
+    def test_a_granted_tool_is_advertised_with_no_channel(
+            self, gated_pair, mocker):
+        """R15, and the measurement from #156 inverted into an assertion.
+
+        `--grant-tools X` with no `--attended` builds exactly this: a grant
+        and no channel. Before R15 the run sent the model byte-identical
+        tools to an unflagged one while the CLI printed that it had
+        authorised something."""
+        assert "mcp__t__plain" in _advertised(
+            granted={"mcp__t__plain"}, mocker=mocker)
+
+    def test_an_ungranted_gated_tool_is_still_hidden(self, gated_pair, mocker):
+        """Control. Without it the assertion above also passes against a
+        loop that stopped filtering entirely, which would be a far worse
+        defect than the one being fixed."""
+        assert "mcp__t__plain" not in _advertised(mocker=mocker)
+
+    def test_a_grant_naming_a_param_dependent_tool_advertises_nothing(
+            self, gated_pair, mocker):
+        """The grantable() re-check at the filter. R2 says a tool deciding
+        from its params was never consented to by name; a stale or
+        hand-built grant naming one must not be able to widen what the
+        model can see any more than it can widen what dispatches."""
+        assert "mcp__t__paramwise" not in _advertised(
+            granted={"mcp__t__paramwise"}, mocker=mocker)
+
+    def test_the_budget_does_not_change_what_is_advertised(
+            self, gated_pair, mocker):
+        """R6 makes exhaustion fall back to ASKING at call time, which is a
+        per-call answer. Advertisement is decided once per step, so an
+        exhausted budget must not retract the tool mid-run -- the model
+        would read that as the tool having ceased to exist, and the
+        fallback R6 specifies would never get the chance to run."""
+        spent = GrantBudget(1)
+        spent.take()
+        assert "mcp__t__plain" in _advertised(
+            granted={"mcp__t__plain"}, budget=spent, mocker=mocker)
+
+    def test_a_channel_still_advertises_everything_gated(
+            self, gated_pair, mocker):
+        """The other control: R15 must not have made a grant the ONLY way
+        past the filter. A run that can ask still sees both tools, grant or
+        no grant."""
+        names = _advertised(channel=_AnswerChannel(), mocker=mocker)
+        assert {"mcp__t__plain", "mcp__t__paramwise"} <= set(names)
+
+
+class TestTheHeadlessNoticeAgreesWithTheFilter:
+    """The WARNING names what was hidden. It reads the same set the filter
+    does, so a granted tool must drop out of both -- a notice that names a
+    tool the model can actually call is the invisibility problem it exists
+    to prevent, wearing the opposite sign."""
+
+    def test_a_granted_tool_is_not_reported_as_hidden(self, gated_pair):
+        assert "mcp__t__plain" not in registry.headless_hidden(
+            None, granted={"mcp__t__plain"})
+
+    def test_it_is_reported_as_hidden_without_the_grant(self, gated_pair):
+        """Control, for the reason every negative in this file now carries
+        one: a fix that shrinks a set turns every 'x not in set' assertion
+        about it into a tautology."""
+        assert "mcp__t__plain" in registry.headless_hidden(None)
+
+    def test_a_param_dependent_tool_stays_hidden_despite_a_grant(
+            self, gated_pair):
+        assert "mcp__t__paramwise" in registry.headless_hidden(
+            None, granted={"mcp__t__paramwise"})
