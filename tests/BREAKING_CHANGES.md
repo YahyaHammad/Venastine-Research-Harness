@@ -1775,6 +1775,9 @@ throughout; the model was never told the tool existed.
 | Denial always blames the name | `test_a_denial_caused_by_the_arguments_says_so` | The model is told to stop when varying one argument would work |
 | Denial always blames the arguments | `test_a_denial_caused_by_the_NAME_tells_the_model_to_stop` | The model retries a tool that is uncallable however it is called, spending the rest of `max_steps` |
 | `response_channel is not None` branch removed | `test_a_human_saying_no_is_not_reframed_as_a_limitation` | A person's "no" gets reported as "this run has no way to ask" -- a decision misattributed to the configuration |
+| Headless filter loosened to `!= GRANT_NEVER` | `test_a_signoff_only_tool_is_invisible_to_a_headless_run` + the relation test | `write_project_doc` becomes visible to an unattended run, which is the one thing `SIGNOFF_ONLY` was declared to prevent |
+| The loop's grant branch stops reading `grant_policy` | `test_a_GRANT_NEVER_tool_in_a_grant_is_still_asked_about` | A grant naming `remember` writes a durable cross-session memory with no prompt (M17's scenario) |
+| `answered_by_name = not signoff` instead of `is None` | `test_s1_signoff_is_remembered_per_agent_not_per_tool_name` | An EMPTY sign-off subset is falsy but is a real answer, so truthiness misreads a memo as a name grant and R13 then blocks it |
 | `ToolApprovals.spawn_subagent = False` | `test_a_headless_run_is_never_offered_spawn_subagent` | r3-1 recreated through config: a headless pass spawns a child that silently loses every gated tool |
 
 Ten mutations run, nine RED on a test named for each, plus a deliberate GREEN control. The
@@ -1782,6 +1785,47 @@ config mutation was re-checked in isolation because `-x` had it killed by an unr
 first: run alone, `test_a_headless_run_is_never_offered_spawn_subagent` fails and its control
 `test_a_run_that_can_ask_IS_offered_spawn_subagent` passes, so the mutation is discriminated
 rather than merely fatal.
+
+### Found reviewing this batch, before merge
+
+Two places ask a question `grant_policy` answers and neither consulted it. Neither is
+reachable — `candidates()`, `candidate_approvals()` and `parse_grant_spec` all refuse the
+names involved — so nothing shipped broken. "Unreachable" is a fact about today's callers;
+these are claims about the policy, and R14 was added on exactly that argument.
+
+**The headless advertisement filter was written `!= GRANT_NEVER`.** It is reached *only*
+when the run is headless, which is the unattended case `GRANT_SIGNOFF_ONLY` exists to
+exclude — so the looser test readmitted `write_project_doc` precisely where R13's argument
+was written against it, and disagreed with `candidates()`, which answers the same question.
+**That is #67/#133's own shape, reappearing inside the batch that generalised it.** Now
+`== GRANT_ANYWHERE`, with a test asserting the *relation* to `candidates()` rather than
+checking each — the same remedy #67 used, for the same reason.
+
+**The loop's grant branch never read the policy at all** (batch 6's gap, not this batch's).
+`spawn_subagent` was covered only because R14's subject condition happens to catch it;
+`remember` carries no subject, so a grant naming it dispatched unprompted:
+
+```
+before:  granted={'remember'}  prompts=0  dispatched=['remember']
+after :  granted={'remember'}  prompts=1  dispatched=['remember']   <- asked, then allowed
+```
+
+**The first attempt at that fix broke the sign-off memo**, and only
+`test_s1_signoff_is_remembered_per_agent_not_per_tool_name` caught it — a test named for the
+memo, not for the policy. Testing `grant_policy` unconditionally stops §23's memo applying,
+because `spawn_subagent` is `GRANT_NEVER`, so the same agent is asked about twice in one
+turn. **R13 is about what approving a NAME buys; a memo is an answer somebody gave about one
+subject, which J8 and R14 govern.** The two enforcement predicates therefore differ on
+purpose:
+
+| question | predicate | why |
+|---|---|---|
+| may a grant make this visible to a **headless** run? | `== GRANT_ANYWHERE` | headless *is* unattended, and `SIGNOFF_ONLY` excludes unattended |
+| does a name grant **apply** to this call? | `!= GRANT_NEVER` | a subagent holding a `SIGNOFF_ONLY` tool after a sign-off has a channel and must run it unprompted — that is what the sign-off bought |
+
+The discriminator is `signoff is None`, **not truthiness**: an empty sign-off subset is a
+real answer (spawn the agent with nothing granted) and is stored as `set()`, which is falsy.
+Both the distinction and the empty-set edge now have tests named for them.
 
 ### A test that supplies the model's move cannot detect that the move was unavailable
 

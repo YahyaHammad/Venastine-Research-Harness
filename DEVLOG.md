@@ -4139,6 +4139,46 @@ flag (`ToolApprovals.spawn_subagent=False`) removed it with the suite green,
 and the one test in the area calls `subagent_tool.run` directly, pinning *"if
 it happens it is safe"* while nothing pinned *"it does not happen"*.
 
+### The pre-merge review found two more, in the batch's own subject
+
+Both are `grant_policy` not reaching a place that asks a question it answers.
+Neither is reachable — `candidates()`, `candidate_approvals()` and
+`parse_grant_spec` all refuse the names — so nothing shipped broken. That is a
+fact about today's callers, not about the policy, and R14 exists on exactly
+that argument.
+
+**The new headless filter was written `!= GRANT_NEVER`**, which readmits
+`write_project_doc` — and this filter is reached *only* when the run is
+headless, which is the unattended case `SIGNOFF_ONLY` was declared to exclude.
+So it disagreed with `candidates()`, the function answering the same question.
+**#67/#133's own shape, inside the batch that generalised it.** Worth saying
+plainly: writing the general lesson down does not stop you making the specific
+mistake one function later. What caught it was re-asking "who else answers this
+question?" — the check the lesson actually prescribes — rather than re-reading
+the new code.
+
+**The loop's grant branch never read the policy at all**, which is batch 6's
+gap rather than this batch's. `spawn_subagent` was covered only because R14's
+subject condition happens to catch it; `remember` carries no subject, so a
+grant naming it dispatched a durable cross-session write with no prompt.
+
+**The first attempt at that fix broke §23's sign-off memo**, and the test that
+caught it is named for the memo, not for the policy. R13 governs what approving
+a NAME buys; a memo is an answer somebody gave about one subject. Applying the
+policy to both makes `spawn_subagent` — `GRANT_NEVER` — lose its memo, so the
+same agent gets asked about twice in one turn. The two enforcement questions
+genuinely want different predicates, and conflating them is the same error in
+miniature:
+
+    headless visibility   == GRANT_ANYWHERE   headless IS unattended
+    does a grant apply    != GRANT_NEVER      a signed-off subagent has a
+                                              channel and keeps its
+                                              SIGNOFF_ONLY tool
+
+The discriminator is `signoff is None`, not truthiness, because an **empty**
+sign-off subset is a real answer stored as `set()`. Both the distinction and
+that edge now have tests named for them, since neither did.
+
 ### Deliberately not in this batch
 
 - **#157** — `shell` auto-approval is unbounded, and the safest-looking tier

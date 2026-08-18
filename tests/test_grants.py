@@ -28,7 +28,8 @@ from core.approval import GrantBudget, RunAuthorization
 from core.interaction import ResponseChannel
 from core.client import StreamToken
 from core.loop import RunAgentLoop
-from tools.base import ToolSpec
+from core.reasoning.authorization import candidates
+from tools.base import GRANT_SIGNOFF_ONLY, ToolSpec
 from tools.context import RunInfo
 from tools.registry import registry
 from tests.conftest import make_model_response
@@ -478,3 +479,124 @@ class TestTheHeadlessNoticeAgreesWithTheFilter:
             self, gated_pair):
         assert "mcp__t__paramwise" in registry.headless_hidden(
             None, granted={"mcp__t__paramwise"})
+
+
+# ===========================================================================
+# ---- R13 reaches the third reader, and the second ------------------------
+# ===========================================================================
+#
+# Found reviewing this batch. R13 declared grant_policy and taught the two
+# functions that decide what may be OFFERED to read it. Two other places ask
+# a question the policy answers and neither consulted it:
+#
+#   the headless ADVERTISEMENT filter (added by R15, this batch) -- written
+#     `!= GRANT_NEVER` first, which let write_project_doc through while
+#     candidates() refused it. #67/#133's own shape, reappearing inside the
+#     batch that generalised it.
+#   the loop's grant ENFORCEMENT branch (batch 6's gap) -- `remember` is
+#     GRANT_NEVER and carries no subject, so R14's condition never caught it
+#     and a grant naming it dispatched a durable cross-session write with no
+#     prompt. That is M17's exact scenario through the one unlocked door.
+#
+# Neither is reachable: candidates(), candidate_approvals() and
+# parse_grant_spec all refuse both names, so nothing can put them in a grant.
+# "Unreachable" is a fact about today's callers; these are claims about the
+# policy, and R14 was added on precisely this argument.
+
+class TestGrantPolicyReachesEveryPlaceThatAsks:
+
+    def test_a_signoff_only_tool_is_invisible_to_a_headless_run(self):
+        """GRANT_SIGNOFF_ONLY means a human answering in the moment may, and
+        an unattended run may not. `_answered_by_grant` is only ever reached
+        when the run is HEADLESS, which is the unattended case exactly."""
+        assert registry.grant_policy("write_project_doc") == GRANT_SIGNOFF_ONLY
+        assert not registry._answered_by_grant(
+            "write_project_doc", {"write_project_doc"})
+
+    def test_what_a_grant_makes_visible_is_what_could_have_been_offered(
+            self, gated_pair):
+        """The RELATION, because two functions disagreeing is the defect --
+        the same reason #67's test compares the two grant sets rather than
+        checking each. `candidates()` decides what may be offered to an
+        unattended run; `_answered_by_grant` decides what a grant then makes
+        visible to one. One question, so one answer."""
+        offerable = {n for n, _ in candidates()}
+        assert offerable, "an empty offer set makes this comparison trivial"
+
+        gated = set(registry.headless_hidden(None)) | offerable
+        assert gated - offerable, "everything gated is offerable; nothing is tested"
+
+        for name in gated:
+            assert (name in offerable) == registry._answered_by_grant(
+                name, {name}), name
+
+    def test_a_GRANT_NEVER_tool_in_a_grant_is_still_asked_about(
+            self, mocker):
+        """Enforcement. `remember` has no subject, so R14's condition never
+        reached it; before this, a grant naming it skipped the prompt and
+        wrote a memory that outlives the run (M17)."""
+        prompts, _ = _drive("remember", granted={"remember"},
+                            channel=_AnswerChannel(), mocker=mocker)
+        assert len(prompts) == 1, (
+            "a GRANT_NEVER tool was covered by a name-level grant")
+
+    def test_a_SIGNOFF_ONLY_tool_in_a_grant_is_NOT_asked_about(self, mocker):
+        """The control, and the reason enforcement uses `!= GRANT_NEVER`
+        where advertisement uses `== GRANT_ANYWHERE`. A subagent holding
+        `write_project_doc` from a sign-off has a channel by construction and
+        must run it unprompted -- that IS the sign-off. Tightening
+        enforcement to match the headless filter would break it."""
+        prompts, _ = _drive("write_project_doc",
+                            granted={"write_project_doc"},
+                            channel=_AnswerChannel(), mocker=mocker)
+        assert prompts == [], (
+            "the sign-off grant stopped covering the tool it exists for")
+
+    def test_an_ordinary_granted_tool_is_untouched(self, gated_pair, mocker):
+        """Control for both halves at once: the GRANT_ANYWHERE case must
+        still skip the prompt and still be advertised headless."""
+        prompts, _ = _drive("mcp__t__plain", granted={"mcp__t__plain"},
+                            channel=_AnswerChannel(), mocker=mocker)
+        assert prompts == []
+        assert registry._answered_by_grant("mcp__t__plain", {"mcp__t__plain"})
+
+    def test_the_policy_does_not_reach_a_subject_keyed_signoff_memo(self):
+        """The distinction the enforcement check turns on, named so the next
+        person does not have to rediscover it the way this one did.
+
+        R13 is about what approving a NAME buys. A sign-off memo is an answer
+        somebody actually gave about one subject, which J8 and R14 govern.
+        `spawn_subagent` is GRANT_NEVER, so a policy test applied to BOTH
+        stops §23's memo working and the same agent is asked about twice in
+        one turn -- caught here only by `test_s1_signoff_is_remembered_per_
+        agent_not_per_tool_name`, which is named for the memo and not for
+        this.
+
+        The loop separates them by what `recall_signoff` returns, and this
+        pins that property: the memo always carries a subset, a name grant
+        always carries None."""
+        info = RunInfo(model="m", provider_name="p",
+                       granted_tools={"mcp__lib__search"})
+        info.remember_signoff("spawn_subagent", "agent-a", {"web_search"})
+
+        remembered, subset = info.recall_signoff("spawn_subagent", "agent-a")
+        assert remembered and subset is not None, (
+            "a memo hit must be distinguishable from a name grant")
+
+        remembered, subset = info.recall_signoff("mcp__lib__search", None)
+        assert remembered and subset is None, (
+            "a name grant must be distinguishable from a memo hit")
+
+    def test_an_EMPTY_signoff_subset_is_still_a_memo_not_a_grant(self):
+        """The edge the discriminator has to survive. An empty sign-off is a
+        real answer -- spawn the agent with nothing granted -- and it is
+        stored as `set()`, which is falsy. Anything testing truthiness rather
+        than `is None` would misread it as a name grant and then apply R13 to
+        it."""
+        info = RunInfo(model="m", provider_name="p")
+        info.remember_signoff("spawn_subagent", "agent-a", set())
+
+        remembered, subset = info.recall_signoff("spawn_subagent", "agent-a")
+        assert remembered
+        assert subset == set()
+        assert subset is not None

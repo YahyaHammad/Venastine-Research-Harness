@@ -50,7 +50,7 @@ Venastine Research Harness/
 ├── CLAUDE.md / QWEN.md             # pointers to AGENTS.md, so a harness that auto-loads one of those names finds the context instead of a second copy of it
 ├── DEVLOG.md                       # implementation notes for built ROADMAP sections -- see §0
 │
-├── tests/                          # 1698 tests, all offline, ~25-45s depending on the machine (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
+├── tests/                          # 1705 tests, all offline, ~25-45s depending on the machine (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
 │   ├── conftest.py                 # fixtures: make_model_response, make_stream_from_response, make_stream_sequence, FakeStorage, ...
 │   ├── BREAKING_CHANGES.md         # what-breaks-it / symptom / fix per area
 │   ├── test_cli.py                 # 20 tests -- ROADMAP §1 thread_id passthrough + UUID validation + §14 parser defaults/resolution/trust flow
@@ -85,7 +85,7 @@ Venastine Research Harness/
 │   ├── test_tui.py                 # 51 tests -- ROADMAP_v2 §16 AC1-AC3 (thread picker, permission round-trip, worker survives a raising tool) + §25 grant picker / attended modal + #106's two axes staying independent + /model's provider/model switch
 │   ├── test_mcp_config.py          # 26 tests -- ROADMAP_v2 §17 mcp.json discovery, tier precedence D29, unknown-key tolerance, strict flag parsing
 │   ├── test_mcp_client.py          # 30 tests -- ROADMAP_v2 §17 bridge, cancel-scope task affinity, v2 field names, normalization, teardown
-│   ├── test_grants.py              # 31 tests -- ROADMAP_v2 §25 R2/R6/R14/R15: grantability, the loop enforcing it, GrantBudget, the audit list, that a grant by name does not answer a subject-carrying question, and that a granted tool is ADVERTISED with no channel (asserted on the wire, since a test that injects the tool call cannot see it)
+│   ├── test_grants.py              # 38 tests -- ROADMAP_v2 §25 R2/R6/R13/R14/R15: grantability, the loop enforcing it, GrantBudget, the audit list, that a grant by name does not answer a subject-carrying question, and that a granted tool is ADVERTISED with no channel (asserted on the wire, since a test that injects the tool call cannot see it)
 │   ├── test_attended.py            # 17 tests -- ROADMAP_v2 §25 R9-R11: ApprovalProvider consulted, headless lifted, run-scope declined
 │   ├── test_research_authorization.py # 51 tests -- ROADMAP_v2 §25 R1/R3/R4/R12/R13: candidates, the per-tool grant policy and its import assert, the two grant paths asserted as a RELATION, grant-spec parsing, both shells' flags, settings precedence
 │   ├── test_granted_calls_artifact.py # 5 tests -- ROADMAP_v2 §25 audit artifact + R7 provenance framing in the universal preamble

@@ -136,18 +136,28 @@ class ToolRegistry:
           grantable()   R2. A tool deciding approval from its PARAMS was
                         never consented to by name, so a grant naming one
                         answers nothing.
-          grant_policy  R13. GRANT_NEVER means approving the name never
-                        carries the authority, on either path. Without this
-                        line `spawn_subagent` would slip through: it has no
-                        approval_check, so grantable() says True, and a
-                        stale grant naming it would advertise a tool R14
-                        then refuses at the approval step -- advertised and
-                        uncallable, which is the exact damage class the rest
-                        of this batch exists to remove.
+          grant_policy  R13, and it must be `== GRANT_ANYWHERE` rather than
+                        `!= GRANT_NEVER`. Both callers of this reach it only
+                        when the run is HEADLESS, and headless is precisely
+                        the unattended case GRANT_SIGNOFF_ONLY exists to
+                        exclude: R13 admits `write_project_doc` to the §18
+                        sign-off because a human is answering in the moment
+                        about one named agent, and refuses it to ten
+                        unattended passes on one launch-time tick. A
+                        headless run has no human answering in the moment,
+                        so the looser test would readmit it exactly where
+                        the argument was written against.
 
-        GRANT_SIGNOFF_ONLY passes. A subagent that received such a tool in
-        its sign-off subset genuinely may call it, and the answer for it was
-        given by a human about that child.
+        THIS IS THE SAME PREDICATE `candidates()` USES, and deliberately so.
+        That function decides what may be OFFERED to an unattended run and
+        this one decides what a grant then makes VISIBLE to it -- one
+        question, so one answer. Written `!= GRANT_NEVER` first, which let
+        `write_project_doc` through here while `candidates()` refused it:
+        #67/#133's own shape, reappearing inside the batch that generalised
+        it. Neither the CLI nor the TUI nor a subagent sign-off can put a
+        SIGNOFF_ONLY name into a headless grant today, so nothing was
+        reachable -- but "unreachable" is a fact about the callers, and this
+        is a claim about the policy.
 
         Shared by schemas() and headless_hidden() rather than written out
         twice -- those two must agree about what is hidden, and #67/#133
@@ -156,7 +166,7 @@ class ToolRegistry:
         return (bool(granted)
                 and tool_name in granted
                 and self.grantable(tool_name)
-                and self.grant_policy(tool_name) != GRANT_NEVER)
+                and self.grant_policy(tool_name) == GRANT_ANYWHERE)
 
     def schemas(
         self, context: Optional["ToolContext"] = None,

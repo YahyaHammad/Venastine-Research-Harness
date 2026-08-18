@@ -42,6 +42,7 @@ from core.memory import ConversationMemory
 # of its three entry points is running -- and storage.create_thread is
 # where it is stored. Nothing in between learns what a kind means.
 from storage import THREAD_KIND_CHAT, THREAD_KIND_RESEARCH_PASS
+from tools.base import GRANT_NEVER
 from tools.context import ToolContext, RunInfo
 from tools.registry import registry, ToolCallDenied
 
@@ -696,9 +697,35 @@ class RunAgentLoop:
                 subject = request_payload.get("subject")
                 remembered, signoff = run_info.recall_signoff(
                     call.name, subject)
+                #   grant_policy on a NAME-LEVEL grant only -- R13's literal
+                #     claim is that approving the NAME never carries the
+                #     authority for a GRANT_NEVER tool, on either path, and
+                #     until now no path enforced it. Batch 6 declared the
+                #     policy and taught the two functions that decide what
+                #     may be OFFERED to read it; this is the reader that
+                #     decides whether a grant already in hand APPLIES.
+                #     `spawn_subagent` was covered only because R14's
+                #     subject condition happens to catch it; `remember`
+                #     carries no subject, so a grant naming it dispatched a
+                #     durable cross-session write with no prompt -- M17's
+                #     scenario through the one door R13 left unlocked.
+                #
+                #     IT MUST NOT REACH THE SIGN-OFF MEMO, and that is not a
+                #     nicety: `spawn_subagent` is GRANT_NEVER, so testing
+                #     the policy unconditionally here stops §23's memo
+                #     applying and the same agent is asked about twice in
+                #     one turn. R13 is about what approving a NAME buys; a
+                #     memo is an answer somebody gave about this subject,
+                #     which J8 and R14 govern instead. recall_signoff
+                #     already separates them by what it returns -- the memo
+                #     always carries a subset, the grant carries None.
+                answered_by_name = signoff is None
                 if (needs_approval
                         and remembered
                         and registry.grantable(call.name)
+                        and not (answered_by_name
+                                 and registry.grant_policy(call.name)
+                                 == GRANT_NEVER)
                         and (run_info.grant_budget is None
                              or run_info.grant_budget.take())):
                     needs_approval = False
