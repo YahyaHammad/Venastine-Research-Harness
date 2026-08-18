@@ -1768,7 +1768,7 @@ throughout; the model was never told the tool existed.
 |---|---|---|
 | `granted=` dropped at the `schemas()` call site | `test_a_granted_tool_is_advertised_with_no_channel` | This IS #156: `--grant-tools` silently does nothing on its own while reporting success |
 | `grantable()` re-check deleted from `_answered_by_grant` | `test_a_grant_naming_a_param_dependent_tool_advertises_nothing` | R2 at the filter -- a stale grant naming `shell` would advertise it |
-| `grant_policy != GRANT_NEVER` deleted from `_answered_by_grant` | `test_a_grant_cannot_smuggle_spawn_subagent_into_a_headless_run` | `spawn_subagent` has no `approval_check`, so `grantable()` alone lets it through -- and R14 then refuses a tool the model was shown, recreating advertised-and-uncallable one line down |
+| The `grant_policy` check deleted from `_answered_by_grant` | `test_a_grant_cannot_smuggle_spawn_subagent_into_a_headless_run` | `spawn_subagent` has no `approval_check`, so `grantable()` alone lets it through -- and R14 then refuses a tool the model was shown, recreating advertised-and-uncallable one line down |
 | `headless_hidden` ignores `granted` | `test_a_granted_tool_is_not_reported_as_hidden` | The WARNING names a tool the model can actually call -- the invisibility problem it exists to prevent, wearing the opposite sign |
 | The budget made to retract advertisement | `test_the_budget_does_not_change_what_is_advertised` | R6's fallback is a *call-time* answer; hiding the tool mid-run means the fallback never runs and the model reads it as the tool ceasing to exist |
 | `run_info` moved back below `schemas()` | `NameError` across every test that drives `_run` | Build order is load-bearing now, and loudly so |
