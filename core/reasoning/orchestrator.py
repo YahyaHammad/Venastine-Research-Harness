@@ -70,6 +70,7 @@ from core.reasoning.confidence_scoring import run_confidence_tiering
 from core.reasoning.events import PipelineEvent
 from core.reasoning.json_retry import parse_json_response as _parse_json_response
 from core.reasoning.json_retry import retry_until_json
+from core.reasoning.payload_validation import validate as _validate_payload
 from core.reasoning.pipeline_storage import create_pipeline_run, update_pipeline_run
 from safety.policy_enforcement import param_digest, redact_secrets
 
@@ -414,6 +415,8 @@ def _run_pass_with_json_retry(
     temperature: float | None = None,
     authorization=None,
     pass_threads: list | None = None,
+    claim_ids: list | None = None,
+    ensemble: bool = False,
 ):
     """Runs one JSON-emitting pass and recovers from malformed JSON.
 
@@ -428,6 +431,24 @@ def _run_pass_with_json_retry(
     Unrecoverable failure raises ValueError with the final parse error
     attached; the caller's try/except turns that into a durable
     status='failed' record.
+
+    §30 (B3): the payload spec is bound HERE, from the pass id, rather
+    than passed in by each of the eight call sites. A call site that
+    forgot the argument would be silently unvalidated, which is the exact
+    condition this batch exists to remove -- and payload_validation.validate
+    raises on a pass id it has no spec for, so an eleventh JSON-emitting
+    pass cannot arrive by omission.
+
+    This function still returns TEXT, deliberately, even though it now
+    parses the payload internally to check it. Around twenty test sites
+    patch or drain it and assert on the returned string, and §20's
+    reviewer shares retry_until_json's contract; re-parsing a short string
+    is cheaper than moving twenty seams in the batch that adds the check.
+
+    `claim_ids` is the set the APPLY step will resolve against -- every
+    claim for 3a/3b/5/6c, the currently-flagged batch for 6a -- because
+    validating against a wider set would accept an entry that then lands
+    on nothing.
 
     §22: a generator, like _run_pass, and for the same reason. The
     corrective attempts inside retry_until_json need no event kind of
@@ -478,6 +499,8 @@ def _run_pass_with_json_retry(
         # The retry re-enters THIS pass's thread, so it runs on the pass's
         # budget rather than continue_conversation's chat default.
         max_total_tokens=config.RESEARCH_PASS_TOKEN_BUDGET,
+        validate=lambda payload: _validate_payload(
+            pass_id, payload, claim_ids=claim_ids, ensemble=ensemble),
     )
     yield PipelineEvent(kind="pass_complete", pass_id=pass_id)
     return text
@@ -911,7 +934,7 @@ def stream_deep_research_pipeline(
         yield from progress.checkpoint()
 
         # --- Pass 2: claim extraction & classification ---
-        claims_json = _parse_json_response((yield from _run_pass_with_json_retry("Pass 2", pass2_input, model, provider_name, run.trace, authorization=authorization, pass_threads=run.pass_threads)))
+        claims_json = _parse_json_response((yield from _run_pass_with_json_retry("Pass 2", pass2_input, model, provider_name, run.trace, authorization=authorization, pass_threads=run.pass_threads, ensemble=effective_n >= 2)))
         run.claims = [_claim_from_json(c) for c in claims_json]
         for claim in run.claims:
             yield PipelineEvent(kind="claim_extracted", claim_id=claim.id,
@@ -935,7 +958,7 @@ def stream_deep_research_pipeline(
                 f"Deduplicated entities to research (search each ONCE, map results back "
                 f"to every claim referencing it):\n{json.dumps(unique_entities)}"
             )
-            grounding_json = _parse_json_response((yield from _run_pass_with_json_retry("Pass 3a", pass3a_input, critic_model, critic_provider, run.trace, authorization=authorization, pass_threads=run.pass_threads)))
+            grounding_json = _parse_json_response((yield from _run_pass_with_json_retry("Pass 3a", pass3a_input, critic_model, critic_provider, run.trace, authorization=authorization, pass_threads=run.pass_threads, claim_ids=[c.id for c in run.claims])))
             _apply_grounding(run.claims, grounding_json)
             yield from progress.checkpoint(f"Pass 3a: grounded {len(unique_entities)} unique entities across {len(factual_claims)} factual claim(s).")
 
@@ -943,7 +966,7 @@ def stream_deep_research_pipeline(
                 f"Raw response:\n{run.raw_response}\n\n"
                 f"Factual claims with grounding:\n{json.dumps([vars(c) for c in factual_claims])}"
             )
-            critic_json = _parse_json_response((yield from _run_pass_with_json_retry("Pass 3b", pass3b_input, critic_model, critic_provider, run.trace, authorization=authorization, pass_threads=run.pass_threads)))
+            critic_json = _parse_json_response((yield from _run_pass_with_json_retry("Pass 3b", pass3b_input, critic_model, critic_provider, run.trace, authorization=authorization, pass_threads=run.pass_threads, claim_ids=[c.id for c in run.claims])))
             _apply_critic(run.claims, critic_json)
             yield from progress.checkpoint("Pass 3b: critique complete for factual claims.")
         else:
@@ -968,7 +991,7 @@ def stream_deep_research_pipeline(
             f"All claims:\n{json.dumps([vars(c) for c in run.claims])}\n\n"
             f"Completeness findings:\n{json.dumps(run.completeness)}"
         )
-        run.assumptions = _parse_json_response((yield from _run_pass_with_json_retry("Pass 5", pass5_input, model, provider_name, run.trace, authorization=authorization, pass_threads=run.pass_threads)))
+        run.assumptions = _parse_json_response((yield from _run_pass_with_json_retry("Pass 5", pass5_input, model, provider_name, run.trace, authorization=authorization, pass_threads=run.pass_threads, claim_ids=[c.id for c in run.claims])))
         _apply_assumption_flags(run.claims, run.assumptions)
         yield from progress.checkpoint(f"Pass 5: assumption audit complete, {len(run.assumptions.get('per_claim_flags', {}))} claim(s) flagged.")
 
@@ -994,7 +1017,7 @@ def stream_deep_research_pipeline(
                 }
                 for c in flagged
             ])
-            revisions = _parse_json_response((yield from _run_pass_with_json_retry("Pass 6a", pass6a_input, model, provider_name, run.trace, authorization=authorization, pass_threads=run.pass_threads)))
+            revisions = _parse_json_response((yield from _run_pass_with_json_retry("Pass 6a", pass6a_input, model, provider_name, run.trace, authorization=authorization, pass_threads=run.pass_threads, claim_ids=[c.id for c in flagged])))
 
             # COUNT THE ROUND, NOT THE REVISION. The increment used to live
             # inside the loop below, so only a claim Pass 6a NAMED counted --
@@ -1033,7 +1056,7 @@ def stream_deep_research_pipeline(
 
             # --- Pass 6c: re-validate the revised subset only (batched, reuses Pass 4's code) ---
             pass6c_input = json.dumps([vars(c) for c in flagged])
-            revalidation = _parse_json_response((yield from _run_pass_with_json_retry("Pass 6c", pass6c_input, critic_model, critic_provider, run.trace, authorization=authorization, pass_threads=run.pass_threads)))
+            revalidation = _parse_json_response((yield from _run_pass_with_json_retry("Pass 6c", pass6c_input, critic_model, critic_provider, run.trace, authorization=authorization, pass_threads=run.pass_threads, claim_ids=[c.id for c in run.claims])))
             _apply_grounding(run.claims, revalidation.get("grounding", []))
             _apply_critic(run.claims, revalidation.get("critic", []))
             # Pass 4's function again -- code, not a call. Scoped to THIS

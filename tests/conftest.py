@@ -76,6 +76,38 @@ def _with_events(response, events):
     return response
 
 
+def well_shaped(pass_id: str) -> str:
+    """The smallest payload `pass_id` accepts, as JSON text.
+
+    ROADMAP_v2 §30 (B2) made a pass's SHAPE part of its contract, not just
+    its parseability. Before that, a double could queue `{"ok": true}` for
+    a pass whose prompt promises an array and the retry loop was perfectly
+    happy -- which is how six real deviations went unnoticed (#76). Now
+    that same double spends every corrective retry and fails the run.
+
+    Tests about the retry MECHANISM want a payload that is valid for its
+    pass and otherwise says nothing. This is that payload, in ONE place,
+    so the next spec change moves one line rather than nine -- the same
+    argument `pass_stream` makes for itself one screen up.
+
+    Deliberately minimal, and that is the point: an empty list satisfies
+    Pass 2 because zero claims is a real answer, while `{"ok": true}` was
+    never an answer to anything.
+    """
+    import json
+
+    return json.dumps({
+        "Pass 0": {"key_entities_or_subjects": []},
+        "Pass 2": [],
+        "Pass 3a": [],
+        "Pass 3b": [],
+        "Pass 3c": {"gaps": [], "coverage_score": 0.0},
+        "Pass 5": {"per_claim_flags": {}},
+        "Pass 6a": [],
+        "Pass 6c": {"grounding": [], "critic": []},
+    }[pass_id])
+
+
 # ---------------------------------------------------------------------------
 # ---- ModelResponse builder (no SDK mocking needed) ----------------------
 # ---------------------------------------------------------------------------

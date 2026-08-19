@@ -22,6 +22,19 @@ and they would drift. So the loop takes an ALREADY-OBTAINED response and
 the parameters needed to continue its thread; each caller starts its own
 first attempt however it likes.
 
+ROADMAP_v2 §30 (B2) added the SECOND thing worth correcting. `validate`
+is an optional callable applied to the parsed payload; if it raises
+PayloadShapeError the loop treats that exactly like a parse failure --
+same thread, same attempt arithmetic -- with one difference that has to
+be there: the corrective WORDING branches. "Your last response did not
+parse as valid JSON" is false about a payload that parsed perfectly and
+was the wrong shape, and telling a model its JSON is malformed when it
+is not is the kind of correction that produces a second wrong answer.
+
+`validate=None` is the default and keeps this function byte-identical
+for §20's reviewer, which does its own value-level filtering in
+review.py:_validated for reasons that module states.
+
 `attempts = max_retries + 1` (one initial plus max_retries corrective).
 Unrecoverable failure raises ValueError with the final parse error
 attached -- the orchestrator's try/except turns that into a durable
@@ -34,6 +47,7 @@ import json
 from typing import Any, Callable, Optional
 
 import config
+from core.reasoning.payload_validation import PayloadShapeError
 
 MAX_JSON_RETRIES = getattr(config, "MAX_JSON_RETRIES", 2)
 
@@ -69,6 +83,7 @@ def retry_until_json(
     on_response: Optional[Callable] = None,
     context=None,
     max_total_tokens: Optional[int] = None,
+    validate: Optional[Callable] = None,
 ) -> str:
     """Returns the first response text that parses as JSON, retrying by
     continuing `response`'s thread.
@@ -98,6 +113,10 @@ def retry_until_json(
                   stands, which is how an empty pass gets produced in the
                   first place. None keeps the wrapper's default, which is
                   right for §20's agent-shaped reviewer.
+    validate      §30 (B2). Applied to the PARSED payload; raising
+                  PayloadShapeError re-enters this same loop. None means
+                  "parse is the only contract", which is what the reviewer
+                  wants and what every caller had before §30.
     """
     from core.loop import RunAgentLoop
 
@@ -105,26 +124,25 @@ def retry_until_json(
 
     for attempt in range(max_retries):
         try:
-            parse_json_response(raw_text)
+            _check(raw_text, validate)
             return raw_text
         except ValueError as e:
+            shape = isinstance(e, PayloadShapeError)
             if trace is not None:
+                # The parse wording is unchanged to the byte. A reader
+                # scanning a trace for "JSON parse failed" is scanning for
+                # a model that cannot emit JSON, and a shape rejection is
+                # a different fact about a different failure.
                 trace.append(
-                    f"{label}: JSON parse failed on attempt {attempt + 1}/"
+                    f"{label}: "
+                    f"{'payload shape rejected' if shape else 'JSON parse failed'}"
+                    f" on attempt {attempt + 1}/"
                     f"{max_retries + 1} ({str(e).splitlines()[0]}), "
                     f"retrying with corrective message."
                 )
             corrective = (
-                f"Your last response did not parse as valid JSON.\n\n"
-                f"Parse error:\n{e}\n\n"
-                f"Start of your failed output (first 200 chars):\n{raw_text[:200]}\n\n"
-                # Caller-neutral: "the JSON your original instructions asked
-                # for" is true for a pass (object) and for §20's reviewer
-                # (array) alike. Naming a shape the caller never promised
-                # could talk the model out of its own output contract.
-                f"Respond again with ONLY valid JSON -- no preamble, no prose, "
-                f"no code fence, just the JSON your original instructions "
-                f"asked for."
+                _shape_corrective(e, raw_text) if shape
+                else _parse_corrective(e, raw_text)
             )
             retry_response = RunAgentLoop.continue_conversation(
                 thread_id=response.thread_id,
@@ -147,5 +165,47 @@ def retry_until_json(
             raw_text = retry_response.text
 
     # Last attempt: validate one more time and either return or raise.
-    parse_json_response(raw_text)
+    _check(raw_text, validate)
     return raw_text
+
+
+def _check(raw_text: str, validate: Optional[Callable]) -> None:
+    """Both contracts, in the order they can be checked: a payload has to
+    parse before it can have a shape."""
+    payload = parse_json_response(raw_text)
+    if validate is not None:
+        validate(payload)
+
+
+def _parse_corrective(error: ValueError, raw_text: str) -> str:
+    return (
+        f"Your last response did not parse as valid JSON.\n\n"
+        f"Parse error:\n{error}\n\n"
+        f"Start of your failed output (first 200 chars):\n{raw_text[:200]}\n\n"
+        # Caller-neutral: "the JSON your original instructions asked
+        # for" is true for a pass (object) and for §20's reviewer
+        # (array) alike. Naming a shape the caller never promised
+        # could talk the model out of its own output contract.
+        f"Respond again with ONLY valid JSON -- no preamble, no prose, "
+        f"no code fence, just the JSON your original instructions "
+        f"asked for."
+    )
+
+
+def _shape_corrective(error: ValueError, raw_text: str) -> str:
+    """§30 (B2). The opening sentence is the whole reason this is a second
+    function: a model told its JSON was malformed, when it was not, has
+    nothing to fix and will most likely resend the same structure.
+
+    The problem line is PayloadShapeError's message, which already names
+    the pass, the field and the expected shape -- the three things #76
+    found the AttributeError naming none of."""
+    return (
+        f"Your last response was valid JSON, but not the structure this "
+        f"step asked for.\n\n"
+        f"Problem:\n{error}\n\n"
+        f"Start of your output (first 200 chars):\n{raw_text[:200]}\n\n"
+        f"Respond again with ONLY valid JSON, in the structure your "
+        f"original instructions specified -- no preamble, no prose, no "
+        f"code fence."
+    )
