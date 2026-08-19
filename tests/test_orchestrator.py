@@ -1395,3 +1395,197 @@ class TestClaimFromJsonFiltersUnknownFields:
 
         with pytest.raises(TypeError):
             _claim_from_json({"id": "C1", "entities": []})   # no text, no type
+
+
+
+# ===========================================================================
+# ---- ROADMAP_v2 §30 (B5): the checkpoint reports the EFFECT ---------------
+# ===========================================================================
+#
+# `Pass 3a: grounded {len(unique_entities)} unique entities across
+# {len(factual_claims)} factual claim(s).` was built entirely from the
+# orchestrator's own side of the call, so it was emitted verbatim whether
+# every entry applied or none did. Driven with 3a answering about ids
+# Pass 2 never issued, the run reported grounding 4 entities across 3
+# claims while grounding nothing.
+#
+# §30 makes a TOTAL mismatch a validation failure (that is tested in
+# test_payload_validation.py). These tests cover the half that must NOT
+# fail: a model that gets most of them right, where the only defence is
+# that the number in the trace is true.
+
+
+def _partly_wrong_payloads(pass_id, entries):
+    """The clean payloads, with one pass answering about a claim that does
+    not exist, plus a bounded retry loop for the claims that fall out."""
+    payloads = _clean_pipeline_payloads()
+    payloads[pass_id] = json.dumps(entries)
+    payloads["Pass 6a"] = [json.dumps([]) for _ in range(config.MAX_PIPELINE_RETRIES)]
+    payloads["Pass 6c"] = [json.dumps({"grounding": [], "critic": []})
+                           for _ in range(config.MAX_PIPELINE_RETRIES)]
+    return payloads
+
+
+def _trace_line(run, prefix):
+    return next(line for line in run.trace if line.startswith(prefix))
+
+
+class TestTheCheckpointReportsWhatWasApplied:
+
+    def test_pass_3a_counts_the_claims_it_grounded(self, mocker):
+        payloads = _partly_wrong_payloads("Pass 3a", [
+            {"claim_id": "C1", "sources": [{"url": "u"}], "status": "grounded"},
+            {"claim_id": "C2", "sources": [{"url": "u"}], "status": "grounded"},
+            {"claim_id": "nonsense", "sources": [], "status": "grounded"},
+        ])
+        mocker.patch.object(
+            RunAgentLoop, "stream_deep_research_mode",
+            side_effect=pass_stream(_build_pass_mock([], payloads)))
+
+        run = run_deep_research_pipeline(
+            user_query="q", model="claude-test", provider_name="ANTHROPIC")
+
+        assert _trace_line(run, "Pass 3a:") == (
+            "Pass 3a: grounded 2 of 3 factual claim(s), across 4 "
+            "deduplicated entities."
+        )
+        assert run.claim_by_id("C3").grounding_status is None, (
+            "C3 was never named, so the line must not claim it was grounded"
+        )
+
+    def test_pass_3b_counts_the_claims_it_critiqued(self, mocker):
+        payloads = _partly_wrong_payloads("Pass 3b", [
+            {"claim_id": "C1", "fallacies": [], "contradictions": [], "severity": 0.0},
+            {"claim_id": "nope", "fallacies": [], "contradictions": [], "severity": 0.0},
+        ])
+        mocker.patch.object(
+            RunAgentLoop, "stream_deep_research_mode",
+            side_effect=pass_stream(_build_pass_mock([], payloads)))
+
+        run = run_deep_research_pipeline(
+            user_query="q", model="claude-test", provider_name="ANTHROPIC")
+
+        assert _trace_line(run, "Pass 3b:") == (
+            "Pass 3b: critique applied to 1 of 3 factual claim(s)."
+        )
+
+    def test_pass_5_counts_the_claims_it_flagged(self, mocker):
+        """Before §30 this interpolated len(per_claim_flags) -- the keys the
+        model SENT. A payload naming three claims that do not exist reported
+        three flagged and flagged none."""
+        payloads = _partly_wrong_payloads("Pass 5", {"per_claim_flags": {
+            "C1": ["a hidden premise"],
+            "not-a-claim": ["another"],
+        }})
+        mocker.patch.object(
+            RunAgentLoop, "stream_deep_research_mode",
+            side_effect=pass_stream(_build_pass_mock([], payloads)))
+
+        run = run_deep_research_pipeline(
+            user_query="q", model="claude-test", provider_name="ANTHROPIC")
+
+        assert _trace_line(run, "Pass 5:") == (
+            "Pass 5: assumption audit complete, 1 of 3 claim(s) flagged."
+        )
+
+    def test_a_fully_applied_pass_reports_the_full_count(self, mocker):
+        """THE CONTROL. A line that always reported a smaller number, or
+        always zero, would pass all three tests above."""
+        mocker.patch.object(
+            RunAgentLoop, "stream_deep_research_mode",
+            side_effect=pass_stream(_build_pass_mock([], _clean_pipeline_payloads())))
+
+        run = run_deep_research_pipeline(
+            user_query="q", model="claude-test", provider_name="ANTHROPIC")
+
+        assert _trace_line(run, "Pass 3a:") == (
+            "Pass 3a: grounded 3 of 3 factual claim(s), across 4 "
+            "deduplicated entities."
+        )
+        assert _trace_line(run, "Pass 3b:") == (
+            "Pass 3b: critique applied to 3 of 3 factual claim(s)."
+        )
+
+    def test_pass_6a_counts_the_revisions_it_landed(self, mocker):
+        """6a is one batched call across every flagged claim, which is
+        exactly the shape a model drops an item from -- and #74 already
+        paid for treating its output as authoritative."""
+        payloads = _one_claim_stuck_through_retry_payloads()
+        payloads["Pass 6a"] = [
+            json.dumps([{"claim_id": "C2", "revised_text": "better"},
+                        {"claim_id": "C9", "revised_text": "for a claim that ended"}])
+            for _ in range(config.MAX_PIPELINE_RETRIES)
+        ]
+        mocker.patch.object(
+            RunAgentLoop, "stream_deep_research_mode",
+            side_effect=pass_stream(_build_pass_mock([], payloads)))
+
+        run = run_deep_research_pipeline(
+            user_query="q", model="claude-test", provider_name="ANTHROPIC")
+
+        assert _trace_line(run, "Pass 6a:") == (
+            "Pass 6a: revised 1 of 1 claim(s) in this retry round."
+        )
+
+
+# ===========================================================================
+# ---- ROADMAP_v2 §30 (B6): one id resolution -------------------------------
+# ===========================================================================
+
+class TestOneIdResolutionForTheWholePipeline:
+
+    def test_resolve_by_id_is_first_wins(self):
+        from core.reasoning.base import Claim, resolve_by_id
+
+        first = Claim(id="C1", text="first", type="factual")
+        second = Claim(id="C1", text="second", type="factual")
+        assert resolve_by_id([first, second])["C1"] is first
+
+    def test_claim_by_id_goes_through_it(self):
+        """It used to be its own `next(...)`, which is how the two policies
+        got to disagree in the first place."""
+        from core.reasoning.base import Claim, PipelineRun
+
+        first = Claim(id="C1", text="first", type="factual")
+        second = Claim(id="C1", text="second", type="factual")
+        run = PipelineRun(user_query="q", claims=[first, second])
+        assert run.claim_by_id("C1") is first
+
+    def test_a_duplicate_id_can_no_longer_split_a_claim(self):
+        """Driven before the fix, against the real pipeline:
+
+            text='first'   grounding=None       severity=0.0  flags=['a flag']
+            text='second'  grounding='grounded' severity=0.4  flags=[]
+
+        _apply_grounding's {c.id: c} took the LAST, _apply_assumption_flags'
+        next(...) took the FIRST, so the grounding landed on one object and
+        the assumption flags on the other -- and Pass 6a then revised the
+        copy with no sources while the grounded one kept them.
+
+        Called directly rather than through the pipeline, because §30 also
+        rejects this payload at Pass 2's boundary. That guard is what stops
+        it arriving; this is what stops the two lookups disagreeing on
+        claims built any other way -- §20's corrections, a future resume."""
+        from core.reasoning.base import Claim
+        from core.reasoning.orchestrator import (
+            _apply_assumption_flags, _apply_critic, _apply_grounding,
+        )
+
+        first = Claim(id="C1", text="first", type="factual")
+        second = Claim(id="C1", text="second", type="factual")
+        claims = [first, second]
+
+        _apply_grounding(claims, [{"claim_id": "C1", "sources": [{"url": "u"}],
+                                   "status": "grounded"}])
+        _apply_critic(claims, [{"claim_id": "C1", "fallacies": [],
+                                "contradictions": [], "severity": 0.4}])
+        _apply_assumption_flags(claims, {"per_claim_flags": {"C1": ["a flag"]}})
+
+        assert first.grounding_status == "grounded"
+        assert first.critic_severity == 0.4
+        assert first.assumption_flags == ["a flag"]
+        assert (second.grounding_status, second.critic_severity,
+                second.assumption_flags) == (None, 0.0, []), (
+            "every apply must land on the same object; a claim carrying "
+            "half of another's results is the defect"
+        )
