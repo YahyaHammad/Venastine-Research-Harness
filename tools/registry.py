@@ -21,12 +21,16 @@ ROADMAP_v2 §15:
 
 import inspect
 import logging
+
+import config
 from typing import Optional, TYPE_CHECKING
 
 from tools.base import (
+    BUDGET_COMPUTE, BUDGET_HUMAN, BUDGET_IO,
     GRANT_ANYWHERE, GRANT_NEVER, GRANT_SIGNOFF_ONLY, ToolSpec,
-    assert_grant_policy_declared,
+    assert_budget_declared, assert_grant_policy_declared,
 )
+from tools import isolation
 from tools.builtin import (
     web_search, fetch_url, get_time, arxiv,
     symbolic_math, linear_algebra, probability_stats, discrete_math, logic, geometry,
@@ -470,7 +474,30 @@ class ToolRegistry:
         }
         injected = {p: available[p] for p in self._injectable.get(tool_name, ())}
         try:
-            result = spec.handler(params, **injected)
+            # §31 (H2). A BUDGET_COMPUTE tool is a pure function of its
+            # params with nothing bounding it from the inside, so it runs
+            # in a child this call can actually kill. Everything else is
+            # called exactly as before -- an io tool carries its own
+            # bound and a human one blocks on a person, and an outer
+            # clock over either would stop WAITING without stopping the
+            # work, which is the mechanism H7 rejects.
+            #
+            # The branch is HERE, inside the containment try and at the
+            # one place a handler is ever invoked, rather than inside the
+            # six tools. A tool that isolated itself could not be called
+            # plainly by a test, and the 123 tests in test_math_tools.py
+            # would then be measuring the transport instead of the maths.
+            #
+            # `injected` is not passed: nothing in _INJECTABLE_PARAMS
+            # survives a process boundary, and assert_budget_declared
+            # rejects the pairing at import so this cannot silently drop
+            # a value a handler wanted.
+            if spec.budget == BUDGET_COMPUTE:
+                result = isolation.run_isolated(
+                    spec.handler, params, config.TOOL_COMPUTE_TIMEOUT_S,
+                    tool_name=tool_name)
+            else:
+                result = spec.handler(params, **injected)
         except Exception as e:  # noqa: BLE001 -- contained on purpose
             # A raising tool used to take the whole run down with it. In
             # chat that is a lost turn; in the research pipeline it is a
@@ -536,39 +563,39 @@ registry = ToolRegistry()
 # today's gating would be answered by whoever edited settings, not by
 # whoever registered the tool. Declaring it here keeps the answer
 # config-independent and next to the tool it is about.
-registry.register(ToolSpec("web_search", web_search.TOOL_SCHEMA, web_search.run, grant_policy=GRANT_ANYWHERE))
-registry.register(ToolSpec("fetch_url", fetch_url.TOOL_SCHEMA, fetch_url.run, grant_policy=GRANT_ANYWHERE))
-registry.register(ToolSpec("get_time", get_time.TOOL_SCHEMA, get_time.run, grant_policy=GRANT_ANYWHERE))
-registry.register(ToolSpec("arxiv_search", arxiv.TOOL_SCHEMA, arxiv.run, grant_policy=GRANT_ANYWHERE))
-registry.register(ToolSpec("symbolic_math", symbolic_math.TOOL_SCHEMA, symbolic_math.run, grant_policy=GRANT_ANYWHERE))
-registry.register(ToolSpec("linear_algebra", linear_algebra.TOOL_SCHEMA, linear_algebra.run, grant_policy=GRANT_ANYWHERE))
-registry.register(ToolSpec("probability_stats", probability_stats.TOOL_SCHEMA, probability_stats.run, grant_policy=GRANT_ANYWHERE))
-registry.register(ToolSpec("discrete_math", discrete_math.TOOL_SCHEMA, discrete_math.run, grant_policy=GRANT_ANYWHERE))
-registry.register(ToolSpec("logic", logic.TOOL_SCHEMA, logic.run, grant_policy=GRANT_ANYWHERE))
-registry.register(ToolSpec("geometry", geometry.TOOL_SCHEMA, geometry.run, grant_policy=GRANT_ANYWHERE))
+registry.register(ToolSpec("web_search", web_search.TOOL_SCHEMA, web_search.run, grant_policy=GRANT_ANYWHERE, budget=BUDGET_IO))
+registry.register(ToolSpec("fetch_url", fetch_url.TOOL_SCHEMA, fetch_url.run, grant_policy=GRANT_ANYWHERE, budget=BUDGET_IO))
+registry.register(ToolSpec("get_time", get_time.TOOL_SCHEMA, get_time.run, grant_policy=GRANT_ANYWHERE, budget=BUDGET_IO))
+registry.register(ToolSpec("arxiv_search", arxiv.TOOL_SCHEMA, arxiv.run, grant_policy=GRANT_ANYWHERE, budget=BUDGET_IO))
+registry.register(ToolSpec("symbolic_math", symbolic_math.TOOL_SCHEMA, symbolic_math.run, grant_policy=GRANT_ANYWHERE, budget=BUDGET_COMPUTE))
+registry.register(ToolSpec("linear_algebra", linear_algebra.TOOL_SCHEMA, linear_algebra.run, grant_policy=GRANT_ANYWHERE, budget=BUDGET_COMPUTE))
+registry.register(ToolSpec("probability_stats", probability_stats.TOOL_SCHEMA, probability_stats.run, grant_policy=GRANT_ANYWHERE, budget=BUDGET_COMPUTE))
+registry.register(ToolSpec("discrete_math", discrete_math.TOOL_SCHEMA, discrete_math.run, grant_policy=GRANT_ANYWHERE, budget=BUDGET_COMPUTE))
+registry.register(ToolSpec("logic", logic.TOOL_SCHEMA, logic.run, grant_policy=GRANT_ANYWHERE, budget=BUDGET_COMPUTE))
+registry.register(ToolSpec("geometry", geometry.TOOL_SCHEMA, geometry.run, grant_policy=GRANT_ANYWHERE, budget=BUDGET_COMPUTE))
 # The four param-dependent tools. grantable() already returns False for
 # them -- an approval_check means the answer depends on the path or the
 # command, so a name-level grant would authorise a call nobody saw -- and
 # the policy field says the same thing from the other side. Both are
 # checked at both call sites; neither is load-bearing alone.
-registry.register(ToolSpec("read", file_ops.READ_TOOL_SCHEMA, file_ops.read_run, approval_check=file_ops._file_approval_check, grant_policy=GRANT_NEVER))
-registry.register(ToolSpec("write", file_ops.WRITE_TOOL_SCHEMA, file_ops.write_run, approval_check=file_ops._file_approval_check, grant_policy=GRANT_NEVER))
-registry.register(ToolSpec("edit", file_ops.EDIT_TOOL_SCHEMA, file_ops.edit_run, approval_check=file_ops._file_approval_check, grant_policy=GRANT_NEVER))
+registry.register(ToolSpec("read", file_ops.READ_TOOL_SCHEMA, file_ops.read_run, approval_check=file_ops._file_approval_check, grant_policy=GRANT_NEVER, budget=BUDGET_IO))
+registry.register(ToolSpec("write", file_ops.WRITE_TOOL_SCHEMA, file_ops.write_run, approval_check=file_ops._file_approval_check, grant_policy=GRANT_NEVER, budget=BUDGET_IO))
+registry.register(ToolSpec("edit", file_ops.EDIT_TOOL_SCHEMA, file_ops.edit_run, approval_check=file_ops._file_approval_check, grant_policy=GRANT_NEVER, budget=BUDGET_IO))
 # §28: approval_notice carries the capability profile into the prompt.
 # The command text is already in the params; what it does not show is
 # WHERE it runs, and "cat /etc/shadow" does not look like a host read.
-registry.register(ToolSpec("shell", shell.TOOL_SCHEMA, shell.run, approval_check=shell._shell_approval_check, approval_notice=shell._shell_approval_notice, grant_policy=GRANT_NEVER))
-registry.register(ToolSpec("load_skill", load_skill.TOOL_SCHEMA, load_skill.run, available_check=load_skill.has_skills, grant_policy=GRANT_ANYWHERE))
-registry.register(ToolSpec("pin", pin.TOOL_SCHEMA, pin.run, available_check=pin.available, grant_policy=GRANT_ANYWHERE))
+registry.register(ToolSpec("shell", shell.TOOL_SCHEMA, shell.run, approval_check=shell._shell_approval_check, approval_notice=shell._shell_approval_notice, grant_policy=GRANT_NEVER, budget=BUDGET_IO))
+registry.register(ToolSpec("load_skill", load_skill.TOOL_SCHEMA, load_skill.run, available_check=load_skill.has_skills, grant_policy=GRANT_ANYWHERE, budget=BUDGET_IO))
+registry.register(ToolSpec("pin", pin.TOOL_SCHEMA, pin.run, available_check=pin.available, grant_policy=GRANT_ANYWHERE, budget=BUDGET_IO))
 # §23 slice 2. No request_kind: this tool does NOT ask through the approval
 # bridge -- it is ungated (J12), so the bridge never fires for it. It names
 # `response_channel` in its handler signature and asks with it directly,
 # which is what _INJECTABLE_PARAMS was generalised for.
-registry.register(ToolSpec("ask_user", ask_user.TOOL_SCHEMA, ask_user.run, grant_policy=GRANT_ANYWHERE))
+registry.register(ToolSpec("ask_user", ask_user.TOOL_SCHEMA, ask_user.run, grant_policy=GRANT_ANYWHERE, budget=BUDGET_HUMAN))
 # §23 slice 2. Ungated and needs no channel (J9): it asks nobody, so a
 # headless research pass can keep a checklist. `memory` is injected by
 # signature inspection, as it is for `pin`.
-registry.register(ToolSpec("todo_write", todo.TOOL_SCHEMA, todo.run, grant_policy=GRANT_ANYWHERE))
+registry.register(ToolSpec("todo_write", todo.TOOL_SCHEMA, todo.run, grant_policy=GRANT_ANYWHERE, budget=BUDGET_IO))
 registry.register(ToolSpec(
     "remember", remember.TOOL_SCHEMA, remember.run,
     available_check=remember.available,
@@ -589,10 +616,12 @@ registry.register(ToolSpec(
     # child its set for the rest of the turn. A durable cross-session
     # write is exactly the authority that outlives the turn somebody was
     # watching.
-    grant_policy=GRANT_NEVER))
+    grant_policy=GRANT_NEVER,
+    budget=BUDGET_IO))
 registry.register(ToolSpec(
     "read_project_doc", project_docs.READ_TOOL_SCHEMA, project_docs.read_run,
-    grant_policy=GRANT_ANYWHERE))
+    grant_policy=GRANT_ANYWHERE,
+    budget=BUDGET_IO))
 registry.register(ToolSpec(
     "write_project_doc", project_docs.WRITE_TOOL_SCHEMA, project_docs.write_run,
     # Gated in config.ToolApprovals; the notice names the destination and
@@ -619,7 +648,8 @@ registry.register(ToolSpec(
     # names the destination and the size. That is the per-call consent a
     # gate is for, which is also why --attended was never the mode at
     # issue in #133.
-    grant_policy=GRANT_SIGNOFF_ONLY))
+    grant_policy=GRANT_SIGNOFF_ONLY,
+    budget=BUDGET_IO))
 registry.register(ToolSpec(
     "spawn_subagent", subagent_tool.TOOL_SCHEMA, subagent_tool.run,
     # §23 AC1b. Approving a spawn is not a yes/no any more: the request
@@ -651,6 +681,7 @@ registry.register(ToolSpec(
     # J8-keyed memo, which is the mechanism that actually shows the user
     # which agent they are authorising.
     grant_policy=GRANT_NEVER,
+    budget=BUDGET_HUMAN,
 ))
 
 # D24: fail loudly at import if any statically registered tool has no
@@ -665,3 +696,13 @@ assert_permissions_declared(registry._tools)
 # and same reason -- after the static registrations, before any dynamic
 # mcp__* one, which is exactly the set that can carry a declaration.
 assert_grant_policy_declared(registry._tools, registry._tools)
+# H1, the same trade one question further over: fail loudly at import if
+# any statically registered tool has not said what a call to it is
+# allowed to cost. Same placement and the same reason as the two above.
+#
+# `_injectable` is passed because BUDGET_COMPUTE is not only a policy --
+# it routes the call through a process boundary that no injected value
+# survives -- so the two declarations have to be checked against each
+# other rather than each on its own.
+assert_budget_declared(registry._tools, registry._tools,
+                       registry._injectable)

@@ -22,7 +22,7 @@ core/client.py about MCP types.
 import logging
 
 from security import permissions
-from tools.base import GRANT_ANYWHERE, ToolSpec
+from tools.base import BUDGET_IO, GRANT_ANYWHERE, ToolSpec
 
 logger = logging.getLogger(__name__)
 
@@ -136,6 +136,15 @@ def register_all(client, registry) -> list:
                 # reason from. The fallback stays as documentation for
                 # any other dynamic registrant.
                 grant_policy=GRANT_ANYWHERE,
+                # H1. Exempt from assert_budget_declared for the reason
+                # R13 exempts them -- named at connection time, so no
+                # static declaration can exist -- and declared anyway,
+                # because these tools DO have a bound and it is worth
+                # naming which: client.call_tool wraps every call in the
+                # two-layer clock DEFAULT_CALL_TIMEOUT_S backstops. That
+                # is BUDGET_IO exactly, and it is the mechanism H2 was
+                # modelled on.
+                budget=BUDGET_IO,
             ))
             _registered.setdefault(server_name, []).append(name)
             registered.append(name)
