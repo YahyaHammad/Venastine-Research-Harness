@@ -82,6 +82,7 @@ Every decision below was made through a structured clarification cycle with the 
 - 27. Thread legibility — thread `kind`, chat-only picker, transcript replay on resume **(added after §26's first live session; BUILT)**
 - 28. The shell capability classifier — one classification for the approval gate and the executor, `SHELL_APPROVAL_MODE`, the `.venastine` read-only mount **(added by Audit Pass 1 fix batch 8 for #157; BUILT)**
 - 29. The CLI shell — one stdin reader, every request kind rendered, `main(argv)` and a startup order that does nothing before argparse **(added by Audit Pass 1 fix batch 9 for #100, #7, #101, #102, #141; BUILT)**
+- 30. The pipeline's payload boundary — one shape check for the ten passes, shape failures re-entering §3's retry, and a trace that reports what was applied **(added by Audit Pass 1 fix batch 10 for #76, #75, #78, #79, #123; BUILT)**
 - **Open Questions — None Remaining** (Rev. 3 — all decisions locked; verification items only)
 - **Why these calls, not just what they are** (Rev. 3 — the reasoning patterns behind several decisions above)
 
@@ -2002,7 +2003,115 @@ N2, the four run-backed prompts: byte-identical (diff of the rendered strings is
   is what `--init` needed. A mid-run prompt that lets you ask for more time is a different feature and
   needs a decision about what an unattended run does with it.
 
----
+## 30. The pipeline's payload boundary — one shape check for the ten passes — BUILT
+
+**Problem (audit #76, S1).** §3's retry corrects a response that does not **parse**. Nothing checked
+that what parsed was the **shape** the pass promised, so the same defect appeared in six places at
+once, and two of them completed a run and reported a false outcome.
+
+Driven end to end against the real `stream_deep_research_pipeline`, one override per run, everything
+else answering correctly:
+
+| what the pass returned | outcome before |
+|---|---|
+| Pass 2 wraps its list: `{"claims": [...]}` | `AttributeError: 'str' object has no attribute 'items'` |
+| Pass 2 omits `id` | `TypeError: Claim.__init__() missing 1 required positional argument: 'id'` |
+| Pass 3c returns a list of gaps | `AttributeError: 'list' object has no attribute 'get'` |
+| Pass 0 returns a bare list | `AttributeError: 'list' object has no attribute 'get'` |
+| Pass 3b returns `severity` as a string | `TypeError: unsupported operand for -: 'float' and 'str'` — **raised in Pass 4**, two passes later |
+| Pass 6a omits `revised_text` | `KeyError: 'revised_text'` |
+
+Not one names the pass, the field, or the expected shape. `{"claims": [...]}` is the single most
+likely way a model deviates here and it produces an error about `str.items`, because
+`run.claims = [_claim_from_json(c) for c in claims_json]` iterates a dict's **keys**.
+
+**The silent half is the reason this is S1.** Two shapes complete successfully:
+
+```
+Pass 5 answers with the flags at the top level  ({"C1": [...]} instead of {"per_claim_flags": {...}})
+  -> a FINISHED run, and the trace line:
+     "Pass 5: assumption audit complete, 0 claim(s) flagged."     <- the line a CLEAN run gets
+
+Pass 3a/3b answer about ids Pass 2 never issued ("1", "2" instead of "C1", "C2")
+  -> a FINISHED run, every claim grounding=None, under:
+     "Pass 3a: grounded 4 unique entities across 3 factual claim(s)."
+     "D1: 3 claim(s) flagged for revision, 0 already clean."
+  then four more model calls in the 6a/6c loop, and a report saying nothing could be verified.
+```
+
+The checkpoint lines report the **input**, not the effect — `len(unique_entities)` and
+`len(factual_claims)` are the counts the pass was *asked* about, so the line is emitted verbatim
+whether every entry applied or none did. `base.py` calls the trace *"at least as trustworthy an
+artifact as the final report itself"*, and here it is the reason nothing looks wrong.
+
+### §20 already built this validator
+
+`review.py:_validated` checks a top-level type, the required keys per entry **with type guards
+before the membership tests**, an id cross-check against `{c.id for c in run.claims}`, an enum, and a
+duplicate — and was built once, for the one payload that is **not** a pass. This is §29's #7 with
+different nouns: the mechanism exists, one consumer got it, the other nine never did.
+
+What §30 takes is that **shape** and not its **policy**. A finding the reviewer cannot apply is
+dropped and traced, because the review stage is optional and contained and a misfiring reviewer must
+not cost a completed ten-pass run. A pass is not optional, so a payload it cannot apply re-enters
+§3's corrective retry and ultimately raises. Same shape, two policies; merging them means choosing
+one, and neither is wrong for its own caller.
+
+### Decisions
+
+| # | Decision | Rationale |
+|---|---|---|
+| **B1** | **One payload boundary for the ten passes**, in `core/reasoning/payload_validation.py`: a declarative `{pass_id: Spec}` table, one `validate(pass_id, payload, claim_ids=None, ensemble=False)`, and `PayloadShapeError(ValueError)`. `review.py` is **not** migrated onto it (comment only). | The same defect appeared in six places because no layer asserted shape at all. A new module rather than the orchestrator, for `json_retry.py`'s own stated reason: a mechanism a second consumer might want must not be trapped there. Migrating §20's reviewer would rewrite a tested boundary feeding the human-consent path, in a batch about the passes — recorded as deliberately deferred rather than forgotten. |
+| **B2** | **A shape or value failure re-enters §3's corrective retry.** `retry_until_json` gains `validate=`; exhaustion raises. **The corrective wording branches.** | The conversation is the same one — the model's own output is already in the thread. But *"your last response did not parse as valid JSON"* is **false** about a payload that parsed perfectly and was the wrong shape, and a model told its JSON is malformed when it is not has nothing to fix and will most likely resend the same structure. The trace branches too: a reader scanning for `JSON parse failed` is scanning for a model that cannot emit JSON, which is a different fact. |
+| **B3** | **`_run_pass_with_json_retry` keeps returning `str`,** and binds the spec itself from the pass id rather than taking it from each call site. | Two findings from reading. **Around twenty test sites** patch or drain that function and assert on the returned string, and §20's reviewer shares `retry_until_json`'s contract — re-parsing a short string is cheaper than moving twenty seams in the batch that adds the check. And a call site that *forgot* a `validate=` argument would be silently unvalidated, which is the condition this section exists to remove; `validate()` raises on a pass id it has no spec for, so an eleventh JSON-emitting pass cannot arrive by omission. |
+| **B4** | **Three properties per spec, plus a declared type where a value is used arithmetically**: the top-level type, the required keys per entry, and that entry ids resolve. | Each has a demonstrated consequence in the table above and nothing else does. Not a schema language and no new dependency (#145 tracks those): a richer vocabulary would let a spec describe things no pass has ever got wrong, at the price of a second place where a payload's meaning lives. |
+| **B5** | **A total id mismatch is the error; a partial one applies what matched and is reported.** The three `_apply_*` return how many claims they touched, and four checkpoints interpolate that. | Turns the second silent case into a named failure without letting one stray id kill a run that has already paid for nine passes. **The exception comes from the prompts:** `assumption_audit.md` asks the model to omit unflagged claims and `completeness.md` allows no gaps, so an empty `per_claim_flags`/`gaps` is the ordinary answer for a clean run — Pass 5's demonstrated defect was the top-level key being *absent*, which B4 catches instead. |
+| **B6** | **A duplicate claim id is rejected at Pass 2's boundary, and the two id lookups collapse onto `base.resolve_by_id`** (first wins). | `_apply_grounding`/`_apply_critic` built `{c.id: c}` (last wins) while `_apply_assumption_flags`/`claim_by_id` used `next(...)` (first wins). Driven, that split one claim in half: `first` carried the flags and no grounding, `second` carried grounding and severity and no flags — so D1 flagged the ungrounded copy and 6a revised the one with no sources. Rejecting the payload stops it arriving; unifying the lookups protects claims built by paths that never go through Pass 2 (§20's corrections, a future resume). |
+| **B7** | **`asserted_by_candidates` gets three layers.** `claim_extraction.md` now asks for it on every claim in ensemble mode; the Pass 2 spec requires it there; and `score_claim` treats an **empty list as unreported** — `consistency_score: None`, no penalty, traced. | The prompt scoped the field to multi-candidate claims, so a claim one candidate raised uncontested had it **absent** — and `len([]) / n` is 0.0, the *maximum* 0.15 penalty, for a claim that exists because a candidate asserted it. One line each, and only the last is enforceable: a prompt is a request. |
+| **B8** | **The numerator is deduplicated and clamped, and a clamp is recorded.** `min(1.0, len(set(...)) / ensemble_n)`, with the unclamped value kept as `consistency_reported`. | `[1, 2, 3, 3]` made consistency 1.3333, so the penalty went **negative** and was subtracted — a MEDIUM claim scored HIGH off a duplicate, against the property E8's own comment says holds "by construction". Recorded rather than silent because a numerator above the denominator is itself evidence Pass 2 misread the candidate labelling, and clamping quietly destroys the evidence along with the bug. |
+| **B9** | **`grounding_status` and `type` are validated in the spec, and coerced to the conservative end if one reaches the scorer anyway.** | `base.py`'s `Literal`s are annotations; dataclasses do not enforce them. An unrecognised status took `GROUNDING_WEIGHTS`' 0.0 default — the same *number* as ungrounded — but the forced-UNVERIFIED rule compares `== "ungrounded"`, so it **escaped**: `'Ungrounded'` published a claim the model could not source as merely LOW. `'Factual'` skipped D0's routing entirely and then sat on `NON_FACTUAL_SCORE_CAP`, scoring MEDIUM. Both are rejected at the boundary now; the coercion is the last resort for a value that survived the retries, and it is traced, because Pass 4 makes no model call and a value it worked around has nowhere else to surface. |
+| **B10** | **`score_breakdown` records what was applied and names the branch.** Both branches reconstruct `raw_score` from their own fields. | `if consistency_score is not None:` was true for every claim on an ensemble run, so a non-factual claim stored a `disagreement_penalty` E9 never subtracts — a reader recomputing from the stored fields got **0.25** against a stored **0.65**. Same class as E10 on the same object. `grounding_component`, inert on a claim D0 routes past 3a and recorded there since before ensemble mode, is replaced by the capped critic term the formula actually used; `consistency_score`/`consistency_denominator` survive as the raw signal E12 and #12 want. |
+| **B11** | **The spec table is pinned against the call sites**, by a test that reads `orchestrator.py`'s source, in both directions — plus one that every id-checking spec's call site passes `claim_ids=`. | §29's N4 lesson: a missing entry must be **loud at CI**, not a runtime warning that fires only once somebody reaches the branch. A spec that declares an id check and receives `None` is switched off without failing anything, which is the same silence one level down. |
+
+### Stated limit, not fixed
+
+Every spec is a transcription of the `Respond with ONLY this JSON structure` block in that pass's own
+`.md`, and **nothing checks that the two still agree**. A prompt edit that renames a field fails the
+run rather than silently mis-applying it — the better failure — but it fails it at the model's
+expense. Recording that is better than a check that would have to parse eight markdown files to
+mean anything.
+
+### Verification
+
+Windows **1914 passed / 16 skipped / 1 deselected**; `python:3.11-slim` **1929 / 1 / 1**; 1931
+collected on both. `main.py --help` exit 0 and `import tui.app` on both platforms.
+
+**34 mutations, 33 red on a test named for each, one green control, tree clean after restore** — and
+the whole table re-run inside the container, where six of the Windows skips are live. Two survivors,
+both in the tests rather than the code, and both are the vacuity class this project keeps meeting:
+
+| survivor | why it survived |
+|---|---|
+| the enum branch's type guard deleted | the only unhashable-value test aimed at `claim_id`, which `entry_types` checks first — so the rule copied from `review.py` **by name** was asserted in a comment and nowhere else |
+| the numerator's `set()` deleted | **the clamp was masking the dedupe.** `[1, 2, 3, 3]` without dedupe is 4/3, which the clamp pulls back to exactly the deduped answer. Two guards overlapping on the one input the test used. The discriminating case is a repeat that stays *below* the denominator: `[1, 1]` out of 3 is 1/3 deduped and 2/3 raw |
+
+The control earned its keep on the same run: it came back RED once, from the documented test count
+drifting behind two newly added tests — not from the mutation. That is the false-RED class the
+harness exists to separate.
+
+### Deliberately not in §30
+
+- **#57**, the tool wall clock — the last S1 after this. `signal.alarm` is main-thread-only, the TUI
+  runs tools in a worker, and abandoning a thread mid-`sympy` leaks one nothing can join. That is a
+  decision about process isolation, and its fix site is on every tool call in the project.
+- **#77**, keeping the ensemble candidates on `PipelineRun`. B8's recorded clamp is a partial answer
+  — a numerator above the denominator is visible now — but the fix adds a field, new artifact files,
+  and `pipeline_storage` + TUI reads.
+- **Migrating `review.py:_validated` onto B1's module.** `json_retry.py`'s own docstring is the
+  argument for doing it; the counter-argument is B1's. The comment naming the shared shape is there
+  so the next reader finds both.
+- **#12**, routing disagreement rather than scoring it. B8 and B10 make the signal trustworthy and
+  self-describing, which is what #12 says it would read; what to *do* with it is unchanged.
 
 ## Open Questions — None Remaining
 

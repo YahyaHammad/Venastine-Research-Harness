@@ -2164,3 +2164,117 @@ until the probe runs where a pty exists. What Windows *can* answer is whether N1
 reader parked with no deadline is not woken by `_thread.interrupt_main()`, and neither is `input()`,
 and neither is `ask`'s timed wait; under a real console control event all three exit identically with
 `STATUS_CONTROL_C_EXIT`.
+
+
+---
+
+## §26 — the tenth fix batch: the pipeline's payload boundary (2026-08-20)
+
+> **Section-number collision, named rather than renumbered.** This file's counter is independent of
+> ROADMAP_v2's — §19–§23 and §25 already collide the same way — so this §26 is the tenth fix batch,
+> and the earlier §26 is §26 of ROADMAP_v2's numbering. Audit **#17** owns the overloaded-namespace
+> family; extending the collision silently is what that issue is about.
+
+Closes audit **#76** (S1), **#75** (S2), **#78** (S3), **#79** (S3) and **#123** (S3).
+ROADMAP_v2 **§30**, decisions **B1–B11**.
+
+### The change that breaks a test, stated first
+
+**A pass's SHAPE is now part of its contract, not just its parseability.** A test double that queues
+`{"ok": true}` for a pass whose prompt promises an array now spends every corrective retry and then
+fails the run. Seven such doubles existed, in four files, and they were possible only because nothing
+checked:
+
+```python
+make_model_response(text='{"ok": true}')        # before
+make_model_response(text=well_shaped("Pass 2")) # after
+```
+
+`tests/conftest.py` grows `well_shaped(pass_id)` — the smallest payload each pass accepts — in ONE
+place, so the next spec change moves one line rather than nine.
+
+### What breaks
+
+| What | Before | After | Why |
+|---|---|---|---|
+| a pass payload that parses but is the wrong shape | applied, or silently discarded | a corrective retry, then `PayloadShapeError` → `status='failed'` | B2. A run that used to complete with wrong data now fails with a message naming the pass and the field |
+| a pass payload naming ids that match **nothing** | silently skipped, trace reported success | the same failure | B5 |
+| a pass payload naming ids that match **some** | unchanged | unchanged — applied, and the trace reports how many | B5's control. Deliberate: one stray id must not kill a nine-pass run |
+| two claims sharing an `id` | accepted, and split across the two lookups | rejected at Pass 2 | B6 |
+| `retry_until_json(...)` | — | `+ validate=` (defaults to `None`, so §20's reviewer is unchanged) | B2 |
+| `_run_pass_with_json_retry(...)` | — | `+ claim_ids=`, `+ ensemble=`; still returns `str` | B3 |
+| `_apply_grounding` / `_apply_critic` / `_apply_assumption_flags` | `-> None` | `-> int`, the number of claims touched | B5 |
+| `PipelineRun.claim_by_id` | its own `next(...)` | `base.resolve_by_id(...)`, first wins | B6 |
+| **`score_breakdown`'s keys**, in `04_confidence.json` and `/claims` | `grounding_component` on every claim; `disagreement_penalty` on every claim of an ensemble run | `+ formula`; `grounding_component` **only** on the factual branch; `+ capped_critic_component` on the non-factual one; `disagreement_penalty` is what was applied; `+ consistency_reported` when a clamp fired; `+ unrecognised_grounding_status` / `unrecognised_type` when one was coerced | B10. A reader can now reconstruct `raw_score` from the stored fields; before, a non-factual claim's fields gave 0.25 against a stored 0.65 |
+| `consistency_score` on an ensemble run | always a number | **`None` when Pass 2 reported nothing** | B7. Absent and zero were indistinguishable, and only one is a statement about the claim |
+| three checkpoint trace lines | reported the count the pass was ASKED about | report the count APPLIED | B5. Anything matching on the old wording moves |
+| `prompts/claim_extraction.md` | asks for `asserted_by_candidates` only on multi-candidate claims | asks for it on every claim in ensemble mode | B7 |
+| an unrecognised `grounding_status` reaching Pass 4 | weight 0.0, and it ESCAPED the forced-UNVERIFIED rule | scored as `ungrounded`, traced | B9 |
+| an unrecognised `type` reaching Pass 4 | the non-factual branch, capped at 0.65 | the factual formula, traced | B9 |
+| `settings.json`, config, the database schema | unchanged | unchanged | nothing here reads or writes either |
+
+### Before and after, measured
+
+```
+#76, driven end to end with the model refusing to correct
+  Pass 2 wraps its list   AttributeError: 'str' object has no attribute 'items'
+                     ->   Pass 2: expected a JSON array, got object. Return the array
+                          itself, not an object wrapping it.
+
+  Pass 3b severity="0.0"  TypeError: unsupported operand type(s) for -: 'float' and 'str'
+                          (raised in PASS 4, two passes downstream)
+                     ->   Pass 3b: entry 0 has severity='0.0', which is string; expected number.
+
+  the two SILENT ones, which completed a run and reported success:
+  Pass 5 flags at top      "Pass 5: assumption audit complete, 0 claim(s) flagged."
+                     ->   Pass 5: the response is missing required key(s) 'per_claim_flags'.
+  3a/3b unknown ids        "Pass 3a: grounded 4 unique entities across 3 factual claim(s)."
+                     ->   Pass 3a: not one of the 3 claim_id value(s) matches a claim you
+                          were given (got '1', '2', '3'; expected ids like 'C1', 'C2', 'C3').
+
+#75.1, grounded factual, severity 0.2143, three-model roster
+  [1, 2, 3, 3] one repeat    HIGH 0.825 penalty -0.05  ->  MEDIUM 0.775 penalty 0.0
+  [1, 2, 3, 4] out of range  HIGH 0.825 penalty -0.05  ->  MEDIUM 0.775 penalty 0.0, reported 1.3333
+
+#75.1b, the same claim with the field ABSENT
+  MEDIUM 0.70 penalty 0.15   ->  HIGH 0.85 penalty 0.0, consistency None
+
+#75.2
+  'Ungrounded' -> LOW    ->  UNVERIFIED        'Factual' -> MEDIUM  ->  UNVERIFIED
+```
+
+### The one thing that did NOT change, and was checked rather than asserted
+
+A well-formed run's full trace and every claim's breakdown were captured before and after and
+diffed. The only differences are the three B5 lines and B10's keys — no tier moved, no `raw_score`
+moved, and §10's byte-for-byte non-ensemble guard still holds: with `ensemble_n == 0` no consistency
+field is recorded at all, exactly as before.
+
+### Vacuity classes
+
+**A test double the fix invalidates.** Seven queued payloads no pass would ever emit. They did not
+fail — they *retried*, three times, and then failed the run with a message about a shape the test
+never meant to be about. The fix makes the doubles more honest than they were.
+
+**Two guards overlapping on one input.** `B8-dedupe-removed` survived because the clamp pulls
+`[1, 2, 3, 3]`'s 4/3 back to exactly the deduped answer. The test could not tell which guard was
+working. The discriminating input — a repeat that stays *below* the denominator — is the one that
+states the defect without the other guard's help.
+
+**A rule asserted in a comment.** `payload_validation.py` copies `review.py`'s "type guards BEFORE
+the membership tests" by name and explains why. Deleting the guard left the suite green: the only
+unhashable-value test aimed at a field checked by a different branch.
+
+### Mutation pass
+
+34 mutations, one green control, `git status --short` clean after restore, and the whole table re-run
+inside `python:3.11-slim` where six of the Windows skips are live — **34/34 on both**. The two
+survivors above were fixed in the tests, not the code, and the control came back RED once for a
+reason that was not the mutation: the documented test count had drifted behind two newly added
+tests. That is exactly the false-RED the control exists to separate.
+
+### Platform note
+
+Nothing in §30 is platform-specific — the boundary is pure Python over already-parsed JSON — and
+that is worth confirming rather than assuming, which is what the container mutation run does. Every
+number matches Windows to the digit.

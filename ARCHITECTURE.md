@@ -1343,3 +1343,44 @@ The single-payload test (`__import__('os').system(...)`) is kept, and was itself
   converted the lot to LF — and whose blanket `\d+ tests` rule rewrote AGENTS.md's *historical*
   "invisibly to 849 tests" into the current number, turning a description of a past bug into a false
   claim. Anchor on the words around a number, work in bytes, and assert afterwards.
+
+- **A trace line built from the caller's own input reports an outcome it cannot know.** `Pass 3a:
+  grounded {len(unique_entities)} unique entities across {len(factual_claims)} factual claim(s).` is
+  assembled entirely on the orchestrator's side of the call, so it was emitted verbatim on a run
+  where the pass grounded nothing — and the run then spent four more model calls concluding that
+  nothing could be verified. The apply step is the only thing that knows what landed, so it returns
+  a count and the checkpoint interpolates that (§30, B5). The trace is the artifact `base.py` calls
+  "at least as trustworthy as the final report itself"; a line derived from its own input cannot be.
+
+- **A `Literal` is an annotation, not a check.** `ClaimType` and `GroundingStatus` are declared in
+  `base.py` and dataclasses enforce neither, so `"Grounded"` scored a well-sourced claim 0.35/LOW
+  where `"grounded"` gives 0.85/HIGH, and `"Ungrounded"` escaped the forced-UNVERIFIED rule entirely
+  — the rule compares `== "ungrounded"`, and an unrecognised value merely took a 0.0 weight. Both
+  vocabularies now live beside their Literals as `frozenset`s, and both the payload boundary and the
+  scorer read those two names rather than re-typing a copy.
+
+- **Two lookups for one thing will disagree, and the disagreement is invisible until data reaches
+  both.** `{c.id: c}` is last-wins; `next(c for c in claims if c.id == x)` is first-wins. Both were
+  live in the same file. With two claims sharing an id, the grounding landed on one object and the
+  assumption flags on the other, so D1 flagged the ungrounded copy and Pass 6a revised the one with
+  no sources. `base.resolve_by_id` is the only resolution now — and it exists even though §30 also
+  rejects the payload that produces duplicates, because the boundary only covers claims that came
+  through Pass 2.
+
+- **A recorded field that nothing applied is worse than no field.** A non-factual claim stored a
+  `disagreement_penalty` E9 never subtracts, so a reader recomputing `raw_score` from the stored
+  fields got 0.25 against a stored 0.65 — with nothing in the breakdown saying which branch produced
+  the number. A breakdown either reconstructs its own result or it is decoration; `formula` names the
+  branch and every term recorded is one that was used (§30, B10).
+
+- **Two guards on one value can hide each other from the tests.** The consistency numerator is
+  deduplicated and then clamped, and `[1, 2, 3, 3]` exercises neither on its own: without the dedupe
+  it is 4/3, which the clamp pulls back to exactly the deduped answer. Deleting the dedupe left the
+  suite green. When two corrections can produce the same output for the same input, at least one test
+  has to use an input where only one of them fires.
+
+- **Turning on a check makes the test doubles part of the contract.** Seven doubles queued
+  `{"ok": true}` for passes whose prompts promise an array — fine while nothing looked, a failing run
+  the moment something did. They did not fail loudly either: they spent every corrective retry first.
+  A payload builder like `tests/conftest.py`'s `well_shaped(pass_id)` keeps the next spec change to
+  one line instead of nine.

@@ -93,6 +93,29 @@ For a factual claim the score is `0.5 × grounding + 0.35 × (1 − critic sever
 
 A claim that stays flagged after two revise/re-validate rounds falls to UNVERIFIED rather than being quietly retried forever.
 
+### A pass that answers the wrong shape is corrected, then it stops the run
+
+Each pass is asked for a specific JSON structure, and each one is checked against that structure
+before anything is applied. A payload that parses but is not what the pass promised goes back to the
+model with the problem named — the same corrective turn a malformed one gets — and if it comes back
+wrong again the run fails, saying which pass and which field:
+
+```
+Pass 3b: entry 0 has severity='0.0', which is string; expected number.
+Pass 2: expected a JSON array, got object. Return the array itself, not an object wrapping it.
+```
+
+That matters more than it sounds. The failures worth preventing are not the loud ones: a model that
+answered about claim ids nobody issued used to produce a *finished* run whose trace said
+`Pass 3a: grounded 4 unique entities across 3 factual claim(s)` while grounding nothing, and then
+spent four more model calls concluding that nothing could be verified. Those counts are what the
+pass was **asked** about; the trace now reports what was actually applied — `grounded 2 of 3` — so a
+pass that half-worked says so.
+
+The run does not die over a single stray id: entries that resolve are applied, and only a payload
+where *nothing* matched is treated as a failure. Every number in `04_confidence.json`'s
+`score_breakdown` is one that was actually used, so the fields reconstruct the score they came with.
+
 ### Different models can check each other
 
 Set `CRITIC_MODEL` and passes 3a, 3b and 6c run on a *different* provider and model from the one that wrote the answer. A model checking its own output brings its own blind spots to the inspection.
