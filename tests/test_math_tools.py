@@ -855,3 +855,87 @@ def test_most_of_the_allowlist_evaluates_strings_which_is_why_they_cannot_get_on
     assert not (set(evaluators) & _STRING_ARG_CONSTRUCTORS), (
         f"{sorted(set(evaluators) & _STRING_ARG_CONSTRUCTORS)} both "
         "evaluate strings AND are licensed to receive them")
+
+
+# ===========================================================================
+# ---- §31 (H5, H6): two shape defects, found while checking whether --------
+# ---- oversized integers were exploitable ----------------------------------
+# ===========================================================================
+#
+# Neither is a SIZE problem, which is why neither is fixed by a bound on a
+# parameter. An `le` on `exponent` would have caught neither, and H4
+# declines to add one anyway: cost in `combinations` is joint in n and r,
+# so no per-parameter ceiling expresses it.
+
+
+class TestModularExponentIsModular:
+    """H5. `modulus` is Optional and `pow(b, e, None)` is PLAIN
+    exponentiation, so omitting one field turned this into a different
+    operation with a different complexity class -- measured at 0.000s with
+    a modulus and 3.3s / 125 MB without one, for the same exponent."""
+
+    def test_a_missing_modulus_is_refused_rather_than_computed(self):
+        result = discrete_math.run({"operation": "modular_exponent",
+                                    "base": 2, "exponent": 1000000000})
+        assert "error" in result
+        assert "modulus" in result["error"]
+
+    def test_the_refusal_is_immediate_not_a_timeout(self):
+        """The point of refusing at the boundary rather than leaning on
+        H2's clock: the same call would otherwise cost a full budget and
+        125 MB of allocation before anything was said."""
+        import time
+        started = time.time()
+        discrete_math.run({"operation": "modular_exponent",
+                           "base": 2, "exponent": 1000000000})
+        assert time.time() - started < 1.0
+
+    def test_the_same_call_with_a_modulus_is_answered(self):
+        """The control. Modular exponentiation of a huge exponent is cheap
+        -- that is what the operation is FOR -- so the fix must not touch
+        it."""
+        result = discrete_math.run({"operation": "modular_exponent",
+                                    "base": 2, "exponent": 1000000000,
+                                    "modulus": 1000003})
+        assert result == {"result": "623034",
+                          "operation": "modular_exponent"}
+
+
+class TestAResultTooLargeToPrintIsTheToolsOwnError:
+    """H6. `str(result)` sat OUTSIDE run()'s try, so a correct answer that
+    merely could not be printed left the handler as a bare ValueError, was
+    caught by dispatch's containment, and was logged with a full traceback
+    as though it were a bug in the harness."""
+
+    def test_an_unprintable_result_is_an_error_dict(self):
+        result = discrete_math.run({"operation": "factorial", "n": 100000})
+        assert "error" in result
+
+    def test_the_message_says_what_to_do_about_it(self):
+        """dispatch's generic wrapper -- "discrete_math failed: Exceeds the
+        limit (4300 digits)..." -- describes CPython to a model that can
+        only change its own inputs."""
+        result = discrete_math.run({"operation": "factorial", "n": 100000})
+        assert "smaller" in result["error"].lower()
+
+    def test_it_does_not_escape_the_handler(self):
+        """The property, stated directly: nothing raises out of run()."""
+        for params in ({"operation": "factorial", "n": 100000},
+                       {"operation": "combinations", "n": 100000,
+                        "r": 50000}):
+            assert isinstance(discrete_math.run(params), dict)
+
+    def test_a_dict_result_still_carries_its_values_untouched(self):
+        """The guard wraps the serialisation; it must not change what is
+        serialised. prime_factors returns {prime: exponent} with INTEGER
+        exponents, and a str() applied one level too far would rewrite
+        every one of them -- which is what the first draft of this fix
+        did."""
+        result = discrete_math.run({"operation": "prime_factors", "n": 360})
+        assert result == {"result": {"2": 3, "3": 2, "5": 1},
+                          "operation": "prime_factors"}
+
+    def test_an_ordinary_factorial_is_unaffected(self):
+        result = discrete_math.run({"operation": "factorial", "n": 20})
+        assert result == {"result": "2432902008176640000",
+                          "operation": "factorial"}
