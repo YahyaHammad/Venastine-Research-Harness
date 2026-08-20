@@ -230,6 +230,20 @@ class TestDeclaredValueTypes:
         with pytest.raises(PayloadShapeError, match="'gaps' is string"):
             validate("Pass 3c", {"gaps": "more detail", "coverage_score": 0.5})
 
+    def test_an_unhashable_value_in_an_ENUM_field_is_a_shape_error(self):
+        """The enum branch has its own type guard, and it needs its own
+        test: `value not in allowed` against a frozenset raises TypeError
+        from INSIDE the validator when the value is a list -- an
+        unhandleable error about hashing, in place of a message naming the
+        pass and the field.
+
+        Found by mutation. Deleting `not isinstance(value, str) or` left
+        the whole suite green, because the only unhashable-value test
+        aimed at `claim_id`, which entry_types checks first."""
+        with pytest.raises(PayloadShapeError, match="type="):
+            validate("Pass 2", [{"id": "c1", "text": "t",
+                                 "type": ["factual", "synthesis"]}])
+
     def test_a_non_string_claim_id_is_rejected_before_it_is_looked_up(self):
         """Type guards BEFORE the membership tests, which is review.py's
         rule: an unhashable value in an id field would otherwise raise

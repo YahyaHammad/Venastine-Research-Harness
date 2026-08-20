@@ -444,6 +444,35 @@ class TestTheConsistencyNumerator:
             "a repeat is a repeat -- it cannot make a claim score better "
             "than the same claim asserted by every candidate once"
         )
+        assert "consistency_reported" not in repeated, (
+            "the DEDUPE resolved this one, so there was nothing left to "
+            "clamp. Recording a clamp here would mean the numerator "
+            "reached the clamp still holding a duplicate"
+        )
+
+    def test_a_repeat_BELOW_the_denominator_still_counts_once(self):
+        """The dedupe on its own, with no help from the clamp.
+
+        Found by mutation: `len(set(...))` -> `len(...)` survived, because
+        the [1, 2, 3, 3] case above is 4/3 without dedupe and the clamp
+        pulls that back to exactly the deduped answer. Two guards
+        overlapping on one input, so the test could not tell which was
+        working.
+
+        [1, 1] out of 3 is 1/3 deduped and 2/3 raw -- a claim ONE candidate
+        asserted twice, reading as two candidates agreeing, at half the
+        penalty it earned."""
+        _, repeated = _scored(grounding_status="grounded",
+                              asserted_by_candidates=[1, 1], ensemble_n=3)
+        _, once = _scored(grounding_status="grounded",
+                          asserted_by_candidates=[1], ensemble_n=3)
+
+        assert repeated["consistency_score"] == once["consistency_score"] == round(1 / 3, 4)
+        assert repeated["disagreement_penalty"] == 0.1
+        assert "consistency_reported" not in repeated, (
+            "1/3 is not above the denominator, so nothing was clamped -- "
+            "the dedupe is what handled it"
+        )
 
     def test_an_out_of_range_candidate_number_is_clamped(self):
         _, breakdown = _scored(grounding_status="grounded", critic_severity=0.2143,
