@@ -32,6 +32,7 @@ from typing import Optional
 
 import yaml
 
+import config
 from core import workspace_trust
 
 logger = logging.getLogger(__name__)
@@ -170,6 +171,47 @@ def _user_config_dir() -> str:
     return os.path.expanduser("~/.config/venastine")
 
 
+def _catalog_text(value) -> str:
+    """One line, bounded, for a string that enters every system prompt.
+
+    Applied to a skill's and an agent's `name` and `description` at
+    PARSE TIME, for every tier -- ROADMAP_v2 §32 A5, #131.
+
+    TWO RULES, ONE FUNCTION, because they are one rule about one kind
+    of string:
+
+      COLLAPSE WHITESPACE, and this is the security half. The catalogs
+        render `- {name}: {description}`, so a value containing a
+        newline does not merely look untidy -- it LEAVES ITS BULLET.
+        A project skill described with a YAML block scalar holding
+        `## Available tools` renders as a top-level section of the
+        system prompt, indistinguishable from one this harness wrote.
+        Driven, and it worked.
+
+      CAP THE LENGTH, and this is the budget half. Progressive
+        disclosure puts every name and description in every prompt of
+        every run; without a bound, one project file sets that cost.
+
+    TRUNCATE RATHER THAN REFUSE THE FILE. `_parse_md_file` skips a
+    malformed definition, which is right for `additional_tools` --
+    a non-string element crashes its first consumer. A description is
+    advisory prose read by a model, so it degrades gracefully, and
+    losing a whole working skill over the length of its summary would
+    be the worse trade. The ellipsis is visible on purpose: a model
+    reading a cut-off summary should be able to tell.
+
+    EVERY TIER, not just project. A rule that applies only to
+    untrusted input is a second source of truth about what a catalog
+    entry is, and the harness tier is where a regression would be
+    least visible -- so the shipped files are held to it too, and
+    tests/test_catalog_text.py asserts they already comply.
+    """
+    text = " ".join(str(value).split())
+    if len(text) <= config.MAX_CATALOG_TEXT_CHARS:
+        return text
+    return text[:config.MAX_CATALOG_TEXT_CHARS - 1].rstrip() + "\u2026"
+
+
 def _parse_frontmatter(text: str) -> tuple[dict, str]:
     """Returns (frontmatter_dict, body). Uses a delimiter that must occupy
     its own line -- NOT text.find("---"), which matches the first bare
@@ -217,6 +259,17 @@ def _parse_md_file(path: str, kind: str, tier: str, category: str = ""):
     if not isinstance(name, str) or not name:
         logger.warning("Skipping %s file %s: missing 'name' in frontmatter", kind, path)
         return None
+    # #131: the NAME is interpolated into the same catalog line as the
+    # description (`- {name}: {description}`), so it is the same
+    # injection surface and gets the same treatment. Bounded AFTER the
+    # emptiness check, because an all-whitespace name collapses to ""
+    # and must be reported as missing rather than registered as a
+    # nameless definition that D18's collision rule cannot reason about.
+    name = _catalog_text(name)
+    if not name:
+        logger.warning("Skipping %s file %s: 'name' is only whitespace",
+                       kind, path)
+        return None
     if kind == "skills":
         tools = fm.get("additional_tools") or []
         if not isinstance(tools, list):
@@ -231,7 +284,7 @@ def _parse_md_file(path: str, kind: str, tier: str, category: str = ""):
             return None
         return SkillDef(
             name=name,
-            description=str(fm.get("description", "")),
+            description=_catalog_text(fm.get("description", "")),
             additional_tools=tools,
             body=body,
             tier=tier,
@@ -271,7 +324,7 @@ def _parse_md_file(path: str, kind: str, tier: str, category: str = ""):
         flags[key] = value
     return AgentDef(
         name=name,
-        description=str(fm.get("description", "")),
+        description=_catalog_text(fm.get("description", "")),
         model=fm.get("model"),
         provider=fm.get("provider"),
         allowed_tools=allowed,
@@ -853,11 +906,52 @@ def skill_catalog_text(active: Optional[list] = None) -> str:
     return "\n".join(lines)
 
 
+def _catalog_entries(root: str, files: list) -> list:
+    """(kind, name, description) for every agent/skill in the listing.
+
+    ROADMAP_v2 §32 A6, #131. The trust prompt's stated criterion is
+    written in describe_project_content below -- the files shown
+    verbatim are "the ones whose contents change what runs". An
+    agent's and a skill's `description` meets it exactly: one `y` puts
+    both into the system prompt of every run in this project, with no
+    tool call and no further consent, and the reason they were left
+    out was that nobody had noticed they qualify.
+
+    PARSED THROUGH _parse_md_file, so what is shown is the NORMALISED
+    text -- the same value A5 will put in the prompt, not the raw
+    frontmatter. That is the whole point of showing it: a summary
+    displaying something other than what gets injected is a worse
+    answer than showing nothing, because it invites trust in the
+    wrong string. It also means the listing is bounded by
+    construction, which is what makes printing it safe at all.
+
+    Runs on UNTRUSTED content by definition, so a file that will not
+    parse is reported as unreadable rather than skipped in silence:
+    'this file is here and I cannot tell you what it says' is a fact
+    the person answering the prompt needs.
+    """
+    out = []
+    for rel in files:
+        parts = rel.split("/")
+        if len(parts) < 2 or parts[0] not in ("agents", "skills"):
+            continue
+        if not rel.lower().endswith(".md"):
+            continue
+        kind = parts[0]
+        defn = _parse_md_file(os.path.join(root, *parts), kind,
+                              "project")
+        if defn is None:
+            out.append((kind, rel, "(could not be read -- see the log)"))
+        else:
+            out.append((kind, defn.name, defn.description))
+    return out
+
+
 def describe_project_content(project_path: str) -> str:
-    """Human-readable summary shown in the trust prompt (file list plus
-    settings.json verbatim), so approving trust is an informed decision --
-    a project's settings can choose the provider and multiply pipeline
-    cost via ensemble_n."""
+    """Human-readable summary shown in the trust prompt, so approving
+    trust is an informed decision -- a project's settings can choose the
+    provider and multiply pipeline cost via ensemble_n, and an agent's
+    or a skill's description reaches every system prompt (#131)."""
     root = workspace_trust.venastine_dir(project_path)
     files = workspace_trust.content_files(project_path)
     lines = [f"Project .venastine/ content ({root}):"]
@@ -889,4 +983,15 @@ def describe_project_content(project_path: str) -> str:
             continue
         lines.append(label)
         lines += ["  | " + line for line in body.splitlines()]
+
+    # §32 A6. Shown AFTER the two config files rather than beside the
+    # file list, because the list answers "what is here" and this
+    # answers "what would it say to the model" -- the same order the
+    # two questions are asked in.
+    entries = _catalog_entries(root, files)
+    if entries:
+        lines.append("these descriptions enter EVERY system prompt in "
+                     "this project:")
+        for kind, name, description in entries:
+            lines.append(f"  | {kind[:-1]} {name}: {description}")
     return "\n".join(lines)

@@ -408,6 +408,26 @@ COMPACTION_STRATEGIES = ("rederive", "chain")
 # gets kept ahead of the cap.
 MAX_INJECTED_MEMORIES = 50
 
+# --- Catalog text (ROADMAP_v2 §32, A5) ---
+#
+# The cap on a skill's or an agent's `name` and `description` -- the
+# two strings that go from a .md file straight into the system prompt
+# of every run in a project, with no tool call and no further consent
+# (#131).
+#
+# 300 is headroom rather than a squeeze: the longest description this
+# project ships is `compactor` at 171 characters, and all eight are
+# single-line. A project whose description does not fit in twice the
+# length of ours is writing instructions, not a summary, which is
+# exactly the thing the cap is for.
+#
+# THE NEWLINE COLLAPSE MATTERS MORE THAN THE NUMBER, and they are one
+# constant because they are one rule -- see config_loader._catalog_text.
+# Same posture as tools/builtin/arxiv.MAX_SUMMARY_CHARS (600) and
+# web_search.MAX_SNIPPET_CHARS (300): model-facing text from a source
+# this project did not write is bounded where it is produced.
+MAX_CATALOG_TEXT_CHARS = 300
+
 # The agent that does the summarizing. §21: this is the shape of an agent
 # call -- a system prompt, a task, a judgment-based output -- so it runs
 # through the same RunAgentLoop as everything else rather than needing its
