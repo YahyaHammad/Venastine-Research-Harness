@@ -541,8 +541,43 @@ def _build_fake_httpx_module():
             outcome.url = url
         return outcome
 
+    def _stream(method, url, **kwargs):
+        """ROADMAP_v2 §31 (H7). fetch_url streams now, so the fake has to.
+
+        Same queue and the same recording as _get -- a test that queues a
+        response does not have to know which of the two the tool reached
+        for. Returns a context manager because that is how httpx.stream
+        is used and the `with` block is where the connection is dropped
+        early; a fake that returned a bare response would let a caller
+        forget it and still pass.
+
+        `iter_bytes` yields in SMALL pieces on purpose. One giant chunk
+        would satisfy any cap on the first iteration and make a broken
+        bound look like a working one -- the double would be deciding
+        the test's outcome instead of the code.
+        """
+        response = _get(url, method=method, **kwargs)
+
+        class _Streamed:
+            def __enter__(inner):
+                return response
+
+            def __exit__(inner, *exc):
+                return False
+
+        return _Streamed()
+
+    def _iter_bytes(self, chunk_size=1024):
+        encoding = getattr(self, "encoding", None) or "utf-8"
+        raw = self.text.encode(encoding, "replace")
+        for start in range(0, len(raw), chunk_size):
+            yield raw[start:start + chunk_size]
+
+    _Response.iter_bytes = _iter_bytes
+
     mod.HTTPError = _HTTPError
     mod.get = _get
+    mod.stream = _stream
     mod.Response = _Response
     return mod
 

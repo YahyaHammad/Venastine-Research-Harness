@@ -240,6 +240,23 @@ SANDBOX_MEMORY_MB = 1024
 SANDBOX_CPU_SECONDS = 30
 SANDBOX_MAX_PIDS = 200
 
+# ROADMAP_v2 §31 (H9). The wall clock on a BUDGET_COMPUTE tool call --
+# the six math tools, which are pure functions of their params and have
+# nothing bounding them from the inside. dispatch runs them in a
+# killable subprocess under this budget (tools/isolation.py).
+#
+# 15s is chosen against measurement, not taste. The slowest LEGITIMATE
+# call found is `symbolic_math series order=1000` at 3.44s, so this is
+# roughly 4x headroom; the runaways it exists for do not return at all.
+# Ten passes each burning a full budget is 150s rather than forever,
+# which is the trade being made.
+#
+# ONE number, not one per tool: there is no evidence any two math tools
+# want different answers, and a per-tool budget makes each a judgement
+# call at the registration site. It sits beside SANDBOX_TIMEOUT_SECONDS
+# because that is the constant a reader would compare it against.
+TOOL_COMPUTE_TIMEOUT_S = 15
+
 # WARNING: commands matching these words get network access inside the
 # sandbox. A compromised package or script can exfiltrate data or
 # download payloads. Only add commands you trust.

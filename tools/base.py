@@ -17,6 +17,36 @@ GRANT_NEVER = "never"
 GRANT_POLICIES = frozenset({GRANT_ANYWHERE, GRANT_SIGNOFF_ONLY, GRANT_NEVER})
 
 
+# ROADMAP_v2 §31 (H1). What a call to this tool is allowed to COST, and
+# therefore which mechanism bounds it. Asked once, at registration, for
+# the same reason grant_policy is: the answer is a property of the tool,
+# and a layer that infers it from a name or a module is a second source
+# of truth that drifts the moment a tool is added.
+#
+#   BUDGET_COMPUTE  A pure function of its params. Nothing bounds it from
+#                   the INSIDE -- sympy has no interruption points -- so
+#                   dispatch runs it in a killable subprocess under
+#                   config.TOOL_COMPUTE_TIMEOUT_S (H2).
+#   BUDGET_IO       Carries its own bound already: a request timeout, a
+#                   size check before opening, a sandbox, or an operation
+#                   bounded by construction. NOT wrapped by dispatch,
+#                   because an outer clock over a blocking read can only
+#                   stop WAITING -- mcp_client says so about its own
+#                   backstop, and a mechanism that reports a timeout while
+#                   the work continues is worse than none (H7).
+#   BUDGET_HUMAN    Blocks on a person, or on a sub-run metered
+#                   separately. ask_user waits up to
+#                   ATTENDED_APPROVAL_TIMEOUT_S; spawn_subagent is bounded
+#                   by the child's max_steps and the token budget. A
+#                   compute clock over either would be a bug, not a
+#                   tightening (H8).
+BUDGET_COMPUTE = "compute"
+BUDGET_IO = "io"
+BUDGET_HUMAN = "human"
+
+BUDGETS = frozenset({BUDGET_COMPUTE, BUDGET_IO, BUDGET_HUMAN})
+
+
 @dataclass
 class ToolSpec:
     name: str  # Tool name
@@ -94,6 +124,21 @@ class ToolSpec:
     # assert_grant_policy_declared() below makes omission fatal at import,
     # the same trade D24 made for permissions.
     grant_policy: Optional[str] = None
+    # ROADMAP_v2 §31 (H1). One of BUDGET_COMPUTE / BUDGET_IO /
+    # BUDGET_HUMAN, above.
+    #
+    # None means UNDECLARED, not a default -- grant_policy's rule one
+    # question over, for grant_policy's reason. Before §31 every bound in
+    # the tool layer was per-tool and voluntary: three network tools each
+    # set their own REQUEST_TIMEOUT_S, `shell` inherited the sandbox's,
+    # and MCP tools got a two-layer clock in mcp_client -- while the six
+    # math tools, the only ones that can burn a core indefinitely, had
+    # none at all (#57). A default here would recreate exactly that, and
+    # silently: an unwrapped tool looks identical to a correctly bounded
+    # one from every layer above.
+    #
+    # assert_budget_declared() below makes omission fatal at import.
+    budget: Optional[str] = None
 
 
 def assert_grant_policy_declared(tools: Iterable[str], specs=None) -> None:
@@ -137,4 +182,55 @@ def assert_grant_policy_declared(tools: Iterable[str], specs=None) -> None:
             f"undeclared={sorted(undeclared)} invalid={sorted(invalid)}. "
             f"Set ToolSpec.grant_policy to one of {sorted(GRANT_POLICIES)} "
             "(ROADMAP_v2 §25, R13)."
+        )
+
+
+def assert_budget_declared(tools: Iterable[str], specs=None,
+                           injectable=None) -> None:
+    """H1: every statically registered tool must declare a cost class, it
+    must be one of the three defined values, and a BUDGET_COMPUTE tool
+    must not also declare an injection.
+
+    Raises rather than warning, and the argument is the one above it,
+    unchanged: the failure is invisible at runtime. An undeclared tool is
+    simply not wrapped, which from every layer above looks exactly like a
+    tool that is correctly bounded somewhere else -- and that is the state
+    #57 found, where dispatch called every handler directly and nothing
+    anywhere recorded whether that was intended.
+
+    The third check is not a style rule. BUDGET_COMPUTE is not merely a
+    policy: it routes the call through a PROCESS boundary, and nothing in
+    _INJECTABLE_PARAMS survives one. A live ConversationMemory or a
+    response_channel cannot be pickled, so a tool declaring both would
+    fail at its first call rather than here. The two fields are checked
+    together because neither is wrong on its own.
+
+    Dynamically-named `mcp__*` tools are exempt, as they are for
+    grant_policy and for the same reason -- they are named at connection
+    time. Their bound is mcp_client's own two-layer clock, and
+    registration.py passes BUDGET_IO explicitly to say so.
+    """
+    specs = specs if specs is not None else tools
+    injectable = injectable or {}
+    undeclared, invalid, contradictory = [], [], []
+    for name in tools:
+        if name.startswith("mcp__"):
+            continue
+        spec = specs.get(name) if hasattr(specs, "get") else None
+        budget = getattr(spec, "budget", None)
+        if budget is None:
+            undeclared.append(name)
+        elif budget not in BUDGETS:
+            invalid.append(f"{name}={budget!r}")
+        elif budget == BUDGET_COMPUTE and injectable.get(name):
+            contradictory.append(
+                f"{name} injects {sorted(injectable[name])}")
+    if undeclared or invalid or contradictory:
+        raise RuntimeError(
+            "Tools are registered without a usable cost class, so what a "
+            "call to them is allowed to cost was never answered: "
+            f"undeclared={sorted(undeclared)} invalid={sorted(invalid)} "
+            f"compute-with-injection={sorted(contradictory)}. "
+            f"Set ToolSpec.budget to one of {sorted(BUDGETS)} "
+            "(ROADMAP_v2 §31, H1)."
         )

@@ -291,6 +291,25 @@ def edit_run(params: dict) -> dict:
     if not os.path.isfile(resolved):
         return {"error": f"No such file: {parsed.path}"}
 
+    # ROADMAP_v2 §31 (H7), #55. read_run has had this check since the
+    # beginning and this module's own docstring gives the reason --
+    # "rejected before opening to prevent memory exhaustion" -- while
+    # the sibling twenty lines down read whatever it was pointed at.
+    # Measured on a 30 MB file: 60 MB of peak traced memory to answer
+    # "old_text not found in file."
+    #
+    # Copied rather than reinvented, down to the wording, so the two
+    # paths refuse identically. A caller that learns what `read` rejects
+    # now knows what `edit` rejects.
+    file_size = os.path.getsize(resolved)
+    if file_size > config.MAX_FILE_SIZE_BYTES:
+        return {
+            "error": (
+                f"File size ({file_size} bytes) exceeds the maximum "
+                f"editable size ({config.MAX_FILE_SIZE_BYTES} bytes)."
+            ),
+        }
+
     try:
         with open(resolved, "r", encoding="utf-8") as f:
             content = f.read()

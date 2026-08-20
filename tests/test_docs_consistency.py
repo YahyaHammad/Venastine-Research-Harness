@@ -387,3 +387,111 @@ def test_architecture_states_the_real_registry_counts():
         f"ARCHITECTURE.md does not state the headless-callable count; it is "
         f"{callable_} of the {advertised} advertised."
     )
+
+
+# ===========================================================================
+# ---- §31 (H10), #56: no undeclared third record ---------------------------
+# ===========================================================================
+#
+# `tools/builtin/.ipynb_checkpoints/` held two committed notebook checkpoint
+# copies. They were inert -- not importable (the directory name is not a
+# valid identifier), not registered (registration is by explicit import),
+# not collected (the filenames do not match pytest's pattern) -- and that is
+# exactly why nothing caught them.
+#
+# What made them worth deleting rather than ignoring is what they said.
+# `web_search-checkpoint.py` carried `BLOCKED_DOMAINS: set[str] = set()`, an
+# EMPTY blocklist, so `grep BLOCKED_DOMAINS` returned it beside the real one
+# in safety/policy_enforcement.py -- while #48, #53 and #54 were open
+# against that exact control. It also carried the `extra={}` logging bug and
+# the `raise WebSearchError` pattern, both of which CLAUDE.md records as
+# fixed defects with the reasons they were fixed.
+#
+# This file's subject is the project not contradicting itself, and #56's own
+# argument is that these were "an undeclared third record" sitting beside
+# DEVLOG.md and BREAKING_CHANGES.md without being marked historical. So the
+# check belongs here.
+#
+# The check is on the TRACKED set, not on what is present on disk, and
+# that distinction was measured rather than assumed: this working tree
+# has EIGHT .ipynb_checkpoints directories and exactly one of them was
+# ever committed. A test that failed on all eight would fail on any
+# machine with notebook history, and a test people learn to ignore
+# protects nothing. Untracked residue is the developer's own business
+# and .gitignore already covers it; a COMMITTED copy is a claim about
+# the project, which is what #56 is about.
+#
+# Note that .gitignore listing `.ipynb_checkpoints/` did not prevent
+# this: both files were added before the entry existed, and gitignore
+# does not untrack. So a gitignore-based check would have passed while
+# the files sat there.
+
+_CHECKPOINT_DIR = ".ipynb_checkpoints"
+
+_SKIP_DIRS = {".git", "__pycache__", "node_modules", ".venv", "venv",
+              ".pytest_cache", "output", "logs", "build", "dist",
+              _CHECKPOINT_DIR}
+
+
+def _project_root():
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _walk_project():
+    """Live source only -- checkpoint directories are excluded here and
+    checked separately, so a stale copy cannot answer a question about
+    what the project defines."""
+    for dirpath, dirnames, filenames in os.walk(_project_root()):
+        dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
+        yield dirpath, dirnames, filenames
+
+
+def test_no_notebook_checkpoint_file_is_committed():
+    """#56. Two of these sat inside tools/builtin/, one carrying an EMPTY
+    BLOCKED_DOMAINS beside the real one.
+
+    Skips without git rather than falling back to a filesystem walk: the
+    property is about what the repository CLAIMS, and that is a git fact.
+    A walk would answer a different question and call it the same name."""
+    import subprocess
+    try:
+        listed = subprocess.run(
+            ["git", "ls-files", "*" + _CHECKPOINT_DIR + "*"],
+            cwd=_project_root(), capture_output=True, text=True,
+            timeout=30)
+    except (OSError, subprocess.SubprocessError):  # pragma: no cover
+        pytest.skip("git is not available to ask what is tracked")
+    if listed.returncode != 0:  # pragma: no cover
+        pytest.skip("not a git checkout")
+
+    tracked = [line for line in listed.stdout.splitlines() if line.strip()]
+    assert tracked == [], (
+        f"{tracked} -- committed notebook checkpoints are stale copies of live code, unmarked as historical, and reachable by every grep and code search a reader or an agent runs (#56)")
+
+
+def test_the_url_blocklist_is_defined_exactly_once():
+    """The harm #56 names, stated as the property rather than as the file.
+
+    A second definition is not a style problem when the name is a security
+    control: `grep BLOCKED_DOMAINS` returned an EMPTY set beside the real
+    one, and a reader auditing #48/#53/#54 had no way to tell from the grep
+    which was live. Anchored on the ASSIGNMENT so the many test-side
+    monkeypatches of the same name do not count.
+    """
+    definition = re.compile(r"^BLOCKED_DOMAINS\s*(:[^=]+)?=", re.M)
+    # _walk_project already excludes checkpoint directories, so untracked
+    # residue on a developer's machine cannot fail this. The committed
+    # case is test_no_notebook_checkpoint_file_is_committed's job.
+    defining = []
+    for dirpath, _dirnames, filenames in _walk_project():
+        for name in filenames:
+            if not name.endswith(".py"):
+                continue
+            path = os.path.join(dirpath, name)
+            with open(path, encoding="utf-8", errors="replace") as f:
+                if definition.search(f.read()):
+                    defining.append(os.path.relpath(path))
+    assert len(defining) == 1, (
+        f"BLOCKED_DOMAINS is defined in {defining}; a security control with "
+        "two definitions has none that a reader can trust")
+    assert defining[0].replace(os.sep, "/") == "safety/policy_enforcement.py"

@@ -11,6 +11,21 @@ logger = logging.getLogger(__name__)
 
 _TOOL_DESCRIPTION = "Retrieve the contents of a web page using a URL."
 MAX_CONTENT_CHARS = 5000
+
+# ROADMAP_v2 §31 (H7), #55. How many BYTES may be pulled off the wire
+# before the connection is dropped, as distinct from how many characters
+# are returned. Both are needed and they bound different things:
+# MAX_CONTENT_CHARS is what the model reads, this is what the process
+# holds.
+#
+# Generous next to 5000 characters -- a multi-byte encoding can spend
+# four bytes on one of them -- because the point is not to be tight. It
+# is that `response.text` had no ceiling AT ALL: httpx.get buffers the
+# entire body before the slice happens, and the body is chosen by
+# whatever the URL points at. A Content-Length check is not the fix
+# either; a hostile server can omit it or lie about it, so the only
+# thing that actually bounds this is refusing to read past a cap.
+MAX_CONTENT_BYTES = 65_536
 REQUEST_TIMEOUT_S = 8.0
 
 # Redirects are followed BY HAND (see run()), so this is the loop bound,
@@ -29,6 +44,31 @@ TOOL_SCHEMA = {
     "description": _TOOL_DESCRIPTION,
     "input_schema": FetchURLParams.model_json_schema(),
 }
+
+
+def _bounded_body(response) -> tuple:
+    """(decoded text, whether the server still had more to send).
+
+    Stops after MAX_CONTENT_BYTES rather than reading to the end. The
+    extra chunk beyond the cap is what makes `more` honest: without it,
+    a body that happens to end exactly at the cap is indistinguishable
+    from one that was cut off.
+    """
+    chunks, total, more = [], 0, False
+    for chunk in response.iter_bytes():
+        chunks.append(chunk)
+        total += len(chunk)
+        if total > MAX_CONTENT_BYTES:
+            more = True
+            break
+    raw = b"".join(chunks)[:MAX_CONTENT_BYTES]
+    encoding = getattr(response, "encoding", None) or "utf-8"
+    try:
+        return raw.decode(encoding, errors="replace"), more
+    except LookupError:
+        # A server may name an encoding this build of Python does not
+        # have. That is not a reason to lose the page.
+        return raw.decode("utf-8", errors="replace"), more
 
 
 def run(params: dict) -> dict:
@@ -63,17 +103,25 @@ def run(params: dict) -> dict:
             return {"error": refusal}
 
         try:
-            response = httpx.get(url, timeout=REQUEST_TIMEOUT_S,
-                                 follow_redirects=False)
-            if response.is_redirect:
-                # .next_request is None on a redirect with no usable
-                # Location; treat that as the end of the chain rather
-                # than following nothing.
-                if response.next_request is None:
-                    break
-                url = str(response.next_request.url)
-                continue
-            response.raise_for_status()
+            # §31 (H7): streamed, so the headers are available before
+            # any body is pulled. Two consequences, both wanted -- a
+            # redirect now costs no body at all (the old path downloaded
+            # every hop's), and the body that IS wanted stops at
+            # MAX_CONTENT_BYTES instead of being buffered whole and then
+            # sliced. read_run's guard is the model: bound before, not
+            # after.
+            with httpx.stream("GET", url, timeout=REQUEST_TIMEOUT_S,
+                              follow_redirects=False) as response:
+                if response.is_redirect:
+                    # .next_request is None on a redirect with no usable
+                    # Location; treat that as the end of the chain rather
+                    # than following nothing.
+                    if response.next_request is None:
+                        break
+                    url = str(response.next_request.url)
+                    continue
+                response.raise_for_status()
+                body, more = _bounded_body(response)
         except httpx.HTTPError as e:
             # Interpolated, NOT extra={}: the default formatter renders only
             # %(message)s, so every field passed via extra was silently
@@ -83,11 +131,23 @@ def run(params: dict) -> dict:
             logger.warning("fetch_url failed for %s: %s", url, e)
             return {"error": f"Could not fetch URL: {e}"}
 
-        content = response.text[:MAX_CONTENT_CHARS]
         return {
             "url": url,
-            "content": content,
-            "truncated": len(response.text) > MAX_CONTENT_CHARS,
+            "content": body[:MAX_CONTENT_CHARS],
+            # True when EITHER bound bit: more characters were decoded
+            # than are returned, or the byte cap stopped the read with
+            # the server still sending. A silently short page is how a
+            # grounding pass concludes a source does not say something.
+            #
+            # `or more` CANNOT FIRE with the shipped constants, and that
+            # is deliberate rather than an oversight: 65,536 bytes is at
+            # least 16,384 characters even at four bytes each, so the
+            # first term is always already true when the byte cap bites.
+            # It is here for the day someone raises MAX_CONTENT_CHARS or
+            # lowers MAX_CONTENT_BYTES, which is exactly when a silent
+            # under-report would appear. A mutation deleting it survived
+            # until a test moved the constants to reach it.
+            "truncated": len(body) > MAX_CONTENT_CHARS or more,
         }
 
     return {"error": f"Too many redirects (more than {MAX_REDIRECTS}): {parsed.url}"}

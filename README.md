@@ -159,6 +159,41 @@ A reviewer agent reads the finished run and proposes corrections. **Each one is 
 
 The harness assumes the model is working with untrusted text — web pages it fetched, files it read, output from third-party MCP servers — and that any of it may be trying to steer the next tool call.
 
+### Every tool says what a call to it may cost
+
+Approval answers *whether* a tool may run. It says nothing about how long it may run for, and until
+recently nothing else did either: a maths tool handed a large enough number simply never came back,
+taking the turn — or an unattended ten-pass run — with it.
+
+Each registered tool now declares one of three answers, and a tool registered without one fails at
+startup rather than at its first call:
+
+| | |
+|---|---|
+| **compute** | The six maths tools. Pure functions of their arguments with nothing to interrupt them from the inside, so they run in a separate process that can be stopped — 15 seconds by default, plus CPU and memory ceilings on Linux |
+| **io** | Anything that reads a file, fetches a page or talks to an MCP server. Each already carries its own limit: a request timeout, a size check before opening, a sandbox |
+| **human** | `ask_user` and `spawn_subagent`, which wait on a person or on a separately metered sub-run. A ten-minute pause here is the feature |
+
+The distinction between the first two is not bureaucratic. A timeout wrapped around a blocking read
+can only stop *waiting* — the work carries on — so declaring an operation bounded when it is not
+would produce a harness that reports timeouts that never happened. Compute tools get a bound that
+genuinely stops them; io tools have to already have one, and three that did not were fixed:
+
+```
+                             before    after
+edit (on a 30 MB file)       60.0 MB   0.0 MB   rejected before opening, as `read` always did
+read_project_doc             60.0 MB   0.1 MB   one page costs one page, not the whole document
+fetch_url                  unbounded   capped   streamed, so a hostile body stops at the cap
+```
+
+When a compute tool does hit its limit, the model is told which tool and which limit, so it can ask
+for something smaller instead of retrying the same call:
+
+```
+symbolic_math exceeded its 15s limit and was stopped. The inputs given are too
+large for this operation -- try smaller values.
+```
+
 ### Access control: stricter always wins
 
 Two separate questions, asked in this order, and they never blend into one score:
@@ -403,7 +438,7 @@ classifier is described under *Security model* above. If you have a fork or a lo
 note that `ToolApprovals.shell` now ships `False` and `SHELL_APPROVAL_MODE` is the gate — see
 `tests/BREAKING_CHANGES.md` §24.
 
-Run the test suite with `pytest` — 1930 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
+Run the test suite with `pytest` — 1991 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
 
 ## Documentation
 

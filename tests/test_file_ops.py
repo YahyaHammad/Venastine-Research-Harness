@@ -350,3 +350,80 @@ class TestSiblingDirectoryPrefix:
         for the tool."""
         assert file_ops._file_approval_check(
             "read", {"path": os.path.join(self._sibling(), "loot.txt")}) is True
+
+
+# ===========================================================================
+# ---- §31 (H7), #55: edit bounds the read, like the sibling above it -------
+# ===========================================================================
+
+
+class TestEditRejectsAnOversizedFileBeforeOpeningIt:
+    """read_run has had this check since the beginning, and this module's
+    own docstring gives the reason -- files over MAX_FILE_SIZE_BYTES are
+    "rejected before opening to prevent memory exhaustion". edit_run, a
+    hundred lines down, read whatever it was pointed at: 60 MB of peak
+    traced memory on a 30 MB file, to answer "old_text not found in file."
+    """
+
+    def test_an_oversized_file_is_refused(self, workspace, monkeypatch):
+        _write(workspace, "big.txt", "x" * 5000)
+        monkeypatch.setattr(config, "MAX_FILE_SIZE_BYTES", 1000)
+
+        result = file_ops.edit_run({"path": "big.txt", "old_text": "x",
+                                    "new_text": "y"})
+
+        assert "error" in result
+        assert "exceeds the maximum" in result["error"]
+
+    def test_it_is_refused_BEFORE_the_content_is_looked_at(self, workspace,
+                                                           monkeypatch):
+        """The distinction the whole issue turns on. A check placed after
+        the read would give the same message having already spent the
+        memory, so this asserts the file was never opened rather than that
+        the wording was right."""
+        import builtins
+
+        full = _write(workspace, "big.txt", "findme" + "x" * 5000)
+        monkeypatch.setattr(config, "MAX_FILE_SIZE_BYTES", 1000)
+
+        opened = []
+        real_open = builtins.open
+
+        def watched_open(path, *a, **kw):
+            opened.append(os.path.realpath(str(path)))
+            return real_open(path, *a, **kw)
+
+        monkeypatch.setattr(builtins, "open", watched_open)
+        file_ops.edit_run({"path": "big.txt", "old_text": "findme",
+                           "new_text": "y"})
+
+        assert os.path.realpath(full) not in opened, (
+            "the oversized file was opened before the size check")
+
+    def test_the_two_paths_refuse_the_same_file(self, workspace, monkeypatch):
+        """The point of copying read_run's guard rather than inventing one:
+        a caller who learns what `read` rejects now knows what `edit`
+        rejects."""
+        _write(workspace, "big.txt", "x" * 5000)
+        monkeypatch.setattr(config, "MAX_FILE_SIZE_BYTES", 1000)
+
+        read = file_ops.read_run({"path": "big.txt"})
+        edit = file_ops.edit_run({"path": "big.txt", "old_text": "x",
+                                  "new_text": "y"})
+
+        assert "error" in read and "error" in edit
+        assert "exceeds the maximum" in read["error"]
+        assert "exceeds the maximum" in edit["error"]
+
+    def test_an_ordinary_edit_still_works(self, workspace):
+        """The control. A guard that refused everything would satisfy all
+        three tests above."""
+        full = _write(workspace, "small.txt", "hello world")
+
+        result = file_ops.edit_run({"path": "small.txt",
+                                    "old_text": "world",
+                                    "new_text": "there"})
+
+        assert "error" not in result, result
+        with open(full, encoding="utf-8") as f:
+            assert f.read() == "hello there"

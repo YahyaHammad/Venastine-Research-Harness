@@ -312,15 +312,30 @@ def _transport(real, routes):
     return real.MockTransport(handler), seen
 
 
+def _patch_stream(real, transport, monkeypatch):
+    """Point real httpx's `stream` at a MockTransport.
+
+    §31 (H7) changed fetch_url from httpx.get to httpx.stream so the body
+    is bounded on the way in rather than sliced after buffering. These two
+    tests drive the REAL httpx -- that is their whole point, since a fake
+    cannot prove a redirect was not requested -- so the stub has to follow
+    the entry point the tool actually calls. Patching `get` here would
+    leave `stream` reaching for a socket, which is exactly how this
+    presented.
+    """
+    monkeypatch.setattr(
+        real, "stream",
+        lambda method, url, **kw: real.Client(
+            transport=transport, **kw).stream(method, url))
+
+
 def test_real_httpx_a_redirect_to_a_blocked_domain_is_never_requested(
         real_httpx, monkeypatch):
     transport, seen = _transport(real_httpx, {
         "https://harmless.example/r": (302, {"location": BLOCKED}, ""),
         BLOCKED: (200, {}, "EXPLOIT PAYLOAD BODY"),
     })
-    monkeypatch.setattr(
-        real_httpx, "get",
-        lambda url, **kw: real_httpx.Client(transport=transport, **kw).get(url))
+    _patch_stream(real_httpx, transport, monkeypatch)
 
     result = fetch_url.run({"url": "https://harmless.example/r"})
 
@@ -336,9 +351,7 @@ def test_real_httpx_reports_the_url_that_answered(real_httpx, monkeypatch):
             (302, {"location": "https://elsewhere.example/final"}, ""),
         "https://elsewhere.example/final": (200, {}, "body"),
     })
-    monkeypatch.setattr(
-        real_httpx, "get",
-        lambda url, **kw: real_httpx.Client(transport=transport, **kw).get(url))
+    _patch_stream(real_httpx, transport, monkeypatch)
 
     result = fetch_url.run({"url": "https://harmless.example/r"})
 
@@ -346,3 +359,132 @@ def test_real_httpx_reports_the_url_that_answered(real_httpx, monkeypatch):
                     "https://elsewhere.example/final"]
     assert result["url"] == "https://elsewhere.example/final"
     assert result["content"] == "body"
+
+
+# ===========================================================================
+# ---- §31 (H7), #55: the body is bounded on the way IN ---------------------
+# ===========================================================================
+#
+# `response.text[:MAX_CONTENT_CHARS]` bounded what the model READ and
+# nothing at all about what the process HELD -- httpx.get buffers the whole
+# body before the slice happens, and the body is chosen by whatever the URL
+# points at. That is the one site in #55 an attacker picks freely.
+#
+# A Content-Length check would not fix it. A hostile server can omit the
+# header or lie about it, so the only thing that actually bounds this is
+# refusing to keep reading, which is what the tests below assert.
+
+
+class TestTheBodyIsBoundedBeforeItIsHeld:
+
+    def test_an_oversized_body_is_truncated_and_says_so(self, http):
+        http.respond(text="A" * (fetch_url.MAX_CONTENT_BYTES * 3),
+                     url="https://example.com/big")
+        result = fetch_url.run({"url": "https://example.com/big"})
+
+        assert len(result["content"]) == fetch_url.MAX_CONTENT_CHARS
+        assert result["truncated"] is True
+
+    def test_the_read_stops_at_the_byte_cap(self, http):
+        """The property that separates this from the old slice: iteration
+        must STOP, not merely be discarded afterwards. Counted through the
+        fake's chunked iterator, which yields in small pieces precisely so
+        a broken bound cannot be satisfied by one giant chunk."""
+        body = "B" * (fetch_url.MAX_CONTENT_BYTES * 4)
+        http.respond(text=body, url="https://example.com/big")
+
+        consumed = {"bytes": 0}
+        response_cls = fetch_url.httpx.Response
+        real_iter = response_cls.iter_bytes
+
+        def counting_iter(self, chunk_size=1024):
+            for chunk in real_iter(self, chunk_size):
+                consumed["bytes"] += len(chunk)
+                yield chunk
+
+        response_cls.iter_bytes = counting_iter
+        try:
+            fetch_url.run({"url": "https://example.com/big"})
+        finally:
+            response_cls.iter_bytes = real_iter
+
+        assert consumed["bytes"] < len(body), (
+            "the whole body was pulled off the wire before being sliced")
+        assert consumed["bytes"] <= fetch_url.MAX_CONTENT_BYTES + 4096
+
+    def test_a_lying_content_length_changes_nothing(self, http):
+        """The reason the fix is a cap and not a header check. The server
+        declares one byte and sends far more; a Content-Length gate would
+        wave this through, and the cap does not care what was declared."""
+        http.respond(text="C" * (fetch_url.MAX_CONTENT_BYTES * 3),
+                     url="https://example.com/liar",
+                     headers={"content-length": "1"})
+        result = fetch_url.run({"url": "https://example.com/liar"})
+
+        assert len(result["content"]) == fetch_url.MAX_CONTENT_CHARS
+        assert result["truncated"] is True
+
+    def test_an_absent_content_length_changes_nothing_either(self, http):
+        http.respond(text="D" * (fetch_url.MAX_CONTENT_BYTES * 3),
+                     url="https://example.com/silent")
+        result = fetch_url.run({"url": "https://example.com/silent"})
+
+        assert result["truncated"] is True
+
+    def test_the_byte_cap_alone_marks_a_page_truncated(self, http,
+                                                        monkeypatch):
+        """The `or more` term, which the shipped constants make
+        unreachable: 65,536 bytes is at least 16,384 characters, so the
+        character comparison is always already true when the byte cap
+        bites. Deleting the term therefore survived every other test
+        here.
+
+        Moving the constants is the point rather than a workaround -- the
+        property being pinned is the RELATIONSHIP (a read stopped by the
+        byte cap reports itself), not today's two numbers, and it is
+        their future ratio that the term defends.
+        """
+        monkeypatch.setattr(fetch_url, "MAX_CONTENT_BYTES", 100)
+        http.respond(text="f" * 500, url="https://example.com/bytes")
+
+        result = fetch_url.run({"url": "https://example.com/bytes"})
+
+        assert len(result["content"]) < fetch_url.MAX_CONTENT_CHARS, (
+            "the character limit fired too, so this cannot discriminate")
+        assert result["truncated"] is True, (
+            "the read was cut off by the byte cap and reported as complete")
+
+    def test_a_small_page_is_returned_whole_and_not_marked_truncated(self,
+                                                                    http):
+        """The control. A bound that reports every page as truncated would
+        pass every test above and be useless -- a grounding pass reads
+        `truncated` to decide whether a source was fully seen."""
+        http.respond(text="a short page", url="https://example.com/small")
+        result = fetch_url.run({"url": "https://example.com/small"})
+
+        assert result["content"] == "a short page"
+        assert result["truncated"] is False
+
+    def test_a_body_exactly_at_the_character_limit_is_not_truncated(self,
+                                                                    http):
+        """The boundary case the extra-chunk read exists for: a body that
+        ends exactly at the cap must be distinguishable from one that was
+        cut off there."""
+        http.respond(text="e" * fetch_url.MAX_CONTENT_CHARS,
+                     url="https://example.com/exact")
+        result = fetch_url.run({"url": "https://example.com/exact"})
+
+        assert len(result["content"]) == fetch_url.MAX_CONTENT_CHARS
+        assert result["truncated"] is False
+
+    def test_a_redirect_costs_no_body_at_all(self, http):
+        """A side effect of streaming worth pinning, because it is a real
+        improvement and a silent one: the old path downloaded every hop's
+        body to read its Location header."""
+        http.redirect(to="https://example.com/final")
+        http.respond(text="final body", url="https://example.com/final")
+
+        result = fetch_url.run({"url": "https://example.com/start"})
+
+        assert result["content"] == "final body"
+        assert result["url"] == "https://example.com/final"
