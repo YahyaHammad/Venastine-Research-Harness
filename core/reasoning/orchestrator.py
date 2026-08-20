@@ -64,7 +64,7 @@ import logging
 
 import config
 import prompts.system_prompts as system_prompts
-from core.loop import RunAgentLoop
+from core.loop import RunAgentLoop, advertisement_facts
 from core.reasoning.base import Claim, PipelineRun, resolve_by_id
 from core.reasoning.confidence_scoring import run_confidence_tiering
 from core.reasoning.events import PipelineEvent
@@ -489,7 +489,10 @@ def _run_pass_with_json_retry(
         # pass_prompt(), NOT the raw pass file: BOTH the original attempt
         # and its retry must carry the same catalogs, or a retry silently
         # sees a different tool set than the attempt it is correcting.
-        system_prompt=system_prompts.pass_prompt(pass_id),
+        # #68 makes that literal -- the same AUTHORIZATION decides the
+        # catalogs here as decided them for the attempt.
+        system_prompt=system_prompts.pass_prompt(
+            pass_id, *advertisement_facts(authorization)),
         model=model,
         provider_name=provider_name,
         trace=trace,

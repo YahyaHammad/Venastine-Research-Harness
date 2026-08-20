@@ -82,7 +82,8 @@ def agent_catalog_text() -> str:
     return "\n".join(lines)
 
 
-def with_catalogs(base_prompt: str, active_skills=None, context=None) -> str:
+def with_catalogs(base_prompt: str, active_skills=None, context=None,
+                  callable_only: bool = False, granted=None) -> str:
     """Both frontmatter-only catalogs (skills §14, agents §18) appended;
     the single assembly point every default system prompt goes through.
 
@@ -104,8 +105,28 @@ def with_catalogs(base_prompt: str, active_skills=None, context=None) -> str:
     than as a per-caller opt-out, because a flag saying what the context
     already knows is a second source of truth for the same fact.
 
-    None means no restriction and both catalogs apply -- which is what
-    pass_prompt() passes, so research prompts are unchanged."""
+    None means no restriction and both catalogs apply.
+
+    `callable_only` / `granted` (#68, A1/A2): THE SAME TWO FACTS
+    registry.schemas() decides advertisement from, with the same names
+    and the same defaults, because they are the same question. The
+    condition here used to be `is_allowed(name, context)`, which is
+    POLICY -- "is this tool permitted" rather than "can this run call
+    it". A research pass is headless, so spawn_subagent is permitted,
+    dropped from the schema list by schemas(callable_only=True), and
+    named in that run's own headless_hidden() WARNING -- while this
+    function appended 819 characters instructing the model to spawn
+    one. 19% of Pass 1's system prompt was an instruction the pass
+    could not follow, and the harness said so to its log and to the
+    model in the same breath.
+
+    THE DEFAULTS ARE THE ATTENDED ANSWER, matching schemas(). A TUI
+    always has a channel, so tui/app.py and agents/tui_commands.py
+    pass nothing and are already correct; the pipeline entry points
+    pass the real values, derived from the bundle that carries them.
+    A caller that forgets is caught by
+    test_no_pass_prompt_invites_a_tool_the_pass_cannot_call, which
+    drives every pass id rather than the one that prompted this."""
     from tools.registry import registry
 
     prompt = base_prompt
@@ -113,17 +134,24 @@ def with_catalogs(base_prompt: str, active_skills=None, context=None) -> str:
     # instruction that cannot be followed. Suppress the whole section:
     # listing the skills without the means to load one is worse than
     # silence, since the model can then only guess at their contents.
-    if registry.is_allowed("load_skill", context):
+    if registry.is_advertised("load_skill", context, callable_only,
+                              granted):
         prompt = with_skill_catalog(prompt, active_skills)
     catalog = agent_catalog_text()
-    if catalog and registry.is_allowed("spawn_subagent", context):
+    if catalog and registry.is_advertised("spawn_subagent", context,
+                                          callable_only, granted):
         prompt = f"{prompt}\n\n{catalog}"
     return prompt
 
 
-def pass_prompt(pass_id: str) -> str:
-    """A research pass's system prompt with both catalogs appended.
+def pass_prompt(pass_id: str, callable_only: bool = False,
+                granted=None) -> str:
+    """A research pass's system prompt with the catalogs it can use.
+
     BOTH the pass entry point (loop.run_deep_research_mode) and the §3
     JSON-retry path (orchestrator) must go through here so the catalogs
-    cannot diverge between an original attempt and its retry."""
-    return with_catalogs(passes_prompts[pass_id])
+    cannot diverge between an original attempt and its retry -- and
+    since #68 that includes the two facts, or a retry would see a
+    different tool set than the attempt it is correcting."""
+    return with_catalogs(passes_prompts[pass_id],
+                         callable_only=callable_only, granted=granted)

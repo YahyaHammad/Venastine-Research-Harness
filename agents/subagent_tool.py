@@ -157,8 +157,14 @@ def run(params: dict, parent_context=None, parent_run=None,
         # `child`, not the agent's own context: C6 intersects with the
         # parent, so a parent that excluded spawn_subagent must not have
         # the catalog re-invite its child to spawn one (review f19).
+        # #68: the child's own facts, not the parent's. A subagent
+        # spawned from a headless run inherits no channel, so its
+        # catalogs must be decided by what IT can call -- the same
+        # values handed to run_agent_conversation two lines below.
         system_prompt=manager.system_prompt_for(
-            agent, DEFAULT_SYSTEM_PROMPT, context=child),
+            agent, DEFAULT_SYSTEM_PROMPT, context=child,
+            callable_only=response_channel is None,
+            granted=granted),
         response_channel=response_channel,
         granted_tools=granted if (response_channel is not None
                                   and granted) else None,

@@ -263,6 +263,33 @@ def _authorization_kwargs(authorization) -> dict:
     }
 
 
+def advertisement_facts(authorization=None, response_channel=None,
+                        granted_tools=None) -> tuple:
+    """(callable_only, granted) for a caller BUILDING A PROMPT (#68).
+
+    Sibling of _authorization_kwargs above, and there for the same
+    reason: one unpacking point, so the places that must agree cannot
+    disagree about what a bundle means. The difference is only WHEN --
+    _run() computes `headless = response_channel is None` after the
+    bundle has been unpacked into its primitives, and a system prompt
+    is assembled before _run() is called at all.
+
+    Accepts either a bundle or the loose primitives, because
+    run_agent_conversation takes both and rejects being given both.
+    The bundle wins when present, which is the same precedence
+    _authorization_kwargs applies.
+
+    A NULL BUNDLE MEANS HEADLESS, not "unknown": _authorization_kwargs
+    returns {} for None, so response_channel stays None and _run reads
+    that as headless. Answering anything else here would advertise a
+    catalog to exactly the runs that cannot use it.
+    """
+    if authorization is not None:
+        return (authorization.provider is None,
+                set(authorization.granted_tools or ()))
+    return (response_channel is None, set(granted_tools or ()))
+
+
 def _denial_reason(tool_name: str, response_channel, context) -> str:
     """Why a gated call was refused, in terms the model can act on (#158).
 
@@ -915,10 +942,15 @@ class RunAgentLoop:
             )
         memory = ConversationMemory(thread_id=thread_id, kind=thread_kind)
         memory.add_user_message(user_goal)
+        # #68, and this branch is the one an unattended CLI run takes.
+        _callable_only, _granted = advertisement_facts(
+            authorization, response_channel, granted_tools)
         prompt = with_goal(
             system_prompt
             if system_prompt is not None
-            else system_prompts.with_catalogs(DEFAULT_SYSTEM_PROMPT),
+            else system_prompts.with_catalogs(
+                DEFAULT_SYSTEM_PROMPT, callable_only=_callable_only,
+                granted=_granted),
             memory,
         )
         # §21b (M13). Only when there is no agent-built prompt: an agent
@@ -1054,7 +1086,12 @@ class RunAgentLoop:
         """
         memory = ConversationMemory(kind=THREAD_KIND_RESEARCH_PASS)
         memory.add_user_message(pass_input)
-        system_prompt = system_prompts.pass_prompt(pass_id)
+        # #68. The catalogs are decided from the SAME bundle the tool
+        # schemas are decided from a few frames down, so a pass cannot
+        # be told to spawn a subagent it will not be given.
+        _callable_only, _granted = advertisement_facts(authorization)
+        system_prompt = system_prompts.pass_prompt(
+            pass_id, callable_only=_callable_only, granted=_granted)
         response = None
         for event in RunAgentLoop._run(
             memory, system_prompt, provider_name, model, context,

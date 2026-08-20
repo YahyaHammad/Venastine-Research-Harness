@@ -146,7 +146,9 @@ class AgentManager:
 
     @staticmethod
     def system_prompt_for(agent: AgentDef, base_prompt: str,
-                          active_skills=None, context=None) -> str:
+                          active_skills=None, context=None,
+                          callable_only: bool = False,
+                          granted=None) -> str:
         """The full system prompt for a run AS this agent: base + skill /
         agent catalogs, then the agent's own body, then the project's
         CONTEXT.md iff the agent opts in (use_project_context). One
@@ -166,8 +168,14 @@ class AgentManager:
         global policy only, and both catalogs apply."""
         import prompts.system_prompts as system_prompts
 
-        prompt = system_prompts.with_catalogs(base_prompt, active_skills,
-                                              context)
+        # callable_only / granted (#68): forwarded, not decided here.
+        # This function knows which agent is running; whether anything
+        # can answer an approval question is the RUN's fact, and the
+        # caller is the one holding it. Defaulting to the attended
+        # answer keeps both TUI call sites correct with no argument.
+        prompt = system_prompts.with_catalogs(
+            base_prompt, active_skills, context,
+            callable_only=callable_only, granted=granted)
         prompt = f"{prompt}\n\n## Agent: {agent.name}\n\n{agent.body}"
         context = config_loader.context_for_agent(agent)
         if context:

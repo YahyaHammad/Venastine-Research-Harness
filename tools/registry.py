@@ -172,6 +172,43 @@ class ToolRegistry:
                 and self.grantable(tool_name)
                 and self.grant_policy(tool_name) == GRANT_ANYWHERE)
 
+    def is_advertised(
+        self, tool_name: str, context: Optional["ToolContext"] = None,
+        callable_only: bool = False,
+        granted: Optional[set] = None,
+    ) -> bool:
+        """Whether schemas() would advertise this tool right now.
+
+        THE WHOLE ADVERTISEMENT QUESTION IN ONE PLACE, and the reason
+        is one method up: _answered_by_grant is shared by schemas()
+        and headless_hidden() because "those two must agree about
+        what is hidden, and #67/#133 are what a shared mechanism with
+        a duplicated policy costs". #68 is the same sentence with a
+        third party to the agreement -- prompts.system_prompts's
+        catalogs, whose prose INSTRUCTS the model to call a tool.
+
+        That third caller asked `is_allowed(name, context)` instead,
+        which is POLICY: it answers "is this tool permitted", not
+        "can this run call it". A research pass is headless, so
+        spawn_subagent is permitted, hidden from the schema list, and
+        named in the run's own headless_hidden() warning -- while the
+        prompt told the model to spawn one. The harness stated the
+        contradiction to its log and to the model in the same breath.
+
+        A PREDICATE RATHER THAN `name in [s["name"] for s in
+        schemas()]`: the schema list is built where the run is, and
+        the prompt is built before the run exists. Both need the
+        answer; only one is in a position to enumerate.
+        """
+        spec = self._tools.get(tool_name)
+        if spec is None:
+            return False
+        if not self._advertised(tool_name, spec, context):
+            return False
+        return not (callable_only
+                    and self.approval_needed(tool_name, {}, context)
+                    and not self._answered_by_grant(tool_name, granted))
+
     def schemas(
         self, context: Optional["ToolContext"] = None,
         callable_only: bool = False,
@@ -214,16 +251,9 @@ class ToolRegistry:
         in-workspace write IS callable headless), but it means a survivor
         of this filter is not a promise about any particular call.
         """
-        out = []
-        for name, spec in self._tools.items():
-            if not self._advertised(name, spec, context):
-                continue
-            if (callable_only
-                    and self.approval_needed(name, {}, context)
-                    and not self._answered_by_grant(name, granted)):
-                continue
-            out.append(spec.schema)
-        return out
+        return [spec.schema for name, spec in self._tools.items()
+                if self.is_advertised(name, context, callable_only,
+                                      granted)]
 
     def headless_hidden(
         self, context: Optional["ToolContext"] = None,
@@ -242,11 +272,14 @@ class ToolRegistry:
         whose whole purpose is to stop invisibility starts producing a
         second kind of wrong answer.
         """
+        # ADVERTISED ATTENDED AND NOT HEADLESS -- written as the two
+        # calls it means rather than as the filter's negation, so the
+        # list and the schemas can only disagree if is_advertised
+        # disagrees with itself.
         return [
-            name for name, spec in self._tools.items()
-            if self._advertised(name, spec, context)
-            and self.approval_needed(name, {}, context)
-            and not self._answered_by_grant(name, granted)
+            name for name in self._tools
+            if self.is_advertised(name, context, False, granted)
+            and not self.is_advertised(name, context, True, granted)
         ]
 
     def approval_needed(
