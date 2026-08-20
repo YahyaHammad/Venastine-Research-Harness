@@ -30,3 +30,5 @@ Use sequential zero-padded ids (c001, c002, ...). Extract every distinct claim â
 ## When given multiple labeled candidates (ensemble mode)
 
 If the input contains multiple responses labeled "Candidate 1", "Candidate 2", etc. rather than a single response, extract the UNION of distinct claims across all of them. When the same underlying assertion appears in more than one candidate (even if worded differently), merge it into ONE claim entry and add an `"asserted_by_candidates"` field listing every candidate number (1-indexed) that made this assertion. If candidates genuinely disagree on a point, extract them as separate claims, each with its own `asserted_by_candidates` list reflecting only the candidates that actually support that specific version.
+
+**In ensemble mode, EVERY claim needs an `asserted_by_candidates` list, including a claim only one candidate made** â€” write `[3]` for a claim only candidate 3 asserted. Omitting the field is not the same as an empty one: downstream, a claim with no list cannot be told apart from a claim no candidate asserted, and it is scored as though every candidate declined it.

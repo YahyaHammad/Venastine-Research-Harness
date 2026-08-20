@@ -4459,3 +4459,95 @@ dispatcher reads through, but adding commands is its own section. And **a way fo
 extend its own deadline**: N2 makes "no deadline" expressible, which is what `--init` needed; letting
 a mid-run prompt ask for more time is a different feature and needs a decision about what an
 unattended run does with it.
+
+
+---
+
+## Audit Pass 1 — fix batch 10: the pipeline's payload boundary (2026-08-20)
+
+`fix/batch-10-payload-boundary`, from `main` at `3e9bd41`. Closes **#76** (S1), **#75** (S2),
+**#78** (S3), **#79** (S3) and **#123** (S3). ROADMAP_v2 **§30**, decisions **B1–B11**.
+
+### Why this batch, and not the other S1
+
+Two S1s were left. **#57** (no wall clock on a tool call) needs a concurrency layer designed before
+a line of it can be written: `signal.alarm` is main-thread-only, the TUI runs tools in a worker, and
+abandoning a thread mid-`sympy` leaks one that nothing can join. Its fix site, `registry.dispatch`,
+is on the path of every tool in every shell and all ten passes.
+
+**#76**'s fix site was already shaped: eight `_parse_json_response` call sites in `orchestrator.py`,
+each with its pass id in hand, and a corrective-retry mechanism that already sends a model its own
+error and asks again. And it did not travel alone — #76 and #75 close by naming each other as the
+two halves of one boundary, #78 is a third read of the same object, and #79 is the unit's
+test-quality issue.
+
+### Three things measured while confirming, each of which changed the work
+
+**§20 already built this validator.** `review.py:_validated` checks a top-level type, the required
+keys per entry with type guards before the membership tests, an id cross-check against the claims, an
+enum and a duplicate — for the one payload that is not a pass. That reframed the batch from "design
+a validation layer" to "the layer exists; nine consumers never got it", which is §29's #7 with
+different nouns. What it does *not* share is the policy: dropping-and-tracing is right for an
+optional review stage and wrong for a pass, so B1 takes the shape and leaves review.py alone.
+
+**Two of #79's four items were already fixed**, by `git log -S`: the `_claim_from_json` allowlist
+(commit `1141375`) and the D2 fallback annotation (commit `e59d51d`, #74). Item 4 is #75's own fix.
+So #79 was half the size it read as, and item 3 — the trace's candidate-number → model mapping — was
+the only live one.
+
+**#123 is fully stale.** Both halves. Closing it needed the measurement it was filed with rather than
+a reading of the code, so its own three mutations were re-run: all three RED, all three green on
+1406 tests when it was opened.
+
+### The corrective wording had to branch, and that was not obvious in advance
+
+Threading validation into `retry_until_json` looked like a one-parameter change. It is not: the
+existing corrective opens *"Your last response did not parse as valid JSON"*, which is **false**
+about a payload that parsed perfectly and was the wrong shape. A model told its JSON is malformed
+when it is not has nothing to fix. The trace line branches for the same reason one level down — a
+reader scanning a trace for `JSON parse failed` is looking for a model that cannot emit JSON, and
+folding a shape rejection under those words makes both unreadable.
+
+### What the build found that neither the issues nor the plan had
+
+**The spec is bound in the wrapper, not at the call sites** — decided after reading, not planned.
+Eight call sites passing their own `validate=` is one forgotten argument away from a silently
+unvalidated pass, which is the condition the whole section exists to remove.
+
+**And the wrapper has to keep returning text.** Around twenty test sites patch or drain
+`_run_pass_with_json_retry` and assert on the returned string. Returning the parsed payload would
+have been tidier and would have moved twenty seams in the batch that adds the check.
+
+**Seven test doubles queued payloads no pass would ever emit.** `{"ok": true}` for a pass whose
+prompt promises an array. That was only possible because nothing checked, and it is a small measure
+of how much shape freedom the passes had.
+
+**The clamp was masking the dedupe.** Found by mutation: `len(set(...))` → `len(...)` survived,
+because `[1, 2, 3, 3]` without dedupe is 4/3 and the clamp pulls that back to exactly the deduped
+answer. Two guards overlapping on the one input the test used. The discriminating case is a repeat
+that stays *below* the denominator — `[1, 1]` out of 3 is 1/3 deduped and 2/3 raw, so a claim one
+candidate asserted twice reads as two candidates agreeing.
+
+**A rule copied by name, and asserted nowhere.** `payload_validation.py` quotes review.py's "type
+guards before the membership tests" and explains it. Deleting the guard left the suite green,
+because the only unhashable-value test aimed at a field a different branch checks first.
+
+### Verification
+
+Windows 1914 passed / 16 skipped / 1 deselected; `python:3.11-slim` 1929 / 1 / 1; 1931 collected on
+both. 34 mutations, 33 red on a test named for each, one green control, tree clean — and the whole
+table re-run in the container, 34/34 there too.
+
+The happy path was checked rather than asserted: a well-formed run's full trace and every claim's
+breakdown, captured before and after and diffed. Only the three B5 lines and B10's keys differ; no
+tier moved and no `raw_score` moved.
+
+### Deferred, deliberately
+
+**#57**, the last S1 — its own section, for the thread-vs-process decision. **#77**, keeping the
+ensemble candidates on `PipelineRun`: B8's recorded clamp makes a misread numerator visible, but
+storing N transcripts adds a field, new artifact files and two more readers. **Migrating
+`review.py:_validated` onto B1's module** — `json_retry.py`'s docstring is the argument for it and B1
+is the argument against, and the comment naming the shared shape is there so the next reader finds
+both. **#12**, routing disagreement rather than scoring it: B8 and B10 make that signal trustworthy
+and self-describing, which is what #12 says it would read.

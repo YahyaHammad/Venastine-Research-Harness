@@ -14,12 +14,23 @@ corresponding PipelineRun fields directly.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal, Optional
+from typing import Literal, Optional, get_args
 from uuid import UUID
 
 ClaimType = Literal["factual", "synthesis", "speculative"]
 ConfidenceTier = Literal["HIGH", "MEDIUM", "LOW", "UNVERIFIED", "UNVERIFIED_COVERAGE"]
 GroundingStatus = Literal["grounded", "partial", "ungrounded"]
+
+# ROADMAP_v2 §30. The Literals above are ANNOTATIONS -- dataclasses do
+# not enforce them, and #75 is what that costs: `"Grounded"` scored a
+# well-sourced claim 0.35/LOW where `"grounded"` gives 0.85/HIGH, and
+# `"Ungrounded"` escaped the forced-UNVERIFIED rule to land LOW. Two
+# modules need the vocabulary as DATA -- the payload boundary rejects a
+# value outside it, the scorer coerces one that got through -- and a
+# second hand-typed copy of a vocabulary is a second thing to keep in
+# step. Derived from the Literal, beside the Literal.
+CLAIM_TYPES = frozenset(get_args(ClaimType))
+GROUNDING_STATUSES = frozenset(get_args(GroundingStatus))
 
 
 @dataclass
@@ -91,6 +102,40 @@ class Claim:
     annotation: Optional[str] = None
 
 
+def resolve_by_id(claims: list) -> dict:
+    """The pipeline's ONE claim-id resolution (ROADMAP_v2 §30, B6).
+
+    There used to be two, and they disagreed. `_apply_grounding` and
+    `_apply_critic` built `{c.id: c}` -- LAST wins -- while
+    `_apply_assumption_flags` and `claim_by_id` used
+    `next(c for c in claims if c.id == claim_id)` -- FIRST wins. With two
+    claims sharing an id, driven against the real pipeline, that split one
+    claim in half:
+
+        text='first'   grounding=None       severity=0.0  flags=['a flag']
+        text='second'  grounding='grounded' severity=0.4  flags=[]
+
+    The first copy is then ungrounded-but-factual, so D1 flags it, and
+    Pass 6a revises the copy that has no sources while the grounded one
+    keeps them.
+
+    §30 also rejects a duplicate id at Pass 2's boundary, which stops that
+    payload arriving. This exists anyway, because the boundary only covers
+    claims that came through Pass 2 -- §20's corrections and any future
+    resume build claims without passing this way, and a disagreement that
+    can only be reached by a path nobody has written yet is still a
+    disagreement waiting.
+
+    FIRST wins, matching what claim_by_id and Pass 6a's in-batch lookup
+    already did and documented. The choice is arbitrary once ids are
+    unique; having one is not.
+    """
+    resolved = {}
+    for claim in claims:
+        resolved.setdefault(claim.id, claim)
+    return resolved
+
+
 @dataclass
 class PipelineRun:
     """
@@ -147,4 +192,4 @@ class PipelineRun:
         self.trace.append(message)
 
     def claim_by_id(self, claim_id: str) -> Optional[Claim]:
-        return next((c for c in self.claims if c.id == claim_id), None)
+        return resolve_by_id(self.claims).get(claim_id)

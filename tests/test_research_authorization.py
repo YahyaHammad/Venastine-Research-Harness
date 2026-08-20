@@ -36,7 +36,7 @@ from core.reasoning.authorization import (
     GRANT_PICKER, NOTHING_TO_GRANT, GrantSpecError, candidates,
     parse_grant_spec,
 )
-from tests.conftest import drain, pass_stream
+from tests.conftest import drain, pass_stream, well_shaped
 from tools.base import (
     GRANT_ANYWHERE, GRANT_NEVER, GRANT_POLICIES, GRANT_SIGNOFF_ONLY, ToolSpec,
     assert_grant_policy_declared,
@@ -561,7 +561,7 @@ class TestAuthorizationReachesThePasses:
             orchestrator.RunAgentLoop, "continue_conversation",
             side_effect=lambda **kw: (
                 seen.append(kw.get("authorization")),
-                _canned("Pass 2", text='{"ok": true}'))[1])
+                _canned("Pass 2", text=well_shaped("Pass 2")))[1])
 
         auth = RunAuthorization(granted_tools={"x"})
         drain(orchestrator._run_pass_with_json_retry(

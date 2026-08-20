@@ -47,6 +47,7 @@ import config
 from core.loop import RunAgentLoop
 from tests.conftest import (
     drain, make_model_response, make_stream_from_response, pass_stream,
+    well_shaped,
 )
 
 from uuid import uuid4
@@ -139,7 +140,7 @@ def test_malformed_then_valid_recovers_in_one_retry(mocker):
     mocker.patch.object(RunAgentLoop, "stream_deep_research_mode",
                         side_effect=pass_stream(fake_run_dr_mode))
 
-    valid_text = json.dumps({"x": 1})
+    valid_text = well_shaped("Pass 2")
     retry_response = make_model_response(text=valid_text)
     continue_calls = _stub_continue_returning_sequence(mocker, [retry_response])
 
@@ -224,7 +225,7 @@ def test_retry_uses_same_thread_id_as_initial_attempt(mocker):
     mocker.patch.object(RunAgentLoop, "stream_deep_research_mode",
                         side_effect=pass_stream(fake_run_dr_mode))
 
-    valid_text = json.dumps({"ok": True})
+    valid_text = well_shaped("Pass 3a")
     retry_response = make_model_response(text=valid_text)
     continue_calls = _stub_continue_returning_sequence(mocker, [retry_response])
 
@@ -407,7 +408,7 @@ def test_trace_line_format_one_per_failed_attempt(mocker):
     # call log isn't inspected here (this test asserts on `trace`); the
     # stub is installed purely for its patching side effect.
     retry_1 = make_model_response(text="still bad {")
-    retry_2 = make_model_response(text=json.dumps({"now": "valid"}))
+    retry_2 = make_model_response(text=well_shaped("Pass 3b"))
     _stub_continue_returning_sequence(mocker, [retry_1, retry_2])
 
     trace = []
@@ -438,7 +439,7 @@ def test_trace_line_format_one_per_failed_attempt(mocker):
         )
 
     # The helper ultimately returned valid JSON (from retry_2).
-    assert result == json.dumps({"now": "valid"})
+    assert result == well_shaped("Pass 3b")
 
 
 # ===========================================================================
@@ -469,7 +470,7 @@ def test_corrective_message_contains_parse_error_excerpt_and_instruction(mocker)
     mocker.patch.object(RunAgentLoop, "stream_deep_research_mode",
                         side_effect=pass_stream(fake_run_dr_mode))
 
-    valid_text = json.dumps({"recovered": True})
+    valid_text = well_shaped("Pass 5")
     retry_response = make_model_response(text=valid_text)
     continue_calls = _stub_continue_returning_sequence(mocker, [retry_response])
 
@@ -554,3 +555,157 @@ def test_every_retry_response_reaches_the_on_response_hook(mocker):
         "Both retry responses must reach the hook -- not just the last one, "
         "and not just the successful one."
     )
+
+
+
+# ===========================================================================
+# ---- ROADMAP_v2 §30 (B2): a WRONG SHAPE is corrected the same way ---------
+# ===========================================================================
+#
+# §3 corrected a response that did not PARSE. A response that parses and is
+# not the structure the pass promised is the same conversation with a
+# different sentence -- the model has its own output in the thread either
+# way. What must NOT be the same is the wording: telling a model its JSON
+# is malformed, when it is not, gives it nothing to fix.
+
+
+class TestAWrongShapeReEntersTheSameRetry:
+
+    def test_a_shape_failure_is_corrected_and_recovers(self, mocker):
+        """The payload parses perfectly. Pass 2 promised an array."""
+        from core.reasoning.orchestrator import _run_pass_with_json_retry
+
+        wrapped = make_model_response(text=json.dumps({"claims": []}))
+        _stub_run_dr_mode_returning(mocker, wrapped, uuid4())
+        good = make_model_response(text=well_shaped("Pass 2"))
+        calls = _stub_continue_returning_sequence(mocker, [good])
+
+        trace = []
+        result = drain(_run_pass_with_json_retry(
+            "Pass 2", "input", "claude-test", "ANTHROPIC", trace,
+        ))
+
+        assert result == well_shaped("Pass 2")
+        assert len(calls) == 1, (
+            "a wrong-shaped payload must spend exactly one corrective "
+            "attempt, like a malformed one"
+        )
+
+    def test_the_corrective_does_not_claim_the_json_was_malformed(self, mocker):
+        """The whole reason the wording branches. A model told its JSON did
+        not parse, when it parsed, has nothing to act on and will most
+        likely resend the same structure."""
+        from core.reasoning.orchestrator import _run_pass_with_json_retry
+
+        wrapped = make_model_response(text=json.dumps({"claims": []}))
+        _stub_run_dr_mode_returning(mocker, wrapped, uuid4())
+        calls = _stub_continue_returning_sequence(
+            mocker, [make_model_response(text=well_shaped("Pass 2"))])
+
+        drain(_run_pass_with_json_retry(
+            "Pass 2", "input", "claude-test", "ANTHROPIC", [],
+        ))
+
+        message = calls[0]["message"]
+        assert "did not parse as valid JSON" not in message, (
+            "that sentence is false about a payload that parsed"
+        )
+        assert "valid JSON, but not the structure" in message
+        # PayloadShapeError's own message, which already names the pass,
+        # the field and the expected shape.
+        assert "Pass 2: expected a JSON array" in message
+
+    def test_the_parse_corrective_is_unchanged(self, mocker):
+        """The control for the branch above: the wording a malformed
+        payload gets must be exactly what it got before §30."""
+        from core.reasoning.orchestrator import _run_pass_with_json_retry
+
+        _stub_run_dr_mode_returning(
+            mocker, make_model_response(text="not json {{{"), uuid4())
+        calls = _stub_continue_returning_sequence(
+            mocker, [make_model_response(text=well_shaped("Pass 2"))])
+
+        drain(_run_pass_with_json_retry(
+            "Pass 2", "input", "claude-test", "ANTHROPIC", [],
+        ))
+
+        assert calls[0]["message"].startswith(
+            "Your last response did not parse as valid JSON.")
+
+    def test_the_trace_distinguishes_the_two_failures(self, mocker):
+        """A reader scanning a trace for "JSON parse failed" is scanning
+        for a model that cannot emit JSON. A shape rejection is a
+        different fact, and folding it under the same words would make
+        both unreadable."""
+        from core.reasoning.orchestrator import _run_pass_with_json_retry
+
+        _stub_run_dr_mode_returning(
+            mocker, make_model_response(text=json.dumps({"claims": []})), uuid4())
+        _stub_continue_returning_sequence(
+            mocker, [make_model_response(text=well_shaped("Pass 2"))])
+
+        trace = []
+        drain(_run_pass_with_json_retry(
+            "Pass 2", "input", "claude-test", "ANTHROPIC", trace,
+        ))
+
+        assert len(trace) == 1
+        assert trace[0].startswith("Pass 2: payload shape rejected on attempt 1/")
+        assert "JSON parse failed" not in trace[0]
+
+    def test_a_shape_that_never_resolves_raises_after_the_budget(self, mocker):
+        """A model that will not comply costs the same as one that cannot
+        emit JSON -- and the exception the orchestrator turns into a
+        durable status='failed' record names the pass and the field."""
+        from core.reasoning.orchestrator import _run_pass_with_json_retry
+        from core.reasoning.payload_validation import PayloadShapeError
+
+        bad = json.dumps([{"text": "t", "type": "factual"}])
+        _stub_run_dr_mode_returning(mocker, make_model_response(text=bad), uuid4())
+        _stub_continue_returning_sequence(
+            mocker, [make_model_response(text=bad)
+                     for _ in range(config.MAX_JSON_RETRIES)])
+
+        with pytest.raises(PayloadShapeError, match=r"Pass 2: entry 0 .*'id'"):
+            drain(_run_pass_with_json_retry(
+                "Pass 2", "input", "claude-test", "ANTHROPIC", [],
+            ))
+
+    def test_a_shape_error_is_still_a_value_error_to_the_orchestrator(self, mocker):
+        """§30 added no except clause anywhere. The outer handler that
+        writes status='failed' catches Exception, and every test that
+        pins the unrecoverable path catches ValueError."""
+        from core.reasoning.orchestrator import _run_pass_with_json_retry
+
+        bad = json.dumps({"claims": []})
+        _stub_run_dr_mode_returning(mocker, make_model_response(text=bad), uuid4())
+        _stub_continue_returning_sequence(
+            mocker, [make_model_response(text=bad)
+                     for _ in range(config.MAX_JSON_RETRIES)])
+
+        with pytest.raises(ValueError):
+            drain(_run_pass_with_json_retry(
+                "Pass 2", "input", "claude-test", "ANTHROPIC", [],
+            ))
+
+
+class TestTheReviewerIsUnaffected:
+
+    def test_retry_until_json_without_a_validator_checks_only_parseability(self, mocker):
+        """§20's reviewer calls this function directly and does its own
+        value-level filtering in review.py:_validated, for reasons that
+        module states. `validate=None` has to leave it exactly as it was:
+        a payload no pass would accept is fine here."""
+        from core.reasoning.json_retry import retry_until_json
+
+        first = make_model_response(text=json.dumps({"ok": True}))
+        first.thread_id = uuid4()
+        calls = _stub_continue_returning_sequence(mocker, [])
+
+        result = retry_until_json(
+            first, label="Review", system_prompt="p", model="m",
+            provider_name="ANTHROPIC",
+        )
+
+        assert json.loads(result) == {"ok": True}
+        assert calls == [], "no correction is owed for a shape nobody declared"

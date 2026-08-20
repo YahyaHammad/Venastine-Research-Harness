@@ -50,7 +50,7 @@ Venastine Research Harness/
 ├── CLAUDE.md / QWEN.md             # pointers to AGENTS.md, so a harness that auto-loads one of those names finds the context instead of a second copy of it
 ├── DEVLOG.md                       # implementation notes for built ROADMAP sections -- see §0
 │
-├── tests/                          # 1818 tests, all offline, ~25-45s depending on the machine (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
+├── tests/                          # 1930 tests, all offline, ~25-45s depending on the machine (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
 │   ├── conftest.py                 # fixtures: make_model_response, make_stream_from_response, make_stream_sequence, FakeStorage, ...
 │   ├── BREAKING_CHANGES.md         # what-breaks-it / symptom / fix per area
 │   ├── test_cli.py                 # 76 tests -- ROADMAP §1 thread_id passthrough + UUID validation + §14 parser defaults/resolution/trust flow + §29 N1-N8 the one stdin reader, N2's channel deadline, every request kind rendered, and the startup block main(argv) made reachable + #102's four declining defaults
@@ -59,7 +59,7 @@ Venastine Research Harness/
 │   ├── test_logging_setup.py       # 7 tests -- configure_logging fallback on bad log path, stderr=False, and #132's redacting formatter (message, traceback, and a real dispatch)
 │   ├── test_credentials.py         # 9 tests -- audit #19: providers.json and the trust store created 0600, asserted under umask 0. The mode cases skip off POSIX; the round-trip cases do not
 │   ├── test_output_writer.py       # 6 tests -- ROADMAP §12 artifact file layout, contents, chart PNG, None guard, tier counts
-│   ├── test_confidence_scoring.py  # 13 tests (3 ROADMAP verbatim regressions)
+│   ├── test_confidence_scoring.py  # 50 tests (3 ROADMAP verbatim regressions)
 │   ├── test_client_translation.py  # 36 tests -- all three provider translation branches + batching + Google call_model
 │   ├── test_client_streaming.py    # 11 tests -- ROADMAP §13 direct call_model_stream coverage (3 providers + D21 + fragment accumulation)
 │   ├── test_loop_stop_conditions.py# 3 tests (ROADMAP verbatim)
@@ -67,12 +67,13 @@ Venastine Research Harness/
 │   ├── test_workspace_trust.py     # 22 tests -- ROADMAP_v2 §14 AC1/AC2 + hash-control properties (path-in-hash, determinism)
 │   ├── test_config_loader.py       # 66 tests -- ROADMAP_v2 §14 frontmatter AC4, tier precedence D8/D18, settings merge, CONTEXT opt-in AC5, catalog
 │   ├── test_load_skill.py          # 7 tests -- load_skill view-only retrieval, D24 permission declaration, catalog prompt injection
-│   ├── test_orchestrator.py        # 23 tests -- full pipeline mocked + JSON-retry + §5 failure/success/acceptance
+│   ├── test_orchestrator.py        # 32 tests -- full pipeline mocked + JSON-retry + §5 failure/success/acceptance
 │   ├── test_registry_permissions.py# 11 tests -- allow/deny/approval
 │   ├── test_math_tools.py          # 123 tests -- symbolic equivalence + injection regression
 │   ├── test_memory_write_through.py# 10 tests -- write-through + storage-path-mismatch catch + resume-shape + list_threads
 │   ├── test_loop_tool_dispatch.py  # 7 tests -- _run tool-dispatch branches
-│   ├── test_json_retry.py          # 9 tests -- ROADMAP §3 malformed-JSON recovery (incl. crux test)
+│   ├── test_json_retry.py          # 16 tests -- ROADMAP §3 malformed-JSON recovery (incl. crux test)
+│   ├── test_payload_validation.py  # 59 tests -- ROADMAP_v2 §30 the pass payload boundary: the spec table, the three properties, the id cross-check and its partial-match control
 │   ├── test_pipeline_storage.py    # 9 tests -- ROADMAP §5 create/update/load_pipeline_run + inner-failure caplog
 │   ├── test_file_ops.py            # 36 tests -- ROADMAP §6 path resolution, approval, read/write/edit, registry
 │   ├── test_shell.py               # 96 tests -- ROADMAP §7 sandbox routing, inert/network classification, approval, backend internals; §28 the capability classifier, the three modes, the .venastine mount
@@ -1342,3 +1343,44 @@ The single-payload test (`__import__('os').system(...)`) is kept, and was itself
   converted the lot to LF — and whose blanket `\d+ tests` rule rewrote AGENTS.md's *historical*
   "invisibly to 849 tests" into the current number, turning a description of a past bug into a false
   claim. Anchor on the words around a number, work in bytes, and assert afterwards.
+
+- **A trace line built from the caller's own input reports an outcome it cannot know.** `Pass 3a:
+  grounded {len(unique_entities)} unique entities across {len(factual_claims)} factual claim(s).` is
+  assembled entirely on the orchestrator's side of the call, so it was emitted verbatim on a run
+  where the pass grounded nothing — and the run then spent four more model calls concluding that
+  nothing could be verified. The apply step is the only thing that knows what landed, so it returns
+  a count and the checkpoint interpolates that (§30, B5). The trace is the artifact `base.py` calls
+  "at least as trustworthy as the final report itself"; a line derived from its own input cannot be.
+
+- **A `Literal` is an annotation, not a check.** `ClaimType` and `GroundingStatus` are declared in
+  `base.py` and dataclasses enforce neither, so `"Grounded"` scored a well-sourced claim 0.35/LOW
+  where `"grounded"` gives 0.85/HIGH, and `"Ungrounded"` escaped the forced-UNVERIFIED rule entirely
+  — the rule compares `== "ungrounded"`, and an unrecognised value merely took a 0.0 weight. Both
+  vocabularies now live beside their Literals as `frozenset`s, and both the payload boundary and the
+  scorer read those two names rather than re-typing a copy.
+
+- **Two lookups for one thing will disagree, and the disagreement is invisible until data reaches
+  both.** `{c.id: c}` is last-wins; `next(c for c in claims if c.id == x)` is first-wins. Both were
+  live in the same file. With two claims sharing an id, the grounding landed on one object and the
+  assumption flags on the other, so D1 flagged the ungrounded copy and Pass 6a revised the one with
+  no sources. `base.resolve_by_id` is the only resolution now — and it exists even though §30 also
+  rejects the payload that produces duplicates, because the boundary only covers claims that came
+  through Pass 2.
+
+- **A recorded field that nothing applied is worse than no field.** A non-factual claim stored a
+  `disagreement_penalty` E9 never subtracts, so a reader recomputing `raw_score` from the stored
+  fields got 0.25 against a stored 0.65 — with nothing in the breakdown saying which branch produced
+  the number. A breakdown either reconstructs its own result or it is decoration; `formula` names the
+  branch and every term recorded is one that was used (§30, B10).
+
+- **Two guards on one value can hide each other from the tests.** The consistency numerator is
+  deduplicated and then clamped, and `[1, 2, 3, 3]` exercises neither on its own: without the dedupe
+  it is 4/3, which the clamp pulls back to exactly the deduped answer. Deleting the dedupe left the
+  suite green. When two corrections can produce the same output for the same input, at least one test
+  has to use an input where only one of them fires.
+
+- **Turning on a check makes the test doubles part of the contract.** Seven doubles queued
+  `{"ok": true}` for passes whose prompts promise an array — fine while nothing looked, a failing run
+  the moment something did. They did not fail loudly either: they spent every corrective retry first.
+  A payload builder like `tests/conftest.py`'s `well_shaped(pass_id)` keeps the next spec change to
+  one line instead of nine.

@@ -42,7 +42,7 @@ from core.reasoning import orchestrator
 # exist in two copies. These tests moved with it rather than being
 # duplicated, so there is still exactly one place that ordering is pinned.
 from safety import policy_enforcement
-from tests.conftest import drain, make_model_response, pass_stream
+from tests.conftest import drain, make_model_response, pass_stream, well_shaped
 from tests.test_orchestrator import _build_pass_mock, _clean_pipeline_payloads
 
 
@@ -202,7 +202,7 @@ class TestAPassReportsItsToolCalls:
         has the twenty-checkpoint version of that mistake in its history."""
         mocker.patch.object(
             RunAgentLoop, "stream_deep_research_mode",
-            side_effect=pass_stream(make_model_response(text='{"ok": true}'),
+            side_effect=pass_stream(make_model_response(text=well_shaped("Pass 2")),
                                     events=[_call("shell", {"command": "ls"})]))
         collected = []
         gen = orchestrator._run_pass_with_json_retry("Pass 2", "in", "m", "p")

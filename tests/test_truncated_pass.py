@@ -36,7 +36,7 @@ import pytest
 import config
 from core.loop import RunAgentLoop
 from core.reasoning import orchestrator
-from tests.conftest import drain, make_model_response, pass_stream
+from tests.conftest import drain, make_model_response, pass_stream, well_shaped
 
 
 def _pass_returning(mocker, response):
@@ -178,7 +178,7 @@ class TestTheResearchPassBudget:
         mocker.patch.object(
             RunAgentLoop, "continue_conversation",
             side_effect=lambda **kw: (
-                seen.update(kw), make_model_response(text='{"ok": true}'))[1])
+                seen.update(kw), make_model_response(text=well_shaped("Pass 2")))[1])
 
         drain(orchestrator._run_pass_with_json_retry("Pass 2", "in", "m", "p", []))
 
