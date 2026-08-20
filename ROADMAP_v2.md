@@ -2188,7 +2188,7 @@ that no size limit would have caught.
 |---|---|---|
 | **H1** | **Every tool declares its cost class, and omission is fatal at import.** `ToolSpec.budget` ∈ {`BUDGET_COMPUTE`, `BUDGET_IO`, `BUDGET_HUMAN`}, with `assert_budget_declared()` beside R13's assert in `registry.py`. | R13's argument one question over, and its own words: *"None means UNDECLARED, not a default. Omission has to be a detectable mistake rather than an inherited answer — this field exists because the previous shape was a denylist in ONE consumer's module."* A per-parameter `le` list is that denylist again. |
 | **H2** | **A `BUDGET_COMPUTE` tool runs in a killable subprocess, at `dispatch` only.** `module.run(params)` stays an ordinary in-process call. | A thread has no interruption point inside `sympy.binomial` to cancel at, so a watchdog over one reports a timeout while the core stays busy — the class of mechanism this project keeps refusing. Isolating at dispatch rather than in the six tools is what keeps `test_math_tools.py`'s 131 tests measuring the maths instead of the transport. |
-| **H3** | **On Unix the child also carries `RLIMIT_CPU` and `RLIMIT_AS`.** Windows runs on the clock alone, recorded rather than hidden. | mcp_client's documented two-layer shape: an inner bound that stops the work, an outer one for when the inner never fires. **Not** `sandbox._unix_resource_limits` verbatim — that spends `SANDBOX_CPU_SECONDS` (30), which is *above* this budget, so reusing it would install a limit that can never fire while reading as though the inner layer were present. |
+| **H3** | **On Unix the child also carries `RLIMIT_CPU` and `RLIMIT_AS`, and both bounds report the same sentence.** Windows runs on the clock alone, recorded rather than hidden. | mcp_client's documented two-layer shape: an inner bound that stops the work, an outer one for when the inner never fires. **Not** `sandbox._unix_resource_limits` verbatim — that spends `SANDBOX_CPU_SECONDS` (30), which is *above* this budget, so reusing it would install a limit that can never fire while reading as though the inner layer were present. |
 | **H4** | **No maximum on any math parameter.** | `combinations n=10**7 r=10**6` hangs on a pair where neither value alone looks unreasonable — cost is joint, so no per-parameter ceiling expresses it. And any number is a guess: `series order=100` is 0.34s, `order=1000` is 3.44s. |
 | **H5** | **`modular_exponent` requires its modulus.** | `pow(b, e, None)` is plain exponentiation. Measured on one exponent: **0.000s** with a modulus, **3.3s and 125 MB** without. Refused at the boundary rather than left to H2's clock, because paying a full budget to learn that is the wrong answer to a one-word fix. Not a separate `power` operation either — that advertises the unbounded path instead of closing it. |
 | **H6** | **A result the tool cannot serialise is the tool's own error.** `str(result)` moves inside `run()`'s `try`. | It sat outside, so a correct answer merely too large to print left the handler as a bare `ValueError` and was `logger.exception`'d with a traceback as though it were a bug. `factorial n=100000` reaches this on ordinary input. dispatch's containment is the backstop for real bugs; filling it with routine outcomes is how a real one stops being noticed. |
@@ -2232,6 +2232,34 @@ deliberately does **not**: refusing a large document is not what that tool is fo
 chunk, which also removes the whole-file re-read a size check would have left in place. `fetch_url`
 streams with a hard byte cap, because a `Content-Length` check is not a bound when the server can
 omit the header or lie about it.
+
+### The two bounds do not fail the same way, and that was live for a day
+
+CI's first Linux run failed one test, and the test was right. On Unix the
+CPU limit kills the **child**, so `subprocess.run` returns normally with a
+negative returncode and **never raises `TimeoutExpired`** -- the parent's
+timeout branch does not run at all:
+
+```
+Linux    3.00s  symbolic_math did not return a usable result (exit -9).
+Windows  15.0s  symbolic_math exceeded its 15s limit and was stopped. The
+                inputs given are too large -- try smaller values.
+```
+
+The platform with **two** bounds gave the worse answer, and the one with a
+single wall clock gave the actionable one. `_interpret` now treats a
+negative returncode as the bound firing and shares `_limit_message` with
+the timeout path, so the two cannot drift again; a child that exits
+non-zero *without* a signal still reports the generic message, because a
+crash is not a budget problem and telling a model to try smaller numbers
+would send it round a loop that cannot end.
+
+Worth recording as a method note rather than only a fix: the container run
+§21 requires exists precisely to catch this, and it had not been run when
+the branch was pushed. The Windows suite was green, the mutation pass was
+28/28, and neither could see it -- the two H3 mutations are declared
+`expect="GREEN"` on Windows *because* their tests skip there, which is the
+harness admitting in advance that this half was unverified.
 
 ### Deliberately not in §31
 

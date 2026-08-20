@@ -198,6 +198,46 @@ class TestAComputeToolIsBoundedByAClockThatCanStopIt:
         assert "symbolic_math" in result["error"]
         assert "3" in result["error"]
 
+    def test_a_child_killed_by_its_own_cpu_limit_reports_the_limit(self):
+        """H3's inner layer kills the CHILD, so subprocess.run RETURNS
+        with a negative returncode and never raises TimeoutExpired --
+        the parent's timeout branch does not run at all.
+
+        This was live for a day: on Linux the answer was
+        "symbolic_math did not return a usable result (exit -9)" while
+        Windows, which has no rlimit and therefore only the wall clock,
+        gave the actionable one. The better-protected platform gave the
+        worse message. CI caught it; the container run that would have
+        caught it first had not been run yet.
+
+        Driven through _interpret directly so it holds on both
+        platforms -- the signal itself is POSIX-only, but the parent's
+        handling of what it reports is not.
+        """
+        result = isolation._interpret("symbolic_math", "", "", -9, 15)
+
+        assert "exceeded its 15s limit" in result["error"]
+        assert "smaller" in result["error"]
+
+    def test_both_bounds_give_the_SAME_sentence(self):
+        """The property, rather than two copies of a string. Whichever
+        layer fires, a model reading the result has to be able to act on
+        it the same way."""
+        by_signal = isolation._interpret("symbolic_math", "", "", -9, 15)
+        by_clock = isolation._limit_message("symbolic_math", 15)
+
+        assert by_signal["error"] == by_clock
+
+    def test_a_crashed_child_is_NOT_reported_as_a_limit(self):
+        """The control, and the reason this is a returncode check rather
+        than a catch-all. A child that exits non-zero WITHOUT a signal
+        has a bug, not a budget problem, and telling the model to try
+        smaller numbers would send it round a loop that cannot end."""
+        result = isolation._interpret("symbolic_math", "", "boom", 1, 15)
+
+        assert "did not return a usable result" in result["error"]
+        assert "smaller" not in result["error"]
+
     def test_an_ordinary_call_still_returns_its_result(self):
         """The cost of the boundary is one interpreter start, measured at
         ~0.34s against a harness whose every step is a model call."""

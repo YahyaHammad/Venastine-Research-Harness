@@ -161,6 +161,25 @@ def _resource_limits():
     return _set_limits
 
 
+def _limit_message(tool_name: str, timeout: float) -> str:
+    """What the model is told when a bound stopped the call.
+
+    ONE wording, because H3 gives the child two bounds on Unix and one
+    on Windows and they do not fail the same way. The wall clock raises
+    TimeoutExpired in the parent; RLIMIT_CPU kills the child, so
+    subprocess.run RETURNS -- normally, with a negative returncode --
+    and the parent never sees a timeout at all.
+
+    They are the same event to the only reader that matters: a model
+    deciding whether to ask for something smaller. Two wordings would
+    make the better-protected platform give the worse answer, which is
+    what CI caught on the first Linux run of this section.
+    """
+    return (f"{tool_name} exceeded its {timeout:g}s limit and was stopped. "
+            f"The inputs given are too large for this operation -- try "
+            f"smaller values.")
+
+
 def _interpret(tool_name: str, stdout: str, stderr: str, returncode: int,
                timeout: float) -> dict:
     """Turn what the child said into the dict dispatch expects.
@@ -181,6 +200,22 @@ def _interpret(tool_name: str, stdout: str, stderr: str, returncode: int,
                 return json.loads(line[len(MARKER):])
             except ValueError:
                 break
+
+    # A NEGATIVE returncode means the child was killed by a signal, and
+    # for a child this module launched that means a bound fired --
+    # RLIMIT_CPU raises SIGXCPU and then SIGKILL at the hard limit
+    # (H3's inner layer), which is the ONLY way a compute child dies
+    # without either answering or timing out in the parent.
+    #
+    # Checked before the generic branch, not after, and reported with
+    # the same sentence the wall clock uses. Windows has no rlimit and
+    # signals a killed process differently, so this is unreachable
+    # there -- which is exactly why it went unnoticed until CI ran the
+    # suite on Linux.
+    if returncode is not None and returncode < 0:
+        logger.info("%s was stopped by its resource limit (signal %d).",
+                    tool_name, -returncode)
+        return {"error": _limit_message(tool_name, timeout)}
 
     excerpt = (stderr or "").strip().replace("\n", " ")[-_STDERR_EXCERPT:]
     # logger.warning, not exception: there is no traceback here to keep,
@@ -235,9 +270,11 @@ def run_isolated(handler, params: dict, timeout: float,
     except subprocess.TimeoutExpired:
         # subprocess.run has already killed the child and reaped it, which
         # is the property that makes this a bound rather than a report.
-        return {"error": f"{tool_name} exceeded its {timeout:g}s limit and "
-                         f"was stopped. The inputs given are too large for "
-                         f"this operation -- try smaller values."}
+        #
+        # On Unix the CPU limit usually gets there first and this branch
+        # never runs -- see _interpret's negative-returncode case, which
+        # shares this wording rather than repeating it.
+        return {"error": _limit_message(tool_name, timeout)}
     except OSError as e:
         logger.warning("Could not start an isolated child for %s: %s",
                        tool_name, e)
