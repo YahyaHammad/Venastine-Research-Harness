@@ -163,6 +163,27 @@ class AgentDef:
     body: str
     tier: str
     path: str
+    # ROADMAP_v2 §32 (A3), #69. Whether spawn_subagent can actually
+    # FEED this agent -- i.e. whether a task string, as the first
+    # message of a fresh thread, is the input its body expects.
+    #
+    # None means UNDECLARED, and what that means depends on who wrote
+    # the file. For the harness tier it is a build error, caught by
+    # assert_spawnable_declared below: our own omission is a bug, and
+    # R13's rule applies -- omission has to be a detectable mistake
+    # rather than an inherited answer. For the user and project tiers
+    # it reads as False, because a third party's silence must get the
+    # SAFE answer: an agent written for /agent and advertised as
+    # spawnable does not fail, it under-performs, and the parent has
+    # no way to tell (which is #69's actual complaint).
+    #
+    # Consulted by prompts.system_prompts.agent_catalog_text only.
+    # It is NOT a permission: C6 still caps a child's tools, and the
+    # depth limit still applies. This decides what the model is TOLD
+    # exists, which is D24's rule ("advertising an uncallable tool is
+    # not harmless: the model keeps choosing it") applied to the
+    # catalog's entries rather than to the tool itself.
+    spawnable: Optional[bool] = None
 
 
 def _user_config_dir() -> str:
@@ -322,6 +343,11 @@ def _parse_md_file(path: str, kind: str, tier: str, category: str = ""):
                 "Skipping agent file %s: %s is not a boolean", path, key)
             return None
         flags[key] = value
+    spawnable = fm.get("spawnable")
+    if spawnable is not None and not isinstance(spawnable, bool):
+        logger.warning(
+            "Skipping agent file %s: spawnable is not a boolean", path)
+        return None
     return AgentDef(
         name=name,
         description=_catalog_text(fm.get("description", "")),
@@ -331,6 +357,7 @@ def _parse_md_file(path: str, kind: str, tier: str, category: str = ""):
         approval_overrides=overrides,
         use_project_context=flags["use_project_context"],
         use_memory=flags["use_memory"],
+        spawnable=spawnable,
         max_steps=max_steps,
         body=body,
         tier=tier,
@@ -777,6 +804,11 @@ def initialize(project_path: str) -> None:
         "settings": settings,
         "context": context,
     }
+    # §32 A3. Before effective_compaction, because this one is about
+    # THIS repository's own files rather than about the user's -- if
+    # it fires, every other startup check is reporting on a build that
+    # should not have shipped.
+    assert_spawnable_declared(_state["agents"])
     # AFTER _state is assigned, because effective_compaction() reads
     # get_settings(). Called here so an incoherent compaction block is a
     # STARTUP error naming the file, rather than a ValueError from inside
@@ -784,6 +816,36 @@ def initialize(project_path: str) -> None:
     # moment the user least wants to find out. §21's "reject at load time,
     # not incoherent trigger math later".
     effective_compaction(warn=True)
+
+
+def assert_spawnable_declared(agents: dict) -> None:
+    """Every HARNESS-tier agent must say whether it is spawnable.
+
+    ROADMAP_v2 §32 (A3). The same shape as
+    tools.base.assert_grant_policy_declared and
+    assert_budget_declared, and for the same stated reason: a field
+    whose absence silently means something is a field nobody will
+    remember to set. #69 exists because there was no field at all, so
+    every agent inherited "spawnable" and four shipped ones were
+    advertised as a delegation route that cannot carry them.
+
+    HARNESS TIER ONLY, and that asymmetry is the decision rather than
+    an omission. These are files this project ships, so a missing
+    declaration is a build error and CI is where it should surface.
+    A user's or a project's agent gets the safe default instead --
+    raising there would take down startup over somebody else's file,
+    which is the trade _parse_md_file already refuses everywhere else
+    in this module.
+    """
+    undeclared = sorted(
+        f"{a.name} ({a.path})" for a in agents.values()
+        if a.tier == "harness" and a.spawnable is None)
+    if undeclared:
+        raise RuntimeError(
+            "These harness agents do not declare `spawnable` in their "
+            "frontmatter, so nothing can tell whether spawn_subagent "
+            "is able to feed them (ROADMAP_v2 §32 A3): "
+            + ", ".join(undeclared))
 
 
 def reset() -> None:

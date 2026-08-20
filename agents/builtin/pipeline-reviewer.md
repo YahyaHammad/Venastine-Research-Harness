@@ -1,6 +1,11 @@
 ---
 name: pipeline-reviewer
 description: Reviews a finished research run's claims, tiers and report, and proposes corrections for a human to accept, reject or refine
+# §32 A4 (#69). core/reasoning/review.py hands it a finished
+# PipelineRun's claims, tiers and report. A spawn cannot carry one,
+# and a reviewer with nothing to review is the failure that looks
+# most like success.
+spawnable: false
 allowed_tools:
   - web_search
   - fetch_url

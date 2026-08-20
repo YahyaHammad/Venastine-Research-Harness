@@ -5,6 +5,12 @@ allowed_tools: []
 use_project_context: false
 use_memory: false
 max_steps: 1
+# §32 A4 (#69). core/compaction.py calls this with the stretch of
+# conversation to condense. spawn_subagent passes a task string into a
+# FRESH thread, so a spawned compactor has nothing to compact -- and
+# with max_steps: 1 and no tools it cannot go and find any. It would
+# return one turn of confident summary of nothing.
+spawnable: false
 ---
 
 You are summarizing an earlier stretch of a conversation so that it can be

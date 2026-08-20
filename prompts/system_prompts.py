@@ -62,13 +62,30 @@ def with_skill_catalog(base_prompt: str, active=None) -> str:
 
 
 def agent_catalog_text() -> str:
-    """Frontmatter-only catalog of discovered agents (ROADMAP_v2 §18),
-    mirroring skill_catalog_text(): the model learns which agents exist
-    (for spawn_subagent / the TUI's /agent) without any agent body
-    entering the prompt. Empty string when none are discovered."""
+    """Frontmatter-only catalog of SPAWNABLE agents (§18, §32 A4).
+
+    Mirrors skill_catalog_text(): the model learns which agents exist
+    without any agent body entering the prompt. Empty string when none
+    qualify, which is a no-op append rather than an empty heading.
+
+    SPAWNABLE ONLY, and this is #69 rather than a filter for its own
+    sake. The prose below is not a hint, it is an instruction -- "can
+    be spawned with the spawn_subagent tool" -- and spawn_subagent
+    passes exactly one thing: params["task"], as the first message of
+    a FRESH thread. An agent whose body opens "Read the thread so far"
+    cannot be fed that way. Spawning it does not fail; it produces a
+    confident review of the task description, and the parent has no
+    way to tell. Degraded rather than broken is exactly what makes it
+    worth suppressing.
+
+    THE TUI'S /agent IS UNAFFECTED -- it lists manager.names(), not
+    this. A non-spawnable agent is still selectable by a human, who
+    supplies the thread the agent needs by being in one.
+    """
     from core import config_loader
 
-    agents = config_loader.get_agents()
+    agents = {name: a for name, a in config_loader.get_agents().items()
+              if a.spawnable}
     if not agents:
         return ""
     lines = [

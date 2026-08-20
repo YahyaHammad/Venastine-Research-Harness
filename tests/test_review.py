@@ -1717,9 +1717,28 @@ from tools.context import ToolContext
 class TestCatalogsFollowTheContext:
 
     @pytest.fixture(autouse=True)
-    def _discovered(self):
+    def _discovered(self, monkeypatch):
+        """The real discovery, PLUS one agent that is actually spawnable.
+
+        §32 A4 made every shipped agent `spawnable: false`, so
+        `agent_catalog_text()` is empty in the default install -- which
+        would make every "## Available agents" assertion below vacuous:
+        absent because the context suppressed it, and absent because
+        there was nothing to suppress, are the same observation. The
+        synthetic agent restores the discrimination without asking the
+        shipped four to pretend they can be fed by a task string.
+        """
         from core import config_loader
+
         config_loader.initialize(".")
+        real = dict(config_loader.get_agents())
+        real["catalog-fixture"] = config_loader.AgentDef(
+            name="catalog-fixture", description="a spawnable fixture",
+            model=None, provider=None, allowed_tools=None,
+            approval_overrides={}, use_project_context=False,
+            use_memory=False, max_steps=None, body="Body.",
+            tier="harness", path="<fixture>", spawnable=True)
+        monkeypatch.setattr(config_loader, "get_agents", lambda: real)
 
     def _prompt(self, allowed):
         import prompts.system_prompts as system_prompts

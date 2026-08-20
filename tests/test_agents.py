@@ -59,7 +59,17 @@ def _roots(tmp_path, monkeypatch):
 def _write_harness_agent(roots, name, fm_lines=(), body="Agent body."):
     d = roots["harness"] / "agents" / "builtin"
     d.mkdir(parents=True, exist_ok=True)
+    # §32 A3: a HARNESS-tier agent must declare `spawnable`, and
+    # config_loader.assert_spawnable_declared raises if one does not. These
+    # fixtures land in the harness tier, so they declare it too -- `true`,
+    # because most of this file is about what a spawn can reach and a
+    # fixture that suppressed itself from the catalog would quietly change
+    # what those tests are measuring. A caller can override by passing its
+    # own `spawnable:` line. The assertion itself is driven in
+    # tests/test_spawnable.py.
+    declared = any(str(line).startswith("spawnable") for line in fm_lines)
     fm = "\n".join([f"name: {name}", f"description: desc for {name}",
+                    *([] if declared else ["spawnable: true"]),
                     *fm_lines])
     (d / f"{name}.md").write_text(f"---\n{fm}\n---\n\n{body}\n",
                                   encoding="utf-8")

@@ -5,6 +5,11 @@ allowed_tools: ["read_project_doc"]
 use_project_context: false
 use_memory: false
 max_steps: 12
+# §32 A4 (#69). Its body opens "You will be given a listing of the
+# project's documents and layout" -- project_init/generator.py builds
+# that manifest and passes it. Nothing in a task string can stand in
+# for it, and read_project_doc alone cannot reconstruct it.
+spawnable: false
 ---
 
 You are writing a project's `CONTEXT.md`: the file this harness injects into
