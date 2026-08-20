@@ -908,3 +908,115 @@ class TestTheCliInitGoesDownTheChannel:
         _, seen, _ = self._run(monkeypatch, tmp_path, [], interactive=False)
         assert seen["confirm"] is None
         assert seen["choose_kind"] is None
+
+
+# ===========================================================================
+# ---- §31 (H7), #55: read_project_doc reads a page, not the file -----------
+# ===========================================================================
+
+
+class TestReadingOnePageCostsOnePage:
+    """This was `text = f.read()` followed by
+    `text[offset:offset + INIT_READ_CHARS]`, so returning 20,000 characters
+    of a 30 MB document cost 60 MB of peak traced memory -- and cost it
+    AGAIN on every page, because each call re-read the whole file to slice a
+    different part of it.
+
+    Not fixed with read_run's getsize guard, deliberately: refusing a large
+    document is not what this tool is for. I7 chose INIT_READ_CHARS so that
+    /init could page through exactly such a document, and a size check would
+    have removed the capability instead of the cost.
+    """
+
+    def _long_doc(self, project, chars):
+        path = project / "LONG.md"
+        path.write_text("z" * chars, encoding="utf-8")
+        return path
+
+    def test_the_whole_file_is_not_held_to_return_one_page(self, project):
+        import tracemalloc
+
+        self._long_doc(project, 4_000_000)
+
+        tracemalloc.start()
+        try:
+            result = project_docs.read_run({"path": "LONG.md"})
+            _current, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+
+        assert len(result["content"]) == config.INIT_READ_CHARS
+        assert peak < 1_000_000, (
+            f"{peak} bytes held to return {config.INIT_READ_CHARS} "
+            "characters -- the whole file is still being read")
+
+    def test_a_LATER_page_does_not_re_read_the_prefix_into_memory(self,
+                                                                  project):
+        """The half a size check would not have fixed. A paging loop used to
+        pay for the entire document on every call, so page 100 cost the same
+        as page 1 and both cost the whole file."""
+        import tracemalloc
+
+        self._long_doc(project, 4_000_000)
+
+        tracemalloc.start()
+        try:
+            result = project_docs.read_run({"path": "LONG.md",
+                                            "offset": 3_000_000})
+            _current, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+
+        assert len(result["content"]) == config.INIT_READ_CHARS
+        assert peak < 1_000_000, (
+            f"{peak} bytes held to return a page from offset 3,000,000")
+
+    def test_paging_still_reaches_the_same_text(self, project):
+        """The behaviour, not the cost. A bound that returned the wrong
+        characters would pass both tests above."""
+        body = "".join(str(i % 10) for i in range(50_000))
+        (project / "LONG.md").write_text(body, encoding="utf-8")
+
+        first = project_docs.read_run({"path": "LONG.md"})
+        offset = int(first["message"].split("offset=")[1].split()[0].strip("."))
+        second = project_docs.read_run({"path": "LONG.md", "offset": offset})
+
+        assert first["content"] == body[:config.INIT_READ_CHARS]
+        assert second["content"] == body[offset:offset + config.INIT_READ_CHARS]
+        assert first["content"] + second["content"] == body[:offset +
+                                                            len(second["content"])]
+
+    def test_truncated_is_true_while_there_is_more_and_false_at_the_end(
+            self, project):
+        """`truncated` used to be computed from len(text), which is the read
+        that was removed. It is answered now by looking one character past
+        the page -- so the two ends of the document have to be checked
+        separately, because a bound that always says True would satisfy the
+        paging test above."""
+        body = "y" * (config.INIT_READ_CHARS + 10)
+        (project / "LONG.md").write_text(body, encoding="utf-8")
+
+        first = project_docs.read_run({"path": "LONG.md"})
+        last = project_docs.read_run({"path": "LONG.md",
+                                      "offset": config.INIT_READ_CHARS})
+
+        assert first["truncated"] is True
+        assert last["truncated"] is False
+        assert last["content"] == "y" * 10
+
+    def test_a_document_shorter_than_one_page_is_returned_whole(self,
+                                                                project):
+        (project / "SHORT.md").write_text("# tiny\n", encoding="utf-8")
+        result = project_docs.read_run({"path": "SHORT.md"})
+
+        assert result["content"] == "# tiny\n"
+        assert result["truncated"] is False
+        assert "message" not in result
+
+    def test_an_offset_past_the_end_is_empty_rather_than_an_error(self,
+                                                                  project):
+        (project / "SHORT.md").write_text("# tiny\n", encoding="utf-8")
+        result = project_docs.read_run({"path": "SHORT.md", "offset": 999999})
+
+        assert result["content"] == ""
+        assert result["truncated"] is False

@@ -146,6 +146,23 @@ READ_TOOL_SCHEMA = {
 }
 
 
+def _skip(handle, offset: int) -> None:
+    """Advance `offset` characters without holding them.
+
+    f.seek() on a text stream takes an opaque cookie, not a character
+    count, so an offset cannot simply be jumped to. Reading forward in
+    bounded pieces keeps the memory ceiling at one piece instead of the
+    whole prefix, which is the property #55 is about -- the cost is
+    proportional to the offset, but the MEMORY is not.
+    """
+    remaining = offset
+    while remaining > 0:
+        piece = handle.read(min(remaining, config.INIT_READ_CHARS))
+        if not piece:
+            return
+        remaining -= len(piece)
+
+
 def read_run(params: dict) -> dict:
     # params.get throughout, not params[]: no provider validates tool inputs
     # against the schema, and a bare KeyError escapes the loop's
@@ -170,26 +187,51 @@ def read_run(params: dict) -> dict:
     if not os.path.isfile(resolved):
         return {"error": f"read_project_doc: no such file: {user_path}"}
 
-    try:
-        with open(resolved, "r", encoding="utf-8", errors="replace") as f:
-            text = f.read()
-    except OSError as e:
-        logger.warning("read_project_doc failed for %s: %s", user_path, e)
-        return {"error": f"Could not read {user_path}: {e}"}
-
     offset = params.get("offset") or 0
     if not isinstance(offset, int) or offset < 0:
         offset = 0
 
-    chunk = text[offset:offset + config.INIT_READ_CHARS]
-    end = offset + len(chunk)
-    result = {"path": user_path, "content": chunk, "truncated": end < len(text)}
+    # ROADMAP_v2 §31 (H7), #55. This used to be f.read() followed by
+    # text[offset:offset + INIT_READ_CHARS], so returning 20,000
+    # characters of a 30 MB document cost 60 MB of peak traced memory --
+    # and cost it AGAIN on every page, because each call re-read the
+    # whole file to slice a different part of it.
+    #
+    # A getsize guard like read_run's would be the obvious copy, and it
+    # is the wrong one here: refusing a large document is not what this
+    # tool is for -- I7 chose INIT_READ_CHARS deliberately so /init could
+    # page through exactly such a document. Seeking to the offset bounds
+    # the read AND removes the re-read, which a size check would not.
+    #
+    # One extra character is read to answer `truncated` without a second
+    # pass. seek() counts characters in text mode only for utf-8-sig-free
+    # streams, so the offset is walked rather than jumped: correctness
+    # over cleverness, and it still holds one chunk rather than the file.
+    try:
+        with open(resolved, "r", encoding="utf-8", errors="replace") as f:
+            _skip(f, offset)
+            chunk = f.read(config.INIT_READ_CHARS)
+            more = f.read(1) != ""
+    except OSError as e:
+        logger.warning("read_project_doc failed for %s: %s", user_path, e)
+        return {"error": f"Could not read {user_path}: {e}"}
+
+    result = {"path": user_path, "content": chunk, "truncated": more}
     if result["truncated"]:
         # The continuation offset is IN the message, not merely implied by
         # the numbers. A model that has to compute where to resume usually
         # re-reads from zero and spends the budget twice.
+        #
+        # §31 (H7) dropped the total. It used to read `of {len(text)}`,
+        # and len(text) was the whole file -- the very read this section
+        # removed. A total could be faked from os.path.getsize, but that
+        # is BYTES and this count is CHARACTERS, so on any document with
+        # a non-ASCII character it would be a number that looks exact and
+        # is not. Saying less is the honest option; the part that was
+        # load-bearing -- where to resume -- is untouched.
+        end = offset + len(chunk)
         result["message"] = (
-            f"Read characters {offset}-{end} of {len(text)}. "
+            f"Read characters {offset}-{end}. "
             f"Call again with offset={end} to continue.")
     return result
 
