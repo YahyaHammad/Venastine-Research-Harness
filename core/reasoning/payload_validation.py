@@ -60,17 +60,11 @@ has a spec here (see tests/test_payload_validation.py).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Optional, get_args
+from typing import Any, Optional
 
-from core.reasoning.base import ClaimType, GroundingStatus
-
-# Read from base.py's Literals rather than re-typed here. A second copy of
-# a vocabulary is a second thing to keep in step, and #75 is what happens
-# when a Literal is treated as enforcement: `"Ungrounded"` scored a claim
-# the model said it could not source as merely LOW, escaping the
-# forced-UNVERIFIED rule entirely.
-CLAIM_TYPES = frozenset(get_args(ClaimType))
-GROUNDING_STATUSES = frozenset(get_args(GroundingStatus))
+# Re-exported, not re-derived: base.py defines these beside the Literals
+# they come from, and the scorer reads the same two names (§30, B9).
+from core.reasoning.base import CLAIM_TYPES, GROUNDING_STATUSES  # noqa: F401
 
 NUMBER = (int, float)
 

@@ -14,12 +14,23 @@ corresponding PipelineRun fields directly.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal, Optional
+from typing import Literal, Optional, get_args
 from uuid import UUID
 
 ClaimType = Literal["factual", "synthesis", "speculative"]
 ConfidenceTier = Literal["HIGH", "MEDIUM", "LOW", "UNVERIFIED", "UNVERIFIED_COVERAGE"]
 GroundingStatus = Literal["grounded", "partial", "ungrounded"]
+
+# ROADMAP_v2 §30. The Literals above are ANNOTATIONS -- dataclasses do
+# not enforce them, and #75 is what that costs: `"Grounded"` scored a
+# well-sourced claim 0.35/LOW where `"grounded"` gives 0.85/HIGH, and
+# `"Ungrounded"` escaped the forced-UNVERIFIED rule to land LOW. Two
+# modules need the vocabulary as DATA -- the payload boundary rejects a
+# value outside it, the scorer coerces one that got through -- and a
+# second hand-typed copy of a vocabulary is a second thing to keep in
+# step. Derived from the Literal, beside the Literal.
+CLAIM_TYPES = frozenset(get_args(ClaimType))
+GROUNDING_STATUSES = frozenset(get_args(GroundingStatus))
 
 
 @dataclass
