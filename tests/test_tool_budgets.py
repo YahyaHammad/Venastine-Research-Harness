@@ -289,14 +289,31 @@ class TestAComputeToolIsBoundedByAClockThatCanStopIt:
             proc.kill()
             proc.wait(timeout=10)
 
-    def test_the_child_does_not_inherit_the_environment(self):
+    def test_the_child_does_not_inherit_the_environment(self, monkeypatch):
         """A math tool needs no credentials, and the child is a fresh
         interpreter with a minimal env -- sandbox._scrubbed_env's argument,
-        applied to the other subprocess this project spawns."""
+        applied to the other subprocess this project spawns.
+
+        The variables are SET here first. An earlier version asserted that
+        "ANTHROPIC_API_KEY" was absent from the child env without setting
+        it in the parent, so it was absent before `_child_env` did
+        anything -- true of a function that copies os.environ wholesale,
+        and true of no function at all. A test whose input is already zero
+        is the vacuity class this batch recorded for os.times(), reached a
+        second way in the same file.
+        """
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-SENTINEL")
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-SENTINEL")
+        monkeypatch.setenv("VENASTINE_UNRELATED", "also-not-wanted")
+
         env = isolation._child_env()
+
         assert "ANTHROPIC_API_KEY" not in env
         assert "OPENAI_API_KEY" not in env
-        assert "PYTHONPATH" in env
+        assert "VENASTINE_UNRELATED" not in env
+        assert "SENTINEL" not in "".join(env.values())
+        assert "PYTHONPATH" in env, (
+            "the child cannot import its own tool without this")
 
     def test_the_child_is_located_from_the_module_not_the_cwd(self):
         """dispatch has no guarantee about the working directory -- the TUI
@@ -316,11 +333,34 @@ class TestAComputeToolIsBoundedByAClockThatCanStopIt:
 
     def test_the_child_stdout_is_bounded_on_read(self):
         """#55's own lesson applied to the mechanism that fixes it: bound
-        the read, do not slice afterwards."""
+        the read, do not slice afterwards.
+
+        The payload is a WELL-FORMED marked result that is merely too
+        large. An earlier version sent unmarked filler, which reaches the
+        "did not return a usable result" branch and produces an error
+        dict whether the size check runs or not -- two paths agreeing on
+        one input, so deleting the check left the test green.
+        """
         assert isolation.MAX_CHILD_OUTPUT_BYTES > 0
-        oversized = "x" * (isolation.MAX_CHILD_OUTPUT_BYTES + 1000)
+        payload = json.dumps(
+            {"result": "y" * (isolation.MAX_CHILD_OUTPUT_BYTES + 1000)})
+        oversized = isolation.MARKER + payload + "\n"
+        assert len(oversized) > isolation.MAX_CHILD_OUTPUT_BYTES
+
         result = isolation._interpret("discrete_math", oversized, "", 0, 15)
-        assert "error" in result
+
+        assert "error" in result, (
+            "an oversized but perfectly parseable result was returned "
+            "verbatim -- the size check is not doing anything")
+        assert "more output than can be returned" in result["error"]
+
+    def test_a_marked_result_UNDER_the_cap_is_returned_verbatim(self):
+        """The control for the test above. A check that rejected every
+        marked result would satisfy it."""
+        payload = json.dumps({"result": "21", "operation": "gcd"})
+        out = isolation._interpret(
+            "discrete_math", isolation.MARKER + payload + "\n", "", 0, 15)
+        assert out == {"result": "21", "operation": "gcd"}
 
 
 class TestTheHumanAndIoClassesAreNotWrapped:

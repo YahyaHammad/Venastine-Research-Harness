@@ -431,6 +431,29 @@ class TestTheBodyIsBoundedBeforeItIsHeld:
 
         assert result["truncated"] is True
 
+    def test_the_byte_cap_alone_marks_a_page_truncated(self, http,
+                                                        monkeypatch):
+        """The `or more` term, which the shipped constants make
+        unreachable: 65,536 bytes is at least 16,384 characters, so the
+        character comparison is always already true when the byte cap
+        bites. Deleting the term therefore survived every other test
+        here.
+
+        Moving the constants is the point rather than a workaround -- the
+        property being pinned is the RELATIONSHIP (a read stopped by the
+        byte cap reports itself), not today's two numbers, and it is
+        their future ratio that the term defends.
+        """
+        monkeypatch.setattr(fetch_url, "MAX_CONTENT_BYTES", 100)
+        http.respond(text="f" * 500, url="https://example.com/bytes")
+
+        result = fetch_url.run({"url": "https://example.com/bytes"})
+
+        assert len(result["content"]) < fetch_url.MAX_CONTENT_CHARS, (
+            "the character limit fired too, so this cannot discriminate")
+        assert result["truncated"] is True, (
+            "the read was cut off by the byte cap and reported as complete")
+
     def test_a_small_page_is_returned_whole_and_not_marked_truncated(self,
                                                                     http):
         """The control. A bound that reports every page as truncated would

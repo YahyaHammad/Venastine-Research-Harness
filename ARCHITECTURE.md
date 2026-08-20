@@ -50,11 +50,11 @@ Venastine Research Harness/
 ├── CLAUDE.md / QWEN.md             # pointers to AGENTS.md, so a harness that auto-loads one of those names finds the context instead of a second copy of it
 ├── DEVLOG.md                       # implementation notes for built ROADMAP sections -- see §0
 │
-├── tests/                          # 1986 tests, all offline, ~25-45s depending on the machine (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
+├── tests/                          # 1988 tests, all offline, ~25-45s depending on the machine (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
 │   ├── conftest.py                 # fixtures: make_model_response, make_stream_from_response, make_stream_sequence, FakeStorage, ...
 │   ├── BREAKING_CHANGES.md         # what-breaks-it / symptom / fix per area
 │   ├── test_cli.py                 # 76 tests -- ROADMAP §1 thread_id passthrough + UUID validation + §14 parser defaults/resolution/trust flow + §29 N1-N8 the one stdin reader, N2's channel deadline, every request kind rendered, and the startup block main(argv) made reachable + #102's four declining defaults
-│   ├── test_fetch_url.py           # 30 tests -- audit #120/#58: fetch_url's whole surface, which no test had ever executed. #53/#54's per-hop policy check, twice: once on the fake httpx and once on REAL httpx through a MockTransport
+│   ├── test_fetch_url.py           # 31 tests -- audit #120/#58: fetch_url's whole surface, which no test had ever executed. #53/#54's per-hop policy check, twice: once on the fake httpx and once on REAL httpx through a MockTransport
 │   ├── test_e2e.py                 # 5 tests -- e2e chat (multi-turn + tool use), research mode, error handling ×3
 │   ├── test_logging_setup.py       # 7 tests -- configure_logging fallback on bad log path, stderr=False, and #132's redacting formatter (message, traceback, and a real dispatch)
 │   ├── test_credentials.py         # 9 tests -- audit #19: providers.json and the trust store created 0600, asserted under umask 0. The mode cases skip off POSIX; the round-trip cases do not
@@ -69,7 +69,7 @@ Venastine Research Harness/
 │   ├── test_load_skill.py          # 7 tests -- load_skill view-only retrieval, D24 permission declaration, catalog prompt injection
 │   ├── test_orchestrator.py        # 32 tests -- full pipeline mocked + JSON-retry + §5 failure/success/acceptance
 │   ├── test_registry_permissions.py# 11 tests -- allow/deny/approval
-│   ├── test_tool_budgets.py        # 29 tests -- ROADMAP_v2 §31 what a tool call may cost: the declaration and its import-time assert, the killable child, and the evidence-on-disk test that a timed-out call is STOPPED rather than abandoned
+│   ├── test_tool_budgets.py        # 30 tests -- ROADMAP_v2 §31 what a tool call may cost: the declaration and its import-time assert, the killable child, and the evidence-on-disk test that a timed-out call is STOPPED rather than abandoned
 │   ├── test_math_tools.py          # 131 tests -- symbolic equivalence + injection regression
 │   ├── test_memory_write_through.py# 10 tests -- write-through + storage-path-mismatch catch + resume-shape + list_threads
 │   ├── test_loop_tool_dispatch.py  # 7 tests -- _run tool-dispatch branches

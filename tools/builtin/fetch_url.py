@@ -136,9 +136,17 @@ def run(params: dict) -> dict:
             "content": body[:MAX_CONTENT_CHARS],
             # True when EITHER bound bit: more characters were decoded
             # than are returned, or the byte cap stopped the read with
-            # the server still sending. The second is the new one, and
-            # it must be reported -- a silently short page is how a
+            # the server still sending. A silently short page is how a
             # grounding pass concludes a source does not say something.
+            #
+            # `or more` CANNOT FIRE with the shipped constants, and that
+            # is deliberate rather than an oversight: 65,536 bytes is at
+            # least 16,384 characters even at four bytes each, so the
+            # first term is always already true when the byte cap bites.
+            # It is here for the day someone raises MAX_CONTENT_CHARS or
+            # lowers MAX_CONTENT_BYTES, which is exactly when a silent
+            # under-report would appear. A mutation deleting it survived
+            # until a test moved the constants to reach it.
             "truncated": len(body) > MAX_CONTENT_CHARS or more,
         }
 
