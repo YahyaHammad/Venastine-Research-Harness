@@ -50,7 +50,7 @@ Venastine Research Harness/
 ├── CLAUDE.md / QWEN.md             # pointers to AGENTS.md, so a harness that auto-loads one of those names finds the context instead of a second copy of it
 ├── DEVLOG.md                       # implementation notes for built ROADMAP sections -- see §0
 │
-├── tests/                          # 1927 tests, all offline, ~25-45s depending on the machine (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
+├── tests/                          # 1928 tests, all offline, ~25-45s depending on the machine (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
 │   ├── conftest.py                 # fixtures: make_model_response, make_stream_from_response, make_stream_sequence, FakeStorage, ...
 │   ├── BREAKING_CHANGES.md         # what-breaks-it / symptom / fix per area
 │   ├── test_cli.py                 # 76 tests -- ROADMAP §1 thread_id passthrough + UUID validation + §14 parser defaults/resolution/trust flow + §29 N1-N8 the one stdin reader, N2's channel deadline, every request kind rendered, and the startup block main(argv) made reachable + #102's four declining defaults
@@ -67,7 +67,7 @@ Venastine Research Harness/
 │   ├── test_workspace_trust.py     # 22 tests -- ROADMAP_v2 §14 AC1/AC2 + hash-control properties (path-in-hash, determinism)
 │   ├── test_config_loader.py       # 66 tests -- ROADMAP_v2 §14 frontmatter AC4, tier precedence D8/D18, settings merge, CONTEXT opt-in AC5, catalog
 │   ├── test_load_skill.py          # 7 tests -- load_skill view-only retrieval, D24 permission declaration, catalog prompt injection
-│   ├── test_orchestrator.py        # 31 tests -- full pipeline mocked + JSON-retry + §5 failure/success/acceptance
+│   ├── test_orchestrator.py        # 32 tests -- full pipeline mocked + JSON-retry + §5 failure/success/acceptance
 │   ├── test_registry_permissions.py# 11 tests -- allow/deny/approval
 │   ├── test_math_tools.py          # 123 tests -- symbolic equivalence + injection regression
 │   ├── test_memory_write_through.py# 10 tests -- write-through + storage-path-mismatch catch + resume-shape + list_threads

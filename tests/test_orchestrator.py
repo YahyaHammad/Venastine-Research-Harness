@@ -1149,6 +1149,71 @@ def test_candidate_labels_follow_survivors_not_roster_positions(monkeypatch, moc
     assert run.claim_by_id("C2").score_breakdown["consistency_score"] == 0.5
 
 
+def test_the_trace_maps_a_candidate_number_to_the_model_that_produced_it(
+        monkeypatch, mocker):
+    """Audit #79 item 3. `Pass 1: ensemble candidate N generated on X.` is
+    the ONLY record anywhere of what a candidate number means -- no
+    PipelineRun field holds candidates 2..N, and `01_raw_response.md` is
+    candidate 1 alone (#77) -- and mutating it to print ROSTER position
+    left the whole suite green.
+
+    The test above cannot catch that: it asserts on the labels Pass 2
+    RECEIVES. E11 is a pairing between two numbering schemes, and half of
+    the pairing was untested, so a stored `asserted_by_candidates: [2]`
+    could point at a different model than the trace said.
+
+    Same roster and the same failing middle candidate, because roster and
+    survivor position only differ once one is lost."""
+    monkeypatch.setattr(config, "ENSEMBLE_MODELS", THREE_MODELS)
+    payloads = _ensemble_payloads(["Candidate A text.", "Candidate C text."])
+    payloads["Pass 2"] = json.dumps([
+        {"id": "C1", "text": "Claim A.", "type": "factual", "entities": ["A"],
+         "source_span": "", "asserted_by_candidates": [1, 2]},
+    ])
+    inner = _build_pass_mock([], payloads)
+    pass2_input_seen = []
+
+    def side_effect(*, pass_input, model, pass_id, provider_name="ANTHROPIC", **kwargs):
+        if pass_id == "Pass 1" and model == "gpt-5.1":
+            raise RuntimeError("down")
+        if pass_id == "Pass 2":
+            pass2_input_seen.append(pass_input)
+        return inner(pass_input=pass_input, model=model, pass_id=pass_id,
+                     provider_name=provider_name, **kwargs)
+
+    mocker.patch.object(RunAgentLoop, "stream_deep_research_mode",
+                        side_effect=pass_stream(side_effect))
+
+    run = run_deep_research_pipeline(
+        user_query="test", model="main-model", provider_name="ANTHROPIC",
+        ensemble_mode=True,
+    )
+
+    generated = [line for line in run.trace if " generated on " in line]
+    assert generated == [
+        "Pass 1: ensemble candidate 1 generated on ANTHROPIC/claude-opus-5.",
+        "Pass 1: ensemble candidate 2 generated on GOOGLE/gemini-2.5-pro.",
+    ], (
+        "the surviving GOOGLE candidate is candidate 2 -- roster position "
+        "would call it candidate 3, and nothing else in the record could "
+        "contradict that"
+    )
+    assert not any(" generated on " in line and "gpt-5.1" in line
+                   for line in run.trace), (
+        "the failed candidate must take no number at all -- E7 skips it, "
+        "and numbering it would leave a gap the record cannot explain"
+    )
+
+    # The pairing, asserted as a pairing: the number in the trace and the
+    # number Pass 2 was given must name the same text.
+    body = pass2_input_seen[0]
+    assert "Candidate 2:\nCandidate C text." in body, (
+        "the trace says candidate 2 is the GOOGLE model; Pass 2 must have "
+        "seen that model's text under the same number, or a stored "
+        "asserted_by_candidates points at the wrong model"
+    )
+
+
 def test_one_surviving_candidate_scores_without_a_penalty(monkeypatch, mocker):
     """E7's second half. One candidate is not an ensemble of one: scoring it
     that way gives every claim consistency 1.0 and a zero penalty, reporting
