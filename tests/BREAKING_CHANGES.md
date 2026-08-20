@@ -2278,3 +2278,90 @@ tests. That is exactly the false-RED the control exists to separate.
 Nothing in §30 is platform-specific — the boundary is pure Python over already-parsed JSON — and
 that is worth confirming rather than assuming, which is what the container mutation run does. Every
 number matches Windows to the digit.
+
+
+---
+
+## §27 — the eleventh fix batch: what a tool call is allowed to cost (2026-08-20)
+
+> **Section-number collision, named rather than renumbered.** This file's counter is independent of
+> ROADMAP_v2's — §19–§23, §25 and §26 already collide the same way — so this §27 is the eleventh fix
+> batch. Audit **#17** owns the overloaded-namespace family; extending the collision silently is what
+> that issue is about.
+
+Closes audit **#57** (S1 — the last one), **#55** (S3) and **#56** (S3).
+ROADMAP_v2 **§31**, decisions **H1–H10**.
+
+### The change that breaks a registration, stated first
+
+**`ToolSpec` has a new REQUIRED field.** `budget` must be one of `BUDGET_COMPUTE`, `BUDGET_IO` or
+`BUDGET_HUMAN`, and `assert_budget_declared()` runs at `tools/registry.py` import. Any out-of-tree
+registration — a fork's extra tool, a branch mid-rebase — now fails at import with the tool named,
+not at its first call.
+
+That is deliberate and it is R13's trade, unchanged: `None` means undeclared rather than defaulting,
+because an unwrapped tool looks, from every layer above it, exactly like a tool that is bounded
+somewhere else. A default would have recreated #57 silently for the next tool added.
+
+`mcp__*` names are exempt — they are named at connection time and cannot carry a static declaration —
+and `mcp_client/registration.py` passes `BUDGET_IO` explicitly anyway, so the exemption is
+documentation rather than the live path.
+
+### If you change this, this is what fails
+
+| change | what fails | why it is that way |
+|---|---|---|
+| Drop `budget=` from any registration | `assert_budget_declared` raises at import; `test_every_statically_registered_tool_declares_a_budget` names the tool | R13's rule. Omission has to be a detectable mistake, not an inherited answer |
+| Give `ToolSpec.budget` a default value | The same tests pass while the mechanism silently stops covering new tools | This is the exact failure the field exists to prevent; the value of `None` is that it is not an answer |
+| Misspell a budget (`"computee"`) | `test_a_misspelled_budget_is_fatal_rather_than_ignored` | A typo drops the tool out of the mechanism *while looking answered*, which is worse than an omission |
+| Declare a `BUDGET_COMPUTE` tool that also injects | `test_a_compute_tool_that_declares_an_injection_is_fatal` | Not a style rule: compute routes through a process boundary and nothing in `_INJECTABLE_PARAMS` survives one. Caught at import instead of at the first call |
+| Route `BUDGET_HUMAN` through the compute clock | `test_ask_user_is_not_bounded_by_the_compute_budget` | `ask_user` blocks on a person for up to `ATTENDED_APPROVAL_TIMEOUT_S` (600s). A 15s clock would answer the question on the user's behalf |
+| Replace the subprocess with a thread watchdog | `test_a_timed_out_call_is_STOPPED_not_merely_abandoned` | Every other test in that class would still pass. sympy has no interruption point, so a thread keeps a core busy while the harness reports a timeout that did not happen |
+| Measure that property with `os.times()` | Nothing fails — and that is the point | `children_user`/`children_system` are always **0.0 on Windows**, so the assertion would be trivially true on the platform it usually runs on. It measures bytes the child wrote to disk instead |
+| Isolate inside the six math tools rather than at `dispatch` | 131 tests in `test_math_tools.py` start measuring the transport | They call `module.run(params)` directly and never `dispatch`. Keeping the seam at the one production handler call site is what keeps them about the maths |
+| Reuse `sandbox._unix_resource_limits` for the child | Nothing fails, and the inner layer stops existing | It spends `SANDBOX_CPU_SECONDS` (30), which is *above* the 15s budget — a limit that can never fire, reading to anyone checking as though H3 were present |
+| Restore `pow(base, exponent, modulus)` with an optional modulus | `TestModularExponentIsModular` | `pow(b, e, None)` is plain exponentiation: 0.000s with a modulus, 3.3s and 125 MB without, on the same exponent |
+| Move `str(result)` back outside `discrete_math.run`'s try | `TestAResultTooLargeToPrintIsTheToolsOwnError` | An ordinary input produced a bare `ValueError`, dispatch's generic wrapper, and a `logger.exception` traceback as though it were a bug |
+| Stringify the dict branch's VALUES while fixing that | `test_a_dict_result_still_carries_its_values_untouched` | The first draft did. It rewrote every `prime_factors` exponent, and the corpus diff caught it |
+| Drop `edit_run`'s size guard | `TestEditRejectsAnOversizedFileBeforeOpeningIt` | 60 MB of peak traced memory on a 30 MB file, to answer "old_text not found in file" |
+| Give `read_project_doc` a `getsize` guard instead of the seek | `test_a_LATER_page_does_not_re_read_the_prefix_into_memory` | A size check would refuse the large document `/init` is meant to page through, and would leave the per-page re-read in place |
+| Replace `fetch_url`'s cap with a `Content-Length` check | `test_a_lying_content_length_changes_nothing` | A hostile server can omit the header or lie about it. Only refusing to keep reading is a bound |
+| Have the fake's `iter_bytes` yield one chunk | `test_the_read_stops_at_the_byte_cap` stops discriminating | One giant chunk satisfies any cap on the first iteration, so the double would decide the outcome instead of the code |
+| Point the two real-httpx tests back at `httpx.get` | They reach for a real socket and error in `socket.py` | §31 moved the tool to `httpx.stream`. Those two drive REAL httpx through a MockTransport precisely so they can prove a blocked hop was never requested, so they must stub the entry point the tool calls |
+| Check for committed checkpoints with a filesystem walk | It fails on any machine with notebook history | This working tree has eight `.ipynb_checkpoints` directories and exactly one was ever committed. A test people learn to ignore protects nothing — it asks git what is tracked |
+| Check for them via `.gitignore` instead | It reports clean while the files sit there | `.gitignore` already listed `.ipynb_checkpoints/`, and gitignore does not untrack. That is how both files survived |
+
+### Behaviour changes a caller can observe
+
+| before | after |
+|---|---|
+| A compute tool ran in-process under `dispatch` | It runs in a child. `module.run(params)` is unchanged, but **patching a math tool's internals no longer affects a *dispatched* call** — the child imports a fresh module |
+| `modular_exponent` with no modulus computed a plain power | An error naming the field, in 0.36s instead of 3.3s |
+| `factorial n=100000` returned `"discrete_math failed: Exceeds the limit (4300 digits)…"` plus a logged traceback | The tool's own error, saying to try smaller inputs, with no traceback |
+| `read_project_doc`'s message said `Read characters 0-20000 of 30000993` | `Read characters 0-20000.` The total **was** the whole-file read being removed, and `os.path.getsize` would substitute bytes for characters — a number that looks exact and is not |
+| `edit` on a file over `MAX_FILE_SIZE_BYTES` reported `old_text not found` | It reports the size refusal, in read's wording |
+| `fetch_url` buffered the whole body, then sliced | It streams and stops at `MAX_CONTENT_BYTES`; `truncated` is now True when *either* bound bit. A redirect costs no body at all |
+| The offline `httpx` fake had `get` only | It also has `stream`, and `_Response.iter_bytes` |
+
+### Vacuity classes
+
+**A test whose input is already zero on the platform it runs on.** The first version of
+`test_the_cpu_is_reclaimed` used `os.times()`, whose child-CPU fields are hard-wired to 0.0 on
+Windows. It passed. It would have passed with the subprocess replaced by a thread, with the timeout
+deleted, with the whole mechanism removed — the assertion was `0.0 < 0.5`. Caught by asking what the
+measurement would read if the code were wrong, rather than by watching it go green.
+
+**A test asserting an absence that a never-started process also produces.** Its replacement asserts a
+file *stopped* growing, which is equally true if the child never ran. `test_the_probe_would_notice_a
+_child_that_kept_going` is the positive control: same handler, observed while still running.
+
+**A double that cannot express the thing under test.** The offline httpx fake had no `stream`, so
+`fetch_url`'s new bound was unreachable through it. Adding one chunk-at-a-time `iter_bytes` is what
+makes the cap testable at all — batch 10's lesson (turning on a check makes the doubles part of the
+contract) with a different tool.
+
+### Platform note
+
+H3's second layer is POSIX-only and its two tests skip on Windows. That makes the container run
+load-bearing rather than confirmatory: a guard whose test can skip is not verified until the mutation
+runs where the test does (§21's rule).

@@ -4551,3 +4551,111 @@ storing N transcripts adds a field, new artifact files and two more readers. **M
 is the argument against, and the comment naming the shared shape is there so the next reader finds
 both. **#12**, routing disagreement rather than scoring it: B8 and B10 make that signal trustworthy
 and self-describing, which is what #12 says it would read.
+
+
+---
+
+## Audit Pass 1 — fix batch 11: what a tool call is allowed to cost (2026-08-20)
+
+`fix/batch-11-tool-budgets`, from `main` at `47fde33`. Closes **#57** (S1), **#55** (S3) and **#56**
+(S3). ROADMAP_v2 **§31**, decisions **H1–H10**.
+
+**#57 was the last S1 in the project.** After this batch there are none.
+
+### The deferral reason was true and still wrong
+
+Batch 10 set #57 aside on stated grounds: *"`signal.alarm` is main-thread-only, the TUI runs tools in
+a worker, and abandoning a thread mid-`sympy` leaks one that nothing can join."* Every clause of that
+is correct. Together they argue against the **thread**, not against the bound — and nothing in the
+sentence requires one.
+
+A prototype settled it before any code was written: a fresh interpreter reading params from stdin,
+importing the tool, printing the result. `gcd` costs 0.35s end to end; `series order=100000` and
+`combinations n=1e7 r=1e6` die at the wall clock with the CPU actually reclaimed. Against a harness
+whose every step is a multi-second model call, 0.34s is not a cost worth designing around.
+
+Two measurements made it safe to wire in. All six math tools inject nothing and are pure functions of
+a JSON dict; the five that **do** inject are exactly the ones that block on a person rather than on
+CPU. And `spec.handler(` in `registry.py` is the only production call site of any handler, so the
+whole change is one branch at one seam.
+
+### The mechanism existed three times over
+
+`mcp_client/client.py` has a two-layer wall clock **with its rationale written out** — an inner
+protocol timeout that cancels the request and an outer `future.result(timeout=)` as backstop *"for
+the case the [answer] is never coming at all"*. `security/sandbox.py` has `subprocess.run(timeout=)`
+plus `RLIMIT_CPU`/`RLIMIT_AS`. The three network tools each carry their own `REQUEST_TIMEOUT_S`.
+
+None of them reach the built-ins. Every bound in the tool layer was per-tool and voluntary, and the
+six in-process math tools — the only ones that can burn a core indefinitely — were the ones that
+opted out. That is §29's #7 and §30's `_validated` a third time, and it is becoming the most common
+shape in this audit: the mechanism is built, one consumer got it, the rest never did.
+
+Worth recording that H3 does **not** reuse `sandbox._unix_resource_limits` despite being three
+identical lines. That helper spends `SANDBOX_CPU_SECONDS` (30), which is above this batch's 15s
+budget — reusing it would install a limit that can never fire while reading, to anyone checking, as
+though the inner layer were present.
+
+### The security question was asked, and it changed the batch
+
+Whether oversized integers are exploitable came up directly, so it was measured rather than reasoned
+about. Integer overflow does not exist in Python; `gmpy2` is absent so sympy runs pure-Python ground
+types, meaning there is no native code in the path at all; memory exhaustion is availability rather
+than integrity; and allocation costs time roughly proportional to size (~39 MB/s), so the clock is
+already a loose memory bound and `RLIMIT_AS` makes it a hard one on Unix.
+
+The answer was "no parameter limits" — but the *check* is what found the two defects the batch would
+otherwise have missed, and neither is a size problem:
+
+**`modular_exponent` was not modular.** `modulus` is `Optional` and `pow(b, e, None)` is plain
+exponentiation. The same exponent: 0.000s with a modulus, 3.3s and a 125 MB integer without one, and
+the model chooses the arguments. An `le` on `exponent` would have caught nothing.
+
+**A correct result the tool could not print escaped as a bug.** `str(result)` sat outside `run()`'s
+own try, so `factorial n=100000` — ordinary input — left the handler as a bare `ValueError`, hit
+dispatch's containment, and was `logger.exception`'d with a full traceback. Filling the backstop with
+routine outcomes is how a real bug stops being noticed.
+
+Both are shape defects. Both are about five lines. Neither was in any issue.
+
+### What the build found that the plan had not
+
+**`_child_env` had to hand over the parent's resolved `sys.path`.** The first version passed the
+package root and a short list of environment variables, and every math call came back
+`ModuleNotFoundError: No module named 'sympy'` — on Windows the user site-packages directory is
+derived from `APPDATA`, which the minimal env had dropped. Guessing which variables reconstruct an
+import surface is a losing game across venv, user-site and conda; handing the child the paths the
+parent actually resolved is deterministic and gives it exactly the parent's imports and no more.
+
+**The first CPU-reclaimed test was vacuous on Windows.** It used `os.times()`, whose
+`children_user`/`children_system` fields are hard-wired to 0.0 there. It passed — and would have
+passed with the subprocess replaced by a thread, the timeout deleted, or the mechanism removed
+entirely, because the assertion was `0.0 < 0.5`. The replacement measures bytes the child wrote to
+disk, works on every platform, and has a positive control beside it, because "the file stopped
+growing" is also what a child that never started would produce.
+
+**Two of #53/#54's tests broke on an entry point, not on behaviour.** They drive REAL httpx through a
+MockTransport, precisely so they can prove a blocked redirect hop was never requested. Moving
+`fetch_url` to `httpx.stream` left them patching `get` while the tool called `stream`, so they
+reached for a real socket. Re-pointed, not relaxed: same transport, same assertions.
+
+**#56's suggested fix was half-done and its remaining half was not what it said.** `.gitignore` has
+listed `.ipynb_checkpoints/` for some time, and gitignore does not untrack — which is exactly how the
+two files survived. The test therefore asks git what is **tracked** rather than walking the
+filesystem: this working tree has eight such directories and precisely one was ever committed, so a
+walk would fail on any machine with notebook history, and a test people learn to ignore protects
+nothing.
+
+**A first pass at H6 stringified the dict branch's values**, rewriting every `prime_factors` exponent
+from `3` to `"3"`. The happy-path corpus diff caught it before it was committed, which is the whole
+reason that corpus is captured before the first line of the change.
+
+### Verification
+
+64 dispatch calls covering every operation of all six math tools, captured before and after and
+diffed: **byte-identical**, including the error paths. The four runaways went from two that never
+return and two that spend 3.7–4.2s of CPU before a traceback, to four that stop at their bound and
+say which tool and which limit. #55's three sites went from 60 MB of peak traced memory to 0.0–0.1 MB,
+including the per-page re-read a size check would not have touched.
+
+Windows 1968 passed / 18 skipped / 1 deselected, 1987 collected.

@@ -50,11 +50,11 @@ Venastine Research Harness/
 ├── CLAUDE.md / QWEN.md             # pointers to AGENTS.md, so a harness that auto-loads one of those names finds the context instead of a second copy of it
 ├── DEVLOG.md                       # implementation notes for built ROADMAP sections -- see §0
 │
-├── tests/                          # 1930 tests, all offline, ~25-45s depending on the machine (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
+├── tests/                          # 1986 tests, all offline, ~25-45s depending on the machine (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
 │   ├── conftest.py                 # fixtures: make_model_response, make_stream_from_response, make_stream_sequence, FakeStorage, ...
 │   ├── BREAKING_CHANGES.md         # what-breaks-it / symptom / fix per area
 │   ├── test_cli.py                 # 76 tests -- ROADMAP §1 thread_id passthrough + UUID validation + §14 parser defaults/resolution/trust flow + §29 N1-N8 the one stdin reader, N2's channel deadline, every request kind rendered, and the startup block main(argv) made reachable + #102's four declining defaults
-│   ├── test_fetch_url.py           # 23 tests -- audit #120/#58: fetch_url's whole surface, which no test had ever executed. #53/#54's per-hop policy check, twice: once on the fake httpx and once on REAL httpx through a MockTransport
+│   ├── test_fetch_url.py           # 30 tests -- audit #120/#58: fetch_url's whole surface, which no test had ever executed. #53/#54's per-hop policy check, twice: once on the fake httpx and once on REAL httpx through a MockTransport
 │   ├── test_e2e.py                 # 5 tests -- e2e chat (multi-turn + tool use), research mode, error handling ×3
 │   ├── test_logging_setup.py       # 7 tests -- configure_logging fallback on bad log path, stderr=False, and #132's redacting formatter (message, traceback, and a real dispatch)
 │   ├── test_credentials.py         # 9 tests -- audit #19: providers.json and the trust store created 0600, asserted under umask 0. The mode cases skip off POSIX; the round-trip cases do not
@@ -69,13 +69,14 @@ Venastine Research Harness/
 │   ├── test_load_skill.py          # 7 tests -- load_skill view-only retrieval, D24 permission declaration, catalog prompt injection
 │   ├── test_orchestrator.py        # 32 tests -- full pipeline mocked + JSON-retry + §5 failure/success/acceptance
 │   ├── test_registry_permissions.py# 11 tests -- allow/deny/approval
-│   ├── test_math_tools.py          # 123 tests -- symbolic equivalence + injection regression
+│   ├── test_tool_budgets.py        # 29 tests -- ROADMAP_v2 §31 what a tool call may cost: the declaration and its import-time assert, the killable child, and the evidence-on-disk test that a timed-out call is STOPPED rather than abandoned
+│   ├── test_math_tools.py          # 131 tests -- symbolic equivalence + injection regression
 │   ├── test_memory_write_through.py# 10 tests -- write-through + storage-path-mismatch catch + resume-shape + list_threads
 │   ├── test_loop_tool_dispatch.py  # 7 tests -- _run tool-dispatch branches
 │   ├── test_json_retry.py          # 16 tests -- ROADMAP §3 malformed-JSON recovery (incl. crux test)
 │   ├── test_payload_validation.py  # 59 tests -- ROADMAP_v2 §30 the pass payload boundary: the spec table, the three properties, the id cross-check and its partial-match control
 │   ├── test_pipeline_storage.py    # 9 tests -- ROADMAP §5 create/update/load_pipeline_run + inner-failure caplog
-│   ├── test_file_ops.py            # 36 tests -- ROADMAP §6 path resolution, approval, read/write/edit, registry
+│   ├── test_file_ops.py            # 40 tests -- ROADMAP §6 path resolution, approval, read/write/edit, registry
 │   ├── test_shell.py               # 96 tests -- ROADMAP §7 sandbox routing, inert/network classification, approval, backend internals; §28 the capability classifier, the three modes, the .venastine mount
 │   ├── test_policy_enforcement.py  # 74 tests -- ROADMAP §8 secret redaction, domain blocking (#48 normalisation + suffix match), is_url_permitted's address guard (#54), output policy, registry integration
 │   ├── test_critic_routing.py      # 2 tests -- ROADMAP §11 critic-model routing (3a/3b/6c to critic, rest to main)
@@ -92,7 +93,7 @@ Venastine Research Harness/
 │   ├── test_granted_calls_artifact.py # 5 tests -- ROADMAP_v2 §25 audit artifact + R7 provenance framing in the universal preamble
 │   ├── test_review.py              # 87 tests -- ROADMAP_v2 §20 V1-V9: the reviewer agent, consent as data, the accept/reject/refine walk, both shells, 07_review.json, plus the 2026-08-04 hardening class (containment, deferred commit, sanitisation, shell lifecycle)
 │   ├── test_skills.py              # 37 tests -- ROADMAP_v2 §19 K1-K6: stateless manager, body pinning (incl. one-shot turns), precondition check (incl. registration), /skill, the pass-prompt boundary
-│   ├── test_docs_consistency.py    # 8 tests -- the documented test count agrees across README/CLAUDE/ARCHITECTURE and matches the real collected total
+│   ├── test_docs_consistency.py    # 10 tests -- the documented test count agrees across README/CLAUDE/ARCHITECTURE and matches the real collected total
 │   ├── test_sdk_conformance.py     # 5 tests -- audit #143: the REAL pinned SDKs asked offline (google-genai fields, the thinking_budget pin note, httpx's redirect default). #35's capability chain is asserted here, and driven against real SDK objects -- the test the dict-shaped doubles could not be
 │   ├── test_prompt_tier_boundary.py # 11 tests -- audit #146: K6 as a RULE. A pass prompt is invariant under every session tier, parametrised over a canary table so a tier added later is covered
 │   ├── test_fake_storage_mirror.py # 16 tests -- audit #123: FakeStorage._reconstruct / _split_at compared against storage._to_neutral / _split_at, which two docstrings and AGENTS.md claimed and nothing checked
@@ -115,7 +116,7 @@ Venastine Research Harness/
 │   ├── test_interaction.py        # 92 tests -- ROADMAP_v2 §23 J2-J7: core/interaction.py's decode, the declining default per kind, CHOICE and SUBAGENT_SIGNOFF validated against the request, and the strict review decoder
 │   ├── test_question_tool.py      # 41 tests -- ROADMAP_v2 §23 slice 2: ask_user through the injected response_channel, QUESTION's three-way answer, and both shells' renderers
 │   ├── test_todo.py               # 57 tests -- ROADMAP_v2 §23 slice 2: todo_write's whole-list write (J13), the notice forwarded and stripped (J10), and the panel reading its content from thread state
-│   ├── test_project_init.py       # 72 tests -- ROADMAP_v2 §24 I1-I13: the two narrow tools, the generated index, stubs vs invented content, one consent covering a named list, and the I6 trust re-grant + §29 N5 the CLI's --init down the response channel
+│   ├── test_project_init.py       # 78 tests -- ROADMAP_v2 §24 I1-I13: the two narrow tools, the generated index, stubs vs invented content, one consent covering a named list, and the I6 trust re-grant + §29 N5 the CLI's --init down the response channel
 │   ├── test_truncated_pass.py     # 10 tests -- _check_not_truncated at the pass: truncated-with-text traces and continues, truncated-with-nothing raises naming the pass, and it runs BEFORE the JSON retry
 │   ├── test_tool_failure_containment.py # 12 tests -- dispatch() turning a raising handler into an {"error": ...} result, the two exceptions deliberately raised above it, and the error result still going through check_output_policy
 │   ├── test_pilot_wait.py         # 10 tests -- TECHNICAL_DEBT 8: settle's wall-clock deadline and its quiesce, pump's count-based form for negative assertions, and why a sixth copy of either fails here
@@ -433,7 +434,7 @@ Three things about it are load-bearing:
   - `provider_factory` / `client_for_provider` — return a mock-`api_initialization`-compatible tuple for translation tests.
   - `clear_client_cache` (autouse) — resets `api_initialization`'s cached clients before each test.
 - **`tests/BREAKING_CHANGES.md`** — per-file tables documenting what breaks each test when production code changes, the symptom, and the fix. Created because `test_orchestrator.py` was identified as the suite's most fragile mock — its mock dict is keyed by pass_id strings that ROADMAP §3 and §10 will modify.
-- **65 test files** (6 per ROADMAP §4 + 2 from §4's own additions: `test_memory_write_through.py`, `test_loop_tool_dispatch.py`; + 2 from §3/§5: `test_json_retry.py`, `test_pipeline_storage.py`; + 2 from §1: `test_cli.py`, `test_e2e.py`; + 1 from §12: `test_output_writer.py`; + 1 from audit: `test_logging_setup.py`; + 1 from §6: `test_file_ops.py`; + 1 from §7: `test_shell.py`; + 1 from §8: `test_policy_enforcement.py`; + 2 from §13: `test_client_streaming.py`, `test_streaming_loop.py`; + 3 from ROADMAP_v2 §14: `test_workspace_trust.py`, `test_config_loader.py`, `test_load_skill.py`; + 1 from §15: `test_permission_context.py`; + 1 from §11: `test_critic_routing.py`; + 1 from §16: `test_client_effort.py`; + 1 from §10's fix: `test_ensemble_guard.py`; + 3 from §17: `test_mcp_client.py`, `test_mcp_config.py`, `test_mcp_integration.py`; + 1 from §16: `test_tui.py`; + 1 from §18: `test_agents.py`; + 4 from §25: `test_grants.py`, `test_attended.py`, `test_research_authorization.py`, `test_granted_calls_artifact.py`; + 1 from §19: `test_skills.py`; + 1 from §20: `test_review.py`; + 1 from the §19–§20 review follow-up: `test_docs_consistency.py`; + 7 from §21a: `test_schema_migration.py`, `test_storage_reads.py`, `test_memory_compaction.py`, `test_compaction.py`, `test_loop_compaction.py`, `test_pin_tool.py`, `test_shell_compaction.py`; + 1 from the §21a review: `test_storage_e2e.py`; + 4 from §21b: `test_memories.py`, `test_remember_tool.py`, `test_memory_injection.py`, `test_memory_shells.py`; + 1 from §22: `test_pipeline_events.py`; + 2 from the 2026-08-05 live-run fixes: `test_tool_failure_containment.py`, `test_truncated_pass.py`; + 1 from §26: `test_research_legibility.py`; + 4 from Audit Pass 1's first fix batch: `test_fake_storage_mirror.py` (#123), `test_prompt_tier_boundary.py` (#146), `test_sdk_conformance.py` (#143), `test_fetch_url.py` (#120/#58); + 3 from §23: `test_interaction.py`, `test_question_tool.py`, `test_todo.py`; + 1 from §24: `test_project_init.py`; + 1 from §21c: `test_thread_refs.py`; + 1 from §27: `test_thread_legibility.py`; + 1 from TECHNICAL_DEBT 8's fix: `test_pilot_wait.py`; + 1 from Audit Pass 1's fifth fix batch: `test_credentials.py` (#19) — the module that writes every provider key to disk, and had no test file at all).
+- **66 test files** (6 per ROADMAP §4 + 2 from §4's own additions: `test_memory_write_through.py`, `test_loop_tool_dispatch.py`; + 2 from §3/§5: `test_json_retry.py`, `test_pipeline_storage.py`; + 2 from §1: `test_cli.py`, `test_e2e.py`; + 1 from §12: `test_output_writer.py`; + 1 from audit: `test_logging_setup.py`; + 1 from §6: `test_file_ops.py`; + 1 from §7: `test_shell.py`; + 1 from §8: `test_policy_enforcement.py`; + 2 from §13: `test_client_streaming.py`, `test_streaming_loop.py`; + 3 from ROADMAP_v2 §14: `test_workspace_trust.py`, `test_config_loader.py`, `test_load_skill.py`; + 1 from §15: `test_permission_context.py`; + 1 from §11: `test_critic_routing.py`; + 1 from §16: `test_client_effort.py`; + 1 from §10's fix: `test_ensemble_guard.py`; + 3 from §17: `test_mcp_client.py`, `test_mcp_config.py`, `test_mcp_integration.py`; + 1 from §16: `test_tui.py`; + 1 from §18: `test_agents.py`; + 4 from §25: `test_grants.py`, `test_attended.py`, `test_research_authorization.py`, `test_granted_calls_artifact.py`; + 1 from §19: `test_skills.py`; + 1 from §20: `test_review.py`; + 1 from the §19–§20 review follow-up: `test_docs_consistency.py`; + 7 from §21a: `test_schema_migration.py`, `test_storage_reads.py`, `test_memory_compaction.py`, `test_compaction.py`, `test_loop_compaction.py`, `test_pin_tool.py`, `test_shell_compaction.py`; + 1 from the §21a review: `test_storage_e2e.py`; + 4 from §21b: `test_memories.py`, `test_remember_tool.py`, `test_memory_injection.py`, `test_memory_shells.py`; + 1 from §22: `test_pipeline_events.py`; + 2 from the 2026-08-05 live-run fixes: `test_tool_failure_containment.py`, `test_truncated_pass.py`; + 1 from §26: `test_research_legibility.py`; + 4 from Audit Pass 1's first fix batch: `test_fake_storage_mirror.py` (#123), `test_prompt_tier_boundary.py` (#146), `test_sdk_conformance.py` (#143), `test_fetch_url.py` (#120/#58); + 3 from §23: `test_interaction.py`, `test_question_tool.py`, `test_todo.py`; + 1 from §24: `test_project_init.py`; + 1 from §21c: `test_thread_refs.py`; + 1 from §27: `test_thread_legibility.py`; + 1 from TECHNICAL_DEBT 8's fix: `test_pilot_wait.py`; + 1 from Audit Pass 1's fifth fix batch: `test_credentials.py` (#19) — the module that writes every provider key to disk, and had no test file at all; + 1 from §31: `test_tool_budgets.py` (#57) — the tool layer had no wall clock at any layer, and no file was about what a call is allowed to cost).
 
   This enumeration is provenance — which section introduced which file — and it is hand-maintained, which is how it came to say 58. **The tree above is the authoritative list**, and since audit #121 it is checked mechanically: `tests/test_docs_consistency.py` fails if a collected test file has no entry, if a stated count is wrong, or if an entry names a file that no longer exists.
 
@@ -1384,3 +1385,57 @@ The single-payload test (`__import__('os').system(...)`) is kept, and was itself
   the moment something did. They did not fail loudly either: they spent every corrective retry first.
   A payload builder like `tests/conftest.py`'s `well_shaped(pass_id)` keeps the next spec change to
   one line instead of nine.
+
+- **A mechanism that stops waiting is not a mechanism that stops working.** A thread watchdog over
+  `sympy.binomial` returns an error at the budget and lets the caller carry on, which passes every
+  obvious test — and the core stays busy until the process exits, because CPython offers no
+  interruption point to cancel at. The harness would then report a timeout that did not happen.
+  `dispatch` runs a `BUDGET_COMPUTE` tool in a killable child instead (§31, H2), and the test that
+  chose the design measures bytes the child wrote to disk rather than trusting the mechanism's own
+  report. This is the same trade `with_catalogs` makes when it suppresses a catalog rather than
+  advertising a tool that cannot be called.
+
+- **A per-tool, voluntary bound is a bound nobody has to add.** Before §31 the tool layer had three
+  separate timeout mechanisms — mcp_client's two-layer clock, the sandbox's `subprocess.run(timeout=)`
+  plus rlimits, and a `REQUEST_TIMEOUT_S` constant in each of the three network tools — and the six
+  in-process math tools, the only ones that can burn a core indefinitely, had none. Nothing was
+  wrong with any of the three; the gap was that no layer ever asked. `ToolSpec.budget` asks at
+  registration and `assert_budget_declared` makes not answering fatal at import, which is R13's trade
+  one question over.
+
+- **`os.times()` reports 0.0 for child CPU on Windows, always.** A test asserting that a timed-out
+  call stopped burning CPU passed there for that reason alone — it would have passed with the
+  subprocess replaced by a thread, or with the mechanism deleted, because the assertion was
+  `0.0 < 0.5`. Any platform-dependent measurement needs the question "what would this read if the
+  code were wrong?" asked on the platform it usually runs on, not only where it is most meaningful.
+
+- **An optional parameter can change an operation's complexity class.** `pow(base, exponent, None)`
+  is plain exponentiation, so `modular_exponent` with its modulus omitted was not modular: 0.000s
+  with one and 3.3s plus a 125 MB integer without, on the same exponent, with the model choosing the
+  arguments. Bounds on parameter *values* would not have found this and would not have fixed it —
+  the defect is that the tool's name stopped describing what it did.
+
+- **CPython's int→str limit is a serialisation guard, not a computation guard, and it reads like
+  one.** `factorial n=100000` failed in 0.46s with `ValueError: Exceeds the limit (4300 digits)`,
+  which looks like a working bound until `n=1000000` never reaches it. Worse, the `str()` producing
+  it sat outside the tool's own `try`, so an ordinary input escaped the handler as a bare exception
+  and was `logger.exception`'d with a traceback by dispatch's containment. A backstop filled with
+  routine outcomes is how a real bug stops being noticed.
+
+- **A limit on what a call RETURNS says nothing about what it READS.** `read_project_doc` returned
+  `INIT_READ_CHARS` characters after `f.read()` on the whole file, so paging through a 30 MB document
+  cost 60 MB of peak traced memory *per page*. The obvious fix — copying `read_run`'s `getsize`
+  guard — is the wrong one here: refusing a large document is not what that tool is for, since I7
+  chose `INIT_READ_CHARS` so `/init` could page through exactly such a document. Seeking and reading
+  one chunk bounds the memory AND removes the re-read; a size check would have done neither.
+
+- **A `Content-Length` check is not a bound.** The server chooses that header and can omit it or lie
+  about it, and for `fetch_url` the body is chosen by whatever the URL points at. The only thing that
+  actually bounds it is refusing to keep reading past a cap, which is why §31 streams. There are
+  tests for both the lying header and the absent one.
+
+- **`.gitignore` does not untrack.** `tools/builtin/.ipynb_checkpoints/` held two committed files
+  carrying an EMPTY `BLOCKED_DOMAINS` beside the real one, while `.ipynb_checkpoints/` had been in
+  `.gitignore` for some time — the entry was added after the files were. A check written against
+  gitignore would have reported clean. The test asks git what is *tracked*, and deliberately not what
+  is on disk: this working tree has eight such directories and exactly one was ever committed.

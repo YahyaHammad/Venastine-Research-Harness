@@ -83,6 +83,7 @@ Every decision below was made through a structured clarification cycle with the 
 - 28. The shell capability classifier — one classification for the approval gate and the executor, `SHELL_APPROVAL_MODE`, the `.venastine` read-only mount **(added by Audit Pass 1 fix batch 8 for #157; BUILT)**
 - 29. The CLI shell — one stdin reader, every request kind rendered, `main(argv)` and a startup order that does nothing before argparse **(added by Audit Pass 1 fix batch 9 for #100, #7, #101, #102, #141; BUILT)**
 - 30. The pipeline's payload boundary — one shape check for the ten passes, shape failures re-entering §3's retry, and a trace that reports what was applied **(added by Audit Pass 1 fix batch 10 for #76, #75, #78, #79, #123; BUILT)**
+- 31. What a tool call is allowed to cost — one declared bound per tool, a killable child for the six that compute, and a bound at the producer for the three that read **(added by Audit Pass 1 fix batch 11 for #57, #55, #56; BUILT)**
 - **Open Questions — None Remaining** (Rev. 3 — all decisions locked; verification items only)
 - **Why these calls, not just what they are** (Rev. 3 — the reasoning patterns behind several decisions above)
 
@@ -2112,6 +2113,140 @@ harness exists to separate.
   so the next reader finds both.
 - **#12**, routing disagreement rather than scoring it. B8 and B10 make the signal trustworthy and
   self-describing, which is what #12 says it would read; what to *do* with it is unchanged.
+
+---
+
+## 31. What a tool call is allowed to cost — one declared bound per tool — BUILT
+
+**Problem (audit #57, S1 — the last S1 in the project).** `registry.dispatch` was
+`result = spec.handler(params, **injected)`. No timeout, no alarm, no signal machinery anywhere
+between the model and the handler, and the arguments come from the model.
+
+Reproduced during this batch, each probe in its own subprocess with an external budget:
+
+```
+symbolic_math series order=100,000              >8s   STILL RUNNING -- killed
+discrete_math combinations n=1e7 r=1e6          >8s   STILL RUNNING -- killed
+discrete_math factorial n=100,000              0.46s  ValueError: Exceeds the limit (4300 digits)
+```
+
+That third line is **not** a bound. The traceback lands in `sympy/printing/str.py:_print_Integer` —
+CPython's int→str limit firing at **serialisation**, after the work is done. `n=1,000,000` never
+reaches it. It is an accident that looks like a control, which is the most expensive kind.
+
+`discrete_math` declares seven `Optional[int]` fields with no `ge`/`le` at all; `symbolic_math.order`
+is `ge=1`, a floor on the one parameter that costs. `linear_algebra`, `probability_stats`, `geometry`
+and `logic` have no numeric bounds either.
+
+### The mechanism existed three times over and reached none of the built-ins
+
+| where | what it already did |
+|---|---|
+| `mcp_client/client.py:300-333` | A **two-layer wall clock with the rationale written out** — `read_timeout_seconds` cancels the request, `future.result(timeout=)` is the backstop *"for the case the [answer] is never coming at all"*. Every MCP tool bounded at 180s |
+| `security/sandbox.py:573`, `:540` | `subprocess.run(timeout=SANDBOX_TIMEOUT_SECONDS)` plus `RLIMIT_CPU` + `RLIMIT_AS` — on `shell`, the one tool globally denied |
+| `fetch_url`, `arxiv`, `web_search` | Each carries its own `REQUEST_TIMEOUT_S` |
+
+So every bound in the tool layer was per-tool and voluntary, and the six in-process math tools — the
+only ones that can burn a core indefinitely — were the ones that opted out. That is §29's #7 and
+§30's `_validated` a third time: the mechanism is built, one consumer got it, the rest never did.
+
+### The deferral reason assumed a thread
+
+Batch 10 set #57 aside on stated grounds: *"`signal.alarm` is main-thread-only, the TUI runs tools in
+a worker, and abandoning a thread mid-`sympy` leaks one that nothing can join."* Every clause is
+true, and together they are an argument against the **thread**, not against the bound. A prototype
+settled it:
+
+```
+gcd a=462 b=1071                        0.35s  {"result": "21", "operation": "gcd"}
+symbolic_math series order=100000       3.02s  KILLED at the wall clock
+discrete_math combinations n=1e7 r=1e6  3.01s  KILLED at the wall clock
+```
+
+A cold interpreter plus sympy plus the tool module is **0.34s**, against a harness whose every step
+is a multi-second model call. Two facts make it safe to wire in: all six math tools inject nothing
+(`registry._injectable` is empty for them) and are pure functions of a JSON dict, while the five that
+**do** inject — `ask_user`, `pin`, `remember`, `todo_write`, `spawn_subagent` — are exactly the ones
+that block on a person rather than on CPU. And `registry.py`'s `spec.handler(` is the only production
+call site of any handler, so there is one seam.
+
+### Was any of this exploitable? Checked, because it decides H4
+
+| claim | measured |
+|---|---|
+| Integer overflow | **Does not exist in Python.** Arbitrary precision, no wraparound, no fixed-width register — the C/C++ chain (overflow → undersized buffer → corruption) has no analogue |
+| Native code in the path | **None.** `gmpy2` is not installed, sympy reports `GROUND_TYPES = 'python'`, mpmath is pure Python |
+| Memory exhaustion | Real, but availability rather than integrity: `MemoryError` or the OOM killer, no attacker-controlled write |
+| Whether a clock bounds memory | **Yes, loosely.** `pow(2, e)` allocates at ~39 MB/s measured, so a 15s budget is already a ~600 MB ceiling; `RLIMIT_AS` makes it hard where the platform allows |
+
+So no parameter maximums (H4) — and the check is what surfaced H5 and H6, which are **shape** defects
+that no size limit would have caught.
+
+### Decisions
+
+| # | Decision | Rationale |
+|---|---|---|
+| **H1** | **Every tool declares its cost class, and omission is fatal at import.** `ToolSpec.budget` ∈ {`BUDGET_COMPUTE`, `BUDGET_IO`, `BUDGET_HUMAN`}, with `assert_budget_declared()` beside R13's assert in `registry.py`. | R13's argument one question over, and its own words: *"None means UNDECLARED, not a default. Omission has to be a detectable mistake rather than an inherited answer — this field exists because the previous shape was a denylist in ONE consumer's module."* A per-parameter `le` list is that denylist again. |
+| **H2** | **A `BUDGET_COMPUTE` tool runs in a killable subprocess, at `dispatch` only.** `module.run(params)` stays an ordinary in-process call. | A thread has no interruption point inside `sympy.binomial` to cancel at, so a watchdog over one reports a timeout while the core stays busy — the class of mechanism this project keeps refusing. Isolating at dispatch rather than in the six tools is what keeps `test_math_tools.py`'s 131 tests measuring the maths instead of the transport. |
+| **H3** | **On Unix the child also carries `RLIMIT_CPU` and `RLIMIT_AS`.** Windows runs on the clock alone, recorded rather than hidden. | mcp_client's documented two-layer shape: an inner bound that stops the work, an outer one for when the inner never fires. **Not** `sandbox._unix_resource_limits` verbatim — that spends `SANDBOX_CPU_SECONDS` (30), which is *above* this budget, so reusing it would install a limit that can never fire while reading as though the inner layer were present. |
+| **H4** | **No maximum on any math parameter.** | `combinations n=10**7 r=10**6` hangs on a pair where neither value alone looks unreasonable — cost is joint, so no per-parameter ceiling expresses it. And any number is a guess: `series order=100` is 0.34s, `order=1000` is 3.44s. |
+| **H5** | **`modular_exponent` requires its modulus.** | `pow(b, e, None)` is plain exponentiation. Measured on one exponent: **0.000s** with a modulus, **3.3s and 125 MB** without. Refused at the boundary rather than left to H2's clock, because paying a full budget to learn that is the wrong answer to a one-word fix. Not a separate `power` operation either — that advertises the unbounded path instead of closing it. |
+| **H6** | **A result the tool cannot serialise is the tool's own error.** `str(result)` moves inside `run()`'s `try`. | It sat outside, so a correct answer merely too large to print left the handler as a bare `ValueError` and was `logger.exception`'d with a traceback as though it were a bug. `factorial n=100000` reaches this on ordinary input. dispatch's containment is the backstop for real bugs; filling it with routine outcomes is how a real one stops being noticed. |
+| **H7** | **An io tool must already carry its own bound — no outer watchdog — and #55 is what makes three declarations true.** | An outer clock over a blocking read can only stop *waiting*; mcp_client is honest that this is all its backstop does. Converting "add a watchdog" into "prove every tool declares a bound" removes the abandonment entirely, and turns #55 from a companion issue into the missing half of the io class. |
+| **H8** | **A human tool's bound is the meter that already exists.** `ask_user` → `ATTENDED_APPROVAL_TIMEOUT_S`; `spawn_subagent` → the child's `max_steps` and the token budget. | Nothing new is built. The declaration turns an incidental fact into a stated one, which is the value of the field: today the reason `ask_user` may block ten minutes is knowable only by reading three files. |
+| **H9** | **One config constant**, `TOOL_COMPUTE_TIMEOUT_S = 15`, beside `SANDBOX_TIMEOUT_SECONDS`. | The slowest *legitimate* call measured is `series order=1000` at 3.44s, so ~4× headroom; ten passes each burning a full budget is 150s rather than forever. One number to defend, next to the constant a reader compares it against. |
+| **H10** | **The two committed checkpoints are deleted, and git is asked to keep them out.** | `.gitignore` already listed `.ipynb_checkpoints/` and gitignore does not untrack, so a gitignore-based check reported clean while the files sat there. The test asks what is **tracked**, not what is on disk: this working tree has eight such directories and one was ever committed, so a filesystem walk would fail on any machine with notebook history — and a test people learn to ignore protects nothing. |
+
+### What the trace and the results look like afterwards
+
+```
+before  symbolic_math series order=100000        -- no return, ever
+after   {"error": "symbolic_math exceeded its 15s limit and was stopped. The inputs
+         given are too large for this operation -- try smaller values."}
+
+before  discrete_math factorial n=100000
+        {"error": "discrete_math failed: Exceeds the limit (4300 digits) for integer
+         string conversion; use sys.set_int_max_str_digits() to increase the limit"}
+        + a logger.exception traceback, for ordinary input
+after   {"error": "The factorial result was computed but is too large to return
+         (...). Ask for the same operation with smaller inputs."}
+
+before  modular_exponent base=2 exponent=1e9 (no modulus)   -- 3.3s, 125 MB, then the above
+after   {"error": "modular_exponent requires a modulus. Without one this is plain
+         exponentiation, ..."}                              -- 0.36s
+```
+
+### #55's three sites, measured with `tracemalloc` against a 30 MB file
+
+```
+                             before    after
+read (the bounded control)    0.0 MB   0.0 MB   <- always had os.path.getsize
+edit                         60.0 MB   0.0 MB
+read_project_doc             60.0 MB   0.1 MB
+read_project_doc offset=25M  60.0 MB   0.1 MB   <- the per-page re-read
+```
+
+`edit_run` copies `read_run`'s guard verbatim so the two refuse identically. `read_project_doc`
+deliberately does **not**: refusing a large document is not what that tool is for — I7 chose
+`INIT_READ_CHARS` so `/init` could page through exactly such a document — so it seeks and reads one
+chunk, which also removes the whole-file re-read a size check would have left in place. `fetch_url`
+streams with a hard byte cap, because a `Content-Length` check is not a bound when the server can
+omit the header or lie about it.
+
+### Deliberately not in §31
+
+**#105** — `/quit` and ctrl+c do not check `_busy`, and Textual's non-daemon workers keep `App.run()`
+from returning. The same root as #57, an in-flight thread nothing can interrupt, but its fix site is
+`tui/app.py` and its subject is the pipeline worker rather than a tool call.
+
+**Bounding the other math tools' inputs.** `linear_algebra`, `probability_stats`, `geometry` and
+`logic` take unbounded lists and expression strings. H2 covers their *cost*; whether a 25-variable
+truth table should be refused before it is attempted is a separate question, and H4's reasoning
+applies to it unchanged.
+
+**A warm subprocess pool.** 0.34s per call did not justify it, and a pool holds interpreters a killed
+call would have to replace anyway — the state a pooled worker accumulates is exactly what a bound
+exists to discard.
 
 ## Open Questions — None Remaining
 
