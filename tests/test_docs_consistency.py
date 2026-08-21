@@ -528,9 +528,13 @@ _RECORD_DOCS = ("ROADMAP.md", "ROADMAP_v2.md")
 _DEFINITION_ROW = re.compile(r"^\|\s*\*{0,2}([A-Z]{1,2}\d+[a-z]?)\*{0,2}\s*\|")
 _DEFINITION_LEAD = re.compile(r"^\s*(?:[-*]\s*)?\*\*([A-Z]{1,2}\d+[a-z]?)\b")
 
-# A citation in code. The leading (?<!-) is not decoration: "[a-zA-Z0-9]"
-# inside a regex literal yields the token "Z0", and safety/policy_enforcement
-# has four of those.
+# A citation in prose. The leading (?<!-) suppresses an id that follows a
+# hyphen, which is the trailing endpoint of a RANGE -- doc_sets.py cites
+# "(I9-I12)" and config_loader.py says "pre-D29 text". Both of those resolve
+# anyway; the case that needs the guard is a range over a SPARSE family,
+# where "C1-C10" would report five ids that never existed. (It also caught
+# "[a-zA-Z0-9]" back when this scanned raw lines; _prose_lines made that
+# half of the reason obsolete, and the mutation pass is what noticed.)
 _CITATION = re.compile(r"(?<![A-Za-z0-9_\-])([A-Z]{1,2}\d{1,2})(?![A-Za-z0-9_])")
 
 # The five namespaces that are NOT the record, each declaring which ids it
@@ -637,7 +641,7 @@ def _prose_lines(path):
         if token.type == tokenize.COMMENT:
             keep[token.start[0]] = lines[token.start[0] - 1]
         elif (token.type == tokenize.STRING
-              and token.string.lstrip("rbfuRBFU")[:3] in ('"""', "\'\'\'")):
+              and token.string.lstrip("rbfuRBFU")[:3] in ('"""', "'''")):
             for n in range(token.start[0], token.end[0] + 1):
                 keep[n] = lines[n - 1]
     return sorted(keep.items())
@@ -822,6 +826,10 @@ def test_the_qualifier_grammar_discriminates():
         # that namespace covers. There are three pipeline gates, and R4 is
         # not one of them.
         ("R4", "    # gate "),
+        # The word has to be ADJACENT. "gate" earlier in a sentence that
+        # then cites a different gate is prose, not a qualifier -- without
+        # this, unanchoring the pattern is a mutation nothing catches.
+        ("D0", "    # the gate table lists D1 and D2 beside "),
         # And a bare AC with no section is the defect itself: AC6 meant
         # three different criteria in three files.
         ("AC6", "            path ("),
@@ -832,3 +840,50 @@ def test_the_qualifier_grammar_discriminates():
             f"{token!r} after {before.strip()!r} was accepted as a qualified "
             f"citation. The grammar has been widened past what it can tell "
             f"apart, and the citation check now passes on anything.")
+
+
+def test_the_citation_scan_reads_docstrings_and_not_runtime_strings():
+    """The domain, pinned. This is the survivor that mattered most.
+
+    A scan that quietly reads LESS finds nothing wrong, and finding nothing
+    wrong is exactly what passing looks like -- so narrowing _prose_lines to
+    comments only leaves every check above green while the docstrings, where
+    most citations actually live, stop being read at all. The mutation pass
+    scored that as a survivor, which is how it got a test.
+
+    The other direction is a real constraint, not symmetry: the pipeline's
+    stage names ARE the strings "D0" and "D1", its trace lines are keyed by
+    them, and test_pipeline_trace_contains_expected_lines_in_order matches
+    on the "D0:" prefix. Reading runtime strings would demand a qualifier
+    inside a value.
+    """
+    seen = dict(_prose_lines(os.path.join(ROOT, "core", "interaction.py")))
+    assert 4 in seen and "AC1" in seen[4], (
+        "core/interaction.py's module docstring cites §23 AC1 on line 4 and "
+        "the scan no longer sees it. If the file changed, re-anchor this; if "
+        "the scan changed, it is reading less than it claims and every check "
+        "above is passing on a domain nobody looked at.")
+
+    orch = dict(_prose_lines(
+        os.path.join(ROOT, "core", "reasoning", "orchestrator.py")))
+    assert 979 not in orch, (
+        "orchestrator.py:979 is `yield from _stage(\"D0\")` -- a runtime "
+        "VALUE, not a citation. Reading it would demand `gate D0` inside a "
+        "string the trace test matches on.")
+
+
+def test_a_range_citation_does_not_report_its_own_endpoint():
+    """The hyphen guard, whose stated reason went stale under it.
+
+    It was written for "[a-zA-Z0-9]" in a regex literal. _prose_lines then
+    stopped reading code, so that reason evaporated -- and the mutation pass
+    scored the guard as dead. Measured, it still changes exactly two lines,
+    both range citations, and the case it is really for is a range over a
+    SPARSE family: C is C1, C3, C6, C8, C10, so "C1-C10" written in a
+    comment would report five decisions that never existed.
+    """
+    line = "    # Recovered per C1-C10, and the I9-I12 set in §24."
+    found = [m.group(1) for m in _CITATION.finditer(line)]
+    assert found == ["C1", "I9"], (
+        f"a range citation reported {found}; only the leading id of a range "
+        f"is a citation, and the trailing one is an endpoint.")
