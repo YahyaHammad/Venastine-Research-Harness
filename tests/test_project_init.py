@@ -86,6 +86,36 @@ def fake_agent(monkeypatch):
     return calls
 
 
+def _hand_back_reversed(monkeypatch, project):
+    """Make the filesystem answer in the worst order it plausibly could.
+
+    Both sort assertions below are about `sorted()` and neither can see it
+    while the OS hands back sorted names anyway -- which NTFS does, and
+    which is what made the tests these replace vacuous (#98). Reversing at
+    the source is the only way the sort is the thing under test.
+    """
+    root = os.path.realpath(str(project))
+    real_listdir, real_walk = os.listdir, os.walk
+
+    def _listdir(path=".", *a, **kw):
+        out = real_listdir(path, *a, **kw)
+        try:
+            here = os.path.realpath(path)
+        except (TypeError, ValueError):
+            return out
+        return list(reversed(sorted(out))) if here == root else out
+
+    def _walk(top, *a, **kw):
+        for dirpath, dirs, files in real_walk(top, *a, **kw):
+            # `dirs` in place: os.walk descends whatever the caller leaves
+            # in it, and _tree prunes by assigning to the slice.
+            dirs[:] = list(reversed(sorted(dirs)))
+            yield dirpath, dirs, list(reversed(sorted(files)))
+
+    monkeypatch.setattr(os, "listdir", _listdir)
+    monkeypatch.setattr(os, "walk", _walk)
+
+
 def _fail_write_of(monkeypatch, filename):
     """Make one write fail the way a real one does (#95).
 
@@ -359,15 +389,42 @@ class TestTheDocumentSets:
             "TEST_WRITING.md", {"test_command": "pytest -q"})
         assert "pytest -q" in withfacts
 
-    def test_the_index_is_a_pure_function_of_the_kind(self):
+    @pytest.mark.parametrize("kind", ["software", "research"])
+    def test_the_index_is_a_pure_function_of_the_kind(self, kind, tmp_path):
         """I11, and the defect that found it: an index that varied with what
         already existed rewrote CONTEXT.md on every subsequent /init and
-        labelled files /init had just authored as pre-existing."""
-        assert doc_sets.render_index("software") == doc_sets.render_index(
-            "software")
-        index = doc_sets.render_index("software")
-        for name in doc_sets.document_set("software"):
-            assert f"[{name}](../{name})" in index
+        labelled files /init had just authored as pre-existing.
+
+        REWRITTEN in batch 14 (#98). The old version asserted
+        `render_index("software") == render_index("software")` and then
+        that every name in the set appeared. Neither assertion pinned the
+        property in the name. The first is true of any deterministic
+        function of anything -- and was true of the reverted design I11
+        exists because of, since two calls in one expression see the same
+        filesystem. The second catches a MISSING name and cannot see an
+        extra one, so building the index from `all_document_names()` --
+        putting all seven research documents into a software project's hub
+        -- was green on all 1406.
+
+        This asserts the exact line set, which catches both directions, and
+        varies the filesystem between the two calls, which is what "pure"
+        was supposed to mean."""
+        index = doc_sets.render_index(kind)
+        links = [ln for ln in index.splitlines() if ln.startswith("- [")]
+
+        expected = [f"- [{n}](../{n}) — {doc_sets._STUBS[n][0]}"
+                    for n in doc_sets.document_set(kind)]
+        assert links == expected
+
+        other = "research" if kind == "software" else "software"
+        for name in doc_sets.document_set(other):
+            if name not in doc_sets.document_set(kind):
+                assert f"[{name}](../{name})" not in index
+
+        # Purity against a filesystem that changed, not against itself.
+        for name in doc_sets.document_set(kind):
+            (tmp_path / name).write_text("# already here\n", encoding="utf-8")
+        assert doc_sets.render_index(kind) == index
 
     def test_the_index_links_out_of_venastine(self):
         """CONTEXT.md lives one level down, so a bare ./NAME.md would be a
@@ -460,10 +517,53 @@ class TestDiscovery:
                                                 encoding="utf-8")
         assert "providers.json" not in manifest.build_manifest(str(project))
 
-    def test_the_manifest_is_stable_across_runs(self, project):
-        """Byte-identical input is what makes /init's output diffable."""
-        assert manifest.build_manifest(str(project)) == manifest.build_manifest(
-            str(project))
+    def test_the_manifest_is_stable_across_runs(self, project, monkeypatch):
+        """Byte-identical input is what makes /init's output diffable.
+
+        REWRITTEN in batch 14 (#98). The old version compared two calls in
+        one process against an unchanged directory, so `os.listdir` handed
+        back the same order both times whatever `sorted()` did -- removing
+        it was green. "Across runs" means across processes and machines and
+        after unrelated files come and go, which is exactly when listdir's
+        order moves, and none of that is reachable from one expression.
+
+        Sorted order IS checkable in one process, and it is the mechanism
+        the property rests on."""
+        for name in ("zebra.md", "alpha.md", "middle.md"):
+            (project / name).write_text("# x\n", encoding="utf-8")
+
+        _hand_back_reversed(monkeypatch, project)
+
+        listed = [ln[2:].split(" (")[0]
+                  for ln in manifest.build_manifest(str(project)).splitlines()
+                  if ln.startswith("- ") and " (" in ln]
+        assert listed == sorted(listed)
+        assert {"alpha.md", "middle.md", "zebra.md"} <= set(listed)
+
+    def test_the_layout_is_sorted_too(self, project, monkeypatch):
+        """`_tree` sorts twice -- directories and files -- and the same
+        argument applies to both: an unsorted walk produces a different
+        manifest for the same project on a different machine, and every
+        /init after the first shows a diff nobody caused.
+
+        This one needed the reversing helper twice over. Written first
+        against three ordinary filenames, it SURVIVED the mutation that
+        deletes the sort, because os.walk hands back an already-sorted list
+        on this filesystem -- an input that cannot discriminate, which is
+        the exact defect #98 filed against the test this replaces. The
+        finding's own pass caught it in the fix for the finding."""
+        pkg = project / "pkg"
+        pkg.mkdir()
+        for name in ("zebra.py", "alpha.py", "middle.py"):
+            (pkg / name).write_text("x\n", encoding="utf-8")
+        _hand_back_reversed(monkeypatch, project)
+
+        lines = manifest.build_manifest(str(project)).splitlines()
+        entries = [ln.strip().split("/")[-1] for ln in lines
+                   if ln.strip().startswith("pkg/")
+                   and ln.strip().endswith(".py")]
+        assert entries == sorted(entries)
+        assert len(entries) == 3, "the fixture must produce entries to sort"
 
     def test_make_test_is_claimed_only_when_the_target_exists(
             self, tmp_path):
@@ -553,6 +653,67 @@ class TestDiscovery:
             (root / name).write_text("x\n", encoding="utf-8")
         found = manifest.detect_facts(str(root))["code_manifests"]
         assert found == ["pyproject.toml", "go.mod", "Dockerfile"]
+
+    def test_the_walk_prunes_the_directories_that_would_flood_it(
+            self, project):
+        """#98: nothing pinned the prune, and dropping `_PRUNED` outright
+        was green on all 1406. Its own comment states the stake --
+        node_modules "can be tens of thousands of files, which turns a
+        listing into a denial of service on the context window"."""
+        for name in ("node_modules", "__pycache__", ".venv", "dist"):
+            d = project / name
+            d.mkdir()
+            (d / "junk.py").write_text("x\n", encoding="utf-8")
+
+        text = manifest.build_manifest(str(project))
+        for name in ("node_modules", "__pycache__", ".venv", "dist"):
+            assert name not in text
+
+    def test_the_walk_prunes_dotted_directories_too(self, project):
+        """The second half of the same line, and the one that matters most:
+        `.venastine` holds mcp.json and settings.json, and neither filename
+        is covered by `_is_secret`. With the dotfile filter gone they reach
+        the model in the listing. Dropping `_PRUNED` and dropping
+        `startswith(".")` are two mutations, so they get two tests."""
+        secrets = project / ".secretstuff"
+        secrets.mkdir()
+        (secrets / "notes.md").write_text("# private\n", encoding="utf-8")
+
+        text = manifest.build_manifest(str(project))
+        assert ".secretstuff" not in text
+        assert "private" not in text
+
+    def test_a_directory_that_should_be_walked_still_is(self, project):
+        """The control. A prune that pruned everything would satisfy both
+        tests above while making the layout useless."""
+        pkg = project / "widgets"
+        pkg.mkdir()
+        (pkg / "core.py").write_text("x\n", encoding="utf-8")
+        assert "widgets" in manifest.build_manifest(str(project))
+
+    def test_a_heading_is_read_from_the_head_of_the_file(self, project):
+        """#98. `_first_heading` reads 4 KB, and its docstring names the
+        cost it is avoiding: this runs over every root document before the
+        agent has chosen anything, and DEVLOG.md is 226 KB in this repo
+        alone -- about 1 MB of reads per manifest build if the guard goes.
+        Changing `f.read(4096)` to `f.read()` was green.
+
+        A heading past the cap is not found, which is the observable
+        consequence of the bound and the only way to pin it from outside.
+
+        The padding is BLANK LINES, and that is the whole test. Written
+        first with 5000 x's it survived the mutation, because
+        `_first_heading` returns on the first non-empty line it sees -- so
+        the heading below was unreachable whether the read was capped or
+        not, and the assertion held for a reason having nothing to do with
+        the cap. #98's own shape, in #98's own fix."""
+        big = project / "BIG.md"
+        big.write_text("\n" * 5000 + "# Buried\n", encoding="utf-8")
+        assert "Buried" not in manifest.build_manifest(str(project))
+
+        small = project / "SMALL.md"
+        small.write_text("# Found\n\nbody\n", encoding="utf-8")
+        assert "Found" in manifest.build_manifest(str(project))
 
     def test_a_blank_folder_is_recognised(self, tmp_path):
         empty = tmp_path / "empty"
