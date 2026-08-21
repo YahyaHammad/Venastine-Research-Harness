@@ -54,7 +54,7 @@ class MemoryManager:
         """Every memory this session may see, newest first.
 
         Global rows plus the project rows recorded against exactly this
-        path (AC6).
+        path (§21 AC6).
 
         NO RESOLVED PROJECT MEANS NO MEMORIES AT ALL, not global-only.
         scope_path() is None exactly when config_loader.initialize() has

@@ -6,7 +6,7 @@ folded, and runs the compactor agent to do it.
 
 The archive is never touched. Compaction adds a CompactionCheckpoint row
 and nothing else; storage.archive_history() keeps returning every message
-ever written, however many times this has run (AC1). That is the property
+ever written, however many times this has run (§21 AC1). That is the property
 that makes an early, frequent trigger safe -- nothing is destroyed, only
 hidden from the next call.
 

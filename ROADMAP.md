@@ -866,7 +866,8 @@ Implemented against `google-genai==1.0.0` with all SDK shapes verified by inspec
 > 2-of-3 agreement. It is now a **disagreement penalty** (E8), subtracted like
 > `ASSUMPTION_FLAG_PENALTY`.
 >
-> **Decisions record: E1–E12.** See DEVLOG §10-revisit. The acceptance criteria at the end
+> **Decisions record: E1–E12.** Defined in `ROADMAP_v2.md`'s Design Decisions Record;
+> this section's build notes are in DEVLOG §10-revisit. The acceptance criteria at the end
 > of this section still hold with two amendments, both recorded there: N comes from
 > `len(config.ENSEMBLE_MODELS)` rather than `ensemble_n`, and the 2-of-3 case's
 > `consistency_score` is still `0.667` but its tier is now HIGH rather than MEDIUM — which

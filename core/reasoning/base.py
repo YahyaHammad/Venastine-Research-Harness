@@ -3,7 +3,7 @@ core/reasoning/base.py
 
 Structured claim-level data model for the deep-research pipeline. This
 REPLACES the earlier free-text PipelineContext/PassResult design -- Pass 4
-(confidence tiering), D0 (claim-type routing), and D1/D2 (threshold and
+(confidence tiering), gate D0 (claim-type routing), and D1/D2 (threshold and
 retry-cap checks) all need to reason about individual claims, not a
 concatenated paragraph of prior-pass prose. Passes that produce
 structured output (2, 3a, 3b, 5) mutate Claim objects in place; passes
@@ -70,7 +70,7 @@ class Claim:
     source_span: str = ""
 
     # Populated by Pass 3a (factual claims only -- synthesis/speculative
-    # claims skip grounding entirely per the pipeline's D0 routing, so
+    # claims skip grounding entirely per the pipeline's gate D0 routing, so
     # these stay at their defaults for those claims).
     grounding_sources: list[dict] = field(default_factory=list)
     grounding_status: Optional[GroundingStatus] = None

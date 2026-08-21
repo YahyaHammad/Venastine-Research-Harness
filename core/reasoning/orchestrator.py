@@ -1,7 +1,7 @@
 """
 core/reasoning/orchestrator.py
 
-Sequences the deep-research pipeline: Pass 0 -> 1 -> 2 -> D0 -> (3a -> 3b
+Sequences the deep-research pipeline: Pass 0 -> 1 -> 2 -> gate D0 -> (3a -> 3b
 for factual claims) -> 3c -> 5 (all claims) -> Pass 4 (code) -> D1 -> the
 6a/6c/D2 retry loop -> 6b (template) -> merge -> final synthesis.
 
@@ -973,7 +973,7 @@ def stream_deep_research_pipeline(
                                 text=claim.text)
         yield from progress.checkpoint(f"Pass 2: extracted {len(run.claims)} claim(s).")
 
-        # --- D0: route by claim type (pure code) ---
+        # --- gate D0: route by claim type (pure code) ---
         factual_claims = [c for c in run.claims if c.type == "factual"]
         non_factual_claims = [c for c in run.claims if c.type != "factual"]
         yield from _stage("D0")

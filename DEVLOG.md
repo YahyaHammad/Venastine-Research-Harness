@@ -339,7 +339,7 @@ Five initial questions, a follow-up round of four, and one final correction. The
 | F2 | `_run()` persistence bug — fix now or work around with a `prior_assistant_response` param? | **Fix the bug** (move `add_assistant_message` up before branching). This is a one-line move that also repairs §1's `--thread` resume path — strictly better than threading a workaround parameter through `continue_conversation`. |
 | F3 | Resume-shape bug (§4 Discovery 2) — fix now? | **Fix now** via `_normalize_resumed_history()` in `ConversationMemory.__init__`. §3's retry re-enters a thread via `continue_conversation`; if the resumed assistant turn came back in the lossy nested-`content` shape, `_messages_for_provider` would translate the wrong shape and the retry would silently misbehave. |
 | F4 | Mock target in `test_orchestrator.py` — switch to `_run`? | **No switch needed.** The plan originally assumed a `prior_assistant_response` design that would have bypassed `run_deep_research_mode`. With the `_run()` fix + `continue_conversation` design, the orchestrator still calls `run_deep_research_mode` for the initial attempt, so the existing mock (keyed on `run_deep_research_mode`) still intercepts the happy path. Retries go through `continue_conversation`, exercised separately in `test_json_retry.py`. |
-| C1 | Final correction: drop the `prior_assistant_response` parameter entirely. | Confirmed — the `_run()` always-persist fix makes it unnecessary. `continue_conversation` has a clean signature; the failed output reaches the model via the resumed thread history, not a parameter. |
+| §3-C1 | Final correction (this table's own numbering, not the Rev. 1 conflict C1 in `ROADMAP_v2.md`'s record): drop the `prior_assistant_response` parameter entirely. | Confirmed — the `_run()` always-persist fix makes it unnecessary. `continue_conversation` has a clean signature; the failed output reaches the model via the resumed thread history, not a parameter. |
 
 ### 3.3 What we followed verbatim from ROADMAP §3
 
@@ -1226,12 +1226,12 @@ every change rather than a sample.
 
 ### Decisions taken during the fix pass (S1–S4)
 
-| # | Decision |
-|---|---|
-| **S1** | **Subagent sign-off, all-or-nothing, per turn.** Approving a spawn authorises the child's whole approval-gated set for the rest of the turn. Per-tool selection is deferred to §23's response channel and recorded there as a named consumer. |
-| **S2** | **The parent's approval tightenings union into the child.** Only `True` entries carry, since a `False` is indistinguishable from absent under D14's OR — so unioning can only tighten. **This amends §18's locked sketch**, which shows `approval_overrides=agent_def.approval_overrides` verbatim; C6 reasoned about `allowed_tools` and never considered the approval axis. |
-| **S3** | **MCP teardown by exact name, not by prefix.** `mcp__<server>__<tool>` cannot be taken apart again — neither `__` in a server name nor in a tool name is illegal. Registration records what it registered. No `mcp.json` content is rejected up front, so decision G stands. |
-| **S4** | **One central effort validator, cached.** A network call at startup is acceptable; on lookup failure the requested level passes through unverified with a WARNING rather than being dropped, and the failure is not cached. |
+Four decisions came out of this pass. **They are defined in `ROADMAP_v2.md`'s
+Design Decisions Record**, beside `D1`–`D31`, because that is where `AGENTS.md`'s
+documentation map says the record lives and they are cited from production code.
+In one line each: **S1** subagent sign-off is all-or-nothing per turn; **S2** the
+parent's approval tightenings union into the child; **S3** MCP teardown is by
+exact name, never by prefix; **S4** one central effort validator, cached.
 
 ### Named consequences
 
@@ -3371,20 +3371,9 @@ So diversity comes from a **roster of different models** (E1), which is finding
 
 ### Decisions E1–E12
 
-| # | Decision |
-|---|---|
-| E1 | Diversity from different MODELS. `config.ENSEMBLE_MODELS`, entries `{provider_name, model}`. Deviates from §10's own note; see above. |
-| E2 | `config.py` only, following `CRITIC_MODEL`. `ensemble_models` is rejected from `settings.json` **by name** — R12's rule applied to a second kind of authority. Turning the mode on can only spend more of the provider the user already chose; a *roster* chooses providers, and a project's `settings.json` beats the user's. §14 already flagged project-tier provider selection as its own grant; this is that grant times N. |
-| E3 | N is `len(ENSEMBLE_MODELS)`, derived. A separately configured count could disagree with the roster that produced the candidates, and a confidence score's denominator must not be able to lie. |
-| E4 | `ensemble_n` stays a known settings key and a pipeline parameter, vestigial, with a WARNING when set. Removing the key would make every existing `settings.json` that sets it **raise** — unknown keys raise by design. |
-| E5 | Refuse on fewer than 2 **distinct** `(provider, model)` pairs. The load-bearing guard: `[X, X, X]` recreates §16's exact defect through the new config. |
-| E6 | API keys are not pre-validated; validation is by connecting. Matches §16's `/model` (warns on an empty `API_KEY` so a local endpoint stays usable) and MCP's per-server posture. |
-| E7 | A failed candidate is named, traced and skipped; the denominator is the number that produced text. One survivor **degrades to the single-candidate path** rather than being scored as an ensemble of one, which would report unanimous corroboration from a single source. All candidates failing is an error. |
-| E8 | Consistency enters as a **disagreement penalty**: `raw -= 0.15 * (1 - consistency)`, factual claims only, subtracted like `ASSUMPTION_FLAG_PENALTY`. Unanimity is free, dissent subtracts. |
-| E9 | Non-factual claims untouched. §10 decided consistency does not *rescue* them from the cap; whether dissent should *penalise* a speculative claim is a different judgment and was never made. |
-| E10 | `score_claim` rounds once, then uses that value for both the tier and the breakdown. |
-| E11 | Candidate labels follow the **survivors**, never roster position. |
-| E12 | No new `Claim` field, no new `PipelineRun` field, no schema change. The denominator goes in the existing `score_breakdown` (§20's precedent, which put tier overrides there to avoid migrating every `vars(c)` site); the roster goes in `run.trace`. |
+**Defined in `ROADMAP_v2.md`'s Design Decisions Record.** They were taken here,
+during §10's revisit, and they are cited from `config.py` and `core/reasoning/`,
+so they live with the rest of the record rather than only in this log.
 
 ### E8's shape is why the regression guard now holds by construction
 
@@ -5035,3 +5024,64 @@ computed from the issues, because #15 recorded audit completion and nothing reco
 completion. **A queue that is never drained stops being evidence of anything** — "no unit has been
 closed" was read as "no unit is done" by the session that wrote it, which was the session closing
 the issues.
+
+
+## Audit Pass 1 — fix batch 15: the record's index (2026-08-22)
+
+Three issues that had each filed one way the same sentence was false, plus the last item of a
+fourth. Full per-change table in `tests/BREAKING_CHANGES.md` §31; decisions Y1–Y5 in `ROADMAP_v2.md`
+§35. What belongs here is what the measurements changed about the plan.
+
+### Every one of the three understated or misstated itself
+
+Re-driving before writing is the standing rule, and this is the batch where it paid most.
+
+- **#16** filed four decisions as `DEVLOG`-only. It is **sixteen** — all of `S1–S4` and all of
+  `E1–E12`. Its suggested fix says to add the four *"beside their siblings S1/S4 and E1–E12"*, and
+  the siblings are not there either. It also says `ROADMAP.md`'s §10 revisit *"wrote a twelve-row
+  decision table and listed ten of them"*; `ROADMAP.md:869` carries a one-line **pointer**, and no
+  table.
+- **#17** filed two overloaded prefixes. `S` carries **three** meanings, the third being the audit's
+  own severity grades, cited six times in `ROADMAP_v2.md` — the same file that now defines decisions
+  `S1–S4`. And the largest overload is one #17 never mentions: `AC` is section-scoped and was cited
+  **unqualified 24 times** in production. Its suggested renaming to `Q11/Q12/Q16` collides with
+  `DEVLOG`'s existing `Q1–Q7`.
+- **#91** filed four items; **three were already fixed** by earlier batches — the dangling
+  `test_compaction_e2e.py` pointers, the `turn_start` comment, and the two drifted tree counts,
+  which audit #121's check now guards.
+
+### The check found the batch's own omission, twice
+
+First run: slice 3 had added the `C` family to the record and not to the map. Later, writing §35's
+own `Y1–Y5` table turned the map check red until `AGENTS.md` named `Y`. Both are the guard working
+on the hand that wrote it, which is the argument for a mechanical check over a careful reading.
+
+### The survivor worth generalising
+
+23 mutations, three survivors, all three in the check rather than in the documents. The one that
+matters is `citation-scan-looks-at-comments-only`:
+
+**A check whose passing condition is "found nothing" cannot detect that it looked in fewer places.**
+
+Batch 14's two survivors were the same class through a different door — an assertion whose input
+could not discriminate. Here the *assertion* was fine and the **domain** silently shrank. The answer
+is the same either way: pin the input, in both directions. A citation that must be seen
+(`core/interaction.py`'s docstring) and a runtime string that must not
+(`orchestrator.py:979`).
+
+A second survivor is worth recording for a different reason. `citation-scan-skips-the-hyphen-guard`
+survived because the guard's **stated reason had gone stale underneath it**: it was written for
+`[a-zA-Z0-9]` inside a regex literal, and once the scan stopped reading code that reason evaporated.
+Measured, it still changes exactly two lines, both range citations. So the guard stayed and its
+comment changed — a comment that explains a line by a reason that no longer applies is a small
+version of the same defect this batch is about.
+
+### Not fixed, and why
+
+- **The `D1`/`D2` pair.** Both a decision and a pipeline gate. Both resolve, so nothing mechanical
+  can tell which was meant, and renumbering was rejected for #147's reason.
+- **#91 item 2 built rather than corrected.** Provenance is destroyed by the merge, not omitted from
+  it, and D27's display surface does not exist. `TECHNICAL_DEBT.md` item 12.
+- **#24 / #49 / #77 / #136** — the last finding standing in units 1, 5, 9 and X2. Four issues, four
+  more trackers, four unrelated subsystems.
+- **#167**, the redactor's plaintext-credential gap, filed by batch 14 against unit 5's file.

