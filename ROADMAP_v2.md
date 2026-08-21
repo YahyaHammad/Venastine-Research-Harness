@@ -102,6 +102,30 @@ they belong in the record with everything else rather than in a note about a not
 | E11 | Candidate labels follow the **survivors**, never roster position. |
 | E12 | No new `Claim` field, no new `PipelineRun` field, no schema change. The denominator goes in the existing `score_breakdown` (§20's precedent, which put tier overrides there to avoid migrating every `vars(c)` site); the roster goes in `run.trace`. |
 
+### Decisions record — C1–C10 (Revision 1's review conflicts)
+
+Revision 1 was reviewed against Revision 2 and the conflicts were numbered. The
+resolutions shipped and are cited as authority in `ROADMAP_v2.md` section
+headings ("fixes C6, locked in"), in `ARCHITECTURE.md`, in
+`tests/BREAKING_CHANGES.md`, and in **six production files** — but the list
+itself was never copied into any document. Recovered here from the citing lines,
+found by audit #147. Only the five with live citations are recovered; the gaps in
+the numbering are conflicts that were resolved without leaving a reference.
+
+| # | Decision |
+|---|---|
+| **C1** | **The permission prompt is bridged, not inlined.** Rev. 1 had the TUI unable to render an approval prompt from inside the loop. `_run()` is already a generator yielding `LoopEvent` and `permission_channel` already exists, so the app consumes the generator on a worker and answers through the queue — no new loop machinery. §16. |
+| **C3** | **A subagent's depth is carried on the `ToolContext`, not passed as a parameter.** Rev. 1's `spawn_subagent` took `depth: int = 0`, which `registry.dispatch()` could never populate — dispatch passes only `params`, parsed from the model's tool call, so no incremented depth could ever reach a nested call. `subagent_depth` rides on the context and `spawn_subagent` increments it when it builds the child. Checked against `config.SUBAGENT_MAX_DEPTH`. §18. |
+| **C6** | **Intersection, never union.** A subagent's effective `allowed_tools` is the intersection of its own declaration and its parent's currently-active set. Without this, a restricted parent could spawn a permissively-declared child specifically to escape its own restriction — privilege escalation one hop removed, undermining §15's "stricter wins". **Amended by S2** for the approval axis, which C6 never considered. §18. |
+| **C8** | **`run_to_completion()` lives in `core/loop.py`, not its own module.** It is coupled to `_run()`'s exact generator shape, and a separate module risked a circular import for no benefit. (Settles Rev. 1's open question S16 — a different S namespace; see `AGENTS.md`.) §13. |
+| **C10** | **`MCPClient.__init__` stores `server_configs`.** Rev. 1's constructor never did, so every later method that needed it failed. A real bug rather than a design conflict; kept in this list because it is cited by number from `mcp_client/client.py` and pinned by a regression test. §17. |
+
+**A fourth namespace uses this prefix.** The research pipeline's claim ids are
+`C1`, `C2`, `C3`… (`{"C1": [...]}` in a Pass 5 payload, and the id shapes
+`test_json_retry` asserts). Those are run data, not decisions; they appear in
+`ROADMAP_v2.md` §26 and in `tests/BREAKING_CHANGES.md` as example payloads. See
+the namespace list in `AGENTS.md`.
+
 ---
 
 ## Index
