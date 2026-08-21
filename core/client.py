@@ -53,6 +53,17 @@ class ToolCallRequest:
     id: str
     name: str
     input: dict
+    # §33 W2 (#37). Set when the provider's `arguments` string could not
+    # be read as a JSON object -- most often because the response was cut
+    # off mid-arguments by the token limit. TRANSPORT ONLY: it describes
+    # one wire read, not the thread, so `add_assistant_message` persists
+    # {id, name, input} exactly as before and this never reaches storage.
+    #
+    # The call is still constructed rather than dropped. The model made a
+    # call and is owed an answer about it; a silently missing tool_result
+    # is M4's pairing defect, and `input={}` with no error would run the
+    # tool with arguments nobody sent.
+    parse_error: Optional[str] = None
 
 
 @dataclass
@@ -82,6 +93,62 @@ class ModelResponse:
     # generator, but the CLI and the pipeline drain it, so a notice with
     # only the event route would be invisible in two shells out of three.
     notices: list = field(default_factory=list)
+
+
+def _tool_arguments(raw_args: str, tool_name: str,
+                    finish_reason: Optional[str] = None) -> tuple:
+    """(input, parse_error) for one provider `arguments` string.
+
+    The ONLY place a wire string is parsed as JSON. Google and Anthropic
+    hand back dicts, so this is the OpenAI-compatible branch's alone --
+    which is the branch a local model server takes, and truncated or
+    malformed tool arguments are likeliest there.
+
+    §33 W1 (#37): a failure is RETURNED, not raised. `dispatch()` turning
+    handler exceptions into {"error": ...} is the whole reason a raising
+    TOOL cannot kill a run; nothing played that role for a raising
+    TRANSLATION one layer up, so a response cut mid-arguments took a
+    JSONDecodeError out of this generator, out of _run(), and into the
+    pipeline's `except Exception` -- recording status='failed' on a
+    finished ten-pass run.
+
+    §33 W4: `finish_reason` is what separates "the provider emitted bad
+    JSON" from "the answer was cut off", which is the likeliest cause by
+    far and the only one the model can act on.
+    """
+    # W9: no arguments is not an error. `get_time` declares properties=[]
+    # and `pin` has no required parameters, so this is a live path -- and
+    # json.loads("") raises. Dropping this fallback was green on the whole
+    # suite when audit unit 3 mutated it (P10).
+    if not raw_args:
+        return {}, None
+
+    try:
+        parsed = json.loads(raw_args)
+    except json.JSONDecodeError as exc:
+        if finish_reason == "length":
+            return {}, (
+                f"The arguments for {tool_name} were cut off by the response "
+                f"token limit, so the call could not be made. Reissue it with "
+                f"shorter arguments."
+            )
+        return {}, (
+            f"The arguments for {tool_name} were not valid JSON ({exc.msg}), "
+            f"so the call could not be made. Reissue it with valid JSON "
+            f"arguments."
+        )
+
+    # Valid JSON that is not an object -- "null", "[1,2]", "3". Rarer than
+    # a truncation and caught in the same place because the consequence is
+    # the same: dispatch() would be handed something that is not params.
+    if not isinstance(parsed, dict):
+        return {}, (
+            f"The arguments for {tool_name} parsed as "
+            f"{type(parsed).__name__}, not a JSON object, so the call could "
+            f"not be made. Reissue it with a JSON object."
+        )
+
+    return parsed, None
 
 
 @dataclass
@@ -744,9 +811,17 @@ def call_model_stream(
     tool_fragments: dict[int, dict] = {}
     usage = {"input_tokens": 0, "output_tokens": 0}
 
+    finish_reason = None
     for chunk in client.chat.completions.create(**openai_kwargs):
         if chunk.choices:
-            delta = chunk.choices[0].delta
+            # W4 (#37): free -- chunk.choices[0] is already read here. The
+            # provider sets this on the last content chunk, and `or
+            # finish_reason` keeps it once seen because the usage chunk
+            # that follows carries none. getattr because a chunk is only
+            # required to have `delta`.
+            choice = chunk.choices[0]
+            finish_reason = getattr(choice, "finish_reason", None) or finish_reason
+            delta = choice.delta
             if delta.content:
                 text_parts.append(delta.content)
                 yield StreamToken(text_delta=delta.content)
@@ -788,11 +863,14 @@ def call_model_stream(
     calls = []
     for idx in sorted(tool_fragments):
         frag = tool_fragments[idx]
-        raw_args = "".join(frag["arguments_parts"])
+        name = "".join(frag["name_parts"])
+        parsed, parse_error = _tool_arguments(
+            "".join(frag["arguments_parts"]), name, finish_reason)
+        if parse_error is not None:
+            logger.warning(
+                "%s: %s (finish_reason=%r)", name, parse_error, finish_reason)
         calls.append(ToolCallRequest(
-            id=frag["id"],
-            name="".join(frag["name_parts"]),
-            input=json.loads(raw_args) if raw_args else {},
+            id=frag["id"], name=name, input=parsed, parse_error=parse_error,
         ))
 
     yield StreamToken(final_response=ModelResponse(

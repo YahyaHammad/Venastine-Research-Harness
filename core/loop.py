@@ -714,6 +714,13 @@ class RunAgentLoop:
                 if needs_approval and registry.refusal_reason(
                         call.name, call.input, context):
                     needs_approval = False
+                # §33 W3 (#37): the same rule for a call whose arguments
+                # never parsed. Approving it could not make it runnable,
+                # so the question has no answer that changes anything --
+                # and headless it would report "requires approval and was
+                # not given", which is A7's exact wrong-cause failure.
+                if needs_approval and call.parse_error is not None:
+                    needs_approval = False
                 # §18 sign-off (S1), narrowed by §25 (R2): a tool whose
                 # grant_scope is "run" is asked about once per run, not
                 # once per call. The loop names no tool -- it asks the
@@ -827,6 +834,19 @@ class RunAgentLoop:
                             )
                         except ToolCallDenied as e:
                             result = {"error": str(e)}
+                elif call.parse_error is not None:
+                    # §33 W1 (#37). The loop is the only layer that can
+                    # see this: dispatch() takes (name, params, context)
+                    # and the failure is a fact about the wire, not about
+                    # the params -- {} is a perfectly good empty dict by
+                    # the time it gets there.
+                    #
+                    # RETURNED as the tool's result, not raised, for
+                    # A10's reason: the model is told its arguments did not
+                    # arrive and can reissue the call, which is the whole
+                    # difference between losing one step and losing a
+                    # ten-pass run.
+                    result = {"error": call.parse_error}
                 else:
                     try:
                         result = registry.dispatch(
