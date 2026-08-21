@@ -1226,12 +1226,12 @@ every change rather than a sample.
 
 ### Decisions taken during the fix pass (S1–S4)
 
-| # | Decision |
-|---|---|
-| **S1** | **Subagent sign-off, all-or-nothing, per turn.** Approving a spawn authorises the child's whole approval-gated set for the rest of the turn. Per-tool selection is deferred to §23's response channel and recorded there as a named consumer. |
-| **S2** | **The parent's approval tightenings union into the child.** Only `True` entries carry, since a `False` is indistinguishable from absent under D14's OR — so unioning can only tighten. **This amends §18's locked sketch**, which shows `approval_overrides=agent_def.approval_overrides` verbatim; C6 reasoned about `allowed_tools` and never considered the approval axis. |
-| **S3** | **MCP teardown by exact name, not by prefix.** `mcp__<server>__<tool>` cannot be taken apart again — neither `__` in a server name nor in a tool name is illegal. Registration records what it registered. No `mcp.json` content is rejected up front, so decision G stands. |
-| **S4** | **One central effort validator, cached.** A network call at startup is acceptable; on lookup failure the requested level passes through unverified with a WARNING rather than being dropped, and the failure is not cached. |
+Four decisions came out of this pass. **They are defined in `ROADMAP_v2.md`'s
+Design Decisions Record**, beside `D1`–`D31`, because that is where `AGENTS.md`'s
+documentation map says the record lives and they are cited from production code.
+In one line each: **S1** subagent sign-off is all-or-nothing per turn; **S2** the
+parent's approval tightenings union into the child; **S3** MCP teardown is by
+exact name, never by prefix; **S4** one central effort validator, cached.
 
 ### Named consequences
 
@@ -3371,20 +3371,9 @@ So diversity comes from a **roster of different models** (E1), which is finding
 
 ### Decisions E1–E12
 
-| # | Decision |
-|---|---|
-| E1 | Diversity from different MODELS. `config.ENSEMBLE_MODELS`, entries `{provider_name, model}`. Deviates from §10's own note; see above. |
-| E2 | `config.py` only, following `CRITIC_MODEL`. `ensemble_models` is rejected from `settings.json` **by name** — R12's rule applied to a second kind of authority. Turning the mode on can only spend more of the provider the user already chose; a *roster* chooses providers, and a project's `settings.json` beats the user's. §14 already flagged project-tier provider selection as its own grant; this is that grant times N. |
-| E3 | N is `len(ENSEMBLE_MODELS)`, derived. A separately configured count could disagree with the roster that produced the candidates, and a confidence score's denominator must not be able to lie. |
-| E4 | `ensemble_n` stays a known settings key and a pipeline parameter, vestigial, with a WARNING when set. Removing the key would make every existing `settings.json` that sets it **raise** — unknown keys raise by design. |
-| E5 | Refuse on fewer than 2 **distinct** `(provider, model)` pairs. The load-bearing guard: `[X, X, X]` recreates §16's exact defect through the new config. |
-| E6 | API keys are not pre-validated; validation is by connecting. Matches §16's `/model` (warns on an empty `API_KEY` so a local endpoint stays usable) and MCP's per-server posture. |
-| E7 | A failed candidate is named, traced and skipped; the denominator is the number that produced text. One survivor **degrades to the single-candidate path** rather than being scored as an ensemble of one, which would report unanimous corroboration from a single source. All candidates failing is an error. |
-| E8 | Consistency enters as a **disagreement penalty**: `raw -= 0.15 * (1 - consistency)`, factual claims only, subtracted like `ASSUMPTION_FLAG_PENALTY`. Unanimity is free, dissent subtracts. |
-| E9 | Non-factual claims untouched. §10 decided consistency does not *rescue* them from the cap; whether dissent should *penalise* a speculative claim is a different judgment and was never made. |
-| E10 | `score_claim` rounds once, then uses that value for both the tier and the breakdown. |
-| E11 | Candidate labels follow the **survivors**, never roster position. |
-| E12 | No new `Claim` field, no new `PipelineRun` field, no schema change. The denominator goes in the existing `score_breakdown` (§20's precedent, which put tier overrides there to avoid migrating every `vars(c)` site); the roster goes in `run.trace`. |
+**Defined in `ROADMAP_v2.md`'s Design Decisions Record.** They were taken here,
+during §10's revisit, and they are cited from `config.py` and `core/reasoning/`,
+so they live with the rest of the record rather than only in this log.
 
 ### E8's shape is why the regression guard now holds by construction
 

