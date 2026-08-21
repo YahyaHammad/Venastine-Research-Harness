@@ -4869,7 +4869,7 @@ stash` between runs, with the AFTER runs bracketing the BEFORE.
   main.py --help        2619 ms    1182 ms   (-55%)
 ```
 
-On Linux, in the CI container: `import core.client` **28 ms**, `main.py --help` **672 ms**.
+On Linux, in the CI container: `import core.client` **54 ms**, `main.py --help` **1,078 ms**.
 
 The residual is sympy via `tools/registry.py`, which is unit 5's file — filed with its number
 attached rather than folded in, because registration at import time is a design and deferring it is
@@ -4900,7 +4900,7 @@ false-kill lesson is now enforced by the harness rather than remembered.
 ### Verification
 
 Windows **2,087 passed / 18 skipped / 1 deselected**. `python:3.11-slim` — the CI configuration —
-**2,102 passed / 2 skipped / 1 deselected**, with every W-decision driven on Linux and behaving
+**2,103 passed / 2 skipped / 1 deselected**, with every W-decision driven on Linux and behaving
 identically, `main.py --help` exit 0 and `import tui.app` ok.
 
 Run **before** the branch went anywhere, for the third batch running. The first container run of

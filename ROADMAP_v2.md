@@ -2516,8 +2516,9 @@ provider SDKs imported to print --help        3              0
 
 The launch numbers are **paired** — `git stash` between runs, with the AFTER runs bracketing the
 BEFORE — because absolute milliseconds on this machine varied by 2× between sessions and the share
-is the only stable claim. On Linux, in the CI container: `import core.client` **28 ms**,
-`main.py --help` **672 ms**.
+is the only stable claim. On Linux, in the CI container: `import core.client` **54 ms**,
+`main.py --help` **1,078 ms** (container timings move with host load too; the paired
+Windows pair above is the claim, and Linux only has to agree in shape).
 
 ### `needs_approval = False` is not "proceed", again — and this time it was designed in
 
@@ -2563,7 +2564,7 @@ Final: **24 of 24 RED.**
 ### Verification
 
 - **Windows: 2,087 passed / 18 skipped / 1 deselected.**
-- **`python:3.11-slim`, the CI configuration: 2,102 passed / 2 skipped / 1 deselected**, with every
+- **`python:3.11-slim`, the CI configuration: 2,103 passed / 2 skipped / 1 deselected**, with every
   W-decision driven on Linux and behaving identically, `main.py --help` exit 0 and `import tui.app`
   ok. Run **before** the branch went anywhere — the third batch to honour §31's correction, and the
   first run of it was thrown away rather than reported, because it had copied the tree between a
