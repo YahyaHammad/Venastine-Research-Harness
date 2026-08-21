@@ -2575,3 +2575,51 @@ Both were diagnosed by running them, not by rereading them. The lesson is the on
 a test named for a property it cannot see *"reads as coverage in a report, which is worse than an
 acknowledged gap"* — and it applies to the fix as much as to the thing being fixed. **Final: 27 of
 27 RED.**
+
+
+## §31 — the fifteenth fix batch: the record's index (2026-08-22)
+
+Audit issues **#16**, **#17**, **#147** and **#91**. Closes unit X5 (#148); #16 and #17 belong to
+the master tracker #15 rather than to a unit.
+
+Three of the four were filed as separate defects and are one: **an id that cannot be found, or that
+resolves to two things.** The fix is one check rather than three prose corrections, which is #147's
+own argument — prose is what drifted.
+
+### If you change this, this fails
+
+| Change | Fails | Why the property exists |
+|---|---|---|
+| Move `S1`–`S4` or `E1`–`E12` back out of `ROADMAP_v2.md`'s record | `test_every_decision_id_the_map_claims_is_in_the_record` | `AGENTS.md`'s map says the ROADMAPs carry the record. All sixteen were `DEVLOG`-only, and this project's convention on finding no record is to **re-derive** the decision (#16) |
+| Drop a `C` definition, or the whole family | same | `C3`/`C6`/`C10` are cited as authority in six production files and in this document; `C6` is intersection-never-union, one of the few where re-deriving it wrongly silently widens a subagent's reach (#147) |
+| Stop naming `E` or `C` in `AGENTS.md`'s map | `test_the_map_names_every_family_the_record_defines` | The forward direction cannot see a family the map never mentions. `E` was omitted while `AGENTS.md`'s own ensemble section cited nine `E` ids by number (#148) |
+| Add a family to the record and not to the map | same | Caught this batch's own omission on the check's first run |
+| Claim a range in the map wider than the record holds | `test_every_decision_id_the_map_claims_is_in_the_record` | The map is where a reader learns which ids exist |
+| Write `C1–C10` as a range in the map | same | `C` is **sparse** — C1, C3, C6, C8, C10. Only the conflicts with live citations were recovered |
+| Remove `§21` from an `AC` citation | `test_every_decision_id_cited_in_production_code_resolves` | `AC` is section-scoped. `AC6` alone meant three different criteria in three files — §17's, §21's and §21b's (#17) |
+| Remove `gate` from a `D0` citation | same | There is no decision `D0`; the record starts at `D1`. `D0` is a pipeline routing gate |
+| Remove `Rev. 1` from `S12`, or `mutation` from `P10` | same | The `S` record stops at S4 and the `P` record at P4; both citations sit inside a decision family's numbering |
+| Let a `review finding` qualifier wrap onto the line above its id | same | A reader greps one line at a time. `core/config_loader.py:122` was qualified in prose and unqualified to a grep |
+| Cite a new id in production without defining or qualifying it | same | The check is a **qualifier grammar**, not a list of blessed ids, so it covers the citation nobody has written yet |
+| Teach the definition scanner only one of the three shapes | `test_the_definition_scanner_sees_every_shape_the_record_uses` | The record writes a decision three ways. Knowing only table rows loses the whole `M` family, 21 ids — which is what this batch's first census did |
+| Narrow `_DEFINITION_ROW` to require bold, or `_DEFINITION_LEAD` to require the dash outside it | same | One shape each: `\| D1 \|` is unbolded, `**M1 — ...**` has the dash inside |
+| Widen a namespace's `covers` so any id can carry that qualifier | `test_the_qualifier_grammar_discriminates` | The loosen-the-check mutation: the citation test passes trivially while nothing about the documents changes. A section number must not qualify a **decision** that follows it (`§32 A3`) |
+| Unanchor a single-word qualifier so it may sit anywhere on the line | same | `gate` must be adjacent. A sentence mentioning gates that then cites one is prose, not a qualifier |
+| Stop reading docstrings in `_prose_lines` | `test_the_citation_scan_reads_docstrings_and_not_runtime_strings` | **The survivor that mattered.** A scan that reads less finds nothing wrong, and finding nothing wrong is what passing looks like. Most citations are in docstrings |
+| Start reading runtime strings in `_prose_lines` | same | The pipeline's stage names **are** the strings `"D0"`/`"D1"` and its trace lines are keyed by them; `test_pipeline_trace_contains_expected_lines_in_order` matches on the `D0:` prefix |
+| Drop the `(?<!-)` guard from `_CITATION` | `test_a_range_citation_does_not_report_its_own_endpoint` | A range's trailing endpoint is not a citation. Over a sparse family, `C1-C10` would report five decisions that never existed |
+| Restore "and where they came from" to `effective_compaction`'s docstring | *nothing* — see below | Honest gap: it is a prose claim with no computable counterpart. `TECHNICAL_DEBT.md` item 12 carries it instead |
+
+### One row with no test, stated rather than hidden
+
+`effective_compaction`'s docstring promised provenance the function does not return (#91 item 2).
+There is nothing for a test to compare a docstring's first sentence against, so this one is guarded
+by the register rather than by the suite — `TECHNICAL_DEBT.md` item 12, which names both decisions
+the eventual builder faces: the return shape (twelve call sites subscript the flat dict) and where a
+user would read it (there is no `/config`).
+
+### The pair nothing can force
+
+`D1` and `D2` are both decisions **and** pipeline gates. Both resolve, so the check cannot tell
+which was meant, and no amount of grammar fixes that without renumbering — which #147 rejected
+because the ids are in six production files. Write `gate D1` when you mean the gate.

@@ -5024,3 +5024,64 @@ computed from the issues, because #15 recorded audit completion and nothing reco
 completion. **A queue that is never drained stops being evidence of anything** — "no unit has been
 closed" was read as "no unit is done" by the session that wrote it, which was the session closing
 the issues.
+
+
+## Audit Pass 1 — fix batch 15: the record's index (2026-08-22)
+
+Three issues that had each filed one way the same sentence was false, plus the last item of a
+fourth. Full per-change table in `tests/BREAKING_CHANGES.md` §31; decisions Y1–Y5 in `ROADMAP_v2.md`
+§35. What belongs here is what the measurements changed about the plan.
+
+### Every one of the three understated or misstated itself
+
+Re-driving before writing is the standing rule, and this is the batch where it paid most.
+
+- **#16** filed four decisions as `DEVLOG`-only. It is **sixteen** — all of `S1–S4` and all of
+  `E1–E12`. Its suggested fix says to add the four *"beside their siblings S1/S4 and E1–E12"*, and
+  the siblings are not there either. It also says `ROADMAP.md`'s §10 revisit *"wrote a twelve-row
+  decision table and listed ten of them"*; `ROADMAP.md:869` carries a one-line **pointer**, and no
+  table.
+- **#17** filed two overloaded prefixes. `S` carries **three** meanings, the third being the audit's
+  own severity grades, cited six times in `ROADMAP_v2.md` — the same file that now defines decisions
+  `S1–S4`. And the largest overload is one #17 never mentions: `AC` is section-scoped and was cited
+  **unqualified 24 times** in production. Its suggested renaming to `Q11/Q12/Q16` collides with
+  `DEVLOG`'s existing `Q1–Q7`.
+- **#91** filed four items; **three were already fixed** by earlier batches — the dangling
+  `test_compaction_e2e.py` pointers, the `turn_start` comment, and the two drifted tree counts,
+  which audit #121's check now guards.
+
+### The check found the batch's own omission, twice
+
+First run: slice 3 had added the `C` family to the record and not to the map. Later, writing §35's
+own `Y1–Y5` table turned the map check red until `AGENTS.md` named `Y`. Both are the guard working
+on the hand that wrote it, which is the argument for a mechanical check over a careful reading.
+
+### The survivor worth generalising
+
+23 mutations, three survivors, all three in the check rather than in the documents. The one that
+matters is `citation-scan-looks-at-comments-only`:
+
+**A check whose passing condition is "found nothing" cannot detect that it looked in fewer places.**
+
+Batch 14's two survivors were the same class through a different door — an assertion whose input
+could not discriminate. Here the *assertion* was fine and the **domain** silently shrank. The answer
+is the same either way: pin the input, in both directions. A citation that must be seen
+(`core/interaction.py`'s docstring) and a runtime string that must not
+(`orchestrator.py:979`).
+
+A second survivor is worth recording for a different reason. `citation-scan-skips-the-hyphen-guard`
+survived because the guard's **stated reason had gone stale underneath it**: it was written for
+`[a-zA-Z0-9]` inside a regex literal, and once the scan stopped reading code that reason evaporated.
+Measured, it still changes exactly two lines, both range citations. So the guard stayed and its
+comment changed — a comment that explains a line by a reason that no longer applies is a small
+version of the same defect this batch is about.
+
+### Not fixed, and why
+
+- **The `D1`/`D2` pair.** Both a decision and a pipeline gate. Both resolve, so nothing mechanical
+  can tell which was meant, and renumbering was rejected for #147's reason.
+- **#91 item 2 built rather than corrected.** Provenance is destroyed by the merge, not omitted from
+  it, and D27's display surface does not exist. `TECHNICAL_DEBT.md` item 12.
+- **#24 / #49 / #77 / #136** — the last finding standing in units 1, 5, 9 and X2. Four issues, four
+  more trackers, four unrelated subsystems.
+- **#167**, the redactor's plaintext-credential gap, filed by batch 14 against unit 5's file.

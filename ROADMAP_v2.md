@@ -152,6 +152,7 @@ the namespace list in `AGENTS.md`.
 - **§32. The catalogs — what the model is told it can do, and who gets to write it** — BUILT (#68, #131, #69, #70, #71, #72; closes unit 8)
 - **§33. The call boundary — the one file every model call goes through** — BUILT (#37, #38, #39, #135; closes unit 3)
 - **§34. /init's vocabulary — four lists for one question** — BUILT (#96, #94, #95, #98; closes unit 12)
+- **§35. The record's index — the decisions, and whether they can be found** — BUILT (#16, #17, #147, #91; closes unit X5)
 - **Open Questions — None Remaining** (Rev. 3 — all decisions locked; verification items only)
 - **Why these calls, not just what they are** (Rev. 3 — the reasoning patterns behind several decisions above)
 
@@ -2820,6 +2821,131 @@ to match ordinary prose and it would apply to every tool result in the harness.
 **#94's fuller ambition** — a `_DOC_EXTENSIONS`/`_DOC_FILENAMES` pair derived from the manifest
 table itself. The two now agree by one calling the other, which is the property that was missing;
 merging them would also merge a security boundary with a discovery heuristic.
+
+## 35. The record's index — the decisions, and whether they can be found — BUILT
+
+**Three findings, one defect, and it is the defect this project is most exposed to.** The whole
+reason the harness can be audited for *"does the code still follow our design choices"* is that the
+choices have stable ids. `AGENTS.md` says so: *"Section and D-numbers are stable and
+cross-referenced everywhere."* Three issues had each filed one way that sentence was false:
+
+| | filed as | measured on `3b99ac0` |
+|---|---|---|
+| **#16** (severity S2) | four decisions (S2, S3, E4, E6) live only in `DEVLOG` | **sixteen** — *all* of `S1–S4` and *all* of `E1–E12`, and the map never named `E` at all |
+| **#17** (severity S2) | two prefixes carry two numbering schemes each | **`S` carries three**, and `AC` — which #17 never mentions — is section-scoped and was cited **unqualified 24 times in production**, where `AC6` alone meant three different criteria in three files |
+| **#147** (severity S3) | the `C` family is cited as authority in six production files and defined nowhere | confirmed; and `C1`'s one lookupable definition answers a different question |
+| **#91** item 2 (severity S3) | `effective_compaction` promises provenance it does not return | confirmed; #91's other three items were already fixed by earlier batches |
+
+#147 is the one that set the shape: *"All three are the same defect at the level of the record's
+index, which is the argument for **one mechanical check** over all of them rather than three prose
+fixes."* Prose fixes are what drifted in the first place.
+
+### Design Decisions Record — §35 (Y1–Y5)
+
+| id | decision |
+|---|---|
+| **Y1** | **The `S` and `E` tables move into the record.** `AGENTS.md` says the ROADMAPs carry it, and the fix is to make that true rather than to qualify the sentence. `DEVLOG` keeps each heading with a one-line summary and a pointer, so its per-section narrative still says a decision was taken there |
+| **Y2** | **The check quantifies over both sides — what the record defines and what the code cites.** Map-side alone would have found none of `AC`, `D0`, `P10` or `S12`, because those are cited in code and never claimed by the map |
+| **Y3** | **Declare the namespaces; qualify the citations; renumber nothing.** #147's own argument — the ids are in six production files, so changing them costs more than defining them. #17's suggested `Q11/Q12/Q16` also collides with `DEVLOG`'s existing `Q1–Q7` |
+| **Y4** | **#91 item 2 is a docstring correction and a promoted deferral, not a build.** Provenance means rewriting the merge, not adding a field, and D27's display surface does not exist |
+| **Y5** | **The new family letter is `Y`, not `O`.** `O1` and `01` are one glyph apart in every monospace font these documents are read in, which is the batch's own failure mode. Free after this: `O` |
+
+### The check, and why it is a grammar rather than a list
+
+An id in a production comment or docstring must either **resolve in the record** or **say which
+other namespace it belongs to**. Six namespaces share the `LETTER+NUMBER` shape:
+
+| namespace | ids | written as |
+|---|---|---|
+| design decisions | ~200, twenty families | bare |
+| pipeline gates | `D0`, `D1`, `D2` | `gate D0` |
+| acceptance criteria | `AC1`… | `§21 AC6` — section-scoped |
+| Rev. 1 open questions | `S11`, `S12`, `S16` | `Rev. 1 S12` |
+| audit severities | `S1`–`S4` | `severity S1` |
+| review findings / mutations | `F2`, `P10` | `review finding F2`, `mutation P10` |
+
+A **qualifier grammar** rather than a list of blessed ids, because a list only covers the citations
+that already exist. That is the property #148 identifies as separating this project's two guards
+that worked — **D24** (a raise over every registered tool, covering a tool nobody has written) and
+**J4** (a decoder parametrised over `SAFE_DEFAULTS`, covering a kind nobody has added) — from the
+warning comments that did not. #148's recommendation, verbatim: *"when an instance number reaches
+three, the next decision should name the domain the rule quantifies over."* Three is where #16,
+#17 and #147 had got to.
+
+`D1` and `D2` are the pair nothing can force: both a decision and a gate, so both resolve and the
+check cannot tell which was meant. Written down rather than papered over.
+
+### What the batch moved
+
+```
+                                                         before        after
+decision families with no definition in the record       5             2   (AC and F, both
+                                                                            declared namespaces)
+  ids in them                                            27            10
+ids the map claims that the record does not hold         4  (S1-S4)    0
+families the record defines that the map does not name   1  (E)        0
+ids cited in production prose that resolve to nothing    26 distinct   0
+  citations                                              83            0
+AC citations that name their section                     29 of 53      53 of 53
+meanings the prefix S carries                            3             2
+```
+
+### Two things the pass changed about the check itself
+
+**The definition scanner has to know three shapes.** The record writes a decision as a plain table
+row (`| D1 | ... |`), a bolded table row (`| **U1** | ... |`), or a bolded lead with the dash
+*inside* the bold (`**M1 — ...**`). A scanner that knows only the first reports the entire `M`
+family — 21 ids — as undefined. This batch's own first census did exactly that, and the count was
+wrong by 21 before anyone noticed. `test_the_definition_scanner_sees_every_shape_the_record_uses`
+pins one id per shape by name.
+
+**The `AC` qualifier is line-scoped, not adjacent.** `§23 (AC1)` and `§27 T2 / AC6` are already
+unambiguous to a reader, so requiring the section immediately before the id would have meant
+rewriting correct prose. What it does require is that the section appear *somewhere earlier on the
+same line*, which `(D23, AC6)` did not.
+
+### The mutation pass, and the survivor that mattered
+
+**23 mutations, three survivors on the first run, all three in the check rather than in the
+documents.** Final: **23 of 23 RED**, from a control green on the unit file and on the full suite.
+
+| survivor | why nothing caught it |
+|---|---|
+| `citation-scan-looks-at-comments-only` | **The narrow-the-domain mutation.** A scan that reads less finds nothing wrong, and finding nothing wrong is exactly what passing looks like. Dropping the docstring branch left every check green while the place most citations live stopped being read |
+| `citation-scan-skips-the-hyphen-guard` | The guard's stated reason had gone **stale underneath it** — written for `[a-zA-Z0-9]` in a regex literal, obsolete once the scan stopped reading code. Measured, it still changes two lines, both range citations, and the case it is really for is a range over a *sparse* family: `C1–C10` would report five decisions that never existed |
+| `grammar-a-qualifier-may-sit-anywhere-on-the-line` | No test had the qualifying word earlier in the sentence but not adjacent to the id |
+
+The first is the same shape as batch 14's two survivors and worth naming as a class: **a check
+whose passing condition is "found nothing" cannot detect that it looked in fewer places.** The
+answer is to pin the domain in both directions — a citation that must be seen, and a runtime string
+that must not.
+
+The check also caught **this batch's own omission** on its first run: slice 3 added the `C` family
+to the record and did not add it to the map.
+
+### Not qualified, deliberately
+
+Two `D0` sites are the pipeline's **data**: the stage name in `events.py`'s tuple and in
+`_stage("D0")`. The trace lines are keyed by them and
+`test_pipeline_trace_contains_expected_lines_in_order` matches on the `D0:` prefix. Found by making
+the change and reading the failure, which is also how the comments-vs-values boundary got drawn
+rather than guessed.
+
+### Verification
+
+- **Windows: 2,145 passed / 18 skipped / 1 deselected.**
+- **`python:3.11-slim`, the CI configuration**, run before the branch went anywhere — the fifth
+  batch to honour §31's correction. It matters here: the check walks the filesystem and reads
+  mixed-EOL documents, and one of its two failing-before tests names paths.
+- **The check demonstrated RED on the branch point**, not merely green after: two of its five tests
+  fail on `3b99ac0`, the citation one listing all 26 ids.
+- **23 of 23 mutations RED.**
+
+### Closed with this section
+
+**Unit X5 (#148)** — its two findings are #146 (fixed earlier) and #147. **#16 and #17** belong to
+the master tracker #15 rather than to a unit. **#91** closes with unit 11 still holding #89, #90
+and #92.
 
 ## Open Questions — None Remaining
 
