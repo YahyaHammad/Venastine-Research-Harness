@@ -2508,3 +2508,70 @@ The vacuity class now has four instances, and this is a new sub-shape. §31's `o
 input that cannot **arrive** — a guard upstream skips it. The usual sweep (vary the input, see
 whether the assertion still holds) does not find it, because the assertion does hold, for a reason
 unrelated to the code under test.
+
+
+## §30 — the fourteenth fix batch: /init's vocabulary (2026-08-21)
+
+> This file's counter is independent of ROADMAP_v2's, so this §30 is the fourteenth fix batch,
+> recorded in ROADMAP_v2 **§34**.
+
+Closes audit **#96** (S2, correctness), **#94** (S3), **#95** (S3) and **#98** (S3) — and with them
+**unit 12 (#99)**.
+
+### The change that affects code outside this repository, stated first
+
+**`read_project_doc` accepts five more filenames:** `setup.py`, `setup.cfg`, `Gemfile`, `pom.xml`,
+`build.gradle` — **at the project root only**. They are exact-basename entries, so `.py` is not a
+readable extension and `main.py` stays refused; and they are the first entries in `_DOC_FILENAMES`
+that do not match at any depth, so `src/vendor/setup.py` stays refused too.
+
+`manifest.detect_facts()` gains a `code_manifests` key (a list, in table order) and now sets
+`stack` for ten of the twelve manifest filenames rather than seven. `_MANIFEST_FILES` is gone,
+replaced by `_MANIFEST_TABLE`; `propose_kind`'s reason string now names the files it found.
+
+`InitError` may carry a multi-line message. Both shells already print it verbatim.
+
+### If you change this, this is what fails
+
+| change | what fails | why it is that way |
+|---|---|---|
+| Branch `propose_kind` on `stack` again | `test_every_manifest_that_names_a_stack_proposes_software`, parametrised over ten filenames | "Is this a codebase" and "what is it written in" are two questions. Answering the first with the second made a Java, Ruby, Gradle, C or container project `research` — and printed *"no code manifests found"* as the reason while the manifest listed the manifest |
+| Give `Dockerfile` or `Makefile` a stack | `test_a_build_file_proposes_software_with_no_stack_claimed` | The fix is not "give every manifest a stack". A Makefile is C, Go, LaTeX or this repository; a Dockerfile says nothing about what is inside the image. Strong evidence of a codebase, none at all about the language |
+| Drop the filenames from the reason | `test_the_reason_names_the_files_it_found` | I13 returns the reason *"so the confirmation prompt can show its working"*, and for this heuristic the filename **is** the working |
+| Claim `make test` without the target | `test_make_test_is_claimed_only_when_the_target_exists` | I10: a fact in a committed document is read as established, and a wrong one is worse than an absent one |
+| Match `test` as a prefix rather than `^test\s*:` | `test_a_tests_target_is_not_a_test_target` | The control. A target name is exact, and `tests:` is a different target |
+| Claim `bundle exec rspec` with no `spec/` | `test_rspec_is_claimed_only_with_a_spec_directory` | Ruby's runner is a choice; minitest and rspec are both ordinary |
+| Ignore a shipped `gradlew` | `test_the_gradle_wrapper_is_preferred_when_the_project_ships_one` | Shipping a wrapper is a statement about which Gradle to use |
+| Let a default beat `package.json`'s `scripts.test` | `test_package_json_still_wins_over_pytest` | Precedence a table could quietly reorder. A project holding both has decided something |
+| Emit one stack per matching file | `test_one_stack_is_named_once_however_many_files_say_it` | Four of the twelve filenames say Python. The stack line is for a human reading a confirmation prompt |
+| Make `code_manifests` a set | `test_the_manifest_list_is_in_table_order_not_set_order` | It is printed to the user behind a proposal, and a set prints in whatever order the interpreter felt like that run |
+| Give the manifest listing its own idea of what is readable | `test_every_advertised_path_is_one_the_tool_accepts` | The listing prints *"Paths below are exactly what read_project_doc expects"* over it. Advertised 15, refused 6 — and each refusal costs one of the initializer's twelve steps |
+| Narrow the listing back to extensions | `test_nothing_readable_is_hidden_from_the_listing` | The direction nobody would notice: `.txt` was readable and invisible, so a project keeping its notes in `.txt` had them unlisted |
+| Advertise `readme.bin` again | `test_a_readme_the_tool_cannot_read_is_not_advertised` | Fixed listing-side. It stays in the LAYOUT, which is not an advertisement — the tree says what the project contains, the listing says what can be read |
+| Match the five build manifests at any depth | `test_a_nested_copy_of_a_build_manifest_is_refused`, parametrised over all five | A vendored tree is where unreviewed third-party source lives, and it is the one place these five are not the project's own statement about itself |
+| Add `.py` to `_DOC_EXTENSIONS` | `test_adding_setup_py_did_not_add_python`, over five filenames | The whole basis on which the widening was taken. A suffix entry turns `read_project_doc` into `read` with no approval gate, for every run in the harness |
+| Drop one of the five names | `test_the_five_build_manifests_are_readable_at_the_root` | |
+| Remove `except InitError` from the write loop | `test_a_write_that_fails_names_the_files_it_already_created` | `ToolCallDenied` cannot fire there — consent is granted a few lines above — while `_write` raises `InitError` for every error dict, which is where every OSError arrives |
+| Settle trust only on success | `test_a_partial_write_leaves_a_trusted_project_trusted` | The partial write has already moved the D17 hash, so I6's bad outcome arrives by the route I6 was not looking at |
+| Grant trust regardless of `was_trusted` | `test_a_partial_write_does_not_launder_an_untrusted_project` | The control. Granting on a failed /init would launder a cloned `.venastine/` in through a door nobody is watching |
+| Drop the list of files already written | `test_a_write_that_fails_names_the_files_it_already_created`, and `test_a_failure_before_anything_was_written_says_so` | The second is the control: "Nothing was written" is a different sentence from a list of length zero |
+| Roll the partial write back | `test_a_partial_write_is_not_rolled_back` | It would be true of the stubs and false of the file that mattered — `CONTEXT.md`'s previous content is gone by the first step |
+| Ignore `_write`'s error dict | the four tests above | The branch every filesystem failure takes. Only `ToolCallDenied` was covered, and a normal /init cannot reach it |
+| Build the index from `all_document_names()` | `test_the_index_is_a_pure_function_of_the_kind` | It asserts the exact line set per kind now. The old version compared a call to itself and then checked each name was present, which catches a MISSING name and cannot see an extra one |
+| Remove `sorted()` from `_root_documents` or `_tree` | `test_the_manifest_is_stable_across_runs`, `test_the_layout_is_sorted_too` | Both hold the filesystem still with `_hand_back_reversed`, because NTFS returns sorted names anyway and the tests could not otherwise see the sort — which is how the versions they replace came to be green |
+| Drop `_PRUNED`, or drop the dotfile filter | `test_the_walk_prunes_the_directories_that_would_flood_it`, `test_the_walk_prunes_dotted_directories_too` | Two mutations, two tests. `node_modules` "turns a listing into a denial of service on the context window"; `.venastine` holds mcp.json and settings.json, neither covered by `_is_secret` |
+| Prune everything | `test_a_directory_that_should_be_walked_still_is` | The control |
+| Change `f.read(4096)` to `f.read()` | `test_a_heading_is_read_from_the_head_of_the_file` | ~1 MB of reads per manifest build in this repo. The padding is BLANK LINES: `_first_heading` returns on the first non-empty line, so `x`-padding cannot reach the cap at all |
+
+### The two survivors, and why they are in this record
+
+27 mutations, two survivors — and both were tests **this batch wrote for #98**, the finding about
+tests that cannot see the property in their own name. `os.walk` hands back an already-sorted list
+on this filesystem, so three ordinary filenames could not discriminate `sorted()`; and
+`_first_heading` returns on the first non-empty line, so a heading after 5,000 `x`s was unreachable
+whether the read was capped or not.
+
+Both were diagnosed by running them, not by rereading them. The lesson is the one #98 states —
+a test named for a property it cannot see *"reads as coverage in a report, which is worse than an
+acknowledged gap"* — and it applies to the fix as much as to the thing being fixed. **Final: 27 of
+27 RED.**

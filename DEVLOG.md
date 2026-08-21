@@ -4916,3 +4916,122 @@ have to explain away is not a verification run.
 
 **sympy's ~330 ms** via `tools/registry.py` — unit 5's file. **#136**, unit X2's other finding,
 which would close X2 but lives in compaction. **#105**, again, for the reason §31 gives.
+
+
+## Audit Pass 1 — fix batch 14: /init's vocabulary (2026-08-21)
+
+`fix/batch-14-init-vocabulary`, from `main` at `df35383`. Closes **#96** (S2, correctness), **#94**
+(S3), **#95** (S3) and **#98** (S3) — and with them **unit 12 (#99)**. ROADMAP_v2 **§34**,
+decisions **U1–U9**.
+
+### Four lists for one question
+
+`/init` writes eight documents into someone's project. It kept four separate answers to "what
+counts as a project file":
+
+```
+1. manifest._MANIFEST_FILES              12 names
+2. detect_facts sets 'stack' for          7 of those 12
+     reads NO branch:  Gemfile, pom.xml, build.gradle, Makefile, Dockerfile
+3. _root_documents.interesting            *.md/.markdown/.rst + readme* + all 12
+4. project_docs allowlist                 4 extensions + 10 exact names
+```
+
+Each disagreement was already filed. #96 is list 1 against list 2, #94 is list 3 against list 4.
+That is why four findings are one batch: fixing any one of them alone leaves the shape that
+produced it.
+
+### The proposal that printed the opposite of what it had seen
+
+Driven, one temp project per shape, before anything was written: **5 of 10 wrong**. A Java/Maven,
+Java/Gradle, Ruby, C/make or container-only project was proposed as `research` — with `"no code
+manifests found"` as the printed reason, while the manifest handed to the agent listed the
+manifest.
+
+`propose_kind` branched on `stack`, which is a different question from "is this a codebase". Both
+are now answered from one table, and `Makefile` and `Dockerfile` deliberately carry no stack: they
+are strong evidence of a codebase and none at all about the language.
+
+I10 governs the table's third column, so a test command is read rather than assumed — `make test`
+only when the Makefile declares that target, `bundle exec rspec` only with a `spec/` directory, and
+the Gradle wrapper when the project ships one.
+
+### The security question, answered with the matcher rather than an opinion
+
+`project_docs.py` locks its readable set as *documentation, not "text files"*, because the tool is
+advertised to **every** run: *"widening this to source files would quietly turn it into `read` with
+no approval gate"*. `setup.py` is source, so the objection was real and had to be driven.
+
+The matcher has two independent rules — exact basename, and suffix. The five are added as five
+**filenames**; `.py` never enters `_DOC_EXTENSIONS`. Verified: `main.py`, `config.py`,
+`credentials.py`, `secrets.py` and `src/vendor/app.py` all stay refused.
+
+The probe then found an exposure nobody had raised. The basename match ignores the directory, so
+`setup.py` would have meant *every* `setup.py` in the tree. All ten existing entries behave that
+way today. The five are root-only — a tightening shipped alongside the widening, and the reason
+this is not simply "five more names".
+
+What the widening leaves behind is filed as **#167**: `_SECRET_PATTERNS` matches seven vendor token
+prefixes, so `<password>s3cr3t</password>`, `password "hunter2"` and `https://user:tok3n@host` all
+pass `check_output_policy` unredacted — the credential conventions of exactly the five file types
+just added. Not fixed here, because a pattern added to that file applies to every tool result in
+the harness and the assignment-shaped one matches ordinary prose.
+
+### A partial /init, and the trust it was quietly dropping
+
+```
+  before   raised: Could not write TECHNICAL_DEBT.md: [Errno 28] ...
+           5 files on disk, the message named none of them
+           trusted before: True    trusted after: False, silently
+
+  after    Could not write TECHNICAL_DEBT.md: [Errno 28] ...
+           Wrote 5 files before that: CONTEXT.md, ...
+           Workspace trust re-granted for the updated .venastine/ content.
+           trusted before: True    trusted after: True
+```
+
+The reachable failure had no handler at all: `except ToolCallDenied` cannot fire after consent is
+granted, while `_write` raises `InitError` for every error dict `write_run` returns — which is
+where every `OSError` arrives.
+
+Nothing is rolled back. `CONTEXT.md`'s previous content is overwritten at the first step and cannot
+be restored, so "rolled back" would be true of the stubs and false of the file that mattered.
+
+### The mutation pass found #98's own defect inside #98's fix
+
+27 mutations, two survivors, and both were tests written *in this batch* for the finding about
+tests that cannot see their own property:
+
+- **the layout sort** — `os.walk` hands back an already-sorted list on this filesystem, so three
+  ordinary filenames could not discriminate the `sorted()` call. Exactly the defect of the test it
+  replaced.
+- **the 4 KB cap** — `_first_heading` returns on the first **non-empty** line, so a heading after
+  5,000 `x`s was unreachable whether the read was capped or not.
+
+Both diagnosed by running them. The fixes hold the filesystem still — a helper hands back reversed
+order, so `sorted()` is the only thing that could produce sorted output — and the padding became
+blank lines so the buried heading can be reached. **27 of 27 RED.**
+
+This is the argument for the standard rather than against it. Two of five replacements would have
+shipped as coverage-in-a-report if the pass had been a formality run after the fact.
+
+### Verification
+
+Windows **2,138 passed / 18 skipped / 1 deselected**. `python:3.11-slim` — the CI configuration —
+**2,154 passed / 2 skipped / 1 deselected**, with every U-decision driven on Linux. That mattered
+more than usual here: three of them read the filesystem — sorted listings, a root-only path rule
+and a case-folded basename — and the two platforms disagree about all three. Run **before** the
+branch went anywhere, the fourth batch running.
+
+### The audit was eight units behind its own tracker
+
+Checking whether batch 13's issues had been closed turned up that **#39 was fixed by batch 13 and
+never closed** — and then that **seven other units had no open findings and an open tracker**.
+Units 16 and X4 had been complete since 2026-08-17, four days before unit 3, which §33 called *"the
+first unit of Audit Pass 1 closed"*.
+
+Eight trackers closed with no code written. The master tracker #15 gained a **Fix progress** table
+computed from the issues, because #15 recorded audit completion and nothing recorded fix
+completion. **A queue that is never drained stops being evidence of anything** — "no unit has been
+closed" was read as "no unit is done" by the session that wrote it, which was the session closing
+the issues.

@@ -84,7 +84,9 @@ Every decision below was made through a structured clarification cycle with the 
 - 29. The CLI shell — one stdin reader, every request kind rendered, `main(argv)` and a startup order that does nothing before argparse **(added by Audit Pass 1 fix batch 9 for #100, #7, #101, #102, #141; BUILT)**
 - 30. The pipeline's payload boundary — one shape check for the ten passes, shape failures re-entering §3's retry, and a trace that reports what was applied **(added by Audit Pass 1 fix batch 10 for #76, #75, #78, #79, #123; BUILT)**
 - 31. What a tool call is allowed to cost — one declared bound per tool, a killable child for the six that compute, and a bound at the producer for the three that read **(added by Audit Pass 1 fix batch 11 for #57, #55, #56; BUILT)**
+- **§32. The catalogs — what the model is told it can do, and who gets to write it** — BUILT (#68, #131, #69, #70, #71, #72; closes unit 8)
 - **§33. The call boundary — the one file every model call goes through** — BUILT (#37, #38, #39, #135; closes unit 3)
+- **§34. /init's vocabulary — four lists for one question** — BUILT (#96, #94, #95, #98; closes unit 12)
 - **Open Questions — None Remaining** (Rev. 3 — all decisions locked; verification items only)
 - **Why these calls, not just what they are** (Rev. 3 — the reasoning patterns behind several decisions above)
 
@@ -2608,6 +2610,151 @@ this batch's coherence is one file.
 #95, #98 — which would close unit 12, and where #96 and #94 both reproduced exactly) and **the
 record itself** (#16 S2 + #17 S2 + #147, #91 — two S2s, but docs-only, so a different batch shape
 with no mutation pass).
+
+## 34. /init's vocabulary — four lists for one question — BUILT
+
+**Four findings, unit 12 closed, and the audit's tracker arithmetic corrected.** `/init` is the
+command that writes eight documents into someone's project. It kept **four** separate answers to
+"what counts as a project file", and no two agreed:
+
+```
+1. manifest._MANIFEST_FILES                12 names
+2. detect_facts sets 'stack' for            7 of those 12
+     reads NO branch:  Gemfile, pom.xml, build.gradle, Makefile, Dockerfile
+3. _root_documents.interesting              *.md/.markdown/.rst + readme* + all 12
+4. project_docs allowlist                   4 extensions + 10 exact names
+```
+
+Each disagreement was a filed finding, which is why they are one batch rather than four.
+
+| | driven against the tree before anything was written |
+|---|---|
+| **#96** (S2) | **5 of 10** project shapes proposed **wrong**. A Java/Maven, Java/Gradle, Ruby, C/make or container-only project was proposed as `research` — with `"no code manifests found"` printed as the reason, **while the manifest shown to the agent listed the manifest** |
+| **#94** (S3) | over the listing: *"Paths below are exactly what `read_project_doc` expects."* Advertised **15**, refused **6**; readable-but-unlisted **4** |
+| **#95** (S3) | a write that fails partway names only the failure, discards the list of files it *did* create, and skips the I6 trust re-grant — `trusted: True → False`, silently |
+| **#98** (S3) | five properties with no test, and **two tests that cannot see the property in their own name** |
+
+### Design Decisions Record — §34 (U1–U9)
+
+| id | decision |
+|---|---|
+| **U1** | **`detect_facts` learns the five it never read**, rather than `propose_kind` merely counting them. The minimal fix stops the false sentence and leaves `stack` empty, so `_fact_lines` produces nothing and a Java project's stubs stay identical to a research project's |
+| **U2** | **The "Readable documents" listing derives from the read tool's own predicate.** One producer for "what is readable", so the printed sentence is true by construction |
+| **U3** | **`_DOC_FILENAMES` gains five build manifests, matched at the project ROOT only.** The first entries that are; the existing ten keep depth-matching |
+| **U4** | **The redactor's gap is filed, not fixed here** (#167). A pattern added to `safety/policy_enforcement.py` redacts content out of *every* tool result in the harness |
+| **U5** | **`readme.bin` is fixed listing-side.** Nothing needs a `.bin` readable; the defect was the listing's |
+| **U6** | **A partial `/init` reports what it wrote and settles trust on both paths** |
+| **U7** | **No rollback.** `CONTEXT.md`'s previous content is overwritten at the first step and cannot be restored |
+| **U8** | **The two vacuous tests are rewritten, not supplemented.** A test named for a property it cannot see reads as coverage in a report |
+| **U9** | **`_MANIFEST_FILES` and the fact branches become one table.** Two lists that happen to overlap is how four vocabularies got here |
+
+### The question that decided U3, and why it was driven rather than argued
+
+`project_docs.py`'s docstring locks the readable set as *documentation, not "text files"*, with the
+reason: this tool is advertised to **every** run, so *"widening this to source files would quietly
+turn it into `read` with no approval gate"*. `setup.py` is source. That is a real objection and it
+had to be answered with the matcher rather than with an opinion.
+
+The matcher has two independent rules — an exact-basename list and a suffix list — so the five are
+added as **five filenames** and `.py` never enters `_DOC_EXTENSIONS`. Driven:
+
+```
+  setup.py             -> READABLE          '.py' in _DOC_EXTENSIONS: False
+  main.py              -> refused
+  config.py            -> refused
+  credentials.py       -> refused
+  src/vendor/app.py    -> refused
+```
+
+The probe then found an exposure **nobody had raised**: the basename match ignores the directory,
+so `setup.py` would have meant *every* `setup.py` in the tree, including a vendored one. Every
+existing entry behaves that way today. The five are therefore root-only — a tightening shipped with
+the widening, and the reason the batch is not simply "five more names".
+
+### What the batch moved
+
+```
+                                                    before        after
+propose_kind, 10 project shapes                 5 wrong        0 wrong
+  and the printed reason                        false          names the files it found
+detect_facts sets a stack for                   7 of 12        10 of 12
+  (Makefile and Dockerfile carry none, deliberately)
+manifest listing vs the read tool               15 / 6 refused  18 / 0 refused
+  readable but unlisted                         4              0
+a /init that fails at the 4th of 8 writes       names 0 of 5    names 5 of 5
+  and the trust the user had                    True -> False   True -> True
+vocabularies for "what counts as a project file"     4              1
+```
+
+### The mutation pass found #98's own defect inside #98's fix
+
+27 mutations, **two survivors**, and both were tests written *in this batch* for the finding about
+tests that cannot see their own property. Diagnosed rather than guessed:
+
+| survivor | why it could not see the property |
+|---|---|
+| `U8-the-tree-files-are-unsorted` | `os.walk` hands back an **already sorted** list on this filesystem, so three ordinary filenames could not discriminate the `sorted()` call — the same defect as the test it replaced |
+| `U8-first_heading-reads-the-whole-file` | `_first_heading` returns on the first **non-empty** line, so a heading after 5,000 `x`s was unreachable whether the read was capped or not |
+
+Both are the **discriminate** sub-shape the vacuity sweep is supposed to catch, and it did — because
+the sweep is now a mutation pass rather than a reading. The fixes hold the filesystem still: a
+helper hands back reversed order so `sorted()` is the only thing that could produce sorted output,
+and the padding became blank lines so the buried heading can actually be reached.
+
+**Final: 27 of 27 RED**, from a control green on the unit file and on the full suite.
+
+That the finding's own shape appeared in its own fix is the argument for the standard, not against
+it. #98 says a test named for a property it cannot see *"reads as coverage in a report, which is
+worse than an acknowledged gap"* — and two of the five replacements would have done exactly that
+if the pass had been a formality run after the fact.
+
+### Verification
+
+- **Windows: 2,138 passed / 18 skipped / 1 deselected.**
+- **`python:3.11-slim`, the CI configuration: 2,154 passed / 2 skipped / 1 deselected**, with every
+  U-decision driven on Linux. It mattered more than usual: three of them read the filesystem —
+  sorted listings, a root-only path rule and a case-folded basename — and the two platforms
+  disagree about all three. `main.py --help` exit 0, `import tui.app` ok. Run **before** the branch
+  went anywhere, the fourth batch to honour §31's correction.
+- **27 of 27 mutations RED.**
+
+Worth recording from the Linux run: `SETUP.PY`, `gemfile` and `Pom.Xml` are all readable there,
+because `_is_readable_doc` folds the basename to lower case. That is **pre-existing** — it is how
+`Makefile`, `makefile`, `LICENSE` and `license` have always all matched — and the five inherit it
+rather than introduce it.
+
+### Closed with this section
+
+**Unit 12 (#99).** Five findings: #97 in an earlier batch; #94, #95, #96, #98 here.
+
+### The audit's tracker arithmetic, corrected in this batch
+
+§33 called unit 3 *"the first unit of Audit Pass 1 closed"*. Checking whether batch 13's issues had
+been closed showed that **#39 was fixed by batch 13 and never closed**, and then that **seven other
+units were carrying no open findings and an open tracker** — units 6, 8, 13, 15, 16, X1 and X4.
+Units 16 and X4 had been complete since **2026-08-17**, four days before unit 3.
+
+Eight trackers closed with no code written, plus unit 12 here. The master tracker **#15** gained a
+**Fix progress** table computed from the issues rather than hand-maintained, because #15 recorded
+audit completion and *nothing recorded fix completion* — which is how a finished unit stayed open
+for four days and how a batch came to believe it had closed the first one.
+
+**The general lesson, and the reason it is in the record rather than in a commit message: a queue
+that is never drained stops being evidence of anything.** "No unit has been closed" was read as "no
+unit is done" by the session that wrote it — including when that session was the one closing the
+issues.
+
+### Deliberately not in §34
+
+**#167**, filed by this batch (U4). `_SECRET_PATTERNS` matches seven vendor token prefixes, so a
+plaintext `<password>` element, a Gradle `password "..."` and a `user:tok3n@host` URL all pass
+`check_output_policy` unredacted — the credential conventions of the five file types just added to
+the allowlist. Left for whoever takes unit 5, because the assignment-shaped pattern is wide enough
+to match ordinary prose and it would apply to every tool result in the harness.
+
+**#94's fuller ambition** — a `_DOC_EXTENSIONS`/`_DOC_FILENAMES` pair derived from the manifest
+table itself. The two now agree by one calling the other, which is the property that was missing;
+merging them would also merge a security boundary with a discovery heuristic.
 
 ## Open Questions — None Remaining
 
