@@ -553,6 +553,17 @@ _NAMESPACES = (
 )
 
 
+def _namespace_of(token, before):
+    """Which non-record namespace this citation announces, or None.
+
+    `before` is the text on the same line, left of the id.
+    """
+    for name, covers, mark in _NAMESPACES:
+        if covers.match(token) and mark.search(before):
+            return name
+    return None
+
+
 def _decision_definitions(docs=_RECORD_DOCS):
     """{id: [document, ...]} for every decision the record defines."""
     found = {}
@@ -750,9 +761,7 @@ def test_every_decision_id_cited_in_production_code_resolves():
         for number, line in _prose_lines(path):
             for hit in _CITATION.finditer(line):
                 token = hit.group(1)
-                before = line[:hit.start()]
-                if any(covers.match(token) and mark.search(before)
-                       for _name, covers, mark in _NAMESPACES):
+                if _namespace_of(token, line[:hit.start()]):
                     continue
                 if token in record:
                     continue
@@ -766,3 +775,60 @@ def test_every_decision_id_cited_in_production_code_resolves():
         f"decision belongs in the record, or the citation belongs to one of "
         f"the namespaces AGENTS.md lists and should say so -- `gate D0`, "
         f"`§21 AC6`, `Rev. 1 S12`, `mutation P10`, `review finding F2`.")
+
+
+def test_the_qualifier_grammar_discriminates():
+    """The guard against loosening the guard.
+
+    test_every_decision_id_cited_in_production_code_resolves passes when
+    every citation either resolves or is qualified -- so widening what
+    counts as a qualifier makes it pass trivially, and nothing about the
+    documents would change. That is the loosen-the-check mutation, and it is
+    the same vacuity shape batch 14 found in two of its own new tests: an
+    assertion whose input cannot discriminate.
+
+    The pairs below are the distinctions the grammar is FOR. A section
+    number is not a blanket qualifier -- `§32 A3` cites decision A3 in a
+    sentence about §32, and reading it as an acceptance criterion is the
+    exact confusion this batch was fixing.
+
+    ONE namespace is deliberately family-open, and writing this test is what
+    made it explicit: a mutation id is named after the decision it mutates
+    (`P10`, and batch 14's `U8`/`W9`), so `mutation` cannot be scoped to a
+    letter the way `gate` is scoped to D0-D2. It is the one qualifier that
+    is a claim about the id rather than a pattern over it. That is a real
+    escape hatch -- one deliberate word wide -- and it is here in writing
+    rather than discovered later.
+    """
+    qualifies = [
+        ("AC6", "    Returns a plain dict, never a CallToolResult (D23, §17 "),
+        ("AC1", "        # §21 "),
+        ("D0", "        # claims skip grounding entirely per the pipeline's gate "),
+        ("S12", "        # Rev. 1 "),
+        ("P10", "        # suite when audit unit 3 ran mutation "),
+        ("F2", "        # (review finding "),
+    ]
+    for token, before in qualifies:
+        assert _namespace_of(token, before), (
+            f"{token!r} after {before.strip()!r} should announce its "
+            f"namespace and does not -- the grammar stopped recognising a "
+            f"form that is in use.")
+
+    refuses = [
+        # A section number qualifies an AC. It does not qualify a DECISION
+        # that happens to follow one, and A3 is a decision (§32).
+        ("A3", "    # §32 "),
+        # The word is not enough on its own; the id has to be in the family
+        # that namespace covers. There are three pipeline gates, and R4 is
+        # not one of them.
+        ("R4", "    # gate "),
+        # And a bare AC with no section is the defect itself: AC6 meant
+        # three different criteria in three files.
+        ("AC6", "            path ("),
+        ("AC2", "    # so the gate is what makes \"no silent overwrite\" ("),
+    ]
+    for token, before in refuses:
+        assert _namespace_of(token, before) is None, (
+            f"{token!r} after {before.strip()!r} was accepted as a qualified "
+            f"citation. The grammar has been widened past what it can tell "
+            f"apart, and the citation check now passes on anything.")
