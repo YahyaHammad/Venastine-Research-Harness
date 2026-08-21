@@ -170,6 +170,42 @@ class TestNoPromptInvitesAToolTheRunCannotCall:
         assert "## Available skills" in prompt
         assert "## Available agents" not in prompt
 
+    def test_a_gated_load_skill_suppresses_the_SKILL_catalog_too(self,
+                                                                 roots):
+        """The skill half of A1, and the only input on which it differs
+        from the condition it replaced.
+
+        `is_allowed("load_skill", context)` and
+        `is_advertised("load_skill", ...)` agree everywhere the shipped
+        install can reach: load_skill is not approval-gated by default,
+        and its `available_check` is exactly "the catalog is non-empty",
+        so when it says no the catalog is empty and the append is a no-op
+        either way. Reverting this one condition therefore survived the
+        whole suite.
+
+        It is NOT inert, which is why this is a test rather than a
+        comment. An agent may declare `approval_overrides: {load_skill:
+        true}`, and D14 makes that a one-way ratchet -- so on a headless
+        run nothing can grant it and the tool is uncallable, while
+        `is_allowed` still says yes. That run would be handed a catalog
+        of skills it cannot load, which is the fetch_url damage class the
+        function's own docstring is about.
+        """
+        _agent(roots, "reviewer")
+        _skill(roots, "helper")
+        config_loader.initialize(str(roots["project"]))
+        gated = ToolContext(approval_overrides={"load_skill": True})
+
+        # The control: attended, it can be asked, so the catalog is right.
+        attended = system_prompts.with_catalogs(
+            "BASE", context=gated, callable_only=False)
+        assert "## Available skills" in attended
+
+        headless = system_prompts.with_catalogs(
+            "BASE", context=gated, callable_only=True)
+        assert "## Available skills" not in headless, (
+            "a headless run was invited to load a skill it cannot load")
+
     def test_a_grant_cannot_readmit_the_agent_catalog(self, roots):
         """R13 reaching the prompt, and the reason `granted` is threaded
         even though it changes nothing today.
@@ -228,6 +264,79 @@ class TestNoPromptInvitesAToolTheRunCannotCall:
                 "mcp__fixture__grantable", gated, True, {"mcp__fixture__grantable"}) is True
         finally:
             registry.unregister("mcp__fixture__grantable")
+
+
+# ===========================================================================
+# ---- A2: the REAL pass entry point, not just pass_prompt ------------------
+# ===========================================================================
+
+class TestTheFactsSurviveTheCallSite:
+    """Everything above drives `pass_prompt` directly, which pins the
+    FUNCTION and not the call. A mutation deleting
+    `run_deep_research_mode`'s two arguments survived the whole suite --
+    the fix was correct and unreached, which is the shape #68 itself has.
+
+    So these drive the real entry point and read the system prompt off
+    the wire, the way test_grants.py asserts advertisement "on the wire,
+    since a test that injects the tool call cannot see it".
+    """
+
+    def _prompt_on_the_wire(self, mocker, authorization):
+        from core.client import StreamToken
+        from core.loop import RunAgentLoop
+        from tests.conftest import make_model_response
+
+        seen = {}
+
+        def _stream(client, provider_name, model, messages, system_prompt,
+                    *rest):
+            seen["system_prompt"] = system_prompt
+            yield StreamToken(final_response=make_model_response(text="{}"))
+
+        mocker.patch("core.loop.api_initialization", return_value=object())
+        mocker.patch("core.loop.effort_for", return_value=None)
+        mocker.patch("core.loop.call_model_stream", side_effect=_stream)
+
+        # run_deep_research_mode, the entry point the orchestrator calls.
+        # §26 made it delegate to stream_deep_research_mode, which is
+        # where the prompt is assembled -- so this drives the real chain
+        # rather than the function the assertions above already cover.
+        RunAgentLoop.run_deep_research_mode(
+            pass_input="x", model="m", pass_id="Pass 1",
+            provider_name="ANTHROPIC", max_steps=1,
+            authorization=authorization)
+        return seen["system_prompt"]
+
+    def test_an_unattended_pass_is_not_told_to_spawn(self, roots, mocker,
+                                                     fake_storage):
+        """No bundle at all -- the plain `python main.py --research`
+        case, which is every pass of every unattended run."""
+        _agent(roots, "reviewer")
+        config_loader.initialize(str(roots["project"]))
+        assert system_prompts.agent_catalog_text(), "fixture produced nothing"
+
+        prompt = self._prompt_on_the_wire(mocker, None)
+
+        assert "## Available agents" not in prompt
+        assert "spawn_subagent" not in prompt
+
+    def test_an_ATTENDED_pass_still_is(self, roots, mocker, fake_storage):
+        """The control, and §25's point: a pass WITH a channel can ask,
+        so hiding its catalog would report a limitation the run does not
+        have. Without this, deleting the arguments and hard-coding
+        `callable_only=True` would satisfy the test above."""
+        from core.approval import RunAuthorization
+        from core.interaction import ResponseChannel
+
+        _agent(roots, "reviewer")
+        config_loader.initialize(str(roots["project"]))
+        attended = RunAuthorization(
+            provider=ResponseChannel(ask=lambda _r: None))
+
+        prompt = self._prompt_on_the_wire(mocker, attended)
+
+        assert "## Available agents" in prompt
+        assert "- reviewer: desc for reviewer" in prompt
 
 
 # ===========================================================================

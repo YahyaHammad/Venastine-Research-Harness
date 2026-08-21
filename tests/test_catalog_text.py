@@ -117,13 +117,21 @@ class TestADescriptionCannotLeaveItsBullet:
             "a silently cut summary is indistinguishable from a short one")
 
     def test_a_description_at_the_cap_is_untouched(self):
-        """The boundary. An off-by-one here would put an ellipsis on text
-        that fits, which is the same class of wrong answer as missing one
-        that does not."""
+        """The boundary, asserted on the RESULT LENGTH in both
+        directions.
+
+        An earlier version's second assertion was `!= exact`, which a
+        `<= MAX + 1` off-by-one satisfies: the over-cap string comes back
+        unchanged at 301 chars, which is indeed not the 300-char one. The
+        mutation survived the whole suite. "Different from" is not
+        "bounded by".
+        """
         exact = "z" * config.MAX_CATALOG_TEXT_CHARS
+        over = "z" * (config.MAX_CATALOG_TEXT_CHARS + 1)
 
         assert _catalog_text(exact) == exact
-        assert _catalog_text("z" * (config.MAX_CATALOG_TEXT_CHARS + 1)) != exact
+        assert len(_catalog_text(over)) == config.MAX_CATALOG_TEXT_CHARS
+        assert _catalog_text(over).endswith("…")
 
     def test_a_non_string_description_does_not_crash_discovery(self):
         """`description: 42` is valid YAML. str() first, then normalise --

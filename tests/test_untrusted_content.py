@@ -112,12 +112,21 @@ class TestTheTwoTailsSayTheSameThingAboutDifferentSources:
         """The two nouns that made the paragraph mode-specific. A chat
         turn has a human in it, which is the only difference that
         matters -- so the chat tail must NOT tell the model its
-        instructions come from a pipeline it is not in."""
-        chat = system_prompts.CHAT_INSTRUCTION_SOURCE
+        instructions come from a pipeline it is not in.
 
-        assert "person you are talking to" in chat
-        assert "pipeline" not in chat
-        assert "pass" not in chat
+        ASSERTED ON DEFAULT_SYSTEM_PROMPT, not on the constant. An
+        earlier version checked CHAT_INSTRUCTION_SOURCE itself, so a
+        mutation swapping which constant core/loop.py reaches for --
+        handing a chat turn the pipeline wording -- was green on the
+        whole suite. The constant was never the thing that had to be
+        right; the prompt built from it is.
+        """
+        assert "person you are talking to" in DEFAULT_SYSTEM_PROMPT
+        assert "pipeline" not in DEFAULT_SYSTEM_PROMPT
+        assert "this pass" not in DEFAULT_SYSTEM_PROMPT
+        # And the constant it is built from, so a failure says which.
+        assert "person you are talking to" in \
+            system_prompts.CHAT_INSTRUCTION_SOURCE
 
     def test_both_tails_make_the_same_claim(self):
         """Different nouns, same rule. If one of them stopped saying that
