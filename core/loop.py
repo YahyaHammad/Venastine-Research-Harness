@@ -48,7 +48,18 @@ from tools.registry import registry, ToolCallDenied
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant."
+# §32 A8 (#72). "You are a helpful assistant." was the whole of it,
+# and everything else in a chat prompt is generated or thread state --
+# the two catalogs, with_goal, with_memories, with_refs, with_todos,
+# and any active skill bodies. So the one paragraph a chat turn most
+# needs was the one part no tier supplied.
+#
+# Shared with the ten research passes rather than copied: see
+# prompts/untrusted_content and system_prompts.untrusted_content_paragraph.
+DEFAULT_SYSTEM_PROMPT = (
+    "You are a helpful assistant.\n\n"
+    + system_prompts.untrusted_content_paragraph(
+        system_prompts.CHAT_INSTRUCTION_SOURCE))
 DEFAULT_PROVIDER = "ANTHROPIC"
 
 # The headless callability notice (§18) names tools hidden by
