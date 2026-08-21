@@ -213,19 +213,28 @@ def _root_documents(project_path: str) -> list:
         full = os.path.join(project_path, name)
         if not os.path.isfile(full):
             continue
-        lower = name.lower()
-        interesting = (
-            lower.endswith((".md", ".markdown", ".rst"))
-            or lower.startswith("readme")
-            or name in _MANIFEST_TABLE
-        )
+        # ONE PRODUCER for "what is readable" (#94). This asked its own
+        # question -- .md/.markdown/.rst, anything starting with `readme`,
+        # or a manifest filename -- and the line printed above this listing
+        # says "Paths below are exactly what read_project_doc expects".
+        # They disagreed in both directions: `readme.bin` and five build
+        # manifests were advertised and refused, and every `.txt` document
+        # in a project was readable and invisible. The tool's test is the
+        # one that decides, so the sentence is true by construction.
+        #
+        # Imported here rather than at module scope: tools/registry.py
+        # imports project_docs at import time and project_docs reaches
+        # config, so a top-level import would tie this module's import
+        # order to the tool layer's for no gain. generator.py does the
+        # same for doc_path.
+        from tools.builtin.project_docs import is_readable_doc
         # `_is_secret` is belt-and-braces HERE and load-bearing in _tree,
-        # which is where the mutation actually turns a test red. Nothing is
-        # both "interesting" and secret today -- .env and providers.json are
-        # neither documents nor manifests -- so this branch is unreachable.
-        # It stays because _MANIFEST_TABLE already contains package.json:
-        # one more .json entry and the reachability flips, silently.
-        if not interesting or _is_secret(name):
+        # which is where the mutation actually turns a test red. It is
+        # unreachable today for a NEW reason: the tool denies
+        # providers.json by name, and credentials.json / secrets.* are not
+        # readable under any rule it has. It stays because both lists grow
+        # -- one more entry on either and the reachability flips, silently.
+        if not is_readable_doc(project_path, name) or _is_secret(name):
             continue
         try:
             size = os.path.getsize(full)
@@ -363,6 +372,12 @@ def build_manifest(project_path: str) -> str:
     lines = [f"# Project: {facts['project_name']}",
              f"Path: {project_path}", ""]
 
+    if facts.get("code_manifests"):
+        # The signal propose_kind acted on, shown to the agent as well as
+        # to the user. A Makefile or a Dockerfile appears here and in no
+        # stack line, which is the whole distinction #96 turned on.
+        lines.append("Code manifests present: "
+                     + ", ".join(facts["code_manifests"]))
     if facts.get("stack"):
         lines.append(f"Detected stack: {facts['stack']}")
     if facts.get("entry_points"):

@@ -210,6 +210,53 @@ class TestTheScopedTools:
         assert "error" in project_docs.read_run(
             {"path": "sub/node_modules/pkg/README.md"})
 
+    @pytest.mark.parametrize("name", [
+        "setup.py", "setup.cfg", "Gemfile", "pom.xml", "build.gradle",
+    ])
+    def test_the_five_build_manifests_are_readable_at_the_root(
+            self, project, name):
+        """#94. These were on neither list while pyproject.toml,
+        package.json, Cargo.toml, go.mod, Makefile and Dockerfile were on
+        the exact-name one -- an incomplete enumeration, not a judgement.
+        requirements.txt got in by accident, through `.txt`."""
+        (project / name).write_text("# a build file\n", encoding="utf-8")
+        result = project_docs.read_run({"path": name})
+        assert "error" not in result
+        assert "a build file" in result["content"]
+
+    @pytest.mark.parametrize("name", [
+        "setup.py", "setup.cfg", "Gemfile", "pom.xml", "build.gradle",
+    ])
+    def test_a_nested_copy_of_a_build_manifest_is_refused(
+            self, project, name):
+        """The tightening that ships WITH the widening. Every other entry
+        in _DOC_FILENAMES matches on basename at any depth, which is right
+        for packages/foo/package.json in a monorepo and wrong here: a
+        vendored tree is where unreviewed third-party source lives, and it
+        is the one place these five are not this project's own statement
+        about itself."""
+        vendor = project / "src" / "vendor"
+        vendor.mkdir(parents=True)
+        (vendor / name).write_text("# somebody else's\n", encoding="utf-8")
+        result = project_docs.read_run({"path": f"src/vendor/{name}"})
+        assert "error" in result
+        assert "somebody else" not in str(result)
+
+    @pytest.mark.parametrize("name", [
+        "main.py", "config.py", "credentials.py", "app.py", "conftest.py",
+    ])
+    def test_adding_setup_py_did_not_add_python(self, project, name):
+        """The control on the widening, and the question that decided its
+        shape: the five are added BY EXACT NAME, so `.py` never enters
+        _DOC_EXTENSIONS and this is five filenames rather than a class of
+        file. A suffix entry would have turned read_project_doc into `read`
+        with no approval gate, for every run in the harness."""
+        (project / name).write_text("SECRET = 1\n", encoding="utf-8")
+        result = project_docs.read_run({"path": name})
+        assert "error" in result
+        assert "SECRET" not in str(result)
+        assert ".py" not in project_docs._DOC_EXTENSIONS
+
     def test_read_still_allows_an_ordinary_nested_document(self, project):
         """Discriminates the two above from a rule that refuses everything
         nested."""
@@ -323,6 +370,67 @@ class TestDiscovery:
         assert "README.md" in text
         assert "— Widget" in text  # the document's first heading
         assert "bytes" in text
+
+    def test_every_advertised_path_is_one_the_tool_accepts(self, project):
+        """#94, and the sentence the manifest prints over its listing:
+        "Paths below are exactly what read_project_doc expects." It was
+        not. The listing came from a parallel test in manifest.py and the
+        tool's set from project_docs.py, and nothing kept them in step --
+        advertised 15, refused 6, driven against the real read_run.
+
+        Each refusal costs one of the initializer's twelve steps, spent
+        learning something the manifest could have said, and the model has
+        no way to know the listing is unreliable."""
+        for name in ("Gemfile", "pom.xml", "build.gradle", "setup.py",
+                     "setup.cfg", "Makefile", "Dockerfile", "docs.rst"):
+            (project / name).write_text("# x\n", encoding="utf-8")
+
+        advertised = [ln[2:].split(" (")[0]
+                      for ln in manifest.build_manifest(str(project)).splitlines()
+                      if ln.startswith("- ") and " (" in ln]
+        assert advertised, "the fixture must produce a listing to check"
+
+        refused = [n for n in advertised
+                   if "error" in project_docs.read_run({"path": n})]
+        assert refused == []
+
+    def test_nothing_readable_is_hidden_from_the_listing(self, project):
+        """The other direction, which is the one nobody would notice. `.txt`
+        is in _DOC_EXTENSIONS and was not in the manifest's extension test,
+        so EVERY .txt document in a project was readable and invisible; and
+        license / licence / changelog / notice reached the listing only if
+        they happened to carry a .md extension."""
+        for name in ("notes.txt", "LICENSE", "CHANGELOG", "NOTICE"):
+            (project / name).write_text("# x\n", encoding="utf-8")
+
+        advertised = [ln[2:].split(" (")[0]
+                      for ln in manifest.build_manifest(str(project)).splitlines()
+                      if ln.startswith("- ") and " (" in ln]
+        for name in ("notes.txt", "LICENSE", "CHANGELOG", "NOTICE"):
+            assert name in advertised
+
+    def test_a_readme_the_tool_cannot_read_is_not_advertised(self, project):
+        """`readme.bin` was listed because the manifest accepted any name
+        starting with `readme` whatever its extension. It is fixed here
+        rather than by widening the allowlist: nothing needs a .bin
+        readable, and the defect was the listing's."""
+        (project / "readme.bin").write_bytes(b"\x00\x01binary")
+        text = manifest.build_manifest(str(project))
+        listing = text.split("## Readable documents")[1].split("## Layout")[0]
+        assert "readme.bin" not in listing
+        # Still in the LAYOUT, which is not an advertisement: the tree says
+        # what the project contains and the listing says what can be read.
+        # Conflating those two is the whole of this finding.
+        assert "readme.bin" in text
+
+    def test_the_facts_block_names_the_manifests_it_found(self, project):
+        """The evidence propose_kind acted on, shown to the agent as well
+        as to the user (#96). A Dockerfile appears here and in no stack
+        line, which is the distinction the proposal now turns on."""
+        (project / "Dockerfile").write_text("FROM x\n", encoding="utf-8")
+        text = manifest.build_manifest(str(project))
+        assert "Code manifests present:" in text
+        assert "Dockerfile" in text.split("## Readable documents")[0]
 
     def test_the_manifest_hides_credential_files(self, project):
         (project / "providers.json").write_text('{"k": "sk-1"}',
