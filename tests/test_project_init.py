@@ -86,6 +86,59 @@ def fake_agent(monkeypatch):
     return calls
 
 
+def _hand_back_reversed(monkeypatch, project):
+    """Make the filesystem answer in the worst order it plausibly could.
+
+    Both sort assertions below are about `sorted()` and neither can see it
+    while the OS hands back sorted names anyway -- which NTFS does, and
+    which is what made the tests these replace vacuous (#98). Reversing at
+    the source is the only way the sort is the thing under test.
+    """
+    root = os.path.realpath(str(project))
+    real_listdir, real_walk = os.listdir, os.walk
+
+    def _listdir(path=".", *a, **kw):
+        out = real_listdir(path, *a, **kw)
+        try:
+            here = os.path.realpath(path)
+        except (TypeError, ValueError):
+            return out
+        return list(reversed(sorted(out))) if here == root else out
+
+    def _walk(top, *a, **kw):
+        for dirpath, dirs, files in real_walk(top, *a, **kw):
+            # `dirs` in place: os.walk descends whatever the caller leaves
+            # in it, and _tree prunes by assigning to the slice.
+            dirs[:] = list(reversed(sorted(dirs)))
+            yield dirpath, dirs, list(reversed(sorted(files)))
+
+    monkeypatch.setattr(os, "listdir", _listdir)
+    monkeypatch.setattr(os, "walk", _walk)
+
+
+def _fail_write_of(monkeypatch, filename):
+    """Make one write fail the way a real one does (#95).
+
+    Patched at `open` rather than at `write_run` or `dispatch`, so the
+    whole chain runs: OSError -> write_run's error dict -> _write's
+    InitError. Patching higher up would test the handler against a failure
+    shape the handler was already written for.
+    """
+    import builtins
+
+    real_open = builtins.open
+
+    def _open(path, *args, **kwargs):
+        mode = args[0] if args else kwargs.get("mode", "r")
+        if (isinstance(path, (str, os.PathLike))
+                and os.path.basename(os.fspath(path)) == filename
+                and "w" in mode):
+            raise OSError(28, "No space left on device")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", _open)
+
+
 def _generate(**overrides):
     kwargs = {
         "model": "m",
@@ -210,6 +263,53 @@ class TestTheScopedTools:
         assert "error" in project_docs.read_run(
             {"path": "sub/node_modules/pkg/README.md"})
 
+    @pytest.mark.parametrize("name", [
+        "setup.py", "setup.cfg", "Gemfile", "pom.xml", "build.gradle",
+    ])
+    def test_the_five_build_manifests_are_readable_at_the_root(
+            self, project, name):
+        """#94. These were on neither list while pyproject.toml,
+        package.json, Cargo.toml, go.mod, Makefile and Dockerfile were on
+        the exact-name one -- an incomplete enumeration, not a judgement.
+        requirements.txt got in by accident, through `.txt`."""
+        (project / name).write_text("# a build file\n", encoding="utf-8")
+        result = project_docs.read_run({"path": name})
+        assert "error" not in result
+        assert "a build file" in result["content"]
+
+    @pytest.mark.parametrize("name", [
+        "setup.py", "setup.cfg", "Gemfile", "pom.xml", "build.gradle",
+    ])
+    def test_a_nested_copy_of_a_build_manifest_is_refused(
+            self, project, name):
+        """The tightening that ships WITH the widening. Every other entry
+        in _DOC_FILENAMES matches on basename at any depth, which is right
+        for packages/foo/package.json in a monorepo and wrong here: a
+        vendored tree is where unreviewed third-party source lives, and it
+        is the one place these five are not this project's own statement
+        about itself."""
+        vendor = project / "src" / "vendor"
+        vendor.mkdir(parents=True)
+        (vendor / name).write_text("# somebody else's\n", encoding="utf-8")
+        result = project_docs.read_run({"path": f"src/vendor/{name}"})
+        assert "error" in result
+        assert "somebody else" not in str(result)
+
+    @pytest.mark.parametrize("name", [
+        "main.py", "config.py", "credentials.py", "app.py", "conftest.py",
+    ])
+    def test_adding_setup_py_did_not_add_python(self, project, name):
+        """The control on the widening, and the question that decided its
+        shape: the five are added BY EXACT NAME, so `.py` never enters
+        _DOC_EXTENSIONS and this is five filenames rather than a class of
+        file. A suffix entry would have turned read_project_doc into `read`
+        with no approval gate, for every run in the harness."""
+        (project / name).write_text("SECRET = 1\n", encoding="utf-8")
+        result = project_docs.read_run({"path": name})
+        assert "error" in result
+        assert "SECRET" not in str(result)
+        assert ".py" not in project_docs._DOC_EXTENSIONS
+
     def test_read_still_allows_an_ordinary_nested_document(self, project):
         """Discriminates the two above from a rule that refuses everything
         nested."""
@@ -289,15 +389,42 @@ class TestTheDocumentSets:
             "TEST_WRITING.md", {"test_command": "pytest -q"})
         assert "pytest -q" in withfacts
 
-    def test_the_index_is_a_pure_function_of_the_kind(self):
+    @pytest.mark.parametrize("kind", ["software", "research"])
+    def test_the_index_is_a_pure_function_of_the_kind(self, kind, tmp_path):
         """I11, and the defect that found it: an index that varied with what
         already existed rewrote CONTEXT.md on every subsequent /init and
-        labelled files /init had just authored as pre-existing."""
-        assert doc_sets.render_index("software") == doc_sets.render_index(
-            "software")
-        index = doc_sets.render_index("software")
-        for name in doc_sets.document_set("software"):
-            assert f"[{name}](../{name})" in index
+        labelled files /init had just authored as pre-existing.
+
+        REWRITTEN in batch 14 (#98). The old version asserted
+        `render_index("software") == render_index("software")` and then
+        that every name in the set appeared. Neither assertion pinned the
+        property in the name. The first is true of any deterministic
+        function of anything -- and was true of the reverted design I11
+        exists because of, since two calls in one expression see the same
+        filesystem. The second catches a MISSING name and cannot see an
+        extra one, so building the index from `all_document_names()` --
+        putting all seven research documents into a software project's hub
+        -- was green on all 1406.
+
+        This asserts the exact line set, which catches both directions, and
+        varies the filesystem between the two calls, which is what "pure"
+        was supposed to mean."""
+        index = doc_sets.render_index(kind)
+        links = [ln for ln in index.splitlines() if ln.startswith("- [")]
+
+        expected = [f"- [{n}](../{n}) — {doc_sets._STUBS[n][0]}"
+                    for n in doc_sets.document_set(kind)]
+        assert links == expected
+
+        other = "research" if kind == "software" else "software"
+        for name in doc_sets.document_set(other):
+            if name not in doc_sets.document_set(kind):
+                assert f"[{name}](../{name})" not in index
+
+        # Purity against a filesystem that changed, not against itself.
+        for name in doc_sets.document_set(kind):
+            (tmp_path / name).write_text("# already here\n", encoding="utf-8")
+        assert doc_sets.render_index(kind) == index
 
     def test_the_index_links_out_of_venastine(self):
         """CONTEXT.md lives one level down, so a bare ./NAME.md would be a
@@ -324,15 +451,269 @@ class TestDiscovery:
         assert "— Widget" in text  # the document's first heading
         assert "bytes" in text
 
+    def test_every_advertised_path_is_one_the_tool_accepts(self, project):
+        """#94, and the sentence the manifest prints over its listing:
+        "Paths below are exactly what read_project_doc expects." It was
+        not. The listing came from a parallel test in manifest.py and the
+        tool's set from project_docs.py, and nothing kept them in step --
+        advertised 15, refused 6, driven against the real read_run.
+
+        Each refusal costs one of the initializer's twelve steps, spent
+        learning something the manifest could have said, and the model has
+        no way to know the listing is unreliable."""
+        for name in ("Gemfile", "pom.xml", "build.gradle", "setup.py",
+                     "setup.cfg", "Makefile", "Dockerfile", "docs.rst"):
+            (project / name).write_text("# x\n", encoding="utf-8")
+
+        advertised = [ln[2:].split(" (")[0]
+                      for ln in manifest.build_manifest(str(project)).splitlines()
+                      if ln.startswith("- ") and " (" in ln]
+        assert advertised, "the fixture must produce a listing to check"
+
+        refused = [n for n in advertised
+                   if "error" in project_docs.read_run({"path": n})]
+        assert refused == []
+
+    def test_nothing_readable_is_hidden_from_the_listing(self, project):
+        """The other direction, which is the one nobody would notice. `.txt`
+        is in _DOC_EXTENSIONS and was not in the manifest's extension test,
+        so EVERY .txt document in a project was readable and invisible; and
+        license / licence / changelog / notice reached the listing only if
+        they happened to carry a .md extension."""
+        for name in ("notes.txt", "LICENSE", "CHANGELOG", "NOTICE"):
+            (project / name).write_text("# x\n", encoding="utf-8")
+
+        advertised = [ln[2:].split(" (")[0]
+                      for ln in manifest.build_manifest(str(project)).splitlines()
+                      if ln.startswith("- ") and " (" in ln]
+        for name in ("notes.txt", "LICENSE", "CHANGELOG", "NOTICE"):
+            assert name in advertised
+
+    def test_a_readme_the_tool_cannot_read_is_not_advertised(self, project):
+        """`readme.bin` was listed because the manifest accepted any name
+        starting with `readme` whatever its extension. It is fixed here
+        rather than by widening the allowlist: nothing needs a .bin
+        readable, and the defect was the listing's."""
+        (project / "readme.bin").write_bytes(b"\x00\x01binary")
+        text = manifest.build_manifest(str(project))
+        listing = text.split("## Readable documents")[1].split("## Layout")[0]
+        assert "readme.bin" not in listing
+        # Still in the LAYOUT, which is not an advertisement: the tree says
+        # what the project contains and the listing says what can be read.
+        # Conflating those two is the whole of this finding.
+        assert "readme.bin" in text
+
+    def test_the_facts_block_names_the_manifests_it_found(self, project):
+        """The evidence propose_kind acted on, shown to the agent as well
+        as to the user (#96). A Dockerfile appears here and in no stack
+        line, which is the distinction the proposal now turns on."""
+        (project / "Dockerfile").write_text("FROM x\n", encoding="utf-8")
+        text = manifest.build_manifest(str(project))
+        assert "Code manifests present:" in text
+        assert "Dockerfile" in text.split("## Readable documents")[0]
+
     def test_the_manifest_hides_credential_files(self, project):
         (project / "providers.json").write_text('{"k": "sk-1"}',
                                                 encoding="utf-8")
         assert "providers.json" not in manifest.build_manifest(str(project))
 
-    def test_the_manifest_is_stable_across_runs(self, project):
-        """Byte-identical input is what makes /init's output diffable."""
-        assert manifest.build_manifest(str(project)) == manifest.build_manifest(
-            str(project))
+    def test_the_manifest_is_stable_across_runs(self, project, monkeypatch):
+        """Byte-identical input is what makes /init's output diffable.
+
+        REWRITTEN in batch 14 (#98). The old version compared two calls in
+        one process against an unchanged directory, so `os.listdir` handed
+        back the same order both times whatever `sorted()` did -- removing
+        it was green. "Across runs" means across processes and machines and
+        after unrelated files come and go, which is exactly when listdir's
+        order moves, and none of that is reachable from one expression.
+
+        Sorted order IS checkable in one process, and it is the mechanism
+        the property rests on."""
+        for name in ("zebra.md", "alpha.md", "middle.md"):
+            (project / name).write_text("# x\n", encoding="utf-8")
+
+        _hand_back_reversed(monkeypatch, project)
+
+        listed = [ln[2:].split(" (")[0]
+                  for ln in manifest.build_manifest(str(project)).splitlines()
+                  if ln.startswith("- ") and " (" in ln]
+        assert listed == sorted(listed)
+        assert {"alpha.md", "middle.md", "zebra.md"} <= set(listed)
+
+    def test_the_layout_is_sorted_too(self, project, monkeypatch):
+        """`_tree` sorts twice -- directories and files -- and the same
+        argument applies to both: an unsorted walk produces a different
+        manifest for the same project on a different machine, and every
+        /init after the first shows a diff nobody caused.
+
+        This one needed the reversing helper twice over. Written first
+        against three ordinary filenames, it SURVIVED the mutation that
+        deletes the sort, because os.walk hands back an already-sorted list
+        on this filesystem -- an input that cannot discriminate, which is
+        the exact defect #98 filed against the test this replaces. The
+        finding's own pass caught it in the fix for the finding."""
+        pkg = project / "pkg"
+        pkg.mkdir()
+        for name in ("zebra.py", "alpha.py", "middle.py"):
+            (pkg / name).write_text("x\n", encoding="utf-8")
+        _hand_back_reversed(monkeypatch, project)
+
+        lines = manifest.build_manifest(str(project)).splitlines()
+        entries = [ln.strip().split("/")[-1] for ln in lines
+                   if ln.strip().startswith("pkg/")
+                   and ln.strip().endswith(".py")]
+        assert entries == sorted(entries)
+        assert len(entries) == 3, "the fixture must produce entries to sort"
+
+    def test_make_test_is_claimed_only_when_the_target_exists(
+            self, tmp_path):
+        """I10: a fact in a committed document is read as established, and
+        a wrong one is worse than an absent one. A Makefile is a build, not
+        a test suite, so `make test` is claimed off the target line and
+        nothing else."""
+        root = tmp_path / "proj"
+        root.mkdir()
+        make = root / "Makefile"
+
+        make.write_text("all:\n\tcc -o app main.c\n", encoding="utf-8")
+        assert "test_command" not in manifest.detect_facts(str(root))
+
+        make.write_text("all:\n\tcc -o app main.c\n\ntest:\n\t./app -t\n",
+                        encoding="utf-8")
+        assert manifest.detect_facts(str(root))["test_command"] == "make test"
+
+    def test_a_tests_target_is_not_a_test_target(self, tmp_path):
+        """The control on the line above. A target name is exact, and
+        matching `test` as a prefix would claim `make test` for a Makefile
+        whose only target is `tests`."""
+        root = tmp_path / "proj"
+        root.mkdir()
+        (root / "Makefile").write_text("tests:\n\t./run\n", encoding="utf-8")
+        assert "test_command" not in manifest.detect_facts(str(root))
+
+    def test_rspec_is_claimed_only_with_a_spec_directory(self, tmp_path):
+        """Ruby's runner is a choice, not a given -- minitest and rspec are
+        both ordinary, so a bare Gemfile names no command."""
+        root = tmp_path / "proj"
+        root.mkdir()
+        (root / "Gemfile").write_text("source 'x'\n", encoding="utf-8")
+        assert "test_command" not in manifest.detect_facts(str(root))
+
+        (root / "spec").mkdir()
+        facts = manifest.detect_facts(str(root))
+        assert facts["test_command"] == "bundle exec rspec"
+
+    def test_the_gradle_wrapper_is_preferred_when_the_project_ships_one(
+            self, tmp_path):
+        """Shipping a wrapper is a statement about which Gradle to use, and
+        running a different one is how a build that passes in CI fails on a
+        laptop."""
+        root = tmp_path / "proj"
+        root.mkdir()
+        (root / "build.gradle").write_text("plugins {}\n", encoding="utf-8")
+        assert manifest.detect_facts(str(root))["test_command"] == "gradle test"
+
+        (root / "gradlew").write_text("#!/bin/sh\n", encoding="utf-8")
+        assert (manifest.detect_facts(str(root))["test_command"]
+                == "./gradlew test")
+
+    def test_package_json_still_wins_over_pytest(self, tmp_path):
+        """Precedence the table must not quietly reorder: a command read
+        out of the project beats a default, and package.json's scripts.test
+        beats pytest because a project holding both has decided
+        something."""
+        root = tmp_path / "proj"
+        root.mkdir()
+        (root / "requirements.txt").write_text("pytest\n", encoding="utf-8")
+        (root / "package.json").write_text('{"scripts": {"test": "jest"}}\n',
+                                           encoding="utf-8")
+        assert manifest.detect_facts(str(root))["test_command"] == "npm test"
+
+    def test_one_stack_is_named_once_however_many_files_say_it(
+            self, tmp_path):
+        """Four of the twelve filenames say Python. The stack line is for a
+        human reading a confirmation prompt."""
+        root = tmp_path / "proj"
+        root.mkdir()
+        for name in ("pyproject.toml", "setup.py", "setup.cfg",
+                     "requirements.txt"):
+            (root / name).write_text("x\n", encoding="utf-8")
+        facts = manifest.detect_facts(str(root))
+        assert facts["stack"] == "Python"
+        assert len(facts["code_manifests"]) == 4
+
+    def test_the_manifest_list_is_in_table_order_not_set_order(
+            self, tmp_path):
+        """`code_manifests` is printed to the user behind a proposal, so it
+        is a list in a fixed order. It was a set, which prints in whatever
+        order the interpreter felt like that run."""
+        root = tmp_path / "proj"
+        root.mkdir()
+        for name in ("Dockerfile", "go.mod", "pyproject.toml"):
+            (root / name).write_text("x\n", encoding="utf-8")
+        found = manifest.detect_facts(str(root))["code_manifests"]
+        assert found == ["pyproject.toml", "go.mod", "Dockerfile"]
+
+    def test_the_walk_prunes_the_directories_that_would_flood_it(
+            self, project):
+        """#98: nothing pinned the prune, and dropping `_PRUNED` outright
+        was green on all 1406. Its own comment states the stake --
+        node_modules "can be tens of thousands of files, which turns a
+        listing into a denial of service on the context window"."""
+        for name in ("node_modules", "__pycache__", ".venv", "dist"):
+            d = project / name
+            d.mkdir()
+            (d / "junk.py").write_text("x\n", encoding="utf-8")
+
+        text = manifest.build_manifest(str(project))
+        for name in ("node_modules", "__pycache__", ".venv", "dist"):
+            assert name not in text
+
+    def test_the_walk_prunes_dotted_directories_too(self, project):
+        """The second half of the same line, and the one that matters most:
+        `.venastine` holds mcp.json and settings.json, and neither filename
+        is covered by `_is_secret`. With the dotfile filter gone they reach
+        the model in the listing. Dropping `_PRUNED` and dropping
+        `startswith(".")` are two mutations, so they get two tests."""
+        secrets = project / ".secretstuff"
+        secrets.mkdir()
+        (secrets / "notes.md").write_text("# private\n", encoding="utf-8")
+
+        text = manifest.build_manifest(str(project))
+        assert ".secretstuff" not in text
+        assert "private" not in text
+
+    def test_a_directory_that_should_be_walked_still_is(self, project):
+        """The control. A prune that pruned everything would satisfy both
+        tests above while making the layout useless."""
+        pkg = project / "widgets"
+        pkg.mkdir()
+        (pkg / "core.py").write_text("x\n", encoding="utf-8")
+        assert "widgets" in manifest.build_manifest(str(project))
+
+    def test_a_heading_is_read_from_the_head_of_the_file(self, project):
+        """#98. `_first_heading` reads 4 KB, and its docstring names the
+        cost it is avoiding: this runs over every root document before the
+        agent has chosen anything, and DEVLOG.md is 226 KB in this repo
+        alone -- about 1 MB of reads per manifest build if the guard goes.
+        Changing `f.read(4096)` to `f.read()` was green.
+
+        A heading past the cap is not found, which is the observable
+        consequence of the bound and the only way to pin it from outside.
+
+        The padding is BLANK LINES, and that is the whole test. Written
+        first with 5000 x's it survived the mutation, because
+        `_first_heading` returns on the first non-empty line it sees -- so
+        the heading below was unreachable whether the read was capped or
+        not, and the assertion held for a reason having nothing to do with
+        the cap. #98's own shape, in #98's own fix."""
+        big = project / "BIG.md"
+        big.write_text("\n" * 5000 + "# Buried\n", encoding="utf-8")
+        assert "Buried" not in manifest.build_manifest(str(project))
+
+        small = project / "SMALL.md"
+        small.write_text("# Found\n\nbody\n", encoding="utf-8")
+        assert "Found" in manifest.build_manifest(str(project))
 
     def test_a_blank_folder_is_recognised(self, tmp_path):
         empty = tmp_path / "empty"
@@ -347,6 +728,70 @@ class TestDiscovery:
         kind, reason = generator.propose_kind(str(project))
         assert kind == doc_sets.SOFTWARE
         assert "Python" in reason
+
+    @pytest.mark.parametrize("filename,stack", [
+        ("pom.xml", "Java/Maven"),
+        ("build.gradle", "Java/Gradle"),
+        ("Gemfile", "Ruby"),
+        ("pyproject.toml", "Python"),
+        ("setup.py", "Python"),
+        ("setup.cfg", "Python"),
+        ("requirements.txt", "Python"),
+        ("package.json", "Node/JavaScript"),
+        ("Cargo.toml", "Rust"),
+        ("go.mod", "Go"),
+    ])
+    def test_every_manifest_that_names_a_stack_proposes_software(
+            self, tmp_path, filename, stack):
+        """#96. `propose_kind` branched on the four stacks `detect_facts`
+        happened to set, not on the twelve filenames the manifest walks
+        for, so Java, Ruby and Gradle projects were proposed as RESEARCH."""
+        root = tmp_path / "proj"
+        root.mkdir()
+        (root / filename).write_text("x\n", encoding="utf-8")
+        kind, reason = generator.propose_kind(str(root))
+        assert kind == doc_sets.SOFTWARE
+        assert stack in reason
+        assert manifest.detect_facts(str(root))["stack"] == stack
+
+    @pytest.mark.parametrize("filename", ["Makefile", "Dockerfile"])
+    def test_a_build_file_proposes_software_with_no_stack_claimed(
+            self, tmp_path, filename):
+        """The other half of #96, and the reason the fix is not "give every
+        manifest a stack". A Makefile is C, Go, LaTeX or this repository; a
+        Dockerfile says nothing about what is inside the image. Both are
+        strong evidence of a codebase and none at all about the language,
+        so the proposal is software and `stack` stays absent."""
+        root = tmp_path / "proj"
+        root.mkdir()
+        (root / filename).write_text("x\n", encoding="utf-8")
+        kind, reason = generator.propose_kind(str(root))
+        assert kind == doc_sets.SOFTWARE
+        assert filename in reason
+        assert "stack" not in manifest.detect_facts(str(root))
+
+    def test_the_reason_names_the_files_it_found(self, tmp_path):
+        """I13 returns the reason so the confirmation prompt can show its
+        working, and for this heuristic the filename IS the working. The
+        old reason named a stack the user then had to take on trust."""
+        root = tmp_path / "proj"
+        root.mkdir()
+        (root / "pom.xml").write_text("<project/>\n", encoding="utf-8")
+        (root / "Dockerfile").write_text("FROM x\n", encoding="utf-8")
+        _kind, reason = generator.propose_kind(str(root))
+        assert "pom.xml" in reason and "Dockerfile" in reason
+
+    def test_the_wrong_reason_is_not_printed_for_a_project_that_has_one(
+            self, tmp_path):
+        """The control on the sentence itself. The defect was not only the
+        kind: the printed reason SAID no code manifests were found while
+        the manifest listed one, which is the half a user could act on."""
+        root = tmp_path / "proj"
+        root.mkdir()
+        (root / "Gemfile").write_text("source 'x'\n", encoding="utf-8")
+        _kind, reason = generator.propose_kind(str(root))
+        assert "no code manifests found" not in reason
+        assert "Gemfile" in manifest.build_manifest(str(root))
 
     def test_research_is_proposed_without_one(self, tmp_path):
         root = tmp_path / "study"
@@ -532,6 +977,97 @@ class TestConsent:
         monkeypatch.setattr(registry_mod.registry, "dispatch", _deny)
         with pytest.raises(generator.InitError):
             _generate()
+
+    def test_a_write_that_fails_names_the_files_it_already_created(
+            self, project, monkeypatch, fake_agent):
+        """#95. `written` was built up and thrown away on the failure path,
+        so a user read "Could not write TECHNICAL_DEBT.md" with no way to
+        tell whether nothing had happened or most of it had.
+
+        The failure injected here is the REACHABLE one: `write_run` turns
+        any OSError into an error dict and `_write` raises `InitError` for
+        it. The only handler was `except ToolCallDenied`, which a normal
+        /init cannot reach because consent is granted a few lines above."""
+        _fail_write_of(monkeypatch, "TECHNICAL_DEBT.md")
+
+        with pytest.raises(generator.InitError) as exc:
+            _generate()
+
+        message = str(exc.value)
+        assert "TECHNICAL_DEBT.md" in message
+        assert "CONTEXT.md" in message
+        assert "ARCHITECTURE.md" in message
+        # and the count is the count, not the whole document set
+        created = [n for n in doc_sets.document_set("software")
+                   if (project / n).exists()]
+        assert f"Wrote {len(created) + 1} files before that" in message
+
+    def test_a_failure_before_anything_was_written_says_so(
+            self, project, monkeypatch, fake_agent):
+        """The control on the line above: a message listing files must not
+        appear when there are none, and "Nothing was written" is a
+        different sentence from a list of length zero."""
+        _fail_write_of(monkeypatch, "CONTEXT.md")
+
+        with pytest.raises(generator.InitError) as exc:
+            _generate()
+        assert "Nothing was written." in str(exc.value)
+
+    def test_a_partial_write_leaves_a_trusted_project_trusted(
+            self, project, monkeypatch, fake_agent):
+        """The half with teeth. The partial write has already moved the D17
+        content hash, so a project the user trusted a moment ago is
+        untrusted -- exactly the state I6 exists to prevent, reached by the
+        route I6 was not looking at. Driven before the fix: True -> False,
+        and nothing said so."""
+        root = os.path.realpath(str(project))
+        workspace_trust.grant_trust(root)
+        assert workspace_trust.is_trusted(root) is True
+
+        _fail_write_of(monkeypatch, "TECHNICAL_DEBT.md")
+        with pytest.raises(generator.InitError) as exc:
+            _generate()
+
+        assert workspace_trust.is_trusted(root) is True
+        assert "trust re-granted" in str(exc.value)
+
+    def test_a_partial_write_does_not_launder_an_untrusted_project(
+            self, project, monkeypatch, fake_agent):
+        """I6's other half, and the control that stops the fix above from
+        becoming a hole. An untrusted project's .venastine/ may already
+        hold agents, skills and an mcp.json that arrived with a clone;
+        granting trust as a side effect of a FAILED /init would launder all
+        of it in through a door nobody is watching.
+
+        The clone is simulated rather than assumed: is_trusted() answers
+        True for a project with no .venastine/ at all ("nothing to trust"),
+        so an agent definition has to be there for the question to mean
+        anything."""
+        root = os.path.realpath(str(project))
+        agents = project / ".venastine" / "agents"
+        agents.mkdir(parents=True)
+        (agents / "arrived_with_the_repo.md").write_text(
+            "---\nname: x\n---\nbody\n", encoding="utf-8")
+        assert workspace_trust.is_trusted(root) is False
+
+        _fail_write_of(monkeypatch, "TECHNICAL_DEBT.md")
+        with pytest.raises(generator.InitError):
+            _generate()
+
+        assert workspace_trust.is_trusted(root) is False
+
+    def test_a_partial_write_is_not_rolled_back(self, project, monkeypatch,
+                                                fake_agent):
+        """U7, recorded as a test because the alternative is tempting.
+        Rolling back would delete documents out of someone's project on an
+        error path, and it would be a lie about the one file that matters:
+        CONTEXT.md's previous content was overwritten at the first step and
+        cannot be restored."""
+        _fail_write_of(monkeypatch, "TECHNICAL_DEBT.md")
+        with pytest.raises(generator.InitError):
+            _generate()
+        assert (project / "ARCHITECTURE.md").exists()
+        assert not (project / "TECHNICAL_DEBT.md").exists()
 
 
 # ---------------------------------------------------------------------------

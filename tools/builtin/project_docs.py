@@ -31,6 +31,34 @@ DOCUMENTATION, not "text files": a doc/manifest allowlist plus a hard deny of
 `.venastine/`, `.git/`, `.env*` and `providers.json` means the most a
 prompt-injected research pass gains is the project's own README. Widening
 this to source files would quietly turn it into `read` with no approval gate.
+
+THE FIVE BUILD MANIFESTS, AND WHY THEY ARE ROOT-ONLY (#94). `setup.py`,
+`setup.cfg`, `Gemfile`, `pom.xml` and `build.gradle` were on neither list
+while `pyproject.toml`, `package.json`, `Cargo.toml`, `go.mod`, `Makefile`
+and `Dockerfile` were on the first -- an incomplete enumeration rather than
+a judgement, and `requirements.txt` got in by accident through `.txt`. The
+manifest /init shows its agent advertised all of them as readable, so the
+agent spent steps out of a budget of twelve discovering that six were not.
+
+They are added BY EXACT NAME. That is what keeps the paragraph above true:
+`.py` never enters `_DOC_EXTENSIONS`, so `main.py`, `config.py` and
+`credentials.py` stay refused, and this is five filenames rather than a
+class of file. Driven, not assumed, before the decision was taken.
+
+They are also the first entries that match at the project ROOT only.
+Everything in `_DOC_FILENAMES` matches on basename at any depth, which is
+right for `packages/foo/package.json` in a monorepo and wrong for
+`src/vendor/setup.py` -- a vendored tree is where unreviewed third-party
+source lives, and it is the one place these five are not this project's own
+statement about itself.
+
+THE RESIDUAL, STATED RATHER THAN LEFT TO BE FOUND: `check_output_policy`
+scans every value (#47), so `sk-ant-...`, `ghp_...`, `AKIA...` and a PEM
+header are redacted out of a result. A plaintext `<password>` element, a
+Gradle `password "..."` and a `user:token@host` URL are NOT, and those are
+the credential shapes that occur in exactly these five files. Filed against
+the redactor rather than fixed here, because a pattern added there redacts
+content out of every tool result in the harness, not only this one.
 """
 
 from __future__ import annotations
@@ -50,6 +78,13 @@ _DOC_EXTENSIONS = frozenset({".md", ".markdown", ".rst", ".txt"})
 _DOC_FILENAMES = frozenset({
     "pyproject.toml", "package.json", "cargo.toml", "go.mod",
     "makefile", "dockerfile", "license", "licence", "changelog", "notice",
+})
+
+# Build manifests, readable at the PROJECT ROOT ONLY -- see the docstring.
+# A nested copy is somebody else's source; the root copy is this project's
+# own statement about what it is.
+_ROOT_ONLY_FILENAMES = frozenset({
+    "setup.py", "setup.cfg", "gemfile", "pom.xml", "build.gradle",
 })
 
 # Denied whatever the extension says. `.venastine/` can hold mcp.json and
@@ -110,7 +145,32 @@ def _is_readable_doc(root: str, resolved: str) -> bool:
         return False
     if name in _DOC_FILENAMES:
         return True
+    if name in _ROOT_ONLY_FILENAMES:
+        # `parts` is the path relative to the project root, so a length of
+        # one IS "at the root". Checked against the split rather than the
+        # string, because os.altsep exists.
+        return len(parts) == 1
     return os.path.splitext(name)[1] in _DOC_EXTENSIONS
+
+
+def is_readable_doc(project_path: str, user_path: str) -> bool:
+    """This tool's own test, in public, for /init's manifest (#94).
+
+    The manifest prints "Paths below are exactly what read_project_doc
+    expects" over its listing, and used to decide what to list with a
+    parallel test of its own. Nothing kept the two in step and they
+    disagreed in both directions: six advertised paths the tool refused,
+    and four it accepted that never appeared -- including every `.txt`
+    document in a project, invisible because the manifest tested extensions
+    and this module tests these.
+
+    Exported rather than reimplemented, so the sentence is true by
+    construction. The read path is unchanged: `read_run` still resolves and
+    re-tests for itself, because a listing is not an authorization.
+    """
+    root = os.path.realpath(project_path)
+    resolved = _resolve_in_project(root, user_path)
+    return resolved is not None and _is_readable_doc(root, resolved)
 
 
 # ===========================================================================
