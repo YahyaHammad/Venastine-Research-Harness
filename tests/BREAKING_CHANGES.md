@@ -2451,7 +2451,9 @@ anyone is positioned to notice.
 > so this §29 is the thirteenth fix batch, recorded in ROADMAP_v2 **§33**.
 
 Closes audit **#37** (S2, stability), **#38** (S3), **#39** (S3) and **#135** (S3, performance) —
-and with them **unit 3 (#41)**, the first unit of Audit Pass 1 to be closed.
+and with them **unit 3 (#41)**, the first unit *tracker* of Audit Pass 1 to be closed. (Corrected
+in §30: unit 3 was the eighth unit **finished**, not the first. Units 16 and X4 were complete on
+2026-08-17.)
 
 ### The change that breaks code outside this repository, stated first
 

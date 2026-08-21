@@ -4790,7 +4790,11 @@ asked for the catalog.
 
 `fix/batch-13-call-boundary`, from `main` at `e4d744f`. Closes **#37** (S2, stability), **#38**
 (S3), **#39** (S3) and **#135** (S3, performance) — and with them **unit 3 (#41)**, the first unit
-of Audit Pass 1 to close. ROADMAP_v2 **§33**, decisions **W1–W9**.
+tracker of Audit Pass 1 to be closed. ROADMAP_v2 **§33**, decisions **W1–W9**.
+
+*(Corrected in batch 14: this entry said "the first unit of Audit Pass 1 to close", which reads as
+the first unit finished. Unit 3 was the eighth — units 16 and X4 were complete on 2026-08-17. See
+§34.)*
 
 One file: `core/client.py`, the only file allowed to know a provider's wire format and the single
 point every model call in both shells and all ten research passes goes through.

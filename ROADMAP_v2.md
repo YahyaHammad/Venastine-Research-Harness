@@ -2457,7 +2457,7 @@ escapes `call_model_stream` into the pipeline's `except Exception`) and `/init`'
 
 ## 33. The call boundary — the one file every model call goes through — BUILT
 
-**Four findings, and the first unit of the audit closed.** `core/client.py` is the only file
+**Four findings, and the audit's first unit tracker closed.** `core/client.py` is the only file
 allowed to know a provider's wire format and the single point every model call in both shells and
 all ten research passes goes through. Unit 3 filed six; three were already closed (#35, #36, #40),
 so **#37 + #38 + #39 closes unit 3 (#41)**. #135 is unit X2's and lives in the same file.
@@ -2574,9 +2574,22 @@ Final: **24 of 24 RED.**
 
 ### Closed with this section
 
-**Unit 3 (#41) — the first unit of Audit Pass 1 closed.** Six findings: #35, #36, #40 in earlier
-batches; #37, #38, #39 here. Twenty-two unit trackers were open when this batch started and none
-had ever been closed.
+**Unit 3 (#41) — the first unit TRACKER of Audit Pass 1 to be closed.** Six findings: #35, #36,
+#40 in earlier batches; #37, #38, #39 here. Twenty-two unit trackers were open when this batch
+started and none had ever been closed.
+
+> **Corrected in batch 14.** This paragraph originally read *"the first unit of Audit Pass 1
+> closed"*, which says the first unit **finished**. It was not. Unit 3 was the **eighth**; units
+> 16 (#130) and X4 (#145) were both complete on **2026-08-17**, four days before this batch. Seven
+> units were carrying no open findings and an open tracker while this was being written, and
+> closing #39 made it eight — none of which was visible from the tracker list, because closing a
+> tracker was not part of any batch's routine. The narrow claim was true and is what the sentence
+> now says: no unit tracker had ever been closed, and this batch closed the first. **The general
+> lesson is the one worth carrying: a queue that is never drained stops being evidence of
+> anything, and "no unit has been closed" was read as "no unit is done" by the session that wrote
+> it — including when that session was the one closing the issues.** Batch 14 closed the other
+> eight, and put the fix progress on the master tracker #15, where the next session will find it
+> without recomputing it.
 
 ### Deliberately not in §33
 
