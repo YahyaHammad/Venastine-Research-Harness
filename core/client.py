@@ -4,13 +4,27 @@ from uuid import UUID, uuid4
 import json
 import logging
 
-from openai import OpenAI
-from google import genai
-from google.genai import types as genai_types
-from anthropic import Anthropic
-
 from credentials import load_provider_data
 import config
+
+# ROADMAP_v2 §33 W7 (#135). The three provider SDKs are NOT imported here.
+#
+# core.loop imports this module and main.py imports core.loop, so a module
+# -scope `from openai import OpenAI` is paid by every invocation of either
+# shell -- `--help`, `--summary`, a mistyped flag, the thread picker --
+# before argparse runs. Measured on Windows: 5.6s to print --help, of
+# which 3.5s was the three SDKs, and no run uses more than one of them.
+#
+# Each import therefore sits at the point of use, INSIDE the branch that
+# needs it rather than at the top of the enclosing function: a
+# GOOGLE-only name imported at the top of `_messages_for_provider` would
+# be paid on every Anthropic turn, which is most of them, and would leave
+# the defect in place while looking fixed.
+#
+# Deferred imports are otherwise not this file's idiom. The trade is
+# stated here rather than left to be re-derived: `import` is cached after
+# the first call, so the cost is a dict lookup per call on the hot path
+# and seconds saved on every launch that never makes one.
 
 logger = logging.getLogger(__name__)
 
@@ -31,10 +45,13 @@ def api_initialization(provider_name: str):
     entry = provider_data[provider_name]
 
     if entry.get("is_v1_compatible", False):
+        from openai import OpenAI
         client = OpenAI(base_url=entry["API_URL"], api_key=entry["API_KEY"])
     elif provider_name == "GOOGLE":
+        from google import genai
         client = genai.Client(api_key=entry["API_KEY"])
     elif provider_name == "ANTHROPIC":
+        from anthropic import Anthropic
         client = Anthropic(api_key=entry["API_KEY"])
         # Add further proprietary API formats here
     else:
@@ -178,6 +195,7 @@ def _tools_for_provider(provider_name: str, tool_schemas: list[dict]):
         return tool_schemas
 
     if provider_name == "GOOGLE":
+        from google.genai import types as genai_types
         return [genai_types.Tool(
             function_declarations=[
                 genai_types.FunctionDeclaration(
@@ -257,6 +275,7 @@ def _messages_for_provider(provider_name: str, neutral_messages: list[dict]) -> 
                         if not _is_empty_assistant_turn(m)]
 
     if provider_name == "GOOGLE":
+        from google.genai import types as genai_types
         # Build a {tool_call_id: function_name} lookup from assistant
         # messages so we can populate FunctionResponse.name (required by
         # Google but absent from the neutral tool-result shape).
@@ -593,6 +612,8 @@ def _google_supports_thinking_budget() -> bool:
     reasoning effort is simply unavailable on Google until the pin moves.
     D22's rule, applied: check the dependency's real shape, don't assume it.
     """
+    from google.genai import types as genai_types
+
     global _google_budget_support
     if _google_budget_support is None:
         fields = getattr(genai_types.ThinkingConfig, "model_fields", {})
@@ -630,6 +651,7 @@ def _thinking_for_provider(provider_name: str, effort: Optional[str]) -> dict:
             "output_config": {"effort": effort},
         }
     if provider_name == "GOOGLE":
+        from google.genai import types as genai_types
         budget = config.GOOGLE_THINKING_BUDGETS.get(effort)
         if budget is None or not _google_supports_thinking_budget():
             return {}
@@ -743,6 +765,7 @@ def call_model_stream(
         return
 
     if provider_name == "GOOGLE":
+        from google.genai import types as genai_types
         genai_config_kwargs = dict(
             system_instruction=system_prompt,
             tools=_tools_for_provider(provider_name, tool_schemas),
