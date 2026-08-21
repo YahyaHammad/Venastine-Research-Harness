@@ -129,11 +129,28 @@ class TestPromptFragment:
         assert manager.prompt_fragment(None) == ""
 
     def test_multiple_active_skills_are_pinned_in_order(self, loaded):
-        loaded(_skill("first", body="FIRST-BODY"),
-               _skill("second", body="SECOND-BODY"))
-        fragment = manager.prompt_fragment(["first", "second"])
+        """ZULU BEFORE ALPHA, and the names are the test (#71).
 
-        assert fragment.index("FIRST-BODY") < fragment.index("SECOND-BODY")
+        This used `first`/`second`, and `sorted(["first", "second"])` is
+        already `["first", "second"]` -- so the one test named for the
+        pinning order held identically whether prompt_fragment preserved
+        activation order or sorted alphabetically. Mutating it to
+        `for name in sorted(active or ())` was green on the whole suite.
+
+        The assertion was always right; the inputs could not
+        discriminate. Its sibling forty lines up
+        (test_activation_order_is_preserved_not_sorted) already used a
+        deliberately contradicting pair for activate()'s half of the same
+        property, and its docstring points HERE -- "it is the order the
+        bodies are pinned in" -- which is the half that was unpinned.
+        """
+        loaded(_skill("zulu", body="ZULU-BODY"),
+               _skill("alpha", body="ALPHA-BODY"))
+        fragment = manager.prompt_fragment(["zulu", "alpha"])
+
+        assert fragment.index("ZULU-BODY") < fragment.index("ALPHA-BODY"), (
+            "the bodies were pinned alphabetically, not in the order the "
+            "user activated them")
 
     def test_an_active_name_that_no_longer_resolves_is_skipped(self, loaded):
         """Skills are rediscovered on initialize(), so an active name can

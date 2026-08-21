@@ -127,8 +127,14 @@ def run_review(run, model: str, provider_name: str, authorization=None):
     # The context suppresses both catalogs here, because this agent's
     # allowed_tools excludes load_skill and spawn_subagent -- but the rule
     # lives in with_catalogs, not in this call (review f19, generalised).
-    prompt = manager.system_prompt_for(agent, DEFAULT_SYSTEM_PROMPT,
-                                       context=context)
+    #
+    # The authorization is passed anyway (#68). It changes nothing for
+    # the reviewer AS SHIPPED, since the context already excludes both
+    # tools -- and that is exactly why it is here: the day somebody
+    # widens pipeline-reviewer's allowed_tools, this call should not be
+    # the one place that quietly goes back to advertising a headless
+    # run's uncallable tools.
+    prompt = _reviewer_prompt(authorization, agent=agent, context=context)
     try:
         response = RunAgentLoop.run_agent_conversation(
             user_goal=_review_input(run),
@@ -401,7 +407,7 @@ def _refine(finding, notes, run, *, model, provider_name, thread_id,
         response = RunAgentLoop.continue_conversation(
             thread_id=thread_id,
             message=message,
-            system_prompt=_reviewer_prompt(),
+            system_prompt=_reviewer_prompt(authorization),
             model=model,
             provider_name=provider_name,
             authorization=authorization,
@@ -414,7 +420,7 @@ def _refine(finding, notes, run, *, model, provider_name, thread_id,
         text = retry_until_json(
             response,
             label="Review",
-            system_prompt=_reviewer_prompt(),
+            system_prompt=_reviewer_prompt(authorization),
             model=model,
             provider_name=provider_name,
             trace=run.trace,
@@ -439,16 +445,23 @@ def _refine(finding, notes, run, *, model, provider_name, thread_id,
     return revised[0] if revised else None
 
 
-def _reviewer_prompt() -> str:
+def _reviewer_prompt(authorization=None, agent=None, context=None) -> str:
     from agents.manager import manager
-    from core.loop import DEFAULT_SYSTEM_PROMPT
+    from core.loop import DEFAULT_SYSTEM_PROMPT, advertisement_facts
 
-    agent = manager.get(REVIEWER_AGENT)
+    if agent is None:
+        agent = manager.get(REVIEWER_AGENT)
     # The SAME context run_review built, so a refinement continues under
-    # the prompt its own first turn ran under.
+    # the prompt its own first turn ran under -- and since #68 the same
+    # authorization too, for the same reason: a refinement that saw a
+    # different catalog than the finding it is revising would be
+    # arguing under different terms.
+    if context is None:
+        context = manager.active_context(agent)
+    callable_only, granted = advertisement_facts(authorization)
     return manager.system_prompt_for(
-        agent, DEFAULT_SYSTEM_PROMPT,
-        context=manager.active_context(agent))
+        agent, DEFAULT_SYSTEM_PROMPT, context=context,
+        callable_only=callable_only, granted=granted)
 
 
 # ===========================================================================

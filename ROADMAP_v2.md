@@ -2276,6 +2276,184 @@ applies to it unchanged.
 call would have to replace anyway — the state a pooled worker accumulates is exactly what a bound
 exists to discard.
 
+## 32. The catalogs — what the model is told it can do, and who gets to write it — BUILT
+
+**Six findings from audit unit 8 (agents, skills, prompt assembly), two of them S2 and one of
+those the last open S2 in security.** They are one property seen from six sides: *the model is
+told what it can do by text this harness assembles, and some of that text comes from files a
+stranger wrote.*
+
+Measured against the working tree before any change, not read off the issues:
+
+| | |
+|---|---|
+| **#68** | `with_catalogs` gated on `registry.is_allowed(name, context)` — POLICY — while `registry.schemas()` decides advertisement from context **and** `callable_only` **and** `granted`. Pass 1's prompt was 4,223 chars and the agent section 819 of them, **19%**, instructing the model to call a tool the pass has no schema for |
+| **#131** | `description=str(fm.get("description", ""))` for both defs, rendered as `- {name}: {description}` — so a YAML block scalar leaves its bullet and forges a top-level section in every system prompt |
+| **#69** | All four shipped agents are internal machinery. `AgentDef` had no `spawnable`, no `internal`, no `invoked_by` |
+| **#70** | `approval_notice` and `request_payload` both return empty for an unknown agent, so the human got a `subagent_signoff` modal with nothing in it, then an error either way |
+| **#71** | `sorted(["first", "second"]) == ["first", "second"]` — the one test named for activation order could not observe it |
+| **#72** | `DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant."` — 28 characters, and the injection defence lived only in the pipeline preamble |
+
+### The catalog was asking a question with the wrong answer in it
+
+The harness stated the contradiction to its log and to the model in the same breath. A research
+pass is headless, so `core/loop.py` computes `headless = response_channel is None`, drops
+`spawn_subagent` from the schema list, and logs it in that run's own `headless_hidden()` WARNING —
+while `with_catalogs` appended 819 characters saying *"The agents below can be spawned with the
+**spawn_subagent tool**"*.
+
+The reason is a seam, not a mistake in either half. **The schemas are built where the run is; the
+prompt is built before the run exists.** `registry.schemas()` is called inside `_run()` at
+`core/loop.py:561`, after the bundle has been unpacked into primitives. `pass_prompt` is called at
+`:1119`, `system_prompt_for` in `agents/manager.py`, `with_catalogs` in `tui/app.py` — all of them
+frames earlier, holding a `ToolContext` and nothing else. So the catalog asked the only question it
+could reach, and `is_allowed` is a genuinely different question from the one `schemas()` answers.
+
+This is f19's defect on the axis f19 did not cover, and `with_catalogs`' own docstring already
+carried the argument: *"each catalog's prose INSTRUCTS the model to call a tool … so every agent
+whose allowed_tools excludes one of those was invited to call a tool it does not have."* That
+reasoning is not specific to the context axis. It was fixed for `ToolContext` and left open for the
+headless filter — which is the axis the pipeline **always** runs on.
+
+### Design Decisions Record — §32 (A1–A11)
+
+| id | decision |
+|---|---|
+| **A1** | **`registry.is_advertised()` is the one predicate.** `schemas()`, `headless_hidden()` and `with_catalogs()` are three readers of one answer, never three copies of one filter |
+| **A2** | **The catalogs take `callable_only` / `granted` — the same names, defaults and meaning as `schemas()`.** The facts come from the bundle that already carries them, unpacked once by `advertisement_facts()` |
+| **A3** | **`AgentDef.spawnable` is declared for ours and off by default for theirs.** A harness-tier omission is a build error naming every offender; a user's or a project's omission gets the safe answer |
+| **A4** | **The four shipped agents declare `spawnable: false`, each with its reason in the file.** D6's model-initiated half advertises nothing in the default install, and that is recorded rather than hidden |
+| **A5** | **Catalog text is normalised at the producer** — whitespace collapsed, capped at one constant, applied to `name` **and** `description`, at parse time, for every tier |
+| **A6** | **The trust prompt shows the descriptions it is deciding about**, parsed through `_parse_md_file` so what is displayed is what would be injected |
+| **A7** | **One `refusal_reason`, read in three places that must agree**: the loop before it asks, `dispatch` before its approval gate, `run()` as the direct-caller backstop |
+| **A8** | **The untrusted-content paragraph is one file with two tails.** The pipeline's concatenation reproduces the original byte for byte |
+| **A9** | **`is_advertised` is a predicate, not a membership test against `schemas()`.** Both sides need the answer; only one is in a position to enumerate |
+| **A10** | **A pre-flight refusal is RETURNED, not raised.** `ToolCallDenied` means policy blocked you, which is a different fact the model should be able to tell apart |
+| **A11** | **The "our own files comply" check is a test, not a runtime assert.** H1's shape would abort startup on a USER's machine for a mistake in OUR repository |
+
+### What the batch actually moved
+
+```
+                                          before          after
+Pass 1 prompt, headless                 4,223 chars    3,402 chars   (-19%)
+Pass 1 prompt, attended                 4,223 chars    3,402 chars   (A4)
+agents advertised, default install          4              0
+a 5,000-char description becomes        5,000 chars      300 chars
+a description with newlines             5 lines        1 line
+trust prompt shows descriptions            no             yes
+chat's base prompt                         28 chars       618 chars
+```
+
+The attended row is A4 and the headless row is A2, and they remove the same 819 characters for two
+independent reasons. #69 said so in advance: *"fixing either alone leaves the other."*
+
+### A3's asymmetry is the decision, not an omission
+
+R13's rule — *"None means UNDECLARED, not a default. Omission has to be a detectable mistake rather
+than an inherited answer"* — was written about a field on a tool this project registers. Applied to
+a file **someone else** wrote, it gives the wrong answer: raising would take down startup over a
+stranger's frontmatter, which is the trade `_parse_md_file` refuses everywhere else in the module
+(*"a broken definition warns and skips rather than taking down startup"*).
+
+So the rule splits by authorship. Our omission is a build error; a stranger's omission gets the safe
+answer, which is not-spawnable, because an agent written for `/agent` and silently advertised as
+spawnable is #69's actual complaint. Not-spawnable is a **default rather than a ban**: a project
+declaring `spawnable: true` is advertised, or this would be a prohibition wearing a default's
+clothes.
+
+### The failure #69 prevents is not a crash
+
+`spawn_subagent` passes exactly one thing: `params["task"]`, as the first message of a fresh thread.
+A spawned `grill-me` is told *"read the thread so far"* in a thread whose only message is the task
+string the parent wrote, so it grills the task description and returns that as a specialist's
+verdict. `compactor` is sharper — `max_steps: 1`, no tools, and a body ending *"For the rest of this
+conversation, your summary IS what happened."*
+
+Degraded rather than broken, and the parent has no way to tell. That is what makes it worth a field
+rather than a note.
+
+### `needs_approval = False` is not "proceed", and that was live for an hour
+
+A7's first version cleared `needs_approval` in the loop, copying the `is_allowed` line directly above
+it. Driving a turn end to end produced:
+
+```
+spawn_subagent requires approval and was not given
+```
+
+for an unknown agent name — a cause that is not the cause, and **worse than the empty modal it
+replaced**. Clearing the flag only stops the LOOP asking; `dispatch()` then re-checks approval
+itself, finds no callback because nothing asked, and denies. The precedent works only because
+dispatch raises its own, correct `ToolCallDenied` first.
+
+So the pre-flight belongs in `dispatch`, ahead of the approval gate, and the loop's skip then behaves
+exactly like the line it copies. Caught by `test_the_refusal_still_reaches_the_model`, which exists
+because skipping a useless question must not also skip the answer — the same shape as §31's
+`test_a_crashed_child_is_NOT_reported_as_a_limit`.
+
+### A4 made three of another unit's tests vacuous, and the change is what found it
+
+`test_review.py::TestCatalogsFollowTheContext` asserted `"## Available agents"` in and out of prompts
+built from the **real** catalog. With every shipped agent non-spawnable that catalog is empty, so
+three of its assertions would have passed for the wrong reason: *absent because the context
+suppressed it* and *absent because there was nothing to suppress* are the same observation.
+
+This is the vacuity class §31 recorded for `os.times()` and #71 records for `first`/`second`, reached
+a third way — and by a change rather than by a sweep. Worth stating as a rule: **a fix that empties a
+collection makes every test asserting absence from that collection vacuous**, and the fix's own batch
+is the only moment anyone is positioned to notice.
+
+### The two provider-side facts the mutation pass turned up
+
+Neither is a defect of this batch; both are properties of the registry that writing discriminating
+tests forced someone to measure.
+
+**No shipped builtin is both approval-gated and `GRANT_ANYWHERE`.** The three gated names are
+`remember` (never), `spawn_subagent` (never) and `write_project_doc` (signoff_only), so R15's granted
+branch in `is_advertised`/`schemas` is reachable today **only by an MCP tool**. The control test
+registers one rather than selecting off the roster: a skipping control is not a control.
+
+**`is_allowed("load_skill", ctx)` and `is_advertised(...)` agree everywhere the shipped install can
+reach**, because `load_skill` is not approval-gated by default and its `available_check` is exactly
+"the catalog is non-empty" — so when it says no, the append is a no-op either way. Reverting that one
+condition survived 2,082 tests. It is **not** inert: an agent may declare
+`approval_overrides: {load_skill: true}`, D14 makes that a one-way ratchet, and a headless run would
+then be handed a catalog of skills it cannot load. Driven and confirmed reachable before a test was
+written for it, rather than assumed inert and left.
+
+### Verification
+
+- **38 mutations, 38 RED.** Four survived the first run: three were gaps in this batch's own tests
+  (the pass entry point never driven, a boundary asserted as "different from" rather than "bounded
+  by", a constant asserted instead of the prompt built from it) and the fourth was the `load_skill`
+  case above.
+- **One survivor first scored a FALSE KILL.** It came back `RED(full)` because three tests added
+  minutes earlier had not yet been counted in the docs, so the full suite was red for an unrelated
+  reason. The standard's "re-run every survivor against the whole suite" step is what produced the
+  wrong answer; a full-suite verdict is only meaningful **from a green baseline**. Batch 11 lost 25
+  rows to a version of this. This cost one, and was caught by reading *which* tests failed rather
+  than trusting the exit code.
+- **`python:3.11-slim`, the CI configuration: 2,078 passed / 2 skipped / 1 deselected**, every
+  decision behaving identically to Windows, `main.py --help` exit 0, `import tui.app` ok, and Pass
+  1's digest matching. Run **before** the branch went anywhere, which is the correction §31 recorded
+  and did not get to apply.
+
+### Deliberately not in §32
+
+**A non-advertised agent can still be spawned by name.** `spawnable` decides what the model is
+**told** exists, not what it may call — the field's own comment says so, and C6 still caps the
+child's tools while the depth limit still applies. A model that names `grill-me` without being
+offered it still gets the degraded spawn #69 describes. Making it a permission is a different
+decision from making it a catalog filter, and #69 asked for the catalog.
+
+**#105** — `/quit` and ctrl+c do not check `_busy`. Deferred again, for the reason §31 gives.
+
+**The remaining fourteen S2s.** #4, #10, #14, #16, #17, #26, #37, #60, #61, #77, #89, #96, #105 and
+#138. Two clusters were verified in code alongside this one and are the natural successors: the call
+boundary (#37 S2 + #38, #39, #135 — one file, and a malformed tool-call arguments string still
+escapes `call_model_stream` into the pipeline's `except Exception`) and `/init`'s vocabulary (#96 S2
++ #94, #95, #98).
+
 ## Open Questions — None Remaining
 
 **(Rev. 3, final)** This document opened by describing itself as "a complete, no-design-decisions-left specification." As of this revision that is actually true: every open question has been answered, and what's left below needs checking against code rather than deciding.

@@ -1,6 +1,12 @@
 ---
 name: grill-me
 description: Reads the current thread and surfaces what still needs a decision — ambiguities, unstated design choices, unverified assumptions
+# §32 A4 (#69). Its first line is "Read the thread so far and grill
+# it". A spawned copy gets a fresh thread whose only message is the
+# task string the parent wrote, so it would grill the task description
+# and hand that back as a specialist's verdict. /grill-me supplies the
+# real thread by being in one.
+spawnable: false
 ---
 
 You are a design reviewer dropped into an ongoing conversation. Read the

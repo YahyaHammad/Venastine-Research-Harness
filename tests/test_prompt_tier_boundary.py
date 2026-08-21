@@ -88,8 +88,14 @@ def catalogued(monkeypatch, tmp_path):
     agent = types.SimpleNamespace(
         name="reviewer", description="a reviewer", body=CANARIES["agent_body"],
         model=None, provider=None, allowed_tools=None, approval_overrides={},
-        use_project_context=True, use_memory=True, max_steps=None,
-        tier="user", path=str(tmp_path / "reviewer.md"))
+        use_project_context=True, use_memory=True, max_steps=None,
+        tier="user", path=str(tmp_path / "reviewer.md"),
+        # §32 A3: the real AgentDef carries this, and
+        # agent_catalog_text reads it. True so the agent catalog is
+        # NON-EMPTY here -- these tests are about what does and does
+        # not reach a pass prompt, and an empty catalog would answer
+        # every one of them for the wrong reason.
+        spawnable=True)
     monkeypatch.setattr(config_loader, "get_skills", lambda: {"crypto": skill})
     monkeypatch.setattr(config_loader, "get_agents", lambda: {"reviewer": agent})
     return types.SimpleNamespace(skill=skill, agent=agent)
