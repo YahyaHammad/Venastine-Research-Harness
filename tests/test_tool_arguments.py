@@ -200,18 +200,49 @@ def test_a_good_call_still_has_no_parse_error():
     assert resp.tool_calls[0].parse_error is None
 
 
-def test_finish_reason_survives_the_usage_chunk():
-    """W4's mechanism. The provider sets finish_reason on the last content
-    chunk, and the usage chunk that follows carries none — so reading it
-    without keeping it would lose it exactly when `include_usage` is on,
-    which is the shipped configuration for three providers."""
+def test_finish_reason_is_kept_once_seen():
+    """W4's mechanism: `... or finish_reason`, a last-write-wins defence of
+    exactly the same family as the `name_parts` accumulation twenty lines
+    above it, and reachable for the same reason — a v1-compatible provider
+    that does not stop emitting choices after the one carrying the reason.
+
+    The trailing chunk here HAS choices and a null finish_reason, which is
+    what makes this discriminating. An earlier version of this test used
+    the usage chunk instead, on the reasoning that it "carries none" —
+    true, but a usage chunk has `choices: []`, so `if chunk.choices:`
+    skips it and the line under test is never reached. It survived the
+    mutation that deletes `or finish_reason`: a test whose input cannot
+    reach the line it is named for, which is the same class as #71's
+    already-sorted inputs.
+
+    Driven both ways before this was rewritten. With `or finish_reason`
+    deleted: the usage-chunk shape still reports the length cut, the shape
+    below reports the generic message.
+    """
     chunks = [
         _chunk(_delta(tool_calls=[_tc(id="t1", name="web_search")])),
         _chunk(_delta(tool_calls=[_tc(arguments='{"query": "trunc')])),
         _chunk(_delta(content=""), finish_reason="length"),
-        _usage_chunk(),                      # no finish_reason on this one
+        _chunk(_delta(content=""), finish_reason=None),   # clobbers it
+        _usage_chunk(),
     ]
     resp = _stream(chunks)
+    assert "cut off by the response token limit" in resp.tool_calls[0].parse_error
+
+
+def test_a_usage_chunk_cannot_clobber_the_reason():
+    """The sibling, and the reason the test above needed rewriting: a
+    chunk with `choices: []` — which is what `include_usage` appends, the
+    shipped configuration for three providers — must not reach the
+    finish_reason read at all."""
+    chunks = [
+        _chunk(_delta(tool_calls=[_tc(id="t1", name="web_search")])),
+        _chunk(_delta(tool_calls=[_tc(arguments='{"query": "trunc')])),
+        _chunk(_delta(content=""), finish_reason="length"),
+        _usage_chunk(),
+    ]
+    resp = _stream(chunks)
+    assert resp.usage == {"input_tokens": 10, "output_tokens": 5}
     assert "cut off by the response token limit" in resp.tool_calls[0].parse_error
 
 
