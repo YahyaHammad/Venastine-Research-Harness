@@ -334,6 +334,95 @@ class TestDiscovery:
         assert manifest.build_manifest(str(project)) == manifest.build_manifest(
             str(project))
 
+    def test_make_test_is_claimed_only_when_the_target_exists(
+            self, tmp_path):
+        """I10: a fact in a committed document is read as established, and
+        a wrong one is worse than an absent one. A Makefile is a build, not
+        a test suite, so `make test` is claimed off the target line and
+        nothing else."""
+        root = tmp_path / "proj"
+        root.mkdir()
+        make = root / "Makefile"
+
+        make.write_text("all:\n\tcc -o app main.c\n", encoding="utf-8")
+        assert "test_command" not in manifest.detect_facts(str(root))
+
+        make.write_text("all:\n\tcc -o app main.c\n\ntest:\n\t./app -t\n",
+                        encoding="utf-8")
+        assert manifest.detect_facts(str(root))["test_command"] == "make test"
+
+    def test_a_tests_target_is_not_a_test_target(self, tmp_path):
+        """The control on the line above. A target name is exact, and
+        matching `test` as a prefix would claim `make test` for a Makefile
+        whose only target is `tests`."""
+        root = tmp_path / "proj"
+        root.mkdir()
+        (root / "Makefile").write_text("tests:\n\t./run\n", encoding="utf-8")
+        assert "test_command" not in manifest.detect_facts(str(root))
+
+    def test_rspec_is_claimed_only_with_a_spec_directory(self, tmp_path):
+        """Ruby's runner is a choice, not a given -- minitest and rspec are
+        both ordinary, so a bare Gemfile names no command."""
+        root = tmp_path / "proj"
+        root.mkdir()
+        (root / "Gemfile").write_text("source 'x'\n", encoding="utf-8")
+        assert "test_command" not in manifest.detect_facts(str(root))
+
+        (root / "spec").mkdir()
+        facts = manifest.detect_facts(str(root))
+        assert facts["test_command"] == "bundle exec rspec"
+
+    def test_the_gradle_wrapper_is_preferred_when_the_project_ships_one(
+            self, tmp_path):
+        """Shipping a wrapper is a statement about which Gradle to use, and
+        running a different one is how a build that passes in CI fails on a
+        laptop."""
+        root = tmp_path / "proj"
+        root.mkdir()
+        (root / "build.gradle").write_text("plugins {}\n", encoding="utf-8")
+        assert manifest.detect_facts(str(root))["test_command"] == "gradle test"
+
+        (root / "gradlew").write_text("#!/bin/sh\n", encoding="utf-8")
+        assert (manifest.detect_facts(str(root))["test_command"]
+                == "./gradlew test")
+
+    def test_package_json_still_wins_over_pytest(self, tmp_path):
+        """Precedence the table must not quietly reorder: a command read
+        out of the project beats a default, and package.json's scripts.test
+        beats pytest because a project holding both has decided
+        something."""
+        root = tmp_path / "proj"
+        root.mkdir()
+        (root / "requirements.txt").write_text("pytest\n", encoding="utf-8")
+        (root / "package.json").write_text('{"scripts": {"test": "jest"}}\n',
+                                           encoding="utf-8")
+        assert manifest.detect_facts(str(root))["test_command"] == "npm test"
+
+    def test_one_stack_is_named_once_however_many_files_say_it(
+            self, tmp_path):
+        """Four of the twelve filenames say Python. The stack line is for a
+        human reading a confirmation prompt."""
+        root = tmp_path / "proj"
+        root.mkdir()
+        for name in ("pyproject.toml", "setup.py", "setup.cfg",
+                     "requirements.txt"):
+            (root / name).write_text("x\n", encoding="utf-8")
+        facts = manifest.detect_facts(str(root))
+        assert facts["stack"] == "Python"
+        assert len(facts["code_manifests"]) == 4
+
+    def test_the_manifest_list_is_in_table_order_not_set_order(
+            self, tmp_path):
+        """`code_manifests` is printed to the user behind a proposal, so it
+        is a list in a fixed order. It was a set, which prints in whatever
+        order the interpreter felt like that run."""
+        root = tmp_path / "proj"
+        root.mkdir()
+        for name in ("Dockerfile", "go.mod", "pyproject.toml"):
+            (root / name).write_text("x\n", encoding="utf-8")
+        found = manifest.detect_facts(str(root))["code_manifests"]
+        assert found == ["pyproject.toml", "go.mod", "Dockerfile"]
+
     def test_a_blank_folder_is_recognised(self, tmp_path):
         empty = tmp_path / "empty"
         empty.mkdir()
@@ -347,6 +436,70 @@ class TestDiscovery:
         kind, reason = generator.propose_kind(str(project))
         assert kind == doc_sets.SOFTWARE
         assert "Python" in reason
+
+    @pytest.mark.parametrize("filename,stack", [
+        ("pom.xml", "Java/Maven"),
+        ("build.gradle", "Java/Gradle"),
+        ("Gemfile", "Ruby"),
+        ("pyproject.toml", "Python"),
+        ("setup.py", "Python"),
+        ("setup.cfg", "Python"),
+        ("requirements.txt", "Python"),
+        ("package.json", "Node/JavaScript"),
+        ("Cargo.toml", "Rust"),
+        ("go.mod", "Go"),
+    ])
+    def test_every_manifest_that_names_a_stack_proposes_software(
+            self, tmp_path, filename, stack):
+        """#96. `propose_kind` branched on the four stacks `detect_facts`
+        happened to set, not on the twelve filenames the manifest walks
+        for, so Java, Ruby and Gradle projects were proposed as RESEARCH."""
+        root = tmp_path / "proj"
+        root.mkdir()
+        (root / filename).write_text("x\n", encoding="utf-8")
+        kind, reason = generator.propose_kind(str(root))
+        assert kind == doc_sets.SOFTWARE
+        assert stack in reason
+        assert manifest.detect_facts(str(root))["stack"] == stack
+
+    @pytest.mark.parametrize("filename", ["Makefile", "Dockerfile"])
+    def test_a_build_file_proposes_software_with_no_stack_claimed(
+            self, tmp_path, filename):
+        """The other half of #96, and the reason the fix is not "give every
+        manifest a stack". A Makefile is C, Go, LaTeX or this repository; a
+        Dockerfile says nothing about what is inside the image. Both are
+        strong evidence of a codebase and none at all about the language,
+        so the proposal is software and `stack` stays absent."""
+        root = tmp_path / "proj"
+        root.mkdir()
+        (root / filename).write_text("x\n", encoding="utf-8")
+        kind, reason = generator.propose_kind(str(root))
+        assert kind == doc_sets.SOFTWARE
+        assert filename in reason
+        assert "stack" not in manifest.detect_facts(str(root))
+
+    def test_the_reason_names_the_files_it_found(self, tmp_path):
+        """I13 returns the reason so the confirmation prompt can show its
+        working, and for this heuristic the filename IS the working. The
+        old reason named a stack the user then had to take on trust."""
+        root = tmp_path / "proj"
+        root.mkdir()
+        (root / "pom.xml").write_text("<project/>\n", encoding="utf-8")
+        (root / "Dockerfile").write_text("FROM x\n", encoding="utf-8")
+        _kind, reason = generator.propose_kind(str(root))
+        assert "pom.xml" in reason and "Dockerfile" in reason
+
+    def test_the_wrong_reason_is_not_printed_for_a_project_that_has_one(
+            self, tmp_path):
+        """The control on the sentence itself. The defect was not only the
+        kind: the printed reason SAID no code manifests were found while
+        the manifest listed one, which is the half a user could act on."""
+        root = tmp_path / "proj"
+        root.mkdir()
+        (root / "Gemfile").write_text("source 'x'\n", encoding="utf-8")
+        _kind, reason = generator.propose_kind(str(root))
+        assert "no code manifests found" not in reason
+        assert "Gemfile" in manifest.build_manifest(str(root))
 
     def test_research_is_proposed_without_one(self, tmp_path):
         root = tmp_path / "study"

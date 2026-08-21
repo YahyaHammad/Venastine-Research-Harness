@@ -33,7 +33,8 @@ from __future__ import annotations
 import json
 import logging
 import os
-from typing import Optional
+import re
+from typing import NamedTuple, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -48,11 +49,98 @@ _PRUNED = frozenset({
     "site-packages", ".next", ".cache",
 })
 
-_MANIFEST_FILES = (
-    "pyproject.toml", "setup.py", "setup.cfg", "requirements.txt",
-    "package.json", "Cargo.toml", "go.mod", "Gemfile", "pom.xml",
-    "build.gradle", "Makefile", "Dockerfile",
-)
+class _Manifest(NamedTuple):
+    """What one manifest filename tells us.
+
+    `stack` is None for a manifest that says a project BUILDS without
+    saying what it is written in.
+
+    `test_command` is a fixed default, or a callable that reads one off
+    the project, or None.
+    """
+    stack: Optional[str]
+    test_command: object
+
+
+def _rspec_if_spec(project_path: str) -> Optional[str]:
+    """Ruby's test runner is a choice rather than a given -- minitest and
+    rspec are both ordinary. `spec/` is the checkable signal that this
+    project made the second one, and without it nothing is claimed."""
+    return ("bundle exec rspec"
+            if os.path.isdir(os.path.join(project_path, "spec")) else None)
+
+
+def _gradle_test(project_path: str) -> str:
+    """The wrapper when the project ships one, which is the entire point of
+    shipping it: `gradle test` against whatever Gradle happens to be on the
+    machine is how a build that passes in CI fails on a laptop."""
+    return ("./gradlew test"
+            if os.path.isfile(os.path.join(project_path, "gradlew"))
+            else "gradle test")
+
+
+# `test:` at the start of a line, and not `tests:` -- a target name is
+# exact. `.PHONY: test` does not match, which is right: it declares the
+# target's kind and is not itself the declaration.
+_MAKE_TEST_TARGET = re.compile(r"^test\s*:", re.M)
+
+
+def _make_test(project_path: str) -> Optional[str]:
+    """`make test` only when the Makefile declares that target."""
+    try:
+        with open(os.path.join(project_path, "Makefile"), "r",
+                  encoding="utf-8", errors="replace") as f:
+            head = f.read(64_000)
+    except OSError:
+        return None
+    return "make test" if _MAKE_TEST_TARGET.search(head) else None
+
+
+# THE ONE TABLE (#96, #94). Every question this module answers about a code
+# manifest is answered from here: which filenames count as one, what stack
+# each implies, and how this project runs its tests.
+#
+# It is one table because it used to be four, and no two agreed. This tuple
+# listed twelve names; `detect_facts` branched on seven of them;
+# `_root_documents` kept a third test of what is interesting; and
+# `tools/builtin/project_docs` a fourth of what is readable. The five
+# filenames no branch read -- Gemfile, pom.xml, build.gradle, Makefile,
+# Dockerfile -- were exactly the five projects proposed as `research` with
+# "no code manifests found" printed as the reason, while the manifest shown
+# to the agent listed the manifest (#96). Two lists that happen to overlap
+# is how that happens. The fix is that there is nothing to keep in step.
+#
+# I10 governs the third column. A fact in a committed document is read as
+# established and a wrong one is worse than an absent one, so `make test`
+# is claimed only when the Makefile declares that target, and `bundle exec
+# rspec` only when there is a spec/ directory to run.
+_MANIFEST_TABLE = {
+    "pyproject.toml":   _Manifest("Python", None),
+    "setup.py":         _Manifest("Python", None),
+    "setup.cfg":        _Manifest("Python", None),
+    "requirements.txt": _Manifest("Python", None),
+    "package.json":     _Manifest("Node/JavaScript", None),
+    "Cargo.toml":       _Manifest("Rust", "cargo test"),
+    "go.mod":           _Manifest("Go", "go test ./..."),
+    "Gemfile":          _Manifest("Ruby", _rspec_if_spec),
+    "pom.xml":          _Manifest("Java/Maven", "mvn test"),
+    "build.gradle":     _Manifest("Java/Gradle", _gradle_test),
+    # A build, and no claim about the language. C, Go, LaTeX and this
+    # repository all have a Makefile; a Dockerfile says even less about
+    # what is inside the image it builds. Both are strong evidence that
+    # this is a codebase, which is the question propose_kind asks, and
+    # terrible evidence about the stack, which is the question it does not.
+    "Makefile":         _Manifest(None, _make_test),
+    "Dockerfile":       _Manifest(None, None),
+}
+
+# Read off the filesystem for a stack that has conventional ones. Nothing
+# is inferred from a file's CONTENTS here -- that is I10's line.
+_ENTRY_POINTS = {
+    "Python": ("main.py", "app.py", "cli.py", "__main__.py"),
+    "Node/JavaScript": ("index.js", "index.ts", "src/index.js",
+                        "src/index.ts"),
+}
 
 _TEST_DIRS = ("tests", "test", "__tests__", "spec")
 
@@ -129,13 +217,13 @@ def _root_documents(project_path: str) -> list:
         interesting = (
             lower.endswith((".md", ".markdown", ".rst"))
             or lower.startswith("readme")
-            or name in _MANIFEST_FILES
+            or name in _MANIFEST_TABLE
         )
         # `_is_secret` is belt-and-braces HERE and load-bearing in _tree,
         # which is where the mutation actually turns a test red. Nothing is
         # both "interesting" and secret today -- .env and providers.json are
         # neither documents nor manifests -- so this branch is unreachable.
-        # It stays because _MANIFEST_FILES already contains package.json:
+        # It stays because _MANIFEST_TABLE already contains package.json:
         # one more .json entry and the reachability flips, silently.
         if not interesting or _is_secret(name):
             continue
@@ -183,34 +271,49 @@ def detect_facts(project_path: str) -> dict:
     than an absent one.
     """
     facts: dict = {"project_name": os.path.basename(os.path.realpath(project_path))}
-    present = {name for name in _MANIFEST_FILES
-               if os.path.isfile(os.path.join(project_path, name))}
+    # A LIST in table order, not a set: it is reported to the user as the
+    # working shown behind a proposal (#96), and a set would print in
+    # whatever order the interpreter felt like.
+    present = [name for name in _MANIFEST_TABLE
+               if os.path.isfile(os.path.join(project_path, name))]
 
-    stacks, entry_points, test_command = [], [], None
+    # Deduplicated in table order: four filenames say Python, and the stack
+    # is named once.
+    stacks = list(dict.fromkeys(
+        _MANIFEST_TABLE[name].stack for name in present
+        if _MANIFEST_TABLE[name].stack))
 
-    if present & {"pyproject.toml", "setup.py", "setup.cfg", "requirements.txt"}:
-        stacks.append("Python")
-        for candidate in ("main.py", "app.py", "cli.py", "__main__.py"):
+    entry_points = []
+    for stack in stacks:
+        for candidate in _ENTRY_POINTS.get(stack, ()):
             if os.path.isfile(os.path.join(project_path, candidate)):
                 entry_points.append(candidate)
-        if _mentions(project_path, ("requirements.txt", "pyproject.toml"), "pytest"):
-            test_command = "pytest"
-    if "package.json" in present:
-        stacks.append("Node/JavaScript")
+
+    # PRECEDENCE, unchanged by the table: a command read out of the project
+    # beats a default, and package.json's `scripts.test` beats pytest
+    # because it is the more specific statement of the two -- a Python
+    # project with a package.json has decided something. Everything else
+    # fills an empty slot only, in table order.
+    test_command = None
+    if "Python" in stacks and _mentions(
+            project_path, ("requirements.txt", "pyproject.toml"), "pytest"):
+        test_command = "pytest"
+    if "Node/JavaScript" in stacks:
         test_command = _package_json_test(project_path) or test_command
-        for candidate in ("index.js", "index.ts", "src/index.js", "src/index.ts"):
-            if os.path.isfile(os.path.join(project_path, candidate)):
-                entry_points.append(candidate)
-    if "Cargo.toml" in present:
-        stacks.append("Rust")
-        test_command = test_command or "cargo test"
-    if "go.mod" in present:
-        stacks.append("Go")
-        test_command = test_command or "go test ./..."
+    for name in present:
+        if test_command is not None:
+            break
+        declared = _MANIFEST_TABLE[name].test_command
+        test_command = (declared(project_path) if callable(declared)
+                        else declared)
 
     test_dirs = [d for d in _TEST_DIRS
                  if os.path.isdir(os.path.join(project_path, d))]
 
+    # The presence set is a FACT, and the only producer of it. propose_kind
+    # reads this rather than keeping its own idea of what a manifest is.
+    if present:
+        facts["code_manifests"] = present
     if stacks:
         facts["stack"] = ", ".join(stacks)
     if entry_points:

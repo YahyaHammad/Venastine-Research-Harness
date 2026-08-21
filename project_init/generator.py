@@ -51,13 +51,29 @@ def propose_kind(project_path: str) -> tuple:
     reads -- spends a call to reach the same place with less certainty
     about how it got there. The reason is returned so the confirmation
     prompt can show its working.
+
+    IT BRANCHES ON THE MANIFEST SET, NOT ON THE STACK (#96). Those are two
+    questions -- "is this a codebase" and "what is it written in" -- and
+    answering the first with the second is what made a Java, Ruby, Gradle,
+    C or container project `research` with "no code manifests found"
+    printed as the reason, while the manifest shown to the agent listed the
+    manifest. `Makefile` and `Dockerfile` still carry no stack, which is
+    the point: they answer the first question and not the second.
+
+    The reason now names the files it found, because I13 asked for working
+    that can be shown and a filename is the whole of the evidence.
     """
     facts = manifest_mod.detect_facts(project_path)
+    found = facts.get("code_manifests")
+    if not found:
+        return (doc_sets.RESEARCH,
+                "no code manifests found, so this looks like written work "
+                "rather than a codebase")
+    named = ", ".join(found)
     if facts.get("stack"):
-        return doc_sets.SOFTWARE, f"{facts['stack']} project files are present"
-    return (doc_sets.RESEARCH,
-            "no code manifests found, so this looks like written work "
-            "rather than a codebase")
+        return (doc_sets.SOFTWARE,
+                f"{facts['stack']} project files are present ({named})")
+    return doc_sets.SOFTWARE, f"code manifests are present ({named})"
 
 
 def _existing_documents(project_path: str, kind: str) -> set:
