@@ -86,6 +86,29 @@ def fake_agent(monkeypatch):
     return calls
 
 
+def _fail_write_of(monkeypatch, filename):
+    """Make one write fail the way a real one does (#95).
+
+    Patched at `open` rather than at `write_run` or `dispatch`, so the
+    whole chain runs: OSError -> write_run's error dict -> _write's
+    InitError. Patching higher up would test the handler against a failure
+    shape the handler was already written for.
+    """
+    import builtins
+
+    real_open = builtins.open
+
+    def _open(path, *args, **kwargs):
+        mode = args[0] if args else kwargs.get("mode", "r")
+        if (isinstance(path, (str, os.PathLike))
+                and os.path.basename(os.fspath(path)) == filename
+                and "w" in mode):
+            raise OSError(28, "No space left on device")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", _open)
+
+
 def _generate(**overrides):
     kwargs = {
         "model": "m",
@@ -793,6 +816,97 @@ class TestConsent:
         monkeypatch.setattr(registry_mod.registry, "dispatch", _deny)
         with pytest.raises(generator.InitError):
             _generate()
+
+    def test_a_write_that_fails_names_the_files_it_already_created(
+            self, project, monkeypatch, fake_agent):
+        """#95. `written` was built up and thrown away on the failure path,
+        so a user read "Could not write TECHNICAL_DEBT.md" with no way to
+        tell whether nothing had happened or most of it had.
+
+        The failure injected here is the REACHABLE one: `write_run` turns
+        any OSError into an error dict and `_write` raises `InitError` for
+        it. The only handler was `except ToolCallDenied`, which a normal
+        /init cannot reach because consent is granted a few lines above."""
+        _fail_write_of(monkeypatch, "TECHNICAL_DEBT.md")
+
+        with pytest.raises(generator.InitError) as exc:
+            _generate()
+
+        message = str(exc.value)
+        assert "TECHNICAL_DEBT.md" in message
+        assert "CONTEXT.md" in message
+        assert "ARCHITECTURE.md" in message
+        # and the count is the count, not the whole document set
+        created = [n for n in doc_sets.document_set("software")
+                   if (project / n).exists()]
+        assert f"Wrote {len(created) + 1} files before that" in message
+
+    def test_a_failure_before_anything_was_written_says_so(
+            self, project, monkeypatch, fake_agent):
+        """The control on the line above: a message listing files must not
+        appear when there are none, and "Nothing was written" is a
+        different sentence from a list of length zero."""
+        _fail_write_of(monkeypatch, "CONTEXT.md")
+
+        with pytest.raises(generator.InitError) as exc:
+            _generate()
+        assert "Nothing was written." in str(exc.value)
+
+    def test_a_partial_write_leaves_a_trusted_project_trusted(
+            self, project, monkeypatch, fake_agent):
+        """The half with teeth. The partial write has already moved the D17
+        content hash, so a project the user trusted a moment ago is
+        untrusted -- exactly the state I6 exists to prevent, reached by the
+        route I6 was not looking at. Driven before the fix: True -> False,
+        and nothing said so."""
+        root = os.path.realpath(str(project))
+        workspace_trust.grant_trust(root)
+        assert workspace_trust.is_trusted(root) is True
+
+        _fail_write_of(monkeypatch, "TECHNICAL_DEBT.md")
+        with pytest.raises(generator.InitError) as exc:
+            _generate()
+
+        assert workspace_trust.is_trusted(root) is True
+        assert "trust re-granted" in str(exc.value)
+
+    def test_a_partial_write_does_not_launder_an_untrusted_project(
+            self, project, monkeypatch, fake_agent):
+        """I6's other half, and the control that stops the fix above from
+        becoming a hole. An untrusted project's .venastine/ may already
+        hold agents, skills and an mcp.json that arrived with a clone;
+        granting trust as a side effect of a FAILED /init would launder all
+        of it in through a door nobody is watching.
+
+        The clone is simulated rather than assumed: is_trusted() answers
+        True for a project with no .venastine/ at all ("nothing to trust"),
+        so an agent definition has to be there for the question to mean
+        anything."""
+        root = os.path.realpath(str(project))
+        agents = project / ".venastine" / "agents"
+        agents.mkdir(parents=True)
+        (agents / "arrived_with_the_repo.md").write_text(
+            "---\nname: x\n---\nbody\n", encoding="utf-8")
+        assert workspace_trust.is_trusted(root) is False
+
+        _fail_write_of(monkeypatch, "TECHNICAL_DEBT.md")
+        with pytest.raises(generator.InitError):
+            _generate()
+
+        assert workspace_trust.is_trusted(root) is False
+
+    def test_a_partial_write_is_not_rolled_back(self, project, monkeypatch,
+                                                fake_agent):
+        """U7, recorded as a test because the alternative is tempting.
+        Rolling back would delete documents out of someone's project on an
+        error path, and it would be a lie about the one file that matters:
+        CONTEXT.md's previous content was overwritten at the first step and
+        cannot be restored."""
+        _fail_write_of(monkeypatch, "TECHNICAL_DEBT.md")
+        with pytest.raises(generator.InitError):
+            _generate()
+        assert (project / "ARCHITECTURE.md").exists()
+        assert not (project / "TECHNICAL_DEBT.md").exists()
 
 
 # ---------------------------------------------------------------------------

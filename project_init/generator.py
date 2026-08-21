@@ -39,7 +39,12 @@ logger = logging.getLogger(__name__)
 
 class InitError(Exception):
     """Something /init cannot proceed past. Carries a message meant for a
-    human, not a traceback -- both shells print it as one line."""
+    human, not a traceback; both shells print it verbatim.
+
+    It may be several lines. A write that fails partway through has to say
+    what it already did (#95), and one line cannot carry "this failed" and
+    "these eight files exist now" without losing one of them.
+    """
 
 
 def propose_kind(project_path: str) -> tuple:
@@ -275,6 +280,7 @@ def generate(
     written = []
     facts = manifest_mod.detect_facts(root)
 
+    failure = None
     try:
         if diff:
             _write(registry, granted, CONTEXT_FILENAME, body)
@@ -283,10 +289,49 @@ def generate(
             _write(registry, granted, name, doc_sets.render_stub(name, facts))
             written.append(name)
     except ToolCallDenied as e:
-        raise InitError(f"The write was denied: {e}")
+        failure = f"The write was denied: {e}"
+    except InitError as e:
+        # THE REACHABLE FAILURE, and the one that had no handler (#95).
+        # `ToolCallDenied` cannot arrive here -- consent is granted a few
+        # lines up -- while `_write` raises `InitError` for every error
+        # dict `write_run` returns, and `write_run` turns ANY OSError into
+        # one. Disk full, permissions, a read-only mount: all of them took
+        # this path, and this path did not exist.
+        failure = str(e)
 
     # ---- 5. Trust ------------------------------------------------------
+    # ON BOTH PATHS (#95). The partial write has already moved the D17
+    # content hash, so a project the user trusted a moment ago is untrusted
+    # now -- exactly the state I6 exists to prevent, reached by the route
+    # I6 was not looking at. Its precondition is unchanged by the failure:
+    # they just authored this content, and that is as true after five of
+    # eight writes as after eight. Skipping this made the failure wrong
+    # about two things instead of one, and silent about the second.
     trust_note = _settle_trust(root, was_trusted)
+
+    if failure is not None:
+        # NAME WHAT WAS CREATED. The success path reports the files so the
+        # user knows what changed; the failure path reported the single
+        # file that did NOT change -- the one thing they could already see
+        # -- and discarded the list of the ones that did. "Could not write
+        # TECHNICAL_DEBT.md" left no way to tell whether nothing had
+        # happened or most of it had.
+        #
+        # NOTHING IS ROLLED BACK, deliberately. CONTEXT.md's previous
+        # content was overwritten at the first step and cannot be restored,
+        # so "rolled back" would be true of the stubs and false of the one
+        # file that mattered -- and deleting documents out of someone's
+        # project on an error path is a worse failure than the one being
+        # reported.
+        lines = [failure]
+        if written:
+            lines.append(f"Wrote {len(written)} file"
+                         f"{'' if len(written) == 1 else 's'} before that: "
+                         + ", ".join(written))
+        else:
+            lines.append("Nothing was written.")
+        lines.append(trust_note)
+        raise InitError("\n".join(line for line in lines if line))
 
     lines = [f"Wrote {len(written)} file{'' if len(written) == 1 else 's'}: "
              + ", ".join(written)]
