@@ -4,6 +4,14 @@ test_client_translation.py
 Verifies _tools_for_provider and _messages_for_provider -- the ONLY
 place provider-specific wire formats should exist (per ARCHITECTURE.md
 §4.7). Doesn't make SDK calls; only exercises translation logic.
+
+The response-parsing tests below used to drive the non-streaming
+sibling, `call_model`. It is gone (#38): it had no production caller and
+had already diverged from the streaming path on `raw`, while three
+documents asserted the two were equivalent. The branches these tests
+care about -- request construction and response parsing -- are the same
+ones `call_model_stream` runs, so they drive that instead, through
+`_call()` below.
 """
 
 import json
@@ -14,10 +22,35 @@ import pytest
 from core.client import (
     _tools_for_provider,
     _messages_for_provider,
-    call_model,
-    ModelResponse,
-    ToolCallRequest,
+    call_model_stream,
 )
+
+
+# `call_model_stream` reads supports_stream_usage from providers.json for
+# D21. That file is gitignored and is copied from the example in CI, where
+# three providers ship the flag true -- so without this the ported tests
+# below would pass or raise depending on the machine.
+@pytest.fixture(autouse=True)
+def _no_provider_data(monkeypatch):
+    monkeypatch.setattr("core.client.load_provider_data", lambda: {})
+
+
+def _call(client, provider_name, model, messages, system_prompt,
+          tool_schemas, temperature=None, effort=None):
+    """Drive the real streaming call and return its final ModelResponse.
+
+    This is what `collect_response()` did, kept local to the file that
+    needs it rather than shipped as a second public entry point nobody
+    calls -- which is how `call_model` got where it did.
+    """
+    final = None
+    for token in call_model_stream(client, provider_name, model, messages,
+                                   system_prompt, tool_schemas, temperature,
+                                   effort):
+        if token.final_response is not None:
+            final = token.final_response
+    assert final is not None, "call_model_stream yielded no final response"
+    return final
 
 
 # ---------------------------------------------------------------------------
@@ -374,16 +407,22 @@ def test_message_translation_preserves_message_count_for_user_assistant_history(
 # ---------------------------------------------------------------------------
 
 class _CapturingGoogleModels:
-    """Records the arguments passed to generate_content so tests can
-    verify request construction, not just response parsing."""
+    """Records the arguments passed to generate_content_stream so tests
+    can verify request construction, not just response parsing.
+
+    One chunk carrying the whole response: the streaming branch reads
+    `chunk.candidates[0].content.parts` and `chunk.usage_metadata` per
+    chunk, which is the same shape the non-streaming response had, so
+    the response builders below did not need changing.
+    """
 
     def __init__(self, response):
         self._response = response
         self.last_call = None
 
-    def generate_content(self, **kwargs):
+    def generate_content_stream(self, **kwargs):
         self.last_call = kwargs
-        return self._response
+        return iter([self._response])
 
 
 def _make_google_response(text="", function_calls=None, usage=None):
@@ -410,7 +449,7 @@ def test_call_model_google_text_only():
     models = _CapturingGoogleModels(resp)
     client = SimpleNamespace(models=models)
 
-    result = call_model(
+    result = _call(
         client=client,
         provider_name="GOOGLE",
         model="gemini-test",
@@ -445,7 +484,7 @@ def test_call_model_google_with_tool_call():
     models = _CapturingGoogleModels(resp)
     client = SimpleNamespace(models=models)
 
-    result = call_model(
+    result = _call(
         client=client,
         provider_name="GOOGLE",
         model="gemini-test",
@@ -476,7 +515,7 @@ def test_call_model_google_preserves_provided_id():
     models = _CapturingGoogleModels(resp)
     client = SimpleNamespace(models=models)
 
-    result = call_model(
+    result = _call(
         client=client,
         provider_name="GOOGLE",
         model="gemini-test",
@@ -496,9 +535,10 @@ def test_call_model_google_empty_candidates():
         candidates=[],
         usage_metadata=SimpleNamespace(prompt_token_count=10, candidates_token_count=0),
     )
-    client = SimpleNamespace(models=SimpleNamespace(generate_content=lambda **kw: resp))
+    client = SimpleNamespace(models=SimpleNamespace(
+        generate_content_stream=lambda **kw: iter([resp])))
 
-    result = call_model(
+    result = _call(
         client=client,
         provider_name="GOOGLE",
         model="gemini-test",
@@ -518,9 +558,10 @@ def test_call_model_google_null_content():
         candidates=[SimpleNamespace(content=None)],
         usage_metadata=SimpleNamespace(prompt_token_count=10, candidates_token_count=0),
     )
-    client = SimpleNamespace(models=SimpleNamespace(generate_content=lambda **kw: resp))
+    client = SimpleNamespace(models=SimpleNamespace(
+        generate_content_stream=lambda **kw: iter([resp])))
 
-    result = call_model(
+    result = _call(
         client=client,
         provider_name="GOOGLE",
         model="gemini-test",
@@ -533,43 +574,75 @@ def test_call_model_google_null_content():
 
 
 # ---------------------------------------------------------------------------
-# ---- call_model: temperature threading (ROADMAP §10) ---------------------
+# ---- temperature threading (ROADMAP §10) ---------------------------------
 # ---------------------------------------------------------------------------
+#
+# Anthropic and OpenAI streaming take different entry points from the
+# non-streaming ones these tests used to drive -- messages.stream() and
+# chat.completions.create(stream=True) -- so the fakes differ. Google's
+# is _CapturingGoogleModels above.
+
+
+def _stream_anthropic(captured):
+    final = SimpleNamespace(
+        content=[SimpleNamespace(type="text", text="ok")],
+        usage=SimpleNamespace(input_tokens=10, output_tokens=5),
+    )
+
+    class _S:
+        text_stream = ["ok"]
+
+        def get_final_message(self):
+            return final
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def stream(**kw):
+        captured.update(kw)
+        return _S()
+
+    return SimpleNamespace(messages=SimpleNamespace(stream=stream))
+
+
+def _stream_openai(captured):
+    chunk = SimpleNamespace(
+        choices=[SimpleNamespace(
+            delta=SimpleNamespace(content="ok", tool_calls=None),
+            finish_reason="stop")],
+        usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5),
+    )
+
+    def create(**kw):
+        captured.update(kw)
+        return iter([chunk])
+
+    return SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
 
 def test_call_model_passes_temperature_when_provided():
     """When temperature is explicitly given, it must appear in the API
     call kwargs for all three providers."""
     # Anthropic
-    resp = SimpleNamespace(
-        content=[SimpleNamespace(type="text", text="ok")],
-        usage=SimpleNamespace(input_tokens=10, output_tokens=5),
-    )
     captured = {}
-    def fake_create(**kw):
-        captured.update(kw)
-        return resp
-    client = SimpleNamespace(messages=SimpleNamespace(create=fake_create))
-    call_model(client, "ANTHROPIC", "m", [], "sys", [], temperature=0.7)
+    client = _stream_anthropic(captured)
+    _call(client, "ANTHROPIC", "m", [], "sys", [], temperature=0.7)
     assert captured["temperature"] == 0.7
 
     # OpenAI
-    resp2 = SimpleNamespace(
-        choices=[SimpleNamespace(message=SimpleNamespace(content="ok", tool_calls=None))],
-        usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5),
-    )
     captured2 = {}
-    def fake_create2(**kw):
-        captured2.update(kw)
-        return resp2
-    client2 = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=fake_create2)))
-    call_model(client2, "OPENAI", "m", [], "sys", [], temperature=0.7)
+    client2 = _stream_openai(captured2)
+    _call(client2, "OPENAI", "m", [], "sys", [], temperature=0.7)
     assert captured2["temperature"] == 0.7
 
     # Google
     resp3 = _make_google_response(text="ok", usage={"input_tokens": 10, "output_tokens": 5})
     models3 = _CapturingGoogleModels(resp3)
     client3 = SimpleNamespace(models=models3)
-    call_model(client3, "GOOGLE", "m", [], "sys", [], temperature=0.7)
+    _call(client3, "GOOGLE", "m", [], "sys", [], temperature=0.7)
     assert models3.last_call["config"].temperature == 0.7
 
 
@@ -577,36 +650,22 @@ def test_call_model_omits_temperature_when_none():
     """When temperature is None (default), it must NOT appear in the
     API call kwargs — each provider uses its own default."""
     # Anthropic
-    resp = SimpleNamespace(
-        content=[SimpleNamespace(type="text", text="ok")],
-        usage=SimpleNamespace(input_tokens=10, output_tokens=5),
-    )
     captured = {}
-    def fake_create(**kw):
-        captured.update(kw)
-        return resp
-    client = SimpleNamespace(messages=SimpleNamespace(create=fake_create))
-    call_model(client, "ANTHROPIC", "m", [], "sys", [])
+    client = _stream_anthropic(captured)
+    _call(client, "ANTHROPIC", "m", [], "sys", [])
     assert "temperature" not in captured
 
     # OpenAI
-    resp2 = SimpleNamespace(
-        choices=[SimpleNamespace(message=SimpleNamespace(content="ok", tool_calls=None))],
-        usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5),
-    )
     captured2 = {}
-    def fake_create2(**kw):
-        captured2.update(kw)
-        return resp2
-    client2 = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=fake_create2)))
-    call_model(client2, "OPENAI", "m", [], "sys", [])
+    client2 = _stream_openai(captured2)
+    _call(client2, "OPENAI", "m", [], "sys", [])
     assert "temperature" not in captured2
 
     # Google
     resp3 = _make_google_response(text="ok", usage={"input_tokens": 10, "output_tokens": 5})
     models3 = _CapturingGoogleModels(resp3)
     client3 = SimpleNamespace(models=models3)
-    call_model(client3, "GOOGLE", "m", [], "sys", [])
+    _call(client3, "GOOGLE", "m", [], "sys", [])
     assert models3.last_call["config"].temperature is None
 
 
@@ -705,3 +764,53 @@ def test_a_whitespace_only_assistant_turn_with_no_tool_calls_is_dropped():
     ])
     assert len(out) == 2
     assert out[1]["content"] == [{"type": "text", "text": "   "}]
+
+
+# ---------------------------------------------------------------------------
+# ---- What importing this module costs (ROADMAP_v2 §33 W7, #135) -----------
+# ---------------------------------------------------------------------------
+
+def test_importing_core_client_does_not_import_any_provider_sdk():
+    """The same contract as the two translation functions above, on the
+    other axis: a provider SDK is touched only at its point of use.
+
+    core.loop imports this module and main.py imports core.loop, so a
+    module-scope `from openai import OpenAI` is paid by every invocation
+    of either shell before argparse runs -- `--help`, `--summary`, a
+    mistyped flag, the thread picker. Measured before the fix: 1,766ms of
+    a 2,619ms `--help`, for three SDKs of which any one run uses at most
+    one.
+
+    A SUBPROCESS, because this cannot be asked inside the test session:
+    the root conftest stubs all three into sys.modules before collection,
+    so `"openai" in sys.modules` is True here no matter what this file
+    does. The full dotted name matters too -- `google` alone is a
+    namespace package that protobuf puts in sys.modules regardless, and
+    checking the first segment reports a false positive.
+
+    The failure mode this guards is a one-line convenience: someone needs
+    a type at module scope, adds the import back, and every launch in
+    every shell silently pays seconds again with nothing to notice it.
+    """
+    import os
+    import subprocess
+    import sys as _sys
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    probe = (
+        "import sys; import core.client; "
+        "print([m for m in ('openai', 'google.genai', 'anthropic') "
+        "if m in sys.modules])"
+    )
+    result = subprocess.run(
+        [_sys.executable, "-c", probe],
+        capture_output=True, text=True, cwd=root, timeout=120)
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "[]", (
+        f"importing core.client pulled in {result.stdout.strip()}. Each "
+        f"provider SDK belongs inside the branch that uses it -- and inside "
+        f"the BRANCH, not at the top of the enclosing function, or a "
+        f"GOOGLE-only name is paid on every Anthropic turn."
+    )

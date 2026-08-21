@@ -1,16 +1,30 @@
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Optional
 from uuid import UUID, uuid4
 import json
 import logging
 
-from openai import OpenAI
-from google import genai
-from google.genai import types as genai_types
-from anthropic import Anthropic
-
 from credentials import load_provider_data
 import config
+
+# ROADMAP_v2 §33 W7 (#135). The three provider SDKs are NOT imported here.
+#
+# core.loop imports this module and main.py imports core.loop, so a module
+# -scope `from openai import OpenAI` is paid by every invocation of either
+# shell -- `--help`, `--summary`, a mistyped flag, the thread picker --
+# before argparse runs. Measured on Windows: 5.6s to print --help, of
+# which 3.5s was the three SDKs, and no run uses more than one of them.
+#
+# Each import therefore sits at the point of use, INSIDE the branch that
+# needs it rather than at the top of the enclosing function: a
+# GOOGLE-only name imported at the top of `_messages_for_provider` would
+# be paid on every Anthropic turn, which is most of them, and would leave
+# the defect in place while looking fixed.
+#
+# Deferred imports are otherwise not this file's idiom. The trade is
+# stated here rather than left to be re-derived: `import` is cached after
+# the first call, so the cost is a dict lookup per call on the hot path
+# and seconds saved on every launch that never makes one.
 
 logger = logging.getLogger(__name__)
 
@@ -31,10 +45,13 @@ def api_initialization(provider_name: str):
     entry = provider_data[provider_name]
 
     if entry.get("is_v1_compatible", False):
+        from openai import OpenAI
         client = OpenAI(base_url=entry["API_URL"], api_key=entry["API_KEY"])
     elif provider_name == "GOOGLE":
+        from google import genai
         client = genai.Client(api_key=entry["API_KEY"])
     elif provider_name == "ANTHROPIC":
+        from anthropic import Anthropic
         client = Anthropic(api_key=entry["API_KEY"])
         # Add further proprietary API formats here
     else:
@@ -42,17 +59,6 @@ def api_initialization(provider_name: str):
 
     _client_cache[provider_name] = client
     return client
-
-
-def list_models(client) -> list[str]:
-    models = client.models.list()
-    return [model.id for model in models.data]
-
-
-def select_model(selected_model: str, available_models: list[str]) -> str:
-    if selected_model in available_models:
-        return selected_model
-    raise ValueError(f"Model '{selected_model}' is not in the available models list")
 
 
 # ============================================================================
@@ -64,13 +70,23 @@ class ToolCallRequest:
     id: str
     name: str
     input: dict
+    # §33 W2 (#37). Set when the provider's `arguments` string could not
+    # be read as a JSON object -- most often because the response was cut
+    # off mid-arguments by the token limit. TRANSPORT ONLY: it describes
+    # one wire read, not the thread, so `add_assistant_message` persists
+    # {id, name, input} exactly as before and this never reaches storage.
+    #
+    # The call is still constructed rather than dropped. The model made a
+    # call and is owed an answer about it; a silently missing tool_result
+    # is M4's pairing defect, and `input={}` with no error would run the
+    # tool with arguments nobody sent.
+    parse_error: Optional[str] = None
 
 
 @dataclass
 class ModelResponse:
     text: str
     tool_calls: list[ToolCallRequest] = field(default_factory=list)
-    raw: Any = None  # original SDK response, kept for logging/debugging only
     usage: dict = field(default_factory=lambda: {"input_tokens": 0, "output_tokens": 0})
     stop_reason: str = "complete"  # set by RunAgentLoop._run(), not here -- see core/loop.py
     thread_id: Optional[UUID] = None  # set by the public entry points (run_deep_research_mode,
@@ -94,6 +110,62 @@ class ModelResponse:
     # generator, but the CLI and the pipeline drain it, so a notice with
     # only the event route would be invisible in two shells out of three.
     notices: list = field(default_factory=list)
+
+
+def _tool_arguments(raw_args: str, tool_name: str,
+                    finish_reason: Optional[str] = None) -> tuple:
+    """(input, parse_error) for one provider `arguments` string.
+
+    The ONLY place a wire string is parsed as JSON. Google and Anthropic
+    hand back dicts, so this is the OpenAI-compatible branch's alone --
+    which is the branch a local model server takes, and truncated or
+    malformed tool arguments are likeliest there.
+
+    §33 W1 (#37): a failure is RETURNED, not raised. `dispatch()` turning
+    handler exceptions into {"error": ...} is the whole reason a raising
+    TOOL cannot kill a run; nothing played that role for a raising
+    TRANSLATION one layer up, so a response cut mid-arguments took a
+    JSONDecodeError out of this generator, out of _run(), and into the
+    pipeline's `except Exception` -- recording status='failed' on a
+    finished ten-pass run.
+
+    §33 W4: `finish_reason` is what separates "the provider emitted bad
+    JSON" from "the answer was cut off", which is the likeliest cause by
+    far and the only one the model can act on.
+    """
+    # W9: no arguments is not an error. `get_time` declares properties=[]
+    # and `pin` has no required parameters, so this is a live path -- and
+    # json.loads("") raises. Dropping this fallback was green on the whole
+    # suite when audit unit 3 mutated it (P10).
+    if not raw_args:
+        return {}, None
+
+    try:
+        parsed = json.loads(raw_args)
+    except json.JSONDecodeError as exc:
+        if finish_reason == "length":
+            return {}, (
+                f"The arguments for {tool_name} were cut off by the response "
+                f"token limit, so the call could not be made. Reissue it with "
+                f"shorter arguments."
+            )
+        return {}, (
+            f"The arguments for {tool_name} were not valid JSON ({exc.msg}), "
+            f"so the call could not be made. Reissue it with valid JSON "
+            f"arguments."
+        )
+
+    # Valid JSON that is not an object -- "null", "[1,2]", "3". Rarer than
+    # a truncation and caught in the same place because the consequence is
+    # the same: dispatch() would be handed something that is not params.
+    if not isinstance(parsed, dict):
+        return {}, (
+            f"The arguments for {tool_name} parsed as "
+            f"{type(parsed).__name__}, not a JSON object, so the call could "
+            f"not be made. Reissue it with a JSON object."
+        )
+
+    return parsed, None
 
 
 @dataclass
@@ -123,6 +195,7 @@ def _tools_for_provider(provider_name: str, tool_schemas: list[dict]):
         return tool_schemas
 
     if provider_name == "GOOGLE":
+        from google.genai import types as genai_types
         return [genai_types.Tool(
             function_declarations=[
                 genai_types.FunctionDeclaration(
@@ -202,6 +275,7 @@ def _messages_for_provider(provider_name: str, neutral_messages: list[dict]) -> 
                         if not _is_empty_assistant_turn(m)]
 
     if provider_name == "GOOGLE":
+        from google.genai import types as genai_types
         # Build a {tool_call_id: function_name} lookup from assistant
         # messages so we can populate FunctionResponse.name (required by
         # Google but absent from the neutral tool-result shape).
@@ -538,6 +612,8 @@ def _google_supports_thinking_budget() -> bool:
     reasoning effort is simply unavailable on Google until the pin moves.
     D22's rule, applied: check the dependency's real shape, don't assume it.
     """
+    from google.genai import types as genai_types
+
     global _google_budget_support
     if _google_budget_support is None:
         fields = getattr(genai_types.ThinkingConfig, "model_fields", {})
@@ -575,6 +651,7 @@ def _thinking_for_provider(provider_name: str, effort: Optional[str]) -> dict:
             "output_config": {"effort": effort},
         }
     if provider_name == "GOOGLE":
+        from google.genai import types as genai_types
         budget = config.GOOGLE_THINKING_BUDGETS.get(effort)
         if budget is None or not _google_supports_thinking_budget():
             return {}
@@ -582,136 +659,9 @@ def _thinking_for_provider(provider_name: str, effort: Optional[str]) -> dict:
     return {"reasoning_effort": effort}
 
 
-def call_model(
-    client,
-    provider_name: str,
-    model: str,
-    messages: list[dict],
-    system_prompt: str,
-    tool_schemas: list[dict],
-    temperature: Optional[float] = None,
-    effort: Optional[str] = None,
-) -> ModelResponse:
-    """
-    One call to the model, regardless of provider. `messages` is the
-    provider-NEUTRAL history from ConversationMemory -- translated here,
-    just before the actual API call, into whatever shape the target
-    provider expects. The system prompt is passed separately since
-    Anthropic and OpenAI disagree about where it belongs.
-
-    `effort` is the reasoning-effort level (§16); None sends nothing.
-    """
-    translated_messages = _messages_for_provider(provider_name, messages)
-    sampling = _sampling_kwargs(provider_name, model, temperature)
-    thinking = _thinking_for_provider(provider_name, effort)
-
-    if provider_name == "ANTHROPIC":
-        kwargs = dict(
-            model=model,
-            max_tokens=config.MAX_TOKENS,
-            system=system_prompt,
-            messages=translated_messages,
-            tools=_tools_for_provider(provider_name, tool_schemas),
-        )
-        kwargs.update(sampling)
-        kwargs.update(thinking)
-        response = client.messages.create(**kwargs)
-        text = "\n".join(b.text for b in response.content if b.type == "text")
-        calls = [
-            ToolCallRequest(id=b.id, name=b.name, input=b.input)
-            for b in response.content if b.type == "tool_use"
-        ]
-        usage_obj = getattr(response, "usage", None)
-        usage = {
-            "input_tokens": getattr(usage_obj, "input_tokens", 0) if usage_obj else 0,
-            "output_tokens": getattr(usage_obj, "output_tokens", 0) if usage_obj else 0,
-        }
-        return ModelResponse(text=text, tool_calls=calls, raw=response, usage=usage)
-
-    if provider_name == "GOOGLE":
-        genai_config_kwargs = dict(
-            system_instruction=system_prompt,
-            tools=_tools_for_provider(provider_name, tool_schemas),
-            max_output_tokens=config.MAX_TOKENS,
-        )
-        genai_config_kwargs.update(sampling)
-        genai_config_kwargs.update(thinking)
-        response = client.models.generate_content(
-            model=model,
-            contents=translated_messages,
-            config=genai_types.GenerateContentConfig(**genai_config_kwargs),
-        )
-        # response.text raises ValueError when function_call parts are
-        # present, so we must iterate parts manually. Guard against
-        # empty candidates (safety filter) and null content (blocked
-        # candidate) — both are documented, non-exceptional API outcomes.
-        candidate = response.candidates[0] if response.candidates else None
-        content = candidate.content if candidate else None
-        parts = content.parts if content else []
-        text = "".join(p.text for p in parts if p.text is not None)
-        calls = []
-        for p in parts:
-            if p.function_call is not None:
-                fc = p.function_call
-                calls.append(ToolCallRequest(
-                    id=fc.id or str(uuid4()),
-                    name=fc.name,
-                    input=fc.args or {},
-                ))
-        usage_meta = getattr(response, "usage_metadata", None)
-        usage = {
-            "input_tokens": getattr(usage_meta, "prompt_token_count", 0) if usage_meta else 0,
-            "output_tokens": getattr(usage_meta, "candidates_token_count", 0) if usage_meta else 0,
-        }
-        return ModelResponse(text=text, tool_calls=calls, raw=response, usage=usage)
-
-    # OpenAI-compatible path
-    full_messages = [{"role": "system", "content": system_prompt}] + translated_messages
-    openai_kwargs = dict(
-        model=model,
-        messages=full_messages,
-        # max_completion_tokens, NOT max_tokens -- max_tokens is deprecated
-        # across the Chat Completions API and is rejected outright by
-        # reasoning (o-series) models. max_completion_tokens works
-        # uniformly across both reasoning and non-reasoning models.
-        max_completion_tokens=config.MAX_TOKENS,
-        tools=_tools_for_provider(provider_name, tool_schemas),
-    )
-    openai_kwargs.update(sampling)
-    openai_kwargs.update(thinking)
-    response = client.chat.completions.create(**openai_kwargs)
-    choice = response.choices[0].message
-    text = choice.content or ""
-    calls = [
-        ToolCallRequest(id=tc.id, name=tc.function.name, input=json.loads(tc.function.arguments))
-        for tc in (choice.tool_calls or [])
-    ]
-    usage_obj = getattr(response, "usage", None)
-    usage = {
-        "input_tokens": getattr(usage_obj, "prompt_tokens", 0) if usage_obj else 0,
-        "output_tokens": getattr(usage_obj, "completion_tokens", 0) if usage_obj else 0,
-    }
-    return ModelResponse(text=text, tool_calls=calls, raw=response, usage=usage)
-
-
 # ============================================================================
 # ---- Streaming call + helpers -----------------------------------------------
 # ============================================================================
-
-def collect_response(gen) -> ModelResponse:
-    """Drain a call_model_stream() generator into a single ModelResponse.
-    For callers that need the streaming path internally but only care
-    about the final result (analogous to run_to_completion for _run())."""
-    final = None
-    for token in gen:
-        if token.final_response is not None:
-            final = token.final_response
-    if final is None:
-        raise RuntimeError(
-            "call_model_stream completed without yielding a final response"
-        )
-    return final
-
 
 def call_model_stream(
     client,
@@ -723,14 +673,21 @@ def call_model_stream(
     temperature: Optional[float] = None,
     effort: Optional[str] = None,
 ):
-    """Generator sibling to call_model(). Yields StreamToken events:
-    text_delta for incremental text, final_response for the terminal
-    ModelResponse with accumulated tool calls and usage.
+    """The one model call, for every provider. Yields StreamToken
+    events: text_delta for incremental text, final_response for the
+    terminal ModelResponse with accumulated tool calls and usage.
 
     Three provider implementations — Anthropic typed events, Google
     chunked candidates, OpenAI-compatible index-accumulated tool-call
-    fragments. Each must produce a ModelResponse identical to what
-    call_model() produces for the same inputs.
+    fragments — which must agree with each other about the ModelResponse
+    they produce for the same inputs.
+
+    There used to be a non-streaming `call_model()` beside this, and this
+    docstring used to promise the two were identical. They were not: it
+    set ModelResponse.raw and no streaming branch did, which is what a
+    second implementation nobody runs accumulates (#38). It is gone, and
+    with it `raw`; the only thing left to keep in step is the three
+    branches below.
 
     D21 (usage-or-raise): if the provider is marked as supporting stream
     usage but the stream completes with zero usage, raise rather than
@@ -808,6 +765,7 @@ def call_model_stream(
         return
 
     if provider_name == "GOOGLE":
+        from google.genai import types as genai_types
         genai_config_kwargs = dict(
             system_instruction=system_prompt,
             tools=_tools_for_provider(provider_name, tool_schemas),
@@ -876,9 +834,17 @@ def call_model_stream(
     tool_fragments: dict[int, dict] = {}
     usage = {"input_tokens": 0, "output_tokens": 0}
 
+    finish_reason = None
     for chunk in client.chat.completions.create(**openai_kwargs):
         if chunk.choices:
-            delta = chunk.choices[0].delta
+            # W4 (#37): free -- chunk.choices[0] is already read here. The
+            # provider sets this on the last content chunk, and `or
+            # finish_reason` keeps it once seen because the usage chunk
+            # that follows carries none. getattr because a chunk is only
+            # required to have `delta`.
+            choice = chunk.choices[0]
+            finish_reason = getattr(choice, "finish_reason", None) or finish_reason
+            delta = choice.delta
             if delta.content:
                 text_parts.append(delta.content)
                 yield StreamToken(text_delta=delta.content)
@@ -920,11 +886,14 @@ def call_model_stream(
     calls = []
     for idx in sorted(tool_fragments):
         frag = tool_fragments[idx]
-        raw_args = "".join(frag["arguments_parts"])
+        name = "".join(frag["name_parts"])
+        parsed, parse_error = _tool_arguments(
+            "".join(frag["arguments_parts"]), name, finish_reason)
+        if parse_error is not None:
+            logger.warning(
+                "%s: %s (finish_reason=%r)", name, parse_error, finish_reason)
         calls.append(ToolCallRequest(
-            id=frag["id"],
-            name="".join(frag["name_parts"]),
-            input=json.loads(raw_args) if raw_args else {},
+            id=frag["id"], name=name, input=parsed, parse_error=parse_error,
         ))
 
     yield StreamToken(final_response=ModelResponse(

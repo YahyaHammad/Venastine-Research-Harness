@@ -153,9 +153,19 @@ def test_google_gate_inspects_the_sdk_class(monkeypatch, fields, expected):
 
     The conftest fake even disagrees with the pinned SDK, so asserting
     through it would prove the fake, not the code.
+
+    Patched on `google.genai.types` itself rather than on a
+    `core.client.genai_types` attribute, which is where it used to live:
+    §33 W7 (#135) moved that import inside the GOOGLE branch that needs
+    it, so there is no module-scope name to patch any more. This target
+    is the stricter of the two -- it is the module the function actually
+    imports from, so a rename of the import would fail here rather than
+    quietly patching something nothing reads.
     """
+    from google.genai import types as genai_types_mod
+
     monkeypatch.setattr(client_module, "_google_budget_support", None)
-    monkeypatch.setattr(client_module.genai_types, "ThinkingConfig",
+    monkeypatch.setattr(genai_types_mod, "ThinkingConfig",
                         SimpleNamespace(model_fields=fields))
 
     assert client_module._google_supports_thinking_budget() is expected

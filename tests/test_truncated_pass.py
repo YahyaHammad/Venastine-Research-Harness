@@ -101,8 +101,8 @@ class TestATruncatedPassIsDetected:
     def test_a_response_with_no_stop_reason_is_not_treated_as_truncated(
             self, mocker):
         """`stop_reason` is set by _run()/the wrappers, never by
-        call_model(). A response that somehow lacks it must not be read as
-        a failure -- absence is not evidence of truncation."""
+        call_model_stream(). A response that somehow lacks it must not be
+        read as a failure -- absence is not evidence of truncation."""
         response = make_model_response(text="fine")
         del response.stop_reason
         _pass_returning(mocker, response)

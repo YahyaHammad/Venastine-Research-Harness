@@ -251,12 +251,19 @@ class ConversationMemory:
 
     def add_assistant_message(self, response) -> None:
         """
-        Takes the NORMALIZED ModelResponse from core.client.call_model()
-        directly -- not a raw SDK object. This is what eliminates the
-        previous Anthropic-only `response.raw.content` reach-through in
-        loop.py; every provider's call_model() already produces the same
-        ModelResponse shape (.text, .tool_calls), so this method never
-        needs to know which provider generated it.
+        Takes the NORMALIZED ModelResponse from
+        core.client.call_model_stream() directly -- not a raw SDK object.
+        This is what eliminated the previous Anthropic-only
+        `response.raw.content` reach-through in loop.py; all three
+        provider branches produce the same ModelResponse shape (.text,
+        .tool_calls), so this method never needs to know which provider
+        generated it.
+
+        This used to name `call_model()`, which had no production caller
+        (#38) -- so the one sentence telling a reader where this argument
+        comes from named a function that never produced one. `raw` went
+        with it: it was set only there, so it was None on every live path
+        while its comment said it held the SDK response.
         """
         tool_calls = [
             {"id": tc.id, "name": tc.name, "input": tc.input}
