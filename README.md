@@ -277,7 +277,7 @@ Symmetric, and applied centrally to every tool in every mode rather than by tool
 
 ### Project directories are untrusted until you say otherwise
 
-A repo you clone can carry `.venastine/` — agents, skills, `settings.json`, `mcp.json`, `CONTEXT.md`. On first run in a directory you are shown what it contains and asked once. Until then that content is **absent, not loaded-and-disabled**. Trust is keyed to the resolved path *and* a content hash, so it does not silently carry over when the files change.
+A repo you clone can carry `.venastine/` — agents, skills, `settings.json`, `mcp.json`, `CONTEXT.md`. On first run in a directory you are shown what it contains and asked once — the file list, `settings.json` and `mcp.json` verbatim, and **every agent's and skill's description**, because those go into the system prompt of every run in the project the moment you say yes. Until then that content is **absent, not loaded-and-disabled**. Trust is keyed to the resolved path *and* a content hash, so it does not silently carry over when the files change.
 
 ```bash
 python main.py --trust-project        # for CI and scripts
@@ -338,6 +338,12 @@ Removal is by id, never by substring: a substring matching two memories would ha
 Markdown files with YAML frontmatter, discovered from three tiers (built-in, yours at `~/.config/venastine/`, the project's at `.venastine/`). Agents set a system prompt and a tool policy; skills pin a body of instructions into the session. `/agent`, `/skill`, `/goal`, `/grill-me`.
 
 A skill declaring `additional_tools` is stating a *need*, not granting anything — activation proceeds and tells you what is missing.
+
+An agent declares `spawnable` — whether the `spawn_subagent` tool can actually feed it. A task string in a fresh thread is all a spawn can pass, and an agent that needs a transcript, a thread or a finished research run cannot be given one; spawning it anyway produces a confident answer about nothing. The four built-in agents each have a real caller that supplies what they need, so none of them is spawnable, and the catalog no longer offers them as a route that cannot work. Your own agents are not spawnable unless they say so.
+
+### A description is text, and the prompt treats it as one line
+
+An agent's or a skill's `name` and `description` go straight into the system prompt, so they are collapsed to a single line and capped at 300 characters when the file is read. Without that, a description written as a multi-line YAML block escapes its bullet and renders as a section of the prompt in its own right — indistinguishable from one this harness wrote. The cap is generous next to real ones: the longest description shipped here is 171 characters.
 
 ### MCP servers
 

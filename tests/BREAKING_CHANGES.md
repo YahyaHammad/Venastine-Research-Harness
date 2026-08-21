@@ -2368,3 +2368,78 @@ contract) with a different tool.
 H3's second layer is POSIX-only and its two tests skip on Windows. That makes the container run
 load-bearing rather than confirmatory: a guard whose test can skip is not verified until the mutation
 runs where the test does (§21's rule).
+
+
+## §28 — the twelfth fix batch: the catalogs (2026-08-21)
+
+> **Section-number collision, named rather than renumbered.** This file's counter is independent of
+> ROADMAP_v2's — §19–§23 and §25–§27 already collide the same way — so this §28 is the twelfth fix
+> batch, recorded in ROADMAP_v2 **§32**. Audit **#17** owns the overloaded-namespace family.
+
+Closes audit **#68** (S2), **#131** (S2, security), **#69** (S3), **#70** (S3), **#71** (S3) and
+**#72** (S3). ROADMAP_v2 **§32**, decisions **A1–A11**.
+
+### The two changes that break a file outside this repository, stated first
+
+**1. A harness-tier agent must declare `spawnable`.** `config_loader.assert_spawnable_declared()`
+runs inside `initialize()` and raises `RuntimeError` naming every offender. A fork's extra
+`agents/builtin/*.md` now fails at startup rather than being silently advertised as a delegation
+target that cannot be fed.
+
+The asymmetry is the decision: **user- and project-tier agents that omit it load as
+not-spawnable and do not raise.** R13's "omission must be a detectable mistake" is a rule about
+fields on things this project declares. Applied to a file someone else wrote it gives the wrong
+answer — raising there would take down startup over a stranger's frontmatter, which is the trade
+`_parse_md_file` refuses everywhere else in that module.
+
+**2. `name` and `description` are rewritten at parse time.** `_catalog_text()` collapses all
+whitespace to single spaces and truncates at `config.MAX_CATALOG_TEXT_CHARS` (300). A multi-line
+description is no longer multi-line, anywhere. Every shipped file already complies —
+`test_no_shipped_description_is_altered_by_the_bound` asserts it — so nothing in this repository
+changes shape, but a project relying on a formatted description will see it flattened.
+
+### If you change this, this is what fails
+
+| change | what fails | why it is that way |
+|---|---|---|
+| Point `with_catalogs` back at `registry.is_allowed` | `test_a_gated_load_skill_suppresses_the_SKILL_catalog_too` for the skill half; `test_no_pass_prompt_invites_a_tool_the_pass_cannot_call` for the agent half | `is_allowed` is POLICY — "is this tool permitted", not "can this run call it". The skill half is the narrow one: the two agree everywhere the shipped install reaches, and differ only for an agent declaring `approval_overrides: {load_skill: true}` on a headless run |
+| Give `is_advertised` a filter of its own instead of the one `schemas()` uses | `test_is_advertised_agrees_with_schemas_for_every_tool`, parametrised over both modes and every registered tool | A wrapper that merely LOOKED like the filter would pass a test naming one tool. Agreement is the property A1 buys, so it is asserted over the whole registry |
+| Write `headless_hidden()` as a hand-copied negation again | `test_headless_hidden_is_exactly_the_difference` | #67/#133 are what a shared mechanism with a duplicated policy costs. It is now literally "advertised attended, not advertised headless" |
+| Default `with_catalogs(callable_only=...)` to `True` | `test_an_attended_pass_still_gets_the_catalog` | §25's point: a pass WITH a channel can ask, so hiding its catalog reports a limitation the run does not have |
+| Stop passing the facts at `run_deep_research_mode` | `test_an_unattended_pass_is_not_told_to_spawn` | Everything else drives `pass_prompt` directly, which pins the FUNCTION and not the call. This mutation survived the whole suite once — the fix correct and unreached, which is #68's own shape |
+| Make `advertisement_facts(None)` return "attended" | `test_no_bundle_means_headless` | `_authorization_kwargs` returns `{}` for `None`, so `response_channel` stays `None` and `_run` reads that as headless. Any other answer advertises a catalog to exactly the runs that cannot use it |
+| Drop the whitespace collapse from `_catalog_text` | `test_the_forged_section_cannot_reach_a_system_prompt` | This is the security half, not a tidiness. The catalogs render `- {name}: {description}`, so a newline does not look untidy — it LEAVES ITS BULLET and forges a top-level prompt section |
+| Apply the bound to `description` but not `name` | `test_the_name_is_normalised_too` | Both are interpolated into the same line. The name is the half a reader is less likely to think of |
+| Widen the cap check to `<= MAX + 1` | `test_a_description_at_the_cap_is_untouched` | Its earlier form asserted `!= exact`, which an off-by-one satisfies: the over-cap string comes back unchanged and is indeed not the shorter one. "Different from" is not "bounded by" |
+| Refuse an over-long description instead of truncating | Nothing fails — and it is the wrong trade | A description is advisory prose read by a model, so it degrades gracefully. Skipping the file loses a whole working skill over the length of its summary. The one exception is a name collapsing to `""`, which DOES hand back to skip-and-warn: D18's collision rule cannot reason about a nameless definition |
+| Show the RAW frontmatter in the trust prompt | `test_what_is_shown_is_what_would_be_injected` | A summary displaying something other than what reaches the prompt is worse than showing nothing — it invites trust in a string that is not the one used |
+| Skip an unparseable project definition in the summary | `test_an_unreadable_definition_is_reported_not_hidden` | This function runs only on untrusted content. "This file is here and I cannot tell you what it says" is a fact the person answering needs, and silently omitting it makes a malformed file the way to stay out of the summary |
+| Default `spawnable` to `True` when undeclared | `test_a_user_agent_that_omits_it_loads_as_not_spawnable`, `test_no_spawnable_agent_means_no_section_at_all` | An agent written for `/agent` and silently advertised as spawnable is #69's actual complaint |
+| Extend the harness-tier assertion to every tier | `test_a_user_agent_that_omits_it_loads_as_not_spawnable` | See the asymmetry above. Our omission is a build error; a stranger's gets the safe answer |
+| Treat `spawnable: false` as a ban rather than a catalog filter | `test_a_non_spawnable_agent_is_still_reachable_by_hand` | `/agent` lists `manager.names()`. A human selecting `grill-me` supplies the thread it needs by BEING in one — the agent is not broken, the delegation route is |
+| Clear `needs_approval` in the loop without a dispatch-side check | `test_the_refusal_still_reaches_the_model` | `needs_approval = False` is not "proceed". dispatch re-checks approval itself, finds no callback, and reports "requires approval and was not given" — a cause that is not the cause, and worse than the empty modal it replaced |
+| Move the pre-flight after dispatch's approval gate | `test_an_unknown_agent_produces_no_question` plus the test above | The order IS the fix |
+| Raise `ToolCallDenied` from the pre-flight instead of returning | `test_the_handler_returns_exactly_what_the_pre_flight_reported` | A refusal is the tool's own answer about its own call. `ToolCallDenied` means policy blocked you, which is a different fact the model should be able to tell apart |
+| Have `refusal_reason` return a reason for everything | `test_a_valid_spawn_IS_still_asked_about` | It would satisfy every "no question was raised" assertion while silently removing §18's sign-off — the mechanism that makes delegation something a human agreed to |
+| Give chat the pipeline's closing sentence | `test_chat_names_the_person` | It tells a chat turn its instructions come from a pipeline it is not in. Asserted on `DEFAULT_SYSTEM_PROMPT`, not on the constant: an earlier version checked the constant, so swapping which one `core/loop.py` reaches for was invisible |
+| Keep a second copy of the defence paragraph | `test_there_is_exactly_one_copy_on_disk` | Two copies is how one gets improved and the other does not, and the one that does not would be whichever mode nobody was thinking about — which is how #72 happened |
+| Edit the preamble so a pass prompt changes | `test_the_pass_prompt_is_byte_identical`, per pass, by digest | A8 moves text between files. Rewriting ten pass prompts is not something to do as a side effect of a chat fix. If the change is deliberate, the digest is what needs updating — and the failure is the prompt to think about whether the pipeline meant to change |
+| Rename `zulu`/`alpha` back to `first`/`second` in the pinning test | `test_multiple_active_skills_are_pinned_in_order` stops discriminating — nothing fails | `sorted(["first", "second"])` is already that order, so the one test named for the pinning order held whether `prompt_fragment` preserved activation order or sorted. The assertion was right; the inputs could not tell the implementations apart |
+| Call `headless_hidden()` with no context in `candidate_approvals` | `test_candidate_approvals_is_computed_FOR_THE_CHILD_not_globally` | Not an escalation — `allowed_tools` still narrows at dispatch. The defect is the sign-off NOTICE promising authority the grant does not carry, which that function's own docstring calls worse than not offering it |
+| Start `active_context` at `subagent_depth=1` | `test_active_context_starts_at_depth_zero` | It silently halves the nesting budget for a `/agent`-switched session and nothing reports the difference |
+| Let the parent run's model beat the agent's declared one | `test_an_agents_declared_model_beats_the_parent_runs` | "An agent's declared model/provider is its identity", and `effort_for`'s docstring cites this exact inversion as one of three ways a wrong effort used to reach the wire |
+
+### Two things measured here that are not this batch's doing
+
+**No shipped builtin is both approval-gated and `GRANT_ANYWHERE`** — `remember` and
+`spawn_subagent` are `never`, `write_project_doc` is `signoff_only` — so R15's granted branch in
+`is_advertised`/`schemas()` is reachable today only by an MCP tool. Its control test registers one
+rather than selecting off the roster, because a skipping control is not a control.
+
+**A fix that empties a collection makes every test asserting absence from that collection vacuous.**
+A4 emptied the agent catalog, and three assertions in `test_review.py::TestCatalogsFollowTheContext`
+would have passed for the wrong reason — *absent because the context suppressed it* and *absent
+because there was nothing to suppress* are the same observation. That class now has three recorded
+instances (§31's `os.times()`, #71's `first`/`second`, this), and this is the first found by making
+the change rather than by sweeping for it. The batch that empties the collection is the only moment
+anyone is positioned to notice.
