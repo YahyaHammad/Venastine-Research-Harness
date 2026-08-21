@@ -495,3 +495,274 @@ def test_the_url_blocklist_is_defined_exactly_once():
         f"BLOCKED_DOMAINS is defined in {defining}; a security control with "
         "two definitions has none that a reader can trust")
     assert defining[0].replace(os.sep, "/") == "safety/policy_enforcement.py"
+
+
+# ---------------------------------------------------------------------------
+# ---- #16 / #17 / #147: the record's index ----------------------------------
+# ---------------------------------------------------------------------------
+#
+# Three issues, one defect. #16: sixteen decisions defined only in DEVLOG
+# while the map said the ROADMAPs carried them. #17: two prefixes carrying
+# two numbering schemes each -- three, measured. #147: a whole family cited
+# as authority in six production files and defined nowhere, whose one
+# lookupable id resolved to a different decision.
+#
+# #147 argued for "one mechanical check over all of them rather than three
+# prose fixes", because prose fixes are the thing that already drifted. Same
+# rule as the rest of this file: a claim earns a check by having ALREADY
+# drifted, and only if the truth is something the suite can compute.
+#
+# What makes this computable is that ids are a closed set with two sides --
+# what the record DEFINES and what the code CITES -- and both are readable.
+
+_RECORD_DOCS = ("ROADMAP.md", "ROADMAP_v2.md")
+
+# THREE SHAPES FOR ONE DEFINITION, and this is the load-bearing detail. The
+# record writes a decision as a table row (`| **U1** | ... |`), as a bolded
+# lead with the dash INSIDE the bold (`**M1 -- Compaction defends...**`), or
+# as a plain table row with no bold (`| D1 | Build order | ... |`). A scanner
+# that knows only the first reports the entire M family -- 21 ids -- as
+# undefined, which is what the first census in this batch did before anyone
+# noticed the number was wrong. test_the_definition_scanner_sees_every_shape
+# below is what stops that from being silent.
+_DEFINITION_ROW = re.compile(r"^\|\s*\*{0,2}([A-Z]{1,2}\d+[a-z]?)\*{0,2}\s*\|")
+_DEFINITION_LEAD = re.compile(r"^\s*(?:[-*]\s*)?\*\*([A-Z]{1,2}\d+[a-z]?)\b")
+
+# A citation in code. The leading (?<!-) is not decoration: "[a-zA-Z0-9]"
+# inside a regex literal yields the token "Z0", and safety/policy_enforcement
+# has four of those.
+_CITATION = re.compile(r"(?<![A-Za-z0-9_\-])([A-Z]{1,2}\d{1,2})(?![A-Za-z0-9_])")
+
+# The five namespaces that are NOT the record, each declaring which ids it
+# covers and how a citation announces it. Covering matters: without it,
+# "§32 A3" would read as an acceptance criterion merely because a section
+# number precedes it, and A3 is a decision. AGENTS.md carries the same table
+# in prose -- if you add a namespace, add it in both places.
+_NAMESPACES = (
+    # Section-scoped, so the SECTION is the qualifier and it may sit anywhere
+    # earlier on the line: "§23 (AC1)" and "§27 T2 / AC6" are already
+    # unambiguous to a reader, and rewriting them would be churn.
+    ("acceptance criterion", re.compile(r"^AC\d+$"), re.compile(r"§\s*\d+")),
+    ("pipeline gate", re.compile(r"^D[012]$"), re.compile(r"gate\s*$", re.I)),
+    ("Rev. 1 open question", re.compile(r"^S1[126]$"),
+     re.compile(r"Rev\.?\s*1\s*$", re.I)),
+    ("mutation id", re.compile(r"^[A-Z]{1,2}\d+$"),
+     re.compile(r"mutation\s*$", re.I)),
+    ("review finding", re.compile(r"^F\d+$"),
+     re.compile(r"finding\s*$", re.I)),
+)
+
+
+def _decision_definitions(docs=_RECORD_DOCS):
+    """{id: [document, ...]} for every decision the record defines."""
+    found = {}
+    for name in docs:
+        path = os.path.join(ROOT, name)
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                for pattern in (_DEFINITION_ROW, _DEFINITION_LEAD):
+                    hit = pattern.match(line)
+                    if hit:
+                        found.setdefault(hit.group(1), []).append(name)
+                        break
+    return found
+
+
+def _map_line():
+    with open(os.path.join(ROOT, "AGENTS.md"), encoding="utf-8") as f:
+        text = f.read().replace("\r\n", "\n")
+    line = next((l for l in text.split("\n")
+                 if "Design Decisions Record" in l and "ROADMAP" in l), None)
+    assert line, (
+        "AGENTS.md has no documentation-map line naming the Design Decisions "
+        "Record. That line is what these checks quantify over; if it moved, "
+        "point this at its new home rather than deleting the check.")
+    return line.replace("\u2013", "-")
+
+
+def _claimed_ids():
+    """Every decision id AGENTS.md's map says the record holds.
+
+    Ranges AND bare listings, because C is sparse: only the Rev. 1 conflicts
+    with live citations were recovered (C1, C3, C6, C8, C10), so claiming
+    "C1-C10" would assert five decisions that never existed. A family is
+    written as a range when it is contiguous and as a list when it is not.
+    """
+    flat = _map_line()
+    ids = set()
+    for hit in re.finditer(r"\b([A-Z]{1,2})(\d+)-[A-Z]{0,2}(\d+)\b", flat):
+        fam, lo, hi = hit.group(1), int(hit.group(2)), int(hit.group(3))
+        ids |= {f"{fam}{n}" for n in range(lo, hi + 1)}
+    ids |= set(re.findall(r"\b[A-Z]{1,2}\d+[a-z]?\b", flat))
+    return ids
+
+
+def _claimed_families():
+    return {re.match(r"[A-Z]+", i).group(0) for i in _claimed_ids()}
+
+
+def _prose_lines(path):
+    """(line number, text) for every comment and docstring line in a file.
+
+    Citations live in prose. A runtime string VALUE holding an id is data:
+    the pipeline's stage names are literally "D0" and "D1", its trace lines
+    are keyed by them, and test_pipeline_trace_contains_expected_lines_in_
+    order matches on the "D0:" prefix. Qualifying one of those would change
+    what the pipeline emits -- which is exactly what happened when this
+    batch tried it, and how the boundary got drawn here instead of guessed.
+    """
+    import io
+    import tokenize
+
+    with open(path, encoding="utf-8", errors="replace") as f:
+        source = f.read()
+    lines = source.split("\n")
+    keep = {}
+    try:
+        tokens = list(tokenize.generate_tokens(io.StringIO(source).readline))
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        return []  # pragma: no cover -- a syntax error is another test's job
+    for token in tokens:
+        if token.type == tokenize.COMMENT:
+            keep[token.start[0]] = lines[token.start[0] - 1]
+        elif (token.type == tokenize.STRING
+              and token.string.lstrip("rbfuRBFU")[:3] in ('"""', "\'\'\'")):
+            for n in range(token.start[0], token.end[0] + 1):
+                keep[n] = lines[n - 1]
+    return sorted(keep.items())
+
+
+def _production_python():
+    for dirpath, dirnames, filenames in _walk_project():
+        if os.path.basename(dirpath) == "tests":
+            dirnames[:] = []
+            continue
+        for name in sorted(filenames):
+            if name.endswith(".py"):
+                yield os.path.join(dirpath, name)
+
+
+def test_the_definition_scanner_sees_every_shape_the_record_uses():
+    """The guard on the guard, and the reason it exists is a measured one.
+
+    Every check below is only as good as _decision_definitions, and that
+    function is exactly the kind of thing that fails SILENTLY: miss a shape
+    and a whole family reads as undefined, or -- worse -- a family that is
+    genuinely missing reads as present because the scanner never looked.
+
+    Batch 14's lesson applied here. Both of its mutation survivors were its
+    own new tests, and both were vacuous for the same reason: the input
+    could not discriminate. So this pins one id per shape, by name, against
+    the real documents.
+    """
+    found = _decision_definitions()
+
+    shapes = {
+        "plain table row (| D1 | ... |)": "D1",
+        "bolded table row (| **U1** | ... |)": "U1",
+        "bolded lead, dash inside (**M1 -- ...**)": "M1",
+    }
+    missed = {shape: i for shape, i in shapes.items() if i not in found}
+    assert not missed, (
+        f"the definition scanner no longer sees {missed}. Each entry is one "
+        f"of the three shapes the record writes a decision in; losing one "
+        f"makes every check below pass on a set it cannot see.")
+
+    # And the count, so narrowing the patterns until they match nothing
+    # cannot look like success.
+    assert len(found) >= 190, (
+        f"the record defines {len(found)} ids, which is far fewer than the "
+        f"~200 known to exist. The scanner probably stopped matching a "
+        f"shape rather than the record having shrunk.")
+
+
+def test_every_decision_id_the_map_claims_is_in_the_record():
+    """#16. AGENTS.md's map says the ROADMAPs carry the locked record and
+    names the families by range. Four of those ids -- S2, S3, E4, E6 -- were
+    filed as living only in DEVLOG; measured, it was all sixteen of S1-S4
+    and E1-E12, and the map never named E at all.
+
+    The cost is not tidiness. This project's convention on finding no record
+    is to treat the question as unsettled and RE-DERIVE it, so a decision
+    that cannot be found is a decision that gets contradicted by someone
+    following the rules. S2's whole subtlety is that a False approval
+    override is indistinguishable from an absent one -- re-derive it without
+    that sentence and you implement assignment instead of union.
+    """
+    record = _decision_definitions()
+    claimed = _claimed_ids()
+    assert len(_claimed_families()) >= 15, (
+        f"the map parsed as {len(_claimed_families())} families, fewer than "
+        f"are known to exist. If its wording changed, update _claimed_ids.")
+
+    missing = {}
+    for one in sorted(claimed):
+        if one not in record:
+            missing.setdefault(re.match(r"[A-Z]+", one).group(0),
+                               []).append(one)
+    assert not missing, (
+        f"AGENTS.md's documentation map says the ROADMAPs carry these, and "
+        f"they are not there: {missing}. Either move the definition into "
+        f"the record or stop claiming the record holds it -- a reader who "
+        f"greps and finds nothing re-derives the decision.")
+
+
+def test_the_map_names_every_family_the_record_defines():
+    """#148's arithmetic, as a check. The map enumerated eleven families
+    while the record held thirteen; E1-E12 was the omission, and AGENTS.md's
+    own ensemble section cites nine E ids by number three sections below the
+    map that says the record runs D through J.
+
+    The forward direction above cannot see this: a family the map never
+    mentions has no range to check.
+    """
+    record = _decision_definitions()
+    claimed = _claimed_families()
+    defined = {re.match(r"[A-Z]+", i).group(0) for i in record}
+
+    unnamed = sorted(defined - claimed)
+    assert not unnamed, (
+        f"the record defines {unnamed} and AGENTS.md's map does not name "
+        f"them. The map is where a reader learns the record exists, so a "
+        f"family missing from it is a family nobody greps for.")
+
+
+def test_every_decision_id_cited_in_production_code_resolves():
+    """#147, and the half of #17 that #17 did not file.
+
+    Measured on the tree this batch started from: 26 distinct ids, 83
+    citations, none of which resolved. C3/C6/C10 were cited as authority in
+    six production files and defined nowhere. AC was cited unqualified 24
+    times, and AC6 alone meant three different criteria in three files --
+    §17's, §21's and §21b's. P10 was a mutation id sitting in the P family's
+    numbering. S12 was a Rev. 1 open question sitting in S's.
+
+    So the rule is: an id in a comment or docstring either resolves in the
+    record, or says which other namespace it belongs to. That is a QUALIFIER
+    GRAMMAR rather than a list of blessed ids, which is what makes it hold
+    for the next citation nobody has written yet -- the property #148 says
+    separates the two guards in this project that worked (D24, J4) from the
+    warnings that did not.
+    """
+    record = _decision_definitions()
+    unresolved = {}
+    for path in _production_python():
+        for number, line in _prose_lines(path):
+            for hit in _CITATION.finditer(line):
+                token = hit.group(1)
+                before = line[:hit.start()]
+                if any(covers.match(token) and mark.search(before)
+                       for _name, covers, mark in _NAMESPACES):
+                    continue
+                if token in record:
+                    continue
+                where = f"{os.path.relpath(path, ROOT)}:{number}"
+                unresolved.setdefault(token, []).append(where)
+
+    assert not unresolved, (
+        f"these ids are cited in production code and resolve to nothing in "
+        f"ROADMAP.md or ROADMAP_v2.md: "
+        f"{ {k: v[:3] for k, v in sorted(unresolved.items())} }. Either the "
+        f"decision belongs in the record, or the citation belongs to one of "
+        f"the namespaces AGENTS.md lists and should say so -- `gate D0`, "
+        f"`§21 AC6`, `Rev. 1 S12`, `mutation P10`, `review finding F2`.")
