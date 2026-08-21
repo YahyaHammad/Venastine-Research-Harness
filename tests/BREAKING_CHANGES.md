@@ -2443,3 +2443,66 @@ because there was nothing to suppress* are the same observation. That class now 
 instances (§31's `os.times()`, #71's `first`/`second`, this), and this is the first found by making
 the change rather than by sweeping for it. The batch that empties the collection is the only moment
 anyone is positioned to notice.
+
+
+## §29 — the thirteenth fix batch: the call boundary (2026-08-21)
+
+> Same section-number collision as §28 records: this file's counter is independent of ROADMAP_v2's,
+> so this §29 is the thirteenth fix batch, recorded in ROADMAP_v2 **§33**.
+
+Closes audit **#37** (S2, stability), **#38** (S3), **#39** (S3) and **#135** (S3, performance) —
+and with them **unit 3 (#41)**, the first unit of Audit Pass 1 to be closed.
+
+### The change that breaks code outside this repository, stated first
+
+**Four public names are gone from `core.client`:** `call_model()`, `collect_response()`,
+`list_models()`, `select_model()`. So is **`ModelResponse.raw`**. Nothing in the tree called any of
+them; `core/loop.py` calling `call_model_stream` is the only model call site there has ever been.
+
+`raw` is the one worth a sentence. It was set only by `call_model`, and every streaming branch
+omitted it, so it was `None` on every live path behind a comment reading *"original SDK response,
+kept for logging/debugging only"*. Deleting `call_model` without deleting `raw` would have turned a
+field that was accurate-but-divergent into one that was simply false.
+
+A caller that wants the streaming result without the events writes the four-line drain itself —
+which is what `collect_response` was, and what both test files now do locally. Shipping it as a
+public entry point nobody called is how `call_model` got where it did.
+
+### If you change this, this is what fails
+
+| change | what fails | why it is that way |
+|---|---|---|
+| Parse `arguments` with a bare `json.loads` again | `test_a_truncated_tool_call_does_not_raise_out_of_the_generator` | `dispatch()` turning a handler's exception into `{"error": ...}` is the whole reason a raising TOOL cannot kill a run. Nothing played that role for a raising TRANSLATION, so a response cut mid-arguments took a JSONDecodeError into the pipeline's `except Exception` — `status='failed'` on a run that had finished nine passes |
+| Raise from `_tool_arguments` instead of returning | `test_the_refusal_reaches_the_model`, and the mutation `W1-parse-failure-raises-again` | A10's rule. A refusal is the boundary's own answer about one call; raising loses the turn, and the model never learns it can reissue |
+| Return `{}` with no error on a parse failure | `test_a_malformed_call_is_never_dispatched` | The arguments are `{}` by then, so a tool that tolerates empty params would RUN — `web_search` with no query. Refusing is not tidiness |
+| Accept JSON that is not an object | `test_valid_json_that_is_not_an_object_is_refused`, parametrised over `null` / list / int / str | `json.loads("null")` is not an error — it returns `None`, and `input=None` reaches every handler. Rarer than a truncation, caught in the same place because the consequence is the same |
+| Drop the `if not raw_args` fallback | `test_empty_arguments_are_not_an_error` | `get_time` declares `properties=[]` and `pin` has no required parameters, so this is a live path. Unit 3's mutation P10 deleted it and was GREEN on all 1406 — nothing covered a tool call with no arguments |
+| Stop reading `finish_reason`, or report every failure as a length cut | `test_a_length_cut_is_named_as_one` and `test_bad_json_is_NOT_reported_as_a_length_cut` | The second is the control. Reporting every parse failure as a truncation would make the branch unfalsifiable and tell the model to shorten arguments that were never too long |
+| Drop `or finish_reason` | `test_finish_reason_is_kept_once_seen` | A last-write-wins defence of the same family as the `name_parts` accumulation twenty lines above, reachable for the same reason: a provider that keeps emitting choices after the one carrying the reason. **This mutation survived once** — see the note below |
+| Test it with the usage chunk instead | nothing fails, and that is the point | A usage chunk has `choices: []`, so `if chunk.choices:` skips it and the line is never reached. `test_a_usage_chunk_cannot_clobber_the_reason` pins the fact that made the wrong version look right |
+| Persist `parse_error` with the tool call | `test_the_parse_error_never_reaches_storage` | W2. It describes one wire read, not the thread. In a resumed history a later turn would read it as something the assistant said |
+| Drop the malformed call instead of carrying it | `test_the_call_is_carried_not_dropped` | The model made a call and is owed an answer. Dropping it leaves a `tool_use` with no matching `tool_result` — M4's pairing defect — and makes a truncated call look like a turn that called nothing |
+| Ask the user to approve a call that cannot run | `test_no_approval_is_asked_for_a_call_that_cannot_run` | A7's rule. Approving it could not make it runnable, and headless the old path reports "requires approval and was not given" — A7's exact wrong-cause failure |
+| Refuse every call rather than only malformed ones | `test_a_well_formed_gated_call_IS_still_asked_about` | The control. A guard that suppressed every question would satisfy the test above while silently removing approval |
+| Move the refusal into `dispatch()`, as A7's is | it cannot be done, and W1 records why | `dispatch(name, params, context)` never sees the failure — `{}` is a perfectly good empty dict by the time it arrives. The loop is the only layer that can see a `parse_error` |
+| Delete `_run()`'s no-final-response guard | `test_a_stream_with_no_final_response_raises` | That contract belonged to `collect_response`, which had its own test. Deleting the helper must not delete the property, and `core/loop.py` was the only enforcement left — untested until this batch |
+| Import a provider SDK at module scope | `test_importing_core_client_does_not_import_any_provider_sdk` | `core.loop` imports this module and `main.py` imports `core.loop`, so it is paid by every invocation of either shell before argparse runs. Measured: 1,766 ms of a 2,619 ms `--help`. A SUBPROCESS test, because the root conftest stubs all three into `sys.modules` before collection |
+| Hoist `genai_types` to the top of its function instead of into the branch | `test_importing_core_client_does_not_import_any_provider_sdk` stays green, and the defect is back | Three of the five functions use it only on their GOOGLE branch, so a top-of-function import is paid on every ANTHROPIC turn. This is the issue's own suggested fix, and it is wrong |
+| Check `"google" in sys.modules` rather than `"google.genai"` | nothing fails, and the check is worthless | `google` is a namespace package protobuf puts in `sys.modules` regardless. This batch made that mistake once while measuring and reported a false positive to itself |
+| Patch `core.client.genai_types` in the effort-gate test | `test_google_gate_inspects_the_sdk_class` errors on a missing attribute | There is no module-scope name any more. It patches `google.genai.types` itself — the stricter target, since that is the module the function imports from |
+
+### The survivor, and the sub-shape of the vacuity class it exposed
+
+One of 24 mutations survived: deleting `or finish_reason`, on a line this batch had **written a
+test for**. The test asserted that a length cut is still reported after the usage chunk arrives.
+True, and irrelevant — the usage chunk has `choices: []`, so the line under test is never reached.
+
+Driven both ways before rewriting, rather than guessed. With `or finish_reason` deleted, the
+usage-chunk shape still reports the length cut; a trailing chunk that *has* choices and a null
+`finish_reason` falls back to the generic message.
+
+The vacuity class now has four instances, and this is a new sub-shape. §31's `os.times()`, #71's
+`first`/`second` and #69's emptied catalog are all inputs that cannot **discriminate**. This is an
+input that cannot **arrive** — a guard upstream skips it. The usual sweep (vary the input, see
+whether the assertion still holds) does not find it, because the assertion does hold, for a reason
+unrelated to the code under test.

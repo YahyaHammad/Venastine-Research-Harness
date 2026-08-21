@@ -4784,3 +4784,131 @@ applies. Making it a permission is a different decision from making it a catalog
 asked for the catalog.
 
 **#105**, again, for the reason §31 gives.
+
+
+## Audit Pass 1 — fix batch 13: the call boundary (2026-08-21)
+
+`fix/batch-13-call-boundary`, from `main` at `e4d744f`. Closes **#37** (S2, stability), **#38**
+(S3), **#39** (S3) and **#135** (S3, performance) — and with them **unit 3 (#41)**, the first unit
+of Audit Pass 1 to close. ROADMAP_v2 **§33**, decisions **W1–W9**.
+
+One file: `core/client.py`, the only file allowed to know a provider's wire format and the single
+point every model call in both shells and all ten research passes goes through.
+
+### The translation had no containment, and that is the whole shape of it
+
+`dispatch()` turning a handler's exception into `{"error": ...}` is the reason a raising **tool**
+cannot kill a run. Nothing played that role one layer up for a raising **translation**: the
+accumulated `arguments` string was parsed with a bare `json.loads`, and `core/loop.py`'s call site
+sits inside no `try`. A response cut mid-arguments by the token limit took a `JSONDecodeError` out
+of the generator, out of `_run()`, and into the pipeline's `except Exception` — `status='failed'` on
+a run that had already finished nine passes.
+
+Driven before anything was written:
+
+```
+  cut mid-arguments (finish_reason=length)
+      RAISED out of the generator: JSONDecodeError: Unterminated string ...
+  genuinely malformed JSON
+      RAISED out of the generator: JSONDecodeError: Expecting value ...
+
+  core/loop.py -- 'try' in the 900 chars before the call site: False
+  anything in core/ reads a provider finish_reason: False
+```
+
+`_tool_arguments()` is now the only place a wire string is parsed and it **returns**
+`(input, parse_error)`. The loop refuses the call, tells the model, and the turn continues.
+
+### Two corrections the issues needed
+
+**`json.loads` is OpenAI-only.** #37 says "both call paths"; Google hands back `fc.args` and
+Anthropic hands back `b.input`, both already dicts. The exposure is exactly the `is_v1_compatible`
+branch — which is what a local model server takes, so the severity holds while the fix has one shape
+rather than three.
+
+**#135's suggested fix would have left the defect in place.** It proposed importing `genai_types` as
+"the first statement" of each function that names it; three of those use it only on their GOOGLE
+branch, so that import is paid on every **Anthropic** turn. Each one sits inside the branch instead.
+
+### `needs_approval = False` is still not "proceed" — designed in this time
+
+§32's A7 learned this by shipping it: clearing the flag stops the LOOP asking, and `dispatch()` then
+denies for a reason that is not the reason. Here the same shape appears and both halves landed
+together — the question is suppressed **and** the call is refused before dispatch.
+
+The difference is where the refusal lives. A7's moved *into* `dispatch()`; this one cannot, because
+`dispatch(name, params, context)` never sees the failure — `{}` is a perfectly good empty dict by
+the time it arrives. The loop is the only layer that can see a `parse_error`. Recorded as W1 rather
+than left looking like an inconsistency with A7.
+
+### Deleting `call_model` was never about the dead code
+
+Three documents told a reader the non-streaming path was either used or guaranteed equivalent:
+`AGENTS.md` instructed every new-provider author to maintain both branches, `core/memory.py` named
+`call_model` as the source of its own argument, and `call_model_stream`'s docstring promised a
+`ModelResponse` *"identical to what call_model() produces for the same inputs"*. That last was
+already false — `call_model` set `raw` and no streaming branch did.
+
+`raw` went with it. Keeping a permanently-`None` field behind a comment saying it holds the SDK
+response would turn an accurate-but-divergent field into a simply false one.
+
+One property came with the deletion rather than being deleted alongside its helper: `collect_response`
+raised when a stream yielded no final response, and had a test for it. `core/loop.py` is now the
+only enforcement, and **nothing covered that copy**. The test moved to where the guard is.
+
+### The launch cost, measured in pairs because the laptop lied
+
+Absolute milliseconds on this machine varied by 2× between sessions — the first `--help` reading was
+5,611 ms and a later one 2,619 ms with no code change. So the numbers below are **paired**: `git
+stash` between runs, with the AFTER runs bracketing the BEFORE.
+
+```
+                        before      after
+  python -c pass          33 ms      32 ms   (baseline, unchanged)
+  import core.client    1766 ms      58 ms   (-97%)
+  main.py --help        2619 ms    1182 ms   (-55%)
+```
+
+On Linux, in the CI container: `import core.client` **28 ms**, `main.py --help` **672 ms**.
+
+The residual is sympy via `tools/registry.py`, which is unit 5's file — filed with its number
+attached rather than folded in, because registration at import time is a design and deferring it is
+a different decision from moving an import to its use site.
+
+### The mutation pass found a new sub-shape of the vacuity class
+
+24 mutations, one survivor — and it was a mutation of a line this batch had **written a test for**.
+`test_finish_reason_survives_the_usage_chunk` asserted a length cut is still reported after the
+usage chunk arrives. True, and irrelevant: a usage chunk has `choices: []`, so `if chunk.choices:`
+skips it and the line under test is never reached.
+
+Driven both ways rather than guessed. With `or finish_reason` deleted the usage-chunk shape still
+reports the cut, while a trailing chunk that *has* choices and a null `finish_reason` falls back to
+the generic message — so the defence is load-bearing, and reachable for exactly the class of
+provider this file already accommodates twenty lines above (`name_parts` accumulates because *"some
+v1-compatible providers split function.name across deltas"*).
+
+**The class now has four instances, and this one is different in kind.** §31's `os.times()`, #71's
+`first`/`second` and #69's emptied catalog are inputs that cannot **discriminate**. This is an input
+that cannot **arrive**. The sweep that finds the first three — vary the input, see whether the
+assertion still holds — does not find this one, because the assertion does hold, for a reason that
+has nothing to do with the code being tested.
+
+Final: **24 of 24 RED**, from a green baseline on the full suite as well as the unit files. §32's
+false-kill lesson is now enforced by the harness rather than remembered.
+
+### Verification
+
+Windows **2,087 passed / 18 skipped / 1 deselected**. `python:3.11-slim` — the CI configuration —
+**2,102 passed / 2 skipped / 1 deselected**, with every W-decision driven on Linux and behaving
+identically, `main.py --help` exit 0 and `import tui.app` ok.
+
+Run **before** the branch went anywhere, for the third batch running. The first container run of
+this batch was **discarded rather than reported**: it had copied the tree between a test being added
+and its count being synced, so it was red for a reason that was not the code. A verification run you
+have to explain away is not a verification run.
+
+### Deferred, deliberately
+
+**sympy's ~330 ms** via `tools/registry.py` — unit 5's file. **#136**, unit X2's other finding,
+which would close X2 but lives in compaction. **#105**, again, for the reason §31 gives.
