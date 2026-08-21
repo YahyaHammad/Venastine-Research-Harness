@@ -371,6 +371,58 @@ either extend the set or record that it was checked and is right.
 
 ---
 
+## 12. `effective_compaction()` reports no provenance (open, deferred)
+
+D27's third implementation note, unbuilt, and the only one of its three that
+was dropped without being recorded as a decision:
+
+> **Surface the effective values.** A `/config` or startup line showing which
+> values are in force **and where each came from** turns "compaction feels too
+> aggressive" from a mystery into a one-line answer. Cheap now, and the
+> alternative is debugging a number three files away from where it was set.
+
+D27's *decision* holds — every value the record names is overridable through
+`settings.json`, and `_COMPACTION_DEFAULTS` covers all five plus two more. What
+is missing is the ability to say **which tier** a value came from. Until fix
+batch 15 the only thing that still claimed otherwise was the function's own
+docstring, which opened "The compaction values actually in force, **and where
+they came from**" and returned a flat dict (audit #91, item 2).
+
+**Why it is more than adding a field.** Provenance is not omitted, it is
+destroyed by the merge:
+
+```python
+values = {key: getattr(config, attr) for key, attr in _COMPACTION_DEFAULTS.items()}
+values.update(get_settings().get("compaction") or {})   # user and project, already flattened
+values.update({k: v for k, v in (overrides or {}).items() if v is not None})
+```
+
+Each `update` overwrites without recording who won, and the user/project tiers
+were already merged into one dict upstream by `_load_merged_settings`.
+
+**Two decisions belong to whoever builds it, and they are why this is deferred
+rather than done.**
+
+1. **The return shape.** Twelve call sites subscript the flat dict —
+   `core/compaction.py` at four places, `tui/app.py`, `config_loader` itself,
+   and six in tests — so `{key: (value, tier)}` breaks every one of them. A
+   parallel `sources` dict, or a second function, does not.
+2. **Where a user would read it.** There is no `/config` command; §21 shipped
+   `/memories`, `/forget`, `/summary` and `/ref`. The only thing on this path
+   today is the headroom advisory, deliberately gated to fire once at startup
+   because `effective_compaction` sits on `should_compact()`'s path and runs
+   once per step of every turn.
+
+Provenance with nothing to display it would be the same defect in a new place —
+a value nothing consumes, promised by a docstring — so the two halves want
+building together. D27's argument is entirely about the display.
+
+Recorded here rather than only in a batch log: it was already noted under "Not
+fixed" in two batches' DEVLOG entries, which is where someone looks when they
+already know it exists.
+
+---
+
 ## Accepted risks noted in the review, deliberately not "fixed"
 
 - `07_review.json` absent on zero-finding reviewed runs — presence-implies-

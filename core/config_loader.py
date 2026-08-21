@@ -638,7 +638,13 @@ _COMPACTION_DEFAULTS = {
 
 def effective_compaction(overrides: Optional[dict] = None,
                          warn: bool = False) -> dict:
-    """The compaction values actually in force, and where they came from.
+    """The compaction values actually in force.
+
+    A flat {key: value}. NOT where each came from -- see
+    TECHNICAL_DEBT.md item 12; the merge below overwrites without
+    recording which tier won, and D27's third implementation note asked
+    for provenance AND somewhere to show it. This sentence used to
+    promise both (audit #91).
 
     config.py default -> user settings.json -> trusted project
     settings.json -> `overrides` (a per-invocation `/compact --strength 4`,
