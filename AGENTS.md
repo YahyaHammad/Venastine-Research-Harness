@@ -96,7 +96,7 @@ That qualifier is load-bearing, not pedantry (audit #128). This file used to say
 
 `run_agent_conversation` and `continue_conversation` drain `_run()` directly via `run_to_completion()`. `run_deep_research_mode` is one step further out since §26: it drains `stream_deep_research_mode()` — a generator that forwards `_run()`'s events and *returns* the response — via `return_value_of()`. Two drainers because they answer different questions: `run_to_completion` reads the response off the terminal event, and `return_value_of` reads a generator's return value, which is the only place `thread_id` has been attached.
 
-Three stop conditions, all in `_run()`: no tool calls (`complete`), `max_steps` exhausted (`max_steps_reached`), cumulative input+output tokens ≥ `max_total_tokens` (`token_budget_exceeded`). `stop_reason` and `thread_id` are set by `_run()`/the wrappers, never by `call_model()`.
+Three stop conditions, all in `_run()`: no tool calls (`complete`), `max_steps` exhausted (`max_steps_reached`), cumulative input+output tokens ≥ `max_total_tokens` (`token_budget_exceeded`). `stop_reason` and `thread_id` are set by `_run()`/the wrappers, never by `call_model_stream()`.
 
 **D20 — persist before branch.** `memory.add_assistant_message(response)` runs immediately after the call returns, *before* any stop-condition branching. Moving it into a conditional silently drops plain-text final answers and budget-truncated responses from the persisted thread, and breaks the §3 JSON-retry path. This has been reintroduced once already; `test_streaming_loop.py` AC6 fails if it happens again.
 
@@ -175,7 +175,7 @@ Current Anthropic models reject `temperature`/`top_p`/`top_k` (`config.MODELS_RE
 
 ### Provider translation (`core/client.py`)
 
-Provider wire formats exist in **exactly two functions**: `_tools_for_provider()` and `_messages_for_provider()`. Adding a provider means extending those (plus the branches in `call_model` / `call_model_stream`) and nothing else. Tool schemas are always authored in Anthropic's native shape (`TOOL_SCHEMA` per tool file); translation happens at the boundary.
+Provider wire formats exist in **exactly two functions**: `_tools_for_provider()` and `_messages_for_provider()`. Adding a provider means extending those, plus the branch in `call_model_stream` and the client construction in `api_initialization`, and nothing else. There is **one** call path: `call_model()` was deleted in batch 13 (#38) after audit unit 3 found it had no production caller and had already diverged from the streaming path on `raw`, while this sentence told every new-provider author to maintain both. Tool schemas are always authored in Anthropic's native shape (`TOOL_SCHEMA` per tool file); translation happens at the boundary.
 
 Anthropic, OpenAI-compatible (any `is_v1_compatible` provider), and Google are all fully implemented. The load-bearing differences (system prompt placement, tool-result batching, `assistant` vs `model` role, `max_tokens` vs `max_completion_tokens` vs `max_output_tokens`, response parsing) are enumerated in ARCHITECTURE.md §4.7.
 

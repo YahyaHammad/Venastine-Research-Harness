@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Optional
 from uuid import UUID, uuid4
 import json
 import logging
@@ -44,17 +44,6 @@ def api_initialization(provider_name: str):
     return client
 
 
-def list_models(client) -> list[str]:
-    models = client.models.list()
-    return [model.id for model in models.data]
-
-
-def select_model(selected_model: str, available_models: list[str]) -> str:
-    if selected_model in available_models:
-        return selected_model
-    raise ValueError(f"Model '{selected_model}' is not in the available models list")
-
-
 # ============================================================================
 # ---- Normalized response shape ---------------------------------------------
 # ============================================================================
@@ -70,7 +59,6 @@ class ToolCallRequest:
 class ModelResponse:
     text: str
     tool_calls: list[ToolCallRequest] = field(default_factory=list)
-    raw: Any = None  # original SDK response, kept for logging/debugging only
     usage: dict = field(default_factory=lambda: {"input_tokens": 0, "output_tokens": 0})
     stop_reason: str = "complete"  # set by RunAgentLoop._run(), not here -- see core/loop.py
     thread_id: Optional[UUID] = None  # set by the public entry points (run_deep_research_mode,
@@ -582,136 +570,9 @@ def _thinking_for_provider(provider_name: str, effort: Optional[str]) -> dict:
     return {"reasoning_effort": effort}
 
 
-def call_model(
-    client,
-    provider_name: str,
-    model: str,
-    messages: list[dict],
-    system_prompt: str,
-    tool_schemas: list[dict],
-    temperature: Optional[float] = None,
-    effort: Optional[str] = None,
-) -> ModelResponse:
-    """
-    One call to the model, regardless of provider. `messages` is the
-    provider-NEUTRAL history from ConversationMemory -- translated here,
-    just before the actual API call, into whatever shape the target
-    provider expects. The system prompt is passed separately since
-    Anthropic and OpenAI disagree about where it belongs.
-
-    `effort` is the reasoning-effort level (§16); None sends nothing.
-    """
-    translated_messages = _messages_for_provider(provider_name, messages)
-    sampling = _sampling_kwargs(provider_name, model, temperature)
-    thinking = _thinking_for_provider(provider_name, effort)
-
-    if provider_name == "ANTHROPIC":
-        kwargs = dict(
-            model=model,
-            max_tokens=config.MAX_TOKENS,
-            system=system_prompt,
-            messages=translated_messages,
-            tools=_tools_for_provider(provider_name, tool_schemas),
-        )
-        kwargs.update(sampling)
-        kwargs.update(thinking)
-        response = client.messages.create(**kwargs)
-        text = "\n".join(b.text for b in response.content if b.type == "text")
-        calls = [
-            ToolCallRequest(id=b.id, name=b.name, input=b.input)
-            for b in response.content if b.type == "tool_use"
-        ]
-        usage_obj = getattr(response, "usage", None)
-        usage = {
-            "input_tokens": getattr(usage_obj, "input_tokens", 0) if usage_obj else 0,
-            "output_tokens": getattr(usage_obj, "output_tokens", 0) if usage_obj else 0,
-        }
-        return ModelResponse(text=text, tool_calls=calls, raw=response, usage=usage)
-
-    if provider_name == "GOOGLE":
-        genai_config_kwargs = dict(
-            system_instruction=system_prompt,
-            tools=_tools_for_provider(provider_name, tool_schemas),
-            max_output_tokens=config.MAX_TOKENS,
-        )
-        genai_config_kwargs.update(sampling)
-        genai_config_kwargs.update(thinking)
-        response = client.models.generate_content(
-            model=model,
-            contents=translated_messages,
-            config=genai_types.GenerateContentConfig(**genai_config_kwargs),
-        )
-        # response.text raises ValueError when function_call parts are
-        # present, so we must iterate parts manually. Guard against
-        # empty candidates (safety filter) and null content (blocked
-        # candidate) — both are documented, non-exceptional API outcomes.
-        candidate = response.candidates[0] if response.candidates else None
-        content = candidate.content if candidate else None
-        parts = content.parts if content else []
-        text = "".join(p.text for p in parts if p.text is not None)
-        calls = []
-        for p in parts:
-            if p.function_call is not None:
-                fc = p.function_call
-                calls.append(ToolCallRequest(
-                    id=fc.id or str(uuid4()),
-                    name=fc.name,
-                    input=fc.args or {},
-                ))
-        usage_meta = getattr(response, "usage_metadata", None)
-        usage = {
-            "input_tokens": getattr(usage_meta, "prompt_token_count", 0) if usage_meta else 0,
-            "output_tokens": getattr(usage_meta, "candidates_token_count", 0) if usage_meta else 0,
-        }
-        return ModelResponse(text=text, tool_calls=calls, raw=response, usage=usage)
-
-    # OpenAI-compatible path
-    full_messages = [{"role": "system", "content": system_prompt}] + translated_messages
-    openai_kwargs = dict(
-        model=model,
-        messages=full_messages,
-        # max_completion_tokens, NOT max_tokens -- max_tokens is deprecated
-        # across the Chat Completions API and is rejected outright by
-        # reasoning (o-series) models. max_completion_tokens works
-        # uniformly across both reasoning and non-reasoning models.
-        max_completion_tokens=config.MAX_TOKENS,
-        tools=_tools_for_provider(provider_name, tool_schemas),
-    )
-    openai_kwargs.update(sampling)
-    openai_kwargs.update(thinking)
-    response = client.chat.completions.create(**openai_kwargs)
-    choice = response.choices[0].message
-    text = choice.content or ""
-    calls = [
-        ToolCallRequest(id=tc.id, name=tc.function.name, input=json.loads(tc.function.arguments))
-        for tc in (choice.tool_calls or [])
-    ]
-    usage_obj = getattr(response, "usage", None)
-    usage = {
-        "input_tokens": getattr(usage_obj, "prompt_tokens", 0) if usage_obj else 0,
-        "output_tokens": getattr(usage_obj, "completion_tokens", 0) if usage_obj else 0,
-    }
-    return ModelResponse(text=text, tool_calls=calls, raw=response, usage=usage)
-
-
 # ============================================================================
 # ---- Streaming call + helpers -----------------------------------------------
 # ============================================================================
-
-def collect_response(gen) -> ModelResponse:
-    """Drain a call_model_stream() generator into a single ModelResponse.
-    For callers that need the streaming path internally but only care
-    about the final result (analogous to run_to_completion for _run())."""
-    final = None
-    for token in gen:
-        if token.final_response is not None:
-            final = token.final_response
-    if final is None:
-        raise RuntimeError(
-            "call_model_stream completed without yielding a final response"
-        )
-    return final
-
 
 def call_model_stream(
     client,
@@ -723,14 +584,21 @@ def call_model_stream(
     temperature: Optional[float] = None,
     effort: Optional[str] = None,
 ):
-    """Generator sibling to call_model(). Yields StreamToken events:
-    text_delta for incremental text, final_response for the terminal
-    ModelResponse with accumulated tool calls and usage.
+    """The one model call, for every provider. Yields StreamToken
+    events: text_delta for incremental text, final_response for the
+    terminal ModelResponse with accumulated tool calls and usage.
 
     Three provider implementations — Anthropic typed events, Google
     chunked candidates, OpenAI-compatible index-accumulated tool-call
-    fragments. Each must produce a ModelResponse identical to what
-    call_model() produces for the same inputs.
+    fragments — which must agree with each other about the ModelResponse
+    they produce for the same inputs.
+
+    There used to be a non-streaming `call_model()` beside this, and this
+    docstring used to promise the two were identical. They were not: it
+    set ModelResponse.raw and no streaming branch did, which is what a
+    second implementation nobody runs accumulates (#38). It is gone, and
+    with it `raw`; the only thing left to keep in step is the three
+    branches below.
 
     D21 (usage-or-raise): if the provider is marked as supporting stream
     usage but the stream completes with zero usage, raise rather than

@@ -639,3 +639,37 @@ def test_the_tool_call_start_event_still_precedes_the_dispatch(mocker):
             order.append("tool_call_start")
 
     assert order == ["tool_call_start", "dispatch"]
+
+
+# ---------------------------------------------------------------------------
+# ---- A stream that never yields a final response --------------------------
+# ---------------------------------------------------------------------------
+
+def test_a_stream_with_no_final_response_raises(mocker):
+    """`_run` must raise rather than carry `response = None` forward.
+
+    This property used to belong to `core.client.collect_response()`,
+    which had its own test. #38 deleted that helper as a public entry
+    point with no production caller -- and `core/loop.py` is now the only
+    place enforcing the contract, which nothing covered. Deleting a
+    helper must not silently delete a property, so the test moved to
+    where the guard actually is.
+
+    The failure it prevents is not the raise: it is `response` staying
+    None through `add_assistant_message(None)` and the stop-condition
+    branches below it, which read attributes off it.
+    """
+    memory = _FakeMemory()
+
+    # A generator of the wrong shape: text arrives, the terminal token
+    # never does. StreamToken and LoopEvent both carry `.final_response`,
+    # so this is the same shape _run reads.
+    def stream_without_final(*args, **kwargs):
+        from core.client import StreamToken
+        yield StreamToken(text_delta="partial")
+
+    mocker.patch("core.loop.call_model_stream", side_effect=stream_without_final)
+
+    with pytest.raises(RuntimeError,
+                       match="without yielding a final response"):
+        list(RunAgentLoop._run(**_run_kwargs(memory)))

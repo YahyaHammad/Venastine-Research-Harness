@@ -11,16 +11,27 @@ call_model_stream takes `client` as a parameter.
 `supports_stream_usage` is read via core.client.load_provider_data, which we
 monkeypatch per test to control the D21 flag.
 
-Most tests drain the stream via collect_response() — the §13 helper for
-callers that only need the final result — which keeps that helper covered
-(its no-final raise contract has its own test at the bottom).
+Most tests drain the stream via the local _drain() helper. That used to
+be core.client.collect_response, deleted in #38 as a public entry point
+with no production caller; the no-final contract it enforced now lives in
+core/loop.py, and is tested there (test_streaming_loop.py).
 """
 
 from types import SimpleNamespace
 
 import pytest
 
-from core.client import StreamToken, call_model_stream, collect_response
+from core.client import StreamToken, call_model_stream
+
+
+def _drain(gen):
+    """Return the final ModelResponse from a call_model_stream generator."""
+    final = None
+    for token in gen:
+        if token.final_response is not None:
+            final = token.final_response
+    assert final is not None, "call_model_stream yielded no final response"
+    return final
 
 
 # ---------------------------------------------------------------------------
@@ -103,7 +114,7 @@ def test_stream_anthropic_d21_raises_on_zero_usage_when_flag_true(monkeypatch):
     client = _FakeAnthropicClient(["hi"], final_message)
 
     with pytest.raises(RuntimeError, match="without usage"):
-        collect_response(call_model_stream(client, "ANTHROPIC", "m", [], "sys", []))
+        _drain(call_model_stream(client, "ANTHROPIC", "m", [], "sys", []))
 
 
 def test_stream_anthropic_honours_the_flag_rather_than_always_raising(monkeypatch):
@@ -125,7 +136,7 @@ def test_stream_anthropic_honours_the_flag_rather_than_always_raising(monkeypatc
     )
     client = _FakeAnthropicClient(["hi"], final_message)
 
-    resp = collect_response(call_model_stream(client, "ANTHROPIC", "m", [], "sys", []))
+    resp = _drain(call_model_stream(client, "ANTHROPIC", "m", [], "sys", []))
     assert resp.usage == {"input_tokens": 0, "output_tokens": 0}
 
 
@@ -164,7 +175,7 @@ def test_stream_google_text_and_function_call(monkeypatch):
     ]
     client = _FakeGoogleClient(chunks)
 
-    resp = collect_response(call_model_stream(
+    resp = _drain(call_model_stream(
         client, "GOOGLE", "m", [], "sys", [],
     ))
     assert resp.text == "The time."
@@ -180,7 +191,7 @@ def test_stream_google_missing_id_gets_uuid(monkeypatch):
     chunks = [_google_chunk([SimpleNamespace(text=None, function_call=fc)])]
     client = _FakeGoogleClient(chunks)
 
-    resp = collect_response(call_model_stream(client, "GOOGLE", "m", [], "sys", []))
+    resp = _drain(call_model_stream(client, "GOOGLE", "m", [], "sys", []))
     assert resp.tool_calls[0].id  # a UUID was generated, not None
 
 
@@ -194,7 +205,7 @@ def test_stream_google_d21_raises_on_zero_usage_when_flag_true(monkeypatch):
     client = _FakeGoogleClient(chunks)
 
     with pytest.raises(RuntimeError, match="without usage"):
-        collect_response(call_model_stream(client, "GOOGLE", "m", [], "sys", []))
+        _drain(call_model_stream(client, "GOOGLE", "m", [], "sys", []))
 
 
 # ---------------------------------------------------------------------------
@@ -241,7 +252,7 @@ def test_stream_openai_tool_fragment_accumulation(monkeypatch):
     ]
     client = _FakeOpenAIClient(chunks)
 
-    resp = collect_response(call_model_stream(client, "OPENAI", "m", [], "sys", []))
+    resp = _drain(call_model_stream(client, "OPENAI", "m", [], "sys", []))
 
     assert len(resp.tool_calls) == 1
     tc = resp.tool_calls[0]
@@ -258,13 +269,13 @@ def test_stream_openai_sends_stream_options_only_when_flag_true(monkeypatch):
     )
     chunks = [_oai_chunk(None, usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1))]
     client = _FakeOpenAIClient(chunks)
-    collect_response(call_model_stream(client, "OPENAI", "m", [], "sys", []))
+    _drain(call_model_stream(client, "OPENAI", "m", [], "sys", []))
     assert client.chat.completions.last_kwargs.get("stream_options") == {"include_usage": True}
 
     # Flag absent -> no stream_options (so providers that reject it still work).
     monkeypatch.setattr("core.client.load_provider_data", lambda: {})
     client2 = _FakeOpenAIClient([_oai_chunk(_oai_delta(content="x"))])
-    collect_response(call_model_stream(client2, "OPENAI", "m", [], "sys", []))
+    _drain(call_model_stream(client2, "OPENAI", "m", [], "sys", []))
     assert "stream_options" not in client2.chat.completions.last_kwargs
 
 
@@ -277,7 +288,7 @@ def test_stream_openai_d21_raises_on_zero_usage_when_flag_true(monkeypatch):
     client = _FakeOpenAIClient(chunks)
 
     with pytest.raises(RuntimeError, match="without usage"):
-        collect_response(call_model_stream(client, "OPENAI", "m", [], "sys", []))
+        _drain(call_model_stream(client, "OPENAI", "m", [], "sys", []))
 
 
 def test_stream_openai_no_raise_when_flag_false_and_zero_usage(monkeypatch):
@@ -285,15 +296,5 @@ def test_stream_openai_no_raise_when_flag_false_and_zero_usage(monkeypatch):
     chunks = [_oai_chunk(_oai_delta(content="hi"))]  # no usage chunk
     client = _FakeOpenAIClient(chunks)
 
-    resp = collect_response(call_model_stream(client, "OPENAI", "m", [], "sys", []))
+    resp = _drain(call_model_stream(client, "OPENAI", "m", [], "sys", []))
     assert resp.usage == {"input_tokens": 0, "output_tokens": 0}
-
-
-def test_collect_response_raises_when_stream_has_no_final():
-    """collect_response() must raise — not return None or a partial
-    result — when the stream completes without a terminal token."""
-    def gen():
-        yield StreamToken(text_delta="partial")
-
-    with pytest.raises(RuntimeError, match="without yielding a final response"):
-        collect_response(gen())
