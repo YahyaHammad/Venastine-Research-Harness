@@ -2934,11 +2934,14 @@ rather than guessed.
 ### Verification
 
 - **Windows: 2,145 passed / 18 skipped / 1 deselected.**
-- **`python:3.11-slim`, the CI configuration**, run before the branch went anywhere — the fifth
+- **`python:3.11-slim`, the CI configuration: 2,161 passed / 2 skipped / 1 deselected**, run
+  on the final tree before the branch went anywhere — the fifth
   batch to honour §31's correction. It matters here: the check walks the filesystem and reads
   mixed-EOL documents, and one of its two failing-before tests names paths.
-- **The check demonstrated RED on the branch point**, not merely green after: two of its five tests
-  fail on `3b99ac0`, the citation one listing all 26 ids.
+- **The check demonstrated RED on the branch point**, not merely green after: **two of its seven
+  tests fail on `3b99ac0`**, the citation one listing all 26 ids. The other five are
+  self-contained pins on the check's own scanner and grammar, so they pass on either tree by
+  design -- which is the point of them.
 - **23 of 23 mutations RED.**
 
 ### Closed with this section
