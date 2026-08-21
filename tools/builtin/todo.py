@@ -19,7 +19,7 @@ list §23" since §18, and §27's column-versus-extra_data argument was about
 keeping `list_threads()` cheap -- a todo list is only ever read for the
 current thread, so queryability buys nothing.
 
-WORKS HEADLESS (J9). AC2 says "both tools deny cleanly with no way to ask",
+WORKS HEADLESS (J9). §23 AC2 says "both tools deny cleanly with no way to ask",
 but that was written before this tool's shape was settled: the deny rule
 exists because a blocking prompt nobody answers turns into a hang, and this
 tool never blocks and never asks anyone anything. A ten-pass research run

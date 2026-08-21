@@ -53,7 +53,7 @@ from mcp.shared.exceptions import MCPError
 
 logger = logging.getLogger(__name__)
 
-# S12: MCP servers are third-party code and can hang. A generous default
+# Rev. 1 S12: MCP servers are third-party code and can hang. A generous default
 # beats an indefinite block; individual calls may override.
 DEFAULT_CALL_TIMEOUT_S = 180.0
 CONNECT_TIMEOUT_S = 60.0
@@ -305,7 +305,7 @@ class MCPClient:
         caller sits on Textual's main loop, a worker thread, or a plain
         CLI script -- the bridge is what makes caller context irrelevant.
 
-        Returns a plain dict, never a CallToolResult (D23, AC6).
+        Returns a plain dict, never a CallToolResult (D23, §17 AC6).
         """
         client = self.clients.get(server_name)
         if client is None:

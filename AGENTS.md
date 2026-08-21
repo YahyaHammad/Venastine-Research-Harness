@@ -61,6 +61,27 @@ Read these before changing anything non-trivial — they carry design decisions 
 
 - **ARCHITECTURE.md** — what's built, file-by-file contracts ("what belongs here / what does NOT"), known gotchas (§11).
 - **ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **ROADMAP_v2.md** (§13–§34, all built) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I13 from §24, J1–J14 from §23, E1–E12 from §10's revisit, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A11 from §32, W1–W9 from §33 and U1–U9 from §34). Section and D-numbers are stable and cross-referenced everywhere.
+
+**Six namespaces use the same `LETTER+NUMBER` shape, and only the first is the
+record.** An id that resolves to two places is a cross-reference that fails
+silently — you read the wrong one and it makes sense. So every citation outside
+the record says which namespace it means, and
+`tests/test_docs_consistency.py::test_every_decision_id_cited_in_production_code_resolves`
+fails on one that does not.
+
+| namespace | ids | written as | where defined |
+|---|---|---|---|
+| **design decisions** | the families above | bare — `D14 forbids widening` | `ROADMAP.md` / `ROADMAP_v2.md` |
+| pipeline gates | `D0`, `D1`, `D2` | `gate D0` | §4/§26 — pure-code routing between passes, no LLM call |
+| acceptance criteria | `AC1`… | `§21 AC6` — **section-scoped**, so the section is required | each section's *Acceptance criteria* block |
+| Rev. 1 open questions | `S11`, `S12`, `S16` | `Rev. 1 S12` | resolved inline in `ROADMAP_v2.md` |
+| audit severities | `S1`–`S4` | `severity S1`, or an issue title | `#15`, the audit tracker |
+| review findings / mutations | `F2`, `P10` | `review finding F2`, `mutation P10` | `DEVLOG.md`, the audit's mutation passes |
+
+`D1` and `D2` are the unavoidable pair: both a decision and a gate. They resolve,
+so nothing can force the distinction mechanically — write `gate D1` when you mean
+the gate. A seventh use of `C1`–`C10` is the research pipeline's **claim ids**,
+which are run data rather than references; see the C table in `ROADMAP_v2.md`.
 - **DEVLOG.md** — per-section implementation notes: what was followed verbatim, what was deviated from (every deviation was an explicit user decision — do not silently override).
 - **tests/BREAKING_CHANGES.md** — what breaks each test when production code changes, the symptom, and the fix.
 - **CLAUDE.md / QWEN.md** — pointers to this file, nothing more. They exist so a harness that looks for one filename finds it without searching; the content has one copy.

@@ -136,7 +136,7 @@ def _tool_arguments(raw_args: str, tool_name: str,
     # W9: no arguments is not an error. `get_time` declares properties=[]
     # and `pin` has no required parameters, so this is a live path -- and
     # json.loads("") raises. Dropping this fallback was green on the whole
-    # suite when audit unit 3 mutated it (P10).
+    # suite when audit unit 3 ran mutation P10.
     if not raw_args:
         return {}, None
 

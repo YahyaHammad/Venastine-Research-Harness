@@ -19,11 +19,11 @@ UNGATED, DELIBERATELY (J12). Requiring approval to ask a question would mean
 approving a prompt in order to be shown a prompt -- and worse, §13 does not
 merely deny a gated tool where nothing can ask, it stops ADVERTISING it. A
 gated question tool would be invisible in every headless run rather than
-denied with a reason, and AC2 wants the opposite: the model must see the tool,
+denied with a reason, and §23 AC2 wants the opposite: the model must see the tool,
 call it, and receive "there is nobody to ask" as something it can work around.
 Same shape as `pin`'s ungating (D26), for the same reason.
 
-NO CHANNEL MEANS DENIED, AND THE DENIAL EXPLAINS ITSELF (AC2). An unattended
+NO CHANNEL MEANS DENIED, AND THE DENIAL EXPLAINS ITSELF (§23 AC2). An unattended
 ten-pass pipeline is exactly where a blocking prompt nobody will answer turns
 into a hang, and where a question injected by fetched web content would be
 least noticed. An attended run carries a channel and can ask -- that is §25's
@@ -113,7 +113,7 @@ def run(params: dict, response_channel=None) -> dict:
         }
 
     if response_channel is None:
-        # AC2. Not an exception: dispatch would convert one to an error dict
+        # §23 AC2. Not an exception: dispatch would convert one to an error dict
         # anyway, and this way the message is written for the reader who
         # needs it -- a model mid-run that must now decide something itself.
         return {

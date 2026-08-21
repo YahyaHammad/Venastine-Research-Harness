@@ -661,14 +661,14 @@ class ToolApprovals:
     # This writes a file into the user's project that is then injected into
     # future prompts, and it invalidates the D17 trust hash as it goes.
     # /init supplies the approval itself, as the yes to a rendered diff --
-    # so the gate is what makes "no silent overwrite" (AC2) structural
+    # so the gate is what makes "no silent overwrite" (§24 AC2) structural
     # rather than a promise the command makes about itself.
     write_project_doc: bool = True
     # §23 slice 2 (J12): UNGATED. Two reasons, and the second is the one
     # that decides it. Gating would mean approving a prompt in order to be
     # shown a prompt -- but worse, §13 does not merely deny a gated tool
     # where nothing can ask, it stops ADVERTISING it. Gated, this tool would
-    # be invisible in every headless run; AC2 requires it be visible,
+    # be invisible in every headless run; §24 AC2 requires it be visible,
     # called, and answered with a denial the model can work around. Asking
     # a person is not an action that needs authorising -- it is the least
     # unilateral thing a run can do.

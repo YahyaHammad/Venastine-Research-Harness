@@ -94,7 +94,7 @@ class TodoPanel(Static):
     one-way reveal, because a todo list EMPTIES as well as fills: clearing
     it must take the panel away again, and `display = True` set once cannot.
 
-    Re-rendered from an EVENT, never polled (AC4). app.py sets `todos` when
+    Re-rendered from an EVENT, never polled (§23 AC4). app.py sets `todos` when
     a `todo_changed` notice arrives, reading the list from thread state --
     the event says when, the thread says what. That split is why this widget
     holds no authoritative copy of anything: the panel cannot disagree with

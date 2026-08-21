@@ -1865,7 +1865,7 @@ defect is that `ConversationThread` has no field saying what a thread *is*, so
 
 ## 28. The shell capability classifier — one classification, two consumers — BUILT
 
-**Problem (audit #157, S1).** `shell`'s approval check documented a five-layer policy. Four of those
+**Problem (audit #157, severity S1).** `shell`'s approval check documented a five-layer policy. Four of those
 layers could only ever return `False` on the shipped config flags, so the whole thing was a
 pass-through for one boolean. Measured, with `ToolApprovals.shell = False`:
 
@@ -1968,7 +1968,7 @@ now would be speculative).
 
 ## 29. The CLI shell — one reader, one channel, one entry point — BUILT
 
-**Problem (audit #100, S1).** `_StdinReader`'s docstring names the hazard, for the case it fixed:
+**Problem (audit #100, severity S1).** `_StdinReader`'s docstring names the hazard, for the case it fixed:
 
 > `input()` cannot be interrupted, and **spawning a reader per prompt would leave several threads
 > racing for the same stdin** after the first timeout — whichever won would answer the wrong question.
@@ -2074,7 +2074,7 @@ N2, the four run-backed prompts: byte-identical (diff of the rendered strings is
 
 ## 30. The pipeline's payload boundary — one shape check for the ten passes — BUILT
 
-**Problem (audit #76, S1).** §3's retry corrects a response that does not **parse**. Nothing checked
+**Problem (audit #76, severity S1).** §3's retry corrects a response that does not **parse**. Nothing checked
 that what parsed was the **shape** the pass promised, so the same defect appeared in six places at
 once, and two of them completed a run and reported a false outcome.
 
@@ -2170,7 +2170,7 @@ harness exists to separate.
 
 ### Deliberately not in §30
 
-- **#57**, the tool wall clock — the last S1 after this. `signal.alarm` is main-thread-only, the TUI
+- **#57**, the tool wall clock — the last severity-S1 finding after this. `signal.alarm` is main-thread-only, the TUI
   runs tools in a worker, and abandoning a thread mid-`sympy` leaks one nothing can join. That is a
   decision about process isolation, and its fix site is on every tool call in the project.
 - **#77**, keeping the ensemble candidates on `PipelineRun`. B8's recorded clamp is a partial answer
@@ -2186,7 +2186,7 @@ harness exists to separate.
 
 ## 31. What a tool call is allowed to cost — one declared bound per tool — BUILT
 
-**Problem (audit #57, S1 — the last S1 in the project).** `registry.dispatch` was
+**Problem (audit #57, severity S1 — the last one in the project).** `registry.dispatch` was
 `result = spec.handler(params, **injected)`. No timeout, no alarm, no signal machinery anywhere
 between the model and the handler, and the arguments come from the model.
 

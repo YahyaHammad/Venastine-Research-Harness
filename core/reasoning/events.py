@@ -9,7 +9,7 @@ they care about; run_pipeline_to_completion() drains it for callers that
 only need the finished PipelineRun.
 
 WHY THIS IS A SEPARATE TYPE FROM core.events.LoopEvent (ROADMAP_v2 §22
-AC4, decision P1). §22 required this decision be made and recorded
+§22 AC4, decision P1). §22 required this decision be made and recorded
 BEFORE any event was added, precisely so nobody discovered the problem at
 §23. Three shapes were considered:
 

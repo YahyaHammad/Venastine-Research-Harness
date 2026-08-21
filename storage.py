@@ -55,12 +55,12 @@ class CompactionCheckpoint(SQLModel, table=True):
 
     THE ARCHIVE IS NEVER EDITED. Compaction only ever ADDS a row here;
     MessageLog is append-only and stays complete forever, which is what
-    AC1 is about and what makes an aggressive compaction trigger safe --
+    §21 AC1 is about and what makes an aggressive compaction trigger safe --
     nothing is ever destroyed, only hidden from the next call. See
     archive_history() for the read that proves it.
 
     `summary_text` represents every message in this thread through
-    `covers_up_to_message_id` EXCEPT the pinned ones (AC2), which is why
+    `covers_up_to_message_id` EXCEPT the pinned ones (§21 AC2), which is why
     the derived view has to re-include them separately (M9) -- a single
     watermark cannot express "everything up to K except rows 5 and 6".
 
@@ -132,7 +132,7 @@ class UserMemory(SQLModel, table=True):
     `scope`, but D25 says a project-scoped memory is "keyed to the same
     resolved project path the workspace-trust store uses" -- and with no
     path recorded, `"project"` cannot tell two projects apart, which makes
-    AC6 untestable rather than merely unenforced. `project_path` is the
+    §21 AC6 untestable rather than merely unenforced. `project_path` is the
     realpath for `scope="project"` and None for `scope="global"`, taken
     from config_loader.get_project_path() so "which project" means one
     thing across trust, config and memory.
@@ -448,7 +448,7 @@ def archive_history(thread_id: UUID) -> List[dict]:
 def pinned_through(thread_id: UUID, message_id: Optional[UUID]) -> List[dict]:
     """Pinned rows at or before the watermark, in neutral shape (§21 M9).
 
-    A summary covers a contiguous span, but AC2 says a pinned message is
+    A summary covers a contiguous span, but §21 AC2 says a pinned message is
     never summarized -- so pinned rows INSIDE the covered span have to
     come back verbatim, and a single `covers_up_to_message_id` cannot say
     "everything through K except these". The derived view is therefore
@@ -516,7 +516,7 @@ def history_through(
 ) -> List[dict]:
     """The span a compaction is about to summarize, in neutral shape.
 
-    Pinned rows are EXCLUDED (AC2: a pinned message is never included in
+    Pinned rows are EXCLUDED (§21 AC2: a pinned message is never included in
     what the compactor is asked to summarize). `after_message_id` is what
     makes chaining possible -- M2's chain strategy summarizes only what
     followed the previous checkpoint, while rederive passes None and
@@ -610,7 +610,7 @@ def save_checkpoint(
     thread_id: UUID, summary_text: str, covers_up_to_message_id: UUID,
     strategy: str = "rederive",
 ) -> UUID:
-    """Record one compaction. Adds a row; touches nothing else (AC1).
+    """Record one compaction. Adds a row; touches nothing else (§21 AC1).
 
     REFUSES A WATERMARK THAT DOES NOT ADVANCE, returning the existing
     checkpoint's id instead. `latest_checkpoint` resolves ties by
@@ -751,7 +751,7 @@ def list_memories(
     """Memories visible from `project_path`, NEWEST FIRST.
 
     Returns global memories plus the project ones recorded against exactly
-    this path -- which is AC6: a memory written in one project does not
+    this path -- which is §21 AC6: a memory written in one project does not
     surface in a thread opened from another. `project_path=None` returns
     global memories only, which is the honest answer when no project has
     been resolved rather than a reason to show everything.

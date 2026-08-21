@@ -118,8 +118,8 @@ TODO_POSITIONS = ("top", "bottom", "side")
 # Settings whose value is a nested object. Both the validator and the
 # cross-tier merge below iterate this rather than naming keys twice --
 # `compaction` was the only member until §16 added `tui`, and hardcoding
-# it in two places is what made the shallow-merge defect (review finding
-# F2) possible in the first place.
+# it in two places is what made the shallow-merge defect
+# (review finding F2) possible in the first place.
 _NESTED_SETTINGS = {
     "compaction": _KNOWN_COMPACTION,
     "tui": _KNOWN_TUI,

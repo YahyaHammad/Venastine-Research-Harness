@@ -12,7 +12,7 @@ and register into this shell rather than being written into it.
 
 Two hard acceptance criteria live in this file:
 
-  AC2  a permission prompt shown mid-loop resumes the SAME generator with
+  §16 AC2  a permission prompt shown mid-loop resumes the SAME generator with
        the user's answer. The worker thread blocks inside _run(), in this
        app's `ask` on the response channel (§23); the UI thread shows the
        modal and puts the decision on a queue that `ask` is waiting on.
@@ -21,7 +21,7 @@ Two hard acceptance criteria live in this file:
        pushed from on_loop_event and the loop itself held the queue --
        which was two mechanisms for one exchange.
 
-  AC3  a tool call that raises must not kill the app. Textual's run_worker
+  §16 AC3  a tool call that raises must not kill the app. Textual's run_worker
        defaults to exit_on_error=True, which would tear the whole TUI down
        on a transient network error, so exit_on_error=False plus an
        on_worker_state_changed handler are both required -- verified
@@ -451,7 +451,7 @@ class VenastineApp(App):
     def refresh_todo_panel(self) -> None:
         """Re-read the checklist from thread state and repaint.
 
-        Called from the `todo_changed` notice (AC4: from an event, never
+        Called from the `todo_changed` notice (§23 AC4: from an event, never
         polled), and on mount/resume so a resumed thread shows the list it
         already had -- §27's lesson that per-thread state must follow the
         thread, or the panel keeps showing the previous one's.
@@ -582,7 +582,7 @@ class VenastineApp(App):
         self.run_worker(
             lambda: self._consume(generator),
             thread=True,
-            exit_on_error=False,       # AC3 — see the module docstring
+            exit_on_error=False,       # §16 AC3 — see the module docstring
             name="agent-turn",
         )
 
@@ -1116,7 +1116,7 @@ class VenastineApp(App):
             self._transcript.write_system(f"[run id: {run.run_id}]")
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
-        """AC3. Required alongside exit_on_error=False: without a handler the
+        """§16 AC3. Required alongside exit_on_error=False: without a handler the
         exception is available on the worker and reported nowhere."""
         if event.worker.state is WorkerState.ERROR:
             self.notify(f"Turn failed: {event.worker.error}", severity="error")

@@ -89,7 +89,7 @@ def score_claim(claim: Claim, ensemble_n: int = 0) -> tuple[ConfidenceTier, dict
     # Same, for the type. Factual is the conservative branch: it has no
     # NON_FACTUAL_SCORE_CAP floor to sit on, and it is the only branch the
     # forced-UNVERIFIED rule can reach. A capitalised `type` used to skip
-    # D0's routing entirely and then score MEDIUM off the cap.
+    # gate D0's routing entirely and then score MEDIUM off the cap.
     claim_type = claim.type
     unrecognised_type = None
     if claim_type not in CLAIM_TYPES:
