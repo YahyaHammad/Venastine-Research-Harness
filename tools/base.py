@@ -97,6 +97,25 @@ class ToolSpec:
     # candidate tool list, which is agents/manager.py's knowledge and must
     # not become the loop's. Mirrors approval_notice exactly.
     request_payload: Optional[Callable[[dict, object], dict]] = None
+    # ROADMAP_v2 §32 (A7). Optional "I would refuse this call anyway"
+    # pre-flight. Signature: (params, context) -> Optional[str], the
+    # refusal reason or None. Returning a reason does NOT deny the
+    # call -- the handler still runs and still refuses; it tells the
+    # loop not to ASK first.
+    #
+    # core/loop.py already establishes this ordering for the case it
+    # can see on its own: "a context-excluded tool reports the context
+    # denial instead of prompting and then being denied anyway". That
+    # reasoning is not specific to contexts, but the loop cannot apply
+    # it to a condition only the tool knows -- spawn_subagent's
+    # unknown-agent and depth-limit checks live inside run(), so both
+    # prompted first and errored second. An unknown name produced a
+    # sign-off modal with an EMPTY notice and an EMPTY candidate list:
+    # a question with nothing in it.
+    #
+    # A property of the tool rather than a name hard-coded into the
+    # loop, for exactly the reason grant_scope and request_kind are.
+    refusal_check: Optional[Callable[[dict, object], Optional[str]]] = None
     # Optional extra text shown in the approval prompt, above the params.
     # Signature: (params, context) -> str. Lets a tool explain what
     # approving actually authorises when the params alone don't say --

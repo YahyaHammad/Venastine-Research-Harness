@@ -688,6 +688,21 @@ class RunAgentLoop:
                 # question whose answer cannot matter.
                 if needs_approval and not registry.is_allowed(call.name, context):
                     needs_approval = False
+                # §32 A7 (#70): the same rule for a refusal only the
+                # TOOL can see. spawn_subagent's unknown-agent and
+                # depth-limit checks lived inside run(), so both
+                # prompted first and errored second -- and for an
+                # unknown name the question had an empty notice and an
+                # empty candidate list, i.e. nothing to tick. The
+                # call is refused by dispatch with the tool's own
+                # reason; this only stops ASKING first. It also keeps
+                # J8's memo from being keyed on
+                # (spawn_subagent, None) -- a subject of None is the
+                # absence of the very thing the key exists to
+                # distinguish.
+                if needs_approval and registry.refusal_reason(
+                        call.name, call.input, context):
+                    needs_approval = False
                 # §18 sign-off (S1), narrowed by §25 (R2): a tool whose
                 # grant_scope is "run" is asked about once per run, not
                 # once per call. The loop names no tool -- it asks the

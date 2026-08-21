@@ -313,6 +313,28 @@ class ToolRegistry:
         )
         return tool_level or requires_approval(tool_name, params, context)
 
+    def refusal_reason(
+        self, tool_name: str, params: dict,
+        context: Optional["ToolContext"] = None,
+    ) -> Optional[str]:
+        """Why this call would be refused before it is asked about,
+        or None (§32 A7).
+
+        The loop asks the registry, the same way it asks whether
+        approval is needed at all -- which tools have pre-flight
+        conditions is not the loop's knowledge.
+
+        NOT AN ENFORCEMENT PATH. dispatch() still runs the handler and
+        the handler still refuses; this only decides whether a human
+        is put to a question whose answer cannot change the outcome.
+        A refusal_check that wrongly returned a reason would therefore
+        skip a prompt, never widen anything.
+        """
+        spec = self._tools.get(tool_name)
+        if spec is None or spec.refusal_check is None:
+            return None
+        return spec.refusal_check(params, context)
+
     def is_allowed(
         self, tool_name: str, context: Optional["ToolContext"] = None,
     ) -> bool:
@@ -470,6 +492,28 @@ class ToolRegistry:
                 raise ToolCallDenied(
                     f"{tool_name} is not available in this context")
             raise ToolCallDenied(f"{tool_name} is disabled by policy")
+
+        # §32 A7 (#70). BEFORE the approval gate, and that order is the
+        # whole fix. A call the tool will refuse must report the REAL
+        # reason, and the approval check would otherwise get there
+        # first: with the loop no longer asking (because it consulted
+        # this same predicate), there is no approval_callback here, so
+        # an unknown agent name came back as "spawn_subagent requires
+        # approval and was not given" -- a cause that is not the cause,
+        # and worse than the empty modal it replaced.
+        #
+        # RETURNED, not raised. This is the tool's own answer about its
+        # own call -- the same dict its handler would have returned --
+        # and ToolCallDenied means policy blocked you, which is a
+        # different fact the model should be able to tell apart.
+        #
+        # Nothing executes past here, so the argument policy below has
+        # nothing left to protect on this path.
+        refused = self.refusal_reason(tool_name, params, context)
+        if refused is not None:
+            logger.info("%s refused before approval: %s",
+                        tool_name, refused)
+            return {"error": refused}
 
         spec = self._tools[tool_name]
 
@@ -689,6 +733,11 @@ registry.register(ToolSpec(
     # carries the candidate tools and the answer carries the subset.
     request_kind="subagent_signoff",
     request_payload=subagent_tool.request_payload,
+    # §32 A7 (#70). The loop consults this before deciding to ask, so
+    # a spawn that will be refused anyway does not first produce a
+    # sign-off modal -- which for an unknown agent name was a question
+    # with an empty notice and nothing to tick.
+    refusal_check=subagent_tool.refusal_reason,
     # Approving a spawn IS the subagent sign-off (§18 S1): it authorises
     # the child's whole approval-gated tool set for the rest of the turn,
     # which is why grant_scope is "run" -- a second spawn in the same turn

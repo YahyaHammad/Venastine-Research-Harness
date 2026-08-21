@@ -728,6 +728,14 @@ def test_an_EMPTY_signoff_is_remembered_too(mocker):
     mocker.patch("core.loop.effort_for", return_value=None)
     mocker.patch("core.loop.call_model_stream", side_effect=_stream)
     mocker.patch("core.loop.registry.dispatch", return_value={"result": "ok"})
+    # §32 A7: the loop now skips the sign-off for a call the tool
+    # would refuse anyway, and these agent names are synthetic --
+    # refusal_reason would report "Unknown agent", so there would be no
+    # question to answer and this test would measure nothing. Patched
+    # beside request_kind/request_payload, which already simulate a tool
+    # that asks one: the subject here is the MEMO, not discovery.
+    mocker.patch("core.loop.registry.refusal_reason",
+                 return_value=None)
     mocker.patch(
         "core.loop.registry.request_payload",
         side_effect=lambda name, params, ctx: {
@@ -785,6 +793,14 @@ def test_s1_signoff_is_remembered_per_agent_not_per_tool_name(mocker):
         mocker.patch("core.loop.api_initialization", return_value=object())
         mocker.patch("core.loop.effort_for", return_value=None)
         mocker.patch("core.loop.call_model_stream", side_effect=_stream)
+        # §32 A7: the loop now skips the sign-off for a call the tool
+        # would refuse anyway, and these agent names are synthetic --
+        # refusal_reason would report "Unknown agent", so there would be no
+        # question to answer and this test would measure nothing. Patched
+        # beside request_kind/request_payload, which already simulate a tool
+        # that asks one: the subject here is the MEMO, not discovery.
+        mocker.patch("core.loop.registry.refusal_reason",
+                     return_value=None)
         mocker.patch("core.loop.registry.dispatch",
                      return_value={"result": "ok"})
         # The payload is what carries the subject; faking it here keeps
@@ -1021,6 +1037,14 @@ def test_refusing_a_spawn_stops_it_happening(mocker):
     mocker.patch("core.loop.call_model_stream", side_effect=_stream)
     dispatched = mocker.patch("core.loop.registry.dispatch",
                               return_value={"result": "ran"})
+    # §32 A7: the loop now skips the sign-off for a call the tool
+    # would refuse anyway, and these agent names are synthetic --
+    # refusal_reason would report "Unknown agent", so there would be no
+    # question to answer and this test would measure nothing. Patched
+    # beside request_kind/request_payload, which already simulate a tool
+    # that asks one: the subject here is the MEMO, not discovery.
+    mocker.patch("core.loop.registry.refusal_reason",
+                 return_value=None)
     mocker.patch("core.loop.registry.request_kind",
                  return_value="subagent_signoff")
     mocker.patch("core.loop.registry.request_payload",

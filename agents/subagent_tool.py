@@ -49,6 +49,42 @@ TOOL_SCHEMA = {
 }
 
 
+def refusal_reason(params: dict, context=None):
+    """Why this spawn would be refused, or None (§32 A7, #70).
+
+    ONE function, TWO callers: the loop consults it before deciding to
+    ask, and run() below calls it before doing anything. That is the
+    point rather than a tidiness -- the sign-off shown and the error
+    returned have to be about the same refusal, and the way to
+    guarantee it is to have one place that decides.
+
+    THE ORDER MATCHES run()'s ORIGINAL ORDER, depth before params
+    before name, because these strings are what the model already
+    sees and reordering them would change a live contract for no
+    reason.
+
+    Returns None for anything it cannot settle in advance -- an agent
+    that exists and a depth that is fine can still fail once it runs,
+    and this function is deliberately not in the business of
+    predicting that.
+    """
+    parent = context or ToolContext()
+    if parent.subagent_depth >= config.SUBAGENT_MAX_DEPTH:
+        return (f"Maximum subagent nesting depth "
+                f"({config.SUBAGENT_MAX_DEPTH}) reached")
+    name = params.get("agent_name")
+    task = params.get("task")
+    if not name or not task:
+        return ("spawn_subagent requires both 'agent_name' and "
+                "'task'.")
+    from agents.manager import manager
+
+    if manager.get(name) is None:
+        return (f"Unknown agent: {name!r} is not "
+                f"in the available agents catalog.")
+    return None
+
+
 def approval_notice(params: dict, context=None) -> str:
     """What approving this spawn actually authorises (§18 S1).
 
@@ -103,24 +139,25 @@ def run(params: dict, parent_context=None, parent_run=None,
     from agents.manager import manager
 
     parent = parent_context or ToolContext()
-    if parent.subagent_depth >= config.SUBAGENT_MAX_DEPTH:
-        return {"error": f"Maximum subagent nesting depth "
-                         f"({config.SUBAGENT_MAX_DEPTH}) reached"}
+    # §32 A7. The SAME function the loop consulted before deciding
+    # whether to ask and dispatch() applied before its approval gate,
+    # so all three agree about what is being refused. It covers the
+    # depth limit, the missing-params case (.get not [], because no
+    # provider validates tool inputs against the schema and a bare
+    # KeyError escapes _run and takes down the turn) and the
+    # unknown-agent case.
+    #
+    # Kept here even though dispatch now short-circuits first: this is
+    # the backstop for a caller that reaches run() directly, which is
+    # every test in the suite and anything future that composes agents
+    # without going through the registry. Two layers, one predicate.
+    refusal = refusal_reason(params, parent)
+    if refusal:
+        return {"error": refusal}
 
-    # .get, not []. No provider validates tool inputs against the schema,
-    # and a bare KeyError here escapes _run() (which catches only
-    # ToolCallDenied) and takes down the turn -- where an error dict lets
-    # the model correct itself. Same pattern as load_skill.
     name = params.get("agent_name")
     task = params.get("task")
-    if not name or not task:
-        return {"error": "spawn_subagent requires both 'agent_name' and "
-                         "'task'."}
-
     agent = manager.get(name)
-    if agent is None:
-        return {"error": f"Unknown agent: {name!r} is not "
-                         f"in the available agents catalog."}
 
     child = manager.child_context(agent, parent)
     # The channel is inherited, and it is NOT redundant with the grant.
