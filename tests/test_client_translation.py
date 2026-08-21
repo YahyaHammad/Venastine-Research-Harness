@@ -23,8 +23,6 @@ from core.client import (
     _tools_for_provider,
     _messages_for_provider,
     call_model_stream,
-    ModelResponse,
-    ToolCallRequest,
 )
 
 
@@ -766,3 +764,53 @@ def test_a_whitespace_only_assistant_turn_with_no_tool_calls_is_dropped():
     ])
     assert len(out) == 2
     assert out[1]["content"] == [{"type": "text", "text": "   "}]
+
+
+# ---------------------------------------------------------------------------
+# ---- What importing this module costs (ROADMAP_v2 §33 W7, #135) -----------
+# ---------------------------------------------------------------------------
+
+def test_importing_core_client_does_not_import_any_provider_sdk():
+    """The same contract as the two translation functions above, on the
+    other axis: a provider SDK is touched only at its point of use.
+
+    core.loop imports this module and main.py imports core.loop, so a
+    module-scope `from openai import OpenAI` is paid by every invocation
+    of either shell before argparse runs -- `--help`, `--summary`, a
+    mistyped flag, the thread picker. Measured before the fix: 1,766ms of
+    a 2,619ms `--help`, for three SDKs of which any one run uses at most
+    one.
+
+    A SUBPROCESS, because this cannot be asked inside the test session:
+    the root conftest stubs all three into sys.modules before collection,
+    so `"openai" in sys.modules` is True here no matter what this file
+    does. The full dotted name matters too -- `google` alone is a
+    namespace package that protobuf puts in sys.modules regardless, and
+    checking the first segment reports a false positive.
+
+    The failure mode this guards is a one-line convenience: someone needs
+    a type at module scope, adds the import back, and every launch in
+    every shell silently pays seconds again with nothing to notice it.
+    """
+    import os
+    import subprocess
+    import sys as _sys
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    probe = (
+        "import sys; import core.client; "
+        "print([m for m in ('openai', 'google.genai', 'anthropic') "
+        "if m in sys.modules])"
+    )
+    result = subprocess.run(
+        [_sys.executable, "-c", probe],
+        capture_output=True, text=True, cwd=root, timeout=120)
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "[]", (
+        f"importing core.client pulled in {result.stdout.strip()}. Each "
+        f"provider SDK belongs inside the branch that uses it -- and inside "
+        f"the BRANCH, not at the top of the enclosing function, or a "
+        f"GOOGLE-only name is paid on every Anthropic turn."
+    )

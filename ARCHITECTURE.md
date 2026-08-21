@@ -50,7 +50,7 @@ Venastine Research Harness/
 ├── CLAUDE.md / QWEN.md             # pointers to AGENTS.md, so a harness that auto-loads one of those names finds the context instead of a second copy of it
 ├── DEVLOG.md                       # implementation notes for built ROADMAP sections -- see §0
 │
-├── tests/                          # 2103 tests, all offline, ~25-45s depending on the machine (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
+├── tests/                          # 2104 tests, all offline, ~25-45s depending on the machine (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
 │   ├── conftest.py                 # fixtures: make_model_response, make_stream_from_response, make_stream_sequence, FakeStorage, ...
 │   ├── BREAKING_CHANGES.md         # what-breaks-it / symptom / fix per area
 │   ├── test_cli.py                 # 76 tests -- ROADMAP §1 thread_id passthrough + UUID validation + §14 parser defaults/resolution/trust flow + §29 N1-N8 the one stdin reader, N2's channel deadline, every request kind rendered, and the startup block main(argv) made reachable + #102's four declining defaults
@@ -60,7 +60,7 @@ Venastine Research Harness/
 │   ├── test_credentials.py         # 9 tests -- audit #19: providers.json and the trust store created 0600, asserted under umask 0. The mode cases skip off POSIX; the round-trip cases do not
 │   ├── test_output_writer.py       # 6 tests -- ROADMAP §12 artifact file layout, contents, chart PNG, None guard, tier counts
 │   ├── test_confidence_scoring.py  # 50 tests (3 ROADMAP verbatim regressions)
-│   ├── test_client_translation.py  # 36 tests -- all three provider translation branches + batching + Google request/response parsing
+│   ├── test_client_translation.py  # 37 tests -- all three provider translation branches + batching + Google request/response parsing + §33's W7 guard that importing core.client pulls in no provider SDK
 │   ├── test_client_streaming.py    # 10 tests -- ROADMAP §13 direct call_model_stream coverage (3 providers + D21 + fragment accumulation)
 │   ├── test_loop_stop_conditions.py# 3 tests (ROADMAP verbatim)
 │   ├── test_streaming_loop.py      # 16 tests -- ROADMAP §13 generator event ordering, exception propagation, D20 persistence, permission_channel, and #158's actionable headless denial (name-gated vs argument-gated)
