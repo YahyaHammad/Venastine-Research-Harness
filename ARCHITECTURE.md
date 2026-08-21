@@ -50,7 +50,7 @@ Venastine Research Harness/
 ├── CLAUDE.md / QWEN.md             # pointers to AGENTS.md, so a harness that auto-loads one of those names finds the context instead of a second copy of it
 ├── DEVLOG.md                       # implementation notes for built ROADMAP sections -- see §0
 │
-├── tests/                          # 2077 tests, all offline, ~25-45s depending on the machine (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
+├── tests/                          # 2080 tests, all offline, ~25-45s depending on the machine (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
 │   ├── conftest.py                 # fixtures: make_model_response, make_stream_from_response, make_stream_sequence, FakeStorage, ...
 │   ├── BREAKING_CHANGES.md         # what-breaks-it / symptom / fix per area
 │   ├── test_cli.py                 # 76 tests -- ROADMAP §1 thread_id passthrough + UUID validation + §14 parser defaults/resolution/trust flow + §29 N1-N8 the one stdin reader, N2's channel deadline, every request kind rendered, and the startup block main(argv) made reachable + #102's four declining defaults
@@ -81,7 +81,7 @@ Venastine Research Harness/
 │   ├── test_policy_enforcement.py  # 74 tests -- ROADMAP §8 secret redaction, domain blocking (#48 normalisation + suffix match), is_url_permitted's address guard (#54), output policy, registry integration
 │   ├── test_critic_routing.py      # 2 tests -- ROADMAP §11 critic-model routing (3a/3b/6c to critic, rest to main)
 │   ├── test_permission_context.py  # 21 tests -- ROADMAP_v2 §15 AC1-AC7 (stricter wins, mcp default, redaction survives, D24, unregister) + schemas filtering
-│   ├── test_agents.py              # 44 tests -- ROADMAP_v2 §18 AC1-AC3 (intersection, depth, manager surface), dispatch injection, headless filter + warning, goal mode, catalog, D24, TUI commands, and R16's "a headless run cannot spawn at all"
+│   ├── test_agents.py              # 47 tests -- ROADMAP_v2 §18 AC1-AC3 (intersection, depth, manager surface), dispatch injection, headless filter + warning, goal mode, catalog, D24, TUI commands, and R16's "a headless run cannot spawn at all"
 │   ├── test_catalog_advertisement.py # 15 tests -- ROADMAP_v2 §32 A1/A2 (#68): is_advertised as the one predicate schemas/headless_hidden/with_catalogs all read, every pass id driven headless, and the grant that cannot re-admit a GRANT_NEVER catalog
 │   ├── test_catalog_text.py        # 19 tests -- ROADMAP_v2 §32 A5/A6 (#131): a description cannot leave its bullet or forge a prompt section, the cap and its boundary, our own files already comply, and the trust prompt showing the NORMALISED text it is deciding about
 │   ├── test_spawnable.py           # 12 tests -- ROADMAP_v2 §32 A3/A4 (#69): a harness agent that omits `spawnable` is a build error naming every offender, a stranger's silence gets the safe answer, and the default install advertises no spawnable agent at all

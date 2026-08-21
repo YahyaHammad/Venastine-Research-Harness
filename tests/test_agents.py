@@ -567,6 +567,84 @@ def test_candidate_approvals_omits_tools_the_grant_cannot_cover(
     assert "shell" not in manager.candidate_approvals(child)
 
 
+def test_candidate_approvals_is_computed_FOR_THE_CHILD_not_globally(
+        _roots, _mcp_tool):
+    """#71 (M7). The sibling filter was pinned and the REACHABILITY one
+    was not, and both halves come from the same docstring paragraph:
+    leaving a tool in this list "would make the sign-off notice promise
+    authority the grant does not carry, which is worse than not offering
+    it".
+
+    Dropping the argument -- `registry.headless_hidden()` with no
+    context -- was green on the whole suite, because every existing
+    caller builds `child` from an unrestricted agent under an
+    unrestricted parent, where the two calls return the same list. The
+    restriction is what makes them differ.
+
+    Note this is not an escalation: `allowed_tools` still narrows at
+    dispatch, so a granted-but-excluded tool is denied when called. The
+    defect is the NOTICE over-promising, which is exactly what the
+    docstring calls worse than not offering it.
+    """
+    _write_harness_agent(_roots, "narrow", ["allowed_tools: [get_time]"])
+    config_loader.initialize(str(_roots["project"]))
+    child = manager.child_context(manager.get("narrow"), ToolContext())
+
+    # The control: globally, there IS something to offer.
+    assert "mcp__probe__tool" in manager.candidate_approvals(ToolContext())
+    # But this child cannot reach it, so the sign-off must not offer it.
+    assert "mcp__probe__tool" not in manager.candidate_approvals(child)
+
+
+def test_active_context_starts_at_depth_zero(_roots):
+    """#71 (M5). `active_context`'s own docstring: "the agent's own
+    restrictions at depth 0 -- no parent to intersect with, no nesting".
+
+    Starting at 1 instead silently HALVES the nesting budget for a
+    /agent-switched session, and nothing reports the difference.
+    test_ac2_nesting_beyond_max_depth_returns_error constructs a
+    ToolContext directly, so the depth-0 entry point had no test at all.
+    """
+    _write_harness_agent(_roots, "worker")
+    config_loader.initialize(str(_roots["project"]))
+
+    assert manager.active_context(manager.get("worker")).subagent_depth == 0
+
+
+def test_an_agents_declared_model_beats_the_parent_runs(_roots, mocker,
+                                                        fake_storage):
+    """#71 (M26). subagent_tool's own comment: "an agent's declared
+    model/provider is its identity". Inverting it -- parent first --
+    was green, because the only test of this pair uses an agent that
+    declares neither and therefore measures the fallback half twice.
+
+    effort_for's docstring cites this exact inversion as one of three
+    ways a wrong effort used to reach the wire, which is why the
+    unpinned half is worth a test rather than a note.
+    """
+    _write_harness_agent(_roots, "opinionated",
+                         ["model: agent-model", "provider: GOOGLE"])
+    config_loader.initialize(str(_roots["project"]))
+
+    captured = {}
+
+    class FakeResponse:
+        text = "done"
+        thread_id = "tid-1"
+
+    mocker.patch.object(RunAgentLoop, "run_agent_conversation",
+                        side_effect=lambda **kw: (captured.update(kw),
+                                                  FakeResponse())[1])
+
+    subagent_tool.run(
+        {"agent_name": "opinionated", "task": "x"},
+        parent_context=ToolContext(),
+        parent_run=RunInfo(model="parent-model", provider_name="OPENAI"))
+
+    assert captured["model"] == "agent-model"
+    assert captured["provider_name"] == "GOOGLE"
+
+
 def test_spawn_forwards_the_channel_and_the_grant(_roots, _mcp_tool, mocker,
                                                   fake_storage):
     """r3-1: without the channel the child ran headless, so
