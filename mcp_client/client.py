@@ -45,6 +45,7 @@ import threading
 from typing import Optional
 
 from mcp import Client
+from mcp.client.sse import sse_client
 from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.client.streamable_http import (
     create_mcp_http_client, streamable_http_client,
@@ -196,6 +197,18 @@ class MCPClient:
                 env=cfg.env or None,
                 cwd=cfg.cwd,
             ))
+        if cfg.transport == "sse":
+            # SSE must ALWAYS build its own transport: a bare URL string
+            # means STREAMABLE HTTP to Client(), which is exactly the
+            # silent misconnection #62 records. Headers go straight to
+            # the SDK (its signature takes `headers=`), through the same
+            # create_mcp_http_client defaults -- so an Authorization
+            # header authenticates here too, never discarded (M19's
+            # property holds on both HTTP transports).
+            return sse_client(
+                cfg.url,
+                headers=dict(cfg.headers) or None,
+            )
         if cfg.transport == "http":
             if not cfg.headers:
                 return cfg.url

@@ -2978,6 +2978,22 @@ One commit per work package on `fix/batch-16-compaction`; per-change tables in
 post-audit. **#136 remains open** (X2): Z2 makes its repeated-attempt path *addressable* (the
 status is data now) but does not yet cache it.
 
+---
+
+## 37. MCP's edges — disclosure, SSE, teardown, catalogue — IN PROGRESS (batch 17)
+
+Audit unit 7's six remaining findings: **#60, #61, #62, #63, #64, #65**, on
+`fix/batch-17-mcp-unit`. One commit per work package; per-change tables in
+`tests/BREAKING_CHANGES.md`.
+
+### Design Decisions Record — §37 (F1–F8)
+
+| id | decision |
+|---|---|
+| **F5** | **SSE only by explicit `"type": "sse"`** (#62). `sse` left the streamable alias set: D4 promises SSE, SDK v2 ships `sse_client`, and aliasing it is how an SSE-only server got offered a streamable handshake it could not answer. A bare `url` keeps meaning streamable — that is what every pre-existing config assumed, and URL sniffing would be magic. The aliases (`http`, `https`, `streamable-http`, `streamablehttp`) are unchanged. An unsupported declared type still refuses with a named error (M7's fall-through stays pinned shut) |
+| **F6** | **Teardown has ONE shared wall-clock budget** (#64): polite close, force-cancel and thread join share a single deadline instead of three sequential 15s waits (~45s worst case, paid by Ctrl+C too). Servers still alive at expiry are NAMED in a WARNING |
+| **F7** | **`unregister_all` is wired into teardown** (#65): `teardown_mcp` calls it after `disconnect_all()`, so ARCHITECTURE.md's "disconnect handling" justification describes something that exists. Runtime `/mcp` management is recorded as a candidate future section, deliberately not built here |
+
 ## Open Questions — None Remaining
 
 **(Rev. 3, final)** This document opened by describing itself as "a complete, no-design-decisions-left specification." As of this revision that is actually true: every open question has been answered, and what's left below needs checking against code rather than deciding.

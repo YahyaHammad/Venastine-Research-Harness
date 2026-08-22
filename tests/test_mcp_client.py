@@ -108,6 +108,52 @@ def test_ac1_server_configs_is_set_and_inspectable():
 
 
 # ---------------------------------------------------------------------------
+# ---- what _transport_for hands Client() (#62, and M19's shape) -----------
+# ---------------------------------------------------------------------------
+#
+# A bare URL string means STREAMABLE HTTP to v2's Client(). That makes the
+# TYPE of the returned object load-bearing: an SSE server handed a string
+# connects as streamable -- #62's silent misconnection -- and a server
+# configured with headers handed a bare string connects UNAUTHENTICATED,
+# because the URL carries none of them (M19, a bug that already happened
+# once). Asserted on type: str without extras, context manager with them.
+
+def test_an_sse_server_always_builds_its_own_transport_never_a_bare_url(monkeypatch):
+    from mcp.client.sse import sse_client
+    c = MCPClient({"e": _cfg("e", transport="sse",
+                             url="https://example.test/sse")})
+    transport = c._transport_for(c.server_configs["e"])
+    assert not isinstance(transport, str), (
+        "a bare URL string means streamable HTTP to Client(); an SSE "
+        "server given one silently misconnects")
+    assert hasattr(transport, "__aenter__")
+
+
+def test_an_http_server_without_headers_hands_client_a_bare_url():
+    c = MCPClient({"r": _cfg("r", transport="http",
+                             url="https://example.test/mcp")})
+    assert isinstance(c._transport_for(c.server_configs["r"]), str)
+
+
+def test_headers_are_carried_on_both_http_transports_not_discarded(monkeypatch):
+    """M19. The streamable branch returns a context manager built around
+    an http client carrying them; the SSE branch passes them to the SDK.
+    A bare str here would mean an Authorization header was dropped and a
+    server connected UNAUTHENTICATED."""
+    hdrs = {"Authorization": "Bearer tok"}
+    c = MCPClient({
+        "http": _cfg("http", transport="http", url="https://x.test/mcp",
+                     headers=hdrs),
+        "sse": _cfg("sse", transport="sse", url="https://x.test/sse",
+                    headers=hdrs),
+    })
+    for name in ("http", "sse"):
+        t = c._transport_for(c.server_configs[name])
+        assert not isinstance(t, str), f"{name}: headers were discarded"
+        assert hasattr(t, "__aenter__")
+
+
+# ---------------------------------------------------------------------------
 # ---- AC2: the bridge makes caller context irrelevant ---------------------
 # ---------------------------------------------------------------------------
 

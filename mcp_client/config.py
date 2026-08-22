@@ -45,7 +45,12 @@ _KNOWN_SERVER_KEYS = frozenset({
     "disabled",
 })
 
-_HTTP_TYPES = frozenset({"http", "https", "sse", "streamable-http", "streamablehttp"})
+# Declared `type` values that mean streamable HTTP. `sse` is NOT one of
+# them (#62): D4 promises SSE, the SDK v2 ships sse_client for it, and
+# aliasing it here is how a server that speaks only SSE got offered a
+# streamable handshake it could not answer.
+_STREAMABLE_TYPES = frozenset({"http", "https", "streamable-http", "streamablehttp"})
+_SSE_TYPES = frozenset({"sse"})
 
 
 @dataclass
@@ -54,7 +59,7 @@ class ServerConfig:
     name: str
     tier: str                       # "user" | "project"
     path: str                       # the file it came from
-    transport: str                  # "stdio" | "http" | "unknown"
+    transport: str                  # "stdio" | "http" | "sse" | "unknown"
     command: Optional[str] = None
     args: list = field(default_factory=list)
     env: dict = field(default_factory=dict)
@@ -75,6 +80,8 @@ class ServerConfig:
             return f"{self.name} [{self.tier}] runs: {argv.strip()}"
         if self.transport == "http":
             return f"{self.name} [{self.tier}] connects to: {self.url}"
+        if self.transport == "sse":
+            return f"{self.name} [{self.tier}] connects via SSE to: {self.url}"
         return f"{self.name} [{self.tier}] UNUSABLE: {self.error}"
 
 
@@ -148,7 +155,15 @@ def _parse_entry(name: str, entry: Any, tier: str, path: str) -> ServerConfig:
         cfg.transport = "stdio"
         cfg.command = str(entry["command"])
         cfg.args = list(raw_args)
-    elif entry.get("url") and (not declared or declared in _HTTP_TYPES):
+    # SSE only by EXPLICIT declaration (F5): a bare "url" keeps meaning
+    # streamable HTTP, because that is what every config written before
+    # this branch existed assumed, and URL sniffing would be magic. The
+    # aliases below stay streamable; an unsupported declared type still
+    # refuses rather than falling through to HTTP (#61's M7).
+    elif entry.get("url") and declared in _SSE_TYPES:
+        cfg.transport = "sse"
+        cfg.url = str(entry["url"])
+    elif entry.get("url") and (not declared or declared in _STREAMABLE_TYPES):
         cfg.transport = "http"
         cfg.url = str(entry["url"])
     elif entry.get("url"):

@@ -50,6 +50,43 @@ def test_stdio_and_http_entries_are_recognized(roots):
     assert cfgs["remote"].url == "https://example.test/mcp"
 
 
+def test_an_explicit_sse_type_is_its_own_transport_not_an_alias(roots):
+    """#62 / F5. 'sse' sat in the streamable alias set, so a server that
+    speaks only Server-Sent Events was handed a streamable handshake it
+    could not answer -- D4 promised SSE and no SSE transport existed.
+    Declared type is the ONLY selector: no URL sniffing."""
+    _write(roots["user"] / "mcp.json",
+           {"events": {"type": "sse", "url": "https://example.test/sse"}})
+    cfgs = mcp_config.load_server_configs(str(roots["project"]), trusted=False)
+    assert cfgs["events"].transport == "sse"
+    assert cfgs["events"].url == "https://example.test/sse"
+
+
+@pytest.mark.parametrize("declared", [None, "http", "https",
+                                      "streamable-http", "streamablehttp"])
+def test_a_bare_or_streamable_typed_url_stays_streamable(roots, declared):
+    """The default is unchanged by SSE's arrival: every config written
+    before this branch existed assumed a bare url meant streamable HTTP,
+    and flipping it would have reconnected them all as SSE."""
+    entry = {"url": "https://example.test/mcp"}
+    if declared is not None:
+        entry["type"] = declared
+    _write(roots["user"] / "mcp.json", {"r": entry})
+    cfgs = mcp_config.load_server_configs(str(roots["project"]), trusted=False)
+    assert cfgs["r"].transport == "http"
+
+
+def test_a_declared_unsupported_type_refuses_rather_than_falling_through(roots):
+    """"#61's M7 lived here: an unsupported declared type must never be
+    quietly connected over HTTP anyway -- validation is by CONNECTION,
+    but only for entries we understood. A named error is the contract."""
+    _write(roots["user"] / "mcp.json",
+           {"ws": {"type": "websocket", "url": "wss://example.test"}})
+    cfgs = mcp_config.load_server_configs(str(roots["project"]), trusted=False)
+    assert cfgs["ws"].transport == "unknown"
+    assert "websocket" in cfgs["ws"].error
+
+
 def test_an_entry_with_neither_command_nor_url_is_unusable_not_fatal(roots):
     """Decision G: validation is by CONNECTION. A nonsense entry becomes
     that one server's named failure, never a startup error that takes the
@@ -154,6 +191,16 @@ def test_describe_names_the_actual_command(roots):
     cfgs = mcp_config.load_server_configs(str(roots["project"]), trusted=False)
     described = cfgs["x"].describe()
     assert "npx" in described and "@evil/pkg" in described
+
+
+def test_describe_renders_sse_as_its_own_protocol(roots):
+    """#62: an SSE server must not describe itself with the streamable
+    line, or the one place a user sees what will connect hides which
+    protocol is being spoken."""
+    _write(roots["user"] / "mcp.json",
+           {"e": {"type": "sse", "url": "https://example.test/sse"}})
+    cfgs = mcp_config.load_server_configs(str(roots["project"]), trusted=False)
+    assert "SSE" in cfgs["e"].describe()
 
 
 # ---------------------------------------------------------------------------
