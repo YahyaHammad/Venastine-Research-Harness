@@ -5,6 +5,7 @@ from typing import List, Dict, Any, Optional
 from uuid import UUID, uuid4
 
 from sqlmodel import Field, SQLModel, JSON, Session, select
+from sqlalchemy import func as sa_func  # real sqlalchemy; sqlmodel is faked in tests, this is not
 
 from database import engine  # your SQLAlchemy engine, assumed to exist here
 
@@ -32,6 +33,21 @@ class ConversationThread(SQLModel, table=True):
     # up only as a performance difference is worse than no index at all;
     # the WHERE clause is what T1 was buying, not the index.
     kind: str = Field(default="chat")
+    # (#32) When this thread was last written to -- ANY archived row,
+    # user, assistant or tool alike. The picker orders by this rather
+    # than by creation, because "most recent first" should surface the
+    # conversation you were just in, not the one you merely opened last.
+    #
+    # Nullable deliberately, twice over. Semantically: NULL means "never
+    # received a message", and the reader falls back to created_at --
+    # which is also what every row predating this column reads as, since
+    # the additive migration never backfills (M7). Mechanically: the
+    # honest default is per-row Python (a timestamp), which has no SQL
+    # literal, so the migrator could not have added it NOT NULL anyway
+    # (#26's WARNING path). save_message is the single writer of
+    # MessageLog rows in production and stamps this in the same session
+    # it writes the message, so the two cannot drift.
+    last_activity_at: Optional[datetime] = Field(default=None)
 
 
 class MessageLog(SQLModel, table=True):
@@ -224,6 +240,16 @@ def save_message(
     name: Optional[str] = None,
     tool_call_id: Optional[str] = None,
 ) -> None:
+    """Append one archived row and stamp the thread's activity (#32).
+
+    THE single production writer of MessageLog rows, which is what makes
+    it the right place to maintain `last_activity_at`: the stamp rides in
+    the same session and commit as the insert, so a message can never be
+    persisted without its thread moving to the top of the picker. Any
+    role counts (Q8b) -- a thread whose last event was tool output is
+    still the one you were just in. An unknown thread_id writes the
+    orphan message exactly as before; there is simply no row to stamp.
+    """
     with Session(engine) as session:
         new_message = MessageLog(
             thread_id=thread_id,
@@ -233,15 +259,27 @@ def save_message(
             tool_call_id=tool_call_id,
         )
         session.add(new_message)
+        thread = session.get(ConversationThread, thread_id)
+        if thread is not None:
+            thread.last_activity_at = datetime.now(timezone.utc)
+            session.add(thread)
         session.commit()
 
 
 def list_threads(kind: Optional[str] = THREAD_KIND_CHAT) -> List[dict]:
-    """Conversation threads, most recent first.
+    """Conversation threads, most recently ACTIVE first (#32).
 
     Each entry: ``{"id": UUID, "created_at": datetime, "kind": str,
     "preview": str}``. Used by the CLI / TUI layer for thread browsing —
     core/memory.py does NOT call this.
+
+    The order key is `last_activity_at`, falling back to `created_at`
+    when it is NULL -- never-received-a-message threads, and every row
+    that predates the column (the additive migration never backfills).
+    §27 made the picker correct by filtering and identifiable by preview;
+    ordering is the third axis: resume yesterday's long thread, work in
+    it an hour, and it stays pinned at the top rather than sinking below
+    three threads opened and abandoned this morning.
 
     ROADMAP_v2 §27 AC2: CONVERSATIONS ONLY by default. One research run
     creates ~10 pass threads plus up to 4 retry-round threads plus the
@@ -260,7 +298,13 @@ def list_threads(kind: Optional[str] = THREAD_KIND_CHAT) -> List[dict]:
         if kind is not None:
             statement = statement.where(ConversationThread.kind == kind)
         threads = session.exec(
-            statement.order_by(ConversationThread.created_at.desc())
+            statement.order_by(
+                sa_func.coalesce(
+                    ConversationThread.last_activity_at,
+                    ConversationThread.created_at,
+                ).desc(),
+                ConversationThread.created_at.desc(),
+            )
         ).all()
         previews = _first_user_messages(session, [t.id for t in threads])
         return [

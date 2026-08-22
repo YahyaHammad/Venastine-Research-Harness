@@ -543,6 +543,7 @@ class FakeStorage:
         self.saved_messages = []  # list of (thread_id, role, content, name, tool_call_id)
         self._threads = {}        # thread_id -> True (existence tracker)
         self._thread_created_at = {}  # thread_id -> datetime
+        self._thread_last_activity = {}  # thread_id -> datetime or None (#32)
         self._thread_kind = {}    # thread_id -> "chat" / "research_pass" / "subagent" (§27)
         self._messages_by_thread = {}  # thread_id -> list of neutral-shape dicts
         self._thread_extra = {}   # thread_id -> dict (extra_data mirror)
@@ -560,6 +561,9 @@ class FakeStorage:
         # §27: recorded, so a test can assert WHAT a code path created
         # without a real database. Mirrors production's column default.
         self._thread_kind[thread_id] = kind
+        # (#32) Mirrors production's nullable column: NULL until the first
+        # message lands, which is what save_message stamps.
+        self._thread_last_activity[thread_id] = None
         self._messages_by_thread[thread_id] = []
         self._thread_extra[thread_id] = {}
         return thread_id
@@ -596,9 +600,20 @@ class FakeStorage:
             extra[key] = value
 
     def list_threads(self, kind="chat"):
-        """Mirrors storage.list_threads(): most recent first, conversations
-        only unless kind=None (§27 AC2), each row carrying `kind` and a
-        `preview` of the first user message."""
+        """Mirrors storage.list_threads(): most recently ACTIVE first
+        (#32), conversations only unless kind=None (§27 AC2), each row
+        carrying `kind` and a `preview` of the first user message."""
+        from datetime import datetime, timezone
+
+        def _activity(tid):
+            """COALESCE(last_activity_at, created_at) in Python. The
+            fallback is what never-messaged threads -- and every row that
+            predates the column, since the migration never backfills --
+            sort by."""
+            stamp = self._thread_last_activity.get(tid)
+            return stamp if stamp is not None \
+                else self._thread_created_at[tid]
+
         rows = [
             {"id": tid, "created_at": ts,
              "kind": self._thread_kind.get(tid, "chat"),
@@ -606,7 +621,10 @@ class FakeStorage:
             for tid, ts in self._thread_created_at.items()
             if kind is None or self._thread_kind.get(tid, "chat") == kind
         ]
-        return sorted(rows, key=lambda t: t["created_at"], reverse=True)
+        # Tie-break on created_at desc, exactly as production's ORDER BY does.
+        return sorted(rows,
+                      key=lambda t: (_activity(t["id"]), t["created_at"]),
+                      reverse=True)
 
     def _first_user_message(self, thread_id):
         for msg in self._messages_by_thread.get(thread_id, []):
@@ -622,6 +640,7 @@ class FakeStorage:
         # RECONSTRUCTION logic below, though, has to mirror storage.py's
         # for real -- that part isn't just a serialization round trip,
         # it's role-specific shape-building that has to match production.
+        from datetime import datetime, timezone
         self.saved_messages.append((thread_id, role, content, name, tool_call_id))
         self._messages_by_thread.setdefault(thread_id, []).append({
             "id": uuid4(),
@@ -631,6 +650,11 @@ class FakeStorage:
             "tool_call_id": tool_call_id,
             "pinned": False,
         })
+        # (#32) Mirrors production: any archived row stamps the thread,
+        # in the same write.
+        if thread_id in self._threads:
+            self._thread_last_activity[thread_id] = \
+                datetime.now(timezone.utc)
 
     # -- ROADMAP_v2 §21 reads ---------------------------------------------
     #

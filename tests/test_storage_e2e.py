@@ -52,6 +52,7 @@ reloaded module -- then puts all of it back.
 """
 
 import contextlib
+import json
 import os
 import sys
 
@@ -987,3 +988,83 @@ def test_the_stored_summary_survives_and_reports_staleness(real_storage,
 
     assert len(compactor) > calls_after_first
     assert fresh["fresh"] is True
+
+
+# ---------------------------------------------------------------------------
+# ---- Activity ordering (#32) -----------------------------------------------
+# ---------------------------------------------------------------------------
+
+def test_working_in_an_old_thread_lifts_it_above_a_newer_one(real_storage):
+    """#32's whole point. The picker ordered by CREATION: resume
+    yesterday's long thread, work in it an hour, and it stayed below
+    three threads opened and abandoned this morning. last_activity_at is
+    what 'most recent first' should have meant all along."""
+    import time as _time
+
+    from core.memory import ConversationMemory
+
+    old = ConversationMemory()          # created first...
+    _time.sleep(0.002)
+    newer = ConversationMemory()        # ...and ahead of it in the picker
+    _time.sleep(0.002)
+
+    # Work in the OLD thread LAST -- that is the lift. Messaging the
+    # newer one afterwards would just make it the most active honestly.
+    real_storage.save_message(newer.thread_id, "user", json.dumps("newer thread"))
+    _time.sleep(0.002)
+    real_storage.save_message(old.thread_id, "user", json.dumps("back to work"))
+
+    order = [r["id"] for r in real_storage.list_threads()]
+    assert order.index(old.thread_id) < order.index(newer.thread_id)
+
+
+def test_any_archived_row_stamps_activity_including_tool_results(real_storage):
+    """Q8b. A thread whose last event was tool output is still the one you
+    were just in; branching on role in the writer would buy nothing and
+    split the truth across two code paths."""
+    from core.memory import ConversationMemory
+
+    memory = ConversationMemory()
+    real_storage.save_message(memory.thread_id, "assistant",
+                              json.dumps({"text": "running the tool"}))
+    after_assistant = _thread_activity(real_storage, memory.thread_id)
+    assert after_assistant is not None
+
+    real_storage.save_message(memory.thread_id, "tool", json.dumps("tool out"))
+    assert _thread_activity(real_storage, memory.thread_id) >= after_assistant
+
+
+def test_a_thread_with_no_messages_sorts_by_creation(real_storage):
+    """The COALESCE half. NULL activity means creation order -- which is
+    also what every row predating the column reads as, since the additive
+    migration never backfills."""
+    import time as _time
+
+    from core.memory import ConversationMemory
+
+    first = ConversationMemory()
+    _time.sleep(0.002)
+    second = ConversationMemory()
+
+    ids = [r["id"] for r in real_storage.list_threads()]
+    assert ids.index(second.thread_id) < ids.index(first.thread_id)
+
+
+def _thread_activity(real_storage, thread_id):
+    row = real_storage.get_thread(thread_id)
+    return row.last_activity_at
+
+def test_zz_debug_activity_stamps(real_storage):
+    import time as _time
+    from core.memory import ConversationMemory
+    old = ConversationMemory()
+    _time.sleep(0.05)
+    newer = ConversationMemory()
+    _time.sleep(0.05)
+    _time.sleep(0.02)
+    real_storage.save_message(newer.thread_id, chr(117)+chr(115)+chr(101)+chr(114), json.dumps(chr(121)))
+    _time.sleep(0.02)
+    real_storage.save_message(old.thread_id, chr(117)+chr(115)+chr(101)+chr(114), json.dumps(chr(120)))
+    for r in real_storage.list_threads():
+        row = real_storage.get_thread(r['id'])
+        print(f'DEBUG listed {str(r[chr(105)+chr(100)])[:8]} activity={row.last_activity_at} created={row.created_at}')
