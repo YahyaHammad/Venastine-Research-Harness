@@ -367,7 +367,7 @@ Tools are namespaced `mcp__<server>__<tool>`. A server that fails to connect is 
 ```
 /help          /theme [name]        /effort [level|auto]     /model [[PROVIDER] name]
 /research      /claims [run id]     /copy [last|report|claims|all] [--file <path>]
-/compact       /threads             /new                     /quit
+/compact       /threads             /resume <thread-id>      /quit
 /agent         /goal                /grill-me                /skill
 /memories      /forget               /summary                 /ref [--list|--clear]
 /init [--software|--research]
@@ -381,7 +381,7 @@ Only `CONTEXT.md` is written for you in full; the rest arrive as skeletons with 
 
 `/summary` distils this conversation and shows it — it does **not** shorten what the model sees; that is `/compact`. `/ref` picks another conversation, summarises it, and attaches that summary to this one as standing context: you choose what crosses between threads, so nothing read or argued in one conversation can steer another without your say-so. `/ref --list` and `/ref --clear` are the way back out, and the summaries are labelled so the model knows they are not part of this conversation. From the CLI the same two are launch flags: `--summary <thread>` and a repeatable `--ref <thread>`.
 
-`/threads` lists your **conversations** — not the ~15 internal threads each research run creates, nor the one every automatic compaction makes. Each row leads with its first message so you can tell them apart. A run's own pass threads are recorded with the run (`output/<run_id>/pass_threads.json`) and can still be opened by id with `--thread`, if you want to see how a particular pass argued.
+`/threads` lists your **conversations** — not the ~15 internal threads each research run creates, nor the one every automatic compaction makes — ordered by last activity, so the conversation you were just in stays on top. Each row leads with its first message so you can tell them apart. The list shows the 200 most recently active and says so when it truncates; `/resume <thread-id>` opens any thread by id, however old, and `/new` starts fresh. A run's own pass threads are recorded with the run (`output/<run_id>/pass_threads.json`) and can still be opened by id with `--thread`, if you want to see how a particular pass argued.
 
 `/model` switches provider and model for the session and saves nothing — use the launch flags or `default_provider` / `default_model` in `settings.json` to make it stick.
 

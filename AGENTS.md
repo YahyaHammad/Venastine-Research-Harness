@@ -34,6 +34,8 @@ python main.py --mode research --review "q"       # §20: review the finished ru
 python main.py --summary <thread>                  # §21c: print a thread's distilled summary
 python main.py --ref <thread> --ref <thread>       # §21c: attach other threads' summaries as context
 # §21c in the TUI: /summary distils this conversation; /ref [--list|--clear] references another
+# §27/batch 18 in the TUI: /threads lists conversations only (most recently active
+#   first, capped at 200 with a notice); /resume <thread-id> opens any thread by id
 python main.py --init                              # §24: scaffold this project's documentation set
 python main.py --init --research-project           # §24: skip the type question on a piped run
 # §24 in the TUI: /init [--software|--research]
