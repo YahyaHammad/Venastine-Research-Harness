@@ -569,25 +569,32 @@ def _resp(thread_id):
 # ---- The boundary ConversationMemory must not cross ------------------------
 # ===========================================================================
 
-def test_memory_forwards_kind_and_learns_nothing_from_it(fake_storage):
-    """§27's note, pinned: ConversationMemory owns active in-run state and
-    must stay unaware of what data exists. The kwarg goes loop ->
-    storage.create_thread, passing through __init__ and nothing more.
+def test_memory_reports_kind_and_still_decides_nothing_from_it(
+        fake_storage):
+    """§27's boundary, as batch 16 (#43) redrew it. The OLD contract was
+    "learns nothing": the kwarg passed through __init__ and the class
+    never carried the value. #43 gave the loop a decision to make FROM
+    the answer -- which compaction mode a re-entered thread runs under
+    derives from what the thread IS -- and the memory is the object
+    holding the thread, so it now REPORTS the stored kind.
 
-    Also asserts the resume case: a kind passed with a thread_id is ignored,
-    because a thread's kind was decided when it was created and resuming is
-    not reclassification.
-    """
+    What did not move is the half that matters: nothing in this class
+    branches on the value. Semantics stay with storage (it stores it) and
+    the loop (it decides what a kind means). Pinned here in both
+    directions: creation forwards the caller's kind; resuming reports the
+    STORED kind, because resuming is not reclassification."""
     from core.memory import ConversationMemory
 
     created = ConversationMemory(kind="research_pass")
     assert fake_storage.thread_kind(created.thread_id) == "research_pass"
-    assert not hasattr(created, "kind"), \
-        "memory must not carry a copy of what storage owns"
+    assert created.kind == "research_pass"
 
     existing = fake_storage.create_thread()
-    ConversationMemory(thread_id=existing, kind="subagent")
+    resumed = ConversationMemory(thread_id=existing, kind="subagent")
     assert fake_storage.thread_kind(existing) == "chat"
+    assert resumed.kind == "chat", (
+        "a kind passed alongside a thread_id is ignored -- the row's kind "
+        "is the answer")
 
 
 def test_storage_kind_constants_are_the_three_the_spec_names():

@@ -86,6 +86,7 @@ class ConversationMemory:
             self.thread_id = create_thread(kind=kind)
             self._messages: list[dict] = []
             self._extra: dict = {}
+            self._kind = kind
         else:
             thread = get_thread(thread_id)
             if thread is None:
@@ -93,6 +94,30 @@ class ConversationMemory:
             self.thread_id = thread_id
             self._extra = dict(getattr(thread, "extra_data", None) or {})
             self._messages = self._derived_view()
+            # getattr, not thread.kind: a row read from a database whose
+            # ALTER has not run yet has no attribute at all (the same
+            # posture list_threads takes). Resuming is not reclassifying,
+            # so the stored kind is simply reported as-is.
+            self._kind = getattr(thread, "kind", None) or THREAD_KIND_CHAT
+
+    @property
+    def kind(self) -> str:
+        """What this thread IS (§27 T1): "chat", "research_pass" or
+        "subagent".
+
+        A deliberate boundary bend, recorded rather than slipped in
+        (#43, batch 16). §27 says this class "learns nothing from kind" --
+        it forwards the kwarg at creation and ignores it on resume --
+        because kind SEMANTICS are storage's to store and the loop's to
+        decide. That still holds: nothing here branches on the value.
+        What changed is that the loop can now ASK, because batch 16 gave
+        it a decision to make from the answer -- which compaction mode a
+        re-entered thread runs under derives from what the thread IS
+        (research_pass and subagent threads get M6's backstop wherever
+        they are resumed), and the memory is the object holding the
+        thread. Reporting a stored fact is not interpreting it.
+        """
+        return self._kind
 
     # -- the derived view (§21) --------------------------------------------
 

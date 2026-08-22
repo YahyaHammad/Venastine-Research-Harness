@@ -251,6 +251,96 @@ def test_an_ordinary_turn_asks_in_working_set_mode(mocker):
 
 
 # ---------------------------------------------------------------------------
+# ---- Derived mode (#43): the mode is what the THREAD is ---------------------
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("kind", ["research_pass", "subagent"])
+def test_a_re_entered_machinery_thread_asks_in_backstop_mode(mocker, kind):
+    """#43. json_retry's corrective retry and the §20 reviewer re-enter
+    their threads through continue_conversation -- which could not express
+    a compaction mode at all, so both evaluated the 40k chat trigger on
+    threads M6 says must never answer to it. The mode now derives from
+    what the thread IS wherever the caller does not say."""
+    from storage import THREAD_KIND_RESEARCH_PASS, THREAD_KIND_SUBAGENT
+
+    seen = []
+    mocker.patch("core.compaction.should_compact",
+                 side_effect=lambda used, model, mode: seen.append(mode) or "")
+    mocker.patch("core.loop.call_model_stream",
+                 side_effect=make_stream_sequence(make_model_response(text="hi")))
+    memory = FakeMemory(thread_id=mocker.sentinel.tid,
+                        kind=THREAD_KIND_RESEARCH_PASS if kind == "research_pass"
+                        else THREAD_KIND_SUBAGENT)
+    # continue_conversation constructs its own memory; install the fake
+    # where it will be found, the way M6's own tests do.
+    mocker.patch("core.loop.ConversationMemory", lambda **kw: memory)
+
+    RunAgentLoop.continue_conversation(
+        thread_id=memory.thread_id, message="retry with valid JSON",
+        system_prompt="s", model="claude-sonnet-5")
+
+    assert seen == ["backstop"], (
+        f"a {kind} thread resumed through continue_conversation ran on "
+        f"the chat trigger")
+
+
+def test_a_resumed_chat_thread_keeps_the_working_set_trigger(mocker):
+    """The control, and /grill-me's answer: a one-shot runs in the
+    user's CURRENT thread (§18's locked decision), which is a chat
+    thread -- routine working-set compaction there is the feature, not
+    the defect, and #172 is what makes its notices visible."""
+    seen = []
+    mocker.patch("core.compaction.should_compact",
+                 side_effect=lambda used, model, mode: seen.append(mode) or "")
+    mocker.patch("core.loop.call_model_stream",
+                 side_effect=make_stream_sequence(make_model_response(text="hi")))
+    memory = FakeMemory(thread_id=mocker.sentinel.tid, kind="chat")
+    mocker.patch("core.loop.ConversationMemory", lambda **kw: memory)
+
+    RunAgentLoop.continue_conversation(
+        thread_id=memory.thread_id, message="grill this",
+        system_prompt="s", model="claude-sonnet-5")
+
+    assert seen == ["working_set"]
+
+
+def test_an_explicit_mode_beats_the_derivation(mocker):
+    """The hybrid's other half. stream_deep_research_mode passes
+    "backstop" explicitly as the definition site; a caller that names a
+    mode is never second-guessed by what the thread happens to be."""
+    seen = []
+    mocker.patch("core.compaction.should_compact",
+                 side_effect=lambda used, model, mode: seen.append(mode) or "")
+    mocker.patch("core.loop.call_model_stream",
+                 side_effect=make_stream_sequence(make_model_response(text="hi")))
+    memory = FakeMemory(kind="chat")   # derivation would say working_set
+
+    _events(memory, compaction_mode="backstop")
+
+    assert seen == ["backstop"]
+
+
+def test_a_spawned_subagent_thread_derives_backstop_without_being_told(mocker):
+    """spawn_subagent and §20's reviewer create subagent-kind threads via
+    run_agent_conversation; neither passes a mode. The derivation covers
+    them by construction rather than by a parameter each call site can
+    forget -- the D24/R13 failure shape this fix exists to avoid."""
+    from storage import THREAD_KIND_SUBAGENT
+
+    seen = []
+    mocker.patch("core.compaction.should_compact",
+                 side_effect=lambda used, model, mode: seen.append(mode) or "")
+    mocker.patch("core.loop.call_model_stream",
+                 side_effect=make_stream_sequence(make_model_response(text="hi")))
+
+    RunAgentLoop.run_agent_conversation(
+        "do the thing", model="claude-sonnet-5",
+        thread_kind=THREAD_KIND_SUBAGENT)
+
+    assert seen == ["backstop"]
+
+
+# ---------------------------------------------------------------------------
 # ---- Standing conditions say themselves once -------------------------------
 # ---------------------------------------------------------------------------
 
