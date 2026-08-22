@@ -676,6 +676,114 @@ def test_per_server_connect_timeout_does_not_starve_the_others(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# ---- #61's surviving mutations, pinned one property at a time -------------
+# ---------------------------------------------------------------------------
+#
+# M16 (the sharp one) is asserted above, in the connect-timeout test's
+# `_done.is_set()` arm. These are the rest of the sweep: each named for
+# the property it observes, each written so deleting the production line
+# it guards turns it red -- which their predecessors demonstrably did not.
+
+def test_non_graceful_shutdown_still_cancels_the_manager(monkeypatch, caplog):
+    """M18. 'Asking politely didn't work, so cancel -- otherwise this
+    returns having reaped nothing while reporting only a warning.'
+    Observed on the CANCELLATION (_done set), not on bookkeeping fields:
+    _task = None records a release, it does not cause one."""
+    srv = _build_server()
+    monkeypatch.setattr(
+        MCPClient, "_transport_for",
+        lambda self, cfg: None if cfg.name == "wedged" else srv)
+    monkeypatch.setattr("mcp_client.client.Client", _HangsOnCloseForNone)
+
+    c = MCPClient({"wedged": _cfg("wedged"), "good": _cfg("good")})
+    c.connect_all(timeout=10.0)
+
+    with caplog.at_level("WARNING", logger="mcp_client.client"):
+        c.disconnect_all()
+
+    assert c._done is not None and c._done.is_set(), (
+        "disconnect returned without the manager unwinding: the stack is "
+        "still open and the child processes are still ours")
+    assert c._task is None and c.clients == {}
+
+
+def test_disabled_servers_are_never_connected(monkeypatch):
+    """M17. _flag's PARSING of `disabled` is tested over in the config
+    file; this is its EFFECT. The transport builder raising here proves
+    the skip happens before any subprocess is even described."""
+    srv = _build_server()
+
+    def transport(self, cfg):
+        if cfg.name == "off":
+            raise AssertionError("a disabled server reached the transport")
+        return srv
+
+    monkeypatch.setattr(MCPClient, "_transport_for", transport)
+    c = MCPClient({"off": _cfg("off", disabled=True), "on": _cfg("on")})
+    c.connect_all()
+    try:
+        assert "off" not in c.clients
+        assert "off" not in c.failures, "skipped is not failed"
+        assert c.call_tool("on", "add", {"a": 1, "b": 1})["result"] == {"result": 2}
+    finally:
+        c.disconnect_all()
+
+
+def test_one_servers_listing_failure_does_not_abort_servers_after_it(monkeypatch):
+    """M25, registration's twice-stated containment rule. Sorted order
+    puts the poisoned server FIRST: without its guard, register_all dies
+    there and every server after it silently loses its tools."""
+    class _Boom:
+        async def list_tools(self):
+            raise RuntimeError("listing exploded")
+
+    class _Tool:
+        def __init__(self, name):
+            self.name = name
+            self.description = ""
+            self.input_schema = {"type": "object", "properties": {}}
+
+    c = MCPClient({"aaa": _cfg("aaa"), "bbb": _cfg("bbb")})
+    c.clients = {"aaa": _Boom(), "bbb": _Boom()}
+    c._catalogs["bbb"] = [_Tool("fine")]     # bbb's catalogue arrived intact
+
+    reg = ToolRegistry()
+    names = registration.register_all(c, reg)
+
+    assert names == ["mcp__bbb__fine"]
+    assert "mcp__aaa__" not in json.dumps(names)
+
+
+def test_a_timed_out_call_cancels_its_future(client, monkeypatch):
+    """M13. 'cancel so the coroutine can't outlive the call.' The branch
+    runs when the LOOP is wedged -- no protocol response, including its
+    timeout, is coming -- so the future is substituted wholesale."""
+    import concurrent.futures
+
+    held = {}
+    real_rc = asyncio.run_coroutine_threadsafe
+
+    def capturing_rc(coro, loop):
+        fut = concurrent.futures.Future()
+        held["fut"] = fut
+        held["coro"] = coro
+        return fut
+
+    monkeypatch.setattr("mcp_client.client.asyncio.run_coroutine_threadsafe",
+                        capturing_rc)
+    try:
+        result = client.call_tool("probe", "add", {"a": 1, "b": 1}, timeout=0.2)
+    finally:
+        held["coro"].close()
+        monkeypatch.setattr("mcp_client.client.asyncio.run_coroutine_threadsafe",
+                            real_rc)
+
+    assert "timed out" in result["error"]
+    assert held["fut"].cancelled(), (
+        "the abandoned coroutine was left free to outlive the call")
+
+
+# ---------------------------------------------------------------------------
 # ---- F6 (#64): ONE shared teardown budget, stragglers named --------------
 # ---------------------------------------------------------------------------
 

@@ -366,6 +366,33 @@ def test_an_unreadable_acknowledgement_store_fails_closed(roots):
     assert mcp_config.is_known(cfg) is False
 
 
+def test_entry_digest_is_stable_under_key_reorder(roots):
+    """M5 (#61): 'sort_keys so key order in the file can't produce a
+    different digest for identical configuration.' The mutation deletes
+    sort_keys; json.dumps then follows insertion order and the SAME
+    server, re-ordered by a formatting pass, becomes an unknown stranger
+    that re-asks -- or worse, two 'different' servers where one was."""
+    base = mcp_config.ServerConfig(
+        name="x", tier="user", path="<t>", transport="stdio")
+    reordered = mcp_config.ServerConfig(
+        name="x", tier="user", path="<t>", transport="stdio")
+    base.raw = {"command": "npx", "args": ["-y", "p"], "env": {"A": "1"}}
+    reordered.raw = {"env": {"A": "1"}, "args": ["-y", "p"], "command": "npx"}
+
+    assert mcp_config.entry_digest(base) == mcp_config.entry_digest(reordered)
+
+    # The property end to end: remembered under one ordering, still known
+    # after the file is rewritten in another.
+    _write(roots["user"] / "mcp.json",
+           {"x": {"command": "npx", "args": ["-y", "p"], "env": {"A": "1"}}})
+    cfg = mcp_config.load_server_configs(str(roots["project"]), trusted=False)["x"]
+    mcp_config.remember_server(cfg)
+    _write(roots["user"] / "mcp.json",
+           {"x": {"env": {"A": "1"}, "args": ["-y", "p"], "command": "npx"}})
+    cfg2 = mcp_config.load_server_configs(str(roots["project"]), trusted=False)["x"]
+    assert mcp_config.is_known(cfg2) is True
+
+
 # ---------------------------------------------------------------------------
 # ---- flags are parsed, not coerced (review r1-1) -------------------------
 # ---------------------------------------------------------------------------
