@@ -150,8 +150,17 @@ def register_all(client, registry) -> list:
             registered.append(name)
 
         if auto_approve:
-            logger.info("MCP server %r is auto-approved; its tools will not "
-                        "prompt before running.", server_name)
+            # WARNING, not INFO (F4): TranscriptLogHandler forwards
+            # WARNING+ into the TUI transcript, and on that path stderr is
+            # already closed -- at INFO this reached nothing but app.log,
+            # so the shell where approval prompts are MODALS was exactly
+            # the one never told some tools would not prompt. Fires every
+            # launch per auto-approved server, deliberately (#60): worst
+            # case it trains people past it, which equals today's silence;
+            # best case it is read once and someone catches a flag they
+            # did not knowingly set.
+            logger.warning("MCP server %r is auto-approved; its tools will "
+                           "not prompt before running.", server_name)
 
     logger.info("Registered %d MCP tool(s).", len(registered))
     return registered

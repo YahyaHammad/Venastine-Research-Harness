@@ -23,6 +23,7 @@ that -- Client, the protocol, the manager task, normalization -- is real.
 
 import asyncio
 import json
+import logging
 import threading
 
 import pytest
@@ -105,6 +106,52 @@ def test_ac1_server_configs_is_set_and_inspectable():
     a missing attribute. Trivial to fix, trivial to reintroduce."""
     cfgs = {"probe": _cfg()}
     assert MCPClient(cfgs).server_configs is cfgs
+
+
+# ---------------------------------------------------------------------------
+# ---- what _transport_for hands Client() (#62, and M19's shape) -----------
+# ---------------------------------------------------------------------------
+#
+# A bare URL string means STREAMABLE HTTP to v2's Client(). That makes the
+# TYPE of the returned object load-bearing: an SSE server handed a string
+# connects as streamable -- #62's silent misconnection -- and a server
+# configured with headers handed a bare string connects UNAUTHENTICATED,
+# because the URL carries none of them (M19, a bug that already happened
+# once). Asserted on type: str without extras, context manager with them.
+
+def test_an_sse_server_always_builds_its_own_transport_never_a_bare_url(monkeypatch):
+    from mcp.client.sse import sse_client
+    c = MCPClient({"e": _cfg("e", transport="sse",
+                             url="https://example.test/sse")})
+    transport = c._transport_for(c.server_configs["e"])
+    assert not isinstance(transport, str), (
+        "a bare URL string means streamable HTTP to Client(); an SSE "
+        "server given one silently misconnects")
+    assert hasattr(transport, "__aenter__")
+
+
+def test_an_http_server_without_headers_hands_client_a_bare_url():
+    c = MCPClient({"r": _cfg("r", transport="http",
+                             url="https://example.test/mcp")})
+    assert isinstance(c._transport_for(c.server_configs["r"]), str)
+
+
+def test_headers_are_carried_on_both_http_transports_not_discarded(monkeypatch):
+    """M19. The streamable branch returns a context manager built around
+    an http client carrying them; the SSE branch passes them to the SDK.
+    A bare str here would mean an Authorization header was dropped and a
+    server connected UNAUTHENTICATED."""
+    hdrs = {"Authorization": "Bearer tok"}
+    c = MCPClient({
+        "http": _cfg("http", transport="http", url="https://x.test/mcp",
+                     headers=hdrs),
+        "sse": _cfg("sse", transport="sse", url="https://x.test/sse",
+                    headers=hdrs),
+    })
+    for name in ("http", "sse"):
+        t = c._transport_for(c.server_configs[name])
+        assert not isinstance(t, str), f"{name}: headers were discarded"
+        assert hasattr(t, "__aenter__")
 
 
 # ---------------------------------------------------------------------------
@@ -394,6 +441,36 @@ def test_registration_names_and_schemas(client):
     assert "probe" in spec.schema["description"]
 
 
+# ---------------------------------------------------------------------------
+# ---- F8 (#63): registration serves the connect-time catalogue ------------
+# ---------------------------------------------------------------------------
+
+def test_registration_never_fetches_the_catalogue_over_the_wire(client, monkeypatch):
+    """The manager already listed tools inside ITS per-server timeout;
+    register_all used to cross the bridge for a second listing -- the one
+    MCP call with no protocol timeout, where a slow server burned its own
+    30s between connect and registration. The live session is poisoned
+    here: if any fetch happens, registration fails loudly."""
+    async def _no_live_fetch(*a, **kw):
+        raise AssertionError("register_all fetched tools over the wire")
+
+    monkeypatch.setattr(client.clients["probe"], "list_tools", _no_live_fetch)
+    reg = ToolRegistry()
+    names = registration.register_all(client, reg)
+    assert "mcp__probe__add" in names
+
+
+def test_list_tools_serves_a_copy_of_the_cache():
+    """Cache-hit path needs no loop at all; and what comes back must be
+    a copy, or a caller sorting/filtering mutates shared state."""
+    c = MCPClient({})
+    c._catalogs["x"] = [1, 2]
+    out = c.list_tools("x")
+    assert out == [1, 2]
+    out.append(3)
+    assert c.list_tools("x") == [1, 2]
+
+
 def test_registration_sets_approval_defaults_from_auto_approve(monkeypatch):
     srv = _build_server()
     monkeypatch.setattr(MCPClient, "_transport_for", lambda self, cfg: srv)
@@ -404,6 +481,25 @@ def test_registration_sets_approval_defaults_from_auto_approve(monkeypatch):
         assert permissions.requires_approval("mcp__probe__add", {}) is False
     finally:
         c.disconnect_all()
+
+
+def test_the_auto_approve_notice_is_a_warning_not_info(monkeypatch, caplog):
+    """F4 (#60). At INFO this reached nothing on the TUI path:
+    TranscriptLogHandler forwards WARNING+ and stderr is already closed
+    by then, so the shell where approval prompts are modals was exactly
+    the one never told some tools would not prompt."""
+    srv = _build_server()
+    monkeypatch.setattr(MCPClient, "_transport_for", lambda self, cfg: srv)
+    c = MCPClient({"probe": _cfg(auto_approve=True)})
+    c.connect_all()
+    try:
+        with caplog.at_level("WARNING", logger="mcp_client.registration"):
+            registration.register_all(c, ToolRegistry())
+    finally:
+        c.disconnect_all()
+
+    warnings = [r for r in caplog.records if "auto-approved" in r.message]
+    assert warnings and all(r.levelno == logging.WARNING for r in warnings)
 
 
 def test_unregister_all_is_idempotent_and_clears_approval_defaults(client):
@@ -417,6 +513,42 @@ def test_unregister_all_is_idempotent_and_clears_approval_defaults(client):
     assert not any(n.startswith("mcp__") for n in reg._tools)
     # Back to the named default, not a stale False left behind.
     assert permissions.requires_approval("mcp__probe__add", {}) is True
+
+
+# ---------------------------------------------------------------------------
+# ---- F7 (#65): teardown removes the server's TOOLS, not just its session --
+# ---------------------------------------------------------------------------
+
+def test_teardown_unregisters_what_setup_registered(client):
+    """unregister_all had no production caller: a disconnected server's
+    tools stayed advertised, approval defaults included. teardown_mcp is
+    now that caller -- ARCHITECTURE.md's 'disconnect handling' describes
+    this, and this is what makes it true rather than aspirational."""
+    reg = ToolRegistry()
+    registration.register_all(client, reg)
+    assert "mcp__probe__add" in reg._tools
+
+    from main import teardown_mcp
+    teardown_mcp(client, reg)
+
+    assert "mcp__probe__add" not in reg._tools
+    # Approval policy left with the tool, not as a stale default.
+    assert permissions.requires_approval("mcp__probe__add", {}) is True
+
+
+def test_teardown_is_safe_twice_and_without_a_registry(client):
+    """Both legacy call shapes keep working: teardown_mcp(None) stays a
+    no-op, a registry-less call still disconnects, and a second full
+    teardown over an already-empty mapping is quiet."""
+    reg = ToolRegistry()
+    registration.register_all(client, reg)
+
+    from main import teardown_mcp
+    teardown_mcp(client)          # no registry -- disconnect only
+    teardown_mcp(client, reg)     # second pass: idempotent unregister
+    teardown_mcp(None, reg)       # the setup-failure shape
+
+    assert "mcp__probe__add" not in reg._tools
 
 
 # ---------------------------------------------------------------------------
@@ -541,6 +673,187 @@ def test_per_server_connect_timeout_does_not_starve_the_others(monkeypatch):
         assert c.call_tool("good", "add", {"a": 1, "b": 1})["result"] == {"result": 2}
     finally:
         c.disconnect_all()
+
+
+# ---------------------------------------------------------------------------
+# ---- #61's surviving mutations, pinned one property at a time -------------
+# ---------------------------------------------------------------------------
+#
+# M16 (the sharp one) is asserted above, in the connect-timeout test's
+# `_done.is_set()` arm. These are the rest of the sweep: each named for
+# the property it observes, each written so deleting the production line
+# it guards turns it red -- which their predecessors demonstrably did not.
+
+def test_non_graceful_shutdown_still_cancels_the_manager(monkeypatch, caplog):
+    """M18. 'Asking politely didn't work, so cancel -- otherwise this
+    returns having reaped nothing while reporting only a warning.'
+    Observed on the CANCELLATION (_done set), not on bookkeeping fields:
+    _task = None records a release, it does not cause one."""
+    srv = _build_server()
+    monkeypatch.setattr(
+        MCPClient, "_transport_for",
+        lambda self, cfg: None if cfg.name == "wedged" else srv)
+    monkeypatch.setattr("mcp_client.client.Client", _HangsOnCloseForNone)
+
+    c = MCPClient({"wedged": _cfg("wedged"), "good": _cfg("good")})
+    c.connect_all(timeout=10.0)
+
+    with caplog.at_level("WARNING", logger="mcp_client.client"):
+        c.disconnect_all()
+
+    assert c._done is not None and c._done.is_set(), (
+        "disconnect returned without the manager unwinding: the stack is "
+        "still open and the child processes are still ours")
+    assert c._task is None and c.clients == {}
+
+
+def test_disabled_servers_are_never_connected(monkeypatch):
+    """M17. _flag's PARSING of `disabled` is tested over in the config
+    file; this is its EFFECT. The transport builder raising here proves
+    the skip happens before any subprocess is even described."""
+    srv = _build_server()
+
+    def transport(self, cfg):
+        if cfg.name == "off":
+            raise AssertionError("a disabled server reached the transport")
+        return srv
+
+    monkeypatch.setattr(MCPClient, "_transport_for", transport)
+    c = MCPClient({"off": _cfg("off", disabled=True), "on": _cfg("on")})
+    c.connect_all()
+    try:
+        assert "off" not in c.clients
+        assert "off" not in c.failures, "skipped is not failed"
+        assert c.call_tool("on", "add", {"a": 1, "b": 1})["result"] == {"result": 2}
+    finally:
+        c.disconnect_all()
+
+
+def test_one_servers_listing_failure_does_not_abort_servers_after_it(monkeypatch):
+    """M25, registration's twice-stated containment rule. Sorted order
+    puts the poisoned server FIRST: without its guard, register_all dies
+    there and every server after it silently loses its tools."""
+    class _Boom:
+        async def list_tools(self):
+            raise RuntimeError("listing exploded")
+
+    class _Tool:
+        def __init__(self, name):
+            self.name = name
+            self.description = ""
+            self.input_schema = {"type": "object", "properties": {}}
+
+    c = MCPClient({"aaa": _cfg("aaa"), "bbb": _cfg("bbb")})
+    c.clients = {"aaa": _Boom(), "bbb": _Boom()}
+    c._catalogs["bbb"] = [_Tool("fine")]     # bbb's catalogue arrived intact
+
+    reg = ToolRegistry()
+    names = registration.register_all(c, reg)
+
+    assert names == ["mcp__bbb__fine"]
+    assert "mcp__aaa__" not in json.dumps(names)
+
+
+def test_a_timed_out_call_cancels_its_future(client, monkeypatch):
+    """M13. 'cancel so the coroutine can't outlive the call.' The branch
+    runs when the LOOP is wedged -- no protocol response, including its
+    timeout, is coming -- so the future is substituted wholesale."""
+    import concurrent.futures
+
+    held = {}
+    real_rc = asyncio.run_coroutine_threadsafe
+
+    def capturing_rc(coro, loop):
+        fut = concurrent.futures.Future()
+        held["fut"] = fut
+        held["coro"] = coro
+        return fut
+
+    monkeypatch.setattr("mcp_client.client.asyncio.run_coroutine_threadsafe",
+                        capturing_rc)
+    try:
+        result = client.call_tool("probe", "add", {"a": 1, "b": 1}, timeout=0.2)
+    finally:
+        held["coro"].close()
+        monkeypatch.setattr("mcp_client.client.asyncio.run_coroutine_threadsafe",
+                            real_rc)
+
+    assert "timed out" in result["error"]
+    assert held["fut"].cancelled(), (
+        "the abandoned coroutine was left free to outlive the call")
+
+
+# ---------------------------------------------------------------------------
+# ---- F6 (#64): ONE shared teardown budget, stragglers named --------------
+# ---------------------------------------------------------------------------
+
+class _HangsOnCloseForNone:
+    """Real Client for every server but the wedged one, which connects
+    instantly and refuses to die -- a child process whose transport
+    __aexit__ never returns."""
+
+    def __init__(self, transport):
+        self._inner = None if transport is None else Client(transport)
+
+    async def __aenter__(self):
+        if self._inner is None:
+            class _Session:
+                async def list_tools(self):
+                    class T:
+                        tools = []
+                    return T()
+            return _Session()
+        return await self._inner.__aenter__()
+
+    async def __aexit__(self, *exc):
+        if self._inner is not None:
+            return await self._inner.__aexit__(*exc)
+        await asyncio.sleep(3600)
+
+
+def test_a_wedged_server_is_named_and_the_budget_holds(monkeypatch, caplog):
+    import time
+
+    srv = _build_server()
+    monkeypatch.setattr(
+        MCPClient, "_transport_for",
+        lambda self, cfg: None if cfg.name == "wedged" else srv)
+    monkeypatch.setattr("mcp_client.client.Client", _HangsOnCloseForNone)
+    monkeypatch.setattr("mcp_client.client.TEARDOWN_BUDGET_S", 4.0)
+
+    c = MCPClient({"wedged": _cfg("wedged"), "healthy": _cfg("healthy")})
+    c.connect_all(timeout=10.0)
+
+    t0 = time.monotonic()
+    with caplog.at_level("WARNING", logger="mcp_client.client"):
+        c.disconnect_all()
+    elapsed = time.monotonic() - t0
+
+    # SHARED, not sequential: polite close (~2.4s of the 4s budget),
+    # force-cancel and join divide what remains. Three independent 15s
+    # waits -- the old shape -- would have been ~45s here.
+    assert elapsed < 8.0, f"teardown ran {elapsed:.1f}s for a 4s budget"
+    stragglers = [r for r in caplog.records
+                  if "did not confirm a clean close" in r.message]
+    assert stragglers, "the wedged server was not named"
+    assert "wedged" in stragglers[0].getMessage()
+    assert "healthy" not in stragglers[0].getMessage(), (
+        "a server that closed cleanly was reported as a straggler")
+
+
+def test_a_clean_teardown_names_nobody(monkeypatch, caplog):
+    """Control for the straggler line: every session closed cleanly means
+    no warning, on the same code path."""
+    srv = _build_server()
+    monkeypatch.setattr(MCPClient, "_transport_for", lambda self, cfg: srv)
+    c = MCPClient({"probe": _cfg()})
+    c.connect_all()
+
+    with caplog.at_level("WARNING", logger="mcp_client.client"):
+        c.disconnect_all()
+
+    assert not [r for r in caplog.records
+                if "did not confirm a clean close" in r.message]
 
 
 # ---------------------------------------------------------------------------

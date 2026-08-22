@@ -1483,21 +1483,37 @@ def setup_mcp(project_path: str):
         # failure AFTER connect_all() (registration raising, a partial
         # connect timing out) left live child processes with no owner and
         # nothing left holding a reference to close them.
-        teardown_mcp(client)
+        from tools.registry import registry
+        teardown_mcp(client, registry)
         return None
 
 
-def teardown_mcp(client) -> None:
+def teardown_mcp(client, registry=None) -> None:
     """Not tidiness. stdio servers are child processes THIS harness
     spawned; the MCP thread is a daemon and dies at interpreter exit
     without unwinding the exit stack, so skipping this orphans them and
-    they accumulate across sessions."""
+    they accumulate across sessions.
+
+    F7 (#65): the server's TOOLS leave with it -- unregister_all removes
+    exactly what register_all put in, approval defaults included. This is
+    the disconnect handling ARCHITECTURE.md always claimed justified
+    unregister_all's idempotency; until now nothing called it. Sequencing
+    lives here in the shell rather than inside client.disconnect_all()
+    for the same reason §20's consent does: mcp_client owns transport,
+    not registry policy.
+    """
     if client is None:
         return
     try:
         client.disconnect_all()
     except Exception:
         logger.debug("MCP teardown failed", exc_info=True)
+    if registry is not None:
+        try:
+            from mcp_client import registration
+            registration.unregister_all(registry)
+        except Exception:
+            logger.debug("MCP unregistration failed", exc_info=True)
 
 
 def _classify_legacy_threads() -> None:
@@ -1688,7 +1704,8 @@ def main(argv=None) -> int:
         # finally, not "at the end": run_research raises SystemExit(1) on a
         # failed pipeline, and Ctrl+C reaches here as KeyboardInterrupt.
         # Both are ordinary exits that must still reap child processes.
-        teardown_mcp(mcp)
+        from tools.registry import registry
+        teardown_mcp(mcp, registry)
     return 0
 
 

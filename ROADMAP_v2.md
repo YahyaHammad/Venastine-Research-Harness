@@ -154,6 +154,7 @@ the namespace list in `AGENTS.md`.
 - **§34. /init's vocabulary — four lists for one question** — BUILT (#96, #94, #95, #98; closes unit 12)
 - **§35. The record's index — the decisions, and whether they can be found** — BUILT (#16, #17, #147, #91; closes unit X5)
 - **§36. Compaction's boundaries — trigger, notice, pin, summarizer input** — BUILT (#43, #44, #45, #89, #90, #92, #172; closes units 4 and 11)
+- **§37. MCP's edges — disclosure, SSE, teardown, catalogue** — BUILT (#60, #61, #62, #63, #64, #65; closes unit 7)
 - **Open Questions — None Remaining** (Rev. 3 — all decisions locked; verification items only)
 - **Why these calls, not just what they are** (Rev. 3 — the reasoning patterns behind several decisions above)
 
@@ -2977,6 +2978,34 @@ One commit per work package on `fix/batch-16-compaction`; per-change tables in
 **#43, #44, #45, #89, #90, #92, #172** — all open unit-11/unit-4 findings plus the sibling filed
 post-audit. **#136 remains open** (X2): Z2 makes its repeated-attempt path *addressable* (the
 status is data now) but does not yet cache it.
+
+---
+
+## 37. MCP's edges — disclosure, SSE, teardown, catalogue — BUILT
+
+Audit unit 7's six remaining findings: **#60, #61, #62, #63, #64, #65**, on
+`fix/batch-17-mcp-unit`. One commit per work package; per-change tables in
+`tests/BREAKING_CHANGES.md` §33.
+
+### Design Decisions Record — §37 (F1–F8)
+
+| id | decision |
+|---|---|
+| **F1** | **The acknowledgement discloses its security posture** (#60): `AUTO-APPROVED` line, `working directory`, `disabled` marker, env **key names only**, and header key names for the http/sse transports (owner follow-up — since M19 stopped discarding them, `Authorization` is where those servers' credentials actually ride). Values never reach the terminal. Display-only by construction: `entry_digest` hashes the raw entry, never the prompt text, so no wording change can re-ask anyone; F3's bump is the one deliberate re-consent |
+| **F2** | **Verbose ack via `VENASTINE_MCP_ACK_FULL=1`**, read at call time: appends the entry verbatim for debugging/audits. An env var deliberately, not a `settings.json` key — settings.json's precedence lets project tier beat user tier, and repo content must not be able to style a consent screen |
+| **F3** | **The known-servers store is versioned; v2 re-asks once.** v1 consents were given under a prompt that omitted `autoApprove`, so they were blind and do not survive the bump: a legacy store reads as unknown-everything, `remember_server` starts from an empty mapping when legacy (a sibling's answer must never convert an unasked server), and the first acknowledgement persists the store as v2 |
+| **F4** | **The auto-approve notice is a WARNING, not INFO.** On the TUI path stderr is closed and TranscriptLogHandler forwards WARNING+, so at INFO this reached nothing but app.log — the shell where approval prompts are modals was the one never told some tools would not prompt. Fires every launch per auto-approved server, deliberately |
+| **F5** | **SSE only by explicit `"type": "sse"`** (#62). `sse` left the streamable alias set: D4 promises SSE, SDK v2 ships `sse_client`, and aliasing it is how an SSE-only server got offered a streamable handshake it could not answer. A bare `url` keeps meaning streamable — that is what every pre-existing config assumed, and URL sniffing would be magic. The aliases (`http`, `https`, `streamable-http`, `streamablehttp`) are unchanged. An unsupported declared type still refuses with a named error (M7's fall-through stays pinned shut) |
+| **F6** | **Teardown has ONE shared wall-clock budget** (#64): polite close, force-cancel and thread join share a single deadline instead of three sequential 15s waits (~45s worst case, paid by Ctrl+C too). Servers still alive at expiry are NAMED in a WARNING |
+| **F7** | **`unregister_all` is wired into teardown** (#65): `teardown_mcp` calls it after `disconnect_all()`, so ARCHITECTURE.md's "disconnect handling" justification describes something that exists. Runtime `/mcp` management is recorded as a candidate future section, deliberately not built here |
+| **F8** | **The tool catalogue is cached at connect** (#63): the manager keeps the `list_tools()` result it already gathered inside the per-server timeout window, and registration serves from it. MCP's one timeout-less bridge call disappears; a miss falls back to fetching |
+
+### Closed with this section
+
+**#60, #61, #62, #63, #64, #65** — unit 7's entire remaining findings list. M16 (the sharp
+orphan-path test) was already pinned by batch 1; this batch pins the other six. **M19's
+headers property is now asserted on BOTH HTTP transports**, since SSE is a second place to
+discard an Authorization header.
 
 ## Open Questions — None Remaining
 
