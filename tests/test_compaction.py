@@ -608,6 +608,73 @@ def test_a_span_under_the_budget_neither_forces_nor_truncates(
 
 
 # ---------------------------------------------------------------------------
+# ---- #92's standalone gaps: what the compactor sees, and the estimate ------
+# ---------------------------------------------------------------------------
+
+def test_a_folded_turn_names_the_tools_it_called(fake_storage, summaries):
+    """#92 item 1. `[called: ...]` on an assistant body is the ONLY thing
+    telling the compactor that a folded turn ran tools -- the tool RESULT
+    rows render through the else-branch with no link back to the turn that
+    asked, and compactor.md explicitly asks the model to preserve what a
+    decision rested on, half of which is which tool it reached for.
+    Deleting the line survived the whole suite: nothing anywhere read it."""
+    from types import SimpleNamespace
+
+    memory = ConversationMemory()
+    memory.add_user_message("search for it")
+    # ToolCallRequest-shaped, as add_assistant_message's contract requires
+    # (attribute access, not a dict).
+    memory.add_assistant_message(_Resp("", tool_calls=[
+        SimpleNamespace(id="t1", name="web_search",
+                        input={"query": "venastine"})]))
+    memory.add_tool_result("t1", {"result": "found it"})
+    # A second plain turn so the keep floors leave something foldable --
+    # with a single turn, everything is protected and no call is spent.
+    memory.add_user_message("and then?")
+    memory.add_assistant_message(_Resp("done"))
+    calls = summaries("S.")
+
+    compaction.compact(memory, "claude-sonnet-5", "ANTHROPIC",
+                       overrides={**OVERRIDES, "keep_recent_turns": 1})
+
+    assert "[called: web_search]" in calls[0]["user_goal"]
+
+
+def test_the_estimate_counts_what_a_turn_weighs():
+    """#92 items 2 and 3. estimated_tokens is the pre-measurement path's
+    whole signal -- a thread written before §21 existed resumes with
+    last_input_tokens at zero, so THIS number decides whether its very
+    first call may compact -- and _chars is its only producer. Both
+    mutations survived everything: the estimate pinned to 0, and _chars
+    ignoring tool_calls entirely, leaving tool-heavy turns invisible at
+    exactly the size where compaction matters most."""
+    call = {"id": "t1", "name": "fetch_url",
+            "input": {"url": "https://example.com/" + "x" * 200}}
+    with_calls = [
+        {"role": "user", "content": "q" * 80},
+        {"role": "assistant", "text": "", "tool_calls": [call]},
+        {"role": "tool", "tool_call_id": "t1", "content": "r" * 400},
+    ]
+    without_calls = [with_calls[0], with_calls[2]]
+
+    est = compaction.estimated_tokens(with_calls)
+    bare = compaction.estimated_tokens(without_calls)
+
+    assert est > 0, "the estimate pinned to zero was survivor #2"
+    # The delta IS the serialized call, by _chars' own definition --
+    # asserted as a computed relation rather than a hardcoded constant,
+    # so the test survives repr drift while still dying if tool_calls
+    # stop being counted (survivor #3).
+    call_chars = len(str(call))
+    # _chars sums content + text + str(call), then the caller divides by
+    # CHARS_PER_TOKEN -- so the delta is that sum divided, within one
+    # token of rounding. Asserted as a computed relation rather than a
+    # hardcoded constant: repr drift survives, a dropped term dies.
+    expected_delta = call_chars // compaction.CHARS_PER_TOKEN
+    assert abs((est - bare) - expected_delta) <= 1
+
+
+# ---------------------------------------------------------------------------
 # ---- Settings validation (D27, AC8) ----------------------------------------
 # ---------------------------------------------------------------------------
 

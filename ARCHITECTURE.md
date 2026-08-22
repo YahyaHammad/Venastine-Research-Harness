@@ -50,7 +50,7 @@ Venastine Research Harness/
 ├── CLAUDE.md / QWEN.md             # pointers to AGENTS.md, so a harness that auto-loads one of those names finds the context instead of a second copy of it
 ├── DEVLOG.md                       # implementation notes for built ROADMAP sections -- see §0
 │
-├── tests/                          # 2184 tests, all offline, ~25-45s depending on the machine (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
+├── tests/                          # 2186 tests, all offline, ~25-45s depending on the machine (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
 │   ├── conftest.py                 # fixtures: make_model_response, make_stream_from_response, make_stream_sequence, FakeStorage, ...
 │   ├── BREAKING_CHANGES.md         # what-breaks-it / symptom / fix per area
 │   ├── test_cli.py                 # 76 tests -- ROADMAP §1 thread_id passthrough + UUID validation + §14 parser defaults/resolution/trust flow + §29 N1-N8 the one stdin reader, N2's channel deadline, every request kind rendered, and the startup block main(argv) made reachable + #102's four declining defaults
@@ -105,7 +105,7 @@ Venastine Research Harness/
 │   ├── test_schema_migration.py   # 18 tests -- ROADMAP_v2 §21a M7: database.ensure_columns() adds a declared column to a table already on disk, driven against stdlib sqlite3 rather than the fake sqlmodel
 │   ├── test_storage_reads.py      # 15 tests -- ROADMAP_v2 §21a the watermark and pinned reads that the derived view is assembled from (M4/M9, AC1/AC2), plus #88's tool-result re-inclusion
 │   ├── test_memory_compaction.py  # 18 tests -- ROADMAP_v2 §21a the derived view (M8/M9) and pin_last's ordinal-to-id mapping
-│   ├── test_compaction.py         # 43 tests -- ROADMAP_v2 §21a the trigger (M1/M6), the three fold floors (M4/M5), the compactor run (M2), D27's settings validation, and #90's input gate (forced chain + stated truncation)
+│   ├── test_compaction.py         # 45 tests -- ROADMAP_v2 §21a the trigger (M1/M6), the three fold floors (M4/M5), the compactor run (M2), D27's settings validation, #90's input gate, and #92's compactor-visibility tests
 │   ├── test_loop_compaction.py    # 20 tests -- ROADMAP_v2 §21a where the trigger is evaluated (M3), how notices reach each shell, #44's once-per-run WARNING, and #43's derived compaction mode
 │   ├── test_pin_tool.py           # 18 tests -- ROADMAP_v2 §21a D24/D26 declarations, the `memory` injectable, input handling, and #89's cap + the symmetric `unpin` tool
 │   ├── test_shell_compaction.py   # 17 tests -- ROADMAP_v2 §21a §21's visibility rule at both shells, and /compact
