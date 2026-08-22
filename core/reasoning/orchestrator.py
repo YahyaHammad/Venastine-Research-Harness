@@ -934,6 +934,21 @@ def stream_deep_research_pipeline(
                     run.log(message)
                     continue
                 run.log(f"Pass 1: ensemble candidate {len(candidates)} generated on {label}.")
+                # E13/#77: the record keeps every surviving candidate.
+                # The metadata half sits beside the trace's candidate-N
+                # lines so a stored asserted_by_candidates tag names
+                # models this run can still identify; the text half feeds
+                # the per-candidate artifacts and Pass 3b's input -- the
+                # two places that must be able to check a claim against
+                # what its number actually said. pipeline_storage strips
+                # `text` at serialization; see PipelineRunRecord.
+                run.candidates.append({
+                    "candidate": len(candidates),
+                    "provider_name": entry["provider_name"],
+                    "model": entry["model"],
+                    "chars": len(candidates[-1]),
+                    "text": candidates[-1],
+                })
 
             # Labels come from the SURVIVORS, never from position in the
             # roster (E11). Labelling by roster position leaves a gap when a

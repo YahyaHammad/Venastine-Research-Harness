@@ -153,6 +153,15 @@ class PipelineRun:
     run_id: Optional[UUID] = None
     plan: dict = field(default_factory=dict)                  # Pass 0
     raw_response: str = ""                                     # Pass 1
+    # E13/#77: one entry per SURVIVOR of ensemble Pass 1, in survivor
+    # order -- {"candidate", "provider_name", "model", "chars", "text"}.
+    # `text` is in-memory working data: pipeline_storage strips it when
+    # persisting (the full texts live in the output directory's
+    # 01_candidate_N.md files and in each candidate's own pass thread),
+    # so the database carries metadata only. Empty for every run that
+    # did not use ensemble mode -- raw_response alone is that run's
+    # record, exactly as before this field existed.
+    candidates: list[dict] = field(default_factory=list)
     claims: list[Claim] = field(default_factory=list)          # Pass 2, mutated by 3a/3b/5/4/6a/6c/6b
     completeness: dict = field(default_factory=dict)           # Pass 3c: {"gaps": [...], "coverage_score": ...}
     coverage_gaps: list[dict] = field(default_factory=list)    # Pass 4-derived: gaps tagged UNVERIFIED_COVERAGE

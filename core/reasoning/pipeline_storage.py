@@ -65,6 +65,15 @@ class PipelineRunRecord(SQLModel, table=True):
     # that did not. Checkpointed like the other data columns, so an
     # abandoned run keeps the ids it had reached.
     pass_threads_json: str = "[]"
+    # E13/#77: [{"candidate", "provider_name", "model", "chars"}] per
+    # ensemble-Pass-1 SURVIVOR, so a stored claim's
+    # asserted_by_candidates names models this row can still identify.
+    # Metadata only: the full texts are per-candidate artifacts and pass
+    # threads, and update_pipeline_run strips the in-memory `text` key
+    # here rather than duplicating bodies into the database.
+    # Checkpointed like the other data columns, so an abandoned run keeps
+    # what it had reached.
+    candidates_json: str = "[]"
     final_report: str = ""
     started_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     finished_at: Optional[datetime] = None
@@ -128,6 +137,14 @@ def update_pipeline_run(
         # that raises on a missing optional field would take down the pass
         # that was only trying to record its progress.
         record.pass_threads_json = json.dumps(getattr(run, "pass_threads", []) or [])
+        # getattr, not run.candidates: same reason as pass_threads above.
+        # `text` rides the in-memory entry (it feeds the artifacts and
+        # Pass 3b) and is stripped HERE -- the database carries metadata
+        # only; see PipelineRunRecord's column comment.
+        record.candidates_json = json.dumps([
+            {k: v for k, v in entry.items() if k != "text"}
+            for entry in getattr(run, "candidates", []) or []
+        ])
         record.final_report = run.final_report
         session.add(record)
         session.commit()
@@ -167,6 +184,10 @@ def load_pipeline_run(run_id: UUID) -> dict:
             # ensure_columns' ALTER (the migration is additive and never
             # backfills), and json.loads(None) raises.
             "pass_threads": json.loads(record.pass_threads_json or "[]"),
+            # Same NULL guard as pass_threads above: ensure_columns'
+            # ALTER never backfills, so a row written before this column
+            # existed reads as NULL, and json.loads(None) raises.
+            "candidates": json.loads(record.candidates_json or "[]"),
             "final_report": record.final_report,
         }
 
