@@ -30,9 +30,12 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import logging
 import re
 import socket
 from urllib.parse import urlparse
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # ---- Blocked domains ------------------------------------------------------
@@ -387,13 +390,51 @@ def check_output_policy(tool_name: str, result: dict) -> dict:
     consumer sees, and a tool result's keys are harness- or
     server-declared names rather than free text. That asymmetry with
     `check_input_policy` is deliberate and predates this change.
+
+    NOTHING THIS FUNCTION DOES IS SILENT ANY MORE (#49). Every
+    alteration — a redacted value, a depth-cap substitution — produces
+    exactly ONE warning naming the tool, what was altered and how many
+    values were touched (and WHICH top-level key sat over a capped
+    container). The matched content is never echoed: this function
+    exists because something credential-shaped was found, so quoting it
+    to say so would leak it into app.log, the TUI transcript and every
+    place a WARNING travels — the same reasoning _input_leaf's refusal
+    already states. Before #49 the depth cap replaced a whole nested
+    container with a sentence and logged nothing, leaving truncated
+    output indistinguishable from complete output; `registry.schemas`
+    states the rule this was violating ("no quiet invisibility").
     """
+    redacted_values = 0
+    capped_keys = []
+
+    def _leaf(text: str) -> str:
+        nonlocal redacted_values
+        replacement = redact_secrets(text)
+        if replacement != text:
+            redacted_values += 1
+        return replacement
+
     for key in list(result):
+        hit_cap = []
         result[key] = _walk(
             result[key],
-            redact_secrets,
-            lambda: "[REDACTED: nested beyond scan depth]",
+            _leaf,
+            lambda: (hit_cap.append(key),
+                     "[REDACTED: nested beyond scan depth]")[1],
         )
+        if hit_cap:
+            capped_keys.append(key)
+
+    if redacted_values or capped_keys:
+        parts = []
+        if redacted_values:
+            parts.append(f"{redacted_values} value(s) had credentials "
+                         f"replaced")
+        if capped_keys:
+            parts.append("nested content beyond scan depth was substituted "
+                         "under key(s): " + ", ".join(map(repr, capped_keys)))
+        logger.warning("Output policy altered %s result: %s.",
+                       tool_name, "; ".join(parts))
     return result
 
 

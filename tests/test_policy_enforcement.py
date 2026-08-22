@@ -586,6 +586,75 @@ class TestDepthCapFailsClosed:
 
 
 # ===========================================================================
+# ---- #49: no quiet invisibility --------------------------------------------
+# ===========================================================================
+#
+# Every comparable control in this layer is legible: dispatch() logs an
+# input-side refusal before raising, headless_hidden names what it hides,
+# and _input_leaf's reason travels to the model, the transcript and the
+# log. check_output_policy was the one path that altered a result --
+# redacting values, substituting a whole capped container -- and said
+# nothing anywhere. These tests pin the contract: ONE warning per altered
+# dispatch result, naming the tool, the alteration and (for caps) the key,
+# never the matched content.
+
+class TestOutputPolicyAlterationsAreVisible:
+
+    @pytest.fixture(autouse=True)
+    def _capture(self, caplog):
+        caplog.set_level("WARNING", logger="safety.policy_enforcement")
+        self.caplog = caplog
+
+    def _records(self):
+        return [r for r in self.caplog.records
+                if r.name == "safety.policy_enforcement"]
+
+    def test_a_redaction_logs_one_warning_naming_the_tool(self, caplog):
+        result = {"content": "key=sk-ant-abc123def456ghi789jkl012mno345pqr678"}
+        check_output_policy("my_tool", result)
+        records = self._records()
+        assert len(records) == 1
+        assert "my_tool" in records[0].getMessage()
+        assert "replaced" in records[0].getMessage()
+
+    def test_a_clean_result_stays_silent(self):
+        """A warning per CLEAN result would be noise on every dispatch
+        call; the contract is one warning per ALTERED result."""
+        check_output_policy("my_tool", {"content": "nothing secret here"})
+        assert self._records() == []
+
+    def test_a_depth_cap_substitution_names_the_key(self):
+        nested = {"leaf": "x"}
+        for _ in range(14):
+            nested = {"next": nested}
+        result = {"result": nested}
+        out = check_output_policy("mcp_server", result)
+        assert "[REDACTED: nested beyond scan depth]" in str(out)
+        records = self._records()
+        assert len(records) == 1
+        message = records[0].getMessage()
+        assert "mcp_server" in message
+        assert "'result'" in message
+
+    def test_the_matched_secret_is_never_echoed(self):
+        """Quoting the credential to say a credential was found would leak
+        it into app.log and every place a WARNING travels -- the same rule
+        _input_leaf's refusal already states."""
+        secret = "sk-ant-abc123def456ghi789jkl012mno345pqr678"
+        check_output_policy("t", {"content": f"key={secret}"})
+        for record in self._records():
+            assert secret not in record.getMessage()
+
+    def test_many_alterations_are_one_warning(self):
+        """Once per dispatch call, not once per occurrence: a hostile MCP
+        payload must not fill the transcript with a line per string."""
+        result = {"a": SECRET, "b": [SECRET, SECRET],
+                  "c": {"d": {"e": SECRET}}}
+        check_output_policy("t", result)
+        assert len(self._records()) == 1
+
+
+# ===========================================================================
 # ---- check_input_policy (ROADMAP_v2 §25, R5) -------------------------------
 # ===========================================================================
 #
