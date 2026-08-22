@@ -264,12 +264,101 @@ def _as_text(messages) -> str:
     return "\n\n".join(lines)
 
 
+#: Every exit `compact()` reports (batch 16, #44). The caller decides how
+#: each becomes a LOG line and whether it becomes a NOTICE -- how often
+#: this function runs is run-scope knowledge the loop has and this module
+#: lacks. Three of them are STANDING CONDITIONS (blocked, all-pinned,
+#: missing-agent) and share one notice kind, so the loop's existing
+#: once-per-run dedup governs their WARNINGs too instead of each firing
+#: its own per-evaluation line.
+COMPACTION_OUTCOMES = (
+    "folded",         # a checkpoint was written (kind="compaction")
+    "blocked",        # the keep floors protect everything
+    "all-pinned",     # everything newly foldable is pinned (#89's silent path, named now)
+    "missing-agent",  # the compactor definition is absent
+    "no-progress",    # the fold boundary has not moved past the last checkpoint
+    "reentrant",      # a compaction is already running in this process
+    "failed",         # the compactor produced nothing usable
+)
+
+
+def pin_measurements(thread_id, last_n: int) -> dict:
+    """What #89's cap is measured against, in M10's character proxy.
+
+    Returns three numbers:
+      requested_tokens  what the last `last_n` turns' ARCHIVE rows cost --
+                        the span one more `pin(last_n)` would protect
+      pinned_tokens     everything ALREADY pinned on this thread
+      max_tokens        PIN_MAX_TRIGGER_FRACTION x the resolved trigger
+
+    Reads the ARCHIVE (the same rows compactable_span walks), so a pinned
+    prefix is counted at full weight exactly as the derived view will
+    carry it. Never compared against a provider count (M10).
+    """
+    from storage import _ordered_rows
+    from core import config_loader
+
+    settings = config_loader.effective_compaction()
+    max_tokens = int(
+        config.PIN_MAX_TRIGGER_FRACTION * settings["trigger_tokens"])
+
+    rows = _ordered_rows(thread_id)
+    starts = [i for i, row in enumerate(rows) if row["role"] == "user"]
+    bounds = starts + [len(rows)]
+
+    def _tokens(lo: int) -> int:
+        return sum(len(rows[i]["content"])
+                   for i in range(lo, len(rows))) // CHARS_PER_TOKEN
+
+    requested = _tokens(bounds[max(0, len(starts) - last_n)]) if starts else 0
+    pinned = sum(len(row["content"]) for row in rows
+                 if row["pinned"]) // CHARS_PER_TOKEN
+    return {
+        "requested_tokens": requested,
+        "pinned_tokens": pinned,
+        "max_tokens": max_tokens,
+    }
+
+
+def _input_budget(model: str) -> int:
+    """One-call INPUT ceiling for a summarizer prompt, in proxy tokens.
+
+    context_limit minus the pipeline backstop margin -- generous by
+    construction, and honest about its weakness (M10): this compares the
+    chars-per-token PROXY against a real window number, which every other
+    comparison in this module refuses to do. The comparison is inherently
+    approximate; what makes it safe is the failure direction. Undershooting
+    the budget costs truncation, which is stated; overshooting it costs an
+    oversized send, which is a provider error mid-compaction on exactly
+    the thread that can least afford one.
+    """
+    return max(1_000, context_limit(model)
+               - config.COMPACTION_PIPELINE_BACKSTOP_TOKENS)
+
+
 def compact(memory, model: str, provider_name: str,
             current_turn_start: Optional[int] = None,
             overrides: Optional[dict] = None,
-            authorization=None) -> Optional[dict]:
-    """Compact `memory`'s thread. Returns a notice dict, or None if
-    nothing could be folded.
+            authorization=None) -> dict:
+    """Compact `memory`'s thread. Returns an OUTCOME dict -- never None.
+
+    Batch 16 (#44) changed this contract. It used to return a notice dict
+    on success and None on every other exit -- five flavors of "nothing
+    happened" that were indistinguishable at the call site and logged by
+    three different conventions (WARNING per evaluation, debug-only,
+    nothing at all). Now every exit is data:
+
+        {"status": <one of COMPACTION_OUTCOMES>,
+         "kind":   <notice kind for the loop's per-run dedup, or None>,
+         "text":   <a human line both shells render>}
+
+    REPORTABILITY LIVES WITH THE CALLER. How often this function runs --
+    once at the turn boundary plus once after every step -- is run-scope
+    knowledge the loop has and this module lacks, which is why the
+    standing-condition WARNINGs moved out of it into _maybe_compact's
+    once-per-run guard (#44). What remains here is mechanics: DEBUG for a
+    fold boundary that did not move, and _summarize's own retry warnings,
+    which are events about one model call rather than states of the run.
 
     Runs the compactor as an ORDINARY AGENT through the same
     RunAgentLoop everything else uses. §21 is explicit that summarizing is
@@ -292,15 +381,17 @@ def compact(memory, model: str, provider_name: str,
     storage_advances = advances
 
     if _compacting:
-        return None
+        return {"status": "reentrant", "kind": None,
+                "text": "A compaction is already running."}
 
     settings = config_loader.effective_compaction(overrides)
     watermark = compactable_span(memory, current_turn_start, overrides)
     if watermark is None:
-        logger.warning(
+        logger.debug(
             "Compaction wanted on thread %s but every message is protected "
             "by the keep floors; nothing folded.", memory.thread_id)
         return {
+            "status": "blocked",
             "kind": "compaction_blocked",
             "text": ("Context is full but the most recent turns fill it "
                      "entirely -- nothing could be compacted."),
@@ -308,10 +399,16 @@ def compact(memory, model: str, provider_name: str,
 
     agent = manager.get(config.COMPACTOR_AGENT)
     if agent is None:
-        logger.warning(
-            "Compaction wanted but the %r agent is not available; skipped.",
+        logger.debug(
+            "Compaction wanted but the %r agent is not available.",
             config.COMPACTOR_AGENT)
-        return None
+        return {
+            "status": "missing-agent",
+            "kind": "compaction_blocked",
+            "text": (f"The {config.COMPACTOR_AGENT!r} agent is not "
+                     f"available, so this conversation cannot be "
+                     f"condensed."),
+        }
 
     previous = latest_checkpoint(memory.thread_id)
     # NO PROGRESS, NO CALL. A watermark at or before the existing one means
@@ -327,27 +424,80 @@ def compact(memory, model: str, provider_name: str,
         logger.debug(
             "Compaction wanted on thread %s but the fold boundary has not "
             "moved past the last checkpoint; nothing to do.", memory.thread_id)
-        return None
+        return {"status": "no-progress", "kind": None,
+                "text": "Nothing new to fold since the last summary."}
 
-    # M2. Re-derive from the archive by default, so exactly one
-    # summarization step always sits between an original message and what
-    # the model sees -- that is what makes an early trigger free in
-    # fidelity terms rather than a tradeoff. Chaining is the configured
-    # alternative and the automatic fallback below.
+    # M2 as amended by batch 16 (#90). Re-derive from the archive by
+    # default WHEN CONFIGURED; chain summarizes the previous summary plus
+    # the tail. Whichever is configured, a span that outgrows one call
+    # falls back to chain (verbose -- see the WARNING below), and one that
+    # outgrows it even chained truncates its oldest material with the
+    # truncation stated twice: to the model in the instruction, and in the
+    # stored summary every later turn reads.
     chaining = settings["strategy"] == "chain" and previous is not None
-    lower = previous.covers_up_to_message_id if chaining else None
-    segment = history_through(memory.thread_id, watermark, after_message_id=lower)
-    if not segment and not chaining:
-        return None
 
-    segment_text = _as_text(segment)
-    if chaining:
-        segment_text = (
-            f"Summary of everything before this point:\n"
-            f"{previous.summary_text}\n\n{segment_text}")
+    def _build(chain_mode: bool):
+        lower = previous.covers_up_to_message_id if chain_mode else None
+        seg = history_through(memory.thread_id, watermark,
+                              after_message_id=lower)
+        text = _as_text(seg)
+        if chain_mode:
+            text = ("Summary of everything before this point:\n"
+                    f"{previous.summary_text}\n\n{text}")
+        return seg, text
+
+    segment, segment_text = _build(chaining)
+    if not segment and not chaining:
+        # Everything newly foldable is pinned (#89). This used to be the
+        # one silent no-progress path -- indistinguishable, at every
+        # level, from "nothing needed doing" -- while the state it reports
+        # is exactly what compaction_blocked's text describes, reached by
+        # another door. Named now, and worded so the reader knows the way
+        # out.
+        return {
+            "status": "all-pinned",
+            "kind": "compaction_blocked",
+            "text": ("Context is full, but everything foldable is pinned. "
+                     "Unpin something with /unpin, or let more unpinned "
+                     "turns accumulate."),
+        }
 
     original = len(segment_text)
     target = _target_chars(original, settings["strength"])
+
+    # M2's automatic fallback, built at last after three documents
+    # promised it for two sections. Forced only when there IS a previous
+    # summary to chain onto; VERBOSE because a configured strategy
+    # quietly doing the other thing is exactly what "(traced)" in the
+    # spec was about.
+    budget = _input_budget(model)
+    forced_chain_note = ""
+    if (not chaining and previous is not None
+            and len(segment_text) // CHARS_PER_TOKEN > budget):
+        logger.warning(
+            "Compaction on thread %s: the rederive span is ~%s tokens "
+            "against a %s-token one-call budget; forcing chain onto the "
+            "previous summary.",
+            memory.thread_id, len(segment_text) // CHARS_PER_TOKEN, budget)
+        chaining = True
+        segment, segment_text = _build(True)
+        original = len(segment_text)
+        target = _target_chars(original, settings["strength"])
+        forced_chain_note = (" Chained onto the previous summary because "
+                             "the span outgrew one call.")
+
+    # Still over -- or no previous summary existed to chain onto. Truncate
+    # the OLDEST material (recent turns are the referent-heavy ones) and
+    # state the cut in both places the summary travels.
+    truncation_notice = None
+    if len(segment_text) // CHARS_PER_TOKEN > budget:
+        keep_chars = max(0, budget * CHARS_PER_TOKEN)
+        dropped = len(segment_text) - keep_chars
+        truncation_notice = (
+            f"[Source truncated: the earliest {dropped} characters were "
+            f"not summarized.]")
+        segment_text = f"{truncation_notice}\n{segment_text[-keep_chars:]}"
+        original = len(segment_text)
 
     _compacting = True
     try:
@@ -359,7 +509,15 @@ def compact(memory, model: str, provider_name: str,
         _compacting = False
 
     if summary is None:
-        return None
+        return {"status": "empty-summary", "kind": None,
+                "text": "The compactor returned nothing usable."}
+
+    if truncation_notice is not None:
+        # Deterministic rather than trusted from the model's compliance:
+        # the marker rides on the STORED summary, so the derived view --
+        # and everyone reading it later -- sees the cut even if the model
+        # never mentioned it.
+        summary = f"{summary}\n\n{truncation_notice}"
 
     strategy = "chain" if chaining else "rederive"
     save_checkpoint(memory.thread_id, summary, watermark, strategy)
@@ -368,8 +526,10 @@ def compact(memory, model: str, provider_name: str,
     logger.info("Compacted thread %s: %s messages -> %s chars (%s).",
                 memory.thread_id, folded, len(summary), strategy)
     return {
+        "status": "folded",
         "kind": "compaction",
-        "text": f"{folded} earlier messages compacted into a summary",
+        "text": f"{folded} earlier messages compacted into a summary"
+                + forced_chain_note,
     }
 
 
@@ -455,6 +615,24 @@ def summarize_thread(thread_id, model: str, provider_name: str,
             "verbatim": True,
         }
 
+    # #90's gate on the second consumer. A thread summary's input is
+    # bounded by NOTHING else -- compact()'s span at least waits for a
+    # threshold -- and T4 documents what tool rows weigh. Reserve room for
+    # the summary this call is meant to PRODUCE, then truncate the oldest
+    # material with the cut stated in the instruction AND in the stored
+    # row, so every referencing thread sees it.
+    budget = max(1_000, _input_budget(model)
+                 - config.SUMMARY_TARGET_CHARS // CHARS_PER_TOKEN)
+    truncation_notice = None
+    if original // CHARS_PER_TOKEN > budget:
+        keep_chars = max(0, budget * CHARS_PER_TOKEN)
+        dropped = len(thread_text) - keep_chars
+        truncation_notice = (
+            f"[Source truncated: the earliest {dropped} characters were "
+            f"not summarized.]")
+        thread_text = f"{truncation_notice}\n{thread_text[-keep_chars:]}"
+        original = len(thread_text)
+
     agent = manager.get(config.COMPACTOR_AGENT)
     if agent is None:
         logger.warning(
@@ -479,6 +657,11 @@ def summarize_thread(thread_id, model: str, provider_name: str,
 
     if summary is None:
         return None
+
+    if truncation_notice is not None:
+        # Same determinism rule as compact(): the marker rides on the
+        # stored row regardless of whether the model mentioned the cut.
+        summary = f"{summary}\n\n{truncation_notice}"
 
     save_thread_summary(thread_id, summary, watermark)
     logger.info("Summarized thread %s: %s chars -> %s.",

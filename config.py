@@ -13,7 +13,11 @@ MODEL_NAME = os.environ.get("AGENT_MODEL", "claude-sonnet-5")
 # where the provider guidance is 64k+ per call.
 MAX_TOKENS = 16_000
 # --- Loop control ---
-MAX_ITERATIONS = 20  # matches the max_steps default used elsewhere
+# Raised from 20 in batch 16 (#45): this is THE default step ceiling -- the
+# `or config.MAX_ITERATIONS` fallback at every agent-shaped call site, the
+# value an invalid `max_steps:` frontmatter field is repaired to, and the
+# ceiling of every chat turn and research pass that does not name its own.
+MAX_ITERATIONS = 50
 
 # --- Subagents (ROADMAP_v2 §18) ---
 # Maximum spawn_subagent nesting. The counter lives on
@@ -365,6 +369,17 @@ COMPACTION_KEEP_RECENT_TOKENS = 4_000
 # summarized; a follow-up like "no, the other one" then has no referent.
 COMPACTION_KEEP_RECENT_TURNS = 3
 
+# #89 (batch 16). The most one `pin` call may protect, as a fraction of
+# the trigger above. A pin is a PERMANENT FLOOR under the derived view:
+# pinned rows re-enter it verbatim forever (M9), nothing folds them, and
+# before this cap one ungated call with last_n=40 could put a thread
+# permanently past the trigger with no unpin to undo it. 0.5 leaves room
+# for a real working session while making "floor the trigger by yourself"
+# structurally impossible. Enforced at the tool with a REFUSAL that states
+# the cap and the current share -- never silently trimmed (M15's rule: a
+# pin asked for more protection than allowed must not quietly deliver less).
+PIN_MAX_TRIGGER_FRACTION = 0.5
+
 # 1-5, mapping to the target compression ratios below.
 COMPACTION_STRENGTH = 3
 
@@ -384,16 +399,28 @@ COMPACTION_TARGET_RATIOS = {1: 0.40, 2: 0.25, 3: 0.15, 4: 0.10, 5: 0.05}
 # the context bigger.
 COMPACTION_RATIO_TOLERANCE = 0.5
 
-# M2. "rederive" summarizes the ORIGINAL messages every time, so exactly
-# one summarization step always sits between an original message and what
-# the model sees -- which is what makes an early trigger free in fidelity
-# terms rather than a tradeoff. "chain" summarizes the previous summary
-# plus what followed it: constant cost per compaction forever, at the price
-# of loss that compounds over a long-lived thread.
+# M2 as amended by batch 16 (#90, owner decision). Two strategies:
 #
-# rederive falls back to chain on its own when the span outgrows a single
-# call, and says so. Setting "chain" here forces it always.
-COMPACTION_STRATEGY = "rederive"
+#   "chain"     summarizes the PREVIOUS SUMMARY plus whatever followed it.
+#               Constant cost per compaction forever -- the input never
+#               grows past summary-plus-tail -- at the price of loss that
+#               compounds over a long-lived thread (a summary of a summary
+#               of a ...).
+#   "rederive"  summarizes the ORIGINAL messages every time, so exactly
+#               one summarization step always sits between an original
+#               message and what the model sees. Fidelity-optimal; input
+#               grows with the covered span.
+#
+# The DEFAULT is "chain", reversing M2's original choice -- an explicit
+# owner decision recorded in DEVLOG (batch 16): rederive's whole-span
+# input made every compaction the most expensive call of the turn, and
+# cost compounds on exactly the threads that trigger most. Whatever is
+# configured here, BOTH strategies fall back to chain automatically when
+# a span outgrows one call (built at last, after three documents promised
+# it for two sections), saying so in a WARNING -- and truncate the oldest
+# material with a stated truncation when even chain cannot fit, because
+# an oversized send is never the right failure direction.
+COMPACTION_STRATEGY = "chain"
 COMPACTION_STRATEGIES = ("rederive", "chain")
 
 # ROADMAP_v2 §21b (M14). Ceiling on how many durable memories reach one
@@ -554,10 +581,16 @@ class ToolPermissions:
     # approval -- the spawned run's own tools are each gated by policy,
     # intersection-capped by the parent's context (C6).
     spawn_subagent: bool = True
-    # §21/D26. Thread-scoped, reversible, and it takes effect inside a
-    # conversation the user is watching -- a wrong pin costs some context
-    # budget and nothing else.
+    # §21/D26. Thread-scoped, reversible (batch 16 gave that word a
+    # mechanism: `unpin`), and it takes effect inside a conversation the
+    # user is watching -- a wrong pin costs some context budget and nothing
+    # else.
     pin: bool = True
+    # §21/D26, restored by batch 16 (#89). D26's premise called a pin
+    # reversible while nothing anywhere unpinned one; unpin is the other
+    # half of making the premise true rather than aspirational. Same axis,
+    # same gating posture, same reasons.
+    unpin: bool = True
     # §21b. Allowed everywhere; whether it can actually RUN is decided
     # by the approval gate below plus §13's headless rule.
     remember: bool = True
@@ -641,6 +674,10 @@ class ToolApprovals:
     # on the CLI and inside a research pass, where an approval-gated tool
     # is not merely denied but not advertised at all (§13).
     pin: bool = False
+    # §21/D26, batch 16 (#89). Ungated for pin's reasons, and now genuinely
+    # symmetric: releasing protection costs context budget in a
+    # conversation the user is watching, exactly like applying it.
+    unpin: bool = False
     # §21b/D26, and the asymmetry with pin above IS the decision. A
     # memory outlives its thread and silently shapes conversations the
     # user has not started yet, so it is persistent and invisible at the

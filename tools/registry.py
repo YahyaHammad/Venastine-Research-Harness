@@ -664,6 +664,10 @@ registry.register(ToolSpec("edit", file_ops.EDIT_TOOL_SCHEMA, file_ops.edit_run,
 registry.register(ToolSpec("shell", shell.TOOL_SCHEMA, shell.run, approval_check=shell._shell_approval_check, approval_notice=shell._shell_approval_notice, grant_policy=GRANT_NEVER, budget=BUDGET_IO))
 registry.register(ToolSpec("load_skill", load_skill.TOOL_SCHEMA, load_skill.run, available_check=load_skill.has_skills, grant_policy=GRANT_ANYWHERE, budget=BUDGET_IO))
 registry.register(ToolSpec("pin", pin.TOOL_SCHEMA, pin.run, available_check=pin.available, grant_policy=GRANT_ANYWHERE, budget=BUDGET_IO))
+# §21/D26 restored (#89): the mirror of pin. Same gating posture (ungated,
+# thread-scoped, visible), same availability, and it is what makes D26's
+# "reversible" premise true rather than aspirational.
+registry.register(ToolSpec("unpin", pin.UNPIN_TOOL_SCHEMA, pin.unpin_run, available_check=pin.available, grant_policy=GRANT_ANYWHERE, budget=BUDGET_IO))
 # §23 slice 2. No request_kind: this tool does NOT ask through the approval
 # bridge -- it is ungated (J12), so the bridge never fires for it. It names
 # `response_channel` in its handler signature and asks with it directly,

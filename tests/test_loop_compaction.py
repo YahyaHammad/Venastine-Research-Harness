@@ -251,6 +251,96 @@ def test_an_ordinary_turn_asks_in_working_set_mode(mocker):
 
 
 # ---------------------------------------------------------------------------
+# ---- Derived mode (#43): the mode is what the THREAD is ---------------------
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("kind", ["research_pass", "subagent"])
+def test_a_re_entered_machinery_thread_asks_in_backstop_mode(mocker, kind):
+    """#43. json_retry's corrective retry and the §20 reviewer re-enter
+    their threads through continue_conversation -- which could not express
+    a compaction mode at all, so both evaluated the 40k chat trigger on
+    threads M6 says must never answer to it. The mode now derives from
+    what the thread IS wherever the caller does not say."""
+    from storage import THREAD_KIND_RESEARCH_PASS, THREAD_KIND_SUBAGENT
+
+    seen = []
+    mocker.patch("core.compaction.should_compact",
+                 side_effect=lambda used, model, mode: seen.append(mode) or "")
+    mocker.patch("core.loop.call_model_stream",
+                 side_effect=make_stream_sequence(make_model_response(text="hi")))
+    memory = FakeMemory(thread_id=mocker.sentinel.tid,
+                        kind=THREAD_KIND_RESEARCH_PASS if kind == "research_pass"
+                        else THREAD_KIND_SUBAGENT)
+    # continue_conversation constructs its own memory; install the fake
+    # where it will be found, the way M6's own tests do.
+    mocker.patch("core.loop.ConversationMemory", lambda **kw: memory)
+
+    RunAgentLoop.continue_conversation(
+        thread_id=memory.thread_id, message="retry with valid JSON",
+        system_prompt="s", model="claude-sonnet-5")
+
+    assert seen == ["backstop"], (
+        f"a {kind} thread resumed through continue_conversation ran on "
+        f"the chat trigger")
+
+
+def test_a_resumed_chat_thread_keeps_the_working_set_trigger(mocker):
+    """The control, and /grill-me's answer: a one-shot runs in the
+    user's CURRENT thread (§18's locked decision), which is a chat
+    thread -- routine working-set compaction there is the feature, not
+    the defect, and #172 is what makes its notices visible."""
+    seen = []
+    mocker.patch("core.compaction.should_compact",
+                 side_effect=lambda used, model, mode: seen.append(mode) or "")
+    mocker.patch("core.loop.call_model_stream",
+                 side_effect=make_stream_sequence(make_model_response(text="hi")))
+    memory = FakeMemory(thread_id=mocker.sentinel.tid, kind="chat")
+    mocker.patch("core.loop.ConversationMemory", lambda **kw: memory)
+
+    RunAgentLoop.continue_conversation(
+        thread_id=memory.thread_id, message="grill this",
+        system_prompt="s", model="claude-sonnet-5")
+
+    assert seen == ["working_set"]
+
+
+def test_an_explicit_mode_beats_the_derivation(mocker):
+    """The hybrid's other half. stream_deep_research_mode passes
+    "backstop" explicitly as the definition site; a caller that names a
+    mode is never second-guessed by what the thread happens to be."""
+    seen = []
+    mocker.patch("core.compaction.should_compact",
+                 side_effect=lambda used, model, mode: seen.append(mode) or "")
+    mocker.patch("core.loop.call_model_stream",
+                 side_effect=make_stream_sequence(make_model_response(text="hi")))
+    memory = FakeMemory(kind="chat")   # derivation would say working_set
+
+    _events(memory, compaction_mode="backstop")
+
+    assert seen == ["backstop"]
+
+
+def test_a_spawned_subagent_thread_derives_backstop_without_being_told(mocker):
+    """spawn_subagent and §20's reviewer create subagent-kind threads via
+    run_agent_conversation; neither passes a mode. The derivation covers
+    them by construction rather than by a parameter each call site can
+    forget -- the D24/R13 failure shape this fix exists to avoid."""
+    from storage import THREAD_KIND_SUBAGENT
+
+    seen = []
+    mocker.patch("core.compaction.should_compact",
+                 side_effect=lambda used, model, mode: seen.append(mode) or "")
+    mocker.patch("core.loop.call_model_stream",
+                 side_effect=make_stream_sequence(make_model_response(text="hi")))
+
+    RunAgentLoop.run_agent_conversation(
+        "do the thing", model="claude-sonnet-5",
+        thread_kind=THREAD_KIND_SUBAGENT)
+
+    assert seen == ["backstop"]
+
+
+# ---------------------------------------------------------------------------
 # ---- Standing conditions say themselves once -------------------------------
 # ---------------------------------------------------------------------------
 
@@ -266,7 +356,8 @@ def test_a_standing_condition_is_reported_once_per_run(mocker, kind):
                      side_effect=RuntimeError("provider down"))
     else:
         mocker.patch("core.compaction.compact",
-                     return_value={"kind": kind, "text": "nothing to fold"})
+                     return_value={"status": "blocked", "kind": kind,
+                                   "text": "nothing to fold"})
     tool_call = make_model_response(
         text="", tool_calls=[{"id": "t1", "name": "get_time", "input": {}}],
         usage={"input_tokens": 10_000_000, "output_tokens": 1})
@@ -277,6 +368,64 @@ def test_a_standing_condition_is_reported_once_per_run(mocker, kind):
     events = _events(_over_threshold(FakeMemory()), max_steps=3)
 
     assert [e.notice["kind"] for e in events if e.notice] == [kind]
+
+
+def test_the_standing_condition_warning_is_also_said_once_per_run(
+        mocker, caplog):
+    """#44, the half the notices could not show. The blocked-compaction
+    WARNING lived inside compact() -- called at the turn boundary AND at
+    every mid-turn valve -- so its NOTICE was deduplicated per run while
+    the identical WARNING fired up to MAX_ITERATIONS + 1 times in one
+    turn. Batch 16 moved both routes under one guard; this pins the log
+    side the way the sibling test above pins the notice side."""
+    mocker.patch("core.compaction.compact",
+                 return_value={"status": "blocked", "kind": "compaction_blocked",
+                               "text": "nothing foldable"})
+    tool_call = make_model_response(
+        text="", tool_calls=[{"id": "t1", "name": "get_time", "input": {}}],
+        usage={"input_tokens": 10_000_000, "output_tokens": 1})
+    mocker.patch("core.loop.call_model_stream",
+                 side_effect=make_stream_sequence(
+                     tool_call, tool_call, make_model_response(text="done")))
+
+    with caplog.at_level("WARNING", logger="core.loop"):
+        events = _events(_over_threshold(FakeMemory()), max_steps=3)
+
+    warnings = [r for r in caplog.records if "cannot proceed" in r.getMessage()]
+    assert len(warnings) == 1, (
+        f"{len(warnings)} standing-condition WARNINGs across three "
+        f"evaluations -- the reader is being trained past it")
+    assert [e.notice["kind"] for e in events if e.notice] == ["compaction_blocked"]
+
+
+def test_a_missing_agent_warns_once_and_names_itself(mocker, caplog):
+    """missing-agent used to warn inside compact() once per evaluation,
+    with no notice at all. It now rides the same once-per-run guard and
+    carries a user-facing line, so the shell can say why nothing folded."""
+    # Reach the agent branch without touching storage: this file runs on
+    # FakeMemory and the fake sqlmodel, neither of which can serve
+    # compactable_span's archive read.
+    import uuid as _uuid
+    mocker.patch("core.compaction.compactable_span",
+                 return_value=_uuid.uuid4())
+    mocker.patch("agents.manager.manager.get", return_value=None)
+    tool_call = make_model_response(
+        text="", tool_calls=[{"id": "t1", "name": "get_time", "input": {}}],
+        usage={"input_tokens": 10_000_000, "output_tokens": 1})
+    mocker.patch("core.loop.call_model_stream",
+                 side_effect=make_stream_sequence(
+                     tool_call, tool_call, make_model_response(text="done")))
+
+    with caplog.at_level("WARNING", logger="core.loop"):
+        response = run_to_completion(RunAgentLoop._run(
+            memory=_over_threshold(FakeMemory()), system_prompt="s",
+            provider_name="ANTHROPIC", model="claude-sonnet-5", context=None,
+            max_steps=3))
+
+    warnings = [r for r in caplog.records if "cannot proceed" in r.getMessage()]
+    assert len(warnings) == 1
+    assert any(n["kind"] == "compaction_blocked" and "compactor" in n["text"]
+               for n in response.notices)
 
 
 def test_a_real_compaction_still_reports_every_time(mocker, compacted):

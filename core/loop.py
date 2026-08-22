@@ -41,7 +41,9 @@ from core.memory import ConversationMemory
 # §27 (T1). The loop is where a thread's kind is DECIDED -- it knows which
 # of its three entry points is running -- and storage.create_thread is
 # where it is stored. Nothing in between learns what a kind means.
-from storage import THREAD_KIND_CHAT, THREAD_KIND_RESEARCH_PASS
+from storage import (
+    THREAD_KIND_CHAT, THREAD_KIND_RESEARCH_PASS, THREAD_KIND_SUBAGENT,
+)
 from tools.base import GRANT_NEVER
 from tools.context import ToolContext, RunInfo
 from tools.registry import registry, ToolCallDenied
@@ -392,6 +394,31 @@ _ONCE_PER_RUN_NOTICES = (
 )
 
 
+def _derived_compaction_mode(memory) -> str:
+    """The compaction mode for a caller that did not say (#43, batch 16).
+
+    The mode is a property of WHAT THE THREAD IS, not of the call site:
+    `research_pass` and `subagent` threads are machinery -- unattended,
+    already returning a distillation, and (for a retry thread) holding
+    exactly the turns §3 exists to keep in front of the model -- so M6's
+    backstop applies WHEREVER they are re-entered. A chat thread is a
+    conversation someone is present for; the ordinary working-set trigger
+    is the feature working as designed there.
+
+    This closes #43 by construction rather than by forwarding: json_retry
+    and the §20 reviewer could not express a mode at all before, and a
+    parameter they had to remember would have re-created the D24/R13
+    failure shape -- correct today, one forgotten call site from wrong
+    again. Unknown kinds fail toward the chat answer: routine compaction
+    of an unforeseen thread kind is the conservative default, and a
+    future kind states its own answer here when it arrives.
+    """
+    kind = getattr(memory, "kind", THREAD_KIND_CHAT)
+    if kind in (THREAD_KIND_RESEARCH_PASS, THREAD_KIND_SUBAGENT):
+        return "backstop"
+    return "working_set"
+
+
 def _already_said(notices, kind: str) -> bool:
     return kind in _ONCE_PER_RUN_NOTICES and any(
         n["kind"] == kind for n in notices)
@@ -406,6 +433,28 @@ def _maybe_compact(memory, model, provider_name, notices, mode):
     would be invisible to the CLI and the pipeline, which drain the
     generator through run_to_completion() and discard everything that is
     not final. §20 and §25 each shipped that defect once.
+
+    Outcome routing (batch 16, #44). compact() returns a status dict now,
+    and this is where reportability is decided:
+
+      folded         notice every occurrence -- an event, and repeats
+                     legitimately, once per compaction.
+      blocked /
+      all-pinned /
+      missing-agent  STANDING CONDITIONS: notice AND WARNING together,
+                     ONCE PER RUN under the same dedup list. The two
+                     WARNINGs used to live inside compact() and fired on
+                     EVERY evaluation -- up to MAX_ITERATIONS + 1
+                     identical lines per turn on a thread that stays over
+                     trigger and fully floored, which is how a reader
+                     gets trained past the warnings that do not repeat.
+                     Same defect `context_limit()` had before it learned
+                     to warn once per model.
+      no-progress /
+      reentrant /
+      empty-summary  no notice at all: ordinary non-events (nothing new
+                     to fold) or already carried by _summarize's own
+                     per-call warnings.
 
     Failure here is contained. Compaction is a model call, and a provider
     error during it must not take down a turn that was otherwise fine --
@@ -441,7 +490,7 @@ def _maybe_compact(memory, model, provider_name, notices, mode):
         # turn runs but no new USER row, so the answer is the same
         # whenever it is asked. Asking lazily keeps a storage read off
         # every turn that is nowhere near the threshold.
-        notice = compaction.compact(
+        outcome = compaction.compact(
             memory, model, provider_name,
             current_turn_start=memory.completed_turns())
     except Exception as e:  # noqa: BLE001 -- contained on purpose, see above
@@ -450,9 +499,23 @@ def _maybe_compact(memory, model, provider_name, notices, mode):
             "kind": "compaction_failed",
             "text": f"Could not compact this conversation: {e}",
         }
-    if notice is not None and not _already_said(notices, notice["kind"]):
-        notices.append(notice)
-        yield LoopEvent(notice=notice)
+        if not _already_said(notices, notice["kind"]):
+            notices.append(notice)
+            yield LoopEvent(notice=notice)
+        return
+
+    kind = outcome.get("kind")
+    if kind is None:
+        return
+    if _already_said(notices, kind):
+        return
+    if kind == "compaction_blocked":
+        # See the docstring's standing-condition row: one WARNING per run,
+        # said in the same breath as the one notice, never per evaluation.
+        logger.warning("Compaction cannot proceed on thread %s: %s",
+                       memory.thread_id, outcome["text"])
+    notices.append({"kind": kind, "text": outcome["text"]})
+    yield LoopEvent(notice=notices[-1])
 
 
 def run_to_completion(gen) -> ModelResponse:
@@ -510,7 +573,7 @@ class RunAgentLoop:
         response_channel=None,
         granted_tools: Optional[set] = None,
         grant_budget=None,
-        compaction_mode: str = "working_set",
+        compaction_mode: Optional[str] = None,
     ):
         """Generator yielding LoopEvent objects as the loop progresses.
 
@@ -543,13 +606,33 @@ class RunAgentLoop:
         reference across every pass of a pipeline run. Exhaustion makes
         the grant stop applying, so calls fall back to being asked.
 
-        compaction_mode (§21): "working_set" for a chat turn, "backstop"
-        for a research pass. M6 -- a pass is headless and unattended and
-        already returns a distillation, so it compacts only near the
-        model's actual context window rather than at the working-set
-        threshold. Passed by run_deep_research_mode; every other caller
-        takes the default.
+        compaction_mode (§21): None -- the default since batch 16 (#43) --
+        means DERIVE from what the thread is: research_pass and subagent
+        threads get M6's backstop wherever they are re-entered, a chat
+        thread gets the ordinary working-set trigger. An explicit value
+        wins, and stream_deep_research_mode passes "backstop" explicitly
+        as the definition site. Before this, every continue_conversation
+        caller silently ran on the chat trigger: a pass's JSON retry and
+        the §20 reviewer evaluated a threshold their own threads were
+        never meant to answer to.
         """
+        # §29/#45 belt. `_run` is a generator, so this fires on the first
+        # next() -- which for every production caller is immediate, since
+        # all three wrappers drain eagerly. It exists because the loader
+        # repairs agent files (#45) while a DIRECT caller bypasses that
+        # repair entirely: there is no file to lose here, only a bug worth
+        # naming, so this raises rather than substituting. The old failure
+        # was an AttributeError on `response.stop_reason` after an empty
+        # step loop -- a traceback pointing three layers away from the bad
+        # value that caused it.
+        if isinstance(max_steps, bool) or not isinstance(max_steps, int) \
+                or max_steps < 1:
+            raise ValueError(
+                f"max_steps must be a positive integer, got {max_steps!r}. "
+                f"Agent definitions carrying an invalid max_steps are "
+                f"repaired by the loader to {config.MAX_ITERATIONS} "
+                f"(config.MAX_ITERATIONS); direct callers must pass a valid "
+                f"value themselves.")
         client = api_initialization(provider_name)
         # Validate the level against the model that will RECEIVE it, here
         # rather than at each caller. Every path -- CLI chat, each research
@@ -622,7 +705,10 @@ class RunAgentLoop:
         # nothing is mid-flight, and last_input_tokens is the provider's
         # own measurement of what the previous call was sent.
         yield from _maybe_compact(
-            memory, model, provider_name, notices, compaction_mode)
+            memory, model, provider_name, notices,
+            compaction_mode
+            if compaction_mode is not None
+            else _derived_compaction_mode(memory))
 
         response = None
         for _ in range(max_steps):
@@ -916,7 +1002,10 @@ class RunAgentLoop:
             # turn nowhere near the threshold. See core/compaction.py's note
             # on why it is computed there rather than passed down.
             yield from _maybe_compact(
-                memory, model, provider_name, notices, compaction_mode)
+                memory, model, provider_name, notices,
+                compaction_mode
+                if compaction_mode is not None
+                else _derived_compaction_mode(memory))
 
         # max_steps exhausted without an earlier return
         response.stop_reason = "max_steps_reached"

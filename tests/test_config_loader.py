@@ -482,19 +482,46 @@ def test_tui_deep_merges_like_compaction(_redirect_roots):
 # silently WRONG one instead of a rejected one.
 
 @pytest.mark.parametrize("value", ["yes", "true", "on"])
-def test_yaml_boolean_max_steps_is_rejected_not_read_as_one(
+def test_yaml_boolean_max_steps_is_repaired_with_a_naming_warning(
         _redirect_roots, value, caplog):
     """`max_steps: yes` is a YAML boolean, and isinstance(True, int) is
     True -- so a bare int check passes it through as True, which every
-    step-budget comparison then reads as 1. The agent would silently stop
-    after a single step instead of the file being rejected at load."""
+    step-budget comparison then reads as 1. #45's repair replaces the old
+    skip-the-whole-file answer: the agent still loads, the field falls
+    back to undeclared so every call site's existing
+    `max_steps or config.MAX_ITERATIONS` applies unchanged, and the
+    warning NAMES the original value rather than letting it vanish."""
     _write_agent(_redirect_roots["user"], "truthy", (f"max_steps: {value}",))
 
     with caplog.at_level("WARNING", logger="core.config_loader"):
         config_loader.initialize(str(_redirect_roots["project"]))
 
-    assert config_loader.get_agent("truthy") is None
-    assert any("max_steps" in r.getMessage() for r in caplog.records)
+    agent = config_loader.get_agent("truthy")
+    assert agent is not None, "a one-field typo must not cost the agent"
+    assert agent.max_steps is None, (
+        "repaired means undeclared, so the call sites' "
+        "`or config.MAX_ITERATIONS` fallback decides")
+    warnings = [r.getMessage() for r in caplog.records if "max_steps" in r.getMessage()]
+    assert warnings and "defaulting to" in warnings[0], (
+        "the warning must say what the value became")
+
+
+def test_negative_max_steps_is_repaired_not_crashed(_redirect_roots, caplog):
+    """The live path of audit #45: `-1` passed the old type check, was
+    truthy at every call-site fallback, reached `_run`, and raised
+    AttributeError on `response.stop_reason` after an empty step loop --
+    three layers from the frontmatter line that caused it. Repair closes
+    that at the producer; `_run`'s belt covers callers that bypass this."""
+    _write_agent(_redirect_roots["user"], "backwards", ("max_steps: -1",))
+
+    with caplog.at_level("WARNING", logger="core.config_loader"):
+        config_loader.initialize(str(_redirect_roots["project"]))
+
+    agent = config_loader.get_agent("backwards")
+    assert agent is not None
+    assert agent.max_steps is None
+    assert any("-1" in r.getMessage() for r in caplog.records), (
+        "the warning names the original value")
 
 
 def test_integer_max_steps_still_loads(_redirect_roots):

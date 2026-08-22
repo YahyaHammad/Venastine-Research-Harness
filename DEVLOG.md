@@ -5085,3 +5085,63 @@ version of the same defect this batch is about.
 - **#24 / #49 / #77 / #136** — the last finding standing in units 1, 5, 9 and X2. Four issues, four
   more trackers, four unrelated subsystems.
 - **#167**, the redactor's plaintext-credential gap, filed by batch 14 against unit 5's file.
+
+## Audit Pass 1 — fix batch 16: compaction's boundaries (2026-08-22)
+
+Seven issues in one subsystem: **#45**, **#44 + #172**, **#89**, **#43**, **#90**, and the
+surviving items of **#92**. One commit per work package on `fix/batch-16-compaction`; per-change
+tables in `tests/BREAKING_CHANGES.md` §32; owner decisions **Z1–Z8** in `ROADMAP_v2.md` §36.
+What belongs here is what the build changed about the plan.
+
+### The owner's answers reshaped three fixes
+
+Every decision was asked for explicitly before code (the AGENTS.md cycle), and three of the
+answers moved the design off the issue's own suggested fix:
+
+- **#45 became repair-not-reject, and grew a global constant flip.** The issue suggested extending
+  the loader's skip guard; the owner chose repair (a one-field typo must not cost the agent) with
+  a warning naming the original value — and set `MAX_ITERATIONS = 50`, because the clamp default
+  IS that constant and two answers to one question was unacceptable. The belt in `_run` raises
+  rather than repairs: a direct caller bypassing the loader has no file to lose, only a bug worth
+  naming.
+- **#89's unpin is a symmetric TOOL, not a shell command.** The argument is the user's, verbatim:
+  unpinning is not inherently dangerous (worst case the agent loses context), and walking a human
+  through releasing dozens of stale pins in a long session is the tedium the model exists to
+  absorb. D26's premise called pin reversible; this makes it true rather than aspirational. The
+  cap REFUSES over 0.5×trigger rather than trimming — silently delivering less protection than
+  asked is M15's rule violated in the tool direction.
+- **#90's default flipped to chain (M2 amended).** Rederive's whole-span input made every
+  compaction the most expensive call of the turn on exactly the threads that trigger most. The
+  fallback promised by three documents since §21a shipped verbose: a WARNING naming the original
+  strategy and both sizes, plus a marker on the outcome text.
+
+### Planning found what the issues had not
+
+The pre-code walkthrough corrected **my own comment on #43**: I had written that M6 applies to
+`/grill-me` "verbatim", but grill-me runs in the user's live chat thread (§18's locked decision)
+with the person present — routine working-set compaction there is the feature, not a rogue spend,
+and #172's visibility fix is what makes it acceptable. That reframed #43's derivation mapping
+(chat → working_set) and is recorded as Z1. A correction comment is posted on the issue.
+
+### Build findings worth keeping
+
+- **Two budgets, not one.** The forced-chain test first used a budget tiny enough to force chain —
+  which then ALSO fell through to truncation, cutting the previous-summary prefix off the input
+  and failing an assertion about what fed the model. Chain-fitting-but-rederive-not is its own
+  arithmetic; truncation is a different path with its own test.
+- **The doubles pay when production grows a read.** pin.py gained `pin_measurements`, and
+  test_pin_tool's `_Memory` — built when the tool touched no storage — needed thread_id and
+  canned measurements. Same shape as §30's `well_shaped`: turning on a check makes existing
+  doubles part of the contract.
+- **add_assistant_message's contract bit within minutes.** The new #92 item-1 test passed dicts
+  into `_Resp(tool_calls=...)`; memory's attribute access (`tc.id`) caught it immediately. The
+  neutral-shape contract is enforced by every consumer touching it, not by the writer.
+- **`_as_text`'s `[called: ...]` line survived 1406+ tests twice** (#92 item 1). The new test
+  drives compact() end-to-end and asserts the instruction text — the property is what the
+  compactor SEES, not what a private helper returns.
+
+### Not fixed, recorded
+
+- **#136** (X2): an empty compactor response still retries once per step. Z2 makes the path
+  ADDRESSABLE — the status is data now — but nothing caches the verdict yet. Still open.
+- **#24 / #49 / #77 / #167** — untouched here; unrelated subsystems, prior batches' findings.

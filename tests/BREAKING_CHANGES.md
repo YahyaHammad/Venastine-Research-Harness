@@ -2623,3 +2623,24 @@ user would read it (there is no `/config`).
 `D1` and `D2` are both decisions **and** pipeline gates. Both resolve, so the check cannot tell
 which was meant, and no amount of grammar fixes that without renumbering — which #147 rejected
 because the ids are in six production files. Write `gate D1` when you mean the gate.
+
+## §32 — the sixteenth fix batch: compaction's boundaries (2026-08-22)
+
+Audit issues **#45**, **#44 + #172**, **#89**, **#43**, **#90** and the
+surviving items of **#92**. One owner decision rides along: `MAX_ITERATIONS`
+is 50 now (it was 20), because #45's repair default is this constant and a
+clamp that repairs to one number while every turn runs at another would be
+two answers to one question.
+
+### If you change this, this fails
+
+| Change | Fails | Why the property exists |
+|---|---|---|
+| Re-widen the loader's max_steps guard to type-only (`config_loader.py`) | `test_yaml_boolean_max_steps_is_repaired_with_a_naming_warning`, `test_negative_max_steps_is_repaired_not_crashed` | #45: `-1` passed the type check, was truthy at every call-site fallback, and crashed `_run` three layers from the frontmatter line. Repair-not-reject is an explicit owner decision — the file keeps its agent, the field falls back to undeclared, and the warning names the original |
+| Delete `_run`'s max_steps belt (`core/loop.py`) | `test_non_positive_max_steps_raises_named_valueerror_not_attributeerror` | Direct callers bypass the loader; the old failure was an AttributeError on `response.stop_reason` after an empty step loop. The raise names the parameter and the loader default instead |
+| Change the derived-mode mapping in `_derived_compaction_mode` (`core/loop.py`) | `test_a_re_entered_machinery_thread_asks_in_backstop_mode`, `test_a_resumed_chat_thread_keeps_the_working_set_trigger`, `test_an_explicit_mode_beats_the_derivation`, `test_a_spawned_subagent_thread_derives_backstop_without_being_told` | #43: a re-entered machinery thread ran on the chat trigger because continue_conversation could not express a mode. Explicit beats derived -- stream_deep_research_mode stays the definition site |
+| Make `compact()` return None on a no-progress exit again, or move logging back inside it | `test_an_empty_summary_skips_compaction`, `test_a_missing_compactor_agent_is_a_skip_not_a_crash`, `test_no_new_turns_means_no_model_call`, `test_the_standing_condition_warning_is_also_said_once_per_run` | #44: reportability lives with the caller. Per-evaluation WARNINGs were heard 21x/turn while the notice was deduplicated to one |
+| Drop the notices field from OneShotFinished, or un-inline the /compact outcome text | `test_a_one_shot_surfaces_the_notices_its_turn_raised` | #172: the one-shot drained through run_to_completion, so a compaction at its boundary reached neither route |
+| Delete `unpin`, or make pin trim instead of refusing over-cap | `test_unpin_is_registered_and_symmetric_with_pin`, `test_unpin_releases_and_reports_what_remains`, `test_an_over_cap_pin_is_refused_with_numbers_and_changes_nothing` | #89: D26 called pin reversible while nothing reversed it; trimming would silently deliver less protection than asked (M15) |
+| Revert `COMPACTION_STRATEGY` to rederive without the gate, or silence the forced-chain WARNING | `test_a_rederive_span_that_outgrows_one_call_forces_chain_and_says_so`, `test_an_oversized_span_with_no_previous_is_truncated_and_says_so_twice`, `test_chain_configured_does_not_claim_a_forced_switch`, `test_an_oversized_thread_is_truncated_and_the_row_says_so` | #90: three documents promised a fallback that did not exist. The truncation marker is deterministic on the stored row -- never trusted from model compliance |
+| Delete the `[called: ...]` line in `_as_text`, or stop _chars counting tool_calls | `test_a_folded_turn_names_the_tools_it_called`, `test_the_estimate_counts_what_a_turn_weighs` | #92 items 1-3: the only signal a folded turn used tools, and the pre-measurement estimate is a resumed thread's whole first-call signal |

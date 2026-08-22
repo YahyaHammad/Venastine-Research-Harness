@@ -50,7 +50,7 @@ Venastine Research Harness/
 ├── CLAUDE.md / QWEN.md             # pointers to AGENTS.md, so a harness that auto-loads one of those names finds the context instead of a second copy of it
 ├── DEVLOG.md                       # implementation notes for built ROADMAP sections -- see §0
 │
-├── tests/                          # 2163 tests, all offline, ~25-45s depending on the machine (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
+├── tests/                          # 2187 tests, all offline, ~25-45s depending on the machine (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
 │   ├── conftest.py                 # fixtures: make_model_response, make_stream_from_response, make_stream_sequence, FakeStorage, ...
 │   ├── BREAKING_CHANGES.md         # what-breaks-it / symptom / fix per area
 │   ├── test_cli.py                 # 76 tests -- ROADMAP §1 thread_id passthrough + UUID validation + §14 parser defaults/resolution/trust flow + §29 N1-N8 the one stdin reader, N2's channel deadline, every request kind rendered, and the startup block main(argv) made reachable + #102's four declining defaults
@@ -62,10 +62,10 @@ Venastine Research Harness/
 │   ├── test_confidence_scoring.py  # 50 tests (3 ROADMAP verbatim regressions)
 │   ├── test_client_translation.py  # 37 tests -- all three provider translation branches + batching + Google request/response parsing + §33's W7 guard that importing core.client pulls in no provider SDK
 │   ├── test_client_streaming.py    # 10 tests -- ROADMAP §13 direct call_model_stream coverage (3 providers + D21 + fragment accumulation)
-│   ├── test_loop_stop_conditions.py# 3 tests (ROADMAP verbatim)
+│   ├── test_loop_stop_conditions.py# 4 tests -- ROADMAP verbatim stop conditions + #45's belt (a non-positive max_steps raises a named ValueError)
 │   ├── test_streaming_loop.py      # 16 tests -- ROADMAP §13 generator event ordering, exception propagation, D20 persistence, permission_channel, and #158's actionable headless denial (name-gated vs argument-gated)
 │   ├── test_workspace_trust.py     # 22 tests -- ROADMAP_v2 §14 AC1/AC2 + hash-control properties (path-in-hash, determinism)
-│   ├── test_config_loader.py       # 66 tests -- ROADMAP_v2 §14 frontmatter AC4, tier precedence D8/D18, settings merge, CONTEXT opt-in AC5, catalog
+│   ├── test_config_loader.py       # 67 tests -- ROADMAP_v2 §14 frontmatter AC4, tier precedence D8/D18, settings merge, CONTEXT opt-in AC5, catalog, #45's repair-not-reject max_steps
 │   ├── test_load_skill.py          # 7 tests -- load_skill view-only retrieval, D24 permission declaration, catalog prompt injection
 │   ├── test_orchestrator.py        # 32 tests -- full pipeline mocked + JSON-retry + §5 failure/success/acceptance
 │   ├── test_registry_permissions.py# 11 tests -- allow/deny/approval
@@ -89,7 +89,7 @@ Venastine Research Harness/
 │   ├── test_untrusted_content.py   # 26 tests -- ROADMAP_v2 §32 A8 (#72): the injection defence in one copy reaching both modes, the ten pass prompts pinned byte-identical by digest across the extraction, and the two tails naming different instruction sources for the same rule
 │   ├── test_client_effort.py       # 26 tests -- ROADMAP_v2 §16 effort levels: queried for Anthropic, table fallback, effort_for validation, cache behaviour
 │   ├── test_ensemble_guard.py      # 15 tests -- §10 revisit: refuse an ensemble roster that cannot disagree with itself
-│   ├── test_tui.py                 # 51 tests -- ROADMAP_v2 §16 AC1-AC3 (thread picker, permission round-trip, worker survives a raising tool) + §25 grant picker / attended modal + #106's two axes staying independent + /model's provider/model switch
+│   ├── test_tui.py                 # 52 tests -- ROADMAP_v2 §16 AC1-AC3 (thread picker, permission round-trip, worker survives a raising tool) + §25 grant picker / attended modal + #106's two axes staying independent + /model's provider/model switch + #172's one-shot notices
 │   ├── test_mcp_config.py          # 26 tests -- ROADMAP_v2 §17 mcp.json discovery, tier precedence D29, unknown-key tolerance, strict flag parsing
 │   ├── test_mcp_client.py          # 30 tests -- ROADMAP_v2 §17 bridge, cancel-scope task affinity, v2 field names, normalization, teardown
 │   ├── test_grants.py              # 39 tests -- ROADMAP_v2 §25 R2/R6/R13/R14/R15: grantability, the loop enforcing it, GrantBudget, the audit list, that a grant by name does not answer a subject-carrying question, and that a granted tool is ADVERTISED with no channel (asserted on the wire, since a test that injects the tool call cannot see it)
@@ -105,9 +105,9 @@ Venastine Research Harness/
 │   ├── test_schema_migration.py   # 18 tests -- ROADMAP_v2 §21a M7: database.ensure_columns() adds a declared column to a table already on disk, driven against stdlib sqlite3 rather than the fake sqlmodel
 │   ├── test_storage_reads.py      # 15 tests -- ROADMAP_v2 §21a the watermark and pinned reads that the derived view is assembled from (M4/M9, AC1/AC2), plus #88's tool-result re-inclusion
 │   ├── test_memory_compaction.py  # 18 tests -- ROADMAP_v2 §21a the derived view (M8/M9) and pin_last's ordinal-to-id mapping
-│   ├── test_compaction.py         # 39 tests -- ROADMAP_v2 §21a the trigger (M1/M6), the three fold floors (M4/M5), the compactor run (M2) and D27's settings validation
-│   ├── test_loop_compaction.py    # 13 tests -- ROADMAP_v2 §21a where the trigger is evaluated (M3) and how notices reach each shell
-│   ├── test_pin_tool.py           # 12 tests -- ROADMAP_v2 §21a D24/D26 declarations, the `memory` injectable, input handling
+│   ├── test_compaction.py         # 46 tests -- ROADMAP_v2 §21a the trigger (M1/M6), the three fold floors (M4/M5), the compactor run (M2), D27's settings validation, #90's input gate, and #92's compactor-visibility tests
+│   ├── test_loop_compaction.py    # 20 tests -- ROADMAP_v2 §21a where the trigger is evaluated (M3), how notices reach each shell, #44's once-per-run WARNING, and #43's derived compaction mode
+│   ├── test_pin_tool.py           # 18 tests -- ROADMAP_v2 §21a D24/D26 declarations, the `memory` injectable, input handling, and #89's cap + the symmetric `unpin` tool
 │   ├── test_shell_compaction.py   # 17 tests -- ROADMAP_v2 §21a §21's visibility rule at both shells, and /compact
 │   ├── test_storage_e2e.py     # 23 tests -- ROADMAP_v2 §21a review: real ConversationMemory + real storage.py on real SQLite, compacting four times through the loop path. The only test at this level, and it found the shipped M11 defect
 │   ├── test_memories.py           # 13 tests -- ROADMAP_v2 §21b scope resolution, the injection cap (M14) and the opt-in rule (M13)
@@ -115,7 +115,7 @@ Venastine Research Harness/
 │   ├── test_memory_injection.py   # 12 tests -- ROADMAP_v2 §21b the three placements and the with_catalogs boundary (M13/K6), plus AC5/AC6 end to end
 │   ├── test_memory_shells.py      # 16 tests -- ROADMAP_v2 §21b M16's CLI approval provider and M15's /memories, /forget
 │   ├── test_pipeline_events.py    # 20 tests -- ROADMAP_v2 §22 AC1-AC4: the drainer, the one trace writer (incl. review.py's and json_retry.py's lines), P1's recorded decision, the abandoned-run record, and the live TUI view
-│   ├── test_thread_refs.py       # 35 tests -- ROADMAP_v2 §21c: what summarize_thread reads and when it spends a call, the ref tier and the pass-prompt boundary it must not cross, the cap that refuses, and both shells' commands
+│   ├── test_thread_refs.py       # 36 tests -- ROADMAP_v2 §21c: what summarize_thread reads and when it spends a call, the ref tier and the pass-prompt boundary it must not cross, the cap that refuses, both shells' commands, and #90's truncation-with-a-stated-cut
 │   ├── test_thread_legibility.py  # 29 tests -- ROADMAP_v2 §27: what each creation path labels its thread, what the picker is offered, the legacy classification (raw sqlite3), what a replay shows, and the per-thread state a resume must reset
 │   ├── test_research_legibility.py # 39 tests -- ROADMAP_v2 §26: a pass's tool calls escaping (P2 amended), the redacted param digest, one stage event per code stage (D2 per ROUND), the role palette, /copy, and ctrl+l vs the Input's ctrl+k
 │   ├── test_interaction.py        # 92 tests -- ROADMAP_v2 §23 J2-J7: core/interaction.py's decode, the declining default per kind, CHOICE and SUBAGENT_SIGNOFF validated against the request, and the strict review decoder
@@ -401,7 +401,7 @@ Three things about it are load-bearing:
 
 **`ToolSpec.available_check` (§15):** an optional `Callable[[], bool]` meaning "do I have anything to act on right now?", consulted by `schemas()` only. Distinct from permissions — the tool is allowed, it just has nothing to do yet (`load_skill` with an empty skill catalog). `dispatch()` deliberately ignores it: a tool declaring itself unavailable is expected to return a clean error if called anyway.
 
-**`registry.schemas(context)` advertises only what is actually callable** (§15) — filtered by `is_tool_allowed(name, context)` and by `available_check`. Advertising an uncallable tool is not harmless: the model keeps choosing it and burning a turn per attempt, with the only signal a denial string buried in a tool result. That is exactly what the `fetch_url` defect did for its entire life. Under default config this is 16 of 22 registered tools. Six are hidden, for **two** different reasons: `read`/`write`/`edit`/`shell` are permission `False`, and `load_skill`/`pin` fall out through `available_check` — the mechanism described three sentences below, which is easy to state and then forget to count. Of the 16 advertised, 13 are callable headless; `remember`, `spawn_subagent` and `write_project_doc` are approval-gated and so hidden again when nothing can ask. These three numbers are asserted against the live registry by `tests/test_docs_consistency.py` (audit #126) rather than recounted by hand, because this paragraph *is* the argument and a stale count weakens it. It was 11 before §19: `load_skill`'s `available_check` hid it while no skills existed, and §19 ships four builtins, so it is now advertised for the first time — which is also the first time the D10 defaults make `load_skill`'s progressive disclosure do anything. `spawn_subagent` is advertised but approval-gated (§18 sign-off), so `schemas(callable_only=True)` drops it on headless runs — which is **R16**: a headless run therefore cannot spawn at all, so every run that can spawn has a channel and `subagent_tool` forwards it. (These counts are the no-grant case; a grant adds its own tools back, see §11's headless rule.)
+**`registry.schemas(context)` advertises only what is actually callable** (§15) — filtered by `is_tool_allowed(name, context)` and by `available_check`. Advertising an uncallable tool is not harmless: the model keeps choosing it and burning a turn per attempt, with the only signal a denial string buried in a tool result. That is exactly what the `fetch_url` defect did for its entire life. Under default config this is 16 of 23 registered tools. Six are hidden, for **two** different reasons: `read`/`write`/`edit`/`shell` are permission `False`, and `load_skill`/`pin`/`unpin` fall out through `available_check` — the mechanism described three sentences below, which is easy to state and then forget to count. Of the 16 advertised, 13 are callable headless; `remember`, `spawn_subagent` and `write_project_doc` are approval-gated and so hidden again when nothing can ask. These three numbers are asserted against the live registry by `tests/test_docs_consistency.py` (audit #126) rather than recounted by hand, because this paragraph *is* the argument and a stale count weakens it. It was 11 before §19: `load_skill`'s `available_check` hid it while no skills existed, and §19 ships four builtins, so it is now advertised for the first time — which is also the first time the D10 defaults make `load_skill`'s progressive disclosure do anything. `spawn_subagent` is advertised but approval-gated (§18 sign-off), so `schemas(callable_only=True)` drops it on headless runs — which is **R16**: a headless run therefore cannot spawn at all, so every run that can spawn has a channel and `subagent_tool` forwards it. (These counts are the no-grant case; a grant adds its own tools back, see §11's headless rule.)
 
 **`register()` / `unregister()` (D15):** registration works at runtime, not just import time, for MCP (§17). `unregister()` is idempotent because disconnect handling can run more than once for the same server. This is why `dispatch()`'s unknown-tool `ValueError` guard matters more since §15, not less — a stale tool name is now a reachable state rather than a programmer error.
 
@@ -569,10 +569,25 @@ Three things about it are load-bearing:
 ### 4.20 `core/compaction.py` — conversation compaction (ROADMAP_v2 §21a)
 
 **Belongs here:** when a thread should be compacted (`should_compact`, in two modes
-— `working_set` for chat, `backstop` for a research pass, M6), what may be folded
-(`compactable_span` and its three floors, M4/M5), and running the compactor agent
-(`compact`, plus the ratio-retry loop). Owns the re-entrancy guard: the compactor is
-an agent, so compacting runs the loop, which evaluates the trigger.
+— `working_set` for chat, `backstop` for machinery threads, M6 — **derived from
+`ConversationThread.kind` since batch 16's #43**: research_pass and subagent
+threads get the backstop wherever they are resumed, chat threads the ordinary
+trigger, and an explicit `compaction_mode` beats both), what may be folded
+(`compactable_span` and its three floors, M4/M5), running the compactor agent
+(`compact`, plus the ratio-retry loop), and #90's input gate: a span too large
+for one call forces chain with a WARNING when a previous summary exists and is
+truncated oldest-first with the cut stated in the instruction AND the stored
+summary otherwise. Also `pin_measurements`, the numbers behind pin.py's cap.
+Owns the re-entrancy guard: the compactor is an agent, so compacting runs the
+loop, which evaluates the trigger.
+
+**`compact()` returns an outcome dict, never None** (batch 16, #44): every exit —
+folded / blocked / all-pinned / missing-agent / no-progress / reentrant /
+empty-summary — carries `{status, kind, text}`. Reportability lives with the
+caller: `_maybe_compact` says standing conditions (blocked, all-pinned,
+missing-agent) ONCE PER RUN, notice and WARNING together under the same dedup;
+per-evaluation WARNINGs inside this module were #44. The TUI `/compact` worker
+renders whatever status comes back.
 
 **Does NOT belong here:** *where* the trigger is evaluated — `core/loop.py` calls in
 at a turn boundary and between steps, because that is the one choke point all three

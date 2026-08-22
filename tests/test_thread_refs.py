@@ -108,6 +108,33 @@ class TestSummarizingAThread:
         stored = fake_storage.latest_thread_summary(memory.thread_id)
         assert stored.summary_text == notice["text"]
 
+    def test_an_oversized_thread_is_truncated_and_the_row_says_so(
+            self, fake_storage, summarizer, mocker):
+        """#90's second site, the one with NO other bound: compact()'s span
+        at least waits for a threshold; this renders the WHOLE archive --
+        tool rows included (T4 documents what those weigh) -- and sent it
+        as one user message. Measured on a grounding-shaped thread:
+        ~225k tokens from three turns. The gate truncates the oldest
+        material and states the cut twice: in the instruction the model
+        sees, and deterministically on the stored row every referencing
+        thread reads."""
+        from core.memory import ConversationMemory
+
+        memory = ConversationMemory()
+        _thread(memory, turns=30, body="y" * 200)
+        mocker.patch("core.compaction._input_budget", return_value=500)
+
+        notice = compaction.summarize_thread(
+            memory.thread_id, "claude-sonnet-5", "ANTHROPIC")
+
+        instruction = summarizer[0]["user_goal"]
+        assert "[Source truncated" in instruction, (
+            "the model must know its excerpt is partial")
+        assert "[Source truncated" in notice["text"], (
+            "the marker is deterministic, not model compliance")
+        stored = fake_storage.latest_thread_summary(memory.thread_id)
+        assert "[Source truncated" in stored.summary_text
+
     def test_a_short_thread_costs_no_model_call(self, fake_storage, summarizer):
         """Its rendered text IS its own best summary. Asking a model to
         compress three messages into more characters than they occupy spends a

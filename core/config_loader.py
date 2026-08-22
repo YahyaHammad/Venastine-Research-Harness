@@ -321,15 +321,34 @@ def _parse_md_file(path: str, kind: str, tier: str, category: str = ""):
         logger.warning("Skipping agent file %s: approval_overrides is not a mapping", path)
         return None
     max_steps = fm.get("max_steps")
-    # `isinstance(True, int)` is True in Python, and YAML reads `yes`/`on`
-    # as booleans -- so `max_steps: yes` would pass a bare int check and
-    # arrive as True, which every step-budget comparison then treats as 1.
-    # A malformed definition must be rejected here, not silently turned
-    # into a one-step agent.
-    if max_steps is not None and (isinstance(max_steps, bool)
-                                  or not isinstance(max_steps, int)):
-        logger.warning("Skipping agent file %s: max_steps is not an integer", path)
-        return None
+    # REPAIR, NOT REJECT (#45, batch 16 -- explicit owner decision). This
+    # guard used to SKIP the whole file for a bad max_steps, which made it
+    # the one frontmatter field whose typo cost the agent entirely while
+    # every sibling produced a warning-and-carry-on. Worse, a negative int
+    # passed the type check and crashed `_run` with an AttributeError on
+    # `response.stop_reason` three layers away from the line that caused it.
+    #
+    # Now: any unusable value -- non-int, YAML's bool-reading of yes/on,
+    # or < 1 (`isinstance(True, int)` is True in Python) -- is repaired to
+    # None with a warning NAMING the original. None is what "not declared"
+    # means downstream, so every call site's existing
+    # `max_steps or config.MAX_ITERATIONS` fallback applies unchanged, and
+    # the warning's default figure and the one that takes effect are the
+    # same number by construction rather than by two copies staying in
+    # step. The belt for values that bypass this loader lives in
+    # core/loop._run, which raises instead of repairing: a programmatic
+    # caller passing a bad value directly has no file to lose, only a bug
+    # worth naming.
+    if max_steps is not None:
+        valid = (isinstance(max_steps, int)
+                 and not isinstance(max_steps, bool)
+                 and max_steps >= 1)
+        if not valid:
+            logger.warning(
+                "Agent file %s: max_steps must be a positive integer, got "
+                "%r; defaulting to %s (config.MAX_ITERATIONS).",
+                path, max_steps, config.MAX_ITERATIONS)
+            max_steps = None
     # Booleans are VALIDATED, not coerced. bool("false") is True, so
     # `use_memory: "false"` would invert a deliberate opt-out with no
     # warning -- and these two fields are exactly the ones a restrictive
