@@ -92,13 +92,12 @@ class ConversationMemory:
             if thread is None:
                 raise ValueError(f"No conversation thread found with id {thread_id}")
             self.thread_id = thread_id
-            self._extra = dict(getattr(thread, "extra_data", None) or {})
+            self._extra = dict(thread.get("extra_data") or {})
             self._messages = self._derived_view()
-            # getattr, not thread.kind: a row read from a database whose
-            # ALTER has not run yet has no attribute at all (the same
-            # posture list_threads takes). Resuming is not reclassifying,
-            # so the stored kind is simply reported as-is.
-            self._kind = getattr(thread, "kind", None) or THREAD_KIND_CHAT
+            # The kind fallback (missing column on a database whose ALTER
+            # has not run) lives inside get_thread's copy now; resuming is
+            # not reclassifying, so the stored kind is simply reported.
+            self._kind = thread.get("kind") or THREAD_KIND_CHAT
 
     @property
     def kind(self) -> str:
@@ -141,10 +140,10 @@ class ConversationMemory:
         if checkpoint is None:
             return get_session_history(self.thread_id)
 
-        watermark = checkpoint.covers_up_to_message_id
+        watermark = checkpoint["covers_up_to_message_id"]
         summary = {
             "role": "user",
-            "content": f"{SUMMARY_PREFIX}{checkpoint.summary_text}",
+            "content": f"{SUMMARY_PREFIX}{checkpoint['summary_text']}",
         }
         return (
             [summary]

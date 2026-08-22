@@ -575,15 +575,19 @@ class FakeStorage:
         return self._thread_kind.get(thread_id)
 
     def get_thread(self, thread_id):
-        # Mirrors production: a row object (truthy, carries extra_data) or
-        # None. core/memory.py reads .extra_data off it, so a bare True
-        # sentinel would no longer represent what production returns.
+        # Mirrors production's PLAIN DICT (#31): a dict of columns or
+        # None. core/memory.py reads extra_data and kind off it, so the
+        # keys must match production's copy -- including the missing-kind
+        # fallback living inside production's reader.
         if thread_id not in self._threads:
             return None
-        return types.SimpleNamespace(
-            id=thread_id,
-            extra_data=dict(self._thread_extra.get(thread_id, {})),
-        )
+        return {
+            "id": thread_id,
+            "created_at": self._thread_created_at.get(thread_id),
+            "extra_data": dict(self._thread_extra.get(thread_id, {})),
+            "kind": self._thread_kind.get(thread_id, "chat"),
+            "last_activity_at": self._thread_last_activity.get(thread_id),
+        }
 
     def get_thread_extra(self, thread_id):
         if thread_id not in self._threads:
@@ -786,12 +790,17 @@ class FakeStorage:
 
     def save_checkpoint(self, thread_id, summary_text,
                         covers_up_to_message_id, strategy="rederive"):
-        checkpoint = types.SimpleNamespace(
-            id=uuid4(), thread_id=thread_id, summary_text=summary_text,
-            covers_up_to_message_id=covers_up_to_message_id,
-            strategy=strategy)
+        from datetime import datetime, timezone
+        # A plain dict, mirroring production's latest_checkpoint (#31):
+        # callers subscript rather than dot-access.
+        checkpoint = {
+            "id": uuid4(), "thread_id": thread_id,
+            "summary_text": summary_text,
+            "covers_up_to_message_id": covers_up_to_message_id,
+            "strategy": strategy, "created_at": datetime.now(timezone.utc),
+        }
         self._checkpoints[thread_id] = checkpoint
-        return checkpoint.id
+        return checkpoint["id"]
 
     # -- ROADMAP_v2 §21c thread summaries ----------------------------------
     #
@@ -809,11 +818,16 @@ class FakeStorage:
 
     def save_thread_summary(self, thread_id, summary_text,
                             covers_up_to_message_id):
-        summary = types.SimpleNamespace(
-            id=uuid4(), thread_id=thread_id, summary_text=summary_text,
-            covers_up_to_message_id=covers_up_to_message_id)
+        from datetime import datetime, timezone
+        # A plain dict, mirroring production's latest_thread_summary (#31).
+        summary = {
+            "id": uuid4(), "thread_id": thread_id,
+            "summary_text": summary_text,
+            "covers_up_to_message_id": covers_up_to_message_id,
+            "created_at": datetime.now(timezone.utc),
+        }
         self._thread_summaries[thread_id] = summary
-        return summary.id
+        return summary["id"]
 
     def _reconstruct(self, rows):
         formatted = []

@@ -420,7 +420,7 @@ def compact(memory, model: str, provider_name: str,
     # degrading it a little on every attempt. Both spend a real call to
     # achieve nothing.
     if previous is not None and not storage_advances(
-            memory.thread_id, previous.covers_up_to_message_id, watermark):
+            memory.thread_id, previous["covers_up_to_message_id"], watermark):
         logger.debug(
             "Compaction wanted on thread %s but the fold boundary has not "
             "moved past the last checkpoint; nothing to do.", memory.thread_id)
@@ -437,13 +437,13 @@ def compact(memory, model: str, provider_name: str,
     chaining = settings["strategy"] == "chain" and previous is not None
 
     def _build(chain_mode: bool):
-        lower = previous.covers_up_to_message_id if chain_mode else None
+        lower = previous["covers_up_to_message_id"] if chain_mode else None
         seg = history_through(memory.thread_id, watermark,
                               after_message_id=lower)
         text = _as_text(seg)
         if chain_mode:
             text = ("Summary of everything before this point:\n"
-                    f"{previous.summary_text}\n\n{text}")
+                    f"{previous['summary_text']}\n\n{text}")
         return seg, text
 
     segment, segment_text = _build(chaining)
@@ -593,10 +593,10 @@ def summarize_thread(thread_id, model: str, provider_name: str,
 
     existing = latest_thread_summary(thread_id)
     if existing is not None and not advances(
-            thread_id, existing.covers_up_to_message_id, watermark):
+            thread_id, existing["covers_up_to_message_id"], watermark):
         return {
             "kind": "thread_summary",
-            "text": existing.summary_text,
+            "text": existing["summary_text"],
             "thread_id": str(thread_id),
             "fresh": False,
         }

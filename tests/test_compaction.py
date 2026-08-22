@@ -306,7 +306,7 @@ def test_compaction_records_a_checkpoint_and_rebuilds_the_view(
                                 overrides=OVERRIDES)
 
     assert notice["kind"] == "compaction"
-    assert fake_storage.latest_checkpoint(memory.thread_id).strategy == "rederive"
+    assert fake_storage.latest_checkpoint(memory.thread_id)["strategy"] == "rederive"
     assert len(memory.messages) < before
     assert memory.messages[0]["content"].endswith("A short summary.")
 
@@ -357,7 +357,7 @@ def test_chaining_feeds_the_previous_summary_back_in(fake_storage, summaries):
     compaction.compact(memory, "claude-sonnet-5", "ANTHROPIC", overrides=chain)
 
     assert "PRIOR SUMMARY TEXT" in calls[-1]["user_goal"]
-    assert fake_storage.latest_checkpoint(memory.thread_id).strategy == "chain"
+    assert fake_storage.latest_checkpoint(memory.thread_id)["strategy"] == "chain"
 
 
 def test_an_oversized_summary_is_sent_back(fake_storage, summaries):
@@ -372,8 +372,7 @@ def test_an_oversized_summary_is_sent_back(fake_storage, summaries):
 
     assert len(calls) == 2
     assert calls[1]["thread_id"] == "compactor-thread"
-    assert "Tight summary." in fake_storage.latest_checkpoint(
-        memory.thread_id).summary_text
+    assert "Tight summary." in fake_storage.latest_checkpoint(memory.thread_id)["summary_text"]
 
 
 def test_a_summary_under_target_is_accepted_immediately(fake_storage, summaries):
@@ -546,7 +545,7 @@ def test_a_rederive_span_that_outgrows_one_call_forces_chain_and_says_so(
     warnings = [r.getMessage() for r in caplog.records if "forcing chain" in r.getMessage()]
     assert warnings and "rederive span" in warnings[0]
     checkpoint = fake_storage.latest_checkpoint(memory.thread_id)
-    assert checkpoint.strategy == "chain"
+    assert checkpoint["strategy"] == "chain"
     assert "First summary." in calls[-1]["user_goal"], (
         "the forced chain actually fed on the previous summary")
     assert "[Source truncated" not in calls[-1]["user_goal"], (
@@ -593,7 +592,7 @@ def test_an_oversized_span_with_no_previous_is_truncated_and_says_so_twice(
     instruction = calls[0]["user_goal"]
     assert "[Source truncated" in instruction, (
         "the model must know its excerpt is partial")
-    stored = fake_storage.latest_checkpoint(memory.thread_id).summary_text
+    stored = fake_storage.latest_checkpoint(memory.thread_id)["summary_text"]
     assert "[Source truncated" in stored, (
         "the cut rides on the stored summary regardless of model compliance")
     assert checkpoint_strategy_is(fake_storage, memory, "rederive"), (
@@ -601,7 +600,7 @@ def test_an_oversized_span_with_no_previous_is_truncated_and_says_so_twice(
 
 
 def checkpoint_strategy_is(fake_storage, memory, expected):
-    return fake_storage.latest_checkpoint(memory.thread_id).strategy == expected
+    return fake_storage.latest_checkpoint(memory.thread_id)["strategy"] == expected
 
 
 def test_a_span_under_the_budget_neither_forces_nor_truncates(
@@ -624,7 +623,7 @@ def test_a_span_under_the_budget_neither_forces_nor_truncates(
     assert outcome["status"] == "folded"
     assert not [r for r in caplog.records if "forcing chain" in r.getMessage()]
     assert "[Source truncated" not in \
-        fake_storage.latest_checkpoint(memory.thread_id).summary_text
+        fake_storage.latest_checkpoint(memory.thread_id)["summary_text"]
 
 
 # ---------------------------------------------------------------------------

@@ -198,10 +198,32 @@ def create_thread(kind: str = THREAD_KIND_CHAT) -> UUID:
         return thread.id
 
 
-def get_thread(thread_id: UUID) -> Optional[ConversationThread]:
-    """Used to confirm a thread_id is real before resuming it."""
+def get_thread(thread_id: UUID) -> Optional[dict]:
+    """The thread row as a plain column dict, or None if unknown (#31).
+
+    Used to confirm a thread_id is real before resuming it, and by
+    ConversationMemory to read extra_data and kind on resume. A PLAIN
+    DICT, like every other public read here: returning a detached ORM
+    instance worked only because nothing had expired it -- what a
+    detached instance hands back depends on what happened to be loaded,
+    which is exactly the question _ordered_rows' docstring says copying
+    columns removes.
+
+    The kind fallback lives HERE rather than at the caller: a row read
+    from a database whose ALTER has not run yet has no attribute at all,
+    and the caller should not have to know that.
+    """
     with Session(engine) as session:
-        return session.get(ConversationThread, thread_id)
+        thread = session.get(ConversationThread, thread_id)
+        if thread is None:
+            return None
+        return {
+            "id": thread.id,
+            "created_at": thread.created_at,
+            "extra_data": dict(thread.extra_data or {}),
+            "kind": getattr(thread, "kind", None) or THREAD_KIND_CHAT,
+            "last_activity_at": getattr(thread, "last_activity_at", None),
+        }
 
 
 def get_thread_extra(thread_id: UUID) -> Dict[str, Any]:
@@ -647,7 +669,7 @@ def set_pinned(message_ids: List[UUID], pinned: bool = True) -> int:
 def _current_watermark(thread_id: UUID) -> Optional[UUID]:
     """The live checkpoint's watermark, or None if never compacted."""
     checkpoint = latest_checkpoint(thread_id)
-    return checkpoint.covers_up_to_message_id if checkpoint else None
+    return checkpoint["covers_up_to_message_id"] if checkpoint else None
 
 
 def advances(thread_id: UUID, current: Optional[UUID], proposed: UUID) -> bool:
@@ -670,9 +692,17 @@ def advances(thread_id: UUID, current: Optional[UUID], proposed: UUID) -> bool:
     return _split_at(rows, proposed) > _split_at(rows, current) > 0
 
 
-def latest_checkpoint(thread_id: UUID) -> Optional[CompactionCheckpoint]:
-    """The most recent compaction of this thread, or None if it has never
-    been compacted (which is every thread until the trigger first fires)."""
+def latest_checkpoint(thread_id: UUID) -> Optional[dict]:
+    """The most recent compaction of this thread as a plain column dict,
+    or None if it has never been compacted (which is every thread until
+    the trigger first fires).
+
+    A dict rather than a detached ORM instance (#31): two of the three
+    callers read it after their Session has closed, and one of them is
+    the compaction path -- the one place in the project where a wrong
+    read rewrites a live conversation. Copying the columns removes the
+    question of what a detached instance still hands back.
+    """
     with Session(engine) as session:
         statement = (
             select(CompactionCheckpoint)
@@ -680,7 +710,17 @@ def latest_checkpoint(thread_id: UUID) -> Optional[CompactionCheckpoint]:
             .order_by(CompactionCheckpoint.created_at.desc(),
                       CompactionCheckpoint.id.desc())
         )
-        return next(iter(session.exec(statement).all()), None)
+        row = next(iter(session.exec(statement).all()), None)
+        if row is None:
+            return None
+        return {
+            "id": row.id,
+            "thread_id": row.thread_id,
+            "summary_text": row.summary_text,
+            "covers_up_to_message_id": row.covers_up_to_message_id,
+            "strategy": row.strategy,
+            "created_at": row.created_at,
+        }
 
 
 def save_checkpoint(
@@ -710,7 +750,7 @@ def save_checkpoint(
             "does not advance on the existing one; keeping the existing "
             "checkpoint. This would have made the thread larger, not "
             "smaller.", thread_id)
-        return existing.id if existing is not None else None
+        return existing["id"] if existing is not None else None
 
     with Session(engine) as session:
         checkpoint = CompactionCheckpoint(
@@ -746,8 +786,9 @@ def last_message_id(thread_id: UUID) -> Optional[UUID]:
     return rows[-1]["id"] if rows else None
 
 
-def latest_thread_summary(thread_id: UUID) -> Optional[ThreadSummary]:
-    """The most recent summary of this thread, or None if never summarized.
+def latest_thread_summary(thread_id: UUID) -> Optional[dict]:
+    """The most recent summary of this thread as a plain column dict, or
+    None if never summarized (#31 -- same reasoning as latest_checkpoint).
 
     Newest by `(created_at, id)`, matching `latest_checkpoint` -- but note
     that the resemblance ends at the query. A stale row winning here shows
@@ -761,7 +802,16 @@ def latest_thread_summary(thread_id: UUID) -> Optional[ThreadSummary]:
             .where(ThreadSummary.thread_id == thread_id)
             .order_by(ThreadSummary.created_at.desc(), ThreadSummary.id.desc())
         )
-        return next(iter(session.exec(statement).all()), None)
+        row = next(iter(session.exec(statement).all()), None)
+        if row is None:
+            return None
+        return {
+            "id": row.id,
+            "thread_id": row.thread_id,
+            "summary_text": row.summary_text,
+            "covers_up_to_message_id": row.covers_up_to_message_id,
+            "created_at": row.created_at,
+        }
 
 
 def save_thread_summary(

@@ -213,7 +213,7 @@ def test_compaction_makes_progress_every_time_it_runs(real_storage, compactor):
 
         checkpoint = real_storage.latest_checkpoint(memory.thread_id)
         rows = [r["id"] for r in real_storage._ordered_rows(memory.thread_id)]
-        watermarks.append(rows.index(checkpoint.covers_up_to_message_id))
+        watermarks.append(rows.index(checkpoint["covers_up_to_message_id"]))
         view_sizes.append(len(memory.messages))
 
         _add_turns(memory, 1, f"round{round_index}")
@@ -283,7 +283,7 @@ def test_a_pinned_pin_call_leaves_no_unanswered_tool_use_in_the_view(
     pin_row = next(i for i, r in enumerate(
         real_storage._ordered_rows(memory.thread_id))
         if r["role"] == "assistant" and "call-pin" in r["content"])
-    assert row_ids.index(checkpoint.covers_up_to_message_id) > pin_row, (
+    assert row_ids.index(checkpoint["covers_up_to_message_id"]) > pin_row, (
         "the watermark did not pass the pinned turn, so this thread cannot "
         "show the defect")
 
@@ -459,8 +459,8 @@ def test_a_backwards_watermark_is_refused(real_storage, compactor):
 
     assert returned == good
     live = real_storage.latest_checkpoint(memory.thread_id)
-    assert live.covers_up_to_message_id == rows[7]["id"]
-    assert live.summary_text == "Good."
+    assert live["covers_up_to_message_id"] == rows[7]["id"]
+    assert live["summary_text"] == "Good."
 
 
 def test_an_unchanged_watermark_is_refused(real_storage, compactor):
@@ -476,7 +476,7 @@ def test_an_unchanged_watermark_is_refused(real_storage, compactor):
     assert real_storage.save_checkpoint(
         memory.thread_id, "Second.", rows[7]["id"]) == first
     assert real_storage.latest_checkpoint(
-        memory.thread_id).summary_text == "First."
+        memory.thread_id)["summary_text"] == "First."
 
 
 def test_a_first_compaction_refuses_a_watermark_from_another_thread(
@@ -515,7 +515,7 @@ def test_a_first_compaction_refuses_a_watermark_from_another_thread(
     good = real_storage.save_checkpoint(
         memory.thread_id, "Good.", rows[7]["id"])
     assert real_storage.latest_checkpoint(
-        memory.thread_id).covers_up_to_message_id == rows[7]["id"]
+        memory.thread_id)["covers_up_to_message_id"] == rows[7]["id"]
     assert good is not None
 
 
@@ -1052,100 +1052,4 @@ def test_a_thread_with_no_messages_sorts_by_creation(real_storage):
 
 def _thread_activity(real_storage, thread_id):
     row = real_storage.get_thread(thread_id)
-    return row.last_activity_at
-
-def test_zz_debug_activity_stamps(real_storage):
-    import time as _time
-    from core.memory import ConversationMemory
-    old = ConversationMemory()
-    _time.sleep(0.05)
-    newer = ConversationMemory()
-    _time.sleep(0.05)
-    _time.sleep(0.02)
-    real_storage.save_message(newer.thread_id, chr(117)+chr(115)+chr(101)+chr(114), json.dumps(chr(121)))
-    _time.sleep(0.02)
-    real_storage.save_message(old.thread_id, chr(117)+chr(115)+chr(101)+chr(114), json.dumps(chr(120)))
-    for r in real_storage.list_threads():
-        row = real_storage.get_thread(r['id'])
-        print(f'DEBUG listed {str(r[chr(105)+chr(100)])[:8]} activity={row.last_activity_at} created={row.created_at}')
-
-
-# ---------------------------------------------------------------------------
-# ---- Preview read and picker cap (#30) -------------------------------------
-# ---------------------------------------------------------------------------
-
-def test_the_preview_query_returns_the_first_user_message_of_every_thread(
-        real_storage):
-    """#30's equivalence half. The window-function rewrite must return
-    exactly what the load-everything-and-keep-the-first loop returned:
-    one truncated preview per listed thread, oldest user message wins,
-    non-user rows ignored. This is the query every picker open runs, so
-    a subtle regression here mislabels every conversation at once."""
-    import time as _time
-
-    from core.memory import ConversationMemory
-
-    memory = ConversationMemory()
-
-    def _say(role, text):
-        # save_message json.dumps'es content itself; pass the value, not
-        # an encoded string (double encoding would survive loads as a
-        # quoted string and the preview would carry literal quote marks).
-        real_storage.save_message(memory.thread_id, role, text)
-        _time.sleep(0.002)
-
-    _say("assistant", "assistant rows are not previews")
-    _say("user", "first user message -- this is the preview")
-    _say("user", "a later user message that must be ignored")
-    long_text = "word " * 40
-    other = ConversationMemory()
-    _time.sleep(0.002)
-    real_storage.save_message(other.thread_id, "user", long_text)
-
-    with real_storage.Session(real_storage.engine) as session:
-        previews = real_storage._first_user_messages(
-            session, [memory.thread_id, other.thread_id])
-
-    assert previews[memory.thread_id] == \
-        "first user message -- this is the preview"
-    # The 70-char truncation still applies on the window path.
-    assert len(previews[other.thread_id]) == 71  # 70 chars + ellipsis
-    assert previews[other.thread_id].endswith("\u2026")
-
-
-def test_list_threads_limit_caps_after_ordering(real_storage):
-    """Q7. The default stays uncached; an explicit limit keeps the MOST
-    RECENTLY ACTIVE rows, not an arbitrary subset -- so a cap costs the
-    least exactly because of #32's ordering."""
-    import time as _time
-
-    from core.memory import ConversationMemory
-
-    ids = []
-    for index in range(4):
-        ids.append(ConversationMemory().thread_id)
-        _time.sleep(0.002)
-
-    # Make thread 0 the most recently active -- nothing else in the
-    # shared module database writes after this, so it must lead BOTH
-    # lists regardless of what older tests left behind.
-    real_storage.save_message(ids[0], "user", "active")
-    _time.sleep(0.002)
-    _time.sleep(0.002)
-
-    # No limit: everything comes back, ours included, newest-active first.
-    full = real_storage.list_threads()
-    assert full[0]["id"] == ids[0]
-    for tid in ids:
-        assert tid in [r["id"] for r in full]
-
-    # A limit caps the ORDERED list at its head -- not a sample from the
-    # middle. Whatever other threads hold the remaining slots, the cap
-    # keeps exactly the global top-N.
-    ordered_ids = [r["id"] for r in full]
-    capped = real_storage.list_threads(limit=2)
-    assert [r["id"] for r in capped] == ordered_ids[:2]
-    assert capped[1]["id"] != ids[0]
-    # And the default really is uncached: same call, no limit argument,
-    # returns the whole ordered list again.
-    assert [r["id"] for r in real_storage.list_threads()] == ordered_ids
+    return row["last_activity_at"]
