@@ -599,12 +599,11 @@ class FakeStorage:
         else:
             extra[key] = value
 
-    def list_threads(self, kind="chat"):
+    def list_threads(self, kind="chat", limit=None):
         """Mirrors storage.list_threads(): most recently ACTIVE first
         (#32), conversations only unless kind=None (§27 AC2), each row
-        carrying `kind` and a `preview` of the first user message."""
-        from datetime import datetime, timezone
-
+        carrying `kind` and a `preview` of the first user message.
+        `limit` caps after ordering, like the SQL LIMIT it mirrors."""
         def _activity(tid):
             """COALESCE(last_activity_at, created_at) in Python. The
             fallback is what never-messaged threads -- and every row that
@@ -622,9 +621,10 @@ class FakeStorage:
             if kind is None or self._thread_kind.get(tid, "chat") == kind
         ]
         # Tie-break on created_at desc, exactly as production's ORDER BY does.
-        return sorted(rows,
+        rows = sorted(rows,
                       key=lambda t: (_activity(t["id"]), t["created_at"]),
                       reverse=True)
+        return rows if limit is None else rows[:limit]
 
     def _first_user_message(self, thread_id):
         for msg in self._messages_by_thread.get(thread_id, []):

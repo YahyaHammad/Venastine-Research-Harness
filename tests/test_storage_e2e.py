@@ -1068,3 +1068,84 @@ def test_zz_debug_activity_stamps(real_storage):
     for r in real_storage.list_threads():
         row = real_storage.get_thread(r['id'])
         print(f'DEBUG listed {str(r[chr(105)+chr(100)])[:8]} activity={row.last_activity_at} created={row.created_at}')
+
+
+# ---------------------------------------------------------------------------
+# ---- Preview read and picker cap (#30) -------------------------------------
+# ---------------------------------------------------------------------------
+
+def test_the_preview_query_returns_the_first_user_message_of_every_thread(
+        real_storage):
+    """#30's equivalence half. The window-function rewrite must return
+    exactly what the load-everything-and-keep-the-first loop returned:
+    one truncated preview per listed thread, oldest user message wins,
+    non-user rows ignored. This is the query every picker open runs, so
+    a subtle regression here mislabels every conversation at once."""
+    import time as _time
+
+    from core.memory import ConversationMemory
+
+    memory = ConversationMemory()
+
+    def _say(role, text):
+        # save_message json.dumps'es content itself; pass the value, not
+        # an encoded string (double encoding would survive loads as a
+        # quoted string and the preview would carry literal quote marks).
+        real_storage.save_message(memory.thread_id, role, text)
+        _time.sleep(0.002)
+
+    _say("assistant", "assistant rows are not previews")
+    _say("user", "first user message -- this is the preview")
+    _say("user", "a later user message that must be ignored")
+    long_text = "word " * 40
+    other = ConversationMemory()
+    _time.sleep(0.002)
+    real_storage.save_message(other.thread_id, "user", long_text)
+
+    with real_storage.Session(real_storage.engine) as session:
+        previews = real_storage._first_user_messages(
+            session, [memory.thread_id, other.thread_id])
+
+    assert previews[memory.thread_id] == \
+        "first user message -- this is the preview"
+    # The 70-char truncation still applies on the window path.
+    assert len(previews[other.thread_id]) == 71  # 70 chars + ellipsis
+    assert previews[other.thread_id].endswith("\u2026")
+
+
+def test_list_threads_limit_caps_after_ordering(real_storage):
+    """Q7. The default stays uncached; an explicit limit keeps the MOST
+    RECENTLY ACTIVE rows, not an arbitrary subset -- so a cap costs the
+    least exactly because of #32's ordering."""
+    import time as _time
+
+    from core.memory import ConversationMemory
+
+    ids = []
+    for index in range(4):
+        ids.append(ConversationMemory().thread_id)
+        _time.sleep(0.002)
+
+    # Make thread 0 the most recently active -- nothing else in the
+    # shared module database writes after this, so it must lead BOTH
+    # lists regardless of what older tests left behind.
+    real_storage.save_message(ids[0], "user", "active")
+    _time.sleep(0.002)
+    _time.sleep(0.002)
+
+    # No limit: everything comes back, ours included, newest-active first.
+    full = real_storage.list_threads()
+    assert full[0]["id"] == ids[0]
+    for tid in ids:
+        assert tid in [r["id"] for r in full]
+
+    # A limit caps the ORDERED list at its head -- not a sample from the
+    # middle. Whatever other threads hold the remaining slots, the cap
+    # keeps exactly the global top-N.
+    ordered_ids = [r["id"] for r in full]
+    capped = real_storage.list_threads(limit=2)
+    assert [r["id"] for r in capped] == ordered_ids[:2]
+    assert capped[1]["id"] != ids[0]
+    # And the default really is uncached: same call, no limit argument,
+    # returns the whole ordered list again.
+    assert [r["id"] for r in real_storage.list_threads()] == ordered_ids

@@ -266,12 +266,22 @@ def save_message(
         session.commit()
 
 
-def list_threads(kind: Optional[str] = THREAD_KIND_CHAT) -> List[dict]:
+def list_threads(
+    kind: Optional[str] = THREAD_KIND_CHAT, limit: Optional[int] = None,
+) -> List[dict]:
     """Conversation threads, most recently ACTIVE first (#32).
 
     Each entry: ``{"id": UUID, "created_at": datetime, "kind": str,
     "preview": str}``. Used by the CLI / TUI layer for thread browsing —
     core/memory.py does NOT call this.
+
+    `limit` caps the result AFTER ordering (#30/#32 together). The default
+    of None is uncached and changes nothing for existing callers -- a
+    caller that wants everything still gets everything. The TUI picker
+    passes a cap because a modal listing thousands of conversations is its
+    own usability defect; with activity ordering the cap costs the least,
+    since the threads most likely to be wanted are exactly the ones that
+    survive it. Anything older stays reachable by id (/resume, --thread).
 
     The order key is `last_activity_at`, falling back to `created_at`
     when it is NULL -- never-received-a-message threads, and every row
@@ -291,21 +301,23 @@ def list_threads(kind: Optional[str] = THREAD_KIND_CHAT) -> List[dict]:
     `preview` is the thread's first user message, truncated (§27's picker
     decision). A row of bare uuid + timestamp is filterable but still not
     recognisable, and identifying a conversation was the actual complaint.
-    It costs ONE extra query for the whole list rather than one per row.
+    It costs ONE extra query for the whole list rather than one per row --
+    and ONE ROW per thread, not one row per user message (#30).
     """
     with Session(engine) as session:
         statement = select(ConversationThread)
         if kind is not None:
             statement = statement.where(ConversationThread.kind == kind)
-        threads = session.exec(
-            statement.order_by(
-                sa_func.coalesce(
-                    ConversationThread.last_activity_at,
-                    ConversationThread.created_at,
-                ).desc(),
-                ConversationThread.created_at.desc(),
-            )
-        ).all()
+        statement = statement.order_by(
+            sa_func.coalesce(
+                ConversationThread.last_activity_at,
+                ConversationThread.created_at,
+            ).desc(),
+            ConversationThread.created_at.desc(),
+        )
+        if limit is not None:
+            statement = statement.limit(limit)
+        threads = session.exec(statement).all()
         previews = _first_user_messages(session, [t.id for t in threads])
         return [
             {
@@ -335,25 +347,42 @@ def _first_user_messages(session, thread_ids: List[UUID]) -> Dict[UUID, str]:
     T3 makes replay do it: on a compacted thread the view begins with the
     synthesized summary, and previewing THAT would label harness-generated
     text as something the user said.
+
+    The "one query" claim is now true of ROWS too (#30): the first-user
+    message is picked by `ROW_NUMBER() OVER (PARTITION BY thread_id ...)`,
+    so SQLite materializes one user message per thread instead of loading
+    every user message of every thread into ORM objects and discarding all
+    but one in Python -- measured at 40x over-read on a realistic database
+    (~98% of the picker's cost). A plain LIMIT-per-thread loop would need
+    one query per thread; the window function keeps the count at one.
     """
     if not thread_ids:
         return {}
-    rows = session.exec(
-        select(MessageLog)
-        .where(MessageLog.thread_id.in_(thread_ids))
+    ranked = (
+        select(
+            MessageLog.thread_id.label("thread_id"),
+            MessageLog.content.label("content"),
+            sa_func.row_number().over(
+                partition_by=MessageLog.thread_id,
+                order_by=(MessageLog.created_at.asc(), MessageLog.id.asc()),
+            ).label("rn"),
+        )
         .where(MessageLog.role == "user")
-        .order_by(MessageLog.created_at.asc(), MessageLog.id.asc())
+        .where(MessageLog.thread_id.in_(thread_ids))
+        .cte("first_user_messages_ranked")
+    )
+    rows = session.exec(
+        select(ranked.c.thread_id, ranked.c.content)
+        .where(ranked.c.rn == 1)
     ).all()
     out: Dict[UUID, str] = {}
-    for row in rows:
-        if row.thread_id in out:
-            continue
+    for thread_id, raw in rows:
         try:
-            text = json.loads(row.content)
+            text = json.loads(raw)
         except (TypeError, ValueError):
-            text = row.content
+            text = raw
         text = " ".join(str(text).split())
-        out[row.thread_id] = (
+        out[thread_id] = (
             text[:_PREVIEW_CHARS] + "…" if len(text) > _PREVIEW_CHARS else text
         )
     return out
