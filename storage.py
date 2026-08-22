@@ -763,30 +763,39 @@ def list_memories(
     `scope` filters to one kind, for the management commands. Absent means
     both, which is what prompt assembly wants.
 
+    Both predicates are pushed INTO THE QUERY (#28): `UserMemory` declares
+    indexes on `scope` and `project_path`, and this function used to load
+    every row and filter in Python -- the exact pattern T1 rejected, run
+    against two columns whose indexes had no reader. SQLite answers the
+    visibility rule below from those indexes now.
+
     Plain dicts rather than ORM instances, for the same reason
     _ordered_rows returns them: every caller reads these after the Session
     has closed.
     """
     with Session(engine) as session:
-        statement = (
-            select(UserMemory)
-            .order_by(UserMemory.created_at.desc(), UserMemory.id.desc())
-        )
-        rows = list(session.exec(statement).all())
-        out = []
-        for row in rows:
-            if scope is not None and row.scope != scope:
-                continue
-            if row.scope == "project" and row.project_path != project_path:
-                continue
-            out.append({
+        statement = select(UserMemory)
+        if scope is not None:
+            statement = statement.where(UserMemory.scope == scope)
+        # Visibility: anything not project-scoped travels; a project memory
+        # only matches its own path. A NULL path therefore matches nothing
+        # except when the caller has no resolved project either -- same as
+        # the Python filter this replaced, edge included deliberately.
+        statement = statement.where(
+            (UserMemory.scope != "project")
+            | (UserMemory.project_path == project_path))
+        statement = statement.order_by(
+            UserMemory.created_at.desc(), UserMemory.id.desc())
+        return [
+            {
                 "id": row.id, "content": row.content,
                 "category": row.category, "scope": row.scope,
                 "project_path": row.project_path,
                 "source_thread_id": row.source_thread_id,
                 "created_at": row.created_at,
-            })
-        return out
+            }
+            for row in session.exec(statement).all()
+        ]
 
 
 def forget_memory(memory_id: UUID) -> bool:

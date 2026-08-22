@@ -669,6 +669,57 @@ def test_memories_come_back_newest_first(real_storage):
     assert contents[:3] == ["fact 2", "fact 1", "fact 0"]
 
 
+def test_the_pushed_down_visibility_query_matches_the_old_filter_exactly(
+        real_storage):
+    """>#28's acceptance test. list_memories used to load every row and
+    filter in Python; the predicates now live in the WHERE clause and the
+    indexes on scope/project_path have a reader. Result equivalence is
+    pinned over the full edge set -- both scopes, an explicit scope=
+    narrowing, another project's rows, a NULL-path project row (which only
+    matches when the caller has no resolved project either), and newest-
+    first order throughout -- because a push-down that silently changes
+    ONE of these edges changes what the model is told about the world."""
+    import time as _time
+
+    from core.memory import ConversationMemory
+
+    thread = ConversationMemory().thread_id
+
+    def _write(content, **kwargs):
+        real_storage.save_memory(content, thread, **kwargs)
+        _time.sleep(0.002)  # created_at has microsecond resolution; make it monotonic
+
+    _write("g1", scope="global")
+    _write("a1", project_path="/proj/a")
+    _write("b1", project_path="/proj/b")
+    _write("g2", scope="global")
+    # The degenerate row: project-scoped with no path. save_memory's caller
+    # contract says this cannot happen; if it ever does, the old Python
+    # filter showed it ONLY to a caller with no resolved project, and the
+    # SQL must agree.
+    _write("orphan", project_path=None)
+
+    def _mine(rows):
+        """The shared module-scoped database carries earlier tests'
+        memories too; every assertion below is about THIS thread's rows
+        and their relative order."""
+        return [m for m in rows if m["source_thread_id"] == thread]
+
+    # Caller inside /proj/a: globals + own project rows only.
+    assert [(m["content"], m["scope"]) for m in
+            _mine(real_storage.list_memories(project_path="/proj/a"))] == [
+        ("g2", "global"), ("a1", "project"), ("g1", "global")]
+    # No resolved project: globals plus the NULL-path orphan, never other projects.
+    assert [m["content"] for m in
+            _mine(real_storage.list_memories())] == ["orphan", "g2", "g1"]
+    # Explicit scope narrowing composes with visibility.
+    assert [m["content"] for m in
+            _mine(real_storage.list_memories(project_path="/proj/a",
+                                             scope="project"))] == ["a1"]
+    assert len([m for m in real_storage.list_memories(scope="global")
+                if m["source_thread_id"] == thread]) == 2
+
+
 def test_forgetting_removes_the_row(real_storage):
     """A REAL delete, unlike everything else in storage.py. A UserMemory is
     a standing assertion the harness keeps repeating, and "this is no
