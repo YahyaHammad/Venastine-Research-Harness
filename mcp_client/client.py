@@ -222,6 +222,12 @@ class MCPClient:
         self.clients: dict = {}
         self.failures: dict = {}      # server name -> why it isn't usable
         self._closed: set = set()     # servers whose session closed cleanly
+        # F8 (#63): the catalogue gathered during connect, inside that
+        # call's per-server timeout. Registration serves from here --
+        # which removes MCP's one bridge call with NO protocol timeout,
+        # and the window where a slow post-connect listing burned its
+        # own 30s. A miss falls back to fetching.
+        self._catalogs: dict = {}
         self._ready: Optional[asyncio.Event] = None
         self._shutdown: Optional[asyncio.Event] = None
         self._done: Optional[asyncio.Event] = None
@@ -294,10 +300,12 @@ class MCPClient:
                             )
                             # Validation is by connection (§17 decision G):
                             # a server that connects AND lists its tools is
-                            # usable. Listing here also gives registration
-                            # its catalogue without a second round trip.
+                            # usable. The listing IS registration's
+                            # catalogue (F8): cached below, served from,
+                            # never fetched a second time.
                             tools = await client.list_tools()
                         self.clients[name] = client
+                        self._catalogs[name] = list(tools.tools)
                         logger.info("MCP server %r connected (%d tools).",
                                     name, len(tools.tools))
                     except Exception as e:
@@ -344,6 +352,7 @@ class MCPClient:
             # take down the others" invariant.
             self._cancel_manager()
             self.clients.clear()
+            self._catalogs.clear()
             self._task = None
             _shutdown_loop()
             raise
@@ -351,6 +360,13 @@ class MCPClient:
     # -- calling ---------------------------------------------------------
 
     def list_tools(self, server_name: str, timeout: float = 30.0):
+        """The server's tool catalogue. Serves the connect-time cache
+        (F8) -- the one MCP call that had no protocol timeout -- and
+        crosses the bridge only on a miss. A copy comes back, so a
+        caller cannot mutate the cache."""
+        cached = self._catalogs.get(server_name)
+        if cached is not None:
+            return list(cached)
         client = self.clients[server_name]
         fut = asyncio.run_coroutine_threadsafe(client.list_tools(), _ensure_loop())
         return fut.result(timeout=timeout).tools
@@ -478,5 +494,6 @@ class MCPClient:
                 "this session.", ", ".join(stragglers), budget)
 
         self.clients.clear()
+        self._catalogs.clear()
         self._task = None
         _shutdown_loop(join_timeout=max(0.5, remaining()))

@@ -441,6 +441,36 @@ def test_registration_names_and_schemas(client):
     assert "probe" in spec.schema["description"]
 
 
+# ---------------------------------------------------------------------------
+# ---- F8 (#63): registration serves the connect-time catalogue ------------
+# ---------------------------------------------------------------------------
+
+def test_registration_never_fetches_the_catalogue_over_the_wire(client, monkeypatch):
+    """The manager already listed tools inside ITS per-server timeout;
+    register_all used to cross the bridge for a second listing -- the one
+    MCP call with no protocol timeout, where a slow server burned its own
+    30s between connect and registration. The live session is poisoned
+    here: if any fetch happens, registration fails loudly."""
+    async def _no_live_fetch(*a, **kw):
+        raise AssertionError("register_all fetched tools over the wire")
+
+    monkeypatch.setattr(client.clients["probe"], "list_tools", _no_live_fetch)
+    reg = ToolRegistry()
+    names = registration.register_all(client, reg)
+    assert "mcp__probe__add" in names
+
+
+def test_list_tools_serves_a_copy_of_the_cache():
+    """Cache-hit path needs no loop at all; and what comes back must be
+    a copy, or a caller sorting/filtering mutates shared state."""
+    c = MCPClient({})
+    c._catalogs["x"] = [1, 2]
+    out = c.list_tools("x")
+    assert out == [1, 2]
+    out.append(3)
+    assert c.list_tools("x") == [1, 2]
+
+
 def test_registration_sets_approval_defaults_from_auto_approve(monkeypatch):
     srv = _build_server()
     monkeypatch.setattr(MCPClient, "_transport_for", lambda self, cfg: srv)
