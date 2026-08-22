@@ -550,6 +550,23 @@ class RunAgentLoop:
         threshold. Passed by run_deep_research_mode; every other caller
         takes the default.
         """
+        # §29/#45 belt. `_run` is a generator, so this fires on the first
+        # next() -- which for every production caller is immediate, since
+        # all three wrappers drain eagerly. It exists because the loader
+        # repairs agent files (#45) while a DIRECT caller bypasses that
+        # repair entirely: there is no file to lose here, only a bug worth
+        # naming, so this raises rather than substituting. The old failure
+        # was an AttributeError on `response.stop_reason` after an empty
+        # step loop -- a traceback pointing three layers away from the bad
+        # value that caused it.
+        if isinstance(max_steps, bool) or not isinstance(max_steps, int) \
+                or max_steps < 1:
+            raise ValueError(
+                f"max_steps must be a positive integer, got {max_steps!r}. "
+                f"Agent definitions carrying an invalid max_steps are "
+                f"repaired by the loader to {config.MAX_ITERATIONS} "
+                f"(config.MAX_ITERATIONS); direct callers must pass a valid "
+                f"value themselves.")
         client = api_initialization(provider_name)
         # Validate the level against the model that will RECEIVE it, here
         # rather than at each caller. Every path -- CLI chat, each research

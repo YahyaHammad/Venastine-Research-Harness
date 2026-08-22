@@ -173,3 +173,53 @@ def test_stop_condition_3_token_budget_exceeded_first_call(mocker):
         f"when budget is exceeded), got {dispatch_calls['n']}."
     )
     assert len(response.tool_calls) == 2
+
+
+# ---------------------------------------------------------------------------
+# ---- Case 4: a non-positive max_steps is refused by name (#45) ----------
+# ---------------------------------------------------------------------------
+
+def test_non_positive_max_steps_raises_named_valueerror_not_attributeerror(
+        mocker):
+    """Audit #45. `for _ in range(max_steps)` with max_steps <= 0 never
+    runs the body, so `response` stayed None and the post-loop
+    `response.stop_reason = ...` raised
+    AttributeError: 'NoneType' object has no attribute 'stop_reason' --
+    a traceback pointing at core/loop.py and naming nothing the caller
+    could act on. The belt raises ValueError naming the parameter, the
+    bad value, and what the loader would have substituted.
+
+    The loader REPAIRS agent files (see test_config_loader), so only a
+    direct programmatic caller can reach this -- which is why it raises
+    rather than repairing: there is no file to lose here, only a bug
+    worth naming."""
+    import pytest
+
+    memory = _FakeMemory()
+    for bad in (0, -1):
+        with pytest.raises(ValueError) as excinfo:
+            run_to_completion(RunAgentLoop._run(
+                memory=memory,
+                system_prompt="ignored",
+                provider_name="ANTHROPIC",
+                model="ignored",
+                context=None,
+                max_steps=bad,
+                max_total_tokens=None,
+            ))
+        message = str(excinfo.value)
+        assert f"got {bad!r}" in message
+        assert "MAX_ITERATIONS" in message, (
+            "the belt names the default the loader would have used, so a "
+            "reader can tell why loaded agents kept working")
+    # A bool is an int subclass; `max_steps=True` would otherwise mean 1.
+    with pytest.raises(ValueError):
+        run_to_completion(RunAgentLoop._run(
+            memory=memory,
+            system_prompt="ignored",
+            provider_name="ANTHROPIC",
+            model="ignored",
+            context=None,
+            max_steps=True,
+            max_total_tokens=None,
+        ))

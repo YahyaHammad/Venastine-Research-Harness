@@ -13,7 +13,11 @@ MODEL_NAME = os.environ.get("AGENT_MODEL", "claude-sonnet-5")
 # where the provider guidance is 64k+ per call.
 MAX_TOKENS = 16_000
 # --- Loop control ---
-MAX_ITERATIONS = 20  # matches the max_steps default used elsewhere
+# Raised from 20 in batch 16 (#45): this is THE default step ceiling -- the
+# `or config.MAX_ITERATIONS` fallback at every agent-shaped call site, the
+# value an invalid `max_steps:` frontmatter field is repaired to, and the
+# ceiling of every chat turn and research pass that does not name its own.
+MAX_ITERATIONS = 50
 
 # --- Subagents (ROADMAP_v2 §18) ---
 # Maximum spawn_subagent nesting. The counter lives on

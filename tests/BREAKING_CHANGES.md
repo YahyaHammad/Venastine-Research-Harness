@@ -2623,3 +2623,18 @@ user would read it (there is no `/config`).
 `D1` and `D2` are both decisions **and** pipeline gates. Both resolve, so the check cannot tell
 which was meant, and no amount of grammar fixes that without renumbering — which #147 rejected
 because the ids are in six production files. Write `gate D1` when you mean the gate.
+
+## §32 — the sixteenth fix batch: compaction's boundaries (2026-08-22)
+
+Audit issues **#45**, **#44 + #172**, **#89**, **#43**, **#90** and the
+surviving items of **#92**. One owner decision rides along: `MAX_ITERATIONS`
+is 50 now (it was 20), because #45's repair default is this constant and a
+clamp that repairs to one number while every turn runs at another would be
+two answers to one question.
+
+### If you change this, this fails
+
+| Change | Fails | Why the property exists |
+|---|---|---|
+| Re-widen the loader's max_steps guard to type-only (`config_loader.py`) | `test_yaml_boolean_max_steps_is_repaired_with_a_naming_warning`, `test_negative_max_steps_is_repaired_not_crashed` | #45: `-1` passed the type check, was truthy at every call-site fallback, and crashed `_run` three layers from the frontmatter line. Repair-not-reject is an explicit owner decision — the file keeps its agent, the field falls back to undeclared, and the warning names the original |
+| Delete `_run`'s max_steps belt (`core/loop.py`) | `test_non_positive_max_steps_raises_named_valueerror_not_attributeerror` | Direct callers bypass the loader; the old failure was an AttributeError on `response.stop_reason` after an empty step loop. The raise names the parameter and the loader default instead |
