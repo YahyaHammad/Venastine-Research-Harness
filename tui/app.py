@@ -1178,86 +1178,109 @@ class VenastineApp(App):
         # session sharing it, so `database is locked` on a read needs no
         # corruption at all.
         try:
-            threads = storage.list_threads()
+            threads = storage.list_threads(limit=PICKER_THREAD_LIMIT)
         except Exception as e:                              # noqa: BLE001
             self._transcript.write_error(f"Could not list threads: {e}")
             return
+
+        # #30/#32. The cap is real, so it says so (M14's rule): a picker
+        # that silently shows 200 of 400 reads as complete. Older
+        # conversations stay reachable by id -- /resume takes any id, and
+        # this note names it rather than leaving the boundary invisible.
+        note = ""
+        if len(threads) == PICKER_THREAD_LIMIT:
+            note = (f"Showing the {PICKER_THREAD_LIMIT} most recently active. "
+                    f"Use /resume <thread-id> for older conversations.")
 
         def chosen(thread_id) -> None:
             if thread_id is None:
                 return
             resolved = thread_id if isinstance(thread_id, UUID) else UUID(str(thread_id))
-            # BEFORE anything is torn down, deliberately. A failure here
-            # means the switch does not happen at all and the session
-            # continues on the thread it was already on -- which is only
-            # true while this read stays above the reset below.
-            try:
-                memory = ConversationMemory(thread_id=resolved)
-            except Exception as e:                          # noqa: BLE001
-                self._transcript.write_error(
-                    f"Could not open thread {resolved}: {e}")
-                return
-            self.memory = memory
-            # The banner is per-thread state; without this it kept showing
-            # the PREVIOUS thread's objective, misrepresenting what
-            # governs the session. /goal was the only path that refreshed.
-            self.refresh_goal_banner()
-            # §23 slice 2, the same reasoning one tier along: a checklist is
-            # per-thread state too, and without this a resume showed the
-            # previous thread's list.
-            self.refresh_todo_panel()
-            # §27 AC4, and the same class of bug the banner above already
-            # fixed in this same callback: `_last_run` and `_live_claims`
-            # survived a thread switch, so /claims or ctrl+l after a resume
-            # showed the PREVIOUS thread's research run under the new
-            # thread's id. Cleared before the replay, so a failure below
-            # cannot leave stale state pointing at the wrong thread.
-            self._last_run = None
-            self._live_claims = {}
-            self._last_response = ""
-            # CLEAR, then replay. Swapping memory without clearing left the
-            # previous conversation on screen beneath the new thread's id --
-            # bug 1's worst half, since a blank panel is merely unhelpful
-            # while a stale one is wrong.
-            self._transcript.reset()
-            self._transcript.write_system(f"Resumed thread {resolved}.")
-            # The DISPLAY half, and it is contained rather than fatal --
-            # §27's rule, which main.py has and this did not. The thread
-            # is already loaded and usable at this point; a replay that
-            # raises would turn a cosmetic problem into "resuming is
-            # broken", and it raises AFTER the reset above, so the app
-            # died having just cleared the screen and written "Resumed
-            # thread <uuid>."
-            #
-            # Read after the reset, not before: a failure here leaves an
-            # empty transcript plus an error, which is honest. Reading
-            # first would leave the PREVIOUS thread's transcript on screen
-            # under the new thread's id, and a stale panel is wrong where
-            # a blank one is merely unhelpful.
-            try:
-                entries = replay_entries(resolved)
-            except Exception as e:                          # noqa: BLE001
-                self._transcript.write_error(
-                    f"Could not replay this thread: {e}. The thread is "
-                    f"open and usable — only its history could not be "
-                    f"drawn.")
-                return
-            for role, text in entries:
-                if role == "user":
-                    self._transcript.write_user(text)
-                elif role == "assistant":
-                    self._transcript.write_answer(text)
-                else:
-                    self._transcript.write_role(role, text)
-            if entries:
-                self._last_response = last_assistant_text(entries)
-                noun = "entry" if len(entries) == 1 else "entries"
-                self._transcript.write_system(
-                    f"— end of {len(entries)} replayed {noun} —")
-            else:
-                self._transcript.write_system("This thread has no messages yet.")
+            self.switch_to_thread(resolved)
 
-        self.push_screen(ThreadPickerScreen(threads), chosen)
+        self.push_screen(ThreadPickerScreen(threads, note), chosen)
+
+    def switch_to_thread(self, thread_id: UUID) -> None:
+        """Open `thread_id` in this session: load, reset per-thread state,
+        replay. ONE site for the whole move (the picker's chosen() and
+        /resume both land here), because every step below exists to keep
+        the two halves of a switch -- teardown and rebuild -- from being
+        separated by a failure. A second copy of this sequence would have
+        to re-learn each comment the hard way."""
+        resolved = thread_id if isinstance(thread_id, UUID) else UUID(str(thread_id))
+        if self._busy:
+            self._transcript.write_error(
+                "Still working — wait for this turn to finish.")
+            return
+        # BEFORE anything is torn down, deliberately. A failure here means
+        # the switch does not happen at all and the session continues on
+        # the thread it was already on -- which is only true while this
+        # read stays above the reset below.
+        try:
+            memory = ConversationMemory(thread_id=resolved)
+        except Exception as e:                                  # noqa: BLE001
+            self._transcript.write_error(
+                f"Could not open thread {resolved}: {e}")
+            return
+        self.memory = memory
+        # The banner is per-thread state; without this it kept showing
+        # the PREVIOUS thread's objective, misrepresenting what
+        # governs the session. /goal was the only path that refreshed.
+        self.refresh_goal_banner()
+        # §23 slice 2, the same reasoning one tier along: a checklist is
+        # per-thread state too, and without this a resume showed the
+        # previous thread's list.
+        self.refresh_todo_panel()
+        # §27 AC4, and the same class of bug the banner above already
+        # fixed in this same callback: `_last_run` and `_live_claims`
+        # survived a thread switch, so /claims or ctrl+l after a resume
+        # showed the PREVIOUS thread's research run under the new
+        # thread's id. Cleared before the replay, so a failure below
+        # cannot leave stale state pointing at the wrong thread.
+        self._last_run = None
+        self._live_claims = {}
+        self._last_response = ""
+        # CLEAR, then replay. Swapping memory without clearing left the
+        # previous conversation on screen beneath the new thread's id --
+        # bug 1's worst half, since a blank panel is merely unhelpful
+        # while a stale one is wrong.
+        self._transcript.reset()
+        self._transcript.write_system(f"Resumed thread {resolved}.")
+        # The DISPLAY half, and it is contained rather than fatal --
+        # §27's rule, which main.py has and this did not. The thread
+        # is already loaded and usable at this point; a replay that
+        # raises would turn a cosmetic problem into "resuming is
+        # broken", and it raises AFTER the reset above, so the app
+        # died having just cleared the screen and written "Resumed
+        # thread <uuid>."
+        #
+        # Read after the reset, not before: a failure here leaves an
+        # empty transcript plus an error, which is honest. Reading
+        # first would leave the PREVIOUS thread's transcript on screen
+        # under the new thread's id, and a stale panel is wrong where
+        # a blank one is merely unhelpful.
+        try:
+            entries = replay_entries(resolved)
+        except Exception as e:                                  # noqa: BLE001
+            self._transcript.write_error(
+                f"Could not replay this thread: {e}. The thread is "
+                f"open and usable — only its history could not be "
+                f"drawn.")
+            return
+        for role, text in entries:
+            if role == "user":
+                self._transcript.write_user(text)
+            elif role == "assistant":
+                self._transcript.write_answer(text)
+            else:
+                self._transcript.write_role(role, text)
+        if entries:
+            self._last_response = last_assistant_text(entries)
+            noun = "entry" if len(entries) == 1 else "entries"
+            self._transcript.write_system(
+                f"— end of {len(entries)} replayed {noun} —")
+        else:
+            self._transcript.write_system("This thread has no messages yet.")
 
     def action_show_claims(self) -> None:
         self.show_claims("")
@@ -1716,6 +1739,26 @@ def _cmd_threads(app: VenastineApp, args: str) -> None:
     app.action_pick_thread()
 
 
+def _cmd_resume(app: VenastineApp, args: str) -> None:
+    """#30/#32's other half. The picker caps at PICKER_THREAD_LIMIT, so
+    "older conversations stay reachable" needs a by-id path in THIS shell
+    -- the CLI has --thread <uuid> and the TUI had nothing. Goes through
+    switch_to_thread, so a /resume gets exactly the load-reset-replay
+    sequence, guards and all, that the picker's chosen() gets."""
+    text = args.strip()
+    if not text:
+        app._transcript.write_error(
+            "Usage: /resume <thread-id>. /threads lists recent ones.")
+        return
+    try:
+        resolved = UUID(text)
+    except ValueError:
+        app._transcript.write_error(
+            f"{text!r} is not a thread id (expected a uuid).")
+        return
+    app.switch_to_thread(resolved)
+
+
 def _cmd_new(app: VenastineApp, args: str) -> None:
     if app._busy:
         app._transcript.write_error(
@@ -1827,6 +1870,12 @@ def _cmd_claims(app: VenastineApp, args: str) -> None:
 
 
 _COPY_TARGETS = ("last", "report", "claims", "all")
+
+# (#30/#32) The picker caps its list and says so; older threads stay
+# reachable by id through /resume. A modal listing thousands of rows is
+# its own usability defect, and with activity ordering the cap costs the
+# least it can -- the threads most likely to be wanted survive it.
+PICKER_THREAD_LIMIT = 200
 
 
 def _cmd_copy(app: VenastineApp, args: str) -> None:
@@ -1954,6 +2003,8 @@ def register_builtin_commands() -> None:
         SlashCommand("copy", "copy text out of the session", _cmd_copy,
                      f"[{'|'.join(_COPY_TARGETS)}] [--file <path>]"),
         SlashCommand("threads", "resume a saved thread", _cmd_threads),
+        SlashCommand("resume", "resume a thread by id, even an old one",
+                     _cmd_resume, "<thread-id>"),
         SlashCommand("new", "start a new thread", _cmd_new),
         SlashCommand("quit", "exit", _cmd_quit),
     ):

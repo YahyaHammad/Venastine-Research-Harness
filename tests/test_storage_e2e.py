@@ -52,6 +52,7 @@ reloaded module -- then puts all of it back.
 """
 
 import contextlib
+import json
 import os
 import sys
 
@@ -212,7 +213,7 @@ def test_compaction_makes_progress_every_time_it_runs(real_storage, compactor):
 
         checkpoint = real_storage.latest_checkpoint(memory.thread_id)
         rows = [r["id"] for r in real_storage._ordered_rows(memory.thread_id)]
-        watermarks.append(rows.index(checkpoint.covers_up_to_message_id))
+        watermarks.append(rows.index(checkpoint["covers_up_to_message_id"]))
         view_sizes.append(len(memory.messages))
 
         _add_turns(memory, 1, f"round{round_index}")
@@ -282,7 +283,7 @@ def test_a_pinned_pin_call_leaves_no_unanswered_tool_use_in_the_view(
     pin_row = next(i for i, r in enumerate(
         real_storage._ordered_rows(memory.thread_id))
         if r["role"] == "assistant" and "call-pin" in r["content"])
-    assert row_ids.index(checkpoint.covers_up_to_message_id) > pin_row, (
+    assert row_ids.index(checkpoint["covers_up_to_message_id"]) > pin_row, (
         "the watermark did not pass the pinned turn, so this thread cannot "
         "show the defect")
 
@@ -379,6 +380,60 @@ def test_the_migration_runs_against_a_real_database(real_storage):
         database.engine.raw_connection(), database._declared_columns()) == []
 
 
+def test_a_migrated_column_matches_the_fresh_schema_exactly(real_storage,
+                                                            tmp_path):
+    """#26's acceptance criterion: a column added by ensure_columns() on a
+    database that predates it must carry the same TYPE, NOT NULL flag and
+    pk flag as what create_all builds on a fresh one -- the flags that
+    change what the schema permits. Compared directly, so future drift
+    between the two paths fails here rather than surfacing as a subtly
+    laxer schema on exactly the databases running longest.
+
+    One deliberate residual difference: the migrated column carries a
+    DEFAULT literal and the fresh one does not. That is not drift -- ALTER
+    TABLE cannot backfill existing rows without a DEFAULT, while
+    create_all needs none because the ORM supplies every value on INSERT.
+    Both sides read the same value everywhere; only raw-SQL inserts into a
+    migrated database would see the fill."""
+    import sqlite3
+
+    import database
+
+    def _flags(conn):
+        for row in conn.execute("PRAGMA table_info(messagelog)"):
+            if row[1] == "pinned":
+                # (type, notnull, pk) -- deliberately excluding dflt_value.
+                return row[2], row[3], row[5]
+        raise AssertionError("no pinned column on one side")
+
+    real_conn = database.engine.raw_connection()
+    try:
+        fresh_flags = _flags(real_conn)
+    finally:
+        real_conn.close()
+
+    assert fresh_flags[1] == 1, (
+        "the model declares pinned non-Optional; if this fails the "
+        "reference itself moved")
+
+    legacy = sqlite3.connect(tmp_path / "legacy.db")
+    try:
+        legacy.execute(
+            "CREATE TABLE messagelog ("
+            " id VARCHAR PRIMARY KEY, thread_id VARCHAR, role VARCHAR,"
+            " content VARCHAR, name VARCHAR, tool_call_id VARCHAR,"
+            " created_at DATETIME)"
+        )
+        legacy.execute(
+            "INSERT INTO messagelog (id, thread_id, role, content)"
+            " VALUES ('m1', 't1', 'user', '\"hello\"')"
+        )
+        database.ensure_columns(legacy, database._declared_columns())
+        assert _flags(legacy) == fresh_flags
+    finally:
+        legacy.close()
+
+
 # ---------------------------------------------------------------------------
 # ---- The monotonic invariant, made to fire ---------------------------------
 # ---------------------------------------------------------------------------
@@ -404,8 +459,8 @@ def test_a_backwards_watermark_is_refused(real_storage, compactor):
 
     assert returned == good
     live = real_storage.latest_checkpoint(memory.thread_id)
-    assert live.covers_up_to_message_id == rows[7]["id"]
-    assert live.summary_text == "Good."
+    assert live["covers_up_to_message_id"] == rows[7]["id"]
+    assert live["summary_text"] == "Good."
 
 
 def test_an_unchanged_watermark_is_refused(real_storage, compactor):
@@ -421,7 +476,65 @@ def test_an_unchanged_watermark_is_refused(real_storage, compactor):
     assert real_storage.save_checkpoint(
         memory.thread_id, "Second.", rows[7]["id"]) == first
     assert real_storage.latest_checkpoint(
-        memory.thread_id).summary_text == "First."
+        memory.thread_id)["summary_text"] == "First."
+
+
+def test_a_first_compaction_refuses_a_watermark_from_another_thread(
+        real_storage, compactor, caplog):
+    """>#27. `advances()` used to return True unconditionally when the
+    thread had no checkpoint yet -- which is the ONLY compaction most
+    threads ever get, and the one moment nothing else stands between a
+    foreign id and the live watermark row. With current=None there was no
+    ordering comparison to fail, so an id from another thread (or from
+    nowhere) became this thread's checkpoint and `_split_at` resolved it
+    to 0: the derived view grew instead of shrinking, silently."""
+    import uuid as uuid_mod
+
+    from core.memory import ConversationMemory
+
+    memory = ConversationMemory()
+    _add_turns(memory, 6, "first")
+    rows = real_storage._ordered_rows(memory.thread_id)
+
+    other = ConversationMemory()
+    _add_turns(other, 2, "other")
+    other_rows = real_storage._ordered_rows(other.thread_id)
+    assert other_rows[0]["id"] != rows[0]["id"]
+
+    with caplog.at_level("WARNING"):
+        returned_foreign = real_storage.save_checkpoint(
+            memory.thread_id, "Foreign.", other_rows[0]["id"])
+        returned_missing = real_storage.save_checkpoint(
+            memory.thread_id, "Missing.", uuid_mod.uuid4())
+
+    assert returned_foreign is None and returned_missing is None
+    assert real_storage.latest_checkpoint(memory.thread_id) is None
+    assert "does not advance" in caplog.text
+
+    # The honest first compaction still works.
+    good = real_storage.save_checkpoint(
+        memory.thread_id, "Good.", rows[7]["id"])
+    assert real_storage.latest_checkpoint(
+        memory.thread_id)["covers_up_to_message_id"] == rows[7]["id"]
+    assert good is not None
+
+
+def test_advances_containment_holds_before_any_checkpoint(real_storage):
+    """The unit-level half of #27, on both sides of the line: a real row
+    of THIS thread advances from nothing; a foreign row does not. The old
+    early return made the second call True without ever looking."""
+    from core.memory import ConversationMemory
+
+    memory = ConversationMemory()
+    _add_turns(memory, 3, "x")
+    own = real_storage._ordered_rows(memory.thread_id)[2]["id"]
+
+    other = ConversationMemory()
+    _add_turns(other, 1, "y")
+    foreign = real_storage._ordered_rows(other.thread_id)[0]["id"]
+
+    assert real_storage.advances(memory.thread_id, None, own) is True
+    assert real_storage.advances(memory.thread_id, None, foreign) is False
 
 
 def test_no_new_turns_means_no_model_call(real_storage, compactor):
@@ -555,6 +668,57 @@ def test_memories_come_back_newest_first(real_storage):
     contents = [m["content"] for m in real_storage.list_memories(scope="global")]
 
     assert contents[:3] == ["fact 2", "fact 1", "fact 0"]
+
+
+def test_the_pushed_down_visibility_query_matches_the_old_filter_exactly(
+        real_storage):
+    """>#28's acceptance test. list_memories used to load every row and
+    filter in Python; the predicates now live in the WHERE clause and the
+    indexes on scope/project_path have a reader. Result equivalence is
+    pinned over the full edge set -- both scopes, an explicit scope=
+    narrowing, another project's rows, a NULL-path project row (which only
+    matches when the caller has no resolved project either), and newest-
+    first order throughout -- because a push-down that silently changes
+    ONE of these edges changes what the model is told about the world."""
+    import time as _time
+
+    from core.memory import ConversationMemory
+
+    thread = ConversationMemory().thread_id
+
+    def _write(content, **kwargs):
+        real_storage.save_memory(content, thread, **kwargs)
+        _time.sleep(0.002)  # created_at has microsecond resolution; make it monotonic
+
+    _write("g1", scope="global")
+    _write("a1", project_path="/proj/a")
+    _write("b1", project_path="/proj/b")
+    _write("g2", scope="global")
+    # The degenerate row: project-scoped with no path. save_memory's caller
+    # contract says this cannot happen; if it ever does, the old Python
+    # filter showed it ONLY to a caller with no resolved project, and the
+    # SQL must agree.
+    _write("orphan", project_path=None)
+
+    def _mine(rows):
+        """The shared module-scoped database carries earlier tests'
+        memories too; every assertion below is about THIS thread's rows
+        and their relative order."""
+        return [m for m in rows if m["source_thread_id"] == thread]
+
+    # Caller inside /proj/a: globals + own project rows only.
+    assert [(m["content"], m["scope"]) for m in
+            _mine(real_storage.list_memories(project_path="/proj/a"))] == [
+        ("g2", "global"), ("a1", "project"), ("g1", "global")]
+    # No resolved project: globals plus the NULL-path orphan, never other projects.
+    assert [m["content"] for m in
+            _mine(real_storage.list_memories())] == ["orphan", "g2", "g1"]
+    # Explicit scope narrowing composes with visibility.
+    assert [m["content"] for m in
+            _mine(real_storage.list_memories(project_path="/proj/a",
+                                             scope="project"))] == ["a1"]
+    assert len([m for m in real_storage.list_memories(scope="global")
+                if m["source_thread_id"] == thread]) == 2
 
 
 def test_forgetting_removes_the_row(real_storage):
@@ -824,3 +988,68 @@ def test_the_stored_summary_survives_and_reports_staleness(real_storage,
 
     assert len(compactor) > calls_after_first
     assert fresh["fresh"] is True
+
+
+# ---------------------------------------------------------------------------
+# ---- Activity ordering (#32) -----------------------------------------------
+# ---------------------------------------------------------------------------
+
+def test_working_in_an_old_thread_lifts_it_above_a_newer_one(real_storage):
+    """#32's whole point. The picker ordered by CREATION: resume
+    yesterday's long thread, work in it an hour, and it stayed below
+    three threads opened and abandoned this morning. last_activity_at is
+    what 'most recent first' should have meant all along."""
+    import time as _time
+
+    from core.memory import ConversationMemory
+
+    old = ConversationMemory()          # created first...
+    _time.sleep(0.002)
+    newer = ConversationMemory()        # ...and ahead of it in the picker
+    _time.sleep(0.002)
+
+    # Work in the OLD thread LAST -- that is the lift. Messaging the
+    # newer one afterwards would just make it the most active honestly.
+    real_storage.save_message(newer.thread_id, "user", json.dumps("newer thread"))
+    _time.sleep(0.002)
+    real_storage.save_message(old.thread_id, "user", json.dumps("back to work"))
+
+    order = [r["id"] for r in real_storage.list_threads()]
+    assert order.index(old.thread_id) < order.index(newer.thread_id)
+
+
+def test_any_archived_row_stamps_activity_including_tool_results(real_storage):
+    """Q8b. A thread whose last event was tool output is still the one you
+    were just in; branching on role in the writer would buy nothing and
+    split the truth across two code paths."""
+    from core.memory import ConversationMemory
+
+    memory = ConversationMemory()
+    real_storage.save_message(memory.thread_id, "assistant",
+                              json.dumps({"text": "running the tool"}))
+    after_assistant = _thread_activity(real_storage, memory.thread_id)
+    assert after_assistant is not None
+
+    real_storage.save_message(memory.thread_id, "tool", json.dumps("tool out"))
+    assert _thread_activity(real_storage, memory.thread_id) >= after_assistant
+
+
+def test_a_thread_with_no_messages_sorts_by_creation(real_storage):
+    """The COALESCE half. NULL activity means creation order -- which is
+    also what every row predating the column reads as, since the additive
+    migration never backfills."""
+    import time as _time
+
+    from core.memory import ConversationMemory
+
+    first = ConversationMemory()
+    _time.sleep(0.002)
+    second = ConversationMemory()
+
+    ids = [r["id"] for r in real_storage.list_threads()]
+    assert ids.index(second.thread_id) < ids.index(first.thread_id)
+
+
+def _thread_activity(real_storage, thread_id):
+    row = real_storage.get_thread(thread_id)
+    return row["last_activity_at"]

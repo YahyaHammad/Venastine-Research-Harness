@@ -5191,3 +5191,70 @@ Six commits on `fix/batch-17-mcp-unit`; per-change tables in
   §37 as a candidate future section; F7 deliberately wires only teardown-time cleanup.
 - **#10** (`pytest -m integration` pid scraping in containers) remains open; untouched here,
   but worth knowing the integration marker still fails in CI containers.
+## Audit Pass 1 — fix batch 18: persistence and the picker (2026-08-22)
+
+Unit 2's entire remaining findings list in one batch: **#26, #27, #28, #30, #31, #32**,
+plus the by-id resume path the picker cap required. Seven commits on
+`fix/batch-18-persistence`; per-change tables in `tests/BREAKING_CHANGES.md` (batch 18).
+No new decision family: every fork was resolved with the owner before any code, and the
+answers below are the record.
+
+### The owner's answers that shaped it
+
+- **Nullability is carried where SQLite can express it** (#26): `NOT NULL DEFAULT x` in one
+  ALTER when a scalar default exists; a factory-default column cannot be added NOT NULL at
+  all and lands nullable under a named WARNING. The two columns migrated before this
+  (`pinned`, `kind`) stay nullable on databases that predate the fix — accepted, not repaired:
+  flipping them needs a table rebuild, outside the migrator's additive contract, for a risk no
+  writer can produce.
+- **Containment before ordering** (#27): `advances()` used to return True unconditionally when
+  no checkpoint existed — exactly the first compaction most threads ever get, and the one
+  moment nothing else catches a foreign watermark. The fix is one line; its test drives a
+  cross-thread id through `save_checkpoint` end to end.
+- **Indexes get readers** (#28): `list_memories`' predicates moved into WHERE over the two
+  columns it already indexed. The equivalence test pins the full edge set, including the
+  NULL-path project row that only a caller with no resolved project may see.
+- **Activity is what "most recent" meant** (#32): `last_activity_at` stamped by
+  `save_message` — the single MessageLog writer — ordered `COALESCE(last_activity_at,
+  created_at) DESC`, no backfill. Any archived row counts; tool output is still "just now".
+- **One query means one ROW** (#30): previews pick their row via `ROW_NUMBER() ... = 1`
+  instead of materialising every user message of every thread. The cap is real, so it says so:
+  the picker passes `limit=200` and shows "Showing the 200 most recently active" at the cap,
+  naming `/resume`.
+- **The three public reads copy columns** (#31): `get_thread` / `latest_checkpoint` /
+  `latest_thread_summary` return plain dicts like every other read in the file. Two of them
+  sit on the compaction path, where a wrong read rewrites a live conversation.
+
+### Build findings worth keeping
+
+- **The fresh-schema reference has no DEFAULT clause.** The first draft of #26's e2e test
+  compared whole PRAGMA rows and failed on it: create_all emits no DDL default because the ORM
+  supplies values on INSERT, while an ALTER cannot backfill without one. The test now compares
+  type / NOT NULL / pk — the flags that change what the schema permits — and documents why the
+  DEFAULT difference is inherent rather than drift.
+- **A comment line missing its `#` produced `'(' was never closed` from the importing file.**
+  The syntax error reported at `core/memory.py:47`'s `from storage import (...)`; the defect
+  was a bare `(§26's WARNING path)` paragraph inside the model class body. The suite caught it
+  at collection, which is the system working — but the error's file pointed at the importer,
+  not the cause.
+- **The lift test failed for the honest reason.** Messaging the NEWER thread after the older
+  one makes the newer thread legitimately most-active; the scenario is "work in the old one
+  last", and the test now says so in a comment so the next reader does not "fix" it backwards.
+- **The module-scoped real-storage fixture shares its database across tests.** Two tests were
+  written assuming they were alone; exact-count assertions became scoped-to-my-rows or
+  head-of-global-order assertions instead. Anything asserting absolute list contents against
+  `real_storage` inherits this constraint.
+
+### Housekeeping found four issues fixed but never closed
+
+The survey pass re-verified every open issue against main and found **#16, #17, #91, #147**
+already remediated (commits `dda06f7`, `aa48b4d`, `ad8c731`, `0a6c57f`) with their parent
+issues left open, and four unit trackers (#46, #66, #93, #148) fully retired but still open.
+All eight closed with evidence comments; #15's checklist refreshed (13 of 22 units complete,
+29 findings open). Closing #91/#147 is what completed units 11 and X5.
+
+### Not fixed, recorded
+
+- **#10** (`pytest -m integration` pid scraping in containers) remains open by agreement;
+  batch 17 validated the AC8 integration test locally against its rewritten teardown, and this
+  batch does not touch MCP paths.

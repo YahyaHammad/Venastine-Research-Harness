@@ -571,23 +571,31 @@ class ThreadPickerScreen(ModalScreen[object]):
     A row leads with the thread's first user message (§27), because a list
     of uuids and timestamps was still unusable once it was short: filtering
     made the picker correct, and the preview is what makes it answerable.
-    The id stays, since it is what --thread takes.
+    The id stays, since it is what --thread and /resume take.
+
+    `note` carries one line shown under the title when the list is not the
+    whole story (#30/#32): the picker caps at PICKER_LIMIT rows, and a cap
+    that does not say so reads as "this is everything" (M14's rule). Older
+    conversations remain reachable by id via /resume.
     """
 
     BINDINGS = [("escape", "cancel", "Cancel")]
 
-    def __init__(self, threads: list[dict]):
+    def __init__(self, threads: list[dict], note: str = ""):
         super().__init__()
         self._threads = threads
+        self._note = note
 
     def compose(self) -> ComposeResult:
         items = [ListItem(Label(_thread_row(t))) for t in self._threads]
-        yield Vertical(
-            Label("Resume which thread?", id="thread-title"),
-            ListView(*items, id="thread-list") if items
-            else Static("No saved threads yet.", id="thread-empty"),
-            id="thread-dialog",
-        )
+        children = [Label("Resume which thread?", id="thread-title")]
+        if self._note:
+            children.append(Static(self._note, id="thread-note"))
+        if items:
+            children.append(ListView(*items, id="thread-list"))
+        else:
+            children.append(Static("No saved threads yet.", id="thread-empty"))
+        yield Vertical(*children, id="thread-dialog")
 
     def on_list_view_selected(self, event: ListView.Selected) -> None:
         index = event.list_view.index

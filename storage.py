@@ -5,6 +5,7 @@ from typing import List, Dict, Any, Optional
 from uuid import UUID, uuid4
 
 from sqlmodel import Field, SQLModel, JSON, Session, select
+from sqlalchemy import func as sa_func  # real sqlalchemy; sqlmodel is faked in tests, this is not
 
 from database import engine  # your SQLAlchemy engine, assumed to exist here
 
@@ -32,6 +33,21 @@ class ConversationThread(SQLModel, table=True):
     # up only as a performance difference is worse than no index at all;
     # the WHERE clause is what T1 was buying, not the index.
     kind: str = Field(default="chat")
+    # (#32) When this thread was last written to -- ANY archived row,
+    # user, assistant or tool alike. The picker orders by this rather
+    # than by creation, because "most recent first" should surface the
+    # conversation you were just in, not the one you merely opened last.
+    #
+    # Nullable deliberately, twice over. Semantically: NULL means "never
+    # received a message", and the reader falls back to created_at --
+    # which is also what every row predating this column reads as, since
+    # the additive migration never backfills (M7). Mechanically: the
+    # honest default is per-row Python (a timestamp), which has no SQL
+    # literal, so the migrator could not have added it NOT NULL anyway
+    # (#26's WARNING path). save_message is the single writer of
+    # MessageLog rows in production and stamps this in the same session
+    # it writes the message, so the two cannot drift.
+    last_activity_at: Optional[datetime] = Field(default=None)
 
 
 class MessageLog(SQLModel, table=True):
@@ -182,10 +198,32 @@ def create_thread(kind: str = THREAD_KIND_CHAT) -> UUID:
         return thread.id
 
 
-def get_thread(thread_id: UUID) -> Optional[ConversationThread]:
-    """Used to confirm a thread_id is real before resuming it."""
+def get_thread(thread_id: UUID) -> Optional[dict]:
+    """The thread row as a plain column dict, or None if unknown (#31).
+
+    Used to confirm a thread_id is real before resuming it, and by
+    ConversationMemory to read extra_data and kind on resume. A PLAIN
+    DICT, like every other public read here: returning a detached ORM
+    instance worked only because nothing had expired it -- what a
+    detached instance hands back depends on what happened to be loaded,
+    which is exactly the question _ordered_rows' docstring says copying
+    columns removes.
+
+    The kind fallback lives HERE rather than at the caller: a row read
+    from a database whose ALTER has not run yet has no attribute at all,
+    and the caller should not have to know that.
+    """
     with Session(engine) as session:
-        return session.get(ConversationThread, thread_id)
+        thread = session.get(ConversationThread, thread_id)
+        if thread is None:
+            return None
+        return {
+            "id": thread.id,
+            "created_at": thread.created_at,
+            "extra_data": dict(thread.extra_data or {}),
+            "kind": getattr(thread, "kind", None) or THREAD_KIND_CHAT,
+            "last_activity_at": getattr(thread, "last_activity_at", None),
+        }
 
 
 def get_thread_extra(thread_id: UUID) -> Dict[str, Any]:
@@ -224,6 +262,16 @@ def save_message(
     name: Optional[str] = None,
     tool_call_id: Optional[str] = None,
 ) -> None:
+    """Append one archived row and stamp the thread's activity (#32).
+
+    THE single production writer of MessageLog rows, which is what makes
+    it the right place to maintain `last_activity_at`: the stamp rides in
+    the same session and commit as the insert, so a message can never be
+    persisted without its thread moving to the top of the picker. Any
+    role counts (Q8b) -- a thread whose last event was tool output is
+    still the one you were just in. An unknown thread_id writes the
+    orphan message exactly as before; there is simply no row to stamp.
+    """
     with Session(engine) as session:
         new_message = MessageLog(
             thread_id=thread_id,
@@ -233,15 +281,37 @@ def save_message(
             tool_call_id=tool_call_id,
         )
         session.add(new_message)
+        thread = session.get(ConversationThread, thread_id)
+        if thread is not None:
+            thread.last_activity_at = datetime.now(timezone.utc)
+            session.add(thread)
         session.commit()
 
 
-def list_threads(kind: Optional[str] = THREAD_KIND_CHAT) -> List[dict]:
-    """Conversation threads, most recent first.
+def list_threads(
+    kind: Optional[str] = THREAD_KIND_CHAT, limit: Optional[int] = None,
+) -> List[dict]:
+    """Conversation threads, most recently ACTIVE first (#32).
 
     Each entry: ``{"id": UUID, "created_at": datetime, "kind": str,
     "preview": str}``. Used by the CLI / TUI layer for thread browsing —
     core/memory.py does NOT call this.
+
+    `limit` caps the result AFTER ordering (#30/#32 together). The default
+    of None is uncached and changes nothing for existing callers -- a
+    caller that wants everything still gets everything. The TUI picker
+    passes a cap because a modal listing thousands of conversations is its
+    own usability defect; with activity ordering the cap costs the least,
+    since the threads most likely to be wanted are exactly the ones that
+    survive it. Anything older stays reachable by id (/resume, --thread).
+
+    The order key is `last_activity_at`, falling back to `created_at`
+    when it is NULL -- never-received-a-message threads, and every row
+    that predates the column (the additive migration never backfills).
+    §27 made the picker correct by filtering and identifiable by preview;
+    ordering is the third axis: resume yesterday's long thread, work in
+    it an hour, and it stays pinned at the top rather than sinking below
+    three threads opened and abandoned this morning.
 
     ROADMAP_v2 §27 AC2: CONVERSATIONS ONLY by default. One research run
     creates ~10 pass threads plus up to 4 retry-round threads plus the
@@ -253,15 +323,23 @@ def list_threads(kind: Optional[str] = THREAD_KIND_CHAT) -> List[dict]:
     `preview` is the thread's first user message, truncated (§27's picker
     decision). A row of bare uuid + timestamp is filterable but still not
     recognisable, and identifying a conversation was the actual complaint.
-    It costs ONE extra query for the whole list rather than one per row.
+    It costs ONE extra query for the whole list rather than one per row --
+    and ONE ROW per thread, not one row per user message (#30).
     """
     with Session(engine) as session:
         statement = select(ConversationThread)
         if kind is not None:
             statement = statement.where(ConversationThread.kind == kind)
-        threads = session.exec(
-            statement.order_by(ConversationThread.created_at.desc())
-        ).all()
+        statement = statement.order_by(
+            sa_func.coalesce(
+                ConversationThread.last_activity_at,
+                ConversationThread.created_at,
+            ).desc(),
+            ConversationThread.created_at.desc(),
+        )
+        if limit is not None:
+            statement = statement.limit(limit)
+        threads = session.exec(statement).all()
         previews = _first_user_messages(session, [t.id for t in threads])
         return [
             {
@@ -291,25 +369,42 @@ def _first_user_messages(session, thread_ids: List[UUID]) -> Dict[UUID, str]:
     T3 makes replay do it: on a compacted thread the view begins with the
     synthesized summary, and previewing THAT would label harness-generated
     text as something the user said.
+
+    The "one query" claim is now true of ROWS too (#30): the first-user
+    message is picked by `ROW_NUMBER() OVER (PARTITION BY thread_id ...)`,
+    so SQLite materializes one user message per thread instead of loading
+    every user message of every thread into ORM objects and discarding all
+    but one in Python -- measured at 40x over-read on a realistic database
+    (~98% of the picker's cost). A plain LIMIT-per-thread loop would need
+    one query per thread; the window function keeps the count at one.
     """
     if not thread_ids:
         return {}
-    rows = session.exec(
-        select(MessageLog)
-        .where(MessageLog.thread_id.in_(thread_ids))
+    ranked = (
+        select(
+            MessageLog.thread_id.label("thread_id"),
+            MessageLog.content.label("content"),
+            sa_func.row_number().over(
+                partition_by=MessageLog.thread_id,
+                order_by=(MessageLog.created_at.asc(), MessageLog.id.asc()),
+            ).label("rn"),
+        )
         .where(MessageLog.role == "user")
-        .order_by(MessageLog.created_at.asc(), MessageLog.id.asc())
+        .where(MessageLog.thread_id.in_(thread_ids))
+        .cte("first_user_messages_ranked")
+    )
+    rows = session.exec(
+        select(ranked.c.thread_id, ranked.c.content)
+        .where(ranked.c.rn == 1)
     ).all()
     out: Dict[UUID, str] = {}
-    for row in rows:
-        if row.thread_id in out:
-            continue
+    for thread_id, raw in rows:
         try:
-            text = json.loads(row.content)
+            text = json.loads(raw)
         except (TypeError, ValueError):
-            text = row.content
+            text = raw
         text = " ".join(str(text).split())
-        out[row.thread_id] = (
+        out[thread_id] = (
             text[:_PREVIEW_CHARS] + "…" if len(text) > _PREVIEW_CHARS else text
         )
     return out
@@ -574,28 +669,40 @@ def set_pinned(message_ids: List[UUID], pinned: bool = True) -> int:
 def _current_watermark(thread_id: UUID) -> Optional[UUID]:
     """The live checkpoint's watermark, or None if never compacted."""
     checkpoint = latest_checkpoint(thread_id)
-    return checkpoint.covers_up_to_message_id if checkpoint else None
+    return checkpoint["covers_up_to_message_id"] if checkpoint else None
 
 
 def advances(thread_id: UUID, current: Optional[UUID], proposed: UUID) -> bool:
-    """Is `proposed` strictly later in the thread than `current`?
+    """Is `proposed` strictly later in this thread than `current`?
 
     The ordering test behind §21's one real monotonic invariant: a
-    compaction watermark only ever moves FORWARD. `current` of None (no
-    checkpoint yet) means any real position advances.
+    compaction watermark only ever moves FORWARD, and -- #27's half --
+    it must name a row THIS THREAD actually has. `current` of None
+    (no checkpoint yet) skips the ordering comparison but not the
+    containment one: a watermark we cannot place is one we must not
+    write, and "first compaction" is exactly when nothing else would
+    catch a foreign id.
 
     A `proposed` this thread does not contain returns False -- the safe
     direction, since a watermark we cannot place is one we must not write.
     """
-    if current is None:
-        return True
     rows = _ordered_rows(thread_id)
+    if current is None:
+        return _split_at(rows, proposed) > 0
     return _split_at(rows, proposed) > _split_at(rows, current) > 0
 
 
-def latest_checkpoint(thread_id: UUID) -> Optional[CompactionCheckpoint]:
-    """The most recent compaction of this thread, or None if it has never
-    been compacted (which is every thread until the trigger first fires)."""
+def latest_checkpoint(thread_id: UUID) -> Optional[dict]:
+    """The most recent compaction of this thread as a plain column dict,
+    or None if it has never been compacted (which is every thread until
+    the trigger first fires).
+
+    A dict rather than a detached ORM instance (#31): two of the three
+    callers read it after their Session has closed, and one of them is
+    the compaction path -- the one place in the project where a wrong
+    read rewrites a live conversation. Copying the columns removes the
+    question of what a detached instance still hands back.
+    """
     with Session(engine) as session:
         statement = (
             select(CompactionCheckpoint)
@@ -603,7 +710,17 @@ def latest_checkpoint(thread_id: UUID) -> Optional[CompactionCheckpoint]:
             .order_by(CompactionCheckpoint.created_at.desc(),
                       CompactionCheckpoint.id.desc())
         )
-        return next(iter(session.exec(statement).all()), None)
+        row = next(iter(session.exec(statement).all()), None)
+        if row is None:
+            return None
+        return {
+            "id": row.id,
+            "thread_id": row.thread_id,
+            "summary_text": row.summary_text,
+            "covers_up_to_message_id": row.covers_up_to_message_id,
+            "strategy": row.strategy,
+            "created_at": row.created_at,
+        }
 
 
 def save_checkpoint(
@@ -633,7 +750,7 @@ def save_checkpoint(
             "does not advance on the existing one; keeping the existing "
             "checkpoint. This would have made the thread larger, not "
             "smaller.", thread_id)
-        return existing.id if existing is not None else None
+        return existing["id"] if existing is not None else None
 
     with Session(engine) as session:
         checkpoint = CompactionCheckpoint(
@@ -669,8 +786,9 @@ def last_message_id(thread_id: UUID) -> Optional[UUID]:
     return rows[-1]["id"] if rows else None
 
 
-def latest_thread_summary(thread_id: UUID) -> Optional[ThreadSummary]:
-    """The most recent summary of this thread, or None if never summarized.
+def latest_thread_summary(thread_id: UUID) -> Optional[dict]:
+    """The most recent summary of this thread as a plain column dict, or
+    None if never summarized (#31 -- same reasoning as latest_checkpoint).
 
     Newest by `(created_at, id)`, matching `latest_checkpoint` -- but note
     that the resemblance ends at the query. A stale row winning here shows
@@ -684,7 +802,16 @@ def latest_thread_summary(thread_id: UUID) -> Optional[ThreadSummary]:
             .where(ThreadSummary.thread_id == thread_id)
             .order_by(ThreadSummary.created_at.desc(), ThreadSummary.id.desc())
         )
-        return next(iter(session.exec(statement).all()), None)
+        row = next(iter(session.exec(statement).all()), None)
+        if row is None:
+            return None
+        return {
+            "id": row.id,
+            "thread_id": row.thread_id,
+            "summary_text": row.summary_text,
+            "covers_up_to_message_id": row.covers_up_to_message_id,
+            "created_at": row.created_at,
+        }
 
 
 def save_thread_summary(
@@ -759,30 +886,39 @@ def list_memories(
     `scope` filters to one kind, for the management commands. Absent means
     both, which is what prompt assembly wants.
 
+    Both predicates are pushed INTO THE QUERY (#28): `UserMemory` declares
+    indexes on `scope` and `project_path`, and this function used to load
+    every row and filter in Python -- the exact pattern T1 rejected, run
+    against two columns whose indexes had no reader. SQLite answers the
+    visibility rule below from those indexes now.
+
     Plain dicts rather than ORM instances, for the same reason
     _ordered_rows returns them: every caller reads these after the Session
     has closed.
     """
     with Session(engine) as session:
-        statement = (
-            select(UserMemory)
-            .order_by(UserMemory.created_at.desc(), UserMemory.id.desc())
-        )
-        rows = list(session.exec(statement).all())
-        out = []
-        for row in rows:
-            if scope is not None and row.scope != scope:
-                continue
-            if row.scope == "project" and row.project_path != project_path:
-                continue
-            out.append({
+        statement = select(UserMemory)
+        if scope is not None:
+            statement = statement.where(UserMemory.scope == scope)
+        # Visibility: anything not project-scoped travels; a project memory
+        # only matches its own path. A NULL path therefore matches nothing
+        # except when the caller has no resolved project either -- same as
+        # the Python filter this replaced, edge included deliberately.
+        statement = statement.where(
+            (UserMemory.scope != "project")
+            | (UserMemory.project_path == project_path))
+        statement = statement.order_by(
+            UserMemory.created_at.desc(), UserMemory.id.desc())
+        return [
+            {
                 "id": row.id, "content": row.content,
                 "category": row.category, "scope": row.scope,
                 "project_path": row.project_path,
                 "source_thread_id": row.source_thread_id,
                 "created_at": row.created_at,
-            })
-        return out
+            }
+            for row in session.exec(statement).all()
+        ]
 
 
 def forget_memory(memory_id: UUID) -> bool:

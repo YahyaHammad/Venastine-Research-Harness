@@ -54,8 +54,9 @@ class _Column:
 
 def _declared(**columns) -> dict:
     """ensure_columns' input shape: column -> (sql type, default literal
-    or None). Plain strings, because _declared_columns() has already
-    resolved everything SQLAlchemy-shaped by the time it gets here."""
+    or None, not-null flag). Plain strings and bools, because
+    _declared_columns() has already resolved everything SQLAlchemy-shaped
+    by the time it gets here."""
     return {"messagelog": columns}
 
 
@@ -90,8 +91,8 @@ def test_a_declared_column_missing_from_an_existing_table_is_added(legacy_db):
     added = database.ensure_columns(
         legacy_db,
         _declared(
-            role=("VARCHAR", None),
-            pinned=("BOOLEAN", "0"),
+            role=("VARCHAR", None, False),
+            pinned=("BOOLEAN", "0", True),
         ),
     )
 
@@ -109,7 +110,7 @@ def test_the_existing_row_survives_and_reads_the_declared_default(legacy_db):
     most likely to be compacted."""
     database.ensure_columns(
         legacy_db,
-        _declared(pinned=("BOOLEAN", "0")),
+        _declared(pinned=("BOOLEAN", "0", True)),
     )
 
     rows = legacy_db.execute(
@@ -120,7 +121,7 @@ def test_the_existing_row_survives_and_reads_the_declared_default(legacy_db):
 def test_running_it_twice_changes_nothing(legacy_db):
     """It runs on every single startup, so being a no-op the second time
     is not a nicety."""
-    declared = _declared(pinned=("BOOLEAN", "0"))
+    declared = _declared(pinned=("BOOLEAN", "0", True))
     database.ensure_columns(legacy_db, declared)
 
     assert database.ensure_columns(legacy_db, declared) == []
@@ -133,7 +134,7 @@ def test_a_table_that_does_not_exist_yet_is_skipped(legacy_db):
     opposite of what this function is for."""
     added = database.ensure_columns(
         legacy_db,
-        {"compactioncheckpoint": {"summary_text": ("VARCHAR", None)}},
+        {"compactioncheckpoint": {"summary_text": ("VARCHAR", None, False)}},
     )
 
     assert added == []
@@ -145,11 +146,59 @@ def test_a_factory_defaulted_column_is_added_without_a_default(legacy_db):
     owns it from there."""
     database.ensure_columns(
         legacy_db,
-        _declared(trace_id=("VARCHAR", None)),
+        _declared(trace_id=("VARCHAR", None, False)),
     )
 
     assert legacy_db.execute(
         "SELECT trace_id FROM messagelog").fetchall() == [(None,)]
+
+
+def _column_flags(connection, table, column):
+    """PRAGMA table_info row for `column`: (name, type, notnull, dflt)."""
+    for row in connection.execute(f"PRAGMA table_info({table})"):
+        if row[1] == column:
+            return {"type": row[2], "notnull": row[3], "default": row[4]}
+    raise AssertionError(f"{table}.{column} does not exist")
+
+
+def test_not_null_is_carried_when_a_literal_exists(legacy_db):
+    """#26. A declared-NOT-NULL column with a scalar default migrates as
+    NOT NULL DEFAULT x -- the exact DDL create_all emits on a fresh
+    database, so migrated and fresh schemas agree instead of the migrated
+    one being silently laxer. SQLite refuses NOT NULL without a non-NULL
+    default on ADD COLUMN, which is why the literal is the gate."""
+    database.ensure_columns(legacy_db, _declared(pinned=("BOOLEAN", "0", True)))
+
+    flags = _column_flags(legacy_db, "messagelog", "pinned")
+    assert flags["notnull"] == 1
+    assert flags["default"] == "0"
+    assert flags["type"].upper() == "BOOLEAN"
+
+
+def test_the_existing_row_survives_the_not_null_default(legacy_db):
+    """NOT NULL must not turn the migration into a data-loss event: the
+    pre-existing row is filled from the DEFAULT clause, same as before."""
+    database.ensure_columns(legacy_db, _declared(pinned=("BOOLEAN", "0", True)))
+
+    rows = legacy_db.execute(
+        "SELECT id, content, pinned FROM messagelog").fetchall()
+    assert rows == [("m1", '"hello"', 0)]
+
+
+def test_a_declared_not_null_column_without_a_literal_stays_nullable_and_warns(
+        legacy_db, caplog):
+    """#26's honest-degradation half. A default_factory column cannot be
+    added NOT NULL -- SQLite would have to invent a value per existing
+    row -- so it lands nullable and the divergence is NAMED rather than
+    silent. The warning is the only place a reader learns their schema
+    differs from the model until a real migration exists."""
+    with caplog.at_level("WARNING"):
+        added = database.ensure_columns(
+            legacy_db, _declared(trace_id=("DATETIME", None, True)))
+
+    assert added == ["messagelog.trace_id"]
+    assert _column_flags(legacy_db, "messagelog", "trace_id")["notnull"] == 0
+    assert "trace_id" in caplog.text and "nullable" in caplog.text
 
 
 def test_a_type_mismatch_warns_and_leaves_the_column_alone(legacy_db, caplog):
@@ -158,7 +207,7 @@ def test_a_type_mismatch_warns_and_leaves_the_column_alone(legacy_db, caplog):
     one code path every launch runs through."""
     with caplog.at_level("WARNING"):
         added = database.ensure_columns(
-            legacy_db, _declared(role=("BOOLEAN", None)))
+            legacy_db, _declared(role=("BOOLEAN", None, False)))
 
     assert added == []
     assert "role" in caplog.text and "additive only" in caplog.text
@@ -173,7 +222,7 @@ def test_a_length_specifier_is_not_a_type_mismatch(legacy_db, caplog):
     something is."""
     with caplog.at_level("WARNING"):
         database.ensure_columns(
-            legacy_db, _declared(role=("VARCHAR(255)", None)))
+            legacy_db, _declared(role=("VARCHAR(255)", None, False)))
 
     assert "additive only" not in caplog.text
 

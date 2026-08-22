@@ -106,7 +106,7 @@ class TestSummarizingAThread:
         assert notice["fresh"] is True
         assert notice["text"] == "A distilled summary of the thread."
         stored = fake_storage.latest_thread_summary(memory.thread_id)
-        assert stored.summary_text == notice["text"]
+        assert stored["summary_text"] == notice["text"]
 
     def test_an_oversized_thread_is_truncated_and_the_row_says_so(
             self, fake_storage, summarizer, mocker):
@@ -133,7 +133,7 @@ class TestSummarizingAThread:
         assert "[Source truncated" in notice["text"], (
             "the marker is deterministic, not model compliance")
         stored = fake_storage.latest_thread_summary(memory.thread_id)
-        assert "[Source truncated" in stored.summary_text
+        assert "[Source truncated" in stored["summary_text"]
 
     def test_a_short_thread_costs_no_model_call(self, fake_storage, summarizer):
         """Its rendered text IS its own best summary. Asking a model to

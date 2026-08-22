@@ -543,6 +543,7 @@ class FakeStorage:
         self.saved_messages = []  # list of (thread_id, role, content, name, tool_call_id)
         self._threads = {}        # thread_id -> True (existence tracker)
         self._thread_created_at = {}  # thread_id -> datetime
+        self._thread_last_activity = {}  # thread_id -> datetime or None (#32)
         self._thread_kind = {}    # thread_id -> "chat" / "research_pass" / "subagent" (§27)
         self._messages_by_thread = {}  # thread_id -> list of neutral-shape dicts
         self._thread_extra = {}   # thread_id -> dict (extra_data mirror)
@@ -560,6 +561,9 @@ class FakeStorage:
         # §27: recorded, so a test can assert WHAT a code path created
         # without a real database. Mirrors production's column default.
         self._thread_kind[thread_id] = kind
+        # (#32) Mirrors production's nullable column: NULL until the first
+        # message lands, which is what save_message stamps.
+        self._thread_last_activity[thread_id] = None
         self._messages_by_thread[thread_id] = []
         self._thread_extra[thread_id] = {}
         return thread_id
@@ -571,15 +575,19 @@ class FakeStorage:
         return self._thread_kind.get(thread_id)
 
     def get_thread(self, thread_id):
-        # Mirrors production: a row object (truthy, carries extra_data) or
-        # None. core/memory.py reads .extra_data off it, so a bare True
-        # sentinel would no longer represent what production returns.
+        # Mirrors production's PLAIN DICT (#31): a dict of columns or
+        # None. core/memory.py reads extra_data and kind off it, so the
+        # keys must match production's copy -- including the missing-kind
+        # fallback living inside production's reader.
         if thread_id not in self._threads:
             return None
-        return types.SimpleNamespace(
-            id=thread_id,
-            extra_data=dict(self._thread_extra.get(thread_id, {})),
-        )
+        return {
+            "id": thread_id,
+            "created_at": self._thread_created_at.get(thread_id),
+            "extra_data": dict(self._thread_extra.get(thread_id, {})),
+            "kind": self._thread_kind.get(thread_id, "chat"),
+            "last_activity_at": self._thread_last_activity.get(thread_id),
+        }
 
     def get_thread_extra(self, thread_id):
         if thread_id not in self._threads:
@@ -595,10 +603,20 @@ class FakeStorage:
         else:
             extra[key] = value
 
-    def list_threads(self, kind="chat"):
-        """Mirrors storage.list_threads(): most recent first, conversations
-        only unless kind=None (§27 AC2), each row carrying `kind` and a
-        `preview` of the first user message."""
+    def list_threads(self, kind="chat", limit=None):
+        """Mirrors storage.list_threads(): most recently ACTIVE first
+        (#32), conversations only unless kind=None (§27 AC2), each row
+        carrying `kind` and a `preview` of the first user message.
+        `limit` caps after ordering, like the SQL LIMIT it mirrors."""
+        def _activity(tid):
+            """COALESCE(last_activity_at, created_at) in Python. The
+            fallback is what never-messaged threads -- and every row that
+            predates the column, since the migration never backfills --
+            sort by."""
+            stamp = self._thread_last_activity.get(tid)
+            return stamp if stamp is not None \
+                else self._thread_created_at[tid]
+
         rows = [
             {"id": tid, "created_at": ts,
              "kind": self._thread_kind.get(tid, "chat"),
@@ -606,7 +624,11 @@ class FakeStorage:
             for tid, ts in self._thread_created_at.items()
             if kind is None or self._thread_kind.get(tid, "chat") == kind
         ]
-        return sorted(rows, key=lambda t: t["created_at"], reverse=True)
+        # Tie-break on created_at desc, exactly as production's ORDER BY does.
+        rows = sorted(rows,
+                      key=lambda t: (_activity(t["id"]), t["created_at"]),
+                      reverse=True)
+        return rows if limit is None else rows[:limit]
 
     def _first_user_message(self, thread_id):
         for msg in self._messages_by_thread.get(thread_id, []):
@@ -622,6 +644,7 @@ class FakeStorage:
         # RECONSTRUCTION logic below, though, has to mirror storage.py's
         # for real -- that part isn't just a serialization round trip,
         # it's role-specific shape-building that has to match production.
+        from datetime import datetime, timezone
         self.saved_messages.append((thread_id, role, content, name, tool_call_id))
         self._messages_by_thread.setdefault(thread_id, []).append({
             "id": uuid4(),
@@ -631,6 +654,11 @@ class FakeStorage:
             "tool_call_id": tool_call_id,
             "pinned": False,
         })
+        # (#32) Mirrors production: any archived row stamps the thread,
+        # in the same write.
+        if thread_id in self._threads:
+            self._thread_last_activity[thread_id] = \
+                datetime.now(timezone.utc)
 
     # -- ROADMAP_v2 §21 reads ---------------------------------------------
     #
@@ -762,12 +790,17 @@ class FakeStorage:
 
     def save_checkpoint(self, thread_id, summary_text,
                         covers_up_to_message_id, strategy="rederive"):
-        checkpoint = types.SimpleNamespace(
-            id=uuid4(), thread_id=thread_id, summary_text=summary_text,
-            covers_up_to_message_id=covers_up_to_message_id,
-            strategy=strategy)
+        from datetime import datetime, timezone
+        # A plain dict, mirroring production's latest_checkpoint (#31):
+        # callers subscript rather than dot-access.
+        checkpoint = {
+            "id": uuid4(), "thread_id": thread_id,
+            "summary_text": summary_text,
+            "covers_up_to_message_id": covers_up_to_message_id,
+            "strategy": strategy, "created_at": datetime.now(timezone.utc),
+        }
         self._checkpoints[thread_id] = checkpoint
-        return checkpoint.id
+        return checkpoint["id"]
 
     # -- ROADMAP_v2 §21c thread summaries ----------------------------------
     #
@@ -785,11 +818,16 @@ class FakeStorage:
 
     def save_thread_summary(self, thread_id, summary_text,
                             covers_up_to_message_id):
-        summary = types.SimpleNamespace(
-            id=uuid4(), thread_id=thread_id, summary_text=summary_text,
-            covers_up_to_message_id=covers_up_to_message_id)
+        from datetime import datetime, timezone
+        # A plain dict, mirroring production's latest_thread_summary (#31).
+        summary = {
+            "id": uuid4(), "thread_id": thread_id,
+            "summary_text": summary_text,
+            "covers_up_to_message_id": covers_up_to_message_id,
+            "created_at": datetime.now(timezone.utc),
+        }
         self._thread_summaries[thread_id] = summary
-        return summary.id
+        return summary["id"]
 
     def _reconstruct(self, rows):
         formatted = []
