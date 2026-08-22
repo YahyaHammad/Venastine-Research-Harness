@@ -154,6 +154,7 @@ the namespace list in `AGENTS.md`.
 - **§34. /init's vocabulary — four lists for one question** — BUILT (#96, #94, #95, #98; closes unit 12)
 - **§35. The record's index — the decisions, and whether they can be found** — BUILT (#16, #17, #147, #91; closes unit X5)
 - **§36. Compaction's boundaries — trigger, notice, pin, summarizer input** — BUILT (#43, #44, #45, #89, #90, #92, #172; closes units 4 and 11)
+- **§37. MCP's edges — disclosure, SSE, teardown, catalogue** — BUILT (#60, #61, #62, #63, #64, #65; closes unit 7)
 - **Open Questions — None Remaining** (Rev. 3 — all decisions locked; verification items only)
 - **Why these calls, not just what they are** (Rev. 3 — the reasoning patterns behind several decisions above)
 
@@ -2980,11 +2981,11 @@ status is data now) but does not yet cache it.
 
 ---
 
-## 37. MCP's edges — disclosure, SSE, teardown, catalogue — IN PROGRESS (batch 17)
+## 37. MCP's edges — disclosure, SSE, teardown, catalogue — BUILT
 
 Audit unit 7's six remaining findings: **#60, #61, #62, #63, #64, #65**, on
 `fix/batch-17-mcp-unit`. One commit per work package; per-change tables in
-`tests/BREAKING_CHANGES.md`.
+`tests/BREAKING_CHANGES.md` §33.
 
 ### Design Decisions Record — §37 (F1–F8)
 
@@ -2998,6 +2999,13 @@ Audit unit 7's six remaining findings: **#60, #61, #62, #63, #64, #65**, on
 | **F6** | **Teardown has ONE shared wall-clock budget** (#64): polite close, force-cancel and thread join share a single deadline instead of three sequential 15s waits (~45s worst case, paid by Ctrl+C too). Servers still alive at expiry are NAMED in a WARNING |
 | **F7** | **`unregister_all` is wired into teardown** (#65): `teardown_mcp` calls it after `disconnect_all()`, so ARCHITECTURE.md's "disconnect handling" justification describes something that exists. Runtime `/mcp` management is recorded as a candidate future section, deliberately not built here |
 | **F8** | **The tool catalogue is cached at connect** (#63): the manager keeps the `list_tools()` result it already gathered inside the per-server timeout window, and registration serves from it. MCP's one timeout-less bridge call disappears; a miss falls back to fetching |
+
+### Closed with this section
+
+**#60, #61, #62, #63, #64, #65** — unit 7's entire remaining findings list. M16 (the sharp
+orphan-path test) was already pinned by batch 1; this batch pins the other six. **M19's
+headers property is now asserted on BOTH HTTP transports**, since SSE is a second place to
+discard an Authorization header.
 
 ## Open Questions — None Remaining
 

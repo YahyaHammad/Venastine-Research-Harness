@@ -5145,3 +5145,49 @@ and #172's visibility fix is what makes it acceptable. That reframed #43's deriv
 - **#136** (X2): an empty compactor response still retries once per step. Z2 makes the path
   ADDRESSABLE — the status is data now — but nothing caches the verdict yet. Still open.
 - **#24 / #49 / #77 / #167** — untouched here; unrelated subsystems, prior batches' findings.
+
+## Audit Pass 1 — fix batch 17: MCP's edges (2026-08-22)
+
+Unit 7's entire remaining findings list in one batch: **#60, #61, #62, #63, #64, #65**.
+Six commits on `fix/batch-17-mcp-unit`; per-change tables in
+`tests/BREAKING_CHANGES.md` §33; decisions **F1–F8** in `ROADMAP_v2.md` §37.
+
+### The owner's answers that shaped it
+
+- **SSE is built, not refused** (#62/F5) — "too common to be left out". The SDK v2 already
+  shipped `sse_client`, so the fix was a config branch plus a transport branch. The one
+  load-bearing subtlety the owner's answer surfaced: a bare URL *string* means streamable to
+  `Client()`, so `_transport_for` returning string-vs-context-manager is now an asserted
+  property, not an implementation detail.
+- **Disclosure over quietness, twice** (#60): env-key NAMES in the acknowledgement prompt,
+  and the auto-approve notice promoted INFO → WARNING even though a repeated WARNING can train
+  people past it — the owner's reasoning was that worst case equals today's silence and best
+  case someone reads it once. The store version bump (F3) was chosen for the same posture:
+  every blind v1 consent re-asks exactly once under a prompt that finally names `autoApprove`.
+- **Shared teardown deadline after a plain-language walkthrough** (#64/F6): "stragglers" and
+  "full budget" were explained before locking; what landed is one 10s wall clock replacing
+  three sequential 15s waits, with wedged servers NAMED via `_TrackClose`'s unexceptional-exit
+  record.
+
+### Build findings worth keeping
+
+- **The first straggler test failed because the FAKE hung both servers.** `_HangsOnClose`
+  ignored its transport argument, so both names appeared in the WARNING — correct behaviour,
+  wrong fixture. The sentinel pattern from the starvation test (None = wedged) fixed it.
+- **M16 was already pinned; nobody had said so loudly.** Batch 1 fixed the sharp test's
+  assertions; this batch's sweep found only six survivors, not seven. The section header in
+  `test_mcp_client.py` now records which arm of which test carries M16.
+- **F8 made M25 harder to reach, not easier**: connect-time listing failures never reach
+  registration at all now, so the guard's remaining job is the cache-MISS fallback path —
+  driven by stuffing `_catalogs["bbb"]` while leaving `aaa` to hit a poisoned live session.
+- **A citation taught the docs check to bite early.** Citing F5 in `config.py` before §37
+  existed turned `test_every_decision_id_cited_in_production_code_resolves` red mid-batch;
+  the full F-family table landed WITH WP-A rather than at the end, which is what the resolver
+  exists to force.
+
+### Not fixed, recorded
+
+- **Runtime `/mcp` management** (per-server disconnect/reconnect as commands) — recorded in
+  §37 as a candidate future section; F7 deliberately wires only teardown-time cleanup.
+- **#10** (`pytest -m integration` pid scraping in containers) remains open; untouched here,
+  but worth knowing the integration marker still fails in CI containers.
