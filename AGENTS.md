@@ -42,7 +42,7 @@ python main.py --init --research-project           # §24: skip the type questio
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 2232 tests, offline, ~25-45s by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 2241 tests, offline, ~25-45s by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -197,6 +197,8 @@ Current Anthropic models reject `temperature`/`top_p`/`top_k` (`config.MODELS_RE
 - **Candidate labels follow the SURVIVORS, never roster position** (E11). A gap ("Candidate 1, Candidate 3") makes Pass 2 tag a claim both survivors asserted as `[1, 3]` against a denominator of 2, so unanimous claims read as dissented-against.
 - **Consistency enters as a DISAGREEMENT PENALTY** (E8): `raw -= 0.15 * (1 - consistency)`, factual claims only, subtracted like `ASSUMPTION_FLAG_PENALTY`. §10's shipped formula redistributed `0.5/0.35` → `0.4/0.3`, which made grounding count for *less* whenever ensemble was on and — since the maximum stayed `0.85` — meant consistency could only ever demote a well-grounded claim. As a penalty, unanimity is free and the non-ensemble formula is *literally* unchanged, so §10's byte-for-byte regression holds by construction. Non-factual claims are untouched (E9).
 - **`score_claim` rounds ONCE** (E10). The tier used to compare the unrounded float while the breakdown stored `round(raw, 4)`, so a claim computing `0.7999999999999999` was persisted as `raw_score: 0.8` and tiered MEDIUM against a table saying `≥0.8` is HIGH. Reachable from ordinary weights, and it is what §10's own acceptance criterion produces.
+- **The record keeps every surviving candidate** (E13, #77). `run.candidates` carries metadata per survivor (text in memory only; `candidates_json` strips it at persistence — the bodies are artifacts and pass threads), Pass 3b sees all labelled candidates when ≥2 survive, and the artifacts are `01_candidate_N.md`, numbered to match the trace and `asserted_by_candidates`. A degraded single survivor keeps `01_raw_response.md` byte for byte.
+- **A pass failure is `pass_complete(ok=False)`, never a new kind** (E14, #115). Both pass wrappers emit it before re-raising; the widget's `pass_completed(pass_id, *, ok)` makes the answer REQUIRED so no caller can tick a failed row done. Panel-only display: the trace line already narrates the cause, and no shell prints it twice.
 
 ### Provider translation (`core/client.py`)
 

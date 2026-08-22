@@ -133,6 +133,8 @@ Every run writes `output/<run_id>/`:
 03_completeness.json
 ```
 
+In ensemble mode the Pass-1 slot is `01_candidate_1.md`, `01_candidate_2.md`, … — one file per surviving candidate, numbered to match the trace and each claim's `asserted_by_candidates` tags, since no single candidate is "the" response the claims came from.
+
 Runs are also persisted to the database, so a run that crashes halfway still leaves a record populated through its last completed pass — and so does one you kill with Ctrl+C.
 
 ### Watching it happen
@@ -451,7 +453,7 @@ classifier is described under *Security model* above. If you have a fork or a lo
 note that `ToolApprovals.shell` now ships `False` and `SHELL_APPROVAL_MODE` is the gate — see
 `tests/BREAKING_CHANGES.md` §24.
 
-Run the test suite with `pytest` — 2232 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
+Run the test suite with `pytest` — 2241 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
 
 ## Documentation
 

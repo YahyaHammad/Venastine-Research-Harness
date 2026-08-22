@@ -2676,3 +2676,18 @@ Six issues, one subsystem (#60, #61, #62, #63, #64, #65); decisions F1–F8 in
 | Load every user message and keep the first in Python again, or drop the rn==1 pick | test_the_preview_query_returns_the_first_user_message_of_every_thread | #30: the window function is what makes ONE query mean one ROW per thread; 40x over-read was ~98% of picker cost |
 | Apply list_threads limit before ordering, or ignore it | test_list_threads_limit_caps_after_ordering | Q7: the cap must keep the globally most-recently-active rows or it silently hides exactly the threads users want |
 | Make get_thread / latest_checkpoint / latest_thread_summary return detached ORM instances again | test_a_backwards_watermark_is_refused and the whole fake-mirror set (test_fake_storage_mirror.py included) | #31: attribute access on a detached instance works only until something expires it; two of the three reads sit on the compaction path where a wrong read rewrites a live conversation |
+
+## Batch 19 -- the nineteenth fix batch: ensemble mode, honest and visible (2026-08-23)
+
+Five production contracts changed. Every test below was driven RED against its
+reverted line before the fix commit landed.
+
+| Change | What breaks | Symptom / fix |
+|---|---|---|
+| `PipelineRunRecord` gains `candidates_json` (#77/E13) | A pre-batch row reads NULL after `ensure_columns`' ALTER | `load_pipeline_run` guards with `or "[]"`; pinned by building that row shape (`test_load_pipeline_run_survives_a_legacy_null_candidates_column`) |
+| `update_pipeline_run` strips `text` from candidate entries | The database silently growing a third copy of every response | Exact key-set assertion on the round-trip; strip-filter mutation RED |
+| Ensemble artifact layout: `01_candidate_N.md` when >=2 survive, else byte-for-byte `01_raw_response.md` (#77/E13) | A reader expecting the historical name on a degraded run | Both shapes pinned in `test_output_writer.py`; the >=2 gate is mutation-sighted |
+| Pass 3b's input carries all labelled survivors instead of bare `raw_response` (#77/E13) | Anything matching the old input prefix | `critic_pass.md` reworded deliberately; `PASS_DIGESTS["Pass 3b"]` updated with a comment; single-candidate shape pinned unchanged |
+| `pass_complete` gains `ok`/`text`; widget's `pass_completed(pass_id, *, ok)` REQUIRED (#115/E14) | An old caller omitting ok now TypeErrors at the widget -- the lock against ticking a failed row done | Sequence tests pin ok=False before a fatal raise and around an ensemble skip; removing the emission turns both RED |
+
+Count 2232 -> 2241.

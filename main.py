@@ -953,6 +953,15 @@ def run_research(
             # silent for minutes inside a tool-heavy pass.
             if event.kind == "pass_start":
                 print(f"-> {event.pass_id}", flush=True)
+            elif event.kind == "pass_complete" and event.ok is False:
+                # E14/#115, L6's both-shells rule. Deliberately prints
+                # nothing: the CLI's narrative for this failure is the
+                # trace_line below ("ensemble candidate on X failed --
+                # skipped"), which arrives beside it, and a second line
+                # would say everything twice. This event's capability is
+                # the TUI sidebar resolving its row; the branch exists so
+                # that is a decision rather than an omission.
+                pass
             elif event.kind == "stage":
                 # Same column as a pass, different marker: a stage that
                 # made no model call is done the moment it is announced,

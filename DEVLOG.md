@@ -5258,3 +5258,67 @@ All eight closed with evidence comments; #15's checklist refreshed (13 of 22 uni
 - **#10** (`pytest -m integration` pid scraping in containers) remains open by agreement;
   batch 17 validated the AC8 integration test locally against its rewritten teardown, and this
   batch does not touch MCP paths.
+## Audit Pass 1 — fix batch 19: ensemble mode, honest and visible (2026-08-23)
+
+The last S2 in the pipeline core plus its most user-visible symptom:
+**#77, #115**. Five commits on `fix/batch-19-ensemble`; per-change tables in
+`tests/BREAKING_CHANGES.md` (batch 19); decisions **E13–E14** recorded in
+`ROADMAP_v2.md` beside E1–E12.
+
+### The owner's answers that shaped it
+
+- **Payload-carried outcome over a new kind** (#115/E14) — chosen after reading
+  `events.py` rather than arguing from memory: `tool_result` already established
+  "ok (+ text when it failed)" in this very event set, and a second mechanism for
+  *ended* would make every future consumer learn which applies where. The lock on
+  the false-tick risk is structural: the widget's `pass_completed(pass_id, *, ok)`
+  is REQUIRED and keyword-only, so no caller can announce completion without
+  confronting the question.
+- **Metadata only in the database** (#77/E13) — resolved by the owner's own
+  conditional: the full candidate texts already live twice over (per-candidate
+  artifacts, each candidate's own pass thread), so a third copy would be
+  redundant under either half of the rule. `candidates_json` carries
+  `{candidate, provider_name, model, chars}`.
+- **No candidate is "the" successful one** — the owner asked why
+  `01_raw_response.md` stays candidate 1, which exposed that my default dressed a
+  positional convention up as a distinction the pipeline never makes. Ensemble
+  runs now write `01_candidate_1.md…N.md`, numbered to match the trace lines and
+  the claims' `asserted_by_candidates` tags; single-candidate runs keep the
+  historical bytes exactly.
+- **One prompt for Pass 3b** — all surviving candidates, labelled identically to
+  Pass 2, in one thread. Pass 2 has always consumed that shape; per-candidate
+  critic threads would recreate #77's mismatch from the other side while
+  multiplying cost.
+
+### Build findings worth keeping
+
+- **A test double that returns `{}` fails payload validation into an unpatched
+  seam.** The fatal-pass sequence test first died inside `core/client.py` —
+  json_retry caught the shape error and re-entered the REAL chat loop through
+  `continue_conversation`. The fix is giving every pass its valid payload
+  (`_clean_pipeline_payloads()`) and raising only where the scenario needs it;
+  the same §22 twelve-doubles trap, one layer deeper than the helper covers.
+- **Inserting a field into the widget row moved two indices.** The failed flag
+  went in at index 2; `tool_called`/`activity` still wrote 3/4, so tool counts
+  landed on the stage flag and the suite caught it as a missing "2 tools" line.
+  The row is positional by design; the comment in `reset()` is its contract.
+- **E11's "unpinned half" was pinned between the audit and the fix.**
+  #77's mutation claim ("roster position prints green") was measured at 1406;
+  `test_the_trace_maps_a_candidate_number_to_the_model_that_produced_it`
+  arrived with #79's batch. The test's docstring cited the gap this batch fills,
+  so it now asserts the record's half too (`run.candidates`) instead of being
+  deleted.
+- **The prompt-digest guard did its job out loud**: rewriting `critic_pass.md`
+  turned `PASS_DIGESTS["Pass 3b"]` red mid-batch, which is the failure mode the
+  pin exists for — deliberate change, digest updated with a comment saying so.
+
+### Housekeeping
+
+Unit 2's tracker (#34) retired at WP-0 — all six of its findings closed in batch
+18. With #77 closed, unit 9 completes and tracker #80 retires with it.
+
+### Not fixed, recorded
+
+- **#12** (route disagreement to verification) remains open by design — it needs
+  its own section and decision record; E13/E14 deliberately touch neither D2 nor
+  the penalty formula.

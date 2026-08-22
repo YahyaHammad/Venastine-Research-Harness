@@ -96,6 +96,7 @@ def test_create_pipeline_run_returns_uuid_and_persists_running_row():
     assert record.claims_json == "[]"
     assert record.trace_json == "[]"
     assert record.coverage_gaps_json == "[]"
+    assert record.candidates_json == "[]"
     assert record.final_report == ""
     assert record.finished_at is None
 
@@ -236,18 +237,30 @@ def test_inner_storage_failure_propagates_original_exception_and_logs_run_id(moc
 # ===========================================================================
 
 def test_load_pipeline_run_round_trips_all_fields():
-    """create -> update (with claims, trace, gaps, report) -> load must
-    return all 9 fields intact: id, user_query, status, started_at,
-    finished_at, claims (list of raw dicts), trace (list of strings),
-    coverage_gaps (list of dicts), final_report (plain text).
+    """create -> update (with claims, trace, gaps, report, candidates)
+    -> load must return all fields intact: id, user_query, status,
+    started_at, finished_at, claims (list of raw dicts), trace (list of
+    strings), coverage_gaps (list of dicts), candidates (metadata per
+    ensemble survivor), final_report (plain text).
 
     Claims come back as raw dicts (the shape vars(c) produced at write
     time), NOT reconstructed Claim dataclass instances -- the read API
-    is for inspection, not pipeline re-entry."""
+    is for inspection, not pipeline re-entry.
+
+    The candidate entries round-trip WITHOUT their `text` key (#77/E13):
+    the database carries metadata only, the full texts being artifacts
+    and pass threads. A persisted body would be a third copy of every
+    candidate response."""
     run_id = create_pipeline_run("round-trip query")
     run = _make_sample_run("round-trip query")
     run.coverage_gaps = [{"gap": "missing Y", "tier": "UNVERIFIED_COVERAGE"}]
     run.final_report = "A round-tripped report."
+    run.candidates = [
+        {"candidate": 1, "provider_name": "ANTHROPIC", "model": "claude-opus-5",
+         "chars": 16, "text": "Candidate one's full response."},
+        {"candidate": 2, "provider_name": "GOOGLE", "model": "gemini-2.5-pro",
+         "chars": 18, "text": "Candidate two's fuller response."},
+    ]
 
     update_pipeline_run(run_id, run, status="complete")
     loaded = load_pipeline_run(run_id)
@@ -273,6 +286,17 @@ def test_load_pipeline_run_round_trips_all_fields():
 
     # coverage_gaps: list of dicts.
     assert loaded["coverage_gaps"] == [{"gap": "missing Y", "tier": "UNVERIFIED_COVERAGE"}]
+
+    # candidates: metadata per survivor, `text` stripped at the writer.
+    # The strip is the contract, not an optimisation -- asserting the
+    # exact key set is what turns "the database grew a copy of every
+    # response" into a red test rather than a slow leak.
+    assert loaded["candidates"] == [
+        {"candidate": 1, "provider_name": "ANTHROPIC", "model": "claude-opus-5",
+         "chars": 16},
+        {"candidate": 2, "provider_name": "GOOGLE", "model": "gemini-2.5-pro",
+         "chars": 18},
+    ]
 
     # final_report: plain text, not JSON-encoded.
     assert loaded["final_report"] == "A round-tripped report."
@@ -306,7 +330,28 @@ def test_load_pipeline_run_returns_empty_defaults_for_running_record():
     assert loaded["claims"] == []
     assert loaded["trace"] == []
     assert loaded["coverage_gaps"] == []
+    assert loaded["candidates"] == []
     assert loaded["final_report"] == ""
+
+
+def test_load_pipeline_run_survives_a_legacy_null_candidates_column():
+    """A row written before `candidates_json` existed reads back as NULL
+    after ensure_columns' ALTER (the migration is additive and never
+    backfills -- #26 establishes such rows exist in the wild), and
+    json.loads(None) raises. The reader's `or "[]"` guard is what keeps
+    /claims <run id> working on a migrated database; this pins it by
+    building exactly that row shape."""
+    run_id = create_pipeline_run("pre-batch-19 query")
+    record = _fetch_record(run_id)
+    record.candidates_json = None
+    from sqlmodel import Session
+    from database import engine
+    with Session(engine) as session:
+        session.add(record)
+        session.commit()
+
+    loaded = load_pipeline_run(run_id)
+    assert loaded["candidates"] == []
 
 
 # ---------------------------------------------------------------------------

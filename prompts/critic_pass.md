@@ -1,9 +1,9 @@
 # Pass 3b — Critic Pass
 
-You will receive the original raw response, the factual claims extracted from it, and their grounding results.
+You will receive every surviving candidate response from Pass 1, labelled `Candidate N:` exactly as Pass 2 labelled them, the factual claims extracted from their union, and their grounding results. A claim may originate from any candidate — check it against the text it came from and against the others.
 
 Check for:
-- **Internal contradictions**: does any claim conflict with another claim elsewhere in the response?
+- **Internal contradictions**: does any claim conflict with another claim elsewhere in the candidate responses?
 - **Logical fallacies**: non-sequiturs, false dichotomies, correlation-causation conflation, circular reasoning, or other reasoning errors in how claims are connected or justified.
 
 Weight severity by how well-grounded the claim already is: a contradiction involving a well-grounded (`grounded` status) claim is more serious than one involving an already-`ungrounded` guess, since undermining something otherwise-credible is a bigger problem than flagging an issue with something already known to be shaky. Use this weighting to inform the `severity` score below, not as a separate field.

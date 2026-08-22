@@ -35,7 +35,10 @@ PASS_DIGESTS = {
     "Pass 1": "58e02a1cecd7d581",
     "Pass 2": "fb56b62cf20c800f",
     "Pass 3a": "a90c695c63256dcb",
-    "Pass 3b": "3880fd58389155d6",
+    # Batch 19 (#77/E13) reworded Pass 3b deliberately -- the critic now
+    # receives every surviving candidate, and the prompt says so. The
+    # digest moving is the guard confirming the change was seen.
+    "Pass 3b": "bb6fb3a830b52583",
     "Pass 3c": "8f2bc9b1231ea65f",
     "Pass 5": "14de2769e3ff5454",
     "Pass 6a": "6cd6acf94d4c898f",

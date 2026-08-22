@@ -666,7 +666,7 @@ def test_the_panel_counts_tool_calls_on_the_running_pass():
     panel.tool_called("Pass 1")
     assert "2 tools" in panel.renderable.plain
 
-    panel.pass_completed("Pass 1")
+    panel.pass_completed("Pass 1", ok=True)
     assert "2 tools" not in panel.renderable.plain, \
         "the counter belongs to the pass in flight; keeping it on a " \
         "finished row spends sidebar width on a number nobody is waiting on"

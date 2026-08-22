@@ -346,6 +346,21 @@ def _ensemble_roster(ensemble_mode: bool) -> list[dict]:
     return list(roster)
 
 
+def _pass_failed_event(pass_id: str, exc: BaseException) -> PipelineEvent:
+    """E14/#115. The one shape a pass failure is reported in: a
+    pass_complete carrying ok=False, mirroring tool_result's
+    outcome-plus-reason contract. A NEW kind was considered and rejected
+    -- tool_result already established payload-carried outcomes in this
+    very event set, and a second mechanism for 'ended' would make every
+    future consumer learn which applies where. The text is TRUNCATED:
+    the trace line (run.log at whatever site caught this) carries the
+    full cause, and an event payload is not the place to duplicate it
+    unboundedly."""
+    return PipelineEvent(
+        kind="pass_complete", pass_id=pass_id, ok=False,
+        text=f"{type(exc).__name__}: {exc}"[:200])
+
+
 def _run_pass(pass_id: str, pass_input: str, model: str, provider_name: str,
               temperature: float | None = None, authorization=None,
               trace: list[str] | None = None, pass_threads: list | None = None):
@@ -362,14 +377,22 @@ def _run_pass(pass_id: str, pass_input: str, model: str, provider_name: str,
     still what every other caller uses.
     """
     yield PipelineEvent(kind="pass_start", pass_id=pass_id)
-    response = yield from _translate(pass_id, RunAgentLoop.stream_deep_research_mode(
-        pass_input=pass_input, model=model, pass_id=pass_id, provider_name=provider_name,
-        temperature=temperature, authorization=authorization,
-    ))
-    _record_granted_calls(pass_id, response, authorization)
-    _record_pass_thread(pass_id, response, pass_threads)
-    _check_not_truncated(pass_id, response, trace)
-    yield PipelineEvent(kind="pass_complete", pass_id=pass_id)
+    try:
+        response = yield from _translate(pass_id, RunAgentLoop.stream_deep_research_mode(
+            pass_input=pass_input, model=model, pass_id=pass_id, provider_name=provider_name,
+            temperature=temperature, authorization=authorization,
+        ))
+        _record_granted_calls(pass_id, response, authorization)
+        _record_pass_thread(pass_id, response, pass_threads)
+        _check_not_truncated(pass_id, response, trace)
+    except Exception as exc:
+        # E14/#115, UNIFORM: a fatal pass reports itself before its
+        # exception propagates, so no shell is left holding a row that
+        # only ever says "running" -- the same property the ensemble
+        # skip path needs, reached from the one site both share.
+        yield _pass_failed_event(pass_id, exc)
+        raise
+    yield PipelineEvent(kind="pass_complete", pass_id=pass_id, ok=True)
     return response.text
 
 
@@ -479,45 +502,52 @@ def _run_pass_with_json_retry(
     larger change than the thing it would show.
     """
     yield PipelineEvent(kind="pass_start", pass_id=pass_id)
-    response = yield from _translate(pass_id, RunAgentLoop.stream_deep_research_mode(
-        pass_input=pass_input, model=model, pass_id=pass_id, provider_name=provider_name,
-        temperature=temperature, authorization=authorization,
-    ))
-    _record_granted_calls(pass_id, response, authorization)
-    # §27: the retries re-enter THIS thread (continue_conversation), so one
-    # entry per pass is the whole truth however many corrections it took.
-    _record_pass_thread(pass_id, response, pass_threads)
-    # BEFORE the retry loop. A truncated pass returned no JSON because it
-    # was cut off, not because the model wrote malformed JSON -- sending
-    # a "your last response did not parse" nudge into a thread that has
-    # already exhausted its budget spends more of it to be told the same
-    # thing, and reports a parse failure for something that never parsed
-    # because it was never finished.
-    _check_not_truncated(pass_id, response, trace)
+    try:
+        response = yield from _translate(pass_id, RunAgentLoop.stream_deep_research_mode(
+            pass_input=pass_input, model=model, pass_id=pass_id, provider_name=provider_name,
+            temperature=temperature, authorization=authorization,
+        ))
+        _record_granted_calls(pass_id, response, authorization)
+        # §27: the retries re-enter THIS thread (continue_conversation), so one
+        # entry per pass is the whole truth however many corrections it took.
+        _record_pass_thread(pass_id, response, pass_threads)
+        # BEFORE the retry loop. A truncated pass returned no JSON because it
+        # was cut off, not because the model wrote malformed JSON -- sending
+        # a "your last response did not parse" nudge into a thread that has
+        # already exhausted its budget spends more of it to be told the same
+        # thing, and reports a parse failure for something that never parsed
+        # because it was never finished.
+        _check_not_truncated(pass_id, response, trace)
 
-    text = retry_until_json(
-        response,
-        label=pass_id,
-        # pass_prompt(), NOT the raw pass file: BOTH the original attempt
-        # and its retry must carry the same catalogs, or a retry silently
-        # sees a different tool set than the attempt it is correcting.
-        # #68 makes that literal -- the same AUTHORIZATION decides the
-        # catalogs here as decided them for the attempt.
-        system_prompt=system_prompts.pass_prompt(
-            pass_id, *advertisement_facts(authorization)),
-        model=model,
-        provider_name=provider_name,
-        trace=trace,
-        temperature=temperature,
-        authorization=authorization,
-        on_response=lambda r: _record_granted_calls(pass_id, r, authorization),
-        # The retry re-enters THIS pass's thread, so it runs on the pass's
-        # budget rather than continue_conversation's chat default.
-        max_total_tokens=config.RESEARCH_PASS_TOKEN_BUDGET,
-        validate=lambda payload: _validate_payload(
-            pass_id, payload, claim_ids=claim_ids, ensemble=ensemble),
-    )
-    yield PipelineEvent(kind="pass_complete", pass_id=pass_id)
+        text = retry_until_json(
+            response,
+            label=pass_id,
+            # pass_prompt(), NOT the raw pass file: BOTH the original attempt
+            # and its retry must carry the same catalogs, or a retry silently
+            # sees a different tool set than the attempt it is correcting.
+            # #68 makes that literal -- the same AUTHORIZATION decides the
+            # catalogs here as decided them for the attempt.
+            system_prompt=system_prompts.pass_prompt(
+                pass_id, *advertisement_facts(authorization)),
+            model=model,
+            provider_name=provider_name,
+            trace=trace,
+            temperature=temperature,
+            authorization=authorization,
+            on_response=lambda r: _record_granted_calls(pass_id, r, authorization),
+            # The retry re-enters THIS pass's thread, so it runs on the pass's
+            # budget rather than continue_conversation's chat default.
+            max_total_tokens=config.RESEARCH_PASS_TOKEN_BUDGET,
+            validate=lambda payload: _validate_payload(
+                pass_id, payload, claim_ids=claim_ids, ensemble=ensemble),
+        )
+    except Exception as exc:
+        # E14/#115: same uniform failure report as _run_pass -- a JSON
+        # pass that exhausts its retries is a pass that ended badly,
+        # whatever the exception class.
+        yield _pass_failed_event(pass_id, exc)
+        raise
+    yield PipelineEvent(kind="pass_complete", pass_id=pass_id, ok=True)
     return text
 
 
@@ -934,6 +964,21 @@ def stream_deep_research_pipeline(
                     run.log(message)
                     continue
                 run.log(f"Pass 1: ensemble candidate {len(candidates)} generated on {label}.")
+                # E13/#77: the record keeps every surviving candidate.
+                # The metadata half sits beside the trace's candidate-N
+                # lines so a stored asserted_by_candidates tag names
+                # models this run can still identify; the text half feeds
+                # the per-candidate artifacts and Pass 3b's input -- the
+                # two places that must be able to check a claim against
+                # what its number actually said. pipeline_storage strips
+                # `text` at serialization; see PipelineRunRecord.
+                run.candidates.append({
+                    "candidate": len(candidates),
+                    "provider_name": entry["provider_name"],
+                    "model": entry["model"],
+                    "chars": len(candidates[-1]),
+                    "text": candidates[-1],
+                })
 
             # Labels come from the SURVIVORS, never from position in the
             # roster (E11). Labelling by roster position leaves a gap when a
@@ -1006,10 +1051,26 @@ def stream_deep_research_pipeline(
             grounded = _apply_grounding(run.claims, grounding_json)
             yield from progress.checkpoint(f"Pass 3a: grounded {grounded} of {len(factual_claims)} factual claim(s), across {len(unique_entities)} deduplicated entities.")
 
-            pass3b_input = (
-                f"Raw response:\n{run.raw_response}\n\n"
-                f"Factual claims with grounding:\n{json.dumps([vars(c) for c in factual_claims])}"
-            )
+            # E13/#77. Two or more survivors: the claims were extracted
+            # from the UNION of the candidates, so the critic sees every
+            # candidate under the labels Pass 2 used -- a claim only
+            # candidate 3 asserted is checked against text that actually
+            # contains it, and contradictions ACROSS candidates are
+            # findable. Handing it bare `raw_response` (candidate 1)
+            # asked an ill-posed question: find conflicts within a text
+            # much of your input did not come from.
+            if len(run.candidates) >= 2:
+                pass3b_input = (
+                    "\n\n".join(
+                        f"Candidate {entry['candidate']}:\n{entry['text']}"
+                        for entry in run.candidates)
+                    + f"\n\nFactual claims with grounding:\n{json.dumps([vars(c) for c in factual_claims])}"
+                )
+            else:
+                pass3b_input = (
+                    f"Raw response:\n{run.raw_response}\n\n"
+                    f"Factual claims with grounding:\n{json.dumps([vars(c) for c in factual_claims])}"
+                )
             critic_json = _parse_json_response((yield from _run_pass_with_json_retry("Pass 3b", pass3b_input, critic_model, critic_provider, run.trace, authorization=authorization, pass_threads=run.pass_threads, claim_ids=[c.id for c in run.claims])))
             critiqued = _apply_critic(run.claims, critic_json)
             yield from progress.checkpoint(f"Pass 3b: critique applied to {critiqued} of {len(factual_claims)} factual claim(s).")

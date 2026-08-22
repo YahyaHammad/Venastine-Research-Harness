@@ -292,12 +292,41 @@ class TestTheProgressPanel:
     def test_it_shows_passes_as_they_start_and_marks_them_done(self):
         panel = self._panel()
         panel.pass_started("Pass 0")
-        panel.pass_completed("Pass 0")
+        panel.pass_completed("Pass 0", ok=True)
         panel.pass_started("Pass 1")
 
         text = str(panel.renderable)
         assert "x Pass 0" in text, "a finished pass must read as finished"
         assert "> Pass 1" in text, "the running pass must read as running"
+
+    def test_a_failed_pass_reads_failed_not_done(self):
+        """#115/E14. The ensemble path can leave a Pass 1 row that never
+        resolves -- the run carries on around it, so nothing else marks
+        it. ok=False is that third state: ✗, not the done x, and not
+        still-running >."""
+        panel = self._panel()
+        panel.pass_started("Pass 1")
+        panel.pass_completed("Pass 1", ok=False)
+        panel.pass_started("Pass 1")
+        panel.pass_completed("Pass 1", ok=True)
+        panel.pass_started("Pass 2")
+
+        text = str(panel.renderable)
+        assert "✗ Pass 1" in text, "the failed candidate must read as failed"
+        assert "x Pass 1" in text, "the surviving candidate reads as done"
+        assert "> Pass 2" in text
+
+    def test_pass_completed_demands_an_answer_about_the_outcome(self):
+        """The required keyword-only ok is the lock on the false-tick
+        door: with a default, an old call site would mark a FAILED row
+        done -- the one outcome worse than the stale row this batch
+        fixes. A caller that cannot say which is exactly the caller
+        this signature exists to stop."""
+        import pytest as _pytest
+        panel = self._panel()
+        panel.pass_started("Pass 0")
+        with _pytest.raises(TypeError):
+            panel.pass_completed("Pass 0")
 
     def test_a_re_tiered_claim_is_not_counted_twice(self):
         """6c re-tiers the same claim once per retry round. Counting
@@ -450,3 +479,82 @@ def test_json_retry_lines_reach_a_consumer_without_json_retry_changing(mocker):
     assert any(e.kind == "trace_line" and "JSON parse failed" in e.text
                for e in events), \
         "the retry's own trace line never reached the consumer"
+
+
+# ===========================================================================
+# ---- E14/#115: a pass that ended badly reports itself ---------------------
+# ===========================================================================
+
+def _pass_complete_events(events):
+    return [(e.pass_id, e.ok, e.text) for e in events
+            if e.kind == "pass_complete"]
+
+
+def test_a_skipped_ensemble_candidate_resolves_as_failed(mocker, monkeypatch):
+    """The row the sidebar could never resolve (#115): a candidate that
+    dies mid-pass has already yielded pass_start, E7 skips it, and the
+    run carries on -- so the only honest report is pass_complete with
+    ok=False for THAT attempt, before the survivors' own events."""
+    from tests.test_orchestrator import (
+        THREE_MODELS, _build_pass_mock, _ensemble_payloads)
+    import config
+
+    monkeypatch.setattr(config, "ENSEMBLE_MODELS", THREE_MODELS)
+    payloads = _ensemble_payloads(["Survivor A text.", "Survivor C text."])
+    inner = _build_pass_mock([], payloads)
+
+    def side_effect(*, pass_input, model, pass_id, provider_name="ANTHROPIC", **kwargs):
+        if pass_id == "Pass 1" and model == "gpt-5.1":
+            raise RuntimeError("down")
+        return inner(pass_input=pass_input, model=model, pass_id=pass_id,
+                     provider_name=provider_name, **kwargs)
+
+    mocker.patch.object(RunAgentLoop, "stream_deep_research_mode",
+                        side_effect=pass_stream(side_effect))
+
+    events = list(orchestrator.stream_deep_research_pipeline(
+        user_query="test", model="main-model", provider_name="ANTHROPIC",
+        ensemble_mode=True))
+
+    completions = _pass_complete_events(events)
+    # Three attempts started, so three must resolve -- the middle one as
+    # a failure, the survivors as successes, in run order.
+    p1 = [(ok, text) for pid, ok, text in completions if pid == "Pass 1"]
+    assert len(p1) == 3, "three attempts started, so three must resolve"
+    assert p1[0][0] is True and p1[0][1] is None
+    assert p1[1][0] is False
+    assert p1[1][1] and "RuntimeError" in p1[1][1], \
+        "the event carries a short reason; the trace carries the full one"
+    assert p1[2][0] is True and p1[2][1] is None
+
+
+def test_a_fatal_pass_reports_itself_before_the_exception_propagates(mocker):
+    """E14's uniform half. The exception still propagates unchanged
+    (events.py's error-handling contract) -- but it does so AFTER the
+    ok=False event, so no consumer is left holding a running row while
+    the run dies around it."""
+    from tests.conftest import make_model_response
+
+    payloads = _clean_pipeline_payloads()
+
+    def exploding_stream(*, pass_input, model, pass_id,
+                         provider_name="ANTHROPIC", **kwargs):
+        if pass_id == "Pass 3c":
+            raise RuntimeError("provider socket died")
+        return make_model_response(text=payloads[pass_id])
+
+    mocker.patch.object(RunAgentLoop, "stream_deep_research_mode",
+                        side_effect=pass_stream(exploding_stream))
+
+    collected = []
+    with pytest.raises(RuntimeError, match="socket"):
+        gen = orchestrator.stream_deep_research_pipeline(
+            user_query="q", model="m", provider_name="ANTHROPIC")
+        for e in gen:
+            collected.append(e)
+
+    failures = [(pid, ok) for pid, ok, _ in _pass_complete_events(collected)
+                if ok is False]
+    assert failures == [("Pass 3c", False)], (
+        "the dying pass reported ok=False before its exception escaped"
+    )
