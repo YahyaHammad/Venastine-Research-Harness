@@ -2990,9 +2990,14 @@ Audit unit 7's six remaining findings: **#60, #61, #62, #63, #64, #65**, on
 
 | id | decision |
 |---|---|
+| **F1** | **The acknowledgement discloses its security posture** (#60): `AUTO-APPROVED` line, `working directory`, `disabled` marker, env **key names only** — values never reach the terminal. Display-only by construction: `entry_digest` hashes the raw entry, never the prompt text, so no wording change can re-ask anyone; F3's bump is the one deliberate re-consent |
+| **F2** | **Verbose ack via `VENASTINE_MCP_ACK_FULL=1`**, read at call time: appends the entry verbatim for debugging/audits. An env var deliberately, not a `settings.json` key — settings.json's precedence lets project tier beat user tier, and repo content must not be able to style a consent screen |
+| **F3** | **The known-servers store is versioned; v2 re-asks once.** v1 consents were given under a prompt that omitted `autoApprove`, so they were blind and do not survive the bump: a legacy store reads as unknown-everything, `remember_server` starts from an empty mapping when legacy (a sibling's answer must never convert an unasked server), and the first acknowledgement persists the store as v2 |
+| **F4** | **The auto-approve notice is a WARNING, not INFO.** On the TUI path stderr is closed and TranscriptLogHandler forwards WARNING+, so at INFO this reached nothing but app.log — the shell where approval prompts are modals was the one never told some tools would not prompt. Fires every launch per auto-approved server, deliberately |
 | **F5** | **SSE only by explicit `"type": "sse"`** (#62). `sse` left the streamable alias set: D4 promises SSE, SDK v2 ships `sse_client`, and aliasing it is how an SSE-only server got offered a streamable handshake it could not answer. A bare `url` keeps meaning streamable — that is what every pre-existing config assumed, and URL sniffing would be magic. The aliases (`http`, `https`, `streamable-http`, `streamablehttp`) are unchanged. An unsupported declared type still refuses with a named error (M7's fall-through stays pinned shut) |
 | **F6** | **Teardown has ONE shared wall-clock budget** (#64): polite close, force-cancel and thread join share a single deadline instead of three sequential 15s waits (~45s worst case, paid by Ctrl+C too). Servers still alive at expiry are NAMED in a WARNING |
 | **F7** | **`unregister_all` is wired into teardown** (#65): `teardown_mcp` calls it after `disconnect_all()`, so ARCHITECTURE.md's "disconnect handling" justification describes something that exists. Runtime `/mcp` management is recorded as a candidate future section, deliberately not built here |
+| **F8** | **The tool catalogue is cached at connect** (#63): the manager keeps the `list_tools()` result it already gathered inside the per-server timeout window, and registration serves from it. MCP's one timeout-less bridge call disappears; a miss falls back to fetching |
 
 ## Open Questions — None Remaining
 

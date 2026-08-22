@@ -204,6 +204,128 @@ def test_describe_renders_sse_as_its_own_protocol(roots):
 
 
 # ---------------------------------------------------------------------------
+# ---- describe() discloses the security posture (#60, F1/F2) --------------
+# ---------------------------------------------------------------------------
+
+def test_describe_names_auto_approve_the_field_that_removes_every_future_prompt(roots):
+    """#60's core: two entries differing only in autoApprove produced
+    byte-identical prompts, so the flag that decides whether the user is
+    ever asked again was invisible at the only moment they were asked."""
+    _write(roots["user"] / "mcp.json", {
+        "gated": {"command": "npx"},
+        "open": {"command": "npx", "autoApprove": True},
+    })
+    cfgs = mcp_config.load_server_configs(str(roots["project"]), trusted=False)
+    assert "AUTO-APPROVED" in cfgs["open"].describe()
+    assert "AUTO-APPROVED" not in cfgs["gated"].describe()
+
+
+def test_describe_shows_cwd_disabled_and_env_key_names(roots):
+    _write(roots["user"] / "mcp.json", {"s": {
+        "command": "./server.sh", "cwd": "/tmp/elsewhere",
+        "disabled": True,
+        "env": {"GITHUB_TOKEN": "value-must-not-appear", "NVD_API_KEY": "x"},
+    }})
+    described = mcp_config.load_server_configs(
+        str(roots["project"]), trusted=False)["s"].describe()
+    assert "/tmp/elsewhere" in described
+    assert "disabled" in described
+    # Keys yes -- the credential surface is itself consent-relevant.
+    assert "GITHUB_TOKEN" in described and "NVD_API_KEY" in described
+    # Values never. Printing them would put a credential on the terminal.
+    assert "value-must-not-appear" not in described
+
+
+def test_venastine_mcp_ack_full_appends_the_raw_entry_verbatim(roots, monkeypatch):
+    entry = {"command": "./server.sh", "env": {"K": "v"}}
+    _write(roots["user"] / "mcp.json", {"s": dict(entry)})
+    cfg = mcp_config.load_server_configs(
+        str(roots["project"]), trusted=False)["s"]
+
+    terse = cfg.describe()
+    assert '"command"' not in terse
+
+    monkeypatch.setenv("VENASTINE_MCP_ACK_FULL", "1")
+    verbose = cfg.describe()
+    assert '"command"' in verbose and "./server.sh" in verbose
+
+    monkeypatch.setenv("VENASTINE_MCP_ACK_FULL", "0")
+    assert '"command"' not in cfg.describe(), (
+        "any value other than 1 must stay terse")
+
+
+def test_improving_describe_alone_never_reasks_an_acknowledged_server(roots, monkeypatch):
+    """F1's load-bearing half: the disclosure lives in prompt TEXT while
+    the digest hashes the raw ENTRY. If text fed the digest, this batch
+    would re-ask everyone on every wording tweak; F3's version bump is
+    the ONE deliberate re-consent, nothing else is."""
+    _write(roots["user"] / "mcp.json", {"x": {"command": "a"}})
+    cfg = mcp_config.load_server_configs(str(roots["project"]), trusted=False)["x"]
+    mcp_config.remember_server(cfg)
+
+    monkeypatch.setattr(mcp_config.ServerConfig, "describe",
+                        lambda self: "COMPLETELY DIFFERENT WORDING")
+    assert mcp_config.is_known(cfg) is True
+
+
+# ---------------------------------------------------------------------------
+# ---- the acknowledgement store's format bump (#60, F3) -------------------
+# ---------------------------------------------------------------------------
+
+def _remember_v1(path, name, digest):
+    """Write a legacy (v1) store: a bare {name: digest} mapping."""
+    path.write_text(json.dumps({name: digest}), encoding="utf-8")
+
+
+def test_a_legacy_store_reasks_every_server_exactly_once(roots):
+    """v1 consents were given under a prompt that never named autoApprove
+    -- the one field deciding whether any future prompt exists -- so they
+    were given BLIND. They do not survive the bump: one re-ask each,
+    under the disclosure that names it."""
+    _write(roots["user"] / "mcp.json", {"x": {"command": "a"}})
+    cfg = mcp_config.load_server_configs(
+        str(roots["project"]), trusted=False)["x"]
+    _remember_v1(roots["user"] / "known_mcp_servers.json", "x",
+                 mcp_config.entry_digest(cfg))
+
+    assert mcp_config.is_known(cfg) is False
+
+    mcp_config.remember_server(cfg)
+    assert mcp_config.is_known(cfg) is True
+
+    raw = json.loads((roots["user"] / "known_mcp_servers.json").read_text())
+    assert raw.get("version") == 2 and set(raw) == {"version", "servers"}
+    # And the second launch asks nobody.
+    assert mcp_config.is_known(cfg) is True
+
+
+def test_acknowledging_one_server_does_not_convert_its_unasked_siblings(roots):
+    """The guard that makes the migration safe: remember_server must not
+    carry the legacy digests forward, or answering ONE prompt would
+    silently mark every never-re-asked sibling as disclosed-and-known --
+    the exact blind consent this bump exists to retire."""
+    _write(roots["user"] / "mcp.json", {
+        "a": {"command": "a"},
+        "b": {"command": "b", "autoApprove": True},
+    })
+    cfgs = mcp_config.load_server_configs(str(roots["project"]), trusted=False)
+    store = roots["user"] / "known_mcp_servers.json"
+    _remember_v1(store, "a", mcp_config.entry_digest(cfgs["a"]))
+    _remember_v1(store, "b", mcp_config.entry_digest(cfgs["b"]))
+
+    # Both look unknown under v1.
+    assert mcp_config.is_known(cfgs["a"]) is False
+    assert mcp_config.is_known(cfgs["b"]) is False
+
+    # The user answers for `a` only.
+    mcp_config.remember_server(cfgs["a"])
+
+    assert mcp_config.is_known(cfgs["a"]) is True
+    assert mcp_config.is_known(cfgs["b"]) is False, (
+        "a blind autoApprove consent was converted by a sibling's answer")
+
+
+# ---------------------------------------------------------------------------
 # ---- first-run acknowledgement (D31) -------------------------------------
 # ---------------------------------------------------------------------------
 

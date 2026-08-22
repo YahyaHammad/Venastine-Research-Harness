@@ -23,6 +23,7 @@ that -- Client, the protocol, the manager task, normalization -- is real.
 
 import asyncio
 import json
+import logging
 import threading
 
 import pytest
@@ -450,6 +451,25 @@ def test_registration_sets_approval_defaults_from_auto_approve(monkeypatch):
         assert permissions.requires_approval("mcp__probe__add", {}) is False
     finally:
         c.disconnect_all()
+
+
+def test_the_auto_approve_notice_is_a_warning_not_info(monkeypatch, caplog):
+    """F4 (#60). At INFO this reached nothing on the TUI path:
+    TranscriptLogHandler forwards WARNING+ and stderr is already closed
+    by then, so the shell where approval prompts are modals was exactly
+    the one never told some tools would not prompt."""
+    srv = _build_server()
+    monkeypatch.setattr(MCPClient, "_transport_for", lambda self, cfg: srv)
+    c = MCPClient({"probe": _cfg(auto_approve=True)})
+    c.connect_all()
+    try:
+        with caplog.at_level("WARNING", logger="mcp_client.registration"):
+            registration.register_all(c, ToolRegistry())
+    finally:
+        c.disconnect_all()
+
+    warnings = [r for r in caplog.records if "auto-approved" in r.message]
+    assert warnings and all(r.levelno == logging.WARNING for r in warnings)
 
 
 def test_unregister_all_is_idempotent_and_clears_approval_defaults(client):

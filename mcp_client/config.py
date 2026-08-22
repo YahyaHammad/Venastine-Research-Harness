@@ -74,15 +74,52 @@ class ServerConfig:
     def describe(self) -> str:
         """One line naming what this server will actually DO -- shown in
         the trust prompt and the first-run warning, where 'informed' has
-        to mean seeing the command, not the server's nickname."""
+        to mean seeing the command, not the server's nickname.
+
+        #60/F1: the fields that change the security posture ride along.
+        `autoApprove` decides whether any later prompt ever exists, so a
+        one-`y` acknowledgement that never named it consented blind to
+        unprompted execution in every future session including all ten
+        headless research passes. Env is disclosed by KEY NAME only --
+        printing values would put a credential on the terminal, which is
+        a different defect. The digest is computed from the raw entry
+        (entry_digest), never from this text, so improving the disclosure
+        cannot by itself re-ask an acknowledged server; F3's store bump
+        is what forces the one re-consent pass.
+
+        VENASTINE_MCP_ACK_FULL=1 (F2) appends the entry verbatim, for
+        debugging and audits. Read at call time, like every other state
+        path in this project: it is operator authority, deliberately not
+        a settings.json key, because settings.json's precedence lets a
+        project tier style a consent screen this flag renders.
+        """
         if self.transport == "stdio":
             argv = " ".join([self.command or ""] + [str(a) for a in self.args])
-            return f"{self.name} [{self.tier}] runs: {argv.strip()}"
-        if self.transport == "http":
-            return f"{self.name} [{self.tier}] connects to: {self.url}"
-        if self.transport == "sse":
-            return f"{self.name} [{self.tier}] connects via SSE to: {self.url}"
-        return f"{self.name} [{self.tier}] UNUSABLE: {self.error}"
+            text = f"{self.name} [{self.tier}] runs: {argv.strip()}"
+        elif self.transport == "http":
+            text = f"{self.name} [{self.tier}] connects to: {self.url}"
+        elif self.transport == "sse":
+            text = f"{self.name} [{self.tier}] connects via SSE to: {self.url}"
+        else:
+            return f"{self.name} [{self.tier}] UNUSABLE: {self.error}"
+
+        notes = []
+        if self.auto_approve:
+            notes.append("AUTO-APPROVED: its tools will run without asking")
+        if self.cwd:
+            notes.append(f"working directory: {self.cwd}")
+        if self.disabled:
+            notes.append("disabled")
+        if self.env:
+            notes.append("env keys: " + ", ".join(sorted(self.env)))
+        lines = [text] + [f"  {n}" for n in notes]
+
+        if os.environ.get("VENASTINE_MCP_ACK_FULL") == "1":
+            rendered = json.dumps(self.raw, indent=2, sort_keys=True,
+                                  default=str)
+            lines.append("  full entry:")
+            lines.extend(f"    {l}" for l in rendered.splitlines())
+        return "\n".join(lines)
 
 
 def user_config_path() -> str:
@@ -260,32 +297,68 @@ def entry_digest(cfg: ServerConfig) -> str:
     ).hexdigest()
 
 
-def load_known_servers() -> dict:
+# v2 (#60/F3): the acknowledgement prompt used to omit autoApprove -- the
+# one field that decides whether any future prompt exists -- so consents
+# recorded under v1 were given blind. The store carries a version; a
+# legacy store's entries are treated as UNKNOWN (one re-ask each, under
+# the improved disclosure) and a blind consent never survives the bump.
+KNOWN_STORE_VERSION = 2
+
+
+def _read_store() -> tuple:
+    """(name -> digest mapping, is_legacy). A missing file is empty and
+    current. An unreadable one fails CLOSED as empty-and-current: every
+    server then looks new and gets re-confirmed, which is the safe
+    direction. A readable store in the OLD flat shape is NOT corrupt --
+    it is valid v1, and comes back marked legacy."""
     path = known_servers_path()
     if not os.path.exists(path):
-        return {}
+        return {}, False
     try:
         with open(path, "r", encoding="utf-8-sig") as f:
             data = json.load(f)
-        return data if isinstance(data, dict) else {}
     except (OSError, ValueError):
-        # An unreadable acknowledgement store must fail CLOSED: returning
-        # {} means every server looks new and gets re-confirmed, which is
-        # the safe direction.
         logger.warning("Could not read %s; re-confirming every user-level "
                        "MCP server.", path)
-        return {}
+        return {}, False
+    if not isinstance(data, dict):
+        logger.warning("%s is not an object; re-confirming every "
+                       "user-level MCP server.", path)
+        return {}, False
+    if data.get("version") == KNOWN_STORE_VERSION \
+            and isinstance(data.get("servers"), dict):
+        return dict(data["servers"]), False
+    return {k: v for k, v in data.items()
+            if isinstance(k, str)}, True
+
+
+def load_known_servers() -> dict:
+    """The acknowledged name -> digest mapping, whatever the version."""
+    return _read_store()[0]
 
 
 def is_known(cfg: ServerConfig, store: Optional[dict] = None) -> bool:
-    store = load_known_servers() if store is None else store
+    if store is None:
+        servers, legacy = _read_store()
+        # F3: a v1 consent was given under a prompt that never named the
+        # field it most needed to name. It does not count.
+        if legacy:
+            return False
+        return servers.get(cfg.name) == entry_digest(cfg)
     return store.get(cfg.name) == entry_digest(cfg)
 
 
 def remember_server(cfg: ServerConfig) -> None:
     path = known_servers_path()
-    store = load_known_servers()
-    store[cfg.name] = entry_digest(cfg)
+    servers, legacy = _read_store()
+    if legacy:
+        # Carrying the old digests forward would silently convert blind
+        # consents into disclosed ones for servers this session never
+        # re-asked. They start over; answering y here records THIS server
+        # only, and the others keep asking until they are answered.
+        servers = {}
+    servers[cfg.name] = entry_digest(cfg)
     os.makedirs(os.path.dirname(path), exist_ok=True)
+    payload = {"version": KNOWN_STORE_VERSION, "servers": servers}
     with open(path, "w", encoding="utf-8") as f:
-        json.dump(store, f, indent=2)
+        json.dump(payload, f, indent=2)
