@@ -69,8 +69,13 @@ def _thread(memory, turns=6, body="x" * 200):
         memory.add_assistant_message(_Resp(f"answer {index} {body}"))
 
 
+# Batch 16 flipped the default strategy to chain (#90), so every test
+# that is ABOUT rederive names it explicitly -- testing a strategy by
+# inheriting whatever the default happens to be is how a default flip
+# silently re-points half a file at the other mechanism.
 OVERRIDES = {"keep_recent_turns": 2, "keep_recent_tokens": 1,
-             "trigger_tokens": 1000, "warning_margin_tokens": 100}
+             "trigger_tokens": 1000, "warning_margin_tokens": 100,
+             "strategy": "rederive"}
 
 
 # ---------------------------------------------------------------------------
@@ -486,6 +491,120 @@ def test_the_compactor_runs_with_no_tools(fake_storage, summaries):
     compaction.compact(memory, "claude-sonnet-5", "ANTHROPIC", overrides=OVERRIDES)
 
     assert calls[0]["context"].allowed_tools == set()
+
+
+# ---------------------------------------------------------------------------
+# ---- M2's automatic fallback and the input gate (#90) -----------------------
+# ---------------------------------------------------------------------------
+
+def test_a_rederive_span_that_outgrows_one_call_forces_chain_and_says_so(
+        fake_storage, summaries, mocker, caplog):
+    """#90's headline path. Three documents promised for two sections that
+    rederivation 'falls back to chain (traced) when the span outgrows a
+    single call'; nothing measured any size. The fallback is built now and
+    VERBOSE: a WARNING names the original strategy, both sizes, and the
+    switch, the checkpoint records what actually ran, and the outcome text
+    tells the user."""
+    memory = ConversationMemory()
+    _thread(memory)
+    calls = summaries("First summary.")
+    compaction.compact(memory, "claude-sonnet-5", "ANTHROPIC",
+                       overrides=OVERRIDES)
+    _thread(memory, turns=3)
+
+    # A budget sized so the FULL rederive span cannot fit but the chained
+    # form (previous summary + short tail) can -- forcing the switch
+    # WITHOUT falling through into truncation, which is a different path
+    # tested separately below.
+    mocker.patch("core.compaction._input_budget", return_value=500)
+    with caplog.at_level("WARNING", logger="core.compaction"):
+        outcome = compaction.compact(memory, "claude-sonnet-5", "ANTHROPIC",
+                                     overrides=OVERRIDES)
+
+    assert outcome["status"] == "folded"
+    assert "chained onto the previous summary" in outcome["text"].lower()
+    warnings = [r.getMessage() for r in caplog.records if "forcing chain" in r.getMessage()]
+    assert warnings and "rederive span" in warnings[0]
+    checkpoint = fake_storage.latest_checkpoint(memory.thread_id)
+    assert checkpoint.strategy == "chain"
+    assert "First summary." in calls[-1]["user_goal"], (
+        "the forced chain actually fed on the previous summary")
+    assert "[Source truncated" not in calls[-1]["user_goal"], (
+        "chain fit -- truncation is a different path, tested below")
+
+
+def test_chain_configured_does_not_claim_a_forced_switch(
+        fake_storage, summaries, mocker, caplog):
+    """The WARNING is about a strategy being OVERRIDDEN. When chain was
+    what the caller asked for, there is nothing to announce -- a warning
+    here would be noise about normal operation."""
+    memory = ConversationMemory()
+    _thread(memory)
+    summaries("S1.")
+    compaction.compact(memory, "claude-sonnet-5", "ANTHROPIC",
+                       overrides={**OVERRIDES, "strategy": "chain"})
+    _thread(memory, turns=3)
+    mocker.patch("core.compaction._input_budget", return_value=10)
+
+    with caplog.at_level("WARNING", logger="core.compaction"):
+        compaction.compact(memory, "claude-sonnet-5", "ANTHROPIC",
+                           overrides={**OVERRIDES, "strategy": "chain"})
+
+    assert not [r for r in caplog.records if "forcing chain" in r.getMessage()]
+
+
+def test_an_oversized_span_with_no_previous_is_truncated_and_says_so_twice(
+        fake_storage, summaries, mocker):
+    """No previous summary to chain onto, and the span outgrows one call:
+    the oldest material is dropped, and the cut is stated TWICE -- to the
+    model in the instruction, so it knows its excerpt is partial, and in
+    the stored summary deterministically (not trusted from model
+    compliance), because the derived view is what every later turn reads.
+    M14's rule applied to inputs."""
+    memory = ConversationMemory()
+    _thread(memory, turns=3, body="x" * 900)
+    calls = summaries("A tiny summary.")
+    mocker.patch("core.compaction._input_budget", return_value=50)
+
+    outcome = compaction.compact(memory, "claude-sonnet-5", "ANTHROPIC",
+                                 overrides=OVERRIDES)
+
+    assert outcome["status"] == "folded"
+    instruction = calls[0]["user_goal"]
+    assert "[Source truncated" in instruction, (
+        "the model must know its excerpt is partial")
+    stored = fake_storage.latest_checkpoint(memory.thread_id).summary_text
+    assert "[Source truncated" in stored, (
+        "the cut rides on the stored summary regardless of model compliance")
+    assert checkpoint_strategy_is(fake_storage, memory, "rederive"), (
+        "with no previous summary there is nothing to force chain ONTO")
+
+
+def checkpoint_strategy_is(fake_storage, memory, expected):
+    return fake_storage.latest_checkpoint(memory.thread_id).strategy == expected
+
+
+def test_a_span_under_the_budget_neither_forces_nor_truncates(
+        fake_storage, summaries, mocker, caplog):
+    """The boundary control: the gate compares strictly greater-than, so a
+    span exactly at budget flows through untouched -- no forced-chain
+    warning, no truncation marker, strategy unchanged."""
+    memory = ConversationMemory()
+    # Three turns: the keep floors (keep_recent_turns=2 in OVERRIDES) must
+    # leave one foldable, or compact() reports blocked before the gate is
+    # ever reached.
+    _thread(memory, turns=3, body="y" * 40)   # ~10 tokens of content
+    summaries("S.")
+    mocker.patch("core.compaction._input_budget", return_value=50)
+
+    with caplog.at_level("WARNING", logger="core.compaction"):
+        outcome = compaction.compact(memory, "claude-sonnet-5", "ANTHROPIC",
+                                     overrides=OVERRIDES)
+
+    assert outcome["status"] == "folded"
+    assert not [r for r in caplog.records if "forcing chain" in r.getMessage()]
+    assert "[Source truncated" not in \
+        fake_storage.latest_checkpoint(memory.thread_id).summary_text
 
 
 # ---------------------------------------------------------------------------

@@ -320,6 +320,22 @@ def pin_measurements(thread_id, last_n: int) -> dict:
     }
 
 
+def _input_budget(model: str) -> int:
+    """One-call INPUT ceiling for a summarizer prompt, in proxy tokens.
+
+    context_limit minus the pipeline backstop margin -- generous by
+    construction, and honest about its weakness (M10): this compares the
+    chars-per-token PROXY against a real window number, which every other
+    comparison in this module refuses to do. The comparison is inherently
+    approximate; what makes it safe is the failure direction. Undershooting
+    the budget costs truncation, which is stated; overshooting it costs an
+    oversized send, which is a provider error mid-compaction on exactly
+    the thread that can least afford one.
+    """
+    return max(1_000, context_limit(model)
+               - config.COMPACTION_PIPELINE_BACKSTOP_TOKENS)
+
+
 def compact(memory, model: str, provider_name: str,
             current_turn_start: Optional[int] = None,
             overrides: Optional[dict] = None,
@@ -411,14 +427,26 @@ def compact(memory, model: str, provider_name: str,
         return {"status": "no-progress", "kind": None,
                 "text": "Nothing new to fold since the last summary."}
 
-    # M2. Re-derive from the archive by default, so exactly one
-    # summarization step always sits between an original message and what
-    # the model sees -- that is what makes an early trigger free in
-    # fidelity terms rather than a tradeoff. Chaining is the configured
-    # alternative and the automatic fallback below.
+    # M2 as amended by batch 16 (#90). Re-derive from the archive by
+    # default WHEN CONFIGURED; chain summarizes the previous summary plus
+    # the tail. Whichever is configured, a span that outgrows one call
+    # falls back to chain (verbose -- see the WARNING below), and one that
+    # outgrows it even chained truncates its oldest material with the
+    # truncation stated twice: to the model in the instruction, and in the
+    # stored summary every later turn reads.
     chaining = settings["strategy"] == "chain" and previous is not None
-    lower = previous.covers_up_to_message_id if chaining else None
-    segment = history_through(memory.thread_id, watermark, after_message_id=lower)
+
+    def _build(chain_mode: bool):
+        lower = previous.covers_up_to_message_id if chain_mode else None
+        seg = history_through(memory.thread_id, watermark,
+                              after_message_id=lower)
+        text = _as_text(seg)
+        if chain_mode:
+            text = ("Summary of everything before this point:\n"
+                    f"{previous.summary_text}\n\n{text}")
+        return seg, text
+
+    segment, segment_text = _build(chaining)
     if not segment and not chaining:
         # Everything newly foldable is pinned (#89). This used to be the
         # one silent no-progress path -- indistinguishable, at every
@@ -434,14 +462,42 @@ def compact(memory, model: str, provider_name: str,
                      "turns accumulate."),
         }
 
-    segment_text = _as_text(segment)
-    if chaining:
-        segment_text = (
-            f"Summary of everything before this point:\n"
-            f"{previous.summary_text}\n\n{segment_text}")
-
     original = len(segment_text)
     target = _target_chars(original, settings["strength"])
+
+    # M2's automatic fallback, built at last after three documents
+    # promised it for two sections. Forced only when there IS a previous
+    # summary to chain onto; VERBOSE because a configured strategy
+    # quietly doing the other thing is exactly what "(traced)" in the
+    # spec was about.
+    budget = _input_budget(model)
+    forced_chain_note = ""
+    if (not chaining and previous is not None
+            and len(segment_text) // CHARS_PER_TOKEN > budget):
+        logger.warning(
+            "Compaction on thread %s: the rederive span is ~%s tokens "
+            "against a %s-token one-call budget; forcing chain onto the "
+            "previous summary.",
+            memory.thread_id, len(segment_text) // CHARS_PER_TOKEN, budget)
+        chaining = True
+        segment, segment_text = _build(True)
+        original = len(segment_text)
+        target = _target_chars(original, settings["strength"])
+        forced_chain_note = (" Chained onto the previous summary because "
+                             "the span outgrew one call.")
+
+    # Still over -- or no previous summary existed to chain onto. Truncate
+    # the OLDEST material (recent turns are the referent-heavy ones) and
+    # state the cut in both places the summary travels.
+    truncation_notice = None
+    if len(segment_text) // CHARS_PER_TOKEN > budget:
+        keep_chars = max(0, budget * CHARS_PER_TOKEN)
+        dropped = len(segment_text) - keep_chars
+        truncation_notice = (
+            f"[Source truncated: the earliest {dropped} characters were "
+            f"not summarized.]")
+        segment_text = f"{truncation_notice}\n{segment_text[-keep_chars:]}"
+        original = len(segment_text)
 
     _compacting = True
     try:
@@ -456,6 +512,13 @@ def compact(memory, model: str, provider_name: str,
         return {"status": "empty-summary", "kind": None,
                 "text": "The compactor returned nothing usable."}
 
+    if truncation_notice is not None:
+        # Deterministic rather than trusted from the model's compliance:
+        # the marker rides on the STORED summary, so the derived view --
+        # and everyone reading it later -- sees the cut even if the model
+        # never mentioned it.
+        summary = f"{summary}\n\n{truncation_notice}"
+
     strategy = "chain" if chaining else "rederive"
     save_checkpoint(memory.thread_id, summary, watermark, strategy)
     memory.apply_checkpoint()
@@ -465,7 +528,8 @@ def compact(memory, model: str, provider_name: str,
     return {
         "status": "folded",
         "kind": "compaction",
-        "text": f"{folded} earlier messages compacted into a summary",
+        "text": f"{folded} earlier messages compacted into a summary"
+                + forced_chain_note,
     }
 
 
@@ -551,6 +615,24 @@ def summarize_thread(thread_id, model: str, provider_name: str,
             "verbatim": True,
         }
 
+    # #90's gate on the second consumer. A thread summary's input is
+    # bounded by NOTHING else -- compact()'s span at least waits for a
+    # threshold -- and T4 documents what tool rows weigh. Reserve room for
+    # the summary this call is meant to PRODUCE, then truncate the oldest
+    # material with the cut stated in the instruction AND in the stored
+    # row, so every referencing thread sees it.
+    budget = max(1_000, _input_budget(model)
+                 - config.SUMMARY_TARGET_CHARS // CHARS_PER_TOKEN)
+    truncation_notice = None
+    if original // CHARS_PER_TOKEN > budget:
+        keep_chars = max(0, budget * CHARS_PER_TOKEN)
+        dropped = len(thread_text) - keep_chars
+        truncation_notice = (
+            f"[Source truncated: the earliest {dropped} characters were "
+            f"not summarized.]")
+        thread_text = f"{truncation_notice}\n{thread_text[-keep_chars:]}"
+        original = len(thread_text)
+
     agent = manager.get(config.COMPACTOR_AGENT)
     if agent is None:
         logger.warning(
@@ -575,6 +657,11 @@ def summarize_thread(thread_id, model: str, provider_name: str,
 
     if summary is None:
         return None
+
+    if truncation_notice is not None:
+        # Same determinism rule as compact(): the marker rides on the
+        # stored row regardless of whether the model mentioned the cut.
+        summary = f"{summary}\n\n{truncation_notice}"
 
     save_thread_summary(thread_id, summary, watermark)
     logger.info("Summarized thread %s: %s chars -> %s.",
