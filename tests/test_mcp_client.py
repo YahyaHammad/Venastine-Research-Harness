@@ -486,6 +486,42 @@ def test_unregister_all_is_idempotent_and_clears_approval_defaults(client):
 
 
 # ---------------------------------------------------------------------------
+# ---- F7 (#65): teardown removes the server's TOOLS, not just its session --
+# ---------------------------------------------------------------------------
+
+def test_teardown_unregisters_what_setup_registered(client):
+    """unregister_all had no production caller: a disconnected server's
+    tools stayed advertised, approval defaults included. teardown_mcp is
+    now that caller -- ARCHITECTURE.md's 'disconnect handling' describes
+    this, and this is what makes it true rather than aspirational."""
+    reg = ToolRegistry()
+    registration.register_all(client, reg)
+    assert "mcp__probe__add" in reg._tools
+
+    from main import teardown_mcp
+    teardown_mcp(client, reg)
+
+    assert "mcp__probe__add" not in reg._tools
+    # Approval policy left with the tool, not as a stale default.
+    assert permissions.requires_approval("mcp__probe__add", {}) is True
+
+
+def test_teardown_is_safe_twice_and_without_a_registry(client):
+    """Both legacy call shapes keep working: teardown_mcp(None) stays a
+    no-op, a registry-less call still disconnects, and a second full
+    teardown over an already-empty mapping is quiet."""
+    reg = ToolRegistry()
+    registration.register_all(client, reg)
+
+    from main import teardown_mcp
+    teardown_mcp(client)          # no registry -- disconnect only
+    teardown_mcp(client, reg)     # second pass: idempotent unregister
+    teardown_mcp(None, reg)       # the setup-failure shape
+
+    assert "mcp__probe__add" not in reg._tools
+
+
+# ---------------------------------------------------------------------------
 # ---- call_tool returns ONE error shape, always (review f6) ---------------
 # ---------------------------------------------------------------------------
 #
