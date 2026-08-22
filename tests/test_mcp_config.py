@@ -236,6 +236,19 @@ def test_describe_shows_cwd_disabled_and_env_key_names(roots):
     assert "value-must-not-appear" not in described
 
 
+def test_describe_shows_header_key_names_for_http_transports(roots):
+    """#60 owner follow-up. Headers are where an http/sse credential
+    actually rides -- and since M19 they are USED, not silently dropped,
+    which makes disclosing their keys more relevant, not less."""
+    _write(roots["user"] / "mcp.json",
+           {"r": {"type": "sse", "url": "https://example.test/sse",
+                  "headers": {"Authorization": "Bearer sekrit-value"}}})
+    described = mcp_config.load_server_configs(
+        str(roots["project"]), trusted=False)["r"].describe()
+    assert "Authorization" in described
+    assert "sekrit-value" not in described
+
+
 def test_venastine_mcp_ack_full_appends_the_raw_entry_verbatim(roots, monkeypatch):
     entry = {"command": "./server.sh", "env": {"K": "v"}}
     _write(roots["user"] / "mcp.json", {"s": dict(entry)})

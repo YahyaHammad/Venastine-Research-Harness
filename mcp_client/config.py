@@ -112,6 +112,11 @@ class ServerConfig:
             notes.append("disabled")
         if self.env:
             notes.append("env keys: " + ", ".join(sorted(self.env)))
+        if self.headers:
+            # Same class of surface as env keys, and MORE live since M19
+            # stopped discarding them: Authorization is where an http/sse
+            # server's credential actually rides (#60 owner follow-up).
+            notes.append("header keys: " + ", ".join(sorted(self.headers)))
         lines = [text] + [f"  {n}" for n in notes]
 
         if os.environ.get("VENASTINE_MCP_ACK_FULL") == "1":
