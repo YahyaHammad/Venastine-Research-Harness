@@ -1214,6 +1214,95 @@ def test_the_trace_maps_a_candidate_number_to_the_model_that_produced_it(
     )
 
 
+def test_pass_3b_sees_every_survivor_under_the_labels_pass2_used(monkeypatch, mocker):
+    """E13/#77's input half. The claims were extracted from the UNION of
+    the candidates, so the critic must see every surviving candidate
+    under Pass 2's labels -- a claim only candidate 2 asserted has to be
+    checkable against text that actually contains it, and contradictions
+    ACROSS candidates have to be findable at all.
+
+    Handing Pass 3b bare `raw_response` asked an ill-posed question:
+    'does any claim conflict elsewhere in the response', where much of
+    its input did not come from that response. Same roster and same
+    failing middle candidate as the E11 tests, because survivor labels
+    are exactly what the old shape got wrong."""
+    monkeypatch.setattr(config, "ENSEMBLE_MODELS", THREE_MODELS)
+    payloads = _ensemble_payloads(["Candidate A text.", "Candidate C text."])
+    inner = _build_pass_mock([], payloads)
+    pass3b_inputs = []
+
+    def side_effect(*, pass_input, model, pass_id, provider_name="ANTHROPIC", **kwargs):
+        if pass_id == "Pass 1" and model == "gpt-5.1":
+            raise RuntimeError("down")
+        if pass_id == "Pass 3b":
+            pass3b_inputs.append(pass_input)
+        return inner(pass_input=pass_input, model=model, pass_id=pass_id,
+                     provider_name=provider_name, **kwargs)
+
+    mocker.patch.object(RunAgentLoop, "stream_deep_research_mode",
+                        side_effect=pass_stream(side_effect))
+
+    run_deep_research_pipeline(
+        user_query="test", model="main-model", provider_name="ANTHROPIC",
+        ensemble_mode=True,
+    )
+
+    body = pass3b_inputs[0]
+    assert "Candidate 1:\nCandidate A text." in body
+    assert "Candidate 2:\nCandidate C text." in body, (
+        "the critic sees the survivors under the SAME labels Pass 2 used"
+    )
+    assert "Candidate A text." not in body.split("Factual claims")[0].replace(
+        "Candidate 1:\nCandidate A text.", ""), (
+        "no stray unlabelled copy of a candidate text may precede the blocks"
+    )
+    assert "gpt-5.1" not in body and "middle candidate" not in body
+    assert "Factual claims with grounding:" in body
+
+
+def test_pass_3b_keeps_the_single_candidate_shape_outside_ensemble(mocker):
+    """The ensemble branch gates on two or more SURVIVORS, so every
+    ordinary -- and every degraded -- run keeps the historical
+    'Raw response:' input byte for byte. Pinned so a future edit cannot
+    quietly relabel the default path."""
+    payloads = {
+        "Pass 0": json.dumps({"key_entities_or_subjects": ["x"], "outline": ["p"]}),
+        "Pass 1": ["One plain response."],
+        "Pass 2": json.dumps([
+            {"id": "C1", "text": "Claim A.", "type": "factual",
+             "entities": ["A"], "source_span": ""},
+        ]),
+        "Pass 3a": json.dumps([
+            {"claim_id": "C1", "sources": [], "status": "grounded"},
+        ]),
+        "Pass 3b": json.dumps([
+            {"claim_id": "C1", "fallacies": [], "contradictions": [], "severity": 0.0},
+        ]),
+        "Pass 3c": json.dumps({"coverage_score": 0.9, "gaps": []}),
+        "Pass 5": json.dumps({"per_claim_flags": {}}),
+        "Pass 6b": json.dumps({}),
+        "Final synthesis": "Report.",
+    }
+    inner = _build_pass_mock([], payloads)
+    pass3b_inputs = []
+
+    def side_effect(*, pass_input, model, pass_id, provider_name="ANTHROPIC", **kwargs):
+        if pass_id == "Pass 3b":
+            pass3b_inputs.append(pass_input)
+        return inner(pass_input=pass_input, model=model, pass_id=pass_id,
+                     provider_name=provider_name, **kwargs)
+
+    mocker.patch.object(RunAgentLoop, "stream_deep_research_mode",
+                        side_effect=pass_stream(side_effect))
+
+    run_deep_research_pipeline(user_query="test", model="main-model",
+                               provider_name="ANTHROPIC")
+
+    assert pass3b_inputs[0].startswith("Raw response:\nOne plain response."), (
+        "outside ensemble mode the critic input keeps its historical shape"
+    )
+
+
 def test_one_surviving_candidate_scores_without_a_penalty(monkeypatch, mocker):
     """E7's second half. One candidate is not an ensemble of one: scoring it
     that way gives every claim consistency 1.0 and a zero penalty, reporting

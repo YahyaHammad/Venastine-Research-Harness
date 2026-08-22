@@ -1021,10 +1021,26 @@ def stream_deep_research_pipeline(
             grounded = _apply_grounding(run.claims, grounding_json)
             yield from progress.checkpoint(f"Pass 3a: grounded {grounded} of {len(factual_claims)} factual claim(s), across {len(unique_entities)} deduplicated entities.")
 
-            pass3b_input = (
-                f"Raw response:\n{run.raw_response}\n\n"
-                f"Factual claims with grounding:\n{json.dumps([vars(c) for c in factual_claims])}"
-            )
+            # E13/#77. Two or more survivors: the claims were extracted
+            # from the UNION of the candidates, so the critic sees every
+            # candidate under the labels Pass 2 used -- a claim only
+            # candidate 3 asserted is checked against text that actually
+            # contains it, and contradictions ACROSS candidates are
+            # findable. Handing it bare `raw_response` (candidate 1)
+            # asked an ill-posed question: find conflicts within a text
+            # much of your input did not come from.
+            if len(run.candidates) >= 2:
+                pass3b_input = (
+                    "\n\n".join(
+                        f"Candidate {entry['candidate']}:\n{entry['text']}"
+                        for entry in run.candidates)
+                    + f"\n\nFactual claims with grounding:\n{json.dumps([vars(c) for c in factual_claims])}"
+                )
+            else:
+                pass3b_input = (
+                    f"Raw response:\n{run.raw_response}\n\n"
+                    f"Factual claims with grounding:\n{json.dumps([vars(c) for c in factual_claims])}"
+                )
             critic_json = _parse_json_response((yield from _run_pass_with_json_retry("Pass 3b", pass3b_input, critic_model, critic_provider, run.trace, authorization=authorization, pass_threads=run.pass_threads, claim_ids=[c.id for c in run.claims])))
             critiqued = _apply_critic(run.claims, critic_json)
             yield from progress.checkpoint(f"Pass 3b: critique applied to {critiqued} of {len(factual_claims)} factual claim(s).")
