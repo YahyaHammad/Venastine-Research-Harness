@@ -478,6 +478,64 @@ def test_an_unchanged_watermark_is_refused(real_storage, compactor):
         memory.thread_id).summary_text == "First."
 
 
+def test_a_first_compaction_refuses_a_watermark_from_another_thread(
+        real_storage, compactor, caplog):
+    """>#27. `advances()` used to return True unconditionally when the
+    thread had no checkpoint yet -- which is the ONLY compaction most
+    threads ever get, and the one moment nothing else stands between a
+    foreign id and the live watermark row. With current=None there was no
+    ordering comparison to fail, so an id from another thread (or from
+    nowhere) became this thread's checkpoint and `_split_at` resolved it
+    to 0: the derived view grew instead of shrinking, silently."""
+    import uuid as uuid_mod
+
+    from core.memory import ConversationMemory
+
+    memory = ConversationMemory()
+    _add_turns(memory, 6, "first")
+    rows = real_storage._ordered_rows(memory.thread_id)
+
+    other = ConversationMemory()
+    _add_turns(other, 2, "other")
+    other_rows = real_storage._ordered_rows(other.thread_id)
+    assert other_rows[0]["id"] != rows[0]["id"]
+
+    with caplog.at_level("WARNING"):
+        returned_foreign = real_storage.save_checkpoint(
+            memory.thread_id, "Foreign.", other_rows[0]["id"])
+        returned_missing = real_storage.save_checkpoint(
+            memory.thread_id, "Missing.", uuid_mod.uuid4())
+
+    assert returned_foreign is None and returned_missing is None
+    assert real_storage.latest_checkpoint(memory.thread_id) is None
+    assert "does not advance" in caplog.text
+
+    # The honest first compaction still works.
+    good = real_storage.save_checkpoint(
+        memory.thread_id, "Good.", rows[7]["id"])
+    assert real_storage.latest_checkpoint(
+        memory.thread_id).covers_up_to_message_id == rows[7]["id"]
+    assert good is not None
+
+
+def test_advances_containment_holds_before_any_checkpoint(real_storage):
+    """The unit-level half of #27, on both sides of the line: a real row
+    of THIS thread advances from nothing; a foreign row does not. The old
+    early return made the second call True without ever looking."""
+    from core.memory import ConversationMemory
+
+    memory = ConversationMemory()
+    _add_turns(memory, 3, "x")
+    own = real_storage._ordered_rows(memory.thread_id)[2]["id"]
+
+    other = ConversationMemory()
+    _add_turns(other, 1, "y")
+    foreign = real_storage._ordered_rows(other.thread_id)[0]["id"]
+
+    assert real_storage.advances(memory.thread_id, None, own) is True
+    assert real_storage.advances(memory.thread_id, None, foreign) is False
+
+
 def test_no_new_turns_means_no_model_call(real_storage, compactor):
     """The caller-side half. save_checkpoint would refuse the write anyway,
     but the model call happens BEFORE that -- so without this check a

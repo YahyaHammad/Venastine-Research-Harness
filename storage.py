@@ -578,18 +578,22 @@ def _current_watermark(thread_id: UUID) -> Optional[UUID]:
 
 
 def advances(thread_id: UUID, current: Optional[UUID], proposed: UUID) -> bool:
-    """Is `proposed` strictly later in the thread than `current`?
+    """Is `proposed` strictly later in this thread than `current`?
 
     The ordering test behind §21's one real monotonic invariant: a
-    compaction watermark only ever moves FORWARD. `current` of None (no
-    checkpoint yet) means any real position advances.
+    compaction watermark only ever moves FORWARD, and -- #27's half --
+    it must name a row THIS THREAD actually has. `current` of None
+    (no checkpoint yet) skips the ordering comparison but not the
+    containment one: a watermark we cannot place is one we must not
+    write, and "first compaction" is exactly when nothing else would
+    catch a foreign id.
 
     A `proposed` this thread does not contain returns False -- the safe
     direction, since a watermark we cannot place is one we must not write.
     """
-    if current is None:
-        return True
     rows = _ordered_rows(thread_id)
+    if current is None:
+        return _split_at(rows, proposed) > 0
     return _split_at(rows, proposed) > _split_at(rows, current) > 0
 
 
