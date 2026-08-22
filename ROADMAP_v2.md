@@ -81,7 +81,7 @@ Pass 1 are graded `S1` (worst) to `S4`, and `ROADMAP_v2.md` cites those grades i
 §30–§35. A bare `S1` in a section written *about* the audit is a severity; a bare
 `S1` anywhere else is the decision above. See the namespace list in `AGENTS.md`.
 
-### Decisions record — E1–E12 (ensemble mode, ROADMAP.md §10's revisit)
+### Decisions record — E1–E14 (ensemble mode, ROADMAP.md §10's revisit)
 
 Ensemble mode is §10's subject and its revisit note lives in `ROADMAP.md`, but its
 decisions are cited from `config.py` and four files under `core/reasoning/`, so
@@ -101,6 +101,16 @@ they belong in the record with everything else rather than in a note about a not
 | E10 | `score_claim` rounds once, then uses that value for both the tier and the breakdown. |
 | E11 | Candidate labels follow the **survivors**, never roster position. |
 | E12 | No new `Claim` field, no new `PipelineRun` field, no schema change. The denominator goes in the existing `score_breakdown` (§20's precedent, which put tier overrides there to avoid migrating every `vars(c)` site); the roster goes in `run.trace`. |
+
+**E13–E14 (batch 19, #77/#115 — the record and the display catch up with E1–E12).**
+E12's "no new field" was about *scoring*; audit #77 showed the run's record could not
+substantiate its own consistency numbers, and #115 that a skipped candidate left a
+sidebar row running forever.
+
+| # | Decision |
+|---|---|
+| E13 | The record keeps every surviving candidate. `PipelineRun.candidates: list[dict]`, one entry per survivor (`candidate`/`provider_name`/`model`/`chars`/`text`); `text` is in-memory only, stripped at persistence into a metadata-only `candidates_json` column (full texts live in `01_candidate_N.md` artifacts and each candidate's own pass thread). With two or more survivors, Pass 3b receives ALL candidates under Pass 2's labels — the claims came from their union, so the critic sees the texts its input came from — and the artifact set is per-candidate numbered to match the trace and `asserted_by_candidates`; a degraded single survivor keeps the historical `01_raw_response.md` byte for byte. |
+| E14 | A pass failure is reported as `pass_complete(ok=False)` — payload-carried outcome, matching `tool_result` — never a new kind. Both `_run_pass` and `_run_pass_with_json_retry` emit it before re-raising (uniform: fatal passes report too), explicit `ok=True` at every success site, and the widget's `pass_completed(pass_id, *, ok)` makes the answer REQUIRED so a future caller cannot tick a failed row done. Display contract: panel-only — the failure narrative already travels as the trace line, and no shell prints it twice. |
 
 ### Decisions record — C1–C10 (Revision 1's review conflicts)
 

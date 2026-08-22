@@ -1152,10 +1152,11 @@ def test_candidate_labels_follow_survivors_not_roster_positions(monkeypatch, moc
 def test_the_trace_maps_a_candidate_number_to_the_model_that_produced_it(
         monkeypatch, mocker):
     """Audit #79 item 3. `Pass 1: ensemble candidate N generated on X.` is
-    the ONLY record anywhere of what a candidate number means -- no
-    PipelineRun field holds candidates 2..N, and `01_raw_response.md` is
-    candidate 1 alone (#77) -- and mutating it to print ROSTER position
-    left the whole suite green.
+    the trace's half of the candidate-number -> model mapping -- batch 19
+    (#77/E13) added the record's other halves (`run.candidates`, the
+    per-candidate artifacts), and this pairing test predates them: it
+    caught a roster-position mutation that once left the whole suite
+    green, when the trace was the ONLY place the mapping lived.
 
     The test above cannot catch that: it asserts on the labels Pass 2
     RECEIVES. E11 is a pairing between two numbering schemes, and half of
@@ -1212,6 +1213,13 @@ def test_the_trace_maps_a_candidate_number_to_the_model_that_produced_it(
         "seen that model's text under the same number, or a stored "
         "asserted_by_candidates points at the wrong model"
     )
+    # E13: the persisted record carries the mapping too -- one metadata
+    # entry per survivor, numbered identically to the trace lines above.
+    assert [(c["candidate"], c["provider_name"], c["model"])
+            for c in run.candidates] == [
+        (1, "ANTHROPIC", "claude-opus-5"),
+        (2, "GOOGLE", "gemini-2.5-pro"),
+    ]
 
 
 def test_pass_3b_sees_every_survivor_under_the_labels_pass2_used(monkeypatch, mocker):
