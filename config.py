@@ -210,6 +210,16 @@ INIT_TOKEN_BUDGET = 1_000_000
 # an unbounded number of small reads inside a large budget.
 INIT_MAX_STEPS = 12
 
+# --- MCP teardown (ROADMAP_v2 §37 F6, #64) ---
+# ONE shared wall-clock budget for the whole goodbye -- polite close,
+# force-cancel, loop-thread join -- replacing three sequential 15-second
+# waits whose worst case hung a quitting harness for ~45s, Ctrl+C
+# included. Servers still alive when the budget expires are named in a
+# WARNING; their child processes may outlive this session. The value
+# lives with the other harness bounds and is re-exported by
+# mcp_client/client.py beside its sibling timeouts.
+TEARDOWN_BUDGET_S = 10.0
+
 # --- Shell / sandbox (ROADMAP §7) ---
 SHELL_BINARY = os.environ.get("AGENT_SHELL", "")  # auto-detect if empty
 ALLOW_INSECURE_SANDBOX_FALLBACK = False  # explicitly enable subprocess fallback

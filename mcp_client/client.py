@@ -42,8 +42,10 @@ import asyncio
 import contextlib
 import logging
 import threading
+import time
 from typing import Optional
 
+import config as _harness_config
 from mcp import Client
 from mcp.client.sse import sse_client
 from mcp.client.stdio import StdioServerParameters, stdio_client
@@ -59,6 +61,14 @@ logger = logging.getLogger(__name__)
 DEFAULT_CALL_TIMEOUT_S = 180.0
 CONNECT_TIMEOUT_S = 60.0
 SHUTDOWN_TIMEOUT_S = 15.0
+
+# F6 (#64): the WHOLE teardown -- polite close, force-cancel, loop-thread
+# join -- shares this one wall-clock budget, instead of three sequential
+# SHUTDOWN_TIMEOUT_S waits whose worst case hung a quitting harness ~45s.
+# Master value lives in config.py beside the other harness bounds; the
+# re-export here keeps it beside its sibling timeouts and gives tests a
+# single name to shrink.
+TEARDOWN_BUDGET_S = _harness_config.TEARDOWN_BUDGET_S
 
 # Per-server, inside the manager. CONNECT_TIMEOUT_S is the caller-side
 # budget for ALL servers together; without a per-server bound one hung
@@ -79,6 +89,38 @@ SERVER_CONNECT_TIMEOUT_S = 20.0
 # (including the timeout) is coming at all.
 _TIMEOUT_MARGIN_S = 5.0
 
+class _TrackClose:
+    """Records that one server's session closed cleanly, so a teardown
+    that runs out of budget can NAME which server ignored the shutdown
+    request instead of reporting an anonymous hang (F6).
+
+    Recorded only on an unexceptional exit: a session whose __aexit__
+    raised, or was interrupted by the force-cancel, did not demonstrably
+    close -- and "we stopped waiting for it" is exactly what the
+    straggler line means. Attribute access forwards to the real client,
+    so list_tools()/call_tool() never notice the wrapper.
+    """
+
+    def __init__(self, inner, name: str, closed: set):
+        self._inner = inner
+        self._name = name
+        self._closed = closed
+
+    async def __aenter__(self):
+        return await self._inner.__aenter__()
+
+    async def __aexit__(self, *exc):
+        try:
+            result = await self._inner.__aexit__(*exc)
+        except BaseException:
+            raise
+        self._closed.add(self._name)
+        return result
+
+    def __getattr__(self, item):
+        return getattr(self._inner, item)
+
+
 _loop: Optional[asyncio.AbstractEventLoop] = None
 _thread: Optional[threading.Thread] = None
 _loop_lock = threading.Lock()
@@ -97,17 +139,17 @@ def _ensure_loop() -> asyncio.AbstractEventLoop:
         return _loop
 
 
-def _shutdown_loop() -> None:
+def _shutdown_loop(join_timeout: float = SHUTDOWN_TIMEOUT_S) -> None:
     global _loop, _thread
     with _loop_lock:
         if _loop is None:
             return
         _loop.call_soon_threadsafe(_loop.stop)
         if _thread is not None:
-            _thread.join(timeout=SHUTDOWN_TIMEOUT_S)
+            _thread.join(timeout=join_timeout)
             if _thread.is_alive():
-                logger.warning("MCP loop thread did not stop within %ss.",
-                               SHUTDOWN_TIMEOUT_S)
+                logger.warning("MCP loop thread did not stop within %.1fs.",
+                               join_timeout)
         _loop = None
         _thread = None
 
@@ -179,6 +221,7 @@ class MCPClient:
         self.server_configs = server_configs
         self.clients: dict = {}
         self.failures: dict = {}      # server name -> why it isn't usable
+        self._closed: set = set()     # servers whose session closed cleanly
         self._ready: Optional[asyncio.Event] = None
         self._shutdown: Optional[asyncio.Event] = None
         self._done: Optional[asyncio.Event] = None
@@ -245,7 +288,9 @@ class MCPClient:
                         # every server after it in this loop.
                         async with asyncio.timeout(SERVER_CONNECT_TIMEOUT_S):
                             client = await stack.enter_async_context(
-                                Client(self._transport_for(cfg))
+                                _TrackClose(
+                                    Client(self._transport_for(cfg)), name,
+                                    self._closed)
                             )
                             # Validation is by connection (§17 decision G):
                             # a server that connects AND lists its tools is
@@ -381,31 +426,57 @@ class MCPClient:
         except Exception as e:
             logger.warning("MCP manager task did not cancel cleanly: %s", e)
 
-    def disconnect_all(self, timeout: float = SHUTDOWN_TIMEOUT_S) -> None:
+    def disconnect_all(self, timeout: float = None) -> None:
         """Close every session and stop the loop thread.
 
         Not tidiness: stdio servers are child processes THIS harness
         spawned. The daemon thread dies at interpreter exit without
         unwinding the stack, and the failure mode is orphaned
         subprocesses accumulating across sessions.
+
+        F6 (#64): `timeout` is ONE budget for everything -- the polite
+        close gets its first slice, force-cancel takes what remains
+        (minus a join reserve), the loop-thread join takes the rest. It
+        used to be three sequential SHUTDOWN_TIMEOUT_S waits, so one
+        wedged server hung a quitting harness ~45s and Ctrl+C paid all
+        of it. Servers that never confirmed a clean close by expiry are
+        named in a WARNING.
         """
+        budget = TEARDOWN_BUDGET_S if timeout is None else timeout
         if self._task is None or _loop is None:
             _shutdown_loop()
             return
+
+        started = time.monotonic()
+
+        def remaining() -> float:
+            return max(0.0, budget - (time.monotonic() - started))
+
         graceful = False
         try:
             async def _stop():
                 self._shutdown.set()
                 await self._done.wait()
-            asyncio.run_coroutine_threadsafe(_stop(), _loop).result(timeout=timeout)
+            asyncio.run_coroutine_threadsafe(_stop(), _loop).result(
+                timeout=max(1.0, budget * 0.6))
             graceful = True
         except Exception as e:
-            logger.warning("MCP shutdown did not complete cleanly: %s", e)
+            logger.warning("MCP shutdown did not complete cleanly within "
+                           "%.1fs of the %.1fs teardown budget: %s",
+                           max(1.0, budget * 0.6), budget, e)
         if not graceful:
             # The stack is still open and the children are still ours.
             # Asking politely didn't work, so cancel -- otherwise this
             # returns having reaped nothing while reporting only a warning.
-            self._cancel_manager(timeout)
+            self._cancel_manager(timeout=max(1.0, remaining() - 1.0))
+
+        stragglers = sorted(set(self.clients) - self._closed)
+        if stragglers:
+            logger.warning(
+                "MCP server(s) %s did not confirm a clean close within the "
+                "%.1fs teardown budget; their child processes may outlive "
+                "this session.", ", ".join(stragglers), budget)
+
         self.clients.clear()
         self._task = None
-        _shutdown_loop()
+        _shutdown_loop(join_timeout=max(0.5, remaining()))

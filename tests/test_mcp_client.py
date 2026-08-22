@@ -610,6 +610,79 @@ def test_per_server_connect_timeout_does_not_starve_the_others(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# ---- F6 (#64): ONE shared teardown budget, stragglers named --------------
+# ---------------------------------------------------------------------------
+
+class _HangsOnCloseForNone:
+    """Real Client for every server but the wedged one, which connects
+    instantly and refuses to die -- a child process whose transport
+    __aexit__ never returns."""
+
+    def __init__(self, transport):
+        self._inner = None if transport is None else Client(transport)
+
+    async def __aenter__(self):
+        if self._inner is None:
+            class _Session:
+                async def list_tools(self):
+                    class T:
+                        tools = []
+                    return T()
+            return _Session()
+        return await self._inner.__aenter__()
+
+    async def __aexit__(self, *exc):
+        if self._inner is not None:
+            return await self._inner.__aexit__(*exc)
+        await asyncio.sleep(3600)
+
+
+def test_a_wedged_server_is_named_and_the_budget_holds(monkeypatch, caplog):
+    import time
+
+    srv = _build_server()
+    monkeypatch.setattr(
+        MCPClient, "_transport_for",
+        lambda self, cfg: None if cfg.name == "wedged" else srv)
+    monkeypatch.setattr("mcp_client.client.Client", _HangsOnCloseForNone)
+    monkeypatch.setattr("mcp_client.client.TEARDOWN_BUDGET_S", 4.0)
+
+    c = MCPClient({"wedged": _cfg("wedged"), "healthy": _cfg("healthy")})
+    c.connect_all(timeout=10.0)
+
+    t0 = time.monotonic()
+    with caplog.at_level("WARNING", logger="mcp_client.client"):
+        c.disconnect_all()
+    elapsed = time.monotonic() - t0
+
+    # SHARED, not sequential: polite close (~2.4s of the 4s budget),
+    # force-cancel and join divide what remains. Three independent 15s
+    # waits -- the old shape -- would have been ~45s here.
+    assert elapsed < 8.0, f"teardown ran {elapsed:.1f}s for a 4s budget"
+    stragglers = [r for r in caplog.records
+                  if "did not confirm a clean close" in r.message]
+    assert stragglers, "the wedged server was not named"
+    assert "wedged" in stragglers[0].getMessage()
+    assert "healthy" not in stragglers[0].getMessage(), (
+        "a server that closed cleanly was reported as a straggler")
+
+
+def test_a_clean_teardown_names_nobody(monkeypatch, caplog):
+    """Control for the straggler line: every session closed cleanly means
+    no warning, on the same code path."""
+    srv = _build_server()
+    monkeypatch.setattr(MCPClient, "_transport_for", lambda self, cfg: srv)
+    c = MCPClient({"probe": _cfg()})
+    c.connect_all()
+
+    with caplog.at_level("WARNING", logger="mcp_client.client"):
+        c.disconnect_all()
+
+    assert not [r for r in caplog.records
+                if "did not confirm a clean close" in r.message]
+
+
+# ---------------------------------------------------------------------------
 # ---- `mcp__<server>__<tool>` is a name, not a parser (review f8) ---------
 # ---------------------------------------------------------------------------
 #
