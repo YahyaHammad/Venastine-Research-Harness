@@ -266,7 +266,8 @@ def test_a_standing_condition_is_reported_once_per_run(mocker, kind):
                      side_effect=RuntimeError("provider down"))
     else:
         mocker.patch("core.compaction.compact",
-                     return_value={"kind": kind, "text": "nothing to fold"})
+                     return_value={"status": "blocked", "kind": kind,
+                                   "text": "nothing to fold"})
     tool_call = make_model_response(
         text="", tool_calls=[{"id": "t1", "name": "get_time", "input": {}}],
         usage={"input_tokens": 10_000_000, "output_tokens": 1})
@@ -277,6 +278,64 @@ def test_a_standing_condition_is_reported_once_per_run(mocker, kind):
     events = _events(_over_threshold(FakeMemory()), max_steps=3)
 
     assert [e.notice["kind"] for e in events if e.notice] == [kind]
+
+
+def test_the_standing_condition_warning_is_also_said_once_per_run(
+        mocker, caplog):
+    """#44, the half the notices could not show. The blocked-compaction
+    WARNING lived inside compact() -- called at the turn boundary AND at
+    every mid-turn valve -- so its NOTICE was deduplicated per run while
+    the identical WARNING fired up to MAX_ITERATIONS + 1 times in one
+    turn. Batch 16 moved both routes under one guard; this pins the log
+    side the way the sibling test above pins the notice side."""
+    mocker.patch("core.compaction.compact",
+                 return_value={"status": "blocked", "kind": "compaction_blocked",
+                               "text": "nothing foldable"})
+    tool_call = make_model_response(
+        text="", tool_calls=[{"id": "t1", "name": "get_time", "input": {}}],
+        usage={"input_tokens": 10_000_000, "output_tokens": 1})
+    mocker.patch("core.loop.call_model_stream",
+                 side_effect=make_stream_sequence(
+                     tool_call, tool_call, make_model_response(text="done")))
+
+    with caplog.at_level("WARNING", logger="core.loop"):
+        events = _events(_over_threshold(FakeMemory()), max_steps=3)
+
+    warnings = [r for r in caplog.records if "cannot proceed" in r.getMessage()]
+    assert len(warnings) == 1, (
+        f"{len(warnings)} standing-condition WARNINGs across three "
+        f"evaluations -- the reader is being trained past it")
+    assert [e.notice["kind"] for e in events if e.notice] == ["compaction_blocked"]
+
+
+def test_a_missing_agent_warns_once_and_names_itself(mocker, caplog):
+    """missing-agent used to warn inside compact() once per evaluation,
+    with no notice at all. It now rides the same once-per-run guard and
+    carries a user-facing line, so the shell can say why nothing folded."""
+    # Reach the agent branch without touching storage: this file runs on
+    # FakeMemory and the fake sqlmodel, neither of which can serve
+    # compactable_span's archive read.
+    import uuid as _uuid
+    mocker.patch("core.compaction.compactable_span",
+                 return_value=_uuid.uuid4())
+    mocker.patch("agents.manager.manager.get", return_value=None)
+    tool_call = make_model_response(
+        text="", tool_calls=[{"id": "t1", "name": "get_time", "input": {}}],
+        usage={"input_tokens": 10_000_000, "output_tokens": 1})
+    mocker.patch("core.loop.call_model_stream",
+                 side_effect=make_stream_sequence(
+                     tool_call, tool_call, make_model_response(text="done")))
+
+    with caplog.at_level("WARNING", logger="core.loop"):
+        response = run_to_completion(RunAgentLoop._run(
+            memory=_over_threshold(FakeMemory()), system_prompt="s",
+            provider_name="ANTHROPIC", model="claude-sonnet-5", context=None,
+            max_steps=3))
+
+    warnings = [r for r in caplog.records if "cannot proceed" in r.getMessage()]
+    assert len(warnings) == 1
+    assert any(n["kind"] == "compaction_blocked" and "compactor" in n["text"]
+               for n in response.notices)
 
 
 def test_a_real_compaction_still_reports_every_time(mocker, compacted):

@@ -201,12 +201,23 @@ class EffortLevelsReady(Message):
 
 class OneShotFinished(Message):
     """A one-shot turn (/grill-me) ran to completion in the CURRENT
-    thread via continue_conversation. Carries the final text, or the
-    exception if it raised."""
+    thread via continue_conversation. Carries the final text, the
+    exception if it raised, and every notice the turn raised.
 
-    def __init__(self, text: str | None, error: BaseException | None = None):
+    The notices are batch 16's #172 fix. continue_conversation drains
+    _run() through run_to_completion(), which discards every non-final
+    event -- so a compaction firing at this turn's boundary reached
+    NEITHER route: no event, and a response field nothing read. §21's
+    "no silent compaction, ever" failed on exactly one path, the one
+    command whose subject is the state of the thread. Carried here so
+    on_one_shot_finished can render them through the SAME branch the
+    streaming path uses."""
+
+    def __init__(self, text: str | None, error: BaseException | None = None,
+                 notices=None):
         self.text = text
         self.error = error
+        self.notices = list(notices or [])
         super().__init__()
 
 
@@ -633,6 +644,7 @@ class VenastineApp(App):
         def work() -> None:
             error = None
             text = None
+            notices = []
             try:
                 response = RunAgentLoop.continue_conversation(
                     thread_id=thread_id,
@@ -643,15 +655,38 @@ class VenastineApp(App):
                     effort=self.effort,
                 )
                 text = response.text
+                notices = list(getattr(response, "notices", ()) or ())
             except BaseException as e:  # noqa: BLE001 — reported, re-raised
                 error = e
-            self.post_message(OneShotFinished(text, error))
+            self.post_message(OneShotFinished(text, error, notices))
             if error is not None:
                 raise error
 
         self.run_worker(
             work, thread=True, exit_on_error=False, name="one-shot",
         )
+
+    def _render_notice(self, notice: dict) -> None:
+        """ONE renderer for a notice dict, on every route that has one.
+
+        Extracted from on_loop_event_message so the one-shot path (#172)
+        drives the same branch instead of growing a second opinion about
+        what a compaction_blocked looks like. The todo panel re-reads
+        thread state here -- the event says when, the thread says what --
+        which is also why callers must have reloaded the memory BEFORE
+        rendering."""
+        transcript = self._transcript
+        if notice["kind"] == "todo_changed":
+            # §23 slice 2 (AC4). PANEL ONLY, no transcript line: the
+            # list changes several times in a turn, and in an
+            # append-only transcript that is a column of near-identical
+            # lines -- §26 made the same call for `pass_activity`.
+            self.refresh_todo_panel()
+        elif notice["kind"] in ("compaction_failed",
+                                "compaction_blocked"):
+            transcript.write_error(f"— {notice['text']} —")
+        else:
+            transcript.write_system(f"— {notice['text']} —")
 
     def on_one_shot_finished(self, message: OneShotFinished) -> None:
         self._busy = False
@@ -675,6 +710,11 @@ class VenastineApp(App):
                 f"Could not reload the thread after the one-shot: {e}. The "
                 f"exchange is saved; this session's next turn may not see "
                 f"it in context.")
+        # BEFORE the answer, because that is when they happened -- and
+        # after the reload above, so refresh_todo_panel reads the state
+        # the turn actually left behind (#172).
+        for notice in message.notices:
+            self._render_notice(notice)
         # write_answer, not write(): a one-shot answer is a model answer,
         # and rendering it as a bare row left it unlabelled, uncoloured,
         # outside the entry log and therefore invisible to /copy.
@@ -707,19 +747,10 @@ class VenastineApp(App):
         if event.notice:
             # ROADMAP_v2 §21's "no silent compaction, ever". Flushed first
             # so the marker lands between messages rather than inside a
-            # half-streamed reply.
+            # half-streamed reply. Rendering lives in _render_notice, the
+            # one branch the one-shot path (#172) drives too.
             transcript.flush_stream()
-            if event.notice["kind"] == "todo_changed":
-                # §23 slice 2 (AC4). PANEL ONLY, no transcript line: the
-                # list changes several times in a turn, and in an
-                # append-only transcript that is a column of near-identical
-                # lines -- §26 made the same call for `pass_activity`.
-                self.refresh_todo_panel()
-            elif event.notice["kind"] in ("compaction_failed",
-                                          "compaction_blocked"):
-                transcript.write_error(f"— {event.notice['text']} —")
-            else:
-                transcript.write_system(f"— {event.notice['text']} —")
+            self._render_notice(event.notice)
 
         if event.permission_request:
             # §23: informational only. The modal is opened by the response
@@ -1771,7 +1802,7 @@ def _cmd_compact(app: VenastineApp, args: str) -> None:
     def _work() -> None:
         from core import compaction
         try:
-            notice = compaction.compact(
+            outcome = compaction.compact(
                 memory, app.model, app.provider_name, overrides=overrides)
         except Exception as e:  # noqa: BLE001 — same containment as the loop's
             app.call_from_thread(
@@ -1779,9 +1810,13 @@ def _cmd_compact(app: VenastineApp, args: str) -> None:
             return
         finally:
             app.call_from_thread(setattr, app, "_busy", False)
-        text = (notice["text"] if notice
-                else "Nothing to compact — every recent turn is protected.")
-        app.call_from_thread(app._transcript.write_system, f"— {text} —")
+        # Batch 16 (#44): compact() reports EVERY outcome as data now --
+        # folded, blocked, all-pinned, missing-agent, no-progress,
+        # reentrant, empty-summary -- each carrying its own line, so a
+        # manual /compact can never answer "nothing happened" for five
+        # different reasons.
+        app.call_from_thread(app._transcript.write_system,
+                             f"— {outcome['text']} —")
 
     app.run_worker(_work, thread=True, exit_on_error=False, name="compact")
 

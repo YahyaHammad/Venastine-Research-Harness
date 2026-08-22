@@ -184,10 +184,18 @@ def _translate(pass_id: str, stream):
                                 to the shell and blocks on the answer. A
                                 second rendering of a question already on
                                 screen is not observability.
-      notice                    compaction notices from a pass. M6 makes
-                                these backstop-only, and they already reach
-                                the shell as WARNING log records.
-    """
+      notice                    a pass's compaction notices, forwarded as
+                                trace LINES. M6 makes these backstop-only,
+                                but "rare" is not "silent" -- §21's rule
+                                has no exception for the pipeline, and a
+                                backstop fold rewrites what the REST of
+                                the pass sees. This used to drop them with
+                                the claim that they "already reach the
+                                shell as WARNING log records", which was
+                                true of blocked and failed compactions and
+                                FALSE of successful ones (INFO only --
+                                audit #172). A trace line lands in
+                                trace.md and both shells print it."""
     names: dict = {}          # tool_call id -> name, since tool_result has none
     streamed = 0
     announced = 0
@@ -210,6 +218,10 @@ def _translate(pass_id: str, stream):
                 announced = streamed
                 yield PipelineEvent(kind="pass_activity", pass_id=pass_id,
                                     chars=streamed)
+        if event.notice:
+            yield PipelineEvent(
+                kind="trace_line",
+                text=f"compaction during {pass_id}: {event.notice['text']}")
         if event.tool_call_start:
             name = event.tool_call_start.get("name")
             names[event.tool_call_start.get("id")] = name

@@ -443,7 +443,7 @@ def test_no_new_turns_means_no_model_call(real_storage, compactor):
                                current_turn_start=memory.completed_turns(),
                                overrides=OVERRIDES)
 
-    assert again is None
+    assert again["status"] == "no-progress"
     assert len(compactor) == spent, "a second compaction spent a call for nothing"
 
 

@@ -407,6 +407,28 @@ def _maybe_compact(memory, model, provider_name, notices, mode):
     generator through run_to_completion() and discard everything that is
     not final. §20 and §25 each shipped that defect once.
 
+    Outcome routing (batch 16, #44). compact() returns a status dict now,
+    and this is where reportability is decided:
+
+      folded         notice every occurrence -- an event, and repeats
+                     legitimately, once per compaction.
+      blocked /
+      all-pinned /
+      missing-agent  STANDING CONDITIONS: notice AND WARNING together,
+                     ONCE PER RUN under the same dedup list. The two
+                     WARNINGs used to live inside compact() and fired on
+                     EVERY evaluation -- up to MAX_ITERATIONS + 1
+                     identical lines per turn on a thread that stays over
+                     trigger and fully floored, which is how a reader
+                     gets trained past the warnings that do not repeat.
+                     Same defect `context_limit()` had before it learned
+                     to warn once per model.
+      no-progress /
+      reentrant /
+      empty-summary  no notice at all: ordinary non-events (nothing new
+                     to fold) or already carried by _summarize's own
+                     per-call warnings.
+
     Failure here is contained. Compaction is a model call, and a provider
     error during it must not take down a turn that was otherwise fine --
     the same call §20 made for its review stage. The thread simply stays
@@ -441,7 +463,7 @@ def _maybe_compact(memory, model, provider_name, notices, mode):
         # turn runs but no new USER row, so the answer is the same
         # whenever it is asked. Asking lazily keeps a storage read off
         # every turn that is nowhere near the threshold.
-        notice = compaction.compact(
+        outcome = compaction.compact(
             memory, model, provider_name,
             current_turn_start=memory.completed_turns())
     except Exception as e:  # noqa: BLE001 -- contained on purpose, see above
@@ -450,9 +472,23 @@ def _maybe_compact(memory, model, provider_name, notices, mode):
             "kind": "compaction_failed",
             "text": f"Could not compact this conversation: {e}",
         }
-    if notice is not None and not _already_said(notices, notice["kind"]):
-        notices.append(notice)
-        yield LoopEvent(notice=notice)
+        if not _already_said(notices, notice["kind"]):
+            notices.append(notice)
+            yield LoopEvent(notice=notice)
+        return
+
+    kind = outcome.get("kind")
+    if kind is None:
+        return
+    if _already_said(notices, kind):
+        return
+    if kind == "compaction_blocked":
+        # See the docstring's standing-condition row: one WARNING per run,
+        # said in the same breath as the one notice, never per evaluation.
+        logger.warning("Compaction cannot proceed on thread %s: %s",
+                       memory.thread_id, outcome["text"])
+    notices.append({"kind": kind, "text": outcome["text"]})
+    yield LoopEvent(notice=notices[-1])
 
 
 def run_to_completion(gen) -> ModelResponse:

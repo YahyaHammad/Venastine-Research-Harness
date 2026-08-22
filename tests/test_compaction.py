@@ -403,13 +403,16 @@ def test_a_summary_still_oversized_after_retries_is_used_anyway(
 
 def test_an_empty_summary_skips_compaction(fake_storage, summaries):
     """Recording an empty checkpoint would replace real history with
-    nothing at all -- the one outcome worse than not compacting."""
+    nothing at all -- the one outcome worse than not compacting. Batch 16
+    (#44) turned the silent None into a named outcome so /compact can say
+    what happened instead of implying nothing was attempted."""
     memory = ConversationMemory()
     _thread(memory)
     summaries("")
 
-    assert compaction.compact(memory, "claude-sonnet-5", "ANTHROPIC",
-                              overrides=OVERRIDES) is None
+    outcome = compaction.compact(memory, "claude-sonnet-5", "ANTHROPIC",
+                                 overrides=OVERRIDES)
+    assert outcome["status"] == "empty-summary"
     assert fake_storage.latest_checkpoint(memory.thread_id) is None
 
 
@@ -427,19 +430,22 @@ def test_a_fully_protected_thread_says_so(fake_storage, summaries):
 
 
 def test_a_missing_compactor_agent_is_a_skip_not_a_crash(
-        fake_storage, summaries, mocker, caplog):
+        fake_storage, summaries, mocker):
     """Same containment §20 applies to a missing reviewer: an optional
-    stage that cannot run must not take the turn down with it."""
+    stage that cannot run must not take the turn down with it. The
+    WARNING moved to core.loop._maybe_compact in batch 16 (#44), which
+    says it once per run instead of once per evaluation -- so this test
+    pins the OUTCOME, and test_loop_compaction.py pins the log."""
     memory = ConversationMemory()
     _thread(memory)
     summaries("unused")
     mocker.patch("agents.manager.manager.get", return_value=None)
 
-    with caplog.at_level("WARNING", logger="core.compaction"):
-        assert compaction.compact(memory, "claude-sonnet-5", "ANTHROPIC",
-                                  overrides=OVERRIDES) is None
+    outcome = compaction.compact(memory, "claude-sonnet-5", "ANTHROPIC",
+                                 overrides=OVERRIDES)
 
-    assert "compactor" in caplog.text
+    assert outcome["status"] == "missing-agent"
+    assert fake_storage.latest_checkpoint(memory.thread_id) is None
 
 
 def test_the_guard_is_released_after_a_compaction(fake_storage, summaries):

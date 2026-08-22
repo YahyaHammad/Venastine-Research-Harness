@@ -1162,6 +1162,43 @@ async def test_grill_me_runs_in_the_current_thread(mocker, tmp_path, fake_storag
     assert continue_conv.call_args.kwargs["thread_id"] == expected
 
 
+@pytest.mark.asyncio
+async def test_a_one_shot_surfaces_the_notices_its_turn_raised(
+        mocker, tmp_path, fake_storage):
+    """#172. continue_conversation drains _run() through
+    run_to_completion(), which discards every non-final event -- so a
+    compaction firing at the one-shot's boundary used to reach NEITHER
+    route: no event, and a response.notices field nothing read. §21's
+    "no silent compaction, ever" failed on exactly the command whose
+    subject is the state of the thread.
+
+    The fix carries response.notices on OneShotFinished and renders them
+    through the SAME branch on_loop_event_message uses. Asserted on the
+    transcript, not on a call count -- the failure this guards against is
+    a display failure."""
+    from core import config_loader
+
+    config_loader.initialize(str(tmp_path))
+    noticed = make_model_response(text="grilled")
+    noticed.notices = [{"kind": "compaction",
+                        "text": "12 earlier messages compacted into a summary"}]
+    mocker.patch("core.loop.RunAgentLoop.continue_conversation",
+                 return_value=noticed)
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        app.query_one("#prompt").value = "/grill-me"
+        await pilot.press("enter")
+
+        assert await settle(pilot, lambda: app._last_response == "grilled"), \
+            "the one-shot never finished"
+
+        rendered = [txt for _role, txt in app._transcript._entries
+                    if "12 earlier" in txt]
+        assert rendered, (
+            "a compaction during /grill-me was silent -- #172's defect")
+
+
 # ===========================================================================
 # ---- #104: a storage failure must not take the shell down ------------------
 # ===========================================================================

@@ -50,7 +50,7 @@ Venastine Research Harness/
 ├── CLAUDE.md / QWEN.md             # pointers to AGENTS.md, so a harness that auto-loads one of those names finds the context instead of a second copy of it
 ├── DEVLOG.md                       # implementation notes for built ROADMAP sections -- see §0
 │
-├── tests/                          # 2165 tests, all offline, ~25-45s depending on the machine (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
+├── tests/                          # 2168 tests, all offline, ~25-45s depending on the machine (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
 │   ├── conftest.py                 # fixtures: make_model_response, make_stream_from_response, make_stream_sequence, FakeStorage, ...
 │   ├── BREAKING_CHANGES.md         # what-breaks-it / symptom / fix per area
 │   ├── test_cli.py                 # 76 tests -- ROADMAP §1 thread_id passthrough + UUID validation + §14 parser defaults/resolution/trust flow + §29 N1-N8 the one stdin reader, N2's channel deadline, every request kind rendered, and the startup block main(argv) made reachable + #102's four declining defaults
@@ -89,7 +89,7 @@ Venastine Research Harness/
 │   ├── test_untrusted_content.py   # 26 tests -- ROADMAP_v2 §32 A8 (#72): the injection defence in one copy reaching both modes, the ten pass prompts pinned byte-identical by digest across the extraction, and the two tails naming different instruction sources for the same rule
 │   ├── test_client_effort.py       # 26 tests -- ROADMAP_v2 §16 effort levels: queried for Anthropic, table fallback, effort_for validation, cache behaviour
 │   ├── test_ensemble_guard.py      # 15 tests -- §10 revisit: refuse an ensemble roster that cannot disagree with itself
-│   ├── test_tui.py                 # 51 tests -- ROADMAP_v2 §16 AC1-AC3 (thread picker, permission round-trip, worker survives a raising tool) + §25 grant picker / attended modal + #106's two axes staying independent + /model's provider/model switch
+│   ├── test_tui.py                 # 52 tests -- ROADMAP_v2 §16 AC1-AC3 (thread picker, permission round-trip, worker survives a raising tool) + §25 grant picker / attended modal + #106's two axes staying independent + /model's provider/model switch + #172's one-shot notices
 │   ├── test_mcp_config.py          # 26 tests -- ROADMAP_v2 §17 mcp.json discovery, tier precedence D29, unknown-key tolerance, strict flag parsing
 │   ├── test_mcp_client.py          # 30 tests -- ROADMAP_v2 §17 bridge, cancel-scope task affinity, v2 field names, normalization, teardown
 │   ├── test_grants.py              # 39 tests -- ROADMAP_v2 §25 R2/R6/R13/R14/R15: grantability, the loop enforcing it, GrantBudget, the audit list, that a grant by name does not answer a subject-carrying question, and that a granted tool is ADVERTISED with no channel (asserted on the wire, since a test that injects the tool call cannot see it)
@@ -106,7 +106,7 @@ Venastine Research Harness/
 │   ├── test_storage_reads.py      # 15 tests -- ROADMAP_v2 §21a the watermark and pinned reads that the derived view is assembled from (M4/M9, AC1/AC2), plus #88's tool-result re-inclusion
 │   ├── test_memory_compaction.py  # 18 tests -- ROADMAP_v2 §21a the derived view (M8/M9) and pin_last's ordinal-to-id mapping
 │   ├── test_compaction.py         # 39 tests -- ROADMAP_v2 §21a the trigger (M1/M6), the three fold floors (M4/M5), the compactor run (M2) and D27's settings validation
-│   ├── test_loop_compaction.py    # 13 tests -- ROADMAP_v2 §21a where the trigger is evaluated (M3) and how notices reach each shell
+│   ├── test_loop_compaction.py    # 15 tests -- ROADMAP_v2 §21a where the trigger is evaluated (M3), how notices reach each shell, and #44's once-per-run WARNING
 │   ├── test_pin_tool.py           # 12 tests -- ROADMAP_v2 §21a D24/D26 declarations, the `memory` injectable, input handling
 │   ├── test_shell_compaction.py   # 17 tests -- ROADMAP_v2 §21a §21's visibility rule at both shells, and /compact
 │   ├── test_storage_e2e.py     # 23 tests -- ROADMAP_v2 §21a review: real ConversationMemory + real storage.py on real SQLite, compacting four times through the loop path. The only test at this level, and it found the shipped M11 defect
