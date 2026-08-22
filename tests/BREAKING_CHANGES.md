@@ -2664,7 +2664,7 @@ Six issues, one subsystem (#60, #61, #62, #63, #64, #65); decisions F1–F8 in
 | Fetch the catalogue again in register_all | `test_registration_never_fetches_the_catalogue_over_the_wire` | MCP's one timeout-less bridge call; the live session is poisoned in the test so any fetch fails loudly |
 | Delete the disabled-skip, register_all's listing guard, future.cancel(), or sort_keys | `test_disabled_servers_are_never_connected`, `test_one_servers_listing_failure_does_not_abort_servers_after_it`, `test_a_timed_out_call_cancels_its_future`, `test_entry_digest_is_stable_under_key_reorder` | M17/M25/M13/M5 — each mutation survived the suite before this batch; each test now dies with its line |
 
-## Batch 18 (in progress) -- persistence and picker
+## Batch 18 -- the eighteenth fix batch: persistence and the picker (2026-08-22)
 
 | Change | Tests that fail if reverted | Why it matters |
 |---|---|---|

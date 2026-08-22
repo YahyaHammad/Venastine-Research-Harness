@@ -40,7 +40,7 @@ python main.py --init --research-project           # §24: skip the type questio
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 2217 tests, offline, ~25-45s by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 2232 tests, offline, ~25-45s by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -369,6 +369,25 @@ Adding a field to a table that is already on disk breaks every existing database
 read time. Additive only — it warns rather than raises on a type mismatch, since
 SQLite's type affinity makes most mismatches harmless and a raise here would brick
 every launch. If it ever grows a `DROP`, the project has outgrown it.
+
+**Nullability rides along where SQLite allows it (#26).** A not-null column WITH a
+scalar default migrates as `NOT NULL DEFAULT x`, matching what create_all permits;
+a factory-default column cannot be added NOT NULL at all and lands nullable under
+a WARNING. The two columns migrated before this existed (`pinned`, `kind`) remain
+nullable on pre-#26 databases — accepted, because flipping them needs a table rebuild
+and no writer can produce a NULL for them. One inherent residue, documented in the e2e
+test: the migrated column carries a DEFAULT literal and create_all emits none, because
+ALTER cannot backfill without one.
+
+**The three public reads return plain dicts (#31), and `save_message` stamps
+`last_activity_at` (#32).** `get_thread` / `latest_checkpoint` /
+`latest_thread_summary` copying columns is the same rule `_ordered_rows` states —
+two of the three sit on the compaction path — and the stamp rides the single
+MessageLog writer so a message cannot persist without its thread moving to the top
+of an activity-ordered picker. `advances()` checks containment even when no
+checkpoint exists yet (#27): "first compaction" is exactly when nothing else catches
+a foreign watermark. The TUI picker caps at 200 and says so; `/resume <thread-id>`
+is the by-id path that keeps older conversations reachable (Q7/#30).
 
 ### Durable memory (`memories/`, §21b)
 
