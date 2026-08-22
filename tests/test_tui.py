@@ -1374,3 +1374,90 @@ async def test_a_storage_failure_starting_a_turn_does_not_kill_the_tui(mocker):
 
     assert running, "a storage failure starting a turn took the whole app down"
     assert not busy, "the shell was left refusing every later turn"
+
+
+# ---------------------------------------------------------------------------
+# ---- /resume <thread-id> (#30/#32 owner follow-up) --------------------------
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_resume_command_opens_a_thread_by_id(mocker):
+    """The by-id path the capped picker leans on. Asserted on the memory
+    swap and the transcript, not on any widget -- same reasoning as AC2:
+    what matters is that the thread actually opened."""
+    from tui.app import _cmd_resume
+
+    thread_id = uuid4()
+    memory = mocker.patch("tui.app.ConversationMemory")
+    mocker.patch("tui.app.replay_entries", return_value=[])
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        await settle(pilot, lambda: app.is_running)
+        _cmd_resume(app, str(thread_id))
+        assert await settle(
+            pilot, lambda: app._memory is memory.return_value), \
+            "/resume did not open the thread"
+
+    kwargs = memory.call_args.kwargs
+    assert kwargs.get("thread_id") == thread_id
+
+
+@pytest.mark.asyncio
+async def test_resume_with_a_malformed_id_says_so_and_switches_nothing(mocker):
+    """A typo must not be silently swallowed into a chat turn (the
+    command registry already refuses unknown names); it names the problem
+    and leaves the session exactly where it was."""
+    from tui.app import _cmd_resume
+
+    mocker.patch("tui.app.ConversationMemory")
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        await settle(pilot, lambda: app.is_running)
+        before = app._memory
+        _cmd_resume(app, "not-a-uuid")
+        await pump(pilot, 3)
+
+    assert app._memory is before
+
+
+@pytest.mark.asyncio
+async def test_resume_with_no_argument_shows_usage(mocker):
+    from tui.app import _cmd_resume
+
+    mocker.patch("tui.app.ConversationMemory")
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        await settle(pilot, lambda: app.is_running)
+        _cmd_resume(app, "")
+        await pump(pilot, 3)
+        text = app._transcript.as_text()
+    assert "/resume" in text
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_thread_id_reports_and_stays_put(mocker):
+    """storage raises ValueError for an unknown id; switch_to_thread
+    contains it. /resume inherits both behaviours by construction -- this
+    test exists so that stays true even if someone re-derives the path."""
+    from tui.app import _cmd_resume
+
+    thread_id = uuid4()
+    mocker.patch("tui.app.ConversationMemory",
+                 side_effect=ValueError("No conversation thread found"))
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        await settle(pilot, lambda: app.is_running)
+        _cmd_resume(app, str(thread_id))
+        await settle(pilot, lambda: "Could not open thread" in
+                     (app._transcript.as_text() or ""))
+
+
+def test_the_resume_command_is_registered():
+    from tui.app import register_builtin_commands
+    import tui.commands as commands_module
+
+    register_builtin_commands()
+    command = commands_module.registry.get("resume")
+    assert command is not None
+    assert command.usage == "<thread-id>"

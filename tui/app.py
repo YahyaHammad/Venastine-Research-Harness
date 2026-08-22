@@ -1739,6 +1739,26 @@ def _cmd_threads(app: VenastineApp, args: str) -> None:
     app.action_pick_thread()
 
 
+def _cmd_resume(app: VenastineApp, args: str) -> None:
+    """#30/#32's other half. The picker caps at PICKER_THREAD_LIMIT, so
+    "older conversations stay reachable" needs a by-id path in THIS shell
+    -- the CLI has --thread <uuid> and the TUI had nothing. Goes through
+    switch_to_thread, so a /resume gets exactly the load-reset-replay
+    sequence, guards and all, that the picker's chosen() gets."""
+    text = args.strip()
+    if not text:
+        app._transcript.write_error(
+            "Usage: /resume <thread-id>. /threads lists recent ones.")
+        return
+    try:
+        resolved = UUID(text)
+    except ValueError:
+        app._transcript.write_error(
+            f"{text!r} is not a thread id (expected a uuid).")
+        return
+    app.switch_to_thread(resolved)
+
+
 def _cmd_new(app: VenastineApp, args: str) -> None:
     if app._busy:
         app._transcript.write_error(
@@ -1983,6 +2003,8 @@ def register_builtin_commands() -> None:
         SlashCommand("copy", "copy text out of the session", _cmd_copy,
                      f"[{'|'.join(_COPY_TARGETS)}] [--file <path>]"),
         SlashCommand("threads", "resume a saved thread", _cmd_threads),
+        SlashCommand("resume", "resume a thread by id, even an old one",
+                     _cmd_resume, "<thread-id>"),
         SlashCommand("new", "start a new thread", _cmd_new),
         SlashCommand("quit", "exit", _cmd_quit),
     ):
