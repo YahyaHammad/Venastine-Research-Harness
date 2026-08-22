@@ -171,6 +171,61 @@ def test_write_run_artifacts_skips_revisions_file_when_no_revisions(tmp_path, mo
     )
 
 
+def _ensemble_run(run: PipelineRun) -> PipelineRun:
+    """Attaches two surviving candidates to a run -- the shape the
+    orchestrator leaves after ensemble Pass 1 with both candidates alive
+    (#77/E13). Text rides each entry; pipeline_storage strips it at
+    persistence, but write_run_artifacts consumes it directly."""
+    run.candidates = [
+        {"candidate": 1, "provider_name": "ANTHROPIC", "model": "claude-opus-5",
+         "chars": 24, "text": run.raw_response},
+        {"candidate": 2, "provider_name": "GOOGLE", "model": "gemini-2.5-pro",
+         "chars": 26, "text": "Candidate two's divergent response."},
+    ]
+    return run
+
+
+def test_ensemble_run_writes_one_file_per_survivor_and_not_raw_response(tmp_path, monkeypatch):
+    """Two or more survivors: one numbered file per candidate, and NO
+    bare 01_raw_response.md. The numbers align with the trace's
+    candidate-N lines and the claims' asserted_by_candidates tags (#77)
+    -- naming candidate 1's text `01_raw_response.md` would present a
+    positional convention as a distinction the pipeline never made,
+    which is exactly the reading this layout exists to prevent."""
+    monkeypatch.setattr(config, "OUTPUT_DIR", str(tmp_path))
+    output_dir = write_run_artifacts(_ensemble_run(_make_full_run()))
+
+    assert not os.path.exists(os.path.join(output_dir, "01_raw_response.md"))
+    for n in (1, 2):
+        path = os.path.join(output_dir, f"01_candidate_{n}.md")
+        assert os.path.isfile(path), f"missing per-candidate artifact {n}"
+
+    with open(os.path.join(output_dir, "01_candidate_2.md"), encoding="utf-8") as f:
+        assert f.read() == "Candidate two's divergent response."
+
+
+def test_a_degraded_ensemble_run_names_its_single_survivor_raw_response(tmp_path, monkeypatch):
+    """One survivor is not an ensemble anymore (E7's degrade) -- the run
+    gets the historical single-candidate layout, byte for byte, so a
+    reader never has to know whether `raw_response` arrived by roster or
+    by degradation."""
+    monkeypatch.setattr(config, "OUTPUT_DIR", str(tmp_path))
+    run = _make_full_run()
+    run.candidates = [
+        {"candidate": 1, "provider_name": "ANTHROPIC", "model": "claude-opus-5",
+         "chars": len(run.raw_response), "text": run.raw_response},
+    ]
+
+    output_dir = write_run_artifacts(run)
+
+    assert os.path.isfile(os.path.join(output_dir, "01_raw_response.md"))
+    assert not any(
+        f.startswith("01_candidate_")
+        for f in os.listdir(output_dir))
+    with open(os.path.join(output_dir, "01_raw_response.md"), encoding="utf-8") as f:
+        assert f.read() == "A synthetic raw response."
+
+
 def test_write_run_artifacts_raises_on_none_run_id(tmp_path, monkeypatch):
     """run.run_id = None must raise ValueError with a clear message --
     in production this can't happen (create_pipeline_run sets it up

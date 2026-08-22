@@ -52,7 +52,17 @@ def write_run_artifacts(run: PipelineRun) -> str:
 
     Layout under OUTPUT_DIR/<run_id>/:
       00_plan.md              Pass 0 plan (JSON)
-      01_raw_response.md      Pass 1 raw generation
+      01_raw_response.md      Pass 1 raw generation (single-candidate runs)
+      01_candidate_N.md       E13/#77: per-candidate generation, one file
+                              per SURVIVOR, written instead of
+                              01_raw_response.md whenever two or more
+                              survived -- the N matches the trace's
+                              candidate-N lines and the claims'
+                              asserted_by_candidates tags, so the record
+                              can substantiate its own consistency scores.
+                              A run degraded to one survivor names its
+                              file 01_raw_response.md like any other
+                              single-candidate run.
       02_claims.json          Pass 2 extracted claims (full vars(c))
       03_grounding.json       Pass 3a grounding per claim
       03_critic.json          Pass 3b critic per claim
@@ -87,7 +97,20 @@ def write_run_artifacts(run: PipelineRun) -> str:
             f.write(content)
 
     write("00_plan.md", json.dumps(run.plan, indent=2))
-    write("01_raw_response.md", run.raw_response)
+    # E13/#77. Two or more survivors: every candidate is an equal -- none
+    # is "the" response, Pass 2 extracted claims from their union and the
+    # report is synthesised from those claims -- so naming candidate 1's
+    # text `01_raw_response.md` would dress a positional convention up as
+    # a distinction the pipeline never made. One numbered file per
+    # survivor, matching the numbering everywhere else. One survivor (or
+    # none -- ensemble mode never ran): the historical single-candidate
+    # shape, unchanged byte for byte.
+    if len(getattr(run, "candidates", []) or []) >= 2:
+        for entry in run.candidates:
+            write(f"01_candidate_{entry['candidate']}.md",
+                  entry.get("text", ""))
+    else:
+        write("01_raw_response.md", run.raw_response)
     write("02_claims.json", json.dumps([vars(c) for c in run.claims], indent=2))
     write("03_grounding.json", json.dumps(
         [{"claim_id": c.id, "sources": c.grounding_sources, "status": c.grounding_status}
