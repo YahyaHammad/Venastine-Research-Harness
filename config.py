@@ -369,6 +369,17 @@ COMPACTION_KEEP_RECENT_TOKENS = 4_000
 # summarized; a follow-up like "no, the other one" then has no referent.
 COMPACTION_KEEP_RECENT_TURNS = 3
 
+# #89 (batch 16). The most one `pin` call may protect, as a fraction of
+# the trigger above. A pin is a PERMANENT FLOOR under the derived view:
+# pinned rows re-enter it verbatim forever (M9), nothing folds them, and
+# before this cap one ungated call with last_n=40 could put a thread
+# permanently past the trigger with no unpin to undo it. 0.5 leaves room
+# for a real working session while making "floor the trigger by yourself"
+# structurally impossible. Enforced at the tool with a REFUSAL that states
+# the cap and the current share -- never silently trimmed (M15's rule: a
+# pin asked for more protection than allowed must not quietly deliver less).
+PIN_MAX_TRIGGER_FRACTION = 0.5
+
 # 1-5, mapping to the target compression ratios below.
 COMPACTION_STRENGTH = 3
 
@@ -558,10 +569,16 @@ class ToolPermissions:
     # approval -- the spawned run's own tools are each gated by policy,
     # intersection-capped by the parent's context (C6).
     spawn_subagent: bool = True
-    # §21/D26. Thread-scoped, reversible, and it takes effect inside a
-    # conversation the user is watching -- a wrong pin costs some context
-    # budget and nothing else.
+    # §21/D26. Thread-scoped, reversible (batch 16 gave that word a
+    # mechanism: `unpin`), and it takes effect inside a conversation the
+    # user is watching -- a wrong pin costs some context budget and nothing
+    # else.
     pin: bool = True
+    # §21/D26, restored by batch 16 (#89). D26's premise called a pin
+    # reversible while nothing anywhere unpinned one; unpin is the other
+    # half of making the premise true rather than aspirational. Same axis,
+    # same gating posture, same reasons.
+    unpin: bool = True
     # §21b. Allowed everywhere; whether it can actually RUN is decided
     # by the approval gate below plus §13's headless rule.
     remember: bool = True
@@ -645,6 +662,10 @@ class ToolApprovals:
     # on the CLI and inside a research pass, where an approval-gated tool
     # is not merely denied but not advertised at all (§13).
     pin: bool = False
+    # §21/D26, batch 16 (#89). Ungated for pin's reasons, and now genuinely
+    # symmetric: releasing protection costs context budget in a
+    # conversation the user is watching, exactly like applying it.
+    unpin: bool = False
     # §21b/D26, and the asymmetry with pin above IS the decision. A
     # memory outlives its thread and silently shapes conversations the
     # user has not started yet, so it is persistent and invisible at the

@@ -282,6 +282,44 @@ COMPACTION_OUTCOMES = (
 )
 
 
+def pin_measurements(thread_id, last_n: int) -> dict:
+    """What #89's cap is measured against, in M10's character proxy.
+
+    Returns three numbers:
+      requested_tokens  what the last `last_n` turns' ARCHIVE rows cost --
+                        the span one more `pin(last_n)` would protect
+      pinned_tokens     everything ALREADY pinned on this thread
+      max_tokens        PIN_MAX_TRIGGER_FRACTION x the resolved trigger
+
+    Reads the ARCHIVE (the same rows compactable_span walks), so a pinned
+    prefix is counted at full weight exactly as the derived view will
+    carry it. Never compared against a provider count (M10).
+    """
+    from storage import _ordered_rows
+    from core import config_loader
+
+    settings = config_loader.effective_compaction()
+    max_tokens = int(
+        config.PIN_MAX_TRIGGER_FRACTION * settings["trigger_tokens"])
+
+    rows = _ordered_rows(thread_id)
+    starts = [i for i, row in enumerate(rows) if row["role"] == "user"]
+    bounds = starts + [len(rows)]
+
+    def _tokens(lo: int) -> int:
+        return sum(len(rows[i]["content"])
+                   for i in range(lo, len(rows))) // CHARS_PER_TOKEN
+
+    requested = _tokens(bounds[max(0, len(starts) - last_n)]) if starts else 0
+    pinned = sum(len(row["content"]) for row in rows
+                 if row["pinned"]) // CHARS_PER_TOKEN
+    return {
+        "requested_tokens": requested,
+        "pinned_tokens": pinned,
+        "max_tokens": max_tokens,
+    }
+
+
 def compact(memory, model: str, provider_name: str,
             current_turn_start: Optional[int] = None,
             overrides: Optional[dict] = None,
