@@ -379,6 +379,60 @@ def test_the_migration_runs_against_a_real_database(real_storage):
         database.engine.raw_connection(), database._declared_columns()) == []
 
 
+def test_a_migrated_column_matches_the_fresh_schema_exactly(real_storage,
+                                                            tmp_path):
+    """#26's acceptance criterion: a column added by ensure_columns() on a
+    database that predates it must carry the same TYPE, NOT NULL flag and
+    pk flag as what create_all builds on a fresh one -- the flags that
+    change what the schema permits. Compared directly, so future drift
+    between the two paths fails here rather than surfacing as a subtly
+    laxer schema on exactly the databases running longest.
+
+    One deliberate residual difference: the migrated column carries a
+    DEFAULT literal and the fresh one does not. That is not drift -- ALTER
+    TABLE cannot backfill existing rows without a DEFAULT, while
+    create_all needs none because the ORM supplies every value on INSERT.
+    Both sides read the same value everywhere; only raw-SQL inserts into a
+    migrated database would see the fill."""
+    import sqlite3
+
+    import database
+
+    def _flags(conn):
+        for row in conn.execute("PRAGMA table_info(messagelog)"):
+            if row[1] == "pinned":
+                # (type, notnull, pk) -- deliberately excluding dflt_value.
+                return row[2], row[3], row[5]
+        raise AssertionError("no pinned column on one side")
+
+    real_conn = database.engine.raw_connection()
+    try:
+        fresh_flags = _flags(real_conn)
+    finally:
+        real_conn.close()
+
+    assert fresh_flags[1] == 1, (
+        "the model declares pinned non-Optional; if this fails the "
+        "reference itself moved")
+
+    legacy = sqlite3.connect(tmp_path / "legacy.db")
+    try:
+        legacy.execute(
+            "CREATE TABLE messagelog ("
+            " id VARCHAR PRIMARY KEY, thread_id VARCHAR, role VARCHAR,"
+            " content VARCHAR, name VARCHAR, tool_call_id VARCHAR,"
+            " created_at DATETIME)"
+        )
+        legacy.execute(
+            "INSERT INTO messagelog (id, thread_id, role, content)"
+            " VALUES ('m1', 't1', 'user', '\"hello\"')"
+        )
+        database.ensure_columns(legacy, database._declared_columns())
+        assert _flags(legacy) == fresh_flags
+    finally:
+        legacy.close()
+
+
 # ---------------------------------------------------------------------------
 # ---- The monotonic invariant, made to fire ---------------------------------
 # ---------------------------------------------------------------------------

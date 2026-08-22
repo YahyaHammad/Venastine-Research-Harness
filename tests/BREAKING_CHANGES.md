@@ -2663,3 +2663,10 @@ Six issues, one subsystem (#60, #61, #62, #63, #64, #65); decisions F1–F8 in
 | Delete disconnect_all's cancel fallback, or unregister from teardown_mcp | `test_non_graceful_shutdown_still_cancels_the_manager`, `test_teardown_unregisters_what_setup_registered` | M18 asserted on _done (cancellation), not bookkeeping; F7 makes ARCHITECTURE.md's "disconnect handling" claim true |
 | Fetch the catalogue again in register_all | `test_registration_never_fetches_the_catalogue_over_the_wire` | MCP's one timeout-less bridge call; the live session is poisoned in the test so any fetch fails loudly |
 | Delete the disabled-skip, register_all's listing guard, future.cancel(), or sort_keys | `test_disabled_servers_are_never_connected`, `test_one_servers_listing_failure_does_not_abort_servers_after_it`, `test_a_timed_out_call_cancels_its_future`, `test_entry_digest_is_stable_under_key_reorder` | M17/M25/M13/M5 — each mutation survived the suite before this batch; each test now dies with its line |
+
+## Batch 18 (in progress) -- persistence and picker
+
+| Change | Tests that fail if reverted | Why it matters |
+|---|---|---|
+| Drop NOT NULL from ensure_columns' DDL, or stop carrying nullability through _declared_columns | test_not_null_is_carried_when_a_literal_exists, test_a_migrated_column_matches_the_fresh_schema_exactly | #26: a migrated database must permit exactly what a fresh one permits; the PRAGMA flags are compared directly against create_all's output |
+| Make the no-literal not-null case silent, or refuse it outright | test_a_declared_not_null_column_without_a_literal_stays_nullable_and_warns | SQLite cannot ADD COLUMN ... NOT NULL without a default; nullable-plus-WARNING is the honest degradation, silence is the defect |
