@@ -1068,9 +1068,18 @@ class VenastineApp(App):
             self._raven.state = ravens.THINKING
             self._transcript.write_role("pass", f"→ {event.pass_id}")
             panel.pass_started(event.pass_id)
+        elif event.kind == "pass_complete" and event.ok is False:
+            # E14/#115. The row resolves as FAILED -- the whole point of
+            # this event, so a skipped ensemble candidate stops showing
+            # as running forever beside a transcript that says it was
+            # dropped. NO transcript line here: the trace_line naming
+            # the cause arrives beside it, and printing again would say
+            # everything twice. Panel only, per the batch's display
+            # contract.
+            panel.pass_completed(event.pass_id, ok=False)
         elif event.kind == "pass_complete":
             self._transcript.write_role("pass_done", f"← {event.pass_id}")
-            panel.pass_completed(event.pass_id)
+            panel.pass_completed(event.pass_id, ok=True)
         elif event.kind == "stage":
             # §26. No arrow: a zero-LLM stage is over by the time it is
             # announced, and an arrow would promise something starting.

@@ -69,7 +69,13 @@ from typing import Any, Optional
 # than a silently-ignored event.
 PIPELINE_EVENT_KINDS = (
     "pass_start",       # pass_id -- an LLM-backed pass is about to run
-    "pass_complete",    # pass_id -- it returned
+    "pass_complete",    # pass_id (+ ok/text) -- it returned. ok=False
+                        # marks a pass that ENDED BADLY (#115/E14): text
+                        # carries a short reason, mirroring tool_result,
+                        # and no success line may be printed for it. A
+                        # skipped ensemble candidate resolves this way
+                        # while the run continues; a fatal pass emits it
+                        # before its exception propagates.
     "trace_line",       # text -- one line appended to PipelineRun.trace
     "claim_extracted",  # claim_id + text -- Pass 2 produced a claim
     "claim_tiered",     # claim_id + tier -- Pass 4 (or a 6c round) scored it

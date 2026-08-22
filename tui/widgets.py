@@ -201,7 +201,7 @@ class ResearchProgress(Static):
         self.reset()
 
     def reset(self) -> None:
-        # [pass_id, done?, code_stage?, tool_calls, chars]
+        # [pass_id, done?, failed?, code_stage?, tool_calls, chars]
         self._passes: list = []
         self._tiers: dict = {}           # claim_id -> tier
         self._claims = 0
@@ -213,13 +213,24 @@ class ResearchProgress(Static):
         self._redraw()
 
     def pass_started(self, pass_id: str) -> None:
-        self._passes.append([pass_id, False, False, 0, 0])
+        self._passes.append([pass_id, False, False, False, 0, 0])
         self._redraw()
 
-    def pass_completed(self, pass_id: str) -> None:
+    def pass_completed(self, pass_id: str, *, ok: bool) -> None:
+        """`ok` is REQUIRED and keyword-only (#115/E14): a caller that
+        cannot say whether the pass succeeded or died is exactly the
+        caller this parameter exists to make think. With a default, an
+        old call site would tick a FAILED row as done -- the one
+        outcome worse than the stale row this batch fixes.
+
+        Correlates to the most recent unresolved row with this label,
+        the same scan pass_completed always used. Correct under ensemble
+        mode's overlapping Pass 1 rows because candidates start and
+        finish sequentially."""
         for entry in reversed(self._passes):
             if entry[0] == pass_id and not entry[1]:
                 entry[1] = True
+                entry[2] = not ok
                 break
         self._redraw()
 
@@ -227,7 +238,7 @@ class ResearchProgress(Static):
         """A zero-LLM stage (§26). Recorded as already done, because it
         was: it made no model call, so it has no observable running
         state."""
-        self._passes.append([pass_id, True, True, 0, 0])
+        self._passes.append([pass_id, True, False, True, 0, 0])
         self._redraw()
 
     def tool_called(self, pass_id: str) -> None:
@@ -236,13 +247,13 @@ class ResearchProgress(Static):
         kind. The count is what proves a quiet pass is working."""
         entry = self._current(pass_id)
         if entry is not None:
-            entry[3] += 1
+            entry[4] += 1
             self._redraw()
 
     def activity(self, pass_id: str, chars: int) -> None:
         entry = self._current(pass_id)
         if entry is not None:
-            entry[4] = chars or 0
+            entry[5] = chars or 0
             self._redraw()
 
     def _current(self, pass_id: str):
@@ -277,9 +288,14 @@ class ResearchProgress(Static):
         styles = self._styles()
         body = Text()
         body.append("research\n\n")
-        for pass_id, done, is_stage, tools, chars in self._passes[-self.ROWS:]:
+        for pass_id, done, failed, is_stage, tools, chars in self._passes[-self.ROWS:]:
             if is_stage:
                 marker, role = "·", "pass_done"
+            elif failed:
+                # #115/E14. The transcript's own failed-tool marker: a
+                # row that ended badly must not share a glyph with one
+                # that finished.
+                marker, role = "✗", "error"
             else:
                 marker, role = ("x", "pass_done") if done else (">", "pass")
             body.append(f"{marker} {pass_id}\n", styles.get(role, ""))
