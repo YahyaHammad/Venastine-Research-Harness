@@ -40,7 +40,7 @@ python main.py --init --research-project           # §24: skip the type questio
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 2186 tests, offline, ~25-45s by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 2187 tests, offline, ~25-45s by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -60,7 +60,7 @@ MCP servers are a *third* config file again — `mcp.json`, user-level or `.vena
 Read these before changing anything non-trivial — they carry design decisions that are locked, not defaults to re-derive.
 
 - **ARCHITECTURE.md** — what's built, file-by-file contracts ("what belongs here / what does NOT"), known gotchas (§11).
-- **ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **ROADMAP_v2.md** (§13–§35, all built) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I13 from §24, J1–J14 from §23, E1–E12 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A11 from §32, W1–W9 from §33 U1–U9 from §34 and Y1–Y5 from §35). Section and D-numbers are stable and cross-referenced everywhere.
+- **ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **ROADMAP_v2.md** (§13–§36, all built) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I13 from §24, J1–J14 from §23, E1–E12 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A11 from §32, W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35 and Z1–Z8 from §36). Section and D-numbers are stable and cross-referenced everywhere.
 
 **Six namespaces use the same `LETTER+NUMBER` shape, and only the first is the
 record.** An id that resolves to two places is a cross-reference that fails
@@ -296,10 +296,17 @@ what makes an early, frequent trigger safe.
   last 3 completed turns, and `keep_recent_tokens`. The current-turn floor is what
   makes the mid-turn valve safe by construction rather than by hoping the threshold
   is far enough away.
-- **Re-derive from the archive by default** (M2). Each compaction summarizes the
-  ORIGINALS, so exactly one summarization step always sits between an original
-  message and what the model sees. Chaining is configurable and is the automatic
-  fallback when a span outgrows one call.
+- **Chain is the default; rederive survives as the fidelity option** (M2, as
+  amended by batch 16 — an explicit owner decision recorded in DEVLOG). M2's
+  original choice was rederive: exactly one summarization step always sits
+  between an original message and what the model sees. Cost flipped it —
+  rederive's input is the WHOLE covered span, making every compaction the
+  most expensive call of the turn on exactly the threads that trigger most.
+  Whichever strategy is configured, a span that outgrows one call falls back
+  to chain with a WARNING (#90's fallback, built after three documents
+  promised it), and one that outgrows even chain truncates its oldest
+  material with the cut stated in both the instruction and the stored
+  summary.
 - **The summary is a synthesized leading `user` message and is NEVER persisted**
   (M8). Persisting it would put derived content in the archive, and the next
   compaction would fold a summary into a summary on the path that means to re-derive.

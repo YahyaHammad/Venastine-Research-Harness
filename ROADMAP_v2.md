@@ -153,6 +153,7 @@ the namespace list in `AGENTS.md`.
 - **§33. The call boundary — the one file every model call goes through** — BUILT (#37, #38, #39, #135; closes unit 3)
 - **§34. /init's vocabulary — four lists for one question** — BUILT (#96, #94, #95, #98; closes unit 12)
 - **§35. The record's index — the decisions, and whether they can be found** — BUILT (#16, #17, #147, #91; closes unit X5)
+- **§36. Compaction's boundaries — trigger, notice, pin, summarizer input** — BUILT (#43, #44, #45, #89, #90, #92, #172; closes units 4 and 11)
 - **Open Questions — None Remaining** (Rev. 3 — all decisions locked; verification items only)
 - **Why these calls, not just what they are** (Rev. 3 — the reasoning patterns behind several decisions above)
 
@@ -2949,6 +2950,33 @@ rather than guessed.
 **Unit X5 (#148)** — its two findings are #146 (fixed earlier) and #147. **#16 and #17** belong to
 the master tracker #15 rather than to a unit. **#91** closes with unit 11 still holding #89, #90
 and #92.
+
+---
+
+## 36. Compaction's boundaries — the trigger, the notice, the pin, the summarizer's input — BUILT
+
+Audit Pass 1 fix batch 16: **#43, #44 + #172, #45, #89, #90**, and the surviving items of **#92**.
+One commit per work package on `fix/batch-16-compaction`; per-change tables in
+`tests/BREAKING_CHANGES.md` §32.
+
+### Design Decisions Record — §36 (Z1–Z8)
+
+| id | decision |
+|---|---|
+| **Z1** | **#43's mode is DERIVED from what the thread is; an explicit value wins.** `research_pass`/`subagent` → M6's backstop wherever re-entered (json_retry, §20 reviewer, spawned children — by construction, not by a parameter each call site can forget: the D24/R13 failure shape). Chat → working_set. Unknown kinds fail toward chat. `/grill-me` stays working_set deliberately — it runs in the user's live chat thread (§18's locked decision), so routine compaction there is the feature, made visible rather than silent by Z5. `ConversationMemory.kind` exists now: a boundary bend recorded in its docstring — it REPORTS what storage stores, it never branches on it |
+| **Z2** | **`compact()` returns an outcome dict, never None** (#44): folded / blocked / all-pinned / missing-agent / no-progress / reentrant / empty-summary. Reportability lives with the caller — standing conditions are said ONCE PER RUN, notice and WARNING under the same dedup list, because only the loop knows how often compact() is called. This kills #44's per-evaluation WARNING and names #89's silent all-pinned path in the same contract |
+| **Z3** | **#45 is repair at the loader, refusal in the loop.** A bad agent-file `max_steps` is repaired to undeclared with a warning naming the original (a one-field typo must not cost the agent); `_run` raises a named ValueError for direct callers — no file to lose there, only a bug worth naming. **`MAX_ITERATIONS` is 50** (was 20): the clamp default IS this constant, and two answers to one question was not acceptable |
+| **Z4** | **A pin is reversible AND bounded** (#89): symmetric model-callable `unpin(last_n)` (same gating posture as pin — D26's premise made true rather than aspirational), and pin REFUSES over `PIN_MAX_TRIGGER_FRACTION` (0.5) × trigger, stating request/cap/share — M15's rule in the tool direction: silently delivering less protection than asked is the worse failure. `pin_measurements()` in compaction.py owns the numbers |
+| **Z5** | **#172's notices ride the response on every drained path.** One-shot turns carry `response.notices` on their completion message and render through the SAME branch streaming uses; `_translate` forwards pass-path compaction notices as trace lines (its old justification — "they reach the shell as WARNING records" — was false for successful compactions, which log INFO). §21's "no silent compaction" now has no exception anywhere |
+| **Z6** | **M2 amended: chain is the default; rederive is the fidelity option.** Owner decision — rederive's whole-span input made every compaction the most expensive call of the turn on exactly the threads that trigger most. Both strategies fall back to chain when a span outgrows one call (#90 built at last, VERBOSE about the switch), and one that outgrows even chain truncates OLDEST material with the cut stated twice: in the instruction, and deterministically on the stored summary — never trusted from model compliance |
+| **Z7** | **The summarizer's input budget is `_input_budget(model)`** = context window minus the pipeline backstop margin. The proxy-vs-window comparison crosses M10's usual line out of necessity and says so; the safe direction is structural — undershooting costs truncation, overshooting costs an oversized send |
+| **Z8** | **#92 closes as tests, not fixes**: item 1 (the `[called: ...]` line), items 2–3 (`estimated_tokens` counts tool_calls; asserted as a computed relation so repr drift survives and a dropped term dies), items 5–6 via Z2's statuses and once-per-run guard. Item 4 was already stale — #88's fix shipped the test |
+
+### Closed with this section
+
+**#43, #44, #45, #89, #90, #92, #172** — all open unit-11/unit-4 findings plus the sibling filed
+post-audit. **#136 remains open** (X2): Z2 makes its repeated-attempt path *addressable* (the
+status is data now) but does not yet cache it.
 
 ## Open Questions — None Remaining
 

@@ -434,6 +434,26 @@ def test_a_fully_protected_thread_says_so(fake_storage, summaries):
     assert fake_storage.latest_checkpoint(memory.thread_id) is None
 
 
+def test_an_all_pinned_thread_names_the_way_out(fake_storage, summaries):
+    """#89's silent path, named now. Everything foldable pinned used to
+    return a bare None -- indistinguishable at every level from 'nothing
+    needed doing' -- while the state is exactly what compaction_blocked
+    describes, reached by another door. The outcome says what happened
+    AND the one command that changes it (#92 item 5's test)."""
+    memory = ConversationMemory()
+    _thread(memory, turns=4)
+    memory.pin_last(4)
+    summaries("unused")
+
+    outcome = compaction.compact(memory, "claude-sonnet-5", "ANTHROPIC",
+                                 overrides=OVERRIDES)
+
+    assert outcome["status"] == "all-pinned"
+    assert outcome["kind"] == "compaction_blocked"
+    assert "/unpin" in outcome["text"]
+    assert fake_storage.latest_checkpoint(memory.thread_id) is None
+
+
 def test_a_missing_compactor_agent_is_a_skip_not_a_crash(
         fake_storage, summaries, mocker):
     """Same containment §20 applies to a missing reviewer: an optional

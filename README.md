@@ -316,9 +316,16 @@ MCP tools can be called without you naming them, but every call is approved indi
 
 ### Long conversations condense themselves
 
-Older turns are summarised automatically as a thread grows. **The archive is never edited** — the full history is always recoverable, and each compaction summarises the *originals*, so exactly one summarisation step ever sits between what you said and what the model sees. Summaries are never written to disk as messages.
+Older turns are summarised automatically as a thread grows. **The archive is never edited** — the full history is always recoverable, and summaries are never written to disk as messages.
 
-`pin` keeps recent turns out of any summary; `/compact` in the TUI triggers it by hand. A research pass only compacts at a hard backstop near the real context window — spending a model call on a judgement nobody is watching is not worth it mid-run.
+Two summarisation strategies exist:
+
+- **`chain` (the default)** — each compaction summarises the *previous summary plus whatever followed it*. The input never grows past summary-plus-tail, so cost stays constant per compaction forever. The trade: loss compounds over a very long-lived thread, since a summary is being made of a summary.
+- **`rederive`** — each compaction summarises the *original messages*, so exactly one summarisation step ever sits between what you said and what the model sees. Fidelity-optimal; the cost is that the whole covered span is re-sent every time.
+
+Whichever you configure (`compaction.strategy` in settings.json), a span too large for one call falls back to chain with a warning, and one too large even for chain has its oldest material truncated — stated in both the instruction and the stored summary, never silently.
+
+`pin` keeps recent turns out of any summary (capped at half the compaction trigger per call — a pin is a permanent floor, so refusing beats trimming); `unpin` releases it again when pinned detail goes stale. `/compact` in the TUI triggers a compaction by hand. **When compaction runs depends on what the thread is**: chat threads use an ordinary working-set trigger (40k tokens by default); research passes and subagents compact only at a hard backstop near the real context window, wherever they are resumed — spending a model call on a judgement nobody is watching is not worth it mid-run.
 
 A replayed thread always shows what you originally said, never the summary — the archive is what is replayed, so a compacted conversation reads back the way you had it.
 
@@ -444,7 +451,7 @@ classifier is described under *Security model* above. If you have a fork or a lo
 note that `ToolApprovals.shell` now ships `False` and `SHELL_APPROVAL_MODE` is the gate — see
 `tests/BREAKING_CHANGES.md` §24.
 
-Run the test suite with `pytest` — 2186 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
+Run the test suite with `pytest` — 2187 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
 
 ## Documentation
 
