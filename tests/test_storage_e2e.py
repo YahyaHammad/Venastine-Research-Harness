@@ -844,6 +844,55 @@ def test_a_row_carries_the_first_user_message(real_storage):
     assert row["preview"] == "first question about quorum"
 
 
+def test_thread_preview_matches_the_picker_row(real_storage):
+    """#171. The CLI's --ref now labels with this, so it must be the SAME
+    text the picker computes -- one wording of what a thread is, not two
+    that drift the way the two shells' rows already had."""
+    thread = real_storage.create_thread()
+    real_storage.save_message(thread, "user", "the quorum question")
+
+    row = next(r for r in real_storage.list_threads() if r["id"] == thread)
+
+    assert real_storage.thread_preview(thread) == row["preview"]
+
+
+def test_thread_preview_of_an_unknown_id_is_empty(real_storage):
+    """--ref takes any uuid; a mistyped one must store no label rather
+    than raise -- the reader renders '' as '(no preview)'."""
+    import uuid as uuid_module
+
+    assert real_storage.thread_preview(uuid_module.uuid4()) == ""
+
+
+def test_thread_preview_reads_the_archive_not_the_view(
+        real_storage, compactor):
+    """T3's rule at #171's new reader: on a compacted thread the derived
+    view BEGINS with §21a's synthesized summary (M8), and previewing THAT
+    would label harness-generated text as something the user said --
+    permanently, in every referencing conversation's prompt tier.
+
+    Asserted against a REAL compaction: archive and view coincide until a
+    checkpoint exists, which is exactly how §21a's watermark defect
+    survived 849 tests."""
+    from core import compaction
+    from core.memory import ConversationMemory
+
+    memory = ConversationMemory()
+    memory.add_user_message("what is a bloom filter used for")
+    _add_turns(memory, 5, "filler")
+    first_line = "what is a bloom filter used for"
+
+    notice = compaction.compact(
+        memory, "claude-sonnet-5", "ANTHROPIC",
+        current_turn_start=memory.completed_turns(), overrides=OVERRIDES)
+    assert notice is not None, "the thread never compacted"
+
+    preview = real_storage.thread_preview(memory.thread_id)
+    assert preview.startswith(first_line), (
+        f"preview followed the view into the summary: {preview!r}")
+    assert "Summary" not in preview
+
+
 def test_replaying_a_compacted_thread_shows_the_original_first_message(
         real_storage, compactor):
     """AC5, and T3's reason for existing.

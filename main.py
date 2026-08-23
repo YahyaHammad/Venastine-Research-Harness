@@ -829,6 +829,7 @@ def attach_cli_refs(thread_id, specs, provider_name: str, model: str) -> None:
     from core import compaction
     from core.loop import attach_ref
     from core.memory import ConversationMemory
+    from storage import thread_preview
 
     memory = ConversationMemory(thread_id=thread_id)
     for spec in specs:
@@ -850,7 +851,13 @@ def attach_cli_refs(thread_id, specs, provider_name: str, model: str) -> None:
         if notice is None:
             print(f"[--ref: nothing to summarise in {source}]")
             continue
-        ok, message = attach_ref(memory, source, notice["text"])
+        # #171. The label the TUI's picker has always attached: the same
+        # first-user-message preview, so both shells store identical rows
+        # and the prompt tier names what the material IS instead of
+        # "(no preview)". Computed only after the summarise succeeded --
+        # a failed reference stores no row to label.
+        ok, message = attach_ref(memory, source, notice["text"],
+                                 thread_preview(source))
         print(f"[--ref: {message}]")
 
 

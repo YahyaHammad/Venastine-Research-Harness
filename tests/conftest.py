@@ -636,6 +636,14 @@ class FakeStorage:
                 return str(msg.get("content", ""))
         return ""
 
+    def thread_preview(self, thread_id):
+        """Mirrors storage.thread_preview() (#171): the same preview
+        list_threads carries, for ONE id. Like this fake's list_threads,
+        it reads its own _first_user_message -- production truncates at
+        _PREVIEW_CHARS and this fake never has; that divergence predates
+        this method and is the fake's documented simplification."""
+        return self._first_user_message(thread_id)
+
     def save_message(self, thread_id, role, content, name=None, tool_call_id=None):
         # Stores content exactly as given -- production's save_message
         # json.dumps'es it and get_session_history json.loads'es it back,
@@ -891,6 +899,9 @@ STORAGE_SYMBOLS = MEMORY_STORAGE_SYMBOLS + (
     # both read `_ordered_rows`, which is faked above, so the REAL functions
     # run here and their position arithmetic is exercised rather than mocked.
     "latest_thread_summary", "save_thread_summary",
+    # #171. main.attach_cli_refs imports this lazily, like compaction does,
+    # so the module patch is what covers it.
+    "thread_preview",
 )
 
 

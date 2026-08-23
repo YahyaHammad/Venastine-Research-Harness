@@ -828,3 +828,56 @@ def _cli_args(**overrides):
     base = {"summary": None, "thread": None, "ref": None}
     base.update(overrides)
     return types.SimpleNamespace(**base)
+
+
+class TestTheCliRefLabel:
+    """#171. The TUI's /ref has always attached the picker's preview as
+    the label; --ref attached none, so every reference it created rendered
+    '(no preview)' permanently -- in /ref --list AND in every turn's
+    prompt tier. One writer (M21) means one stored shape: both shells
+    store the same label now."""
+
+    def test_a_cli_ref_stores_the_same_label_the_tui_would(
+            self, fake_storage, summarizer, capsys, monkeypatch):
+        import main
+        from core.loop import with_refs
+        from core.memory import ConversationMemory
+
+        target = ConversationMemory()
+        source = ConversationMemory()
+        _thread(source, turns=30, body="y" * 200)
+        monkeypatch.setattr(
+            "storage.thread_preview",
+            lambda tid: "first question about entropy")
+
+        main.attach_cli_refs(target.thread_id, [str(source.thread_id)],
+                             "ANTHROPIC", "m")
+
+        # extra_data round-trips through storage, so assert through a
+        # RESUMED memory -- the same way the writer-contract test beside
+        # the fixture does.
+        resumed = ConversationMemory(thread_id=target.thread_id)
+        stored = (resumed.extra.get("refs") or [])[0]
+        assert stored["label"] == "first question about entropy"
+        assert "### first question about entropy" in with_refs("base", resumed)
+
+    def test_a_failed_reference_stores_no_row_to_label(
+            self, fake_storage, summarizer, capsys, monkeypatch):
+        """A spec that never parses fails before anything else, so no row
+        exists to label -- and thread_preview must not even be consulted
+        for it."""
+        import main
+        from core.memory import ConversationMemory
+
+        target = ConversationMemory()
+        previews = []
+        monkeypatch.setattr(
+            "storage.thread_preview",
+            lambda tid: previews.append(tid) or "never")
+
+        main.attach_cli_refs(target.thread_id, ["not-a-uuid"],
+                             "ANTHROPIC", "m")
+
+        assert "not a thread id" in capsys.readouterr().out
+        assert not (target.extra.get("refs") or [])
+        assert previews == [], "preview was read for a ref that stored nothing"
