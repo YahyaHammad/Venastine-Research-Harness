@@ -229,6 +229,12 @@ def test_research_mode_e2e_prints_report_and_trace(mocker, capsys):
         # through unnoticed.
         review=None,
         subagent_review=None,
+        # Batch 25 (#139): the CLI resolves effort beside provider/model
+        # and forwards it. None here -- this test drives run_research
+        # directly with no effort argument, and None is the parameter's
+        # "send nothing" value, asserted so a future default of "always
+        # force a level at this seam" cannot slip through unnoticed.
+        effort=None,
     )
 
     # --- Verify write_run_artifacts was called with the run ---

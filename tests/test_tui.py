@@ -2419,3 +2419,76 @@ async def test_a_healthy_mount_adds_no_warning_lines():
 
         assert not [txt for _role, txt in app._transcript._entries
                     if "API_KEY" in txt or "warning" in txt.lower()]
+
+
+# ===========================================================================
+# ---- Batch 25 (#139): the TUI forwards its effort to the pipeline ---------
+# ===========================================================================
+
+@pytest.mark.asyncio
+async def test_the_tui_forwards_its_effort_to_the_pipeline(mocker):
+    """#139. /effort high changed the status bar and the chat turns and
+    silently changed nothing about the ten-pass run. Captured at start
+    (D2): a mid-run /effort affects the next run, like model/provider."""
+    from tui.app import _cmd_research
+
+    captured = {}
+    mocker.patch(
+        "core.reasoning.orchestrator.stream_deep_research_pipeline",
+        side_effect=lambda **kw: (captured.update(kw), _stub_events())[1])
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        app.effort = "high"
+        _cmd_research(app, "what is entropy")
+        assert await settle(pilot, lambda: "effort" in captured), \
+            "the pipeline never started"
+
+    assert captured.get("effort") == "high", (
+        f"the pipeline must run at the session's effort, "
+        f"got {captured.get('effort')!r}")
+
+
+# ===========================================================================
+# ---- Batch 25 (#139): the TUI mount resolves effort from BOTH keys --------
+# ===========================================================================
+
+def test_tui_effort_still_wins_inside_the_tui():
+    """tui.effort predates the top-level key; existing configs must not
+    change meaning. Specific beats general inside this shell."""
+    app = VenastineApp("ANTHROPIC", "test-model",
+                       {"tui": {"effort": "low"}, "effort": "high"})
+    assert app.effort == "low"
+
+
+def test_top_level_effort_reaches_the_mount_without_a_tui_key():
+    app = VenastineApp("ANTHROPIC", "test-model", {"effort": "medium"})
+    assert app.effort == "medium"
+
+
+@pytest.mark.asyncio
+async def test_only_a_named_effort_probes_at_mount(mocker):
+    """The mount-time validation is feedback for a DELIBERATE persisted
+    choice (§16). A default-derived level is not that: probing it fired
+    the fallback WARNING on every launch for models without a known
+    table, breaking #138's healthy-mount silence for users who never
+    asked about effort. It validates at call time like every non-TUI
+    caller instead."""
+    import config
+    probes = []
+    mocker.patch.object(VenastineApp, "start_effort_lookup",
+                        side_effect=lambda *a, **k: probes.append(k))
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        await pump(pilot, 3)
+        assert app.effort == config.DEFAULT_EFFORT
+        assert probes == [], \
+            "a default-derived level must not probe at mount"
+
+    named = VenastineApp("ANTHROPIC", "test-model",
+                         {"tui": {"effort": "high"}})
+    async with named.run_test() as pilot:
+        assert await settle(
+            pilot, lambda: bool(probes)), \
+            "an explicitly named level keeps its early feedback"

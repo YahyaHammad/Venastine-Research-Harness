@@ -42,7 +42,7 @@ python main.py --init --research-project           # §24: skip the type questio
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 2363 tests, offline, ~25-45s by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 2381 tests, offline, ~25-45s by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -177,7 +177,11 @@ Two things in `tui/app.py` are load-bearing and easy to break silently:
 
 ### Reasoning effort
 
-`effort=None` sends nothing, on every provider — deliberately. `reasoning_effort` is rejected by OpenAI-compatible non-reasoning models and adaptive thinking by pre-4.6 Anthropic models, so silence is the only universally safe value. Anthropic's valid levels are **queried** (`capabilities.effort` on the Models API) so new Anthropic models need no table entry; everything else falls back to `config.MODEL_EFFORT_LEVELS` with a WARNING. Google reports no levels at all on the pinned `google-genai==1.0.0`, which has no `thinking_budget` field.
+`effort=None` sends nothing, on every provider. `reasoning_effort` is rejected by OpenAI-compatible non-reasoning models and adaptive thinking by pre-4.6 Anthropic models, which is why None was the shipped default for its whole life — **until batch 25 changed it** (#139, owner decision): `config.DEFAULT_EFFORT` is now `"high"`, because the research pipeline consumed no effort at all and the mode this project exists for ran at the provider's own default invisibly. The old note's risk is managed in `MODEL_EFFORT_LEVELS` rather than by silence: an entry mapped to an EMPTY list (the gpt-4o/gpt-4.1/gpt-3.5 family ships listed) is authoritative "takes no effort parameter", so `effort_for()` drops the default cleanly instead of 400ing; an unlisted non-reasoning endpoint still fails loud — same posture as `MODELS_REJECTING_SAMPLING_PARAMS`, and `--effort auto` is the off switch. Precedence: CLI flag > settings.json top-level `effort` > `DEFAULT_EFFORT`, with `tui.effort` still winning inside the TUI; a TUI level validates against the mounted model only when a human named it (`_effort_named`) — probing a default-derived one fired fallback WARNINGs on every launch and broke #138's healthy-mount silence.
+
+Anthropic's valid levels are **queried** (`capabilities.effort` on the Models API) so new Anthropic models need no table entry; everything else falls back to `config.MODEL_EFFORT_LEVELS`, where an unknown model ASSUMES `["low","medium","high"]` — optimistic, cached, and the reason the empty-list entries above matter. Google reports no levels at all on the pinned `google-genai==1.0.0`, which has no `thinking_budget` field, so effort drops there regardless of the default.
+
+The pipeline carries effort like authorization (#139): every pass, every JSON retry ("a retry is the same pass continuing"), §20's reviewer and its re-synthesis inherit it, and `effort_for` validating per RECEIVING model is what makes ensemble rosters and critic routing safe by construction.
 
 `config.MAX_TOKENS` caps thinking **plus** response on current Anthropic models — that is why §16 raised it from 4096.
 

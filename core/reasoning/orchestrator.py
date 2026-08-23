@@ -363,7 +363,8 @@ def _pass_failed_event(pass_id: str, exc: BaseException) -> PipelineEvent:
 
 def _run_pass(pass_id: str, pass_input: str, model: str, provider_name: str,
               temperature: float | None = None, authorization=None,
-              trace: list[str] | None = None, pass_threads: list | None = None):
+              trace: list[str] | None = None, pass_threads: list | None = None,
+              effort: str | None = None):
     """One LLM-backed pass. Every actual model call in this file goes
     through this single function.
 
@@ -375,12 +376,17 @@ def _run_pass(pass_id: str, pass_input: str, model: str, provider_name: str,
     so what it does between its start and its end is visible. Same shape
     as §22's own change to the shells -- the drainer still exists and is
     still what every other caller uses.
+
+    Batch 25 (#139): effort reaches the passes like authorization does --
+    threaded from the shell's setting through the pipeline, validated per
+    RECEIVING model by effort_for() inside the loop, so an ensemble roster
+    or critic routing needs no effort-specific handling here.
     """
     yield PipelineEvent(kind="pass_start", pass_id=pass_id)
     try:
         response = yield from _translate(pass_id, RunAgentLoop.stream_deep_research_mode(
             pass_input=pass_input, model=model, pass_id=pass_id, provider_name=provider_name,
-            temperature=temperature, authorization=authorization,
+            temperature=temperature, authorization=authorization, effort=effort,
         ))
         _record_granted_calls(pass_id, response, authorization)
         _record_pass_thread(pass_id, response, pass_threads)
@@ -452,6 +458,7 @@ def _run_pass_with_json_retry(
     pass_threads: list | None = None,
     claim_ids: list | None = None,
     ensemble: bool = False,
+    effort: str | None = None,
 ):
     """Runs one JSON-emitting pass and recovers from malformed JSON.
 
@@ -505,7 +512,7 @@ def _run_pass_with_json_retry(
     try:
         response = yield from _translate(pass_id, RunAgentLoop.stream_deep_research_mode(
             pass_input=pass_input, model=model, pass_id=pass_id, provider_name=provider_name,
-            temperature=temperature, authorization=authorization,
+            temperature=temperature, authorization=authorization, effort=effort,
         ))
         _record_granted_calls(pass_id, response, authorization)
         # §27: the retries re-enter THIS thread (continue_conversation), so one
@@ -534,6 +541,7 @@ def _run_pass_with_json_retry(
             trace=trace,
             temperature=temperature,
             authorization=authorization,
+            effort=effort,
             on_response=lambda r: _record_granted_calls(pass_id, r, authorization),
             # The retry re-enters THIS pass's thread, so it runs on the pass's
             # budget rather than continue_conversation's chat default.
@@ -639,7 +647,7 @@ def _synthesis_input(run: PipelineRun, directives: list | None = None) -> str:
 
 def _review_stage(run: PipelineRun, progress: _Progress, model: str,
                   provider_name: str, authorization, review,
-                  enabled: bool = False):
+                  enabled: bool = False, effort: str | None = None):
     """ROADMAP_v2 §20. Opt-in review of the finished run, with every
     correction consented to individually.
 
@@ -665,6 +673,9 @@ def _review_stage(run: PipelineRun, progress: _Progress, model: str,
 
     A consent object with `enabled` false still runs it, because a caller
     that went to the trouble of building one wants the review.
+
+    Batch 25 (#139): effort inherits into the reviewer (V7's rule applied
+    to one more axis) and into the re-synthesis pass below.
     """
     if not enabled and review is None:
         return
@@ -672,7 +683,7 @@ def _review_stage(run: PipelineRun, progress: _Progress, model: str,
     from core.reasoning import review as review_module
 
     findings, thread_id = review_module.run_review(
-        run, model, provider_name, authorization)
+        run, model, provider_name, authorization, effort=effort)
     run.log(f"Review: {len(findings)} finding(s) raised.")
     # The findings' CONTENT is durable from this checkpoint on (review
     # r1-2): a kill during the consent walk used to leave only the count,
@@ -687,7 +698,7 @@ def _review_stage(run: PipelineRun, progress: _Progress, model: str,
 
     decisions = review_module.walk_consent(
         findings, review, run, model=model, provider_name=provider_name,
-        thread_id=thread_id, authorization=authorization)
+        thread_id=thread_id, authorization=authorization, effort=effort)
     run.subagent_reviews = decisions
     yield from progress.checkpoint()
 
@@ -706,6 +717,7 @@ def _review_stage(run: PipelineRun, progress: _Progress, model: str,
                 model, provider_name, authorization=authorization,
                 trace=run.trace,
                 pass_threads=run.pass_threads,
+                effort=effort,
             )
         except Exception as e:
             # CONTAINED, not re-raised. A provider error on this one call
@@ -819,6 +831,7 @@ def run_deep_research_pipeline(
     authorization=None,
     review=None,
     subagent_review: bool | None = None,
+    effort: str | None = None,
 ) -> PipelineRun:
     """The synchronous entry point: run the pipeline, return the finished
     PipelineRun. Unchanged in signature and behaviour by §22 (AC1) --
@@ -838,6 +851,7 @@ def run_deep_research_pipeline(
         authorization=authorization,
         review=review,
         subagent_review=subagent_review,
+        effort=effort,
     ))
 
 
@@ -850,6 +864,7 @@ def stream_deep_research_pipeline(
     authorization=None,
     review=None,
     subagent_review: bool | None = None,
+    effort: str | None = None,
 ):
     """The pipeline, as a generator of PipelineEvents (§22). The terminal
     `run_complete` event carries the finished PipelineRun.
@@ -929,7 +944,7 @@ def stream_deep_research_pipeline(
 
     try:
         # --- Pass 0: preliminary plan ---
-        run.plan = _parse_json_response((yield from _run_pass_with_json_retry("Pass 0", user_query, model, provider_name, run.trace, authorization=authorization, pass_threads=run.pass_threads)))
+        run.plan = _parse_json_response((yield from _run_pass_with_json_retry("Pass 0", user_query, model, provider_name, run.trace, authorization=authorization, pass_threads=run.pass_threads, effort=effort)))
         yield from progress.checkpoint(f"Pass 0: plan produced ({len(run.plan.get('key_entities_or_subjects', []))} key entities anticipated).")
 
         # --- Pass 1: initial generation (ensemble mode: N candidates) ---
@@ -952,7 +967,7 @@ def stream_deep_research_pipeline(
                     candidates.append((yield from _run_pass(
                         "Pass 1", pass1_input, entry["model"], entry["provider_name"],
                         authorization=authorization, trace=run.trace,
-                        pass_threads=run.pass_threads)))
+                        pass_threads=run.pass_threads, effort=effort)))
                 except Exception as e:
                     # NAMED, TRACED, SKIPPED (E7) -- §20's containment rule.
                     # An optional generation strategy must not flip a
@@ -1017,13 +1032,13 @@ def stream_deep_research_pipeline(
                         "each provider's error."
                     )
         else:
-            run.raw_response = yield from _run_pass("Pass 1", pass1_input, model, provider_name, authorization=authorization, trace=run.trace, pass_threads=run.pass_threads)
+            run.raw_response = yield from _run_pass("Pass 1", pass1_input, model, provider_name, authorization=authorization, trace=run.trace, pass_threads=run.pass_threads, effort=effort)
             pass2_input = f"Response to extract claims from:\n{run.raw_response}"
             run.log("Pass 1: initial generation complete.")
         yield from progress.checkpoint()
 
         # --- Pass 2: claim extraction & classification ---
-        claims_json = _parse_json_response((yield from _run_pass_with_json_retry("Pass 2", pass2_input, model, provider_name, run.trace, authorization=authorization, pass_threads=run.pass_threads, ensemble=effective_n >= 2)))
+        claims_json = _parse_json_response((yield from _run_pass_with_json_retry("Pass 2", pass2_input, model, provider_name, run.trace, authorization=authorization, pass_threads=run.pass_threads, ensemble=effective_n >= 2, effort=effort)))
         run.claims = [_claim_from_json(c) for c in claims_json]
         for claim in run.claims:
             yield PipelineEvent(kind="claim_extracted", claim_id=claim.id,
@@ -1047,7 +1062,7 @@ def stream_deep_research_pipeline(
                 f"Deduplicated entities to research (search each ONCE, map results back "
                 f"to every claim referencing it):\n{json.dumps(unique_entities)}"
             )
-            grounding_json = _parse_json_response((yield from _run_pass_with_json_retry("Pass 3a", pass3a_input, critic_model, critic_provider, run.trace, authorization=authorization, pass_threads=run.pass_threads, claim_ids=[c.id for c in run.claims])))
+            grounding_json = _parse_json_response((yield from _run_pass_with_json_retry("Pass 3a", pass3a_input, critic_model, critic_provider, run.trace, authorization=authorization, pass_threads=run.pass_threads, claim_ids=[c.id for c in run.claims], effort=effort)))
             grounded = _apply_grounding(run.claims, grounding_json)
             yield from progress.checkpoint(f"Pass 3a: grounded {grounded} of {len(factual_claims)} factual claim(s), across {len(unique_entities)} deduplicated entities.")
 
@@ -1071,7 +1086,7 @@ def stream_deep_research_pipeline(
                     f"Raw response:\n{run.raw_response}\n\n"
                     f"Factual claims with grounding:\n{json.dumps([vars(c) for c in factual_claims])}"
                 )
-            critic_json = _parse_json_response((yield from _run_pass_with_json_retry("Pass 3b", pass3b_input, critic_model, critic_provider, run.trace, authorization=authorization, pass_threads=run.pass_threads, claim_ids=[c.id for c in run.claims])))
+            critic_json = _parse_json_response((yield from _run_pass_with_json_retry("Pass 3b", pass3b_input, critic_model, critic_provider, run.trace, authorization=authorization, pass_threads=run.pass_threads, claim_ids=[c.id for c in run.claims], effort=effort)))
             critiqued = _apply_critic(run.claims, critic_json)
             yield from progress.checkpoint(f"Pass 3b: critique applied to {critiqued} of {len(factual_claims)} factual claim(s).")
         else:
@@ -1084,7 +1099,7 @@ def stream_deep_research_pipeline(
 
         # --- Pass 3c: completeness, independent of Pass 1's raw_response ---
         pass3c_input = f"Original query:\n{user_query}\n\nPreliminary plan:\n{json.dumps(run.plan)}"
-        run.completeness = _parse_json_response((yield from _run_pass_with_json_retry("Pass 3c", pass3c_input, model, provider_name, run.trace, authorization=authorization, pass_threads=run.pass_threads)))
+        run.completeness = _parse_json_response((yield from _run_pass_with_json_retry("Pass 3c", pass3c_input, model, provider_name, run.trace, authorization=authorization, pass_threads=run.pass_threads, effort=effort)))
         yield from progress.checkpoint(
             f"Pass 3c: coverage_score={run.completeness.get('coverage_score')}, "
             f"{len(run.completeness.get('gaps', []))} gap(s) identified."
@@ -1096,7 +1111,7 @@ def stream_deep_research_pipeline(
             f"All claims:\n{json.dumps([vars(c) for c in run.claims])}\n\n"
             f"Completeness findings:\n{json.dumps(run.completeness)}"
         )
-        run.assumptions = _parse_json_response((yield from _run_pass_with_json_retry("Pass 5", pass5_input, model, provider_name, run.trace, authorization=authorization, pass_threads=run.pass_threads, claim_ids=[c.id for c in run.claims])))
+        run.assumptions = _parse_json_response((yield from _run_pass_with_json_retry("Pass 5", pass5_input, model, provider_name, run.trace, authorization=authorization, pass_threads=run.pass_threads, claim_ids=[c.id for c in run.claims], effort=effort)))
         flagged_count = _apply_assumption_flags(run.claims, run.assumptions)
         yield from progress.checkpoint(f"Pass 5: assumption audit complete, {flagged_count} of {len(run.claims)} claim(s) flagged.")
 
@@ -1122,7 +1137,7 @@ def stream_deep_research_pipeline(
                 }
                 for c in flagged
             ])
-            revisions = _parse_json_response((yield from _run_pass_with_json_retry("Pass 6a", pass6a_input, model, provider_name, run.trace, authorization=authorization, pass_threads=run.pass_threads, claim_ids=[c.id for c in flagged])))
+            revisions = _parse_json_response((yield from _run_pass_with_json_retry("Pass 6a", pass6a_input, model, provider_name, run.trace, authorization=authorization, pass_threads=run.pass_threads, claim_ids=[c.id for c in flagged], effort=effort)))
 
             # COUNT THE ROUND, NOT THE REVISION. The increment used to live
             # inside the loop below, so only a claim Pass 6a NAMED counted --
@@ -1163,7 +1178,7 @@ def stream_deep_research_pipeline(
 
             # --- Pass 6c: re-validate the revised subset only (batched, reuses Pass 4's code) ---
             pass6c_input = json.dumps([vars(c) for c in flagged])
-            revalidation = _parse_json_response((yield from _run_pass_with_json_retry("Pass 6c", pass6c_input, critic_model, critic_provider, run.trace, authorization=authorization, pass_threads=run.pass_threads, claim_ids=[c.id for c in run.claims])))
+            revalidation = _parse_json_response((yield from _run_pass_with_json_retry("Pass 6c", pass6c_input, critic_model, critic_provider, run.trace, authorization=authorization, pass_threads=run.pass_threads, claim_ids=[c.id for c in run.claims], effort=effort)))
             _apply_grounding(run.claims, revalidation.get("grounding", []))
             _apply_critic(run.claims, revalidation.get("critic", []))
             # 6c's own checkpoint below already reports an EFFECT -- how
@@ -1210,13 +1225,13 @@ def stream_deep_research_pipeline(
         yield from progress.checkpoint(f"Merge: final claim set assembled -- {len(run.claims)} claim(s), {len(run.coverage_gaps)} coverage gap(s).")
 
         # --- Final synthesis ---
-        run.final_report = yield from _run_pass("Final synthesis", _synthesis_input(run), model, provider_name, authorization=authorization, trace=run.trace, pass_threads=run.pass_threads)
+        run.final_report = yield from _run_pass("Final synthesis", _synthesis_input(run), model, provider_name, authorization=authorization, trace=run.trace, pass_threads=run.pass_threads, effort=effort)
         yield from progress.checkpoint("Final synthesis complete.")
 
         # --- §20: review, consent, correct ---
         yield from _review_stage(run, progress, model, provider_name,
                                  authorization, review,
-                                 enabled=subagent_review)
+                                 enabled=subagent_review, effort=effort)
 
         update_pipeline_run(run.run_id, run, status="complete")
         yield PipelineEvent(kind="run_complete", run=run)

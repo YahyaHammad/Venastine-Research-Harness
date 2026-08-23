@@ -100,7 +100,8 @@ def _review_input(run) -> str:
     )
 
 
-def run_review(run, model: str, provider_name: str, authorization=None):
+def run_review(run, model: str, provider_name: str, authorization=None,
+               effort: str | None = None):
     """Runs the reviewer agent over the finished run. Returns
     (findings, thread_id) -- the thread_id is what a refinement re-enters.
 
@@ -109,6 +110,10 @@ def run_review(run, model: str, provider_name: str, authorization=None):
     its tool calls spend from the ceiling the launcher set rather than a
     fresh one. An unauthorised run gives it no tools and it reviews what
     it was handed; that is a weaker review, not a broken one.
+
+    Batch 25 (#139): effort joins the inheritance -- V7's rule applied to
+    one more axis. The reviewer thinks at the depth the run was launched
+    with, not at the parameter's silent default.
     """
     from agents.manager import manager
     from core.loop import RunAgentLoop, DEFAULT_SYSTEM_PROMPT
@@ -144,6 +149,7 @@ def run_review(run, model: str, provider_name: str, authorization=None):
             context=context,
             system_prompt=prompt,
             authorization=authorization,
+            effort=effort,
             # §27 AC1. The reviewer IS a subagent -- §20 calls it one and it
             # runs through the same entry point -- so its thread is labelled
             # like one rather than getting a fourth kind of its own.
@@ -161,6 +167,7 @@ def run_review(run, model: str, provider_name: str, authorization=None):
             authorization=authorization,
             on_response=lambda r: _record_granted_calls(run, r, authorization),
             context=context,
+            effort=effort,
         )
     except Exception as e:
         # A transient reviewer failure (provider error, unrecoverable
@@ -299,7 +306,8 @@ def _validated(raw, run) -> list:
 # ===========================================================================
 
 def walk_consent(findings, consent, run, *, model=None, provider_name=None,
-                 thread_id=None, authorization=None) -> list:
+                 thread_id=None, authorization=None,
+                 effort: str | None = None) -> list:
     """Returns one decision record per finding, in the order asked.
 
     `consent` is a core.interaction.ResponseChannel (§23) -- it was a
@@ -327,7 +335,7 @@ def walk_consent(findings, consent, run, *, model=None, provider_name=None,
             continue
         decision, current = _decide_one(
             finding, consent, run, model=model, provider_name=provider_name,
-            thread_id=thread_id, authorization=authorization)
+            thread_id=thread_id, authorization=authorization, effort=effort)
         if decision == REJECT_ALL:
             stopped = True
             decisions.append(dict(current, decision=REJECT,
@@ -338,7 +346,7 @@ def walk_consent(findings, consent, run, *, model=None, provider_name=None,
 
 
 def _decide_one(finding, consent, run, *, model, provider_name, thread_id,
-                authorization):
+                authorization, effort: str | None = None):
     """One finding through however many refinement rounds it takes.
 
     Returns (decision, finding) where finding is the LAST version shown --
@@ -366,7 +374,7 @@ def _decide_one(finding, consent, run, *, model, provider_name, thread_id,
             return REJECT, dict(current, refinements=refinements)
         refined = _refine(current, notes, run, model=model,
                           provider_name=provider_name, thread_id=thread_id,
-                          authorization=authorization)
+                          authorization=authorization, effort=effort)
         if refined is None:
             run.log("Review: refinement produced no revised finding; "
                     "recorded as rejected.")
@@ -405,7 +413,7 @@ def _ask(consent, finding, round_index):
 
 
 def _refine(finding, notes, run, *, model, provider_name, thread_id,
-            authorization):
+            authorization, effort: str | None = None):
     """Sends one finding back into the reviewer's OWN thread (V5).
 
     The thread continuation is the point: the reviewer sees its own
@@ -442,6 +450,7 @@ def _refine(finding, notes, run, *, model, provider_name, thread_id,
             provider_name=provider_name,
             authorization=authorization,
             context=context,
+            effort=effort,
         )
         _record_granted_calls(run, response, authorization)
         # Same recovery as the first reviewer call: a prose-wrapped
@@ -457,6 +466,7 @@ def _refine(finding, notes, run, *, model, provider_name, thread_id,
             authorization=authorization,
             on_response=lambda r: _record_granted_calls(run, r, authorization),
             context=context,
+            effort=effort,
         )
         revised = _validated(parse_json_response(text), run)
     except Exception as e:

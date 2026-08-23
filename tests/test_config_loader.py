@@ -990,3 +990,15 @@ def test_the_symlinked_tier_is_reported_not_silently_dropped(
     assert any("symlink" in r.getMessage().lower() and "skills" in r.getMessage()
                for r in caplog.records), (
         "the tier was dropped with nothing said about it")
+
+
+def test_settings_top_level_effort_is_known(_redirect_roots):
+    _write_settings(_redirect_roots["user"], {"effort": "high"})
+    config_loader.initialize(str(_redirect_roots["project"]))
+    assert config_loader.get_settings()["effort"] == "high"
+
+
+def test_settings_top_level_effort_wrong_type_raises(_redirect_roots):
+    _write_settings(_redirect_roots["user"], {"effort": 3})
+    with pytest.raises(ValueError, match="must be str"):
+        config_loader.initialize(str(_redirect_roots["project"]))

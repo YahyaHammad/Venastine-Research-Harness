@@ -84,6 +84,7 @@ def retry_until_json(
     context=None,
     max_total_tokens: Optional[int] = None,
     validate: Optional[Callable] = None,
+    effort: Optional[str] = None,
 ) -> str:
     """Returns the first response text that parses as JSON, retrying by
     continuing `response`'s thread.
@@ -113,6 +114,9 @@ def retry_until_json(
                   stands, which is how an empty pass gets produced in the
                   first place. None keeps the wrapper's default, which is
                   right for §20's agent-shaped reviewer.
+    effort        batch 25 (#139): the caller's effort level. A retry is
+                  the same pass continuing, so it carries the same level;
+                  effort_for() re-validates against this thread's model.
     validate      §30 (B2). Applied to the PARSED payload; raising
                   PayloadShapeError re-enters this same loop. None means
                   "parse is the only contract", which is what the reviewer
@@ -157,6 +161,10 @@ def retry_until_json(
                 # be a second malformed answer.
                 authorization=authorization,
                 context=context,
+                # Same rule, batch 25 (#139): a retry is the same pass
+                # continuing, so it carries the pass's effort too --
+                # effort_for re-validates against this thread's model.
+                effort=effort,
                 **({} if max_total_tokens is None
                    else {"max_total_tokens": max_total_tokens}),
             )

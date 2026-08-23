@@ -151,18 +151,42 @@ MODELS_REJECTING_SAMPLING_PARAMS = frozenset({
 # Example to enable: {"provider_name": "OPENAI", "model": "gpt-5.1"}
 CRITIC_MODEL: dict | None = None
 
-# --- Reasoning effort (ROADMAP_v2 §16) ---
+# --- Reasoning effort (ROADMAP_v2 §16; default changed batch 25, #139) ---
 # The default effort level requested when the user has not chosen one.
-# None means "send nothing" -- the provider's own default applies.
-DEFAULT_EFFORT: str | None = None
+#
+# This shipped as None -- "send nothing", the one universally safe value,
+# because reasoning_effort is rejected by OpenAI-compatible NON-reasoning
+# models. Batch 25 changed it to "high" by owner decision: the pipeline
+# now consumes the setting (#139), so None meant the mode this project
+# exists for ran at the provider's own default forever, invisibly. The
+# risk the old note named is managed in MODEL_EFFORT_LEVELS rather than
+# by silence: known non-reasoning models are listed there with an EMPTY
+# level set, which effort_for() treats as authoritative and drops the
+# level cleanly instead of sending a parameter that would 400.
+DEFAULT_EFFORT: str | None = "high"
 
 # Fallback effort levels for providers whose APIs expose no capability
 # endpoint (every OpenAI-compatible provider, and Google). ANTHROPIC is NOT
 # listed here on purpose: its Models API reports per-model effort support,
-# so client.py queries it and new Anthropic models need no entry. Consulted
-# only on the fallback path, which logs at WARNING -- same posture as §21's
-# MODEL_CONTEXT_WINDOWS.
-MODEL_EFFORT_LEVELS: dict[str, list[str]] = {}
+# so client.py queries it and new Anthropic models need no entry.
+#
+# An entry whose value is an EMPTY list means "this model takes no effort
+# parameter at all" and is authoritative: effort_for() DROPS the requested
+# level with a naming warning instead of sending it. That is the safety
+# mechanism behind DEFAULT_EFFORT="high" -- without these entries, the
+# fallback for an unknown model ASSUMES ["low","medium","high"] and the
+# default high would reach gpt-4o-class endpoints as a 400 on every call.
+# Incomplete on purpose (same posture as MODELS_REJECTING_SAMPLING_PARAMS):
+# an unlisted non-reasoning endpoint still fails loud, and the fix is one
+# line here or `--effort auto`.
+MODEL_EFFORT_LEVELS: dict[str, list[str]] = {
+    "gpt-4o": [],
+    "gpt-4o-mini": [],
+    "gpt-4.1": [],
+    "gpt-4.1-mini": [],
+    "gpt-4.1-nano": [],
+    "gpt-3.5-turbo": [],
+}
 DEFAULT_EFFORT_LEVELS = ["low", "medium", "high"]
 
 # Google expresses reasoning depth as an integer token budget rather than an

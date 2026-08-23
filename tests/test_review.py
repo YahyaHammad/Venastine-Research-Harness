@@ -325,7 +325,8 @@ def _explode(*args, **kwargs):
     raise RuntimeError("reviewer exploded")
 
 
-def _stage(run, mocker, consent=None, authorization=None, enabled=False):
+def _stage(run, mocker, consent=None, authorization=None, enabled=False,
+           effort=None):
     from core import config_loader
     from core.reasoning import orchestrator
 
@@ -342,7 +343,7 @@ def _stage(run, mocker, consent=None, authorization=None, enabled=False):
     # at all, which would make every assertion below pass vacuously.
     events = list(orchestrator._review_stage(
         run, orchestrator._Progress(run), "m", "ANTHROPIC", authorization,
-        consent, enabled=enabled))
+        consent, enabled=enabled, effort=effort))
     return events
 
 
@@ -1517,6 +1518,10 @@ class _FakeTuiApp:
         self.provider_name = "ANTHROPIC"
         self._settings = {}
         self._busy = False
+        # #139: _start_research forwards the session's effort into the
+        # pipeline. The real app resolves it at mount; the double stays
+        # silent.
+        self.effort = None
         # #105: _forwarding reads this on every event. The real app gets
         # it from VenastineApp; the double needs the quiet default.
         self._shutting_down = False
@@ -1975,3 +1980,78 @@ class TestUnpinnedReviewProperties:
 
         assert out is None
         assert any("re-targeted" in line for line in run.trace)
+
+
+# ===========================================================================
+# ---- Batch 25 (#139): the review stage inherits the run's effort ----------
+# ===========================================================================
+
+class TestEffortInheritance:
+    """D4. V7's rule -- the reviewer inherits the run unchanged -- applied
+    to one more axis. Every hop is pinned separately because each is one
+    line whose omission nothing else would catch: stage -> reviewer call,
+    stage -> walk_consent -> _refine -> continue_conversation, and
+    stage -> re-synthesis."""
+
+    def test_the_reviewer_call_carries_the_effort(self, mocker):
+        run = _reviewed_run()
+        captured = []
+
+        def side_effect(*args, **kwargs):
+            captured.append(kwargs.get("effort", "ABSENT"))
+            return make_model_response(text=json.dumps([TEXT_FINDING]))
+
+        mocker.patch.object(RunAgentLoop, "run_agent_conversation",
+                            side_effect=side_effect)
+        _stub_resynthesis(mocker)
+        _stage(run, mocker, consent=_consent(("reject", "")), effort="high")
+
+        assert captured == ["high"], (
+            f"the reviewer must inherit the run's effort, got {captured}")
+
+    def test_the_refinement_carries_the_effort(self, mocker):
+        """stage -> walk_consent -> _decide_one -> _refine ->
+        continue_conversation: every hop in the chain must forward, or a
+        refine round quietly drops to None while the review around it
+        thinks hard."""
+        thread = uuid4()
+        run = _reviewed_run()
+        _stub_reviewer(mocker, [TEXT_FINDING], thread_id=thread)
+        _stub_resynthesis(mocker)
+
+        revised = dict(TEXT_FINDING, proposed="better text")
+        captured = []
+
+        def _continue(*, thread_id, message, **kwargs):
+            captured.append(kwargs.get("effort", "ABSENT"))
+            return make_model_response(text=json.dumps([revised]))
+
+        mocker.patch.object(RunAgentLoop, "continue_conversation",
+                            side_effect=_continue)
+        _stage(run, mocker,
+               consent=_consent(("refine", "note"), ("accept", "")),
+               effort="high")
+
+        assert captured == ["high"], (
+            f"a refinement must carry the run's effort, got {captured}")
+        assert run.claims[0].final_text == "better text"
+
+    def test_the_re_synthesis_carries_the_effort(self, mocker):
+        """The re-synthesis is _run_pass like any other pass; D4 names it
+        explicitly because nothing about 'review' suggests it runs another
+        generation pass at all."""
+        run = _reviewed_run()
+        _stub_reviewer(mocker, [TEXT_FINDING])
+
+        calls = []
+
+        def side_effect(*, pass_input, model, pass_id, **kwargs):
+            calls.append(kwargs.get("effort", "ABSENT"))
+            return make_model_response(text="REPORT v2")
+
+        mocker.patch.object(RunAgentLoop, "stream_deep_research_mode",
+                            side_effect=pass_stream(side_effect))
+        _stage(run, mocker, consent=_consent(("accept", "")), effort="high")
+
+        assert calls == ["high"], (
+            f"the re-synthesis must carry the run's effort, got {calls}")

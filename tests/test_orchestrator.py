@@ -1751,3 +1751,103 @@ class TestOneIdResolutionForTheWholePipeline:
             "every apply must land on the same object; a claim carrying "
             "half of another's results is the defect"
         )
+
+
+# ===========================================================================
+# ---- Batch 25 (#139): effort reaches the pipeline -------------------------
+# ===========================================================================
+
+def test_effort_reaches_every_model_call_in_the_pipeline(mocker):
+    """#139. The pipeline never mentioned effort: every pass ran at the
+    parameter's default of None while the TUI showed a level in its status
+    bar. Threaded like authorization, so the entry point's kwarg must land
+    on EVERY model call -- including the JSON-retry wrapper's own first
+    attempt, which is a separate stream_deep_research_mode call from
+    _run_pass's.
+
+    effort_for() validating per RECEIVING model is what makes this safe
+    for ensemble rosters and critic routing; this pin is only about the
+    plumbing not dropping it."""
+    payloads = _clean_pipeline_payloads()
+    efforts = []
+
+    def side_effect(*, pass_input, model, pass_id, provider_name="ANTHROPIC", **kwargs):
+        efforts.append(kwargs.get("effort", "ABSENT"))
+        return _response_with_text(payloads[pass_id])
+
+    mocker.patch.object(
+        RunAgentLoop, "stream_deep_research_mode",
+        side_effect=pass_stream(side_effect),
+    )
+
+    run_deep_research_pipeline(
+        user_query="q", model="claude-test", provider_name="ANTHROPIC",
+        effort="high",
+    )
+
+
+    expected = ["Pass 0", "Pass 1", "Pass 2", "Pass 3a", "Pass 3b",
+                "Pass 3c", "Pass 5", "Final synthesis"]
+    assert len(efforts) == len(expected), (
+        f"expected {len(expected)} model calls, saw {len(efforts)}")
+    assert efforts == ["high"] * len(expected), (
+        f"effort did not reach every call identically: {efforts}")
+
+
+def test_without_an_effort_the_passes_receive_none(mocker):
+    """The parameter must not be FABRICATED either: a caller that says
+    nothing sends nothing (the pre-batch behaviour), which effort_for
+    treats as the one universally quiet value."""
+    payloads = _clean_pipeline_payloads()
+    efforts = []
+
+    def side_effect(*, pass_input, model, pass_id, provider_name="ANTHROPIC", **kwargs):
+        efforts.append(kwargs.get("effort", "ABSENT"))
+        return _response_with_text(payloads[pass_id])
+
+    mocker.patch.object(
+        RunAgentLoop, "stream_deep_research_mode",
+        side_effect=pass_stream(side_effect),
+    )
+
+    run_deep_research_pipeline(
+        user_query="q", model="claude-test", provider_name="ANTHROPIC")
+
+    assert efforts and all(e is None for e in efforts), (
+        f"a caller that passes no effort must forward None, got {efforts}")
+
+
+def test_the_json_retry_carries_the_pass_effort(mocker):
+    """D5: a retry is the SAME pass continuing, so the corrective
+    continue_conversation carries the pass's effort too -- the same
+    reasoning that already gives it the budget, the context and the
+    authorization."""
+    from uuid import uuid4
+    fake_thread_id = uuid4()
+    retry_efforts = []
+
+    def fake_run_dr_mode(*, pass_input, model, pass_id,
+                         provider_name="ANTHROPIC", **kwargs):
+        resp = make_model_response(text="not valid json {{{")
+        resp.thread_id = fake_thread_id
+        return resp
+
+    def fake_continue(*, thread_id, message, system_prompt, model,
+                      provider_name="ANTHROPIC", **kwargs):
+        retry_efforts.append(kwargs.get("effort", "ABSENT"))
+        resp = make_model_response(text="still not json")
+        resp.thread_id = thread_id
+        return resp
+
+    mocker.patch.object(RunAgentLoop, "stream_deep_research_mode",
+                        side_effect=pass_stream(fake_run_dr_mode))
+    mocker.patch.object(RunAgentLoop, "continue_conversation",
+                        side_effect=fake_continue)
+
+    with pytest.raises(ValueError, match="did not return valid JSON"):
+        run_deep_research_pipeline(
+            user_query="test", model="claude-test", provider_name="ANTHROPIC",
+            effort="high")
+
+    assert retry_efforts, "the retry path never fired"
+    assert retry_efforts == ["high"] * len(retry_efforts)
