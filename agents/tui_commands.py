@@ -72,15 +72,26 @@ def _note_skills_under_new_context(app) -> None:
 
 def _cmd_goal(app, args: str) -> None:
     """Persistent per-thread objective (extra_data). Injected into every
-    turn's system prompt in ANY shell; the banner mirrors it here."""
+    turn's system prompt in ANY shell; the banner mirrors it here.
+
+    #113: the read and clear paths go through `app._memory`, NOT
+    `app.memory` -- same rule refresh_goal_banner's comment states.
+    Constructing a ConversationMemory persists a thread row, so answering
+    "there is no goal" (or clearing one on a session that has none) must
+    not be what creates the thread. Only SETTING a goal touches
+    app.memory: the user is putting state on a thread, so a thread is
+    warranted."""
     if args == "clear":
-        app.memory.set_extra("goal", None)
-        app._transcript.write_system("Goal cleared.")
+        if app._memory is None:
+            app._transcript.write_system("No goal set.")
+        else:
+            app.memory.set_extra("goal", None)
+            app._transcript.write_system("Goal cleared.")
     elif args:
         app.memory.set_extra("goal", args)
         app._transcript.write_system(f"Goal set: {args}")
     else:
-        goal = app.memory.extra.get("goal")
+        goal = app._memory.extra.get("goal") if app._memory else None
         if goal:
             app._transcript.write_system(f"Current goal: {goal}")
         else:

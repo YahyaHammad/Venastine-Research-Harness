@@ -284,8 +284,8 @@ def shrink_approval_timeout():
 
     Read at call time, so patching the module attribute is enough. Nothing
     asserts on the value or on the rendered "600s" string, and the tests
-    that exercise the timeout path call `_timed_out_review` directly
-    rather than through the wait.
+    that exercise the timeout path call `_timed_out_ask` directly rather
+    than through the wait.
     """
     import config
     original = config.ATTENDED_APPROVAL_TIMEOUT_S

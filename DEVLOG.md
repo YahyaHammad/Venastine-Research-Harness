@@ -5380,3 +5380,56 @@ Counts 2241 → 2272 (+27: five #49 visibility pins, twenty-two shape/switch
 pins, four latch pins minus one rewritten). Unit trackers untouched this time:
 #49 dents unit 5 (with #167 filed against it from outside), #136 retires X2's
 second finding but leaves #4 open, so tracker #137 stays.
+## Audit Pass 1 — fix batch 21: the human surface (2026-08-23)
+
+**#107, #112, #113, #114, #140** — five fixes on the consent/answer side of
+the TUI: what a timeout tells the human, whether the modals fit an 80×24
+terminal, whether asking about the goal creates the thread it asks about,
+whether ask_user can produce an unanswerable question, and whether `/copy
+all` carries what its name promises. Five commits on
+`fix/batch-21-human-surface`; per-change table in
+`tests/BREAKING_CHANGES.md` (batch 21).
+
+### The owner's answers that shaped it
+
+- **D10 was widened by the owner**, not us: the viewport test asserts not
+  just containment and centring but border-and-background presence — "a
+  screen with no rules at all" is now caught twice over.
+- **D11(b)**: `/goal clear` on a threadless session says `No goal set.`
+  rather than claiming a write that never happened. Same sentence the bare
+  read path already used, which is why it reads as designed rather than as
+  an error path.
+- **D12**: shape validation completes before the reachability check in
+  `ask_user`, so a model that gets both wrong is told what to FIX first;
+  ordering is itself pinned.
+
+### Build findings worth keeping
+
+- **The first mutation exposed a real coverage shape, not a script bug.**
+  M2 (reverting question's timeout line to confirm's false sentence) stayed
+  GREEN against the parametrized pins — because they feed their own line
+  contents. What was missing was a WIRING pin: each of the six `ask_*`
+  methods captured through a shadowed `_blocking_modal`, firing its real
+  callback against a stacked and then an empty stack. That test is why M2
+  and M3 (review's dismissal flipped) bite now. Lesson: a table-driven pin
+  over literals proves the callback logic; it does not prove any caller
+  wired the right literals in.
+- **The fix for #114 broke a pre-existing test, correctly.**
+  `test_allow_text_can_be_turned_off` had been driving `allow_text: false`
+  with no options — exactly the unanswerable shape — as the cheapest way to
+  reach the payload assertion. It now supplies options; its intent (the
+  affordance can be turned off) is unchanged, and the suite is the one place
+  that noticed the contract move.
+- **The viewport test tuned the CSS, not vice versa.** Grant-dialog capped
+  at 26 rows and claims at 32 — both over a 24-row terminal, both invisible
+  until a case with enough content pushed them. All modal caps now sit at ≤22,
+  claims-body at 14. The numbers are asserted nowhere directly; the geometry
+  test is their enforcement.
+- `_StubApp` in test_agents.py gained the `_memory` slot (#113) — the stub
+  models the real app's surface, and the real app has had two memory slots
+  since §18.
+
+### Housekeeping
+
+Counts 2272 → 2309 (+37). No unit tracker retires this batch: 14a drops to
+3 open (#105, #109, #110), 14b to 2 (#116, #117), X3 to 2 (#138, #139).

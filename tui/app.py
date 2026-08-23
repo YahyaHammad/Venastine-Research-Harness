@@ -872,8 +872,14 @@ class VenastineApp(App):
         # answer no longer goes anywhere.
         return self._blocking_modal(
             PermissionScreen(tool_name, params, notice),
-            on_timeout=lambda screen: self._timed_out_permission(
-                screen, tool_name))
+            on_timeout=lambda screen: self._timed_out_ask(
+                screen,
+                dismiss_with=False,
+                on_timeout_line=(
+                    f"[no answer for {tool_name} — denied; "
+                    f"the run continues]"),
+                after_line=("[answer arrived after the timeout — that call "
+                            "was denied; the run continues]")))
 
     def ask_confirm_blocking(self, title: str, body: str,
                              confirm_label: str = "Yes") -> bool:
@@ -895,7 +901,12 @@ class VenastineApp(App):
             return False
         return self._blocking_modal(
             ConfirmScreen(title, body, confirm_label),
-            on_timeout=self._timed_out_confirm)
+            on_timeout=lambda screen: self._timed_out_ask(
+                screen,
+                dismiss_with=False,
+                on_timeout_line="[no answer — nothing was written]",
+                after_line=("[answer arrived after the timeout — "
+                            "nothing was written]")))
 
     def _blocking_modal(self, screen, *, on_timeout):
         """Push `screen` from a worker thread and park until it dismisses.
@@ -923,13 +934,6 @@ class VenastineApp(App):
         finally:
             self._permission_channel = None
 
-    def _timed_out_confirm(self, screen) -> None:
-        # Only report a timeout if there genuinely was one -- the user may
-        # have clicked between the get() timeout and this callback.
-        if screen in self.screen_stack:
-            screen.dismiss(False)
-            self._transcript.write_system("[no answer — nothing was written]")
-
     def ask_choice_blocking(self, payload: dict):
         """Pick one of a set of offered options. Blocks; returns whatever
         the modal dismissed with, RAW.
@@ -946,7 +950,16 @@ class VenastineApp(App):
         screen = ProjectKindScreen(payload.get("proposal"),
                                    payload.get("reason", ""),
                                    payload.get("blank", False))
-        return self._blocking_modal(screen, on_timeout=self._timed_out_confirm)
+        return self._blocking_modal(
+            screen,
+            on_timeout=lambda screen: self._timed_out_ask(
+                screen,
+                dismiss_with=False,
+                # CHOICE's only caller is /init's project-kind picker, so
+                # the sentence confirm uses is true here too (#107).
+                on_timeout_line="[no answer — nothing was written]",
+                after_line=("[answer arrived after the timeout — "
+                            "nothing was written]")))
 
     def ask_question_blocking(self, payload: dict):
         """Put the model's question to the user (§23 slice 2). Blocks;
@@ -964,7 +977,14 @@ class VenastineApp(App):
             payload.get("multi_select", False),
             payload.get("allow_text", True))
         return self._blocking_modal(
-            screen, on_timeout=self._timed_out_confirm)
+            screen,
+            on_timeout=lambda screen: self._timed_out_ask(
+                screen,
+                dismiss_with=False,
+                on_timeout_line=(
+                    "[no answer — the model was told nobody answered]"),
+                after_line=("[answer arrived after the timeout — the model "
+                            "was told nobody answered]")))
 
     def ask_signoff_blocking(self, agent: str, candidates: list):
         """Which of a subagent's gated tools it may use unprompted (§23
@@ -978,8 +998,14 @@ class VenastineApp(App):
             return None
         return self._blocking_modal(
             SubagentSignoffScreen(agent, candidates),
-            on_timeout=lambda screen: self._timed_out_permission(
-                screen, f"{agent} (subagent sign-off)"))
+            on_timeout=lambda screen: self._timed_out_ask(
+                screen,
+                dismiss_with=False,
+                on_timeout_line=(
+                    f"[no answer for {agent} (subagent sign-off) — "
+                    f"denied; the spawn was refused]"),
+                after_line=("[answer arrived after the timeout — the spawn "
+                            "was refused]")))
 
     def ask_review_blocking(self, finding: dict, round_index: int):
         """Show the review modal and BLOCK until answered. §20 V4.
@@ -1015,31 +1041,54 @@ class VenastineApp(App):
         # rather than a promise that three paths share one (review f25).
         return self._blocking_modal(
             ReviewScreen(finding, round_index, config.MAX_REVIEW_REFINEMENTS),
-            on_timeout=self._timed_out_review)
+            on_timeout=lambda screen: self._timed_out_ask(
+                screen,
+                dismiss_with=("reject", ""),
+                on_timeout_line=(
+                    "[no answer — correction rejected; the review continues]"),
+                after_line=("[answer arrived after the timeout — that "
+                            "correction was already rejected; the review "
+                            "continues]")))
 
-    def _timed_out_review(self, screen) -> None:
+    def _timed_out_ask(self, screen, *, on_timeout_line: str,
+                       after_line: str, dismiss_with) -> None:
+        """One timeout callback for all six asks (#107).
+
+        THE MECHANICS, ONCE. There were three of these for six kinds, and
+        they disagreed about the same race: _timed_out_review handled
+        answered-just-after-the-timeout correctly, _timed_out_permission
+        guarded the dismissal but wrote "no answer" outside the guard,
+        contradicting a click that landed microseconds late, and
+        _timed_out_confirm sat entirely inside the guard, saying nothing
+        at all in exactly that case.
+
+        Both branches now exist for every kind, and each kind supplies its
+        own truthful sentences -- QUESTION's no-answer line says what
+        actually happened (the model was told nobody answered), not what
+        confirm's used to claim ("nothing was written"). The lines arrive
+        WHOLE rather than as an interpolated subject so review's two
+        strings stay byte-identical with what
+        test_the_no_answer_line_only_prints_when_there_was_no_answer pins.
+
+        `dismiss_with` carries the same raw value the old callbacks used:
+        False for permission/signoff/confirm/choice/question (decode turns
+        it into that kind's declining default) and ("reject", "") for
+        review. interaction.decode is untouched; this method changes only
+        what the human is told.
+        """
         # Only say "no answer" when there genuinely was none: if the user
         # clicked between the get() timeout and this callback, the screen
         # is gone and the message would contradict what they just did
         # (review §19-20 f15).
         if screen in self.screen_stack:
-            screen.dismiss(("reject", ""))
-            self._transcript.write_system(
-                "[no answer — correction rejected; the review continues]")
+            screen.dismiss(dismiss_with)
+            self._transcript.write_system(on_timeout_line)
         else:
             # They DID answer, microseconds after the timeout claimed the
             # slot, and their answer went nowhere. Saying nothing leaves
-            # them to discover it in the "N applied" summary and conclude
-            # the button is broken.
-            self._transcript.write_system(
-                "[answer arrived after the timeout — that correction was "
-                "already rejected; the review continues]")
-
-    def _timed_out_permission(self, screen, tool_name: str) -> None:
-        if screen in self.screen_stack:
-            screen.dismiss(False)
-        self._transcript.write_system(
-            f"[no answer for {tool_name} — denied; the run continues]")
+            # them to discover it in the run's summary and conclude the
+            # button is broken.
+            self._transcript.write_system(after_line)
 
     def on_turn_finished(self, message: TurnFinished) -> None:
         self._busy = False
@@ -1986,7 +2035,23 @@ def _copy_payload(app: VenastineApp, target: str):
             return None, "the claim list"
         return json.dumps(claims, indent=2, default=str), "the claim list"
     # all
-    return (app._transcript.as_text() or None), "this session"
+    # #140: "all" is a SUPERSET, not just the transcript. The transcript
+    # never carries the claims (on_research_finished advertises them as
+    # one line pointing at /claims), and it carries the report only as
+    # rendered answer text -- so before this change the one target whose
+    # name promised everything carried the least. Sections are omitted
+    # when there is nothing in them; with no run at all this is exactly
+    # the payload it always produced.
+    parts = [app._transcript.as_text() or ""]
+    run = app._last_run
+    if run is not None and run.final_report:
+        parts.append("\n\n## Report\n\n" + run.final_report)
+    claims = ([vars(c) for c in run.claims] if run is not None and run.claims
+              else list(app._live_claims.values()))
+    if claims:
+        parts.append("\n\n## Claims\n\n"
+                     + json.dumps(claims, indent=2, default=str))
+    return ("".join(parts).strip() or None), "this session"
 
 
 def _cmd_quit(app: VenastineApp, args: str) -> None:

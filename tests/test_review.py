@@ -1589,7 +1589,14 @@ class TestTuiReviewLifecycle:
         screen = _Screen()
 
         app._stack = []                # the user answered; screen is gone
-        app._timed_out_review(screen)
+        app._timed_out_ask(
+            screen,
+            dismiss_with=("reject", ""),
+            on_timeout_line=(
+                "[no answer — correction rejected; the review continues]"),
+            after_line=("[answer arrived after the timeout — that "
+                        "correction was already rejected; the review "
+                        "continues]"))
         assert screen.dismissed is None, (
             "a screen the user already dismissed must not be dismissed again")
         assert not any("no answer" in line
@@ -1602,7 +1609,14 @@ class TestTuiReviewLifecycle:
 
         app._t.lines.clear()
         app._stack = [screen]
-        app._timed_out_review(screen)
+        app._timed_out_ask(
+            screen,
+            dismiss_with=("reject", ""),
+            on_timeout_line=(
+                "[no answer — correction rejected; the review continues]"),
+            after_line=("[answer arrived after the timeout — that "
+                        "correction was already rejected; the review "
+                        "continues]"))
         assert screen.dismissed == ("reject", "")
         assert any("no answer" in line for line in app._transcript.lines)
 

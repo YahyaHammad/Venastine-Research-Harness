@@ -25,6 +25,8 @@ of pytest.ini, and per-test markers keep that true.
 
 import queue
 
+from types import SimpleNamespace
+
 import pytest
 
 from tests.conftest import (make_model_response, make_stream_sequence,
@@ -1461,3 +1463,403 @@ def test_the_resume_command_is_registered():
     command = commands_module.registry.get("resume")
     assert command is not None
     assert command.usage == "<thread-id>"
+
+
+# ---------------------------------------------------------------------------
+# ---- #107: one timeout callback, both branches, truthful per kind ---------
+# ---------------------------------------------------------------------------
+
+class _Rec:
+    def __init__(self):
+        self.lines = []
+
+    def write_system(self, t):
+        self.lines.append(t)
+
+
+class _Screen:
+    def __init__(self):
+        self.dismissed = None
+
+    def dismiss(self, value):
+        self.dismissed = value
+
+
+def _timeout_app():
+    """The same bare-instance seam test_review's f15 pin uses: the
+    callback logic is pure -- read the stack, maybe dismiss, write a
+    line -- so it needs no pilot."""
+    from tui.app import VenastineApp
+
+    class _Bare(VenastineApp):
+        @property
+        def _transcript(self):
+            return self._t
+
+        @property
+        def screen_stack(self):
+            return self._stack
+
+    app = _Bare.__new__(_Bare)
+    app._t = _Rec()
+    app._stack = []
+    return app
+
+
+PERMISSION = dict(
+    dismiss_with=False,
+    on_timeout_line="[no answer for shell — denied; the run continues]",
+    after_line=("[answer arrived after the timeout — that call was "
+                "denied; the run continues]"))
+SIGNOFF = dict(
+    dismiss_with=False,
+    on_timeout_line=(
+        "[no answer for researcher (subagent sign-off) — denied; "
+        "the spawn was refused]"),
+    after_line="[answer arrived after the timeout — the spawn was refused]")
+CONFIRM = dict(
+    dismiss_with=False,
+    on_timeout_line="[no answer — nothing was written]",
+    after_line="[answer arrived after the timeout — nothing was written]")
+QUESTION = dict(
+    dismiss_with=False,
+    on_timeout_line="[no answer — the model was told nobody answered]",
+    after_line=("[answer arrived after the timeout — the model was told "
+                "nobody answered]"))
+
+
+@pytest.mark.parametrize("kind", [PERMISSION, SIGNOFF, CONFIRM, QUESTION])
+def test_a_timeout_dismisses_and_says_what_happened(kind):
+    """Every kind keeps its raw dismissal value and gets ONE truthful
+    'no answer' sentence (#107)."""
+    app = _timeout_app()
+    screen = _Screen()
+    app._stack = [screen]
+
+    app._timed_out_ask(screen, **kind)
+
+    assert screen.dismissed == kind["dismiss_with"]
+    assert any(kind["on_timeout_line"] in line
+               for line in app._transcript.lines), (
+        "the no-answer line must name what actually happened")
+
+
+@pytest.mark.parametrize("kind", [PERMISSION, SIGNOFF, CONFIRM, QUESTION])
+def test_an_answer_landing_after_the_timeout_is_acknowledged(kind):
+    """The review callback has handled this race since §20; the other
+    kinds said either the wrong thing or nothing. All of them now say
+    the answer went nowhere, without re-dismissing (#107)."""
+    app = _timeout_app()
+    screen = _Screen()
+    app._stack = []                # they clicked between get() and here
+
+    app._timed_out_ask(screen, **kind)
+
+    assert screen.dismissed is None, (
+        "a screen the user already dismissed must not be dismissed again")
+    assert any(kind["after_line"] in line
+               for line in app._transcript.lines), (
+        "silence sends them to the summary to work out that their "
+        "click did nothing")
+    assert not any("no answer" in line for line in app._transcript.lines)
+
+
+def test_the_question_timeout_does_not_claim_nothing_was_written():
+    """The old confirm sentence was written for /init and inherited by
+    ask_user, where nothing is ever proposed to be written -- the model
+    is told nobody answered, and the line should say so (#107)."""
+    app = _timeout_app()
+    screen = _Screen()
+    app._stack = [screen]
+
+    app._timed_out_ask(screen, **QUESTION)
+
+    lines = "\n".join(app._transcript.lines)
+    assert "nobody answered" in lines
+    assert "nothing was written" not in lines
+
+REVIEW = dict(
+    dismiss_with=("reject", ""),
+    on_timeout_line="[no answer — correction rejected; the review continues]",
+    after_line=("[answer arrived after the timeout — that correction was "
+                "already rejected; the review continues]"))
+
+ASKS = [
+    ("permission",
+     lambda app: app.ask_permission_blocking("shell", {"query": "x"}, None),
+     PERMISSION),
+    ("signoff",
+     lambda app: app.ask_signoff_blocking("researcher", ["web_search"]),
+     SIGNOFF),
+    ("confirm",
+     lambda app: app.ask_confirm_blocking("Title", "Body"), CONFIRM),
+    ("choice", lambda app: app.ask_choice_blocking({}), CONFIRM),
+    ("question",
+     lambda app: app.ask_question_blocking({"question": "Which database?"}),
+     QUESTION),
+    ("review",
+     lambda app: app.ask_review_blocking({"kind": "text"}, 0), REVIEW),
+]
+
+
+@pytest.mark.parametrize("name,ask,expected", ASKS,
+                         ids=[a[0] for a in ASKS])
+def test_every_ask_wires_the_truthful_lines_into_the_callback(
+        name, ask, expected):
+    """The parametrized pins above feed their own line contents, so they
+    say nothing about what the six ask methods ACTUALLY wire (#107).
+    This one captures each real on_timeout through _blocking_modal and
+    fires it against a stacked screen -- both sentences and the raw
+    dismissal value are asserted off production code, not test data."""
+    app = _timeout_app()
+    app._shutting_down = False
+    captured = {}
+
+    def fake_blocking(screen, *, on_timeout):
+        captured["screen"] = screen
+        captured["callback"] = on_timeout
+        return None
+
+    app._blocking_modal = fake_blocking          # instance shadow, not a patch
+    ask(app)
+
+    assert captured["callback"] is not None
+    fired = _Screen()
+    app._t = _Rec()
+    app._stack = [fired]
+    captured["callback"](fired)
+
+    assert fired.dismissed == expected["dismiss_with"], (
+        f"{name} must keep its raw timeout dismissal value")
+    transcript = "\n".join(app._transcript.lines)
+    assert expected["on_timeout_line"] in transcript, (
+        f"{name} must write its own no-answer sentence")
+    # The gone-screen branch too: swap the stack and fire again.
+    app._t.lines.clear()
+    app._stack = []
+    late = _Screen()
+    captured["callback"](late)
+    assert "\n".join(app._transcript.lines) == expected["after_line"]
+
+
+# ---------------------------------------------------------------------------
+# ---- #112: every modal is styled, centred, and fits an 80x24 terminal -----
+# ---------------------------------------------------------------------------
+
+def _modal_cases():
+    """(name, screen factory, dialog id), one per ModalScreen subclass in
+    tui/screens.py -- this table SHADOWS those constructors, so adding a
+    tenth screen means adding a row here. The sign-off appears twice: its
+    empty-candidates branch composes the permission dialog, its populated
+    branch the grant one."""
+    from tui.screens import (
+        ClaimsScreen, ConfirmScreen, GrantPickerScreen, ProjectKindScreen,
+        QuestionScreen, ReviewScreen, SubagentSignoffScreen,
+        ThreadPickerScreen,
+    )
+
+    claim = {"id": "c001", "claim": "Water boils at 100C.",
+             "confidence_tier": "HIGH"}
+    return [
+        ("permission",
+         lambda: PermissionScreen("web_search", {"query": "x"}, None),
+         "#permission-dialog"),
+        ("grant",
+         lambda: GrantPickerScreen([("web_search", "Search the web.")]),
+         "#grant-dialog"),
+        ("signoff-populated",
+         lambda: SubagentSignoffScreen("researcher", ["web_search"]),
+         "#grant-dialog"),
+        ("signoff-empty",
+         lambda: SubagentSignoffScreen("bare", []),
+         "#permission-dialog"),
+        ("question",
+         lambda: QuestionScreen("Which database should we use?",
+                                ["postgres", "sqlite"], True, True),
+         "#question-dialog"),
+        ("review",
+         lambda: ReviewScreen({"kind": "text", "reason": "Overstates.",
+                               "proposed": "Soften."}, 0),
+         "#review-dialog"),
+        ("claims", lambda: ClaimsScreen([claim]), "#claims-dialog"),
+        ("confirm", lambda: ConfirmScreen("Title", "Body text."),
+         "#permission-dialog"),
+        ("project-kind", lambda: ProjectKindScreen(),
+         "#permission-dialog"),
+        ("thread-picker", lambda: ThreadPickerScreen([], ""),
+         "#thread-dialog"),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name,make_screen,dialog_id", _modal_cases(),
+                         ids=[c[0] for c in _modal_cases()])
+async def test_every_modal_is_centred_bounded_and_styled(
+        name, make_screen, dialog_id):
+    """/112's durable half: nothing noticed when a screen shipped without
+    its stylesheet rules -- ReviewScreen had none at all and four more
+    sat pinned to the top-left corner. Every modal must render INSIDE
+    the default 80x24 viewport, centred, with a border and a surface
+    background, so a consent surface's buttons cannot fall off-screen."""
+    from textual.color import Color
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        await app.push_screen(make_screen())
+        await pilot.pause()
+
+        dialog = app.screen.query_one(dialog_id)
+        r = dialog.region
+
+        assert r.x >= 0 and r.y >= 0, f"{name} starts off-screen"
+        assert r.x + r.width <= 80, f"{name} overflows to the right"
+        assert r.y + r.height <= 24, (
+            f"{name} is {r.height} rows tall on a 24-row terminal; "
+            "its bottom rows (often the buttons) are unreachable")
+
+        assert abs(r.x - (80 - r.width) / 2) <= 1, f"{name} not centred"
+        assert abs(r.y - (24 - r.height) / 2) <= 1, f"{name} not centred"
+
+        edges = list(dialog.styles.border)
+        assert any(edge[0] for edge in edges), (
+            f"{name} has no border rule at all")
+        assert dialog.styles.background != Color(0, 0, 0, 0), (
+            f"{name} has no background rule")
+
+
+# ---------------------------------------------------------------------------
+# ---- #113: asking about the goal must not create the thread ---------------
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("argv", ["", "clear"],
+                         ids=["bare-goal", "clear-on-fresh-session"])
+async def test_a_goal_read_or_clear_persists_no_thread(mocker, argv):
+    """_cmd_goal's read path went through app.memory -- whose property
+    CONSTRUCTS a ConversationMemory and persists a thread row -- so the
+    command answering "there is no goal" was the one creating a thread to
+    answer about (#113). kind=chat rows are exactly what §27's picker
+    filter cannot remove."""
+    made = mocker.patch("tui.app.ConversationMemory")
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        from agents.tui_commands import _cmd_goal
+        _cmd_goal(app, argv)
+        await pilot.pause()
+
+        made.assert_not_called()
+        assert app._memory is None
+        assert "No goal set." in app._transcript.as_text()
+
+
+@pytest.mark.asyncio
+async def test_setting_a_goal_still_creates_the_thread(mocker):
+    """Control for #113: /goal <text> puts state ON a thread, so a thread
+    is warranted and must still be built."""
+    mocker.patch("tui.app.ConversationMemory",
+                 side_effect=__import__("tui.app", fromlist=["x"])
+                 .ConversationMemory)
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        from agents.tui_commands import _cmd_goal
+        _cmd_goal(app, "ship the review fixes")
+        await pilot.pause()
+
+        assert app._memory is not None
+        assert "Goal set: ship the review fixes" in (
+            app._transcript.as_text())
+
+
+# ---------------------------------------------------------------------------
+# ---- #140: /copy all carries the report AND the claims --------------------
+# ---------------------------------------------------------------------------
+
+class _CopyStubRun:
+    def __init__(self, report=None, claims=()):
+        self.final_report = report
+        self.claims = list(claims)
+
+
+class _CopyStubTranscript:
+    def __init__(self, text):
+        self._text = text
+
+    def as_text(self):
+        return self._text
+
+
+def _copy_app(transcript="", run=None, live=None):
+    from types import SimpleNamespace
+    app = SimpleNamespace(_transcript=_CopyStubTranscript(transcript),
+                          _last_run=run,
+                          _live_claims=live or {})
+    return app
+
+
+def test_copy_all_is_a_superset_of_transcript_report_and_claims():
+    """#140's whole point: the transcript never contains the claims
+    (on_research_finished advertises them as one /claims pointer) and the
+    report only as rendered answer text -- so 'all' carried the least of
+    any target while promising everything."""
+    from tui.app import _copy_payload
+
+    claim = SimpleNamespace(id="c001", text="CLAIM-ONLY-MARKER",
+                            confidence_tier="HIGH")
+    app = _copy_app(
+        transcript="body line TRANSCRIPT-ONLY-MARKER",
+        run=_CopyStubRun(report="REPORT-ONLY-MARKER", claims=[claim]))
+
+    text, described = _copy_payload(app, "all")
+
+    assert described == "this session"
+    assert "TRANSCRIPT-ONLY-MARKER" in text
+    assert "## Report\n\nREPORT-ONLY-MARKER" in text
+    assert "CLAIM-ONLY-MARKER" in text          # claim TEXT
+    assert '"confidence_tier": "HIGH"' in text  # and its metadata
+    # Section order: transcript, then report, then claims.
+    assert (text.index("TRANSCRIPT") < text.index("## Report")
+            < text.index("## Claims"))
+
+
+def test_copy_all_without_a_run_is_unchanged():
+    """No run -> byte-identical with the pre-#140 payload: the sections
+    are additive, never a new wrapper around an old contract."""
+    from tui.app import _copy_payload
+
+    app = _copy_app(transcript="just the session")
+    text, described = _copy_payload(app, "all")
+
+    assert text == "just the session"
+    assert described == "this session"
+
+
+@pytest.mark.parametrize("kwargs,absent", [
+    (dict(report="R"), "## Claims"),
+    (dict(claims=[SimpleNamespace(id="c001", confidence_tier="HIGH")]),
+     "## Report"),
+], ids=["no-claims", "no-report"])
+def test_copy_all_omits_empty_sections(kwargs, absent):
+    """An empty section must not appear as a heading over nothing."""
+    from tui.app import _copy_payload
+
+    app = _copy_app(transcript="t",
+                    run=_CopyStubRun(**kwargs))
+    text, _ = _copy_payload(app, "all")
+
+    assert absent not in text
+
+
+def test_live_claims_fall_back_when_the_run_has_none():
+    """Mid-run there is no finished run yet; the live tally is what
+    /copy claims serves, so all must serve it too."""
+    from tui.app import _copy_payload
+
+    app = _copy_app(
+        transcript="t",
+        run=None,
+        live={"c001": {"id": "c001", "confidence_tier": "LOW"}})
+
+    text, _ = _copy_payload(app, "all")
+    assert "## Claims" in text and "c001" in text
