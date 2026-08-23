@@ -5533,3 +5533,64 @@ model call and match what the picker already shows.
 Counts 2328 → 2346 (+18). Unit findings drop to 8 across 4 open units
 (14a: #105/#109/#110; 14b: #116/#117; X2: #4; X3: #139); outside-unit
 drop to 8 (#170/#14/#12/#10/#9/#8/#6/#5).
+## Audit Pass 1 — fix batch 24: unit 14a, the app (2026-08-23)
+
+**#105, #109, #110, #170** — the TUI app unit retires. Three commits on
+`fix/batch-24-unit-14a`; per-change table in `tests/BREAKING_CHANGES.md`
+(batch 24). Unit 14a is the fourth fully-resolved unit.
+
+### The owner's answers that shaped it
+
+D1a: /grill-me is ATTENDED — a TUI turn with no channel was strictly weaker
+than the chat beside it, and §18 already specified grill-me as an agent
+running through the loop like every other agent. D2a: run_one_shot owns the
+WHOLE assembly and takes the agent, because prompt facts and run facts must
+be one answer — desyncing them again is how #170 happened. D3a: abandonment
+is its own outcome on ResearchFinished, not an error. D4: exit() narrates.
+D5: _consume untouched — a chat turn is bounded by one model call, and
+closing a chat generator mid-tool buys nothing for real risk. D6: the
+issue's twelve as contract; WP-A/B carried their own natural pins.
+
+### Build findings worth keeping
+
+- **#110 needed ZERO production changes.** Every one of the twelve gaps was
+  a missing test, including /copy's unknown-target check, which the issue's
+  phrasing suggested might be absent but was already there. Coverage issues
+  read like bug reports; verify each claimed defect before planning fixes.
+- **`memory.extra` is a SNAPSHOT** (`dict(self._extra)`); writing through
+  it silently discards. The write path is `set_extra`. A test lost its goal
+  to this until attach_ref's surviving sibling exposed the difference.
+- **`app._transcript` queries the ACTIVE screen** (§27 knew this). exit()
+  narrating under a modal found no #transcript at all; best-effort means
+  catching NoMatches, not hoping.
+- **A canned non-streaming response never sets `_last_response`** — that
+  comes from flush_stream on TurnFinished. Settle streaming-turn tests on
+  `_busy`, not on response text.
+- **The r1-1 test set `_shutting_down` by hand**, proving readers without
+  writers. Driving `app.exit()` on a REAL app is the fix; the same rewrite
+  is why `_shutting_down` became a class attribute — three bare-instance
+  seams build the app with __new__ and the flag's reader ran there first.
+- **Mutation M2's crash left its mutation applied**, and the rerun read the
+  mutated file as baseline ("anchor missing" on a string the mutation had
+  eaten). When a mutation script dies mid-run, diff the file BEFORE
+  re-running anything.
+- The abandoned pilot fake paces events with `time.sleep(0.02)` between
+  yields: safe against close() because a generator runs on its CONSUMER's
+  thread, so close() always lands at the suspension point. Unpaced, the
+  whole fake drains before the flag can land and the test cannot
+  discriminate.
+
+### Mutation ledger (all RED)
+
+WP-A: authorization dropped · tiers deleted · memories duplicated.
+WP-B: forwarding break removed · abandoned branch dropped · busy warning
+removed · post-quit narration guard removed.
+WP-C: refs guarded by agent · memories unconditional · exit arming removed ·
+picker guard removed · resume refresh removed · worker-error handler
+neutered · copy-target check removed · claims ValueError branch raised ·
+tally fed fresh ids · reload deleted · artifacts_ok ignored.
+
+### Housekeeping
+
+Counts 2346 → 2363 (+17). Open findings drop to 11 (unit-scoped 4 across 3
+units: 14b ×2, X2 ×1, X3 ×1; outside-unit 7).
