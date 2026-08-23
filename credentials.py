@@ -1,7 +1,42 @@
 import json
 import os
 
-LLM_PROVIDERS_FILE = "providers.json"
+# #24. Resolved at IMPORT time, exactly like its four siblings --
+# config.DB_PATH / OUTPUT_DIR / WORKSPACE_DIR and logging_setup's log
+# file are all `os.environ.get(NAME, default)` evaluated once -- so a
+# test can still redirect it by monkeypatching the attribute, and a
+# user can point it anywhere with AGENT_PROVIDERS_FILE before launch.
+# The default stays CWD-relative on purpose: for a repo-local tool,
+# per-checkout state is what you want, and repo-relative would share
+# one key file across every clone on the machine.
+LLM_PROVIDERS_FILE = os.environ.get("AGENT_PROVIDERS_FILE", "providers.json")
+
+
+def no_providers_message() -> str:
+    """The error for "the file itself is not there" (#24).
+
+    ONE wording, used by both raisers -- api_initialization (the one
+    every user actually meets) and load_credentials below -- so the two
+    cannot drift apart the way their old messages already had.
+    """
+    return (
+        f"No providers configured: {LLM_PROVIDERS_FILE} was not found in "
+        f"{os.getcwd()!r}. Copy providers.json.example to "
+        f"{LLM_PROVIDERS_FILE} and add your API key."
+    )
+
+
+def unknown_provider_message(provider_name: str, providers: dict) -> str:
+    """The error for "the file is there, this provider is not in it" (#24).
+
+    Names the configured set exactly like /model's refusal does, so the
+    typo is answered where it was made rather than two layers later.
+    """
+    configured = ", ".join(sorted(providers)) or "none"
+    return (
+        f"Unknown provider: {provider_name}. Configured: {configured} "
+        f"(file: {LLM_PROVIDERS_FILE})."
+    )
 
 
 def load_provider_data() -> dict:
@@ -75,8 +110,13 @@ def save_credentials(
 
 def load_credentials(provider_name: str) -> tuple[str, str]:
     provider_data = load_provider_data()
+    # #24. The two failure modes say different things now -- "the file is
+    # not there" is a setup problem with a one-line remedy; "the provider
+    # is not in it" is a typo. Same builders api_initialization uses.
+    if not provider_data and not os.path.exists(LLM_PROVIDERS_FILE):
+        raise ValueError(no_providers_message())
     if provider_name not in provider_data:
-        raise ValueError(f"Provider '{provider_name}' not found")
+        raise ValueError(unknown_provider_message(provider_name, provider_data))
 
     entry = provider_data[provider_name]
     return entry["API_KEY"], entry.get("API_URL", "")
