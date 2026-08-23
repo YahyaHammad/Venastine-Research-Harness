@@ -379,6 +379,10 @@ class _StubTranscript:
 
 class _StubApp:
     def __init__(self, memory):
+        # Both slots, like the real app (#113): _memory is what the
+        # goal command's read/clear paths must consult, memory is the
+        # constructing property.
+        self._memory = memory
         self.memory = memory
         self.active_agent = None
         # Part of the real app's contract since §19; /agent re-checks

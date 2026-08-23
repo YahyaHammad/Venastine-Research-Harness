@@ -1723,3 +1723,48 @@ async def test_every_modal_is_centred_bounded_and_styled(
             f"{name} has no border rule at all")
         assert dialog.styles.background != Color(0, 0, 0, 0), (
             f"{name} has no background rule")
+
+
+# ---------------------------------------------------------------------------
+# ---- #113: asking about the goal must not create the thread ---------------
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("argv", ["", "clear"],
+                         ids=["bare-goal", "clear-on-fresh-session"])
+async def test_a_goal_read_or_clear_persists_no_thread(mocker, argv):
+    """_cmd_goal's read path went through app.memory -- whose property
+    CONSTRUCTS a ConversationMemory and persists a thread row -- so the
+    command answering "there is no goal" was the one creating a thread to
+    answer about (#113). kind=chat rows are exactly what §27's picker
+    filter cannot remove."""
+    made = mocker.patch("tui.app.ConversationMemory")
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        from agents.tui_commands import _cmd_goal
+        _cmd_goal(app, argv)
+        await pilot.pause()
+
+        made.assert_not_called()
+        assert app._memory is None
+        assert "No goal set." in app._transcript.as_text()
+
+
+@pytest.mark.asyncio
+async def test_setting_a_goal_still_creates_the_thread(mocker):
+    """Control for #113: /goal <text> puts state ON a thread, so a thread
+    is warranted and must still be built."""
+    mocker.patch("tui.app.ConversationMemory",
+                 side_effect=__import__("tui.app", fromlist=["x"])
+                 .ConversationMemory)
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        from agents.tui_commands import _cmd_goal
+        _cmd_goal(app, "ship the review fixes")
+        await pilot.pause()
+
+        assert app._memory is not None
+        assert "Goal set: ship the review fixes" in (
+            app._transcript.as_text())
