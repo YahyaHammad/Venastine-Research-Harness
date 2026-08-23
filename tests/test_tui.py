@@ -25,6 +25,8 @@ of pytest.ini, and per-test markers keep that true.
 
 import queue
 
+from types import SimpleNamespace
+
 import pytest
 
 from tests.conftest import (make_model_response, make_stream_sequence,
@@ -1768,3 +1770,96 @@ async def test_setting_a_goal_still_creates_the_thread(mocker):
         assert app._memory is not None
         assert "Goal set: ship the review fixes" in (
             app._transcript.as_text())
+
+
+# ---------------------------------------------------------------------------
+# ---- #140: /copy all carries the report AND the claims --------------------
+# ---------------------------------------------------------------------------
+
+class _CopyStubRun:
+    def __init__(self, report=None, claims=()):
+        self.final_report = report
+        self.claims = list(claims)
+
+
+class _CopyStubTranscript:
+    def __init__(self, text):
+        self._text = text
+
+    def as_text(self):
+        return self._text
+
+
+def _copy_app(transcript="", run=None, live=None):
+    from types import SimpleNamespace
+    app = SimpleNamespace(_transcript=_CopyStubTranscript(transcript),
+                          _last_run=run,
+                          _live_claims=live or {})
+    return app
+
+
+def test_copy_all_is_a_superset_of_transcript_report_and_claims():
+    """#140's whole point: the transcript never contains the claims
+    (on_research_finished advertises them as one /claims pointer) and the
+    report only as rendered answer text -- so 'all' carried the least of
+    any target while promising everything."""
+    from tui.app import _copy_payload
+
+    claim = SimpleNamespace(id="c001", text="CLAIM-ONLY-MARKER",
+                            confidence_tier="HIGH")
+    app = _copy_app(
+        transcript="body line TRANSCRIPT-ONLY-MARKER",
+        run=_CopyStubRun(report="REPORT-ONLY-MARKER", claims=[claim]))
+
+    text, described = _copy_payload(app, "all")
+
+    assert described == "this session"
+    assert "TRANSCRIPT-ONLY-MARKER" in text
+    assert "## Report\n\nREPORT-ONLY-MARKER" in text
+    assert "CLAIM-ONLY-MARKER" in text          # claim TEXT
+    assert '"confidence_tier": "HIGH"' in text  # and its metadata
+    # Section order: transcript, then report, then claims.
+    assert (text.index("TRANSCRIPT") < text.index("## Report")
+            < text.index("## Claims"))
+
+
+def test_copy_all_without_a_run_is_unchanged():
+    """No run -> byte-identical with the pre-#140 payload: the sections
+    are additive, never a new wrapper around an old contract."""
+    from tui.app import _copy_payload
+
+    app = _copy_app(transcript="just the session")
+    text, described = _copy_payload(app, "all")
+
+    assert text == "just the session"
+    assert described == "this session"
+
+
+@pytest.mark.parametrize("kwargs,absent", [
+    (dict(report="R"), "## Claims"),
+    (dict(claims=[SimpleNamespace(id="c001", confidence_tier="HIGH")]),
+     "## Report"),
+], ids=["no-claims", "no-report"])
+def test_copy_all_omits_empty_sections(kwargs, absent):
+    """An empty section must not appear as a heading over nothing."""
+    from tui.app import _copy_payload
+
+    app = _copy_app(transcript="t",
+                    run=_CopyStubRun(**kwargs))
+    text, _ = _copy_payload(app, "all")
+
+    assert absent not in text
+
+
+def test_live_claims_fall_back_when_the_run_has_none():
+    """Mid-run there is no finished run yet; the live tally is what
+    /copy claims serves, so all must serve it too."""
+    from tui.app import _copy_payload
+
+    app = _copy_app(
+        transcript="t",
+        run=None,
+        live={"c001": {"id": "c001", "confidence_tier": "LOW"}})
+
+    text, _ = _copy_payload(app, "all")
+    assert "## Claims" in text and "c001" in text

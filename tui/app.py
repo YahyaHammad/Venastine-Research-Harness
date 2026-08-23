@@ -2035,7 +2035,23 @@ def _copy_payload(app: VenastineApp, target: str):
             return None, "the claim list"
         return json.dumps(claims, indent=2, default=str), "the claim list"
     # all
-    return (app._transcript.as_text() or None), "this session"
+    # #140: "all" is a SUPERSET, not just the transcript. The transcript
+    # never carries the claims (on_research_finished advertises them as
+    # one line pointing at /claims), and it carries the report only as
+    # rendered answer text -- so before this change the one target whose
+    # name promised everything carried the least. Sections are omitted
+    # when there is nothing in them; with no run at all this is exactly
+    # the payload it always produced.
+    parts = [app._transcript.as_text() or ""]
+    run = app._last_run
+    if run is not None and run.final_report:
+        parts.append("\n\n## Report\n\n" + run.final_report)
+    claims = ([vars(c) for c in run.claims] if run is not None and run.claims
+              else list(app._live_claims.values()))
+    if claims:
+        parts.append("\n\n## Claims\n\n"
+                     + json.dumps(claims, indent=2, default=str))
+    return ("".join(parts).strip() or None), "this session"
 
 
 def _cmd_quit(app: VenastineApp, args: str) -> None:
