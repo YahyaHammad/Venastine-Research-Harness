@@ -28,6 +28,7 @@ import pytest
 import prompts.system_prompts as system_prompts
 from core import config_loader
 from core.loop import advertisement_facts
+from tests.conftest import make_model_response
 from tools.base import BUDGET_IO, GRANT_ANYWHERE, GRANT_NEVER, ToolSpec
 from tools.context import ToolContext
 from tools.registry import registry
@@ -383,3 +384,92 @@ class TestWhereTheFactsComeFrom:
 
         assert advertisement_facts(
             Bundle(), response_channel=object()) == (True, set())
+
+
+# ===========================================================================
+# ---- #170: the one-shot prompt speaks for the run that carries it ---------
+# ===========================================================================
+
+class TestTheOneShotPromptSpeaksForTheRun:
+    """/grill-me assembled its prompt as attended while the run it
+    started was headless: `system_prompt_for`'s defaults answered
+    "attended" for a run with no channel, so the catalog invited tools --
+    spawn_subagent, whenever a spawnable agent existed outside the
+    harness tier -- that the schema list knew were unreachable. The same
+    contradiction #68 closed for passes, on the one agent-shaped entry
+    point that fix did not reach.
+
+    The owner decision (batch 24, D1a/D2a) makes the one-shot ATTENDED and
+    moves assembly into run_one_shot, so prompt facts and run facts are
+    ONE answer. These tests pin the agreement, not either side of it."""
+
+    def _bare_app(self):
+        from types import SimpleNamespace
+        from uuid import uuid4
+        from tui.app import VenastineApp
+
+        class _R:
+            state = None
+
+        class _Bare(VenastineApp):
+            @property
+            def _raven(self):
+                return self._r
+
+        app = _Bare.__new__(_Bare)
+        app._r = _R()
+        app.active_skills = []
+        app.memory = SimpleNamespace(thread_id=uuid4(), extra={})
+        app._busy = False
+        app.model = "m"
+        app.provider_name = "ANTHROPIC"
+        app.effort = None
+        app.response_channel = lambda honour_run_scope=True: object()
+        app.post_message = lambda m: None
+        app.run_worker = lambda work, **kw: work()
+        return app
+
+    def _grill_agent(self):
+        from core.config_loader import AgentDef
+        return AgentDef(
+            name="grill-me", description="d", model=None, provider=None,
+            allowed_tools=None, approval_overrides={},
+            use_project_context=False, use_memory=False, max_steps=None,
+            body="GRILL BODY", tier="harness", path="/grill-me.md")
+
+    def test_the_one_shot_prompt_and_its_run_agree_about_the_catalog(
+            self, roots, mocker):
+        _agent(roots, "grillable")
+        config_loader.initialize(str(roots["project"]))
+        assert system_prompts.agent_catalog_text(), (
+            "fixture produced no catalog, so this cannot discriminate")
+
+        captured = {}
+        mocker.patch(
+            "core.loop.RunAgentLoop.continue_conversation",
+            side_effect=lambda **kw: (captured.update(kw),
+                                      make_model_response(text="ok"))[1])
+
+        self._bare_app().run_one_shot(self._grill_agent(), "grill")
+
+        authorization = captured.get("authorization")
+        assert authorization is not None, \
+            "#170: the one-shot ran without an authorization at all"
+        assert authorization.provider is not None, \
+            "#170: the one-shot ran headless behind an attended prompt"
+
+        # The AGREEMENT: whatever the schemas list admits for the bundle
+        # the run actually carries is exactly what the prompt may invite.
+        callable_only, granted = advertisement_facts(
+            authorization=authorization)
+        names = {s["name"] for s in registry.schemas(
+            None, callable_only=callable_only, granted=granted)}
+        prompt = captured["system_prompt"]
+        if "spawn_subagent" in names:
+            assert "## Available agents" in prompt, (
+                "the run can spawn but the prompt hides the catalog")
+            assert "- grillable:" in prompt
+        else:
+            assert "## Available agents" not in prompt, (
+                "the prompt invites a spawn the schema list does not carry")
+            assert "spawn_subagent" not in prompt

@@ -1201,6 +1201,92 @@ async def test_a_one_shot_surfaces_the_notices_its_turn_raised(
             "a compaction during /grill-me was silent -- #172's defect")
 
 
+@pytest.mark.asyncio
+async def test_the_one_shot_sees_the_thread_state_the_streaming_turn_sees(
+        mocker, tmp_path, fake_storage):
+    """#109. run_agent_turn applies goal, references and the checklist to
+    every streaming turn; run_one_shot applied none of them -- so the one
+    command whose subject is "what is still open" was the one run that
+    could not see the open items, which live in memory.extra rather than
+    in the message history a one-shot reads.
+
+    Asserted on the prompt continue_conversation receives: that string is
+    what the model is actually told, which is exactly what #109 got
+    wrong. The goal banner being on screen above the grill answer is not
+    the model knowing the goal.
+    """
+    from core import config_loader
+    from core.loop import attach_ref
+    from core.memory import ConversationMemory
+
+    config_loader.initialize(str(tmp_path))
+    continue_conv = mocker.patch(
+        "core.loop.RunAgentLoop.continue_conversation",
+        return_value=make_model_response(text="grilled"))
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        memory = app.memory
+        # extra is a SNAPSHOT (core/memory.py); set_extra is the
+        # write-through path, exactly what /goal and todo_write use.
+        memory.set_extra("goal", "ship the batch")
+        memory.set_extra("todos", [
+            {"content": "pick a storage format", "status": "pending"}])
+        source = ConversationMemory()
+        source.add_user_message("the question about retries")
+        attach_ref(memory, source.thread_id,
+                   "a distilled summary of the retry question",
+                   "first question about retries")
+
+        app.query_one("#prompt").value = "/grill-me"
+        await pilot.press("enter")
+        assert await settle(pilot, lambda: continue_conv.called), \
+            "/grill-me never ran"
+
+    prompt = continue_conv.call_args.kwargs["system_prompt"]
+    assert "ship the batch" in prompt, \
+        "the one-shot ran without the thread's goal"
+    assert "pick a storage format" in prompt, \
+        "the one-shot ran without the checklist"
+    assert "### first question about retries" in prompt, \
+        "the one-shot ran without its references"
+
+
+@pytest.mark.asyncio
+async def test_the_one_shot_never_adds_the_memories_tier(
+        mocker, tmp_path, fake_storage):
+    """#109's guard rail. The one-shot prompt comes from
+    system_prompt_for(agent), which has already appended this agent's
+    memories (M13) -- so run_one_shot must not call with_memories at all.
+    A streaming turn guards the same call behind `active_agent is None`;
+    here there is no condition to hide behind, because EVERY one-shot
+    prompt was assembled through system_prompt_for."""
+    from core import config_loader
+
+    config_loader.initialize(str(tmp_path))
+    mocker.patch("core.loop.RunAgentLoop.continue_conversation",
+                 return_value=make_model_response(text="grilled"))
+    import core.loop as core_loop
+    mem_calls = []
+    real_with_memories = core_loop.with_memories
+
+    def _spy(prompt, *args, **kwargs):
+        mem_calls.append(1)
+        return real_with_memories(prompt, *args, **kwargs)
+
+    mocker.patch("tui.app.with_memories", side_effect=_spy)
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        app.query_one("#prompt").value = "/grill-me"
+        await pilot.press("enter")
+        assert await settle(pilot, lambda: app._last_response == "grilled"), \
+            "/grill-me never ran"
+
+    assert not mem_calls, \
+        "with_memories fired on a one-shot turn -- M13 duplication"
+
+
 # ===========================================================================
 # ---- #104: a storage failure must not take the shell down ------------------
 # ===========================================================================

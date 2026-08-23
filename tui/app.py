@@ -49,10 +49,11 @@ from memories.tui_commands import register_memory_commands
 from project_init.tui_commands import register_init_commands
 from skills.tui_commands import register_skill_commands
 from core import config_loader
+from core.approval import RunAuthorization
 from core.client import api_initialization, effort_levels_for_model
 from core.loop import (
-    DEFAULT_PROVIDER, DEFAULT_SYSTEM_PROMPT, RunAgentLoop, with_goal, with_refs,
-    with_memories, with_todos,
+    DEFAULT_PROVIDER, DEFAULT_SYSTEM_PROMPT, RunAgentLoop, advertisement_facts,
+    with_goal, with_refs, with_memories, with_todos,
 )
 from core.memory import ConversationMemory
 from core.replay import last_assistant_text, replay_entries
@@ -628,12 +629,21 @@ class VenastineApp(App):
         if error is not None:
             raise error
 
-    def run_one_shot(self, system_prompt: str, message: str) -> None:
-        """Run ONE turn in the CURRENT thread under a different system
-        prompt (§18 /grill-me: the agent sees the live history directly,
-        no digest loss). Uses continue_conversation so the exchange
-        persists into the thread; the live memory is reloaded when the
-        result lands so the next streaming turn sees it too."""
+    def run_one_shot(self, agent, message: str) -> None:
+        """Run ONE turn in the CURRENT thread under a different agent's
+        system prompt (§18 /grill-me: the agent sees the live history
+        directly, no digest loss). Uses continue_conversation so the
+        exchange persists into the thread; the live memory is reloaded
+        when the result lands so the next streaming turn sees it too.
+
+        This method owns the WHOLE assembly (#109/#170), because prompt
+        facts and run facts must come from one answer: a system_prompt
+        built by the caller would have to guess whether the turn can
+        ask, and #170 is exactly what that guessing produced — a prompt
+        advertising tools a headless run could not call, beside a schema
+        list that knew better. The channel exists before any of the
+        prompt is built, and every layer after reads it.
+        """
         self._busy = True
         self._raven.state = ravens.THINKING
         # #104, same shape as run_agent_turn: this can be the first touch
@@ -646,12 +656,30 @@ class VenastineApp(App):
             self._transcript.write_error(f"Could not open the thread: {e}")
             return
         model, provider = self.model, self.provider_name
+        # §23/§25. Attended, like every other TUI turn (#170 D1): the
+        # human is at the keyboard, so gated tools stay advertised AND
+        # promptable instead of silently vanishing for this one command.
+        channel = self.response_channel()
+        authorization = RunAuthorization(provider=channel)
+        callable_only, granted = advertisement_facts(
+            response_channel=channel)
+        base_prompt = manager.system_prompt_for(
+            agent, DEFAULT_SYSTEM_PROMPT, self.active_skills,
+            callable_only=callable_only, granted=granted)
+        # §18/§21c/§23. Unconditional, for with_refs' documented reason:
+        # goal, references and checklist are thread state, not an agent's
+        # opt-in. Deliberately NO with_memories — system_prompt_for has
+        # already appended this agent's memories (M13), and a second call
+        # would duplicate them.
+        prompt = with_goal(base_prompt, self.memory)
+        prompt = with_refs(prompt, self.memory)
+        prompt = with_todos(prompt, self.memory)
         # K1 holds for one-shot turns too (review §19-20 f22 decision):
         # an activated skill governs the /grill-me turn in the same
         # thread, mirroring run_agent_turn's pinning.
         fragment = skills.prompt_fragment(self.active_skills)
         if fragment:
-            system_prompt = f"{system_prompt}\n\n{fragment}"
+            prompt = f"{prompt}\n\n{fragment}"
 
         def work() -> None:
             error = None
@@ -661,10 +689,11 @@ class VenastineApp(App):
                 response = RunAgentLoop.continue_conversation(
                     thread_id=thread_id,
                     message=message,
-                    system_prompt=system_prompt,
+                    system_prompt=prompt,
                     model=model,
                     provider_name=provider,
                     effort=self.effort,
+                    authorization=authorization,
                 )
                 text = response.text
                 notices = list(getattr(response, "notices", ()) or ())

@@ -393,8 +393,11 @@ class _StubApp:
         self.one_shots = []
         self.banner_refreshes = 0
 
-    def run_one_shot(self, prompt, message):
-        self.one_shots.append((prompt, message))
+    def run_one_shot(self, agent, message):
+        # #170: run_one_shot takes the AGENT and owns the whole assembly,
+        # so the stub records what the command layer is now allowed to
+        # know -- which agent, and what to ask it.
+        self.one_shots.append((agent, message))
 
     def refresh_goal_banner(self):
         self.banner_refreshes += 1
@@ -439,8 +442,9 @@ def test_cmd_goal_sets_and_clears(_roots, fake_storage):
 def test_cmd_grill_me_routes_to_run_one_shot(tmp_path, fake_storage):
     """Named for what it can actually see. The stub replaces
     run_one_shot, which is WHERE "current thread" is implemented, so this
-    pins the routing and the prompt only -- the thread property itself is
-    pinned in test_tui.py against the real method.
+    pins the routing only -- the thread property and the assembly the
+    command layer no longer does are pinned in test_tui.py against the
+    real method (#170).
     """
     from agents.tui_commands import _cmd_grill
     from core.memory import ConversationMemory
@@ -455,8 +459,8 @@ def test_cmd_grill_me_routes_to_run_one_shot(tmp_path, fake_storage):
 
     _cmd_grill(app, "")
     assert len(app.one_shots) == 1
-    prompt, message = app.one_shots[0]
-    assert "grill" in prompt.lower()
+    agent, message = app.one_shots[0]
+    assert agent.name == "grill-me"
     assert "decision" in message.lower()
 
 

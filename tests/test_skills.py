@@ -526,6 +526,7 @@ class TestPromptAssembly:
         from uuid import uuid4
         from tui.app import VenastineApp
         from core.loop import RunAgentLoop
+        from core.config_loader import AgentDef
         from tests.conftest import make_model_response
 
         loaded(_skill("alpha", body="ALPHA-METHODOLOGY"))
@@ -543,11 +544,21 @@ class TestPromptAssembly:
         app = _Bare.__new__(_Bare)
         app._r = _R()
         app.active_skills = ["alpha"]
-        app.memory = SimpleNamespace(thread_id=uuid4())
+        # extra is thread state the tiers read (goal/refs/todos); an
+        # empty dict keeps them no-op appends.
+        app.memory = SimpleNamespace(thread_id=uuid4(), extra={})
         app._busy = False
         app.model = "m"
         app.provider_name = "ANTHROPIC"
         app.effort = None
+        # The one-shot turn is attended (#170): a channel that is never
+        # asked is exactly what the real app has when nothing gates.
+        app.response_channel = lambda honour_run_scope=True: object()
+        agent = AgentDef(
+            name="grill-me", description="d", model=None, provider=None,
+            allowed_tools=None, approval_overrides={},
+            use_project_context=False, use_memory=False, max_steps=None,
+            body="GRILL BODY", tier="harness", path="/grill-me.md")
         captured = {}
 
         def _continue(**kwargs):
@@ -559,7 +570,7 @@ class TestPromptAssembly:
         app.post_message = lambda m: None
         app.run_worker = lambda work, **kw: work()
 
-        app.run_one_shot("BASE PROMPT", "grill")
+        app.run_one_shot(agent, "grill")
 
         assert "ALPHA-METHODOLOGY" in captured["system_prompt"]
 
