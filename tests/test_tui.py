@@ -1429,6 +1429,280 @@ async def test_quitting_while_busy_says_what_happens_to_the_work(_mocked_loop):
 
 
 # ===========================================================================
+# ---- #110: coverage for properties tui/app.py's own comments call out -----
+# ===========================================================================
+#
+# Twelve mutations survived every file that touches this module. No defect
+# is claimed here; each test below pins a property the production code's
+# own comments identify as load-bearing, where the wrong edit currently
+# looks right. Group numbers match the issue.
+
+@pytest.mark.asyncio
+async def test_an_active_agent_still_gets_the_thread_state_tiers(
+        _mocked_loop, mocker):
+    """#110 group 1. run_agent_turn applies refs and todos UNCONDITIONALLY
+    -- M19's rule, whose own comment says the wrong edit looks right.
+    Guarding either behind `active_agent is None` would make an active
+    agent lose its thread state, and until now nothing went red."""
+    import core.loop as core_loop
+    from core.config_loader import AgentDef
+
+    counts = {"refs": 0, "todos": 0}
+
+    def _spy(name):
+        real = getattr(core_loop, name)
+
+        def wrapper(prompt, *a, **kw):
+            counts[name[5:]] += 1
+            return real(prompt, *a, **kw)
+
+        return wrapper
+
+    mocker.patch("tui.app.with_refs", side_effect=_spy("with_refs"))
+    mocker.patch("tui.app.with_todos", side_effect=_spy("with_todos"))
+
+    agent = AgentDef(
+        name="sec", description="d", model=None, provider=None,
+        allowed_tools=None, approval_overrides={},
+        use_project_context=False, use_memory=False, max_steps=None,
+        body="BODY", tier="harness", path="/sec.md")
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        app.active_agent = agent
+        app.memory.set_extra("goal", "ship it")
+        type_into_prompt(app, "hello")
+        await pilot.press("enter")
+        assert await settle(pilot, lambda: not app._busy), \
+            "the turn never finished"
+
+    assert counts["refs"] >= 1, \
+        "an active agent lost its references (M19)"
+    assert counts["todos"] >= 1, \
+        "an active agent lost its checklist"
+
+
+@pytest.mark.asyncio
+async def test_an_active_agent_is_not_given_its_memories_twice(
+        _mocked_loop, mocker):
+    """#110 group 1, M13's direction. An active agent gets its memories
+    INSIDE system_prompt_for(); appending them again in run_agent_turn
+    would duplicate the tier on every agent turn."""
+    import core.loop as core_loop
+    from core.config_loader import AgentDef
+
+    mem_calls = []
+    real_with_memories = core_loop.with_memories
+
+    def _spy(prompt, *a, **kw):
+        mem_calls.append(1)
+        return real_with_memories(prompt, *a, **kw)
+
+    mocker.patch("tui.app.with_memories", side_effect=_spy)
+
+    agent = AgentDef(
+        name="sec", description="d", model=None, provider=None,
+        allowed_tools=None, approval_overrides={},
+        use_project_context=False, use_memory=True, max_steps=None,
+        body="BODY", tier="harness", path="/sec.md")
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        app.active_agent = agent
+        type_into_prompt(app, "hello")
+        await pilot.press("enter")
+        assert await settle(pilot, lambda: not app._busy)
+
+    assert mem_calls == [], \
+        "with_memories fired behind an active agent -- duplicated tier"
+
+
+def type_into_prompt(app, text):
+    app.query_one("#prompt").value = text
+
+
+@pytest.mark.asyncio
+async def test_ctrl_t_is_refused_mid_turn(fake_storage):
+    """#110 group 2. Swapping memory mid-turn leaves the worker writing
+    into the abandoned thread while rendering under the new one; /model
+    and /new have their guards pinned and ctrl+t did not."""
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        before = app.memory
+        app._busy = True
+        app.action_pick_thread()
+        await pump(pilot, 3)
+
+        assert app.memory is before, "memory was swapped mid-turn"
+        assert not isinstance(app.screen, ThreadPickerScreen), \
+            "the picker opened over a running turn"
+        assert any("Still working" in t for _r, t in
+                   app._transcript._entries)
+
+
+@pytest.mark.asyncio
+async def test_resuming_refreshes_the_todo_panel(fake_storage, mocker):
+    """#110 group 2. §23 added this call for §27's reason ("a resume
+    showed the previous thread's list"); deleting it was green because
+    the test covered the callback and stopped one line short."""
+    from uuid import uuid4
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        spy = mocker.spy(app, "refresh_todo_panel")
+        # A REAL thread: an unknown id would stop at the load guard
+        # (#104) and never reach the refresh at all.
+        app.switch_to_thread(app.memory.thread_id)
+        await pump(pilot, 3)
+        assert not [t for _r, t in app._transcript._entries
+                    if "Could not open" in t], "the resume never happened"
+
+    assert spy.called, "a resume kept the previous thread's checklist"
+
+
+def test_a_worker_error_is_reported_not_swallowed(mocker):
+    """/#110 group 3, AC3's second half. exit_on_error=False keeps the
+    app alive through a worker exception; on_worker_state_changed is what
+    makes that exception VISIBLE. Neutering the body was green."""
+    from textual.worker import WorkerState
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    seen = []
+    mocker.patch.object(app, "notify",
+                        side_effect=lambda *a, **k: seen.append(a))
+    event = SimpleNamespace(worker=SimpleNamespace(
+        state=WorkerState.ERROR, error=RuntimeError("boom")))
+    app.on_worker_state_changed(event)
+
+    assert seen, "the worker's exception was reported nowhere"
+    assert "boom" in str(seen[0])
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_copy_target_is_an_error_not_everything():
+    """#110 group 4. The unknown-OPTION check is pinned beside this; the
+    unknown-TARGET check is its twin. `_parse_copy_args` rejecting is what
+    stops `/copy repot` from silently falling through to the whole
+    session."""
+    from tui.app import _cmd_copy
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        sent = []
+        app.copy_to_clipboard = lambda text: sent.append(text)
+        _cmd_copy(app, "repot")
+        await pump(pilot, 3)
+
+        assert any("Unknown copy target" in t for _r, t in
+                   app._transcript._entries), "the typo passed silently"
+        assert sent == [], "/copy repot copied SOMETHING"
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_claims_id_is_contained(fake_storage):
+    """#110 group 4. Narrowing `_stored_claims`' except ValueError was
+    green: a malformed id reaching the message pump would take the app
+    down from a read-only command (#104's shape, one command along)."""
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        app.show_claims("not-a-uuid")
+        await pump(pilot, 3)
+
+        assert any(t.startswith("/claims:") for _r, t in
+                   app._transcript._entries), "the failure was silent"
+        assert app.is_running, \
+            "the malformed id reached the message pump and took the app down"
+
+
+@pytest.mark.asyncio
+async def test_the_tier_tally_keys_by_claim_id_not_by_event(mocker):
+    """#110 group 4, the app-side seam. The widget keys by claim id and
+    that IS pinned; this pins the handler FEEDING it the claim id. A
+    fresh id per event is exactly §26's stated failure -- 6c re-tiers the
+    same claim once per retry round, so counting reports more claims than
+    the run has and the number keeps climbing."""
+    from core.reasoning.events import PipelineEvent
+    from tui.app import PipelineEventMessage
+    from tui.widgets import ResearchProgress
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        panel = app.query_one(ResearchProgress)
+
+        def tiered(cid, tier):
+            return PipelineEventMessage(PipelineEvent(
+                kind="claim_tiered", claim_id=cid, tier=tier))
+
+        app.post_message(tiered("c1", "HIGH"))
+        await pump(pilot, 3)
+        app.post_message(tiered("c2", "HIGH"))
+        await pump(pilot, 3)
+        app.post_message(tiered("c1", "LOW"))   # 6c re-tiers it
+        await pump(pilot, 3)
+
+    assert set(panel._tiers) == {"c1", "c2"}, (
+        f"the tally counted events, not claims: {panel._tiers}")
+    assert panel._tiers["c1"] == "LOW", "a re-tier did not land"
+
+
+@pytest.mark.asyncio
+async def test_the_one_shot_answer_reloads_the_live_memory(
+        mocker, tmp_path, fake_storage):
+    """#110 group 4. on_one_shot_finished's docstring promises the reload
+    ("so the next streaming turn sees it too"); deleting it was green."""
+    from core import config_loader
+
+    config_loader.initialize(str(tmp_path))
+    mocker.patch("core.loop.RunAgentLoop.continue_conversation",
+                 return_value=make_model_response(text="grilled"))
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        before = app.memory
+        app.query_one("#prompt").value = "/grill-me"
+        await pilot.press("enter")
+        assert await settle(pilot,
+                            lambda: app._last_response == "grilled")
+
+        assert app.memory is not before, "the live memory was never reloaded"
+        assert app.memory.thread_id == before.thread_id
+
+
+@pytest.mark.asyncio
+async def test_a_failed_artifact_write_does_not_advertise_the_review_record(
+        fake_storage):
+    """#110 group 4, r4-3's transport. ResearchFinished carries
+    artifacts_ok so the summary cannot point at a 07_review.json that was
+    never written; posting without the flag was green."""
+    from core.reasoning.base import PipelineRun
+    from tui.app import ResearchFinished
+
+    def run_with_review():
+        run = PipelineRun(user_query="q")
+        run.final_report = "report"
+        run.subagent_reviews = [{"decision": "accept"}]
+        return run
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        app.on_research_finished(
+            ResearchFinished(run_with_review(), None, artifacts_ok=False))
+        await pump(pilot, 3)
+        failed_text = app._transcript.as_text()
+
+        app.on_research_finished(
+            ResearchFinished(run_with_review(), None, artifacts_ok=True))
+        await pump(pilot, 3)
+        ok_text = app._transcript.as_text()
+
+        assert "artifact write FAILED" in failed_text
+        assert "full record in 07_review.json" not in failed_text, (
+            "the summary pointed at a review record that was never written")
+        assert "no 07_review.json" in failed_text
+        assert "full record in 07_review.json" in ok_text
+
+
+# ===========================================================================
 # ---- #104: a storage failure must not take the shell down ------------------
 # ===========================================================================
 #
