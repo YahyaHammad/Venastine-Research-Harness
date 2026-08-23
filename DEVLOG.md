@@ -5433,3 +5433,48 @@ all` carries what its name promises. Five commits on
 
 Counts 2272 → 2309 (+37). No unit tracker retires this batch: 14a drops to
 3 open (#105, #109, #110), 14b to 2 (#116, #117), X3 to 2 (#138, #139).
+## Audit Pass 1 — fix batch 22: unit 10, the pipeline periphery (2026-08-23)
+
+**#81, #82, #84, #85, #86** — the second fully-retired audit unit. Five commits on
+`fix/batch-22-u10-pipeline-periphery`; per-change table in
+`tests/BREAKING_CHANGES.md` (batch 22).
+
+### The owner's answers that shaped it
+
+- **A2 went beyond containment**: every degrade path in both supplementary writers now
+  WARNS naming the helper and the cause — a chart failing on every run is the signal
+  you want shouted, not hidden.
+- **B3's fallback is loud**: corrupted `pass_threads_json` falls back to that run's
+  time window AND warns naming the run id. Data the writer did write must not vanish
+  silently.
+- **D3(b) introduced the module's first rewrite**: `_validated` had only ever kept or
+  dropped findings; a synthesis finding's stray claim_id is now stripped, the finding
+  kept, and the strip traced. The owner chose keeping the human's access to the
+  report-level note over stylistic purity.
+
+### Build findings worth keeping
+
+- **The unfinished-run guard finally has teeth.** Under the old correlated subquery,
+  dropping `finished_at IS NOT NULL` was invisible (`x <= NULL` was already not true)
+  — audit #83 documented exactly that gap. Moving the bounds into Python flipped it:
+  the mutation now fails seven tests, because `start <= created_at <= None` raises
+  instead of silently matching nothing. Same guard, same intent, first time it can be
+  violated loudly.
+- **The headline #82 test needed a disjoint clock.** The fixture's own legacy run
+  shares the modern scenario's window, so the concurrent-chat-thread pin failed on
+  legitimate tier-2 behaviour before moving the modern run to September. The fixture
+  teaches: overlapping windows are correct behaviour, so test scenarios must not
+  overlap by accident.
+- **E5's pin needs a non-MCP name.** An ungated `mcp__*` tool would be OFFERED — D28's
+  dynamic gate default makes it approval-gated, which is precisely why the fixture's
+  `mcp__lib__search` is offered. The "ungated tool never offered" property needed a
+  built-in-style name with no default gate behind it.
+- **#86 item 2's twin already existed** (the candidates_json NULL pin from batch 19);
+  the issue's count of eight included one already closed. The pass_threads sibling is
+  the new test; worth re-checking such lists against current HEAD before scoping.
+
+### Housekeeping
+
+Counts 2309 → 2328 (+19). Tracker #87 retires — unit 10 is complete, the second
+retirement after u5. Unit findings drop to 9 across 5 open units (u1: #24; 14a:
+#105/#109/#110; 14b: #116/#117; X2: #4; X3: #138/#139).

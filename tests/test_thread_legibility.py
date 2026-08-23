@@ -222,7 +222,8 @@ def legacy_db(tmp_path):
         " DEFAULT 'chat')")
     connection.execute(
         "CREATE TABLE pipelinerunrecord ("
-        " id VARCHAR PRIMARY KEY, started_at DATETIME, finished_at DATETIME)")
+        " id VARCHAR PRIMARY KEY, started_at DATETIME, finished_at DATETIME,"
+        " pass_threads_json TEXT)")
     rows = [
         ("before", "2026-08-01 10:00:00.000000"),
         ("in-window-1", "2026-08-01 12:00:05.000000"),
@@ -601,3 +602,171 @@ def test_storage_kind_constants_are_the_three_the_spec_names():
     assert {storage.THREAD_KIND_CHAT, storage.THREAD_KIND_RESEARCH_PASS,
             storage.THREAD_KIND_SUBAGENT} == {"chat", "research_pass",
                                               "subagent"}
+
+
+# ===========================================================================
+# ---- #82: the two-tier classification --------------------------------------
+# ===========================================================================
+
+class TestTwoTierClassification:
+    """Since T2 every run records its pass threads' exact ids in
+    pass_threads_json, so that record is authoritative (tier 1) and the
+    time-window heuristic is only ever needed for rows that predate it
+    (tier 2) -- a set which cannot grow. That is what makes a chat thread
+    another session creates during a modern run safe (#82's headline)."""
+
+    def _add_run(self, connection, run_id, started, finished,
+                 recorded=None):
+        import json as _json
+        connection.execute(
+            "INSERT INTO pipelinerunrecord"
+            " (id, started_at, finished_at, pass_threads_json)"
+            " VALUES (?, ?, ?, ?)",
+            (run_id, started, finished,
+             _json.dumps(recorded) if recorded is not None else None))
+        connection.commit()
+
+    def test_recorded_thread_ids_are_relabelled_even_outside_any_window(
+            self, legacy_db):
+        from core.reasoning.pipeline_storage import classify_legacy_pass_threads
+
+        self._add_run(legacy_db, "modern", "2026-08-01 12:00:00.000000",
+                      "2026-08-01 12:00:30.000000",
+                      [{"pass": "Pass 1", "thread_id": "recorded"}])
+        legacy_db.execute(
+            "INSERT INTO conversationthread (id, created_at, kind)"
+            " VALUES ('recorded', '2026-07-01 09:00:00.000000', 'chat')")
+        legacy_db.commit()
+
+        relabelled = classify_legacy_pass_threads(legacy_db)
+
+        assert relabelled == 3  # the two in-window legacy threads + this one
+        assert _kinds(legacy_db)["recorded"] == "research_pass"
+
+    def test_a_concurrent_chat_thread_during_a_modern_run_survives(
+            self, legacy_db):
+        """"The unrecoverable direction" (#82): two sessions on one app.db.
+        A chat thread created inside a MODERN run's window must stay chat --
+        only the ids the run itself recorded are hidden."""
+        from core.reasoning.pipeline_storage import classify_legacy_pass_threads
+
+        self._add_run(legacy_db, "modern", "2026-09-01 12:00:00.000000",
+                      "2026-09-01 12:00:30.000000",
+                      [{"pass": "Pass 0", "thread_id": "pass-zero"},
+                       {"pass": "Pass 4", "thread_id": "pass-four"}])
+        for thread_id in ("pass-zero", "pass-four", "my-conversation"):
+            created = ("2026-09-01 12:00:05.000000" if thread_id
+                       != "my-conversation"
+                       else "2026-09-01 12:00:20.000000")
+            legacy_db.execute(
+                "INSERT INTO conversationthread (id, created_at, kind)"
+                " VALUES (?, ?, 'chat')", (thread_id, created))
+        legacy_db.commit()
+
+        classify_legacy_pass_threads(legacy_db)
+
+        kinds = _kinds(legacy_db)
+        assert kinds["pass-zero"] == "research_pass"
+        assert kinds["pass-four"] == "research_pass"
+        assert kinds["my-conversation"] == "chat"
+
+    def test_an_abandoned_runs_recorded_threads_are_still_relabelled(
+            self, legacy_db):
+        """Tier 1 needs no closing bound -- membership is exact -- so an
+        abandoned run's recorded passes are hidden even though its WINDOW
+        would be refused. The unfinished-run guard belongs to tier 2
+        alone."""
+        from core.reasoning.pipeline_storage import classify_legacy_pass_threads
+
+        self._add_run(legacy_db, "abandoned-modern",
+                      "2026-08-01 16:00:00.000000", None,
+                      [{"pass": "Pass 2", "thread_id": "inside-an-unfinished-run"}])
+
+        classify_legacy_pass_threads(legacy_db)
+
+        assert (_kinds(legacy_db)["inside-an-unfinished-run"]
+                == "research_pass")
+
+    def test_corrupted_json_falls_back_to_the_window_and_warns(
+            self, legacy_db, caplog):
+        """"Owner decision B3: unparseable pass_threads_json puts THAT run
+        in the window tier rather than crashing the launch, and warns
+        naming the run -- data the writer did write must not vanish
+        silently."""
+        import logging
+        from core.reasoning.pipeline_storage import classify_legacy_pass_threads
+
+        legacy_db.execute(
+            "INSERT INTO pipelinerunrecord"
+            " (id, started_at, finished_at, pass_threads_json)"
+            " VALUES ('broken', '2026-08-01 18:00:00.000000',"
+            " '2026-08-01 18:00:30.000000', 'not json {')")
+        legacy_db.execute(
+            "INSERT INTO conversationthread (id, created_at, kind)"
+            " VALUES ('during-broken', '2026-08-01 18:00:10.000000', 'chat')")
+        legacy_db.commit()
+
+        with caplog.at_level(logging.WARNING,
+                             logger="core.reasoning.pipeline_storage"):
+            classify_legacy_pass_threads(legacy_db)
+
+        assert _kinds(legacy_db)["during-broken"] == "research_pass"
+        warnings = [r.getMessage() for r in caplog.records
+                    if r.levelno == logging.WARNING]
+        assert any("broken" in w and "unparseable" in w for w in warnings), (
+            warnings)
+
+    def test_a_database_without_the_recorded_column_classifies_by_window(
+            self, tmp_path):
+        """B2's defensive shape: a database whose pipelinerunrecord has no
+        pass_threads_json column at all treats every run as pre-T2 --
+        window behaviour exactly as before."""
+        from core.reasoning.pipeline_storage import classify_legacy_pass_threads
+
+        connection = sqlite3.connect(tmp_path / "no-recorded-column.db")
+        connection.execute(
+            "CREATE TABLE conversationthread ("
+            " id VARCHAR PRIMARY KEY, created_at DATETIME, kind VARCHAR"
+            " DEFAULT 'chat')")
+        connection.execute(
+            "CREATE TABLE pipelinerunrecord ("
+            " id VARCHAR PRIMARY KEY, started_at DATETIME,"
+            " finished_at DATETIME)")
+        connection.execute(
+            "INSERT INTO pipelinerunrecord (id, started_at, finished_at)"
+            " VALUES ('r', '2026-08-01 12:00:00.000000',"
+            " '2026-08-01 12:00:30.000000')")
+        connection.execute(
+            "INSERT INTO conversationthread (id, created_at, kind)"
+            " VALUES ('in-window', '2026-08-01 12:00:05.000000', 'chat')")
+        connection.commit()
+
+        assert classify_legacy_pass_threads(connection) == 1
+        connection.close()
+
+
+class TestTheMissingKindColumnGuard:
+    """#86 item 8: unreachable in production (main.py always runs
+    create_all/ensure_columns first), but the docstring states the
+    contract -- 'a caller that skipped them gets a no-op rather than no
+    such column'. The pin keeps the stated contract honest."""
+
+    def test_a_database_without_the_kind_column_is_a_no_op(self, tmp_path):
+        from core.reasoning.pipeline_storage import classify_legacy_pass_threads
+
+        connection = sqlite3.connect(tmp_path / "no-kind-column.db")
+        connection.execute(
+            "CREATE TABLE conversationthread ("
+            " id VARCHAR PRIMARY KEY, created_at DATETIME)")
+        connection.execute(
+            "CREATE TABLE pipelinerunrecord ("
+            " id VARCHAR PRIMARY KEY, started_at DATETIME,"
+            " finished_at DATETIME, pass_threads_json TEXT)")
+        connection.execute(
+            "INSERT INTO pipelinerunrecord (id, started_at, finished_at)"
+            " VALUES ('r', '2026-08-01 12:00:00.000000',"
+            " '2026-08-01 12:00:30.000000')")
+        connection.commit()
+
+        assert classify_legacy_pass_threads(connection) == 0
+        connection.close()

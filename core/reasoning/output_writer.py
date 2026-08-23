@@ -26,6 +26,7 @@ ever added to Claim, ALL of those sites migrate to asdict(c) together
 from __future__ import annotations
 
 import json
+import logging
 import os
 from typing import TYPE_CHECKING
 
@@ -33,6 +34,8 @@ import config
 
 if TYPE_CHECKING:
     from core.reasoning.base import PipelineRun
+
+logger = logging.getLogger(__name__)
 
 
 def _tier_counts(run: PipelineRun) -> tuple[list[str], list[int]]:
@@ -174,17 +177,27 @@ def write_run_artifacts(run: PipelineRun) -> str:
 
 
 def _write_confidence_chart(run: PipelineRun, output_dir: str) -> None:
-    """Bar chart of confidence tier distribution. Degrades gracefully --
-    matplotlib is a project dependency (requirements.txt), but any
-    failure here (missing import, rendering error) must not crash a
-    completed pipeline run over a chart."""
+    """Bar chart of confidence tier distribution. Degrades loudly, never
+    fatally -- matplotlib is a project dependency (requirements.txt), but
+    any failure here (missing import, backend error, rendering error)
+    must not crash a completed pipeline run over a chart (#81). Every
+    degrade path warns naming the helper and the cause: a chart failing
+    on every run is exactly the signal worth shouting, not hiding."""
     try:
         import matplotlib
         matplotlib.use("Agg")  # headless, no display needed
         import matplotlib.pyplot as plt
-    except ImportError:
+    except Exception as e:
+        logger.warning(
+            "Confidence chart skipped (matplotlib unavailable): %s", e)
         return
 
+    # #81. `fig` is bound INSIDE the try, so a failure before the binding
+    # used to leave `finally: plt.close(fig)` raising UnboundLocalError --
+    # the containment guard inverting into exactly the crash it existed to
+    # prevent. Binding None first makes "nothing to clean up" a state
+    # instead of an exception.
+    fig = None
     try:
         tiers, counts = _tier_counts(run)
         fig, ax = plt.subplots()
@@ -193,24 +206,26 @@ def _write_confidence_chart(run: PipelineRun, output_dir: str) -> None:
         ax.set_title("Confidence tier distribution")
         fig.tight_layout()
         fig.savefig(os.path.join(output_dir, "confidence_chart.png"))
-    except Exception:
-        pass  # chart is non-essential; never fail the run over it
+    except Exception as e:
+        logger.warning("Confidence chart skipped (render failed): %s", e)
     finally:
-        plt.close(fig)
+        if fig is not None:
+            plt.close(fig)
 
 
 def _try_write_pdf(report_markdown: str, output_dir: str) -> None:
-    """Also degrades gracefully. No markdown-to-PDF library is currently
-    a project dependency -- install markdown + weasyprint if you want
-    this to actually produce output; until then this silently skips
-    rather than failing the run."""
+    """Also degrades loudly, never fatally (#81). No markdown-to-PDF
+    library is currently a project dependency -- install markdown +
+    weasyprint if you want this to actually produce output; until then
+    this warns and skips rather than failing the run."""
     try:
         import markdown
         import weasyprint
-    except ImportError:
+    except Exception as e:
+        logger.warning("PDF report skipped (converters unavailable): %s", e)
         return
     try:
         html = markdown.markdown(report_markdown)
         weasyprint.HTML(string=html).write_pdf(os.path.join(output_dir, "report.pdf"))
-    except Exception:
-        pass  # PDF is best-effort; never fail the run over it
+    except Exception as e:
+        logger.warning("PDF report skipped (render failed): %s", e)

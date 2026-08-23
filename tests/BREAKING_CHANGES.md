@@ -2722,3 +2722,18 @@ landed.
 | /copy all is a superset (#140) | A test asserting the transcript-only payload | Adds `## Report` and `## Claims` sections (claims JSON identical to /copy claims); empty sections omitted; no-run payload unchanged |
 
 Count 2272 -> 2309.
+
+## Batch 22 -- the twenty-second fix batch: unit 10, the pipeline periphery (2026-08-23)
+
+Five production files changed. Every mutation below ran RED against its reverted line
+before its commit landed.
+
+| Change | What breaks | Symptom / fix |
+|---|---|---|
+| Chart/PDF failure is contained AND named (#81) | A test asserting silent degradation | `fig = None` before the try (the old guard inverted into UnboundLocalError pre-bind); every degrade path in BOTH helpers warns naming helper+cause; import guards Exception-wide; the module docstring that reasoned "no graceful-degradation test needed" is rewritten |
+| Pass-thread classification trusts the record before the clock (#82) | Tests asserting pure window behaviour on modern runs | Two tiers: ids from populated `pass_threads_json` relabel outright (even from abandoned runs); only absent/NULL/empty/corrupted rows fall back to the time window -- a pre-T2 set that cannot grow, so a concurrent session's chat thread is safe. Corrupted JSON warns naming the run. The unfinished-run guard now lives in Python and HAS a red test (it never could under `x <= NULL`) |
+| A repeated synthesis finding reaches the human once (#85) | Tests feeding duplicate synthesis findings through consent | Synthesis dedupes on `(claim_id, kind, proposed.strip())`; claim-level kinds keep `(claim_id, kind)`. A stray claim_id is STRIPPED, kept, and the strip traced; the duplicate trace sentence no longer claims "same claim and kind" where there is no claim |
+| CODE_STAGES deleted (#84) | Nothing -- it had no consumer | The why-stages-not-passes rationale moved onto the `stage` entry of PIPELINE_EVENT_KINDS |
+| Periphery pins + one removal (#86) | -- | Six properties pinned (status-guard, pass_threads NULL default, V1 input, V5 re-target, candidates basis, unconditional pass_threads.json); missing-kind-column guard tested; the `getattr(run, "pass_threads", [])` fallback REMOVED -- no caller or double lacks the field |
+
+Count 2309 -> 2328.

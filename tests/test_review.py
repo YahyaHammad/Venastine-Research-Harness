@@ -816,6 +816,72 @@ class TestReviewHardening:
         assert any("1 malformed or unresolvable" in line
                    for line in run.trace)
 
+    def test_duplicate_synthesis_findings_are_kept_once(self):
+        """#85: the dedupe guard used to be unreachable for synthesis --
+        three identical report-level findings meant three consent prompts,
+        a tripled directive in the re-synthesis prompt, and three
+        decisions in 07_review.json."""
+        from core.reasoning import review as review_module
+
+        run = _reviewed_run()
+        synth = {"kind": "synthesis", "proposed": "soften the conclusion"}
+        out = review_module._validated(
+            [dict(synth), dict(synth), dict(synth)], run)
+
+        assert len(out) == 1
+        directives = review_module.synthesis_directives(
+            [dict(d, decision=review_module.ACCEPT) for d in out])
+        assert directives == ["soften the conclusion"]
+        assert any("2 duplicate finding(s)" in line for line in run.trace)
+        # The old sentence ("same claim and kind...") was false twice over
+        # on this branch -- there is no claim.
+        assert any("same target as an earlier" in line for line in run.trace)
+
+    def test_distinct_synthesis_proposals_are_not_duplicates(self):
+        from core.reasoning import review as review_module
+
+        run = _reviewed_run()
+        out = review_module._validated([
+            {"kind": "synthesis", "proposed": "soften the conclusion"},
+            {"kind": "synthesis", "proposed": "add a limitations section"},
+        ], run)
+
+        assert len(out) == 2
+
+    def test_synthesis_duplicates_match_after_stripping_but_not_case(self):
+        """D2: exact-after-strip. Over-normalising would collapse
+        genuinely different directives into one."""
+        from core.reasoning import review as review_module
+
+        run = _reviewed_run()
+        out = review_module._validated([
+            {"kind": "synthesis", "proposed": "soften the conclusion"},
+            {"kind": "synthesis", "proposed": "  soften the conclusion  "},
+            {"kind": "synthesis", "proposed": "Soften the conclusion"},
+        ], run)
+
+        assert len(out) == 2
+        assert any("1 duplicate finding(s)" in line for line in run.trace)
+
+    def test_a_stray_claim_id_on_a_synthesis_finding_is_stripped_and_traced(
+            self):
+        """D3(b): the finding survives, only the lying key goes -- and it
+        goes loudly (#49). Downstream, _describe must stop attributing a
+        report-level note to a claim that does not exist."""
+        from core.reasoning import review as review_module
+
+        run = _reviewed_run()
+        finding = {"kind": "synthesis", "claim_id": "no-such-claim",
+                   "proposed": "soften the conclusion"}
+        out = review_module._validated([finding], run)
+
+        assert len(out) == 1
+        assert "claim_id" not in out[0]
+        assert any("ignored claim_id 'no-such-claim'" in line
+                   for line in run.trace)
+        assert review_module._describe(
+            dict(out[0], decision=review_module.ACCEPT)) == "synthesis correction to report"
+
     def test_a_tier_override_rewrites_the_annotation(self, mocker):
         """r3-1: the stale '[HIGH]' tag beside a corrected tier
         contradicts it inside the re-synthesis input and every vars(c)
@@ -1847,3 +1913,52 @@ class TestCatalogsFollowTheContext:
         prompt = system_prompts.pass_prompt("Pass 0")
         assert "## Available skills" in prompt
         assert "## Available agents" in prompt
+
+
+# ===========================================================================
+# ---- #86 items 3-4: V1's input and V5's scope ------------------------------
+# ===========================================================================
+
+class TestUnpinnedReviewProperties:
+    """Two properties the unit-10 mutation pass found unpinned. Both are
+    documented as load-bearing; neither had a test."""
+
+    def test_the_reviewer_is_shown_content_not_just_the_trace(self):
+        """V1 -- the decision that revised §20's own one-line spec
+        ('run.trace alone cannot support correction'). Nothing asserted
+        the reviewer sees any of what correction needs."""
+        from core.reasoning.review import _review_input
+
+        run = _reviewed_run()
+        run.log("Pass 4: tiered 2 claim(s).")
+
+        text = _review_input(run)
+
+        assert "q" in text                                  # the query
+        assert '"id": "c1"' in text                         # each claim,
+        assert '"confidence_tier": "HIGH"' in text          # with its tier
+        assert "REPORT v1" in text                          # the report
+        assert "- Pass 4: tiered 2 claim(s)." in text       # and the trace
+
+    def test_a_refinement_retargeting_another_claim_is_dropped(self, mocker):
+        """V5's re-target check (#86 item 4): a note about #3 must not
+        silently redraft #7. This is the one mutating stage, so it is the
+        one place unit 6's delete-the-guard rule applies."""
+        from core.reasoning import review as review_module
+        from core import config_loader
+
+        config_loader.initialize(".")
+        run = _reviewed_run()
+        hijacked = [dict(TEXT_FINDING, claim_id="c2", proposed="hijacked")]
+        response = make_model_response(text=json.dumps(hijacked))
+        response.thread_id = uuid4()
+        mocker.patch.object(RunAgentLoop, "continue_conversation",
+                            return_value=response)
+
+        out = review_module._refine(
+            TEXT_FINDING, "this is really about the other claim", run,
+            model="m", provider_name="ANTHROPIC",
+            thread_id=response.thread_id, authorization=None)
+
+        assert out is None
+        assert any("re-targeted" in line for line in run.trace)

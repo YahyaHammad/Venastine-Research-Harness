@@ -641,3 +641,20 @@ def _canned(pass_id, text="text", granted=None):
     r = make_model_response(text=text)
     r.granted_calls = list(granted or ())
     return r
+
+
+class TestCandidatesBasis:
+    """#86 item 5: the offering basis is headless_hidden -- approval-
+    gated -- not 'advertised'. The loop consults a grant only when a call
+    needs approval, so granting an ungated tool does nothing; listing it
+    would only pad the picker with authority nobody was asked about."""
+
+    def test_an_ungated_tool_is_never_offered(self, offered_tools):
+        registry.register(ToolSpec(
+            "fake_builtin_open",
+            {"name": "fake_builtin_open", "description": "Open things."},
+            lambda p: {"result": "ok"}, grant_policy=GRANT_ANYWHERE))
+        try:
+            assert "fake_builtin_open" not in dict(candidates())
+        finally:
+            registry.unregister("fake_builtin_open")

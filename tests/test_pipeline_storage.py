@@ -420,3 +420,45 @@ def test_create_db_and_tables_refuses_to_create_an_empty_database(mocker):
     mocker.patch.object(database.SQLModel, "metadata", mocker.Mock(tables={}))
     with pytest.raises(RuntimeError, match="no table classes registered"):
         database.create_db_and_tables()
+
+
+# ===========================================================================
+# ---- #86 items 1-2: guards documented as load-bearing ---------------------
+# ===========================================================================
+
+def test_a_data_only_checkpoint_never_touches_a_terminal_status():
+    """"#86 item 1. The `status is not None` guard exists for a caller
+    that §5 proper has not built yet -- deferred per-pass checkpointing,
+    which will write plain data snapshots WITHOUT a status. Defaulting
+    status here would silently reset a 'complete'/'failed' record on
+    exactly those updates; the docstring promises safe-by-construction,
+    and this pins the promise against the day the caller arrives."""
+    run_id = create_pipeline_run("guard query")
+    run = _make_sample_run("guard query")
+
+    update_pipeline_run(run_id, run, status="complete")
+    finished_before = _fetch_record(run_id).finished_at
+
+    update_pipeline_run(run_id, run)  # the future checkpointing call shape
+
+    record = _fetch_record(run_id)
+    assert record.status == "complete"
+    assert record.finished_at == finished_before
+
+
+def test_load_pipeline_run_survives_a_legacy_null_pass_threads_column():
+    """#86 item 2 -- the sibling of the candidates_json pin above, and the
+    closest of the eight to S2: the guarded path is LIVE on every database
+    that predates §27 (ensure_columns' ALTER never backfills), and
+    /claims <run id> reads this function."""
+    run_id = create_pipeline_run("pre-§27 query")
+    record = _fetch_record(run_id)
+    record.pass_threads_json = None
+    from sqlmodel import Session
+    from database import engine
+    with Session(engine) as session:
+        session.add(record)
+        session.commit()
+
+    loaded = load_pipeline_run(run_id)
+    assert loaded["pass_threads"] == []
