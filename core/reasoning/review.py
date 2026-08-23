@@ -237,6 +237,33 @@ def _validated(raw, run) -> list:
             dropped += 1
             continue
         if kind == "synthesis":
+            # #85: the dedupe guard used to be unreachable for synthesis
+            # findings -- there is no claim to overwrite, so the early
+            # return predates it. Being asked once per COPY is a different
+            # cost from being overwritten, and it is the one the human
+            # pays: walk_consent asks per finding, the re-synthesis prompt
+            # repeats each directive, and 07_review.json records each
+            # decision. Identical proposals are one finding raised
+            # several times: key on the normalised text and keep the
+            # first. Distinct proposals stay distinct -- two different
+            # report-level notes are two reviewers' worth of instruction,
+            # not duplicates (D1/D2).
+            key = (None, "synthesis", proposed.strip())
+            if key in seen_targets:
+                duplicates += 1
+                continue
+            if claim_id is not None:
+                # D3(b): a synthesis correction has no target claim, so a
+                # stray claim_id would have _describe attribute a
+                # report-level note to a claim in the trace and
+                # 07_review.json. The FINDING survives; only the lying
+                # key goes, and the strip is traced (#49's rule).
+                item = dict(item)
+                item.pop("claim_id", None)
+                run.log(f"Review: ignored claim_id {claim_id!r} on a "
+                        f"synthesis finding -- report-level corrections "
+                        f"have no target.")
+            seen_targets.add(key)
             out.append(item)
             continue
         if not isinstance(claim_id, str) or claim_id not in known:
@@ -256,8 +283,11 @@ def _validated(raw, run) -> list:
         out.append(item)
 
     if duplicates:
+        # #85: "claim and kind" became "target" -- for a synthesis
+        # duplicate there is no claim, and the old sentence was false
+        # twice over on that branch.
         run.log(f"Review: dropped {duplicates} duplicate finding(s) "
-                f"(same claim and kind as an earlier, higher-severity one).")
+                f"(same target as an earlier, higher-severity one).")
     if dropped:
         run.log(f"Review: dropped {dropped} malformed or unresolvable "
                 f"finding(s) before asking.")

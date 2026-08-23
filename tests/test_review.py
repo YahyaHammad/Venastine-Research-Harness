@@ -816,6 +816,72 @@ class TestReviewHardening:
         assert any("1 malformed or unresolvable" in line
                    for line in run.trace)
 
+    def test_duplicate_synthesis_findings_are_kept_once(self):
+        """#85: the dedupe guard used to be unreachable for synthesis --
+        three identical report-level findings meant three consent prompts,
+        a tripled directive in the re-synthesis prompt, and three
+        decisions in 07_review.json."""
+        from core.reasoning import review as review_module
+
+        run = _reviewed_run()
+        synth = {"kind": "synthesis", "proposed": "soften the conclusion"}
+        out = review_module._validated(
+            [dict(synth), dict(synth), dict(synth)], run)
+
+        assert len(out) == 1
+        directives = review_module.synthesis_directives(
+            [dict(d, decision=review_module.ACCEPT) for d in out])
+        assert directives == ["soften the conclusion"]
+        assert any("2 duplicate finding(s)" in line for line in run.trace)
+        # The old sentence ("same claim and kind...") was false twice over
+        # on this branch -- there is no claim.
+        assert any("same target as an earlier" in line for line in run.trace)
+
+    def test_distinct_synthesis_proposals_are_not_duplicates(self):
+        from core.reasoning import review as review_module
+
+        run = _reviewed_run()
+        out = review_module._validated([
+            {"kind": "synthesis", "proposed": "soften the conclusion"},
+            {"kind": "synthesis", "proposed": "add a limitations section"},
+        ], run)
+
+        assert len(out) == 2
+
+    def test_synthesis_duplicates_match_after_stripping_but_not_case(self):
+        """D2: exact-after-strip. Over-normalising would collapse
+        genuinely different directives into one."""
+        from core.reasoning import review as review_module
+
+        run = _reviewed_run()
+        out = review_module._validated([
+            {"kind": "synthesis", "proposed": "soften the conclusion"},
+            {"kind": "synthesis", "proposed": "  soften the conclusion  "},
+            {"kind": "synthesis", "proposed": "Soften the conclusion"},
+        ], run)
+
+        assert len(out) == 2
+        assert any("1 duplicate finding(s)" in line for line in run.trace)
+
+    def test_a_stray_claim_id_on_a_synthesis_finding_is_stripped_and_traced(
+            self):
+        """D3(b): the finding survives, only the lying key goes -- and it
+        goes loudly (#49). Downstream, _describe must stop attributing a
+        report-level note to a claim that does not exist."""
+        from core.reasoning import review as review_module
+
+        run = _reviewed_run()
+        finding = {"kind": "synthesis", "claim_id": "no-such-claim",
+                   "proposed": "soften the conclusion"}
+        out = review_module._validated([finding], run)
+
+        assert len(out) == 1
+        assert "claim_id" not in out[0]
+        assert any("ignored claim_id 'no-such-claim'" in line
+                   for line in run.trace)
+        assert review_module._describe(
+            dict(out[0], decision=review_module.ACCEPT)) == "synthesis correction to report"
+
     def test_a_tier_override_rewrites_the_annotation(self, mocker):
         """r3-1: the stale '[HIGH]' tag beside a corrected tier
         contradicts it inside the re-synthesis input and every vars(c)
