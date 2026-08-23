@@ -1461,3 +1461,180 @@ def test_the_resume_command_is_registered():
     command = commands_module.registry.get("resume")
     assert command is not None
     assert command.usage == "<thread-id>"
+
+
+# ---------------------------------------------------------------------------
+# ---- #107: one timeout callback, both branches, truthful per kind ---------
+# ---------------------------------------------------------------------------
+
+class _Rec:
+    def __init__(self):
+        self.lines = []
+
+    def write_system(self, t):
+        self.lines.append(t)
+
+
+class _Screen:
+    def __init__(self):
+        self.dismissed = None
+
+    def dismiss(self, value):
+        self.dismissed = value
+
+
+def _timeout_app():
+    """The same bare-instance seam test_review's f15 pin uses: the
+    callback logic is pure -- read the stack, maybe dismiss, write a
+    line -- so it needs no pilot."""
+    from tui.app import VenastineApp
+
+    class _Bare(VenastineApp):
+        @property
+        def _transcript(self):
+            return self._t
+
+        @property
+        def screen_stack(self):
+            return self._stack
+
+    app = _Bare.__new__(_Bare)
+    app._t = _Rec()
+    app._stack = []
+    return app
+
+
+PERMISSION = dict(
+    dismiss_with=False,
+    on_timeout_line="[no answer for shell — denied; the run continues]",
+    after_line=("[answer arrived after the timeout — that call was "
+                "denied; the run continues]"))
+SIGNOFF = dict(
+    dismiss_with=False,
+    on_timeout_line=(
+        "[no answer for researcher (subagent sign-off) — denied; "
+        "the spawn was refused]"),
+    after_line="[answer arrived after the timeout — the spawn was refused]")
+CONFIRM = dict(
+    dismiss_with=False,
+    on_timeout_line="[no answer — nothing was written]",
+    after_line="[answer arrived after the timeout — nothing was written]")
+QUESTION = dict(
+    dismiss_with=False,
+    on_timeout_line="[no answer — the model was told nobody answered]",
+    after_line=("[answer arrived after the timeout — the model was told "
+                "nobody answered]"))
+
+
+@pytest.mark.parametrize("kind", [PERMISSION, SIGNOFF, CONFIRM, QUESTION])
+def test_a_timeout_dismisses_and_says_what_happened(kind):
+    """Every kind keeps its raw dismissal value and gets ONE truthful
+    'no answer' sentence (#107)."""
+    app = _timeout_app()
+    screen = _Screen()
+    app._stack = [screen]
+
+    app._timed_out_ask(screen, **kind)
+
+    assert screen.dismissed == kind["dismiss_with"]
+    assert any(kind["on_timeout_line"] in line
+               for line in app._transcript.lines), (
+        "the no-answer line must name what actually happened")
+
+
+@pytest.mark.parametrize("kind", [PERMISSION, SIGNOFF, CONFIRM, QUESTION])
+def test_an_answer_landing_after_the_timeout_is_acknowledged(kind):
+    """The review callback has handled this race since §20; the other
+    kinds said either the wrong thing or nothing. All of them now say
+    the answer went nowhere, without re-dismissing (#107)."""
+    app = _timeout_app()
+    screen = _Screen()
+    app._stack = []                # they clicked between get() and here
+
+    app._timed_out_ask(screen, **kind)
+
+    assert screen.dismissed is None, (
+        "a screen the user already dismissed must not be dismissed again")
+    assert any(kind["after_line"] in line
+               for line in app._transcript.lines), (
+        "silence sends them to the summary to work out that their "
+        "click did nothing")
+    assert not any("no answer" in line for line in app._transcript.lines)
+
+
+def test_the_question_timeout_does_not_claim_nothing_was_written():
+    """The old confirm sentence was written for /init and inherited by
+    ask_user, where nothing is ever proposed to be written -- the model
+    is told nobody answered, and the line should say so (#107)."""
+    app = _timeout_app()
+    screen = _Screen()
+    app._stack = [screen]
+
+    app._timed_out_ask(screen, **QUESTION)
+
+    lines = "\n".join(app._transcript.lines)
+    assert "nobody answered" in lines
+    assert "nothing was written" not in lines
+
+REVIEW = dict(
+    dismiss_with=("reject", ""),
+    on_timeout_line="[no answer — correction rejected; the review continues]",
+    after_line=("[answer arrived after the timeout — that correction was "
+                "already rejected; the review continues]"))
+
+ASKS = [
+    ("permission",
+     lambda app: app.ask_permission_blocking("shell", {"query": "x"}, None),
+     PERMISSION),
+    ("signoff",
+     lambda app: app.ask_signoff_blocking("researcher", ["web_search"]),
+     SIGNOFF),
+    ("confirm",
+     lambda app: app.ask_confirm_blocking("Title", "Body"), CONFIRM),
+    ("choice", lambda app: app.ask_choice_blocking({}), CONFIRM),
+    ("question",
+     lambda app: app.ask_question_blocking({"question": "Which database?"}),
+     QUESTION),
+    ("review",
+     lambda app: app.ask_review_blocking({"kind": "text"}, 0), REVIEW),
+]
+
+
+@pytest.mark.parametrize("name,ask,expected", ASKS,
+                         ids=[a[0] for a in ASKS])
+def test_every_ask_wires_the_truthful_lines_into_the_callback(
+        name, ask, expected):
+    """The parametrized pins above feed their own line contents, so they
+    say nothing about what the six ask methods ACTUALLY wire (#107).
+    This one captures each real on_timeout through _blocking_modal and
+    fires it against a stacked screen -- both sentences and the raw
+    dismissal value are asserted off production code, not test data."""
+    app = _timeout_app()
+    app._shutting_down = False
+    captured = {}
+
+    def fake_blocking(screen, *, on_timeout):
+        captured["screen"] = screen
+        captured["callback"] = on_timeout
+        return None
+
+    app._blocking_modal = fake_blocking          # instance shadow, not a patch
+    ask(app)
+
+    assert captured["callback"] is not None
+    fired = _Screen()
+    app._t = _Rec()
+    app._stack = [fired]
+    captured["callback"](fired)
+
+    assert fired.dismissed == expected["dismiss_with"], (
+        f"{name} must keep its raw timeout dismissal value")
+    transcript = "\n".join(app._transcript.lines)
+    assert expected["on_timeout_line"] in transcript, (
+        f"{name} must write its own no-answer sentence")
+    # The gone-screen branch too: swap the stack and fire again.
+    app._t.lines.clear()
+    app._stack = []
+    late = _Screen()
+    captured["callback"](late)
+    assert "\n".join(app._transcript.lines) == expected["after_line"]
