@@ -7,15 +7,21 @@ points config.OUTPUT_DIR at a tmp_path, and verifies the artifact
 directory's file layout and contents.
 
 matplotlib is a hard project dependency (requirements.txt), so the
-confidence chart is always produced -- no graceful-degradation test
-needed. PDF rendering (markdown + weasyprint) is NOT a project
-dependency, so report.pdf is expected to be absent (the graceful
-skip path).
+confidence chart is normally produced -- but every failure inside the
+two supplementary writers is contained and WARNED (#81): the guards
+exist so a completed run is never lost over a chart or a PDF, and #49's
+rule means containment is never silent. The degrade tests below pin
+both halves of that contract. PDF rendering (markdown + weasyprint) is
+NOT a project dependency, so report.pdf is expected to be absent (the
+warned-skip path).
 """
 
 import json
+import logging
 import os
 import sys
+import types
+from unittest import mock
 from uuid import uuid4
 
 import pytest
@@ -268,3 +274,81 @@ def test_tier_counts_matches_run_data():
 
     assert tiers == ["HIGH", "MEDIUM", "LOW", "UNVERIFIED", "UNVERIFIED_COVERAGE"]
     assert counts == [1, 0, 1, 0, 1]
+
+
+# ===========================================================================
+# ---- #81: degradation is contained AND named ------------------------------
+# ===========================================================================
+
+class TestSupplementaryDegradation:
+    """#81. The guards' whole job: a failure in a supplementary writer
+    must not escape write_run_artifacts (which both shells report as
+    'no artifacts written' -- the opposite of what happened), and since
+    the batch-22 fix it must not be silent either."""
+
+    def test_a_chart_failure_does_not_kill_the_artifacts(self, tmp_path,
+                                                         monkeypatch, mocker,
+                                                         caplog):
+        """plt.subplots() raising -- the documented rendering-error case,
+        and pre-#81 an UnboundLocalError escaping the guard's own
+        finally -- must leave every essential artifact on disk, no chart,
+        and a WARNING naming what was skipped."""
+        monkeypatch.setattr(config, "OUTPUT_DIR", str(tmp_path))
+        mocker.patch("matplotlib.pyplot.subplots",
+                     side_effect=RuntimeError("no usable backend"))
+        run = _make_full_run()
+
+        with caplog.at_level(logging.WARNING,
+                             logger="core.reasoning.output_writer"):
+            output_dir = write_run_artifacts(run)
+
+        assert os.path.isfile(os.path.join(output_dir, "report.md"))
+        assert os.path.isfile(os.path.join(output_dir, "trace.md"))
+        assert not os.path.exists(
+            os.path.join(output_dir, "confidence_chart.png"))
+        warnings = [r.getMessage() for r in caplog.records
+                    if r.levelno == logging.WARNING]
+        assert any("Confidence chart" in w and "render failed" in w
+                   for w in warnings), warnings
+
+    def test_a_backend_failure_skips_with_a_warning(self, tmp_path,
+                                                    monkeypatch, mocker,
+                                                    caplog):
+        """matplotlib.use() raising on a bad backend escapes nothing and
+        warns -- the import guard is Exception-wide now, not
+        ImportError-only (#81)."""
+        monkeypatch.setattr(config, "OUTPUT_DIR", str(tmp_path))
+        mocker.patch("matplotlib.use",
+                     side_effect=RuntimeError("unrecognized backend"))
+        run = _make_full_run()
+
+        with caplog.at_level(logging.WARNING,
+                             logger="core.reasoning.output_writer"):
+            output_dir = write_run_artifacts(run)
+
+        assert not os.path.exists(
+            os.path.join(output_dir, "confidence_chart.png"))
+        warnings = [r.getMessage() for r in caplog.records
+                    if r.levelno == logging.WARNING]
+        assert any("matplotlib unavailable" in w for w in warnings), warnings
+
+    def test_a_pdf_render_failure_degrades_with_a_warning(self, tmp_path,
+                                                          monkeypatch,
+                                                          mocker):
+        """The PDF path's render guard warns like the chart's. Fake both
+        converters so the render branch is reached deterministically --
+        whether weasyprint happens to be installed must not decide what
+        this test exercises."""
+        monkeypatch.setattr(config, "OUTPUT_DIR", str(tmp_path))
+        fake_markdown = types.SimpleNamespace(
+            markdown=lambda text: f"<p>{text}</p>")
+        fake_weasyprint = types.SimpleNamespace(
+            HTML=lambda string: types.SimpleNamespace(
+                write_pdf=mock.Mock(side_effect=OSError("disk full"))))
+        mocker.patch.dict(sys.modules, {"markdown": fake_markdown,
+                                        "weasyprint": fake_weasyprint})
+
+        from core.reasoning.output_writer import _try_write_pdf
+        _try_write_pdf("# Report", str(tmp_path))
+
+        assert not os.path.exists(os.path.join(tmp_path, "report.pdf"))
