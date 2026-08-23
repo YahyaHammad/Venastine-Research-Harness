@@ -2419,3 +2419,31 @@ async def test_a_healthy_mount_adds_no_warning_lines():
 
         assert not [txt for _role, txt in app._transcript._entries
                     if "API_KEY" in txt or "warning" in txt.lower()]
+
+
+# ===========================================================================
+# ---- Batch 25 (#139): the TUI forwards its effort to the pipeline ---------
+# ===========================================================================
+
+@pytest.mark.asyncio
+async def test_the_tui_forwards_its_effort_to_the_pipeline(mocker):
+    """#139. /effort high changed the status bar and the chat turns and
+    silently changed nothing about the ten-pass run. Captured at start
+    (D2): a mid-run /effort affects the next run, like model/provider."""
+    from tui.app import _cmd_research
+
+    captured = {}
+    mocker.patch(
+        "core.reasoning.orchestrator.stream_deep_research_pipeline",
+        side_effect=lambda **kw: (captured.update(kw), _stub_events())[1])
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        app.effort = "high"
+        _cmd_research(app, "what is entropy")
+        assert await settle(pilot, lambda: "effort" in captured), \
+            "the pipeline never started"
+
+    assert captured.get("effort") == "high", (
+        f"the pipeline must run at the session's effort, "
+        f"got {captured.get('effort')!r}")
