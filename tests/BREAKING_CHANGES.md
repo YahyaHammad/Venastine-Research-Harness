@@ -2706,3 +2706,19 @@ mutation below was run RED against its reverted line before its commit landed.
 | The loop LATCHES on `compaction_failed` (#136) | A turn whose compaction failed once no longer retries on later steps — by design; next turn retries fresh | Spend pins assert `call_count == 1`; cheap outcomes deliberately not latched, pinned at 3 calls |
 
 Count 2241 -> 2272.
+
+## Batch 21 -- the twenty-first fix batch: the human surface (2026-08-23)
+
+Five production contracts changed, all on the consent/answer side of the TUI.
+Every mutation below was run RED against its reverted line before its commit
+landed.
+
+| Change | What breaks | Symptom / fix |
+|---|---|---|
+| One timeout callback for all six asks (#107) | A test asserting the old per-kind messages or silence-on-race | QUESTION's no-answer line is now true ("the model was told nobody answered"); every kind acknowledges an answer that landed just after the timeout; review's two strings byte-identical, pinned |
+| Every modal centred + bounded at 80x24 (#112) | A test pushing a modal and reading its region | ReviewScreen had NO rules; four screens sat top-left; claims was 96 wide on 80 columns. The viewport test pushes all nine (+signoff-empty) asserting containment/centring/border/background -- a tenth screen needs its rules or it goes red |
+| /goal read+clear do not construct a thread (#113) | A test expecting app.memory on those paths | Bare /goal and /goal clear answer "No goal set." without persisting a kind=chat row; only setting a goal builds one |
+| ask_user refuses options-less AND textless questions (#114) | A tool call with `{"allow_text": false}` and no options | New shape refusal, checked before reachability; the pre-existing affordance probe now supplies options |
+| /copy all is a superset (#140) | A test asserting the transcript-only payload | Adds `## Report` and `## Claims` sections (claims JSON identical to /copy claims); empty sections omitted; no-run payload unchanged |
+
+Count 2272 -> 2309.
