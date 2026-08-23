@@ -5659,3 +5659,77 @@ TUI precedence flipped · settings key removed · named-gate removed.
 Counts 2363 → 2381 (+18). Open findings drop to 10 (unit-scoped 3 across
 2 units: 14b ×2, X2 ×1; outside-unit 7). X3's header (#142) retires with
 this batch if #139 was its only finding.
+## Audit Pass 1 — fix batch 26: unit 14b, the TUI widgets (#116 + #117) (2026-08-24)
+
+Two commits on `fix/batch-26-unit-14b` (WP-A 0f7bb5c, WP-B da7cbaf); per-change table in
+`tests/BREAKING_CHANGES.md` is deliberately absent — no signature or contract changed. Unit 14b
+retires; X2 ({#4}) is the last standing unit.
+
+### The owner's answers that shaped it
+
+D1: `_thread_row` indexes `created_at`/`id` DELIBERATELY and the docstring now says so — only
+`preview` is optional, because a row without its id has nothing honest to render. D3: the goal
+banner keeps its bold weight; only the hue moved to the palette (`warning`, one of §26's three
+theme-invariant roles). D4: code blocks pick `ansi_dark`/`ansi_light` from the active theme's own
+`dark` flag via `themes.syntax_theme_for()`; no running app defaults dark. D7: a source-scan guard
+test holds both widget files at zero `style="` literals.
+
+### Corrections found while building
+
+- **The "five stale docstrings" were two.** #117 reported five places claiming a None dismissal
+  would hang/park forever; current code has exactly two (`PermissionScreen.action_deny`,
+  `ReviewScreen`'s docstring) — the rest were already rewritten post-§23. Both corrected to
+  §23-accurate reasoning: decode supplies the declining default for any unusuable dismissal; the
+  invariant is that the channel receives AN answer, not that None is dangerous.
+  `ConfirmScreen`'s comment was left alone — it argues about a queue receiving NOTHING, which is
+  still the real hazard, and was already correct.
+- **ReviewScreen's note field was never broken.** It is read on every button path before
+  dismissing (`screens.py`, `on_button_pressed`). What was missing was the pin; the batch adds the
+  test and touches no code there.
+
+### Two mutations that were inert through the public API, and what replaced them
+
+- **M9's first form** (drop `_current`'s unresolved-only guard) passed all tests: `reversed()`
+  reaches the newest row before any older one, so the guard-drop is invisible unless two
+  UNRESOLVED rows share a label. The test gained an ensemble-overlap arm (detail-line position:
+  `rindex("1 tool") > rindex("> Pass 1")`) that also catches a pure direction-flip, and the
+  ledger entry uses the compound forward-scan variant.
+- **M11's first form** (stage recorded not-done) was masked by `_redraw` keying the glyph off
+  `is_stage` BEFORE done. The honest mutation makes `stage_completed` append a plain running row,
+  which is exactly the failure mode its docstring warns about ("a state that never exists").
+
+Both are recorded rather than papered over — #117's own distinction between gaps and inert
+survivors, applied in reverse.
+
+### Build findings worth keeping
+
+- **Class-level `mocker.patch.object(GoalBanner, "update", ...)` breaks Static**: textual 1.0's
+  mocks are not descriptors, so `self.update(...)` skips instance binding and the mock sees a
+  different call shape — then `visualize()` tries to set `_content` on a Rich `Text` (which has
+  `__slots__`) and explodes. Instance-level patching after mount is the working shape; the same
+  applies to spying `write`.
+- **Rich's `Syntax` has no theme NAME** — `_theme` is an `ANSISyntaxTheme` with only style maps.
+  The light/dark assertion matches resolved `style_map`s against reference instances
+  (`_syntax_token_theme` helper).
+- **Assertions must run INSIDE `run_test()`**: after the async context exits the DOM is torn
+  down, and `app._transcript` (a property querying `#transcript`) raises NoMatches. Capture into
+  a local before leaving the block.
+- **D6 observed, deferred, filed:** `/theme` rerenders only the transcript; GoalBanner,
+  TodoPanel and ResearchProgress repaint on their next event only. A palette-routed banner joins
+  that family behaviour rather than fixing it — live-restyle of the sidebar widgets is new scope,
+  filed as an enhancement issue and linked from this entry.
+
+### Mutation ledger (all RED)
+
+WP-A: banner literal restored · syntax unconditional dark · preview indexing restored · literal
+injected for the guard test. WP-B: grant-escape dismisses set() · kind-escape dismisses
+"software" · grant options pre-ticked · signoff options pre-ticked · _current forward+unguarded ·
+pass_completed scans forward · stage appended as running · flush_stream returns "" · as_text
+labels dropped · fences bypassed · goal-clear hide branch removed · review note skipped ·
+unknown-command error suppressed · skill check consults global context · summary busy guard
+removed.
+
+### Housekeeping
+
+Counts 2381 → 2400 (+19: tui 112→128, research_legibility 39→42). Open findings drop to 8;
+units standing: X2 only.
