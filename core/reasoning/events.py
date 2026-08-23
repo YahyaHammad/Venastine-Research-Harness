@@ -82,7 +82,17 @@ PIPELINE_EVENT_KINDS = (
     "retry",            # claim_id + attempt -- Pass 6a revised a claim
     "run_complete",     # run -- the terminal event, carrying the PipelineRun
     # --- §26 ---------------------------------------------------------
-    "stage",            # pass_id -- a ZERO-LLM stage completed
+    "stage",            # pass_id -- a ZERO-LLM stage completed. Pass 4 and
+                        # 6b are passes by the pipeline's numbering and
+                        # stages by their cost: they make no model call,
+                        # so they complete instantly and can never be
+                        # meaningfully "running". Consumers distinguish
+                        # them by THIS kind (tui/widgets.py's is_stage,
+                        # main.py's '..'), never by matching pass-id
+                        # strings -- #84 deleted CODE_STAGES, an unused
+                        # list of those strings whose only future was to
+                        # drift away from the orchestrator's _stage()
+                        # call sites while looking like a contract.
     "tool_call",        # pass_id + tool + text -- a pass invoked a tool
     "tool_result",      # pass_id + tool + ok (+ text when it failed)
     "pass_activity",    # pass_id + chars -- output streamed so far, throttled
@@ -99,15 +109,6 @@ PIPELINE_EVENT_KINDS = (
 # writer of related data -- and pass_activity covers the other half: a pass
 # that calls no tools (Pass 1, final synthesis) still proves it is alive by
 # how much it has written.
-
-# The zero-LLM stages, named here so a consumer can render them
-# differently from a pass without matching on strings of its own. Pass 4
-# and 6b are passes by the pipeline's numbering and stages by their cost:
-# they make no model call, so they complete instantly and can never be
-# meaningfully "running".
-CODE_STAGES = (
-    "D0", "Pass 4", "D1", "D2", "Pass 6b", "Merge", "Pass 3a/3b",
-)
 
 
 @dataclass
