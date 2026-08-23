@@ -1638,3 +1638,88 @@ def test_every_ask_wires_the_truthful_lines_into_the_callback(
     late = _Screen()
     captured["callback"](late)
     assert "\n".join(app._transcript.lines) == expected["after_line"]
+
+
+# ---------------------------------------------------------------------------
+# ---- #112: every modal is styled, centred, and fits an 80x24 terminal -----
+# ---------------------------------------------------------------------------
+
+def _modal_cases():
+    """(name, screen factory, dialog id), one per ModalScreen subclass in
+    tui/screens.py -- this table SHADOWS those constructors, so adding a
+    tenth screen means adding a row here. The sign-off appears twice: its
+    empty-candidates branch composes the permission dialog, its populated
+    branch the grant one."""
+    from tui.screens import (
+        ClaimsScreen, ConfirmScreen, GrantPickerScreen, ProjectKindScreen,
+        QuestionScreen, ReviewScreen, SubagentSignoffScreen,
+        ThreadPickerScreen,
+    )
+
+    claim = {"id": "c001", "claim": "Water boils at 100C.",
+             "confidence_tier": "HIGH"}
+    return [
+        ("permission",
+         lambda: PermissionScreen("web_search", {"query": "x"}, None),
+         "#permission-dialog"),
+        ("grant",
+         lambda: GrantPickerScreen([("web_search", "Search the web.")]),
+         "#grant-dialog"),
+        ("signoff-populated",
+         lambda: SubagentSignoffScreen("researcher", ["web_search"]),
+         "#grant-dialog"),
+        ("signoff-empty",
+         lambda: SubagentSignoffScreen("bare", []),
+         "#permission-dialog"),
+        ("question",
+         lambda: QuestionScreen("Which database should we use?",
+                                ["postgres", "sqlite"], True, True),
+         "#question-dialog"),
+        ("review",
+         lambda: ReviewScreen({"kind": "text", "reason": "Overstates.",
+                               "proposed": "Soften."}, 0),
+         "#review-dialog"),
+        ("claims", lambda: ClaimsScreen([claim]), "#claims-dialog"),
+        ("confirm", lambda: ConfirmScreen("Title", "Body text."),
+         "#permission-dialog"),
+        ("project-kind", lambda: ProjectKindScreen(),
+         "#permission-dialog"),
+        ("thread-picker", lambda: ThreadPickerScreen([], ""),
+         "#thread-dialog"),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name,make_screen,dialog_id", _modal_cases(),
+                         ids=[c[0] for c in _modal_cases()])
+async def test_every_modal_is_centred_bounded_and_styled(
+        name, make_screen, dialog_id):
+    """/112's durable half: nothing noticed when a screen shipped without
+    its stylesheet rules -- ReviewScreen had none at all and four more
+    sat pinned to the top-left corner. Every modal must render INSIDE
+    the default 80x24 viewport, centred, with a border and a surface
+    background, so a consent surface's buttons cannot fall off-screen."""
+    from textual.color import Color
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        await app.push_screen(make_screen())
+        await pilot.pause()
+
+        dialog = app.screen.query_one(dialog_id)
+        r = dialog.region
+
+        assert r.x >= 0 and r.y >= 0, f"{name} starts off-screen"
+        assert r.x + r.width <= 80, f"{name} overflows to the right"
+        assert r.y + r.height <= 24, (
+            f"{name} is {r.height} rows tall on a 24-row terminal; "
+            "its bottom rows (often the buttons) are unreachable")
+
+        assert abs(r.x - (80 - r.width) / 2) <= 1, f"{name} not centred"
+        assert abs(r.y - (24 - r.height) / 2) <= 1, f"{name} not centred"
+
+        edges = list(dialog.styles.border)
+        assert any(edge[0] for edge in edges), (
+            f"{name} has no border rule at all")
+        assert dialog.styles.background != Color(0, 0, 0, 0), (
+            f"{name} has no background rule")

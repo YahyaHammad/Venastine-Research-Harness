@@ -49,6 +49,32 @@ PermissionScreen {
     align: center middle;
 }
 
+/* Every modal screen gets one of these (#112). Nothing checked that a
+   screen had both a type selector and an id block for its dialog, and
+   five of nine never got the first -- they measured at x=0, y=0, pinned
+   to the top-left corner of an 80x24 terminal. The viewport test in
+   tests/test_tui.py pushes all nine and would catch a tenth. */
+
+GrantPickerScreen {
+    align: center middle;
+}
+
+SubagentSignoffScreen {
+    align: center middle;
+}
+
+ConfirmScreen {
+    align: center middle;
+}
+
+ProjectKindScreen {
+    align: center middle;
+}
+
+ReviewScreen {
+    align: center middle;
+}
+
 #permission-dialog {
     grid-size: 2 3;
     grid-gutter: 1 2;
@@ -86,9 +112,14 @@ ClaimsScreen {
 }
 
 #claims-dialog {
-    width: 96;
+    /* 90% with a cap, not a fixed width (#112): at 96 the dialog was
+       wider than an 80-column terminal, and align: center middle cannot
+       centre something wider than its container -- the right ~16
+       columns, tail of every score: line included, sat off-screen. */
+    width: 90%;
+    max-width: 96;
     height: auto;
-    max-height: 32;
+    max-height: 22;
     padding: 1 2;
     border: thick $primary;
     background: $surface;
@@ -101,7 +132,7 @@ ClaimsScreen {
 
 #claims-body {
     height: auto;
-    max-height: 26;
+    max-height: 14;
     overflow-y: auto;
 }
 
@@ -112,7 +143,7 @@ ClaimsScreen {
 #grant-dialog {
     width: 76;
     height: auto;
-    max-height: 26;
+    max-height: 22;
     padding: 1 2;
     border: thick $warning;
     background: $surface;
@@ -163,6 +194,11 @@ QuestionScreen {
 #question-dialog {
     width: 66;
     height: auto;
+    /* The body is the MODEL's question -- the one length the app does
+       not choose (#112). Without a max-height a long question pushed the
+       dialog to 45 rows on a 24-row terminal, title off the top and the
+       defer button off the bottom. */
+    max-height: 22;
     padding: 1 2;
     border: thick $primary;
     background: $surface;
@@ -176,6 +212,7 @@ QuestionScreen {
 #question-body {
     padding: 1 0;
     width: 100%;
+    overflow-y: auto;
 }
 
 #question-help {
@@ -188,6 +225,40 @@ QuestionScreen {
     height: auto;
     max-height: 8;
     margin-bottom: 1;
+}
+
+/* The sign-off's list is capped like the grant list it is modelled on:
+   its length is the subagent's gated tool set, and uncapped it pushed
+   the decision buttons off-screen (#112). */
+#signoff-list {
+    height: auto;
+    max-height: 14;
+    margin-bottom: 1;
+}
+
+/* §20's review consent surface (#112). It had NO rules at all -- full
+    screen, top-left, unbordered -- and its body carries reason and
+    proposed straight from the reviewer model, so an uncapped body pushed
+    the four decision buttons below the fold. Warning-bordered like
+    permission/grant rather than primary like claims/question: this one
+    AUTHORISES AN EDIT to a finished research run. */
+#review-dialog {
+    width: 76;
+    height: auto;
+    max-height: 22;
+    padding: 1 2;
+    border: thick $warning;
+    background: $surface;
+}
+
+#review-title {
+    text-style: bold;
+}
+
+#review-body {
+    height: auto;
+    max-height: 10;
+    overflow-y: auto;
 }
 
 /* §23 slice 2's checklist. `height: auto` so an empty list costs no rows in
