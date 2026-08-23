@@ -42,7 +42,7 @@ python main.py --init --research-project           # §24: skip the type questio
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 2309 tests, offline, ~25-45s by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 2328 tests, offline, ~25-45s by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -660,12 +660,19 @@ independent bugs, both found by using the app.
   (AC3). M7's migration is additive and never backfills, so the column arrives with
   every existing row defaulted to `chat`.
   `pipeline_storage.classify_legacy_pass_threads()` runs at every launch over a DBAPI
-  connection (the `ensure_columns` seam) and moves only `chat` rows that fall inside a
-  **finished** run's window. A run with `finished_at IS NULL` (§22's abandoned
-  generator) is skipped: under-classifying leaves a straggler in the picker,
-  over-classifying hides a real conversation, and only one of those is recoverable by
-  the user. Both the `IS NOT NULL` guard and the upper bound must be removed for that
-  to break — SQL's `x <= NULL` is already not true — so do not "simplify" either half.
+  connection (the `ensure_columns` seam) and works in TWO TIERS (#82): every thread id
+  named in a populated `pass_threads_json` is relabelled outright — the run's own
+  record, authoritative over any clock comparison and bound-free, which is what makes
+  a chat thread another session creates during a modern run safe; only runs with an
+  absent/NULL/empty/corrupted column fall back to the time window, a pre-T2 set that
+  cannot grow. The window tier keeps the **finished-run** guard: a run with
+  `finished_at IS NULL` (§22's abandoned generator) contributes no window, because an
+  open one would swallow real conversations — under-classifying leaves a straggler in
+  the picker, over-classifying hides a real conversation, and only one of those is
+  recoverable by the user. Corrupted JSON falls back for that one run AND warns naming
+  it. Under the old correlated subquery, dropping the `IS NOT NULL` guard was invisible
+  to the whole suite (`x <= NULL` was already not true); as ordinary Python it now has
+  teeth, and both tiers are pinned.
 - **`param_digest` lives in `safety/policy_enforcement.py`**, beside `redact_secrets`,
   since §27's replay renderer is its second caller. It redacts BEFORE truncating, and
   a second copy is how that ordering regresses in one place and not the other.

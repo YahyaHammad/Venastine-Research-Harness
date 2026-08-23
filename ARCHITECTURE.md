@@ -50,7 +50,7 @@ Venastine Research Harness/
 ├── CLAUDE.md / QWEN.md             # pointers to AGENTS.md, so a harness that auto-loads one of those names finds the context instead of a second copy of it
 ├── DEVLOG.md                       # implementation notes for built ROADMAP sections -- see §0
 │
-├── tests/                          # 2309 tests, all offline, ~25-45s depending on the machine (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
+├── tests/                          # 2328 tests, all offline, ~25-45s depending on the machine (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
 │   ├── conftest.py                 # fixtures: make_model_response, make_stream_from_response, make_stream_sequence, FakeStorage, ...
 │   ├── BREAKING_CHANGES.md         # what-breaks-it / symptom / fix per area
 │   ├── test_cli.py                 # 76 tests -- ROADMAP §1 thread_id passthrough + UUID validation + §14 parser defaults/resolution/trust flow + §29 N1-N8 the one stdin reader, N2's channel deadline, every request kind rendered, and the startup block main(argv) made reachable + #102's four declining defaults
@@ -58,7 +58,7 @@ Venastine Research Harness/
 │   ├── test_e2e.py                 # 5 tests -- e2e chat (multi-turn + tool use), research mode, error handling ×3
 │   ├── test_logging_setup.py       # 7 tests -- configure_logging fallback on bad log path, stderr=False, and #132's redacting formatter (message, traceback, and a real dispatch)
 │   ├── test_credentials.py         # 9 tests -- audit #19: providers.json and the trust store created 0600, asserted under umask 0. The mode cases skip off POSIX; the round-trip cases do not
-│   ├── test_output_writer.py       # 8 tests -- ROADMAP §12 artifact file layout, contents, chart PNG, None guard, tier counts
+│   ├── test_output_writer.py       # 12 tests -- ROADMAP §12 artifact file layout, contents, chart PNG, None guard, tier counts
 │   ├── test_confidence_scoring.py  # 50 tests (3 ROADMAP verbatim regressions)
 │   ├── test_client_translation.py  # 37 tests -- all three provider translation branches + batching + Google request/response parsing + §33's W7 guard that importing core.client pulls in no provider SDK
 │   ├── test_client_streaming.py    # 10 tests -- ROADMAP §13 direct call_model_stream coverage (3 providers + D21 + fragment accumulation)
@@ -75,7 +75,7 @@ Venastine Research Harness/
 │   ├── test_loop_tool_dispatch.py  # 7 tests -- _run tool-dispatch branches
 │   ├── test_json_retry.py          # 16 tests -- ROADMAP §3 malformed-JSON recovery (incl. crux test)
 │   ├── test_payload_validation.py  # 59 tests -- ROADMAP_v2 §30 the pass payload boundary: the spec table, the three properties, the id cross-check and its partial-match control
-│   ├── test_pipeline_storage.py    # 10 tests -- ROADMAP §5 create/update/load_pipeline_run + inner-failure caplog
+│   ├── test_pipeline_storage.py    # 12 tests -- ROADMAP §5 create/update/load_pipeline_run + inner-failure caplog
 │   ├── test_file_ops.py            # 40 tests -- ROADMAP §6 path resolution, approval, read/write/edit, registry
 │   ├── test_shell.py               # 96 tests -- ROADMAP §7 sandbox routing, inert/network classification, approval, backend internals; §28 the capability classifier, the three modes, the .venastine mount
 │   ├── test_policy_enforcement.py  # 101 tests -- ROADMAP §8 secret redaction, domain blocking (#48 normalisation + suffix match), is_url_permitted's address guard (#54), output policy, registry integration
@@ -94,9 +94,9 @@ Venastine Research Harness/
 │   ├── test_mcp_client.py          # 44 tests -- ROADMAP_v2 §17 bridge, cancel-scope task affinity, v2 field names, normalization; §37 F4-F8 teardown budget, straggler naming, catalogue cache, M17/M18/M25/M13 pins
 │   ├── test_grants.py              # 39 tests -- ROADMAP_v2 §25 R2/R6/R13/R14/R15: grantability, the loop enforcing it, GrantBudget, the audit list, that a grant by name does not answer a subject-carrying question, and that a granted tool is ADVERTISED with no channel (asserted on the wire, since a test that injects the tool call cannot see it)
 │   ├── test_attended.py            # 17 tests -- ROADMAP_v2 §25 R9-R11: ApprovalProvider consulted, headless lifted, run-scope declined
-│   ├── test_research_authorization.py # 51 tests -- ROADMAP_v2 §25 R1/R3/R4/R12/R13: candidates, the per-tool grant policy and its import assert, the two grant paths asserted as a RELATION, grant-spec parsing, both shells' flags, settings precedence
+│   ├── test_research_authorization.py # 52 tests -- ROADMAP_v2 §25 R1/R3/R4/R12/R13: candidates, the per-tool grant policy and its import assert, the two grant paths asserted as a RELATION, grant-spec parsing, both shells' flags, settings precedence
 │   ├── test_granted_calls_artifact.py # 5 tests -- ROADMAP_v2 §25 audit artifact + R7 provenance framing in the universal preamble
-│   ├── test_review.py              # 87 tests -- ROADMAP_v2 §20 V1-V9: the reviewer agent, consent as data, the accept/reject/refine walk, both shells, 07_review.json, plus the 2026-08-04 hardening class (containment, deferred commit, sanitisation, shell lifecycle)
+│   ├── test_review.py              # 93 tests -- ROADMAP_v2 §20 V1-V9: the reviewer agent, consent as data, the accept/reject/refine walk, both shells, 07_review.json, plus the 2026-08-04 hardening class (containment, deferred commit, sanitisation, shell lifecycle)
 │   ├── test_skills.py              # 37 tests -- ROADMAP_v2 §19 K1-K6: stateless manager, body pinning (incl. one-shot turns), precondition check (incl. registration), /skill, the pass-prompt boundary
 │   ├── test_docs_consistency.py    # 17 tests -- the documented counts, ROADMAP_v2's status markers, README's approval table, and the decision record's index against its citations
 │   ├── test_sdk_conformance.py     # 5 tests -- audit #143: the REAL pinned SDKs asked offline (google-genai fields, the thinking_budget pin note, httpx's redirect default). #35's capability chain is asserted here, and driven against real SDK objects -- the test the dict-shaped doubles could not be
@@ -116,7 +116,7 @@ Venastine Research Harness/
 │   ├── test_memory_shells.py      # 16 tests -- ROADMAP_v2 §21b M16's CLI approval provider and M15's /memories, /forget
 │   ├── test_pipeline_events.py    # 24 tests -- ROADMAP_v2 §22 AC1-AC4: the drainer, the one trace writer (incl. review.py's and json_retry.py's lines), P1's recorded decision, the abandoned-run record, and the live TUI view
 │   ├── test_thread_refs.py       # 36 tests -- ROADMAP_v2 §21c: what summarize_thread reads and when it spends a call, the ref tier and the pass-prompt boundary it must not cross, the cap that refuses, both shells' commands, and #90's truncation-with-a-stated-cut
-│   ├── test_thread_legibility.py  # 29 tests -- ROADMAP_v2 §27: what each creation path labels its thread, what the picker is offered, the legacy classification (raw sqlite3), what a replay shows, and the per-thread state a resume must reset
+│   ├── test_thread_legibility.py  # 35 tests -- ROADMAP_v2 §27: what each creation path labels its thread, what the picker is offered, the legacy classification (raw sqlite3), what a replay shows, and the per-thread state a resume must reset
 │   ├── test_research_legibility.py # 39 tests -- ROADMAP_v2 §26: a pass's tool calls escaping (P2 amended), the redacted param digest, one stage event per code stage (D2 per ROUND), the role palette, /copy, and ctrl+l vs the Input's ctrl+k
 │   ├── test_interaction.py        # 92 tests -- ROADMAP_v2 §23 J2-J7: core/interaction.py's decode, the declining default per kind, CHOICE and SUBAGENT_SIGNOFF validated against the request, and the strict review decoder
 │   ├── test_question_tool.py      # 45 tests -- ROADMAP_v2 §23 slice 2: ask_user through the injected response_channel, QUESTION's three-way answer, and both shells' renderers
