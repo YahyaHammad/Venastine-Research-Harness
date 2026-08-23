@@ -2447,3 +2447,48 @@ async def test_the_tui_forwards_its_effort_to_the_pipeline(mocker):
     assert captured.get("effort") == "high", (
         f"the pipeline must run at the session's effort, "
         f"got {captured.get('effort')!r}")
+
+
+# ===========================================================================
+# ---- Batch 25 (#139): the TUI mount resolves effort from BOTH keys --------
+# ===========================================================================
+
+def test_tui_effort_still_wins_inside_the_tui():
+    """tui.effort predates the top-level key; existing configs must not
+    change meaning. Specific beats general inside this shell."""
+    app = VenastineApp("ANTHROPIC", "test-model",
+                       {"tui": {"effort": "low"}, "effort": "high"})
+    assert app.effort == "low"
+
+
+def test_top_level_effort_reaches_the_mount_without_a_tui_key():
+    app = VenastineApp("ANTHROPIC", "test-model", {"effort": "medium"})
+    assert app.effort == "medium"
+
+
+@pytest.mark.asyncio
+async def test_only_a_named_effort_probes_at_mount(mocker):
+    """The mount-time validation is feedback for a DELIBERATE persisted
+    choice (§16). A default-derived level is not that: probing it fired
+    the fallback WARNING on every launch for models without a known
+    table, breaking #138's healthy-mount silence for users who never
+    asked about effort. It validates at call time like every non-TUI
+    caller instead."""
+    import config
+    probes = []
+    mocker.patch.object(VenastineApp, "start_effort_lookup",
+                        side_effect=lambda *a, **k: probes.append(k))
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        await pump(pilot, 3)
+        assert app.effort == config.DEFAULT_EFFORT
+        assert probes == [], \
+            "a default-derived level must not probe at mount"
+
+    named = VenastineApp("ANTHROPIC", "test-model",
+                         {"tui": {"effort": "high"}})
+    async with named.run_test() as pilot:
+        assert await settle(
+            pilot, lambda: bool(probes)), \
+            "an explicitly named level keeps its early feedback"

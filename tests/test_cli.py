@@ -1214,3 +1214,128 @@ class TestTheLaunchProviderCheck:
         assert len(seen.get("warnings", [])) == 1, seen
         assert "Unknown provider: ANTHROPIC" in seen["warnings"][0]
         assert "[warning]" not in capsys.readouterr().out
+
+
+# ===========================================================================
+# ---- Batch 25 (#139): --effort, resolve_effort, and the CLI surface -------
+# ===========================================================================
+
+def test_build_parser_effort_flag():
+    parser = build_parser()
+    args = parser.parse_args(["--effort", "high"])
+    assert args.effort == "high"
+    # Absent must stay None so resolve_effort can tell "flag absent" from
+    # "flag given" -- the same mechanism provider/model rely on.
+    assert build_parser().parse_args([]).effort is None
+
+
+def test_resolve_effort_precedence():
+    """--effort > settings.json top-level 'effort' > config.DEFAULT_EFFORT.
+    'auto' is the explicit off switch at either layer."""
+    import config
+    from main import resolve_effort
+
+    def ns(effort):
+        return SimpleNamespace(effort=effort)
+
+    # flag beats settings
+    assert resolve_effort(ns("low"), {"effort": "high"}) == "low"
+    # settings beats the config floor
+    assert resolve_effort(ns(None), {"effort": "medium"}) == "medium"
+    # nothing set -> the config floor ("high" since batch 25)
+    assert resolve_effort(ns(None), {}) == "high"
+    assert config.DEFAULT_EFFORT == "high"
+    # 'auto' at the flag clears even a settings level
+    assert resolve_effort(ns("auto"), {"effort": "high"}) is None
+    # 'auto' in settings clears too
+    assert resolve_effort(ns(None), {"effort": "auto"}) is None
+
+
+def test_main_resolves_and_passes_effort_to_run_chat(monkeypatch):
+    """main() computes the level beside provider/model and hands it to the
+    chat loop -- a flag that resolved to nothing would make --effort a
+    decorative argument."""
+    import main
+
+    captured = {}
+
+    def fake_chat(*args, **kwargs):
+        captured["effort"] = kwargs.get("effort", "ABSENT")
+
+    monkeypatch.setattr(main, "create_db_and_tables", lambda: None)
+    monkeypatch.setattr(main, "_classify_legacy_threads", lambda *a: None)
+    monkeypatch.setattr(main, "load_project_config", lambda *a, **k: {})
+    monkeypatch.setattr(main, "setup_mcp",
+                        lambda project_path: (None, None, []))
+    monkeypatch.setattr(main, "teardown_mcp", lambda *a, **k: None)
+    monkeypatch.setattr(main, "run_chat", fake_chat)
+
+    main.main(["--effort", "high"])
+    assert captured["effort"] == "high"
+
+
+def test_run_chat_forwards_effort_to_every_turn(mocker, cli_stdin, capsys):
+    """The chat turn carries the resolved level; and the header says what
+    is running, because a setting that shapes every answer should be
+    visible where the provider and model are. The REAL entry point runs,
+    wrapped only to record what it was handed."""
+    import main
+
+    original = RunAgentLoop.run_agent_conversation
+    captured = []
+
+    def spy(*args, **kwargs):
+        captured.append(kwargs.get("effort", "ABSENT"))
+        return original(*args, **kwargs)
+
+    mocker.patch.object(
+        RunAgentLoop, "_run",
+        side_effect=_fake_run_generator(make_model_response(text="ok")))
+    mocker.patch.object(RunAgentLoop, "run_agent_conversation",
+                        side_effect=spy)
+
+    cli_stdin()
+    main.run_chat(None, "ANTHROPIC", "m", first_message="hello",
+                  effort="high")
+
+    out = capsys.readouterr().out
+    assert "Effort: high" in out, out
+    assert captured == ["high"], captured
+
+
+def test_run_research_forwards_effort_to_the_pipeline(mocker, capsys):
+    """#139 on the CLI's other path. The pipeline receives the resolved
+    level, and the header names it. run_research imports the generator
+    lazily from the orchestrator module, so that is the seam."""
+    from core.reasoning.base import PipelineRun
+    from core.reasoning.events import PipelineEvent
+    import main
+
+    captured = {}
+    run = PipelineRun(user_query="q", final_report="REPORT")
+
+    def fake_pipeline(**kw):
+        captured.update(kw)
+        yield PipelineEvent(kind="run_complete", run=run)
+
+    import core.reasoning.orchestrator as orch
+    mocker.patch.object(orch, "stream_deep_research_pipeline",
+                        side_effect=fake_pipeline)
+    mocker.patch("core.reasoning.output_writer.write_run_artifacts",
+                 lambda *a: None)
+
+    main.run_research("q", "ANTHROPIC", "m", effort="high")
+    out = capsys.readouterr().out
+    assert captured.get("effort") == "high"
+    assert "Effort: high" in out
+
+
+def test_a_plain_run_still_gets_the_floor():
+    """A bare `python main.py` now runs at DEFAULT_EFFORT ("high"), not
+    silently at None -- resolving nothing must not mean sending nothing,
+    or the default change would only ever apply when a flag spoke."""
+    import config
+    import main
+
+    args = SimpleNamespace(effort=None)
+    assert main.resolve_effort(args, {}) == config.DEFAULT_EFFORT == "high"

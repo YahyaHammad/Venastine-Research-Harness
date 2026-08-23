@@ -98,10 +98,16 @@ def run_chat(
     provider_name: str,
     model: str,
     first_message: str | None = None,
+    effort: str | None = None,
 ) -> None:
     """Interactive chat loop. If first_message is given (positional arg
     in chat mode), it's sent as the first user turn before dropping into
-    the interactive loop."""
+    the interactive loop.
+
+    Batch 25 (#139): `effort` is the resolved level (resolve_effort). It
+    rides every run_agent_conversation call and is printed in the header,
+    because a setting that shapes every answer should be visible where the
+    provider and model are."""
     current_thread_id = thread_id
     printed_thread_id = False
     # §21b M16. Built once for the session rather than per turn: the
@@ -111,7 +117,8 @@ def run_chat(
     authorization = build_chat_authorization()
 
     print("Venastine Research Harness — chat mode.")
-    print(f"Provider: {provider_name} | Model: {model}")
+    print(f"Provider: {provider_name} | Model: {model} | "
+          f"Effort: {effort or 'auto'}")
     if current_thread_id:
         print(f"Resuming thread: {current_thread_id}")
         # §27 AC4/T5. --thread had the same gap as the TUI picker: the
@@ -151,6 +158,7 @@ def run_chat(
                 provider_name=provider_name,
                 thread_id=current_thread_id,
                 authorization=authorization,
+                effort=effort,
             )
         except Exception as e:
             logger.exception("Chat turn failed")
@@ -922,6 +930,7 @@ def run_research(
     authorization=None,
     review=None,
     subagent_review=None,
+    effort: str | None = None,
 ) -> None:
     """Run the full deep-research pipeline, write artifacts to disk,
     and print the results. ensemble_mode/ensemble_n come from
@@ -935,6 +944,9 @@ def run_research(
     runs at all -- separate, because --review on a piped run has no
     consent object and must still report.
 
+    effort (batch 25, #139) is the resolved level from resolve_effort();
+    it reaches every pass and the reviewer, and is printed in the header.
+
     §22: the pipeline is ITERATED, not called, so a run that takes many
     minutes says what it is doing while it does it. The CLI is where that
     matters most -- it is the shell an unattended run is usually launched
@@ -943,7 +955,8 @@ def run_research(
     from core.reasoning.output_writer import write_run_artifacts
 
     print(f"Running deep-research pipeline on: {query!r}")
-    print(f"Provider: {provider_name} | Model: {model}\n")
+    print(f"Provider: {provider_name} | Model: {model} | "
+          f"Effort: {effort or 'auto'}\n")
 
     run = None
     try:
@@ -951,7 +964,7 @@ def run_research(
             user_query=query, model=model, provider_name=provider_name,
             ensemble_mode=ensemble_mode, ensemble_n=ensemble_n,
             authorization=authorization, review=review,
-            subagent_review=subagent_review,
+            subagent_review=subagent_review, effort=effort,
         ):
             # §26: tool calls and code stages print here too. The CLI is
             # the shell an unattended run is launched from, so a
@@ -1071,6 +1084,21 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=f"Model name (default: settings.json, else "
              f"{config.MODEL_NAME}).",
+    )
+    # Batch 25 (#139). A free string, not choices=: the vocabulary lives at
+    # effort_for(), which validates against the RECEIVING model (a static
+    # argparse list would reject a level a custom endpoint accepts and
+    # accept one it does not). "auto" is the explicit off switch -- it
+    # clears even a settings.json level, which matters now that
+    # config.DEFAULT_EFFORT defaults to "high". Resolution in main via
+    # resolve_effort, same mechanism as provider/model.
+    parser.add_argument(
+        "--effort",
+        default=None,
+        metavar="LEVEL",
+        help="Reasoning effort for chat AND research (typically "
+             "low|medium|high; 'auto' sends none). Default: settings.json "
+             "'effort' key, else config.DEFAULT_EFFORT.",
     )
     # ROADMAP_v2 §25. TWO flags onto ONE dest, in a mutually exclusive
     # group, rather than a single nargs="?" flag with an optional value.
@@ -1225,6 +1253,25 @@ def resolve_runtime_defaults(args, settings: dict) -> tuple[str, str]:
     provider = args.provider or settings.get("default_provider") or DEFAULT_PROVIDER
     model = args.model or settings.get("default_model") or config.MODEL_NAME
     return provider, model
+
+
+def resolve_effort(args, settings: dict) -> str | None:
+    """Batch 25 (#139). Effort precedence: --effort > settings.json
+    top-level 'effort' > config.DEFAULT_EFFORT.
+
+    Same mechanism as resolve_attended/resolve_review: it only works
+    because the argparse default is None, so "flag absent" is
+    distinguishable from "flag given".
+
+    'auto' is the explicit OFF switch at either layer: with
+    DEFAULT_EFFORT now "high", a user who wants the pre-batch behaviour
+    says --effort auto and gets exactly None. A settings.json "auto"
+    clears too; JSON null cannot be distinguished from an absent key via
+    .get(), so null falls through to the next layer by design."""
+    raw = args.effort if args.effort is not None else settings.get("effort")
+    if raw is None:
+        return config.DEFAULT_EFFORT
+    return None if raw == "auto" else raw
 
 
 def resolve_attended(args, settings: dict) -> bool:
@@ -1602,6 +1649,7 @@ def main(argv=None) -> int:
     project_path = os.getcwd()
     settings = load_project_config(project_path, args.trust_project)
     provider, model = resolve_runtime_defaults(args, settings)
+    effort = resolve_effort(args, settings)
 
     # #138. Say at launch what /model says on a switch -- the file, the
     # provider, the key -- because both shells otherwise print
@@ -1723,6 +1771,7 @@ def main(argv=None) -> int:
                 # gets the findings and still changes nothing (V6).
                 subagent_review=review_on,
                 review=build_review_consent() if review_on else None,
+                effort=effort,
             )
         else:
             thread_id = args.thread
@@ -1737,7 +1786,8 @@ def main(argv=None) -> int:
                     thread_id = ConversationMemory().thread_id
                     print(f"[thread: {thread_id}]")
                 attach_cli_refs(thread_id, args.ref, provider, model)
-            run_chat(thread_id, provider, model, first_message=args.query)
+            run_chat(thread_id, provider, model, first_message=args.query,
+                     effort=effort)
     finally:
         # finally, not "at the end": run_research raises SystemExit(1) on a
         # failed pipeline, and Ctrl+C reaches here as KeyboardInterrupt.

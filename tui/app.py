@@ -274,7 +274,24 @@ class VenastineApp(App):
         tui_settings = self._settings.get("tui", {})
         self._theme_name = themes.resolve(tui_settings.get("theme"))
         self._animations = tui_settings.get("animations", True)
-        self.effort = tui_settings.get("effort") or config.DEFAULT_EFFORT
+        # Batch 25 (#139): tui.effort still wins INSIDE the TUI -- it
+        # predates the top-level key and changing its meaning would
+        # surprise existing configs -- then the universal key, then the
+        # config floor (now "high").
+        self.effort = (tui_settings.get("effort")
+                       or self._settings.get("effort")
+                       or config.DEFAULT_EFFORT)
+        # Whether a HUMAN named this level. The mount-time validation
+        # below exists as early feedback for a deliberate persisted
+        # choice (§16: tui.effort used to be trusted as-is and 400 every
+        # turn); a default-derived level is not that -- it validates at
+        # call time like every non-TUI caller, where effort_for drops an
+        # unsupported one with a naming warning. Probing a default here
+        # instead would fire the fallback WARNING on every launch for
+        # models without a known table, breaking #138's healthy-mount
+        # silence for users who never asked about effort at all.
+        self._effort_named = bool(tui_settings.get("effort")
+                                  or self._settings.get("effort"))
         # §23 slice 2. Validated at load by config_loader against
         # TODO_POSITIONS, so an unknown value never reaches here.
         self._todo_position = tui_settings.get("todo_position", "side")
@@ -354,14 +371,15 @@ class VenastineApp(App):
             self._transcript.write_error(warning)
         self._transcript.write_system("Type /help for commands.")
         self.query_one("#prompt", Input).focus()
-        if self.effort:
-            # A persisted tui.effort was trusted as-is and sent on every
+        if self.effort and self._effort_named:
+            # A persisted effort level was trusted as-is and sent on every
             # turn, unlike the sibling tui.theme three lines up which gets
             # themes.resolve()'s fallback. A stale or mistyped level meant
             # every turn failed with a provider 400 until the user
             # happened to run /effort auto. Verified off the UI thread,
             # so a slow or unreachable Models API delays the check, not
-            # the app.
+            # the app. Gated on _effort_named: see its comment in
+            # __init__ for why a default-derived level does not probe.
             self.start_effort_lookup(None, validate_only=True)
 
     def on_unmount(self) -> None:

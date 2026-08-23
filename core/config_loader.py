@@ -46,6 +46,17 @@ _FRONTMATTER_DELIM = re.compile(r"^---\s*$", re.MULTILINE)
 _KNOWN_SETTINGS = {
     "default_provider": str,
     "default_model": str,
+    # Batch 25 (#139). The effort level every path runs at unless something
+    # more specific speaks: CLI flag > this key > config.DEFAULT_EFFORT,
+    # with tui.effort still winning INSIDE the TUI (it predates this key
+    # and changing its meaning would surprise existing configs).
+    #
+    # Deliberately NOT an R12 by-name rejection, and the reason is worth
+    # stating so nobody "completes" the pattern: R12 rejects keys that are
+    # AUTHORITY. This one is cost -- the worst a cloned repo's settings.json
+    # can do here is make runs think harder and spend more tokens, which is
+    # compaction-settings territory, not granted-tools territory.
+    "effort": str,
     "ensemble_mode": bool,
     "ensemble_n": int,
     "compaction": dict,
