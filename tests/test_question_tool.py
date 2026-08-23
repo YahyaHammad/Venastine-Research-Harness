@@ -125,7 +125,9 @@ class TestTheFourAffordances:
 
     def test_allow_text_can_be_turned_off(self):
         channel, seen = _capturing()
-        ask_user.run({"question": "q", "allow_text": False},
+        # Options supplied (#114): allow_text=False without any would now
+        # be refused as unanswerable before reaching the payload at all.
+        ask_user.run({"question": "q", "options": ["a"], "allow_text": False},
                      response_channel=channel)
         assert seen[0].payload["allow_text"] is False
 
@@ -215,6 +217,44 @@ class TestBadParams:
 
     def test_no_params_at_all_does_not_raise(self):
         assert "error" in ask_user.run({}, response_channel=None)
+
+    def test_no_options_and_no_text_box_is_refused(self):
+        """#114: the one combination with no way to reply. The modal
+        would render a single "Discuss instead" button, so its defer
+        would mean "that was my only button", not "let's talk about it"
+        -- collapsing the distinction the two answers exist to keep."""
+        result = ask_user.run(
+            {"question": "Which database?",
+             "options": [], "allow_text": False},
+            response_channel=_channel(None))
+        assert result["error"] == (
+            "ask_user needs something to answer with: give options, or "
+            "leave allow_text true so the user can write a reply.")
+
+    def test_empty_options_with_the_default_allow_text_proceeds(self):
+        """allow_text defaults TRUE, so absence of the key is not
+        absence of the affordance: an open question is legitimate and
+        must reach the channel."""
+        channel, seen = _capturing()
+        answer = ask_user.run({"question": "What next?"},
+                              response_channel=channel)
+        assert "error" not in answer
+
+    def test_options_without_allow_text_still_proceeds(self):
+        channel, seen = _capturing()
+        answer = ask_user.run(
+            {"question": "Pick one.", "options": ["a"],
+             "allow_text": False},
+            response_channel=channel)
+        assert "error" not in answer
+
+    def test_the_shape_refusal_wins_over_an_unreachable_channel(self):
+        """Ordering (#114): shape validation completes before the
+        channel check, so the model is told what to FIX first."""
+        result = ask_user.run({"question": "q", "options": [],
+                               "allow_text": False},
+                              response_channel=None)
+        assert "something to answer with" in result["error"]
 
 
 # ---------------------------------------------------------------------------

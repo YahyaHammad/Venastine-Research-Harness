@@ -112,6 +112,18 @@ def run(params: dict, response_channel=None) -> dict:
                      f"or drop the options and ask it openly.",
         }
 
+    if not options and params.get("allow_text", True) is False:
+        # #114, same family as the two refusals above: a question with no
+        # options and no text box renders as a modal whose only button is
+        # "Discuss instead", so a defer means "that was my only button"
+        # rather than "let's talk about it" -- collapsing exactly the
+        # distinction QuestionScreen's escape/defer pair exists to keep.
+        return {
+            "error": "ask_user needs something to answer with: give "
+                     "options, or leave allow_text true so the user can "
+                     "write a reply.",
+        }
+
     if response_channel is None:
         # §23 AC2. Not an exception: dispatch would convert one to an error dict
         # anyway, and this way the message is written for the reader who
