@@ -5594,3 +5594,68 @@ tally fed fresh ids · reload deleted · artifacts_ok ignored.
 
 Counts 2346 → 2363 (+17). Open findings drop to 11 (unit-scoped 4 across 3
 units: 14b ×2, X2 ×1, X3 ×1; outside-unit 7).
+## Audit Pass 1 — fix batch 25: effort reaches the pipeline (#139) (2026-08-23)
+
+**#139** — unit X3's actionable half retires. Two commits on
+`fix/batch-25-effort-pipeline` (WP-A 936e0d9, WP-B 8e8e2d0); per-change
+table in `tests/BREAKING_CHANGES.md` (batch 25).
+
+### The owner's answers that shaped it
+
+D1/D2 confirmed (thread like authorization; capture at start). D3(a): full
+CLI/settings parity, with one addition the owner asked for explicitly —
+DEFAULT_EFFORT moves from None to "high". D4: the reviewer inherits. D5/D6
+confirmed.
+
+### Build findings worth keeping
+
+- **The default-high request had real teeth, and the survey caught it.**
+  `_effort_levels` ASSUMES ["low","medium","high"] for unknown
+  OpenAI-compatible models and caches that as authoritative, so a default
+  of high would have reached gpt-4o-class endpoints as `reasoning_effort`
+  and 400ed every call out of the box — including through the TUI's
+  mount-time validation, which consults the same assumed levels. Option 2
+  (owner-chosen): populate MODEL_EFFORT_LEVELS with the known
+  non-reasoning models mapped to [], authoritative-empty, so they degrade
+  with a naming warning instead of failing; unlisted endpoints keep the
+  documented loud-failure posture.
+- **One table entry was wrong before it shipped**: o3-mini is a REASONING
+  model and accepts reasoning_effort; listing it as [] would have
+  silently dropped effort there. The [] list is rejection-KNOWN models
+  only. Caught by re-reading the entry's own claim against what accepts
+  the parameter, which is exactly the audit this repo keeps asking for.
+- **The suite going racy was the bug, not the tests.** After WP-B, nine
+  to twelve TUI tests failed with a SHIFTING membership across runs.
+  Root cause: DEFAULT_EFFORT="high" made the mount-time effort probe fire
+  on EVERY launch; its failed-lookup WARNINGs go through process-global
+  logging, and TranscriptLogHandler is attached per app — so one app's
+  warnings landed in another app's transcript. Fix at the producer:
+  the probe is feedback for a NAMED level (`_effort_named`), and a
+  default-derived one validates at call time like every non-TUI caller.
+  This is #138's silence principle applied to defaults, and it is now a
+  pinned test (`test_only_a_named_effort_probes_at_mount`).
+- **The issue's "16 call sites" was close but not current** — recount by
+  grep found 11 pass sites + 2 stream_deep_research_mode calls + review's
+  chain (run_review/walk_consent/_decide_one/_refine) + retry's
+  continue_conversation. AST-guidance stands: blanket replace still hits
+  walk_consent/synthesis_directives/_synthesis_input, none of which take
+  effort.
+- `RunAgentLoop.run_agent_conversation` accessed via class in py3.13 is a
+  plain function — no `__func__`; and an autospec'd mock strips self from
+  side_effect calls. Plain `side_effect(*args, **kwargs)` wrapping the
+  pre-patch reference is the shape that works.
+
+### Mutation ledger (all RED)
+
+WP-A: pass wrappers' forward dropped · drainer dropped · json-retry
+forward dropped · reviewer call dropped · refine chain dropped · stage→
+run_review dropped · stage→walk_consent dropped · re-synthesis dropped ·
+TUI forward dropped. WP-B: resolve order flipped · auto switch removed ·
+config floor removed · chat forward dropped · research forward dropped ·
+TUI precedence flipped · settings key removed · named-gate removed.
+
+### Housekeeping
+
+Counts 2363 → 2381 (+18). Open findings drop to 10 (unit-scoped 3 across
+2 units: 14b ×2, X2 ×1; outside-unit 7). X3's header (#142) retires with
+this batch if #139 was its only finding.

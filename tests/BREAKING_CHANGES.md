@@ -2766,3 +2766,21 @@ mutation below ran RED against its reverted line before its commit landed.
 | Twelve coverage pins (#110) | Mutations only | Zero production changes were needed -- even /copy's unknown-target check already existed. Each pin's mutation listed in DEVLOG |
 
 Count 2346 -> 2363.
+
+## Batch 25 -- the twenty-fifth fix batch: effort reaches the pipeline (#139) (2026-08-23)
+
+Four production files changed (`core/reasoning/orchestrator.py`,
+`core/reasoning/json_retry.py`, `core/reasoning/review.py`, `main.py`) plus
+the config surfaces (`config.py`, `core/config_loader.py`, `tui/app.py`).
+Every mutation below ran RED against its reverted line before its commit
+landed.
+
+| Change | What breaks | Symptom / fix |
+|---|---|---|
+| `effort` keyword on six pipeline functions | Tests calling them positionally past the old tail are unaffected (keyword with default); tests asserting EXACT forwarded kwargs must add `effort=None` | `stream_deep_research_pipeline`, `run_deep_research_pipeline`, `_run_pass`, `_run_pass_with_json_retry`, `_review_stage`, `retry_until_json`. Threaded like authorization; test_e2e's exact-kwargs pin updated |
+| review.py inherits effort (D4/V7) | Nothing external | `run_review`, `walk_consent`, `_decide_one`, `_refine` take and forward it |
+| `--effort LEVEL` CLI flag + top-level settings.json `"effort"` key | Exact-argv parsers unaffected; `_KNOWN_SETTINGS` grew a key so an unknown-key test listing keys may need updating | Free string, not choices= -- the chokepoint validates. `resolve_effort(args, settings)` mirrors resolve_attended's None-default mechanism; "auto" is the explicit off switch at either layer |
+| `config.DEFAULT_EFFORT` is now `"high"` (owner decision amending §16's silence-is-safe note) | Any test asserting the old None default; any exact-kwargs assertion on paths that now forward "high" | Known non-reasoning OpenAI models ship in MODEL_EFFORT_LEVELS mapped to [] (authoritative empty -> dropped cleanly). Unlisted endpoints fail loud; `--effort auto` reverts |
+| TUI mount probes only NAMED efforts (`_effort_named`) | Tests asserting a probe for every mount | A default-derived level validated at call time instead -- probing it fired fallback WARNINGs on every launch and broke #138's healthy-mount silence (found by the suite going racy: process-global logging landed one app's warnings in another app's transcript) |
+
+Count 2363 -> 2381.
