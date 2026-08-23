@@ -5478,3 +5478,58 @@ Counts 2272 → 2309 (+37). No unit tracker retires this batch: 14a drops to
 Counts 2309 → 2328 (+19). Tracker #87 retires — unit 10 is complete, the second
 retirement after u5. Unit findings drop to 9 across 5 open units (u1: #24; 14a:
 #105/#109/#110; 14b: #116/#117; X2: #4; X3: #138/#139).
+## Audit Pass 1 — fix batch 23: the first run (2026-08-23)
+
+**#24, #138, #171** — unit 1's last finding plus two outside-unit stragglers.
+Three commits on `fix/batch-23-first-run`; per-change table in
+`tests/BREAKING_CHANGES.md` (batch 23). Retires unit 1 (tracker #25) — the
+third fully-resolved unit.
+
+### The owner's answers that shaped it
+
+All twelve decisions were locked before planning: import-time env constant
+(A1), CWD-relative default stays for providers.json AND app.db (A2),
+two-message split at the real raiser with load_credentials mirroring (A3),
+one credentials.py wording source for both shells (B1), one gated call site
+in main() that also covers --summary/--init (B2), warnings as DATA into the
+TUI (B3), warn-only everywhere (B4), the README copy line (B5),
+storage.thread_preview over a list_threads scan (C1), no backfill (C2).
+
+C1 carried a recorded deferral: generated titles were considered and
+explicitly deferred — labels are the stopgap, chosen because they need no
+model call and match what the picker already shows.
+
+### Build findings worth keeping
+
+- **The dead code was where the message lived.** `load_credentials` — whose
+  "Provider 'X' not found" is half of #24's confusion — has ZERO production
+  callers; every user meets `api_initialization`'s string instead. The fix
+  went to the producer first and mirrored outward through shared builders,
+  so the unused twin cannot drift again. Worth re-checking "who actually
+  calls this" before scoping any error-message fix.
+- **A from-import would have frozen the override.** `from credentials import
+  LLM_PROVIDERS_FILE` binds the value at client-import time; a test's
+  monkeypatch of `credentials.LLM_PROVIDERS_FILE` would not be seen by the
+  new existence check in api_initialization. The constant is read THROUGH
+  the module there. The same trap is why A1 had to stay import-time: a
+  call-time resolver would break test_credentials' monkeypatch fixture.
+- **TUI visibility decided B3's shape.** Anything printed pre-mount
+  vanishes when Textual renders, and TranscriptLogHandler attaches only AT
+  mount — so launch warnings had to travel into the app as data. This is
+  the same lesson logging_setup's stderr=False documents from the other
+  side.
+- **STORAGE_SYMBOLS earned its comment.** Adding thread_preview there made
+  fake_storage redirect it automatically, which is why the pre-existing
+  attach_cli_refs test needed no edit once the fixture knew the symbol.
+  The lazy-from-import pattern (compaction, main.attach_cli_refs) is
+  exactly what the module-level patch covers.
+- **Subprocess tests need an explicit cwd.** Whatever a prior test did to
+  the process cwd leaks into children; deriving the project root from
+  credentials.__file__ (ONE dirname — it points at the file) keeps them
+  hermetic.
+
+### Housekeeping
+
+Counts 2328 → 2346 (+18). Unit findings drop to 8 across 4 open units
+(14a: #105/#109/#110; 14b: #116/#117; X2: #4; X3: #139); outside-unit
+drop to 8 (#170/#14/#12/#10/#9/#8/#6/#5).

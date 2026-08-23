@@ -2737,3 +2737,16 @@ before its commit landed.
 | Periphery pins + one removal (#86) | -- | Six properties pinned (status-guard, pass_threads NULL default, V1 input, V5 re-target, candidates basis, unconditional pass_threads.json); missing-kind-column guard tested; the `getattr(run, "pass_threads", [])` fallback REMOVED -- no caller or double lacks the field |
 
 Count 2309 -> 2328.
+
+## Batch 23 -- the twenty-third fix batch: the first run (2026-08-23)
+
+Three production files changed. Every mutation below ran RED against its
+reverted line before its commit landed.
+
+| Change | What breaks | Symptom / fix |
+|---|---|---|
+| providers.json is overridable, and its absence says so (#24) | Tests asserting the old "Unknown provider: X" / "Provider 'X' not found" strings | `AGENT_PROVIDERS_FILE` joins the four sibling env overrides (import-time constant, monkeypatchable); api_initialization distinguishes file-absent (names path + remedy) from provider-absent (names the configured set); load_credentials mirrors through the same two builders. ValueError TYPE unchanged -- callers catch the type |
+| Launch says what /model says (#138) | Tests driving main() with exact stdout in a dir without providers.json | One warning pass before either shell starts, gated off --memories/--forget; TUI receives the warnings as data (`VenastineApp(startup_warnings=)`, written at mount -- a pre-mount print would vanish under Textual's screen). Warn-only everywhere; README gains the copy line it never had |
+| A CLI --ref stores the label /ref always did (#171) | Tests calling attach_cli_refs without a thread_preview double | storage.thread_preview() is new public API and on STORAGE_SYMBOLS, so the fake_storage fixture redirects it automatically. Rows written by older CLIs keep "(no preview)" -- no backfill, deliberately |
+
+Count 2328 -> 2346.
