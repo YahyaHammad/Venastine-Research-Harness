@@ -201,48 +201,69 @@ def classify_legacy_pass_threads(connection) -> int:
     number of rows relabelled.
 
     WHY THIS IS NOT PART OF ensure_columns(). That function is additive
-    only and explicitly never backfills (§21 M7) -- so every row already on
+    only and explicitly never backfills (#21 M7) -- so every row already on
     disk takes `kind='chat'` from the column default, and the hundreds of
-    pass threads in an existing database would still fill the picker §27
+    pass threads in an existing database would still fill the picker #27
     exists to clear. Widening ensure_columns' contract to backfill would
     put data policy inside a schema migrator; if that function ever grows a
     DROP or an UPDATE, the project has outgrown it.
 
     WHY IT LIVES HERE rather than in storage.py. The signal is a pipeline
-    fact -- "a thread created between a run's started_at and finished_at is
-    a pass thread of that run" -- and storage.py owns schema and CRUD
-    without knowing what a run is. The dependency runs this way round only;
-    storage.py does not import this module.
+    fact -- which threads belong to which run -- and storage.py owns schema
+    and CRUD without knowing what a run is. The dependency runs this way
+    round only; storage.py does not import this module.
 
-    THE SIGNAL IS STRUCTURAL, NOT HEURISTIC. A chat thread cannot be born
-    inside that window: the CLI is blocked inside the synchronous pipeline
-    call, and the TUI's `_busy` guard already refuses /new and thread
-    switching mid-run. Nothing here inspects content or counts messages.
+    TWO TIERS, EXACT FIRST (#82). Since T2, every run records the exact
+    thread ids of its passes in `pass_threads_json`. That record is
+    authoritative over any clock comparison -- so:
 
-    A RUN WITH finished_at IS NULL IS SKIPPED. §22's abandoned-generator
-    case deliberately leaves status='running' with no closing bound, so an
-    open window would swallow every thread created since -- including real
-    conversations. Under-classifying leaves a straggler in the picker;
-    over-classifying HIDES A REAL CONVERSATION, and only one of those is
-    recoverable by the user.
+      * TIER 1 (exact): every thread id named in a populated
+        `pass_threads_json` is a pass thread, whatever its timestamp says
+        and whether or not the run ever finished. Membership was recorded
+        at run time; there is nothing to infer.
+      * TIER 2 (window): only runs whose `pass_threads_json` is absent,
+        NULL, empty, or unusable fall back to the time-window heuristic --
+        "created between started_at and finished_at". That set is the
+        pre-T2 population, WHICH CANNOT GROW: a run recorded after T2
+        always names its own passes, so its window is never consulted and
+        a chat thread another session creates during it is safe (#82's
+        headline hazard).
 
-    IDEMPOTENT BY CONSTRUCTION, not by a marker. It only ever moves rows
-    that are still 'chat' into 'research_pass', so running it at every
-    launch is a no-op after the first -- and a database last opened by an
-    older build still gets classified, which a one-shot flag would miss.
+    CORRUPTED JSON FALLS BACK, LOUDLY. An unparseable `pass_threads_json`
+    puts THAT run in the window tier rather than crashing the launch --
+    the under-classification direction, which this docstring already
+    prefers -- and warns naming the run, because silently ignoring data
+    the writer did write is how the corruption spreads unnoticed.
+
+    A RUN WITH finished_at IS NULL GETS ONLY TIER 1. The window needs a
+    closing bound: #22's abandoned-generator case deliberately leaves
+    status='running', so an open window would swallow every thread created
+    since -- including real conversations. Tier 1 needs no bound (exact
+    ids), so an abandoned run's recorded passes ARE relabelled.
+    Under-classifying leaves a straggler in the picker; over-classifying
+    HIDES A REAL CONVERSATION, and only one of those is recoverable by the
+    user.
+
+    IDEMPOTENT BY CONSTRUCTION. It only ever moves rows still 'chat', so
+    running it at every launch is a no-op after the first -- and a database
+    last opened by an older build still gets classified, both for its
+    pre-T2 rows (window tier) and its post-T2 rows (whose ids were recorded
+    all along).
 
     Raw SQL over a DBAPI connection (`engine.raw_connection()` in
     production, stdlib `sqlite3.connect(...)` in tests), the same seam
     database.ensure_columns() uses and for the same reason: the suite's
-    fake `sqlmodel` cannot execute DDL or a correlated subquery, and a seam
-    that only works in production is not a seam. Does NOT close the
-    connection -- the caller owns its lifetime.
+    fake `sqlmodel` cannot execute DDL, and a seam that only works in
+    production is not a seam. Does NOT close the connection -- the caller
+    owns its lifetime. Computation happens in Python (fetch runs once,
+    fetch chat rows once, one bounded UPDATE per chunk) so the two tiers'
+    conditions are ordinary code a mutation can target, not a correlated
+    subquery whose bounds the suite could only probe end-to-end.
 
     Threads a legacy compactor or subagent created are relabelled
-    'research_pass' here if they happen to fall inside a run's window, and
-    left as 'chat' otherwise. Both are acceptable: the first is hidden
-    either way, and the second is the under-classification this docstring
-    already prefers.
+    'research_pass' here if they happen to fall inside a PRE-T2 run's
+    window, and left as 'chat' otherwise. Both acceptable: the first is
+    hidden either way, and the second is under-classification.
     """
     cursor = connection.cursor()
     cursor.execute("PRAGMA table_info(conversationthread)")
@@ -252,45 +273,90 @@ def classify_legacy_pass_threads(connection) -> int:
         # no-op rather than "no such column".
         return 0
     cursor.execute("PRAGMA table_info(pipelinerunrecord)")
-    if not cursor.fetchall():
+    run_columns = {row[1] for row in cursor.fetchall()}
+    if not run_columns:
         # A database that has never run research. Nothing to classify, and
-        # the subquery below would raise on the missing table.
+        # neither query below would find its table.
         return 0
-    # `finished_at IS NOT NULL` is belt-and-braces: SQL's `x <= NULL` is
-    # NULL rather than true, so an open window already matches nothing. It
-    # stays because the guard is the INTENT -- a later edit that made the
-    # upper bound lenient (`finished_at IS NULL OR ...`) would otherwise
-    # relabel every conversation since an abandoned run, and that edit reads
-    # as a kindness.
-    #
-    # Measured by mutation, one at a time, against the full suite:
-    #
-    #   drop `finished_at IS NOT NULL` alone  ->  0 red
-    #   drop the upper bound alone            ->  4 red
-    #   drop both                             ->  4 red
-    #
-    # The four are all in test_thread_legibility.py::TestClassifyingLegacy-
-    # Threads. So the mechanism above is right and the coverage is the other
-    # way round from what this comment used to claim ("dropping BOTH turns
-    # three tests red, dropping either alone turns none" -- audit #83). The
-    # half with NO test is the `IS NOT NULL` guard, which is the half this
-    # comment exists to defend: `created_at <= NULL` is already not true, so
-    # test_an_unfinished_run_hides_nothing passes with it deleted. A reader
-    # told the upper bound was unprotected would conclude the opposite of
-    # the truth in both directions.
+    has_recorded = "pass_threads_json" in run_columns
+
+    # ---- Fetch the runs once, and sort each into a tier -------------------
     cursor.execute(
-        "UPDATE conversationthread SET kind = ? "
-        " WHERE kind = ? AND EXISTS ("
-        "  SELECT 1 FROM pipelinerunrecord AS r"
-        "   WHERE r.finished_at IS NOT NULL"
-        "     AND conversationthread.created_at >= r.started_at"
-        "     AND conversationthread.created_at <= r.finished_at)",
-        (THREAD_KIND_RESEARCH_PASS, THREAD_KIND_CHAT),
-    )
+        "SELECT id, started_at, finished_at"
+        + (", pass_threads_json" if has_recorded else "")
+        + " FROM pipelinerunrecord")
+    run_rows = cursor.fetchall()
+
+    exact_ids = set()       # tier 1: named in some run's pass_threads_json
+    window_runs = []        # tier 2: (started_at, finished_at) pairs
+    for row in run_rows:
+        run_id, started_at, finished_at = row[0], row[1], row[2]
+        raw = row[3] if has_recorded else None
+        usable, corrupted = False, False
+        if raw:
+            try:
+                entries = json.loads(raw)
+            except ValueError:
+                corrupted = True
+            else:
+                if not isinstance(entries, list):
+                    corrupted = True
+                else:
+                    # T2's shape: [{"pass": ..., "thread_id": ...}]. Entries
+                    # without a usable thread_id contribute nothing either
+                    # way; an entry list that is merely EMPTY is the
+                    # legitimate pre-T2 shape, i.e. window tier.
+                    for entry in entries:
+                        if (isinstance(entry, dict)
+                                and isinstance(entry.get("thread_id"), str)):
+                            exact_ids.add(entry["thread_id"])
+                            usable = True
+        # raw None/"" (or a missing column) falls through with usable=False:
+        # the legitimate pre-T2 shape, i.e. window tier -- not corruption.
+        if corrupted:
+            # #82, owner decision B3: fall back for THIS run, and say so --
+            # data the writer did write must not vanish without a trace.
+            logger.warning(
+                "Classify pass threads: run %s has unparseable "
+                "pass_threads_json (%r); using its time window instead.",
+                run_id, raw[:80] if isinstance(raw, str) else raw)
+        if not usable:
+            # Window tier -- but only a CLOSED window. The intent guard
+            # against a future edit "kindly" treating NULL finished_at as
+            # open-ended lives here, in ordinary code, where removing it
+            # turns a test red (it never could under the old correlated
+            # subquery: SQL's x <= NULL was already not true).
+            if started_at is not None and finished_at is not None:
+                window_runs.append((started_at, finished_at))
+
+    # ---- Fetch the still-chat rows once ------------------------------------
+    cursor.execute(
+        "SELECT id, created_at FROM conversationthread WHERE kind = ?",
+        (THREAD_KIND_CHAT,))
+    chat_rows = cursor.fetchall()
+
+    to_relabel = []
+    for thread_id, created_at in chat_rows:
+        if thread_id in exact_ids:
+            to_relabel.append(thread_id)
+        elif created_at is not None and any(
+                start <= created_at <= finish for start, finish in window_runs):
+            to_relabel.append(thread_id)
+
+    relabelled = 0
+    # Chunked: SQLite's host-parameter ceiling is finite, and a long-lived
+    # database can carry thousands of pass threads.
+    for offset in range(0, len(to_relabel), 500):
+        chunk = to_relabel[offset:offset + 500]
+        placeholders = ",".join("?" * len(chunk))
+        cursor.execute(
+            f"UPDATE conversationthread SET kind = ? "
+            f" WHERE kind = ? AND id IN ({placeholders})",
+            (THREAD_KIND_RESEARCH_PASS, THREAD_KIND_CHAT, *chunk))
+        relabelled += cursor.rowcount if cursor.rowcount > 0 else 0
     connection.commit()
-    relabelled = cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0
     if relabelled:
         logger.info(
-            "Classified %d pre-§27 thread(s) as research passes; they no "
+            "Classified %d pre-\u00a727 thread(s) as research passes; they no "
             "longer appear in the thread picker.", relabelled)
     return relabelled
