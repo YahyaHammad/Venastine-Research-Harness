@@ -455,10 +455,12 @@ def _render_claims(claims: list) -> str:
 def _thread_row(thread: dict) -> str:
     """One picker row: timestamp, first message, id (§27).
 
-    `.get` for preview rather than indexing: the row shape gained fields in
-    §27 and this screen is constructed directly in tests with hand-built
-    dicts, where a KeyError would be a test-only failure in a renderer whose
-    job is to survive a thin row.
+    `created_at` and `id` are INDEXED deliberately, not .get: a row
+    without either has nothing honest to render -- storage.list_threads()
+    always supplies both, and the id is the row's whole payload on
+    selection. Only `preview` is optional (.get): §27 added it, so
+    hand-built test rows predate it, and a missing preview degrades to an
+    id-only row rather than a KeyError in a test-only construction.
     """
     created = thread["created_at"]
     stamp = (f"{created:%Y-%m-%d %H:%M}"

@@ -2492,3 +2492,137 @@ async def test_only_a_named_effort_probes_at_mount(mocker):
         assert await settle(
             pilot, lambda: bool(probes)), \
             "an explicitly named level keeps its early feedback"
+
+
+# ---- #116: nothing in tui/ paints a colour the palette did not choose -----
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_the_goal_banner_paints_its_hue_from_the_palette(mocker):
+    """The banner is on screen for a whole session, and `yellow` is ANSI
+    3 -- what it looked like was the terminal's choice, not the theme's,
+    which on the light themes is some colour on near-white nobody here
+    picked. `warning` is one of the three roles §26 guarantees mean the
+    same thing on every theme, so the hue resolves against the active
+    palette; the weight stays bold (composing it is what role_styles
+    itself does)."""
+    from tui.widgets import GoalBanner
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        await pump(pilot, 2)
+        # INSTANCE-level patch: Static.update mutates the object it is
+        # handed, and a class-level mock changes the call shape it sees.
+        banner = app.query_one(GoalBanner)
+        captured = []
+        real_update = banner.update
+        mocker.patch.object(
+            banner, "update",
+            side_effect=lambda content="": (
+                captured.append(content), real_update(content))[1])
+
+        app.memory.set_extra("goal", "ship the batch")
+        app.refresh_goal_banner()
+        await pilot.pause()
+
+    assert captured, "the banner never rendered its goal"
+    text = captured[-1]
+    assert text.style == "bold #d9a441", \
+        f"banner style {text.style!r} is not the palette's warning hue " \
+        "(dark-plain's warning) -- a literal is back"
+
+
+def _syntax_token_theme(syntax) -> str:
+    """Which of Rich's two token themes a Syntax instance carries.
+
+    ANSISyntaxTheme has no name, so match the resolved style map against
+    reference instances built from each name.
+    """
+    from rich.syntax import Syntax
+
+    for name in ("ansi_dark", "ansi_light"):
+        if syntax._theme.style_map == Syntax("", "text",
+                                             theme=name)._theme.style_map:
+            return name
+    return f"other({type(syntax._theme).__name__})"
+
+
+@pytest.mark.asyncio
+async def test_code_blocks_highlight_against_the_active_background(mocker):
+    """`ansi_dark` was applied unconditionally, so on all four light
+    themes every code block was highlighted against the opposite
+    background. Rich ships exactly two token themes and the Theme object
+    already carries the boolean that chooses between them."""
+    from rich.syntax import Syntax
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        await pump(pilot, 2)
+        t = app._transcript
+
+        written = []
+        real_write = t.write
+        mocker.patch.object(
+            t, "write",
+            side_effect=lambda r, *a, **k: (
+                written.append(r), real_write(r, *a, **k))[1])
+
+        t.write_user("before")
+        t.stream_delta("```python\nx = 1\n```")
+        t.flush_stream()
+        dark_blocks = [r for r in written if isinstance(r, Syntax)]
+        assert dark_blocks, "no fenced block reached write as Syntax"
+        assert all(_syntax_token_theme(s) == "ansi_dark"
+                   for s in dark_blocks)
+
+        app.theme = "light-plain"
+        t.rerender()
+        light_blocks = [r for r in written if isinstance(r, Syntax)]
+        assert any(_syntax_token_theme(s) == "ansi_light"
+                   for s in light_blocks), \
+            "after switching to a light theme the replayed code block " \
+            "still highlights against dark"
+
+
+def test_a_thread_row_without_a_preview_still_renders():
+    """Decided rather than smoothed over (#116): created_at and id are
+    INDEXED deliberately -- storage.list_threads() always supplies them,
+    and the id is the row's whole payload on selection. Only preview is
+    optional (.get, added in §27 after these hand-built test rows
+    existed), so its absence degrades to an id-only row instead of a
+    KeyError in a test-only construction."""
+    from datetime import datetime
+
+    from tui.screens import _thread_row
+
+    full = _thread_row({"id": "t-1",
+                        "created_at": datetime(2026, 8, 24, 9, 30),
+                        "preview": "hello there"})
+    assert "2026-08-24" in full and "hello there" in full and "t-1" in full
+
+    thin = _thread_row({"id": "t-2",
+                        "created_at": datetime(2026, 8, 24, 9, 31)})
+    assert "t-2" in thin and "hello" not in thin
+
+
+def test_no_widget_or_screen_paints_a_literal_colour():
+    """§26's rule reaches beyond themes.py (#116): widgets resolve colour
+    against the active Theme object because a RichLog cannot read app.tcss
+    variables. A literal like "bold yellow" is an ANSI slot -- the terminal
+    picks what it looks like, and half the shipped themes disagree with it.
+    After #116 there are ZERO such literals in these two files; this holds
+    the count at zero. (Rich THEME names such as ansi_dark are chosen by
+    lookup from the active theme's dark flag, not painted, and are not
+    caught here.)"""
+    import io
+    import os
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    offenders = []
+    for rel in ("tui/widgets.py", "tui/screens.py"):
+        with io.open(os.path.join(root, rel), encoding="utf-8") as fh:
+            for lineno, line in enumerate(fh, 1):
+                if 'style="' in line:
+                    offenders.append(f"{rel}:{lineno}")
+    assert offenders == [], \
+        "hardcoded style literals returned: " + ", ".join(offenders)

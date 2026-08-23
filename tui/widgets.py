@@ -78,10 +78,28 @@ class GoalBanner(Static):
 
     goal = reactive(None, always_update=True)
 
+    def _styles(self) -> dict:
+        # TodoPanel's shape, and Transcript._styles' guard: resolved per
+        # update rather than cached, and bare-built test widgets render
+        # unstyled rather than raising (self.app raises NoActiveAppError).
+        try:
+            app = self.app
+        except Exception:  # noqa: BLE001 -- no running app; render unstyled
+            return {}
+        return themes.styles_for(app)
+
     def watch_goal(self) -> None:
         if self.goal:
             self.display = True
-            self.update(Text(f"goal  {self.goal}", style="bold yellow"))
+            # The palette, not a literal (#116): `warning` is one of the
+            # three theme-invariant roles, so the hue means the same thing
+            # on all eight themes. The WEIGHT stays bold -- composing it
+            # here is what role_styles itself does ("bold {theme.primary}")
+            # -- but guarded, because a bare-built widget has no styles
+            # dict to draw the colour from.
+            colour = self._styles().get("warning", "")
+            style = f"bold {colour}" if colour else "bold"
+            self.update(Text(f"goal  {self.goal}", style=style))
         else:
             self.display = False
             self.update("")
@@ -378,6 +396,15 @@ class Transcript(RichLog):
     def _style(self, role: str) -> str:
         return self._styles().get(role, "")
 
+    def _syntax_theme(self) -> str:
+        # The guard is at the attribute access, like _styles: self.app
+        # RAISES outside a running app, and syntax_theme_for can only help
+        # once it has been handed one.
+        try:
+            return themes.syntax_theme_for(self.app)
+        except Exception:  # noqa: BLE001 -- no running app; default dark
+            return "ansi_dark"
+
     # -- writing -----------------------------------------------------------
 
     def _emit(self, role: str, text: str, record: bool = True) -> None:
@@ -397,7 +424,8 @@ class Transcript(RichLog):
                 if isinstance(block, tuple):
                     language, code = block
                     self.write(Syntax(code, language or "text",
-                                      theme="ansi_dark", word_wrap=True,
+                                      theme=self._syntax_theme(),
+                                      word_wrap=True,
                                       indent_guides=False))
                 else:
                     self.write(Text(block, self._style("assistant")))

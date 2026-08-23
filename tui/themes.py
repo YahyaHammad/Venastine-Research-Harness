@@ -165,6 +165,30 @@ def styles_for(app) -> dict[str, str]:
     return role_styles(theme)
 
 
+def syntax_theme_for(app) -> str:
+    """Which Rich token theme code blocks highlight against (#116).
+
+    Rich ships exactly two: ansi_dark for dark backgrounds, ansi_light for
+    light ones. Half the shipped themes are light, and every one of them
+    was rendering every code block in a palette designed against the
+    opposite background -- on the one transcript element a reader is most
+    likely to read character by character.
+
+    Resolved here, against the Theme object's own `dark` flag, for the same
+    reason role_styles is: a RichLog cannot reach app.tcss variables, so
+    the lookup happens where the Theme object already is. No running app
+    (bare-built test widgets) defaults to dark, which preserves what the
+    unconditional version did.
+    """
+    try:
+        theme = app.get_theme(app.theme)
+    except Exception:  # noqa: BLE001 -- no app, or a theme name we lost
+        theme = None
+    if theme is not None and not theme.dark:
+        return "ansi_light"
+    return "ansi_dark"
+
+
 def resolve(name: str | None) -> str:
     """Theme name to apply, falling back to the default.
 
