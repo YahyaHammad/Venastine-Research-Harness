@@ -120,3 +120,33 @@ def load_credentials(provider_name: str) -> tuple[str, str]:
 
     entry = provider_data[provider_name]
     return entry["API_KEY"], entry.get("API_URL", "")
+
+
+def provider_startup_issues(provider_name: str) -> list:
+    """What launch should say about the provider setup, before either
+    shell starts (#138).
+
+    The same three checks /model performs on a switch -- file present,
+    provider configured, key non-empty -- applied at the moment the user
+    chose the provider, instead of at the first model call, which is a
+    dead end away from the mistake that caused it. WARN-ONLY, never a
+    refusal: an OpenAI-compatible endpoint running locally legitimately
+    takes no key (the reason /model warns there too), and refusing would
+    block a real configuration.
+
+    Empty list means healthy and says NOTHING -- silence is the healthy
+    case's whole UX. Plain sentences, no prefix: rendering is the
+    shell's (CLI prints, TUI write_error), so one wording reaches both.
+    """
+    providers = load_provider_data()
+    if not providers and not os.path.exists(LLM_PROVIDERS_FILE):
+        return [no_providers_message()]
+    if provider_name not in providers:
+        return [unknown_provider_message(provider_name, providers)]
+    if not providers[provider_name].get("API_KEY"):
+        return [
+            f"{provider_name} has no API_KEY in {LLM_PROVIDERS_FILE} "
+            f"— calls will fail unless it is a local endpoint that "
+            f"needs none."
+        ]
+    return []

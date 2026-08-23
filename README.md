@@ -29,8 +29,11 @@ pip install -r requirements.txt
 | **Tool API keys** (GitHub token, NVD key, …) | `.env` | `env_secrets.py`, template at `.env.example` |
 
 ```bash
+cp providers.json.example providers.json   # then add your provider's API key
 cp .env.example .env     # then fill in only the keys your tools actually need
 ```
+
+Without the first file every model call fails — both shells say so at launch (#138), but creating it is the one setup step they cannot do for you.
 
 Both are gitignored. They are kept apart on purpose: provider keys are read by one module at model-call time, while tool keys are handed to code that talks to third parties. Mixing them would put every tool's secrets in reach of the credential path and vice versa. If it is ever unclear which file a new secret belongs in, it belongs in `.env` unless a model provider is going to authenticate with it.
 

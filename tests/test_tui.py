@@ -1863,3 +1863,40 @@ def test_live_claims_fall_back_when_the_run_has_none():
 
     text, _ = _copy_payload(app, "all")
     assert "## Claims" in text and "c001" in text
+
+
+# ===========================================================================
+# ---- #138: launch-time provider warnings reach the transcript --------------
+# ===========================================================================
+
+@pytest.mark.asyncio
+async def test_launch_warnings_are_written_to_the_transcript_at_mount():
+    """#138's TUI half. main() cannot print these -- anything on stdout
+    before Textual takes the screen vanishes when it renders -- so they
+    travel into the app and on_mount writes each one where the user
+    actually reads. Beside the status line it qualifies, before the
+    /help hint: a warning that arrives after the user typed is a dead
+    end one step later than #138 complained about."""
+    app = VenastineApp("ANTHROPIC", "test-model", {},
+                       startup_warnings=[
+                           "ANTHROPIC has no API_KEY in providers.json"])
+    async with app.run_test() as pilot:
+        assert await settle(pilot, lambda: bool(app._transcript._entries)), \
+            "the transcript never rendered"
+
+        rendered = [txt for _role, txt in app._transcript._entries
+                    if "has no API_KEY" in txt]
+        assert rendered, (
+            "the launch warning never reached the transcript")
+
+
+@pytest.mark.asyncio
+async def test_a_healthy_mount_adds_no_warning_lines():
+    """Silence is the healthy case's whole UX (#138): an install with a
+    configured provider and key gets no extra lines at all."""
+    app = VenastineApp("ANTHROPIC", "test-model", {}, startup_warnings=[])
+    async with app.run_test() as pilot:
+        assert await settle(pilot, lambda: bool(app._transcript._entries))
+
+        assert not [txt for _role, txt in app._transcript._entries
+                    if "API_KEY" in txt or "warning" in txt.lower()]
