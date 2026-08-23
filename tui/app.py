@@ -36,6 +36,7 @@ from uuid import UUID
 
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
+from textual.css.query import NoMatches
 from textual.message import Message
 from textual.widgets import Footer, Header, Input
 from textual.worker import Worker, WorkerState
@@ -49,10 +50,11 @@ from memories.tui_commands import register_memory_commands
 from project_init.tui_commands import register_init_commands
 from skills.tui_commands import register_skill_commands
 from core import config_loader
+from core.approval import RunAuthorization
 from core.client import api_initialization, effort_levels_for_model
 from core.loop import (
-    DEFAULT_PROVIDER, DEFAULT_SYSTEM_PROMPT, RunAgentLoop, with_goal, with_refs,
-    with_memories, with_todos,
+    DEFAULT_PROVIDER, DEFAULT_SYSTEM_PROMPT, RunAgentLoop, advertisement_facts,
+    with_goal, with_refs, with_memories, with_todos,
 )
 from core.memory import ConversationMemory
 from core.replay import last_assistant_text, replay_entries
@@ -157,13 +159,21 @@ class ResearchFinished(Message):
     artifacts_ok (review §19-20 r4-3): the worker swallows artifact-write
     failures so a disk error cannot discard a completed run -- but the
     summary line must not then point the user at a 07_review.json that
-    was never written."""
+    was never written.
+
+    abandoned (#105): the user quit while the run was going. The worker
+    stopped forwarding at its next event and closed the generator, which
+    is §22's abandoned-generator path -- the record stays status='running'
+    with every checkpoint it took, honestly neither complete nor failed.
+    That is a third outcome, distinct from both: reporting it through the
+    error branch would call the user's own quit a pipeline failure."""
 
     def __init__(self, run, error: BaseException | None,
-                 artifacts_ok: bool = True) -> None:
+                 artifacts_ok: bool = True, abandoned: bool = False) -> None:
         self.run = run
         self.error = error
         self.artifacts_ok = artifacts_ok
+        self.abandoned = abandoned
         super().__init__()
 
 
@@ -239,6 +249,15 @@ class VenastineApp(App):
         ("ctrl+l", "show_claims", "Claims"),
     ]
 
+    # Set by exit(); consulted by the blocking ask paths (review §19-20
+    # r1-1: a walk that re-arms AFTER the one-shot channel release must
+    # not park a non-daemon worker on a queue nobody will ever answer),
+    # by _forwarding (#105), and by the timeout narration. A CLASS
+    # attribute so a bare-instance seam built with __new__ -- which three
+    # test files use for exactly this callback logic -- reads False
+    # instead of raising.
+    _shutting_down = False
+
     def __init__(self, provider_name: str = DEFAULT_PROVIDER,
                  model: str = None, settings: dict | None = None,
                  startup_warnings: list[str] | None = None):
@@ -272,6 +291,8 @@ class VenastineApp(App):
         # new session starts clean. A LIST, not a set: activation order is
         # the order the bodies are pinned in.
         self.active_skills: list = []
+        # `_last_response` is the most
+        # recent model answer by any route (streamed turn, one-shot,
         # §26. What /copy and /claims read. `_last_response` is the most
         # recent model answer by any route (streamed turn, one-shot,
         # research report); `_last_run` is the finished PipelineRun, which
@@ -281,11 +302,6 @@ class VenastineApp(App):
         self._last_response: str = ""
         self._last_run = None
         self._live_claims: dict = {}
-        # Set by exit(); the blocking ask paths consult it so a walk that
-        # re-arms AFTER the one-shot channel release cannot park a
-        # non-daemon worker on a queue nobody will ever answer (review
-        # §19-20 r1-1).
-        self._shutting_down = False
 
     # -- layout --------------------------------------------------------------
 
@@ -628,12 +644,21 @@ class VenastineApp(App):
         if error is not None:
             raise error
 
-    def run_one_shot(self, system_prompt: str, message: str) -> None:
-        """Run ONE turn in the CURRENT thread under a different system
-        prompt (§18 /grill-me: the agent sees the live history directly,
-        no digest loss). Uses continue_conversation so the exchange
-        persists into the thread; the live memory is reloaded when the
-        result lands so the next streaming turn sees it too."""
+    def run_one_shot(self, agent, message: str) -> None:
+        """Run ONE turn in the CURRENT thread under a different agent's
+        system prompt (§18 /grill-me: the agent sees the live history
+        directly, no digest loss). Uses continue_conversation so the
+        exchange persists into the thread; the live memory is reloaded
+        when the result lands so the next streaming turn sees it too.
+
+        This method owns the WHOLE assembly (#109/#170), because prompt
+        facts and run facts must come from one answer: a system_prompt
+        built by the caller would have to guess whether the turn can
+        ask, and #170 is exactly what that guessing produced — a prompt
+        advertising tools a headless run could not call, beside a schema
+        list that knew better. The channel exists before any of the
+        prompt is built, and every layer after reads it.
+        """
         self._busy = True
         self._raven.state = ravens.THINKING
         # #104, same shape as run_agent_turn: this can be the first touch
@@ -646,12 +671,30 @@ class VenastineApp(App):
             self._transcript.write_error(f"Could not open the thread: {e}")
             return
         model, provider = self.model, self.provider_name
+        # §23/§25. Attended, like every other TUI turn (#170 D1): the
+        # human is at the keyboard, so gated tools stay advertised AND
+        # promptable instead of silently vanishing for this one command.
+        channel = self.response_channel()
+        authorization = RunAuthorization(provider=channel)
+        callable_only, granted = advertisement_facts(
+            response_channel=channel)
+        base_prompt = manager.system_prompt_for(
+            agent, DEFAULT_SYSTEM_PROMPT, self.active_skills,
+            callable_only=callable_only, granted=granted)
+        # §18/§21c/§23. Unconditional, for with_refs' documented reason:
+        # goal, references and checklist are thread state, not an agent's
+        # opt-in. Deliberately NO with_memories — system_prompt_for has
+        # already appended this agent's memories (M13), and a second call
+        # would duplicate them.
+        prompt = with_goal(base_prompt, self.memory)
+        prompt = with_refs(prompt, self.memory)
+        prompt = with_todos(prompt, self.memory)
         # K1 holds for one-shot turns too (review §19-20 f22 decision):
         # an activated skill governs the /grill-me turn in the same
         # thread, mirroring run_agent_turn's pinning.
         fragment = skills.prompt_fragment(self.active_skills)
         if fragment:
-            system_prompt = f"{system_prompt}\n\n{fragment}"
+            prompt = f"{prompt}\n\n{fragment}"
 
         def work() -> None:
             error = None
@@ -661,10 +704,11 @@ class VenastineApp(App):
                 response = RunAgentLoop.continue_conversation(
                     thread_id=thread_id,
                     message=message,
-                    system_prompt=system_prompt,
+                    system_prompt=prompt,
                     model=model,
                     provider_name=provider,
                     effort=self.effort,
+                    authorization=authorization,
                 )
                 text = response.text
                 notices = list(getattr(response, "notices", ()) or ())
@@ -802,6 +846,22 @@ class VenastineApp(App):
         # Every exit route funnels through here (action_quit, ctrl+c, and
         # any programmatic exit), which is why the release lives here
         # rather than on the quit binding alone.
+        if self._busy:
+            # #105, D4. Say what quitting does to a run rather than
+            # leaving it mysterious: the worker stops forwarding at its
+            # next event (#105's fix), so this is a bounded goodbye, and
+            # the line tells the user what became of the run.
+            #
+            # Best-effort twice over (#104's rule): quitting from under a
+            # modal means query_one finds no #transcript at all -- it
+            # searches the ACTIVE screen (§27) -- and an unrenderable
+            # goodbye must not block the goodbye.
+            try:
+                self._transcript.write_system(
+                    "[quitting — the active work is abandoned at its next "
+                    "event; its checkpoints are kept.]")
+            except NoMatches:
+                pass
         self._shutting_down = True
         self._release_permission_channel()
         return super().exit(*args, **kwargs)
@@ -1088,6 +1148,12 @@ class VenastineApp(App):
         review. interaction.decode is untouched; this method changes only
         what the human is told.
         """
+        # #105's family: after a quit there is nobody listening, and the
+        # widgets this writes to may already be gone -- exit() released
+        # the channel with a value, so the worker is not parked and the
+        # narration would only describe an app that has closed.
+        if self._shutting_down:
+            return
         # Only say "no answer" when there genuinely was none: if the user
         # clicked between the get() timeout and this callback, the screen
         # is gone and the message would contradict what they just did
@@ -1186,6 +1252,16 @@ class VenastineApp(App):
     def on_research_finished(self, message: ResearchFinished) -> None:
         self._busy = False
         self._raven.state = ravens.IDLE
+        if getattr(message, "abandoned", False):
+            # #105. A deliberate quit is not a pipeline failure: say what
+            # actually happened to the run. §22's wording -- abandoned,
+            # checkpoints kept, record left 'running' -- is the honest
+            # summary of the state the record is in.
+            self._transcript.write_system(
+                "[run abandoned — quit requested. Checkpoints so far are "
+                "kept; the run's record stays 'running' rather than "
+                "claiming completion.]")
+            return
         if message.error is not None:
             self._transcript.write_error(f"[pipeline failed: {message.error}]")
             return
@@ -1733,7 +1809,7 @@ def _review_consent_for(app: VenastineApp):
     return app.response_channel()
 
 
-def _forwarding(app: VenastineApp, events):
+def _forwarding(app: "VenastineApp", events, outcome: dict):
     """Post every PipelineEvent to the UI thread, then pass it on.
 
     A pass-through rather than a consumption loop, so the run's terminal
@@ -1741,8 +1817,20 @@ def _forwarding(app: VenastineApp, events):
     receiving a finished PipelineRun. Forwarding and draining in two
     separate loops would mean either buffering the whole run before
     rendering any of it, or reimplementing the drainer here.
+
+    #105: when the app is shutting down, stop at the NEXT event rather
+    than draining the remaining twenty minutes of pipeline. `outcome`
+    records the abandonment for work(), which cannot otherwise
+    distinguish this early StopIteration from a bug; closing the
+    generator HERE makes the §22 semantics deterministic -- GeneratorExit
+    at the current yield, so the record stays status='running' with every
+    checkpoint it took, neither complete nor failed.
     """
     for event in events:
+        if app._shutting_down:
+            outcome["abandoned"] = True
+            events.close()
+            return
         app.post_message(PipelineEventMessage(event))
         yield event
 
@@ -1780,8 +1868,22 @@ def _start_research(app: VenastineApp, query: str, authorization) -> None:
                 review=consent,
                 subagent_review=review_on,
             )
-            run = run_pipeline_to_completion(
-                _forwarding(app, events))
+            outcome = {}
+            run = None
+            try:
+                run = run_pipeline_to_completion(
+                    _forwarding(app, events, outcome))
+            except RuntimeError:
+                if not outcome.get("abandoned"):
+                    raise
+                # #105. The user quit; _forwarding stopped at its next
+                # event and closed the generator, so the drainer saw no
+                # terminal event -- §22's abandoned run, recorded
+                # honestly as status='running'. NOT an error.
+            if outcome.get("abandoned"):
+                app.post_message(ResearchFinished(None, None,
+                                                  abandoned=True))
+                return
             # §20 V9. write_run_artifacts had ONE production call site
             # (main.py), so a TUI research run produced no /output/<run_id>/
             # at all -- the shipped consequence of leaving a post-pipeline

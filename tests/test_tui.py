@@ -24,6 +24,7 @@ of pytest.ini, and per-test markers keep that true.
 """
 
 import queue
+import time
 
 from types import SimpleNamespace
 
@@ -1201,6 +1202,506 @@ async def test_a_one_shot_surfaces_the_notices_its_turn_raised(
             "a compaction during /grill-me was silent -- #172's defect")
 
 
+@pytest.mark.asyncio
+async def test_the_one_shot_sees_the_thread_state_the_streaming_turn_sees(
+        mocker, tmp_path, fake_storage):
+    """#109. run_agent_turn applies goal, references and the checklist to
+    every streaming turn; run_one_shot applied none of them -- so the one
+    command whose subject is "what is still open" was the one run that
+    could not see the open items, which live in memory.extra rather than
+    in the message history a one-shot reads.
+
+    Asserted on the prompt continue_conversation receives: that string is
+    what the model is actually told, which is exactly what #109 got
+    wrong. The goal banner being on screen above the grill answer is not
+    the model knowing the goal.
+    """
+    from core import config_loader
+    from core.loop import attach_ref
+    from core.memory import ConversationMemory
+
+    config_loader.initialize(str(tmp_path))
+    continue_conv = mocker.patch(
+        "core.loop.RunAgentLoop.continue_conversation",
+        return_value=make_model_response(text="grilled"))
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        memory = app.memory
+        # extra is a SNAPSHOT (core/memory.py); set_extra is the
+        # write-through path, exactly what /goal and todo_write use.
+        memory.set_extra("goal", "ship the batch")
+        memory.set_extra("todos", [
+            {"content": "pick a storage format", "status": "pending"}])
+        source = ConversationMemory()
+        source.add_user_message("the question about retries")
+        attach_ref(memory, source.thread_id,
+                   "a distilled summary of the retry question",
+                   "first question about retries")
+
+        app.query_one("#prompt").value = "/grill-me"
+        await pilot.press("enter")
+        assert await settle(pilot, lambda: continue_conv.called), \
+            "/grill-me never ran"
+
+    prompt = continue_conv.call_args.kwargs["system_prompt"]
+    assert "ship the batch" in prompt, \
+        "the one-shot ran without the thread's goal"
+    assert "pick a storage format" in prompt, \
+        "the one-shot ran without the checklist"
+    assert "### first question about retries" in prompt, \
+        "the one-shot ran without its references"
+
+
+@pytest.mark.asyncio
+async def test_the_one_shot_never_adds_the_memories_tier(
+        mocker, tmp_path, fake_storage):
+    """#109's guard rail. The one-shot prompt comes from
+    system_prompt_for(agent), which has already appended this agent's
+    memories (M13) -- so run_one_shot must not call with_memories at all.
+    A streaming turn guards the same call behind `active_agent is None`;
+    here there is no condition to hide behind, because EVERY one-shot
+    prompt was assembled through system_prompt_for."""
+    from core import config_loader
+
+    config_loader.initialize(str(tmp_path))
+    mocker.patch("core.loop.RunAgentLoop.continue_conversation",
+                 return_value=make_model_response(text="grilled"))
+    import core.loop as core_loop
+    mem_calls = []
+    real_with_memories = core_loop.with_memories
+
+    def _spy(prompt, *args, **kwargs):
+        mem_calls.append(1)
+        return real_with_memories(prompt, *args, **kwargs)
+
+    mocker.patch("tui.app.with_memories", side_effect=_spy)
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        app.query_one("#prompt").value = "/grill-me"
+        await pilot.press("enter")
+        assert await settle(pilot, lambda: app._last_response == "grilled"), \
+            "/grill-me never ran"
+
+    assert not mem_calls, \
+        "with_memories fired on a one-shot turn -- M13 duplication"
+
+
+# ===========================================================================
+# ---- #105: quitting while a research run is going --------------------------
+# ===========================================================================
+#
+# Textual runs thread workers on non-daemon executor threads, so App.run()
+# cannot return until the worker does -- and a /research worker is a
+# ten-pass pipeline. exit() already set _shutting_down; what was missing is
+# anything READING it on the forwarding path, so quitting waited for the
+# pipeline with no UI. The fix makes _forwarding stop at its next event and
+# close the generator -- §22's abandoned run, honestly neither complete nor
+# failed.
+
+class _ClosableEvents:
+    """An events iterable that records close(), like a generator would."""
+
+    def __init__(self, events):
+        self._it = iter(events)
+        self.closed = False
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return next(self._it)
+
+    def close(self):
+        self.closed = True
+
+
+def test_forwarding_stops_at_the_next_event_when_shutting_down():
+    """_forwarding is the consumer §22's abandonment semantics were
+    written for: stopping early leaves the record 'running' with its
+    checkpoints -- provided the underlying generator is actually closed,
+    deterministically, here rather than at GC's leisure."""
+    from types import SimpleNamespace
+
+    from core.reasoning.events import PipelineEvent
+    from tui.app import _forwarding
+
+    def ev(kind):
+        return PipelineEvent(kind=kind)
+
+    app = SimpleNamespace(_shutting_down=False, post_message=lambda m: None)
+    events = _ClosableEvents([ev("pass_start"), ev("trace_line"),
+                              ev("pass_complete")])
+    outcome = {}
+
+    got = list(_forwarding(app, events, outcome))
+    assert [e.kind for e in got] == ["pass_start", "trace_line",
+                                     "pass_complete"]
+    assert not outcome.get("abandoned"), "a full drain read as abandoned"
+    assert not events.closed
+
+    # Flip mid-run: nothing further is forwarded, the source IS closed,
+    # and work() can tell this apart from a bug.
+    app._shutting_down = True
+    events2 = _ClosableEvents([ev("pass_start"), ev("trace_line")])
+    outcome2 = {}
+    got2 = list(_forwarding(app, events2, outcome2))
+    assert got2 == [], "events kept flowing after quit"
+    assert outcome2.get("abandoned") is True
+    assert events2.closed, "the pipeline generator was left to the GC"
+
+
+@pytest.mark.asyncio
+async def test_quitting_mid_run_abandons_it_without_calling_it_a_failure(
+        mocker):
+    """/quit during a ten-pass run must release the terminal within an
+    event of the quit, skip artifacts (there is no finished run), and say
+    what happened -- NOT print '[pipeline failed]'. The flag is set by
+    hand here because THIS property is about the forwarding path reading
+    it; that exit() arms it is pinned in test_review.py's r1-1 rewrite."""
+    from core.reasoning.events import PipelineEvent
+
+    def fake_stream(**kw):
+        def gen():
+            yield PipelineEvent(kind="pass_start", pass_id="Pass 1")
+            for i in range(5000):
+                # A pass takes minutes; a trace line takes ~20ms. The
+                # pacing is what makes "quit mid-run" reachable at all --
+                # unpaced, the whole fake drains before the flag lands.
+                # Safe against close(): the generator executes on the
+                # WORKER's thread (the consumer drives next()), so close()
+                # always lands while it is suspended at this yield.
+                time.sleep(0.02)
+                yield PipelineEvent(kind="trace_line",
+                                    text=f"working {i}")
+            # No run_complete: a real quit lands mid-run.
+        return gen()
+
+    mocker.patch(
+        "core.reasoning.orchestrator.stream_deep_research_pipeline",
+        side_effect=fake_stream)
+    mocker.patch("core.reasoning.output_writer.write_run_artifacts",
+                 side_effect=AssertionError(
+                     "an abandoned run must not write artifacts"))
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        from tui.app import _cmd_research
+        _cmd_research(app, "what is entropy")
+        assert await settle(pilot, lambda: app._busy), \
+            "the run never started"
+
+        app._shutting_down = True   # what exit() sets; arming pinned elsewhere
+        assert await settle(pilot, lambda: not app._busy, timeout=10), \
+            "quit did not release the worker within an event"
+        await pump(pilot, 3)
+
+        text = app._transcript.as_text()
+        assert "abandoned" in text, \
+            "the abandoned run went unexplained"
+        assert "pipeline failed" not in text, \
+            "the user's own quit was reported as a failure"
+
+
+@pytest.mark.asyncio
+async def test_quitting_while_busy_says_what_happens_to_the_work(_mocked_loop):
+    """D4: with a turn running, every exit route says so instead of the
+    window just ending. And when idle, nothing is announced."""
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        app._busy = True
+        app.exit()
+        await pilot.pause()
+
+        busy_lines = app._transcript.as_text()
+        assert "quitting" in busy_lines, \
+            "exit said nothing about the work it abandons"
+
+    idle_app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with idle_app.run_test() as pilot:
+        idle_app.exit()
+        await pilot.pause()
+
+        idle_lines = idle_app._transcript.as_text()
+        assert "quitting" not in idle_lines, \
+            "an idle exit announced an abandonment that never happened"
+
+
+# ===========================================================================
+# ---- #110: coverage for properties tui/app.py's own comments call out -----
+# ===========================================================================
+#
+# Twelve mutations survived every file that touches this module. No defect
+# is claimed here; each test below pins a property the production code's
+# own comments identify as load-bearing, where the wrong edit currently
+# looks right. Group numbers match the issue.
+
+@pytest.mark.asyncio
+async def test_an_active_agent_still_gets_the_thread_state_tiers(
+        _mocked_loop, mocker):
+    """#110 group 1. run_agent_turn applies refs and todos UNCONDITIONALLY
+    -- M19's rule, whose own comment says the wrong edit looks right.
+    Guarding either behind `active_agent is None` would make an active
+    agent lose its thread state, and until now nothing went red."""
+    import core.loop as core_loop
+    from core.config_loader import AgentDef
+
+    counts = {"refs": 0, "todos": 0}
+
+    def _spy(name):
+        real = getattr(core_loop, name)
+
+        def wrapper(prompt, *a, **kw):
+            counts[name[5:]] += 1
+            return real(prompt, *a, **kw)
+
+        return wrapper
+
+    mocker.patch("tui.app.with_refs", side_effect=_spy("with_refs"))
+    mocker.patch("tui.app.with_todos", side_effect=_spy("with_todos"))
+
+    agent = AgentDef(
+        name="sec", description="d", model=None, provider=None,
+        allowed_tools=None, approval_overrides={},
+        use_project_context=False, use_memory=False, max_steps=None,
+        body="BODY", tier="harness", path="/sec.md")
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        app.active_agent = agent
+        app.memory.set_extra("goal", "ship it")
+        type_into_prompt(app, "hello")
+        await pilot.press("enter")
+        assert await settle(pilot, lambda: not app._busy), \
+            "the turn never finished"
+
+    assert counts["refs"] >= 1, \
+        "an active agent lost its references (M19)"
+    assert counts["todos"] >= 1, \
+        "an active agent lost its checklist"
+
+
+@pytest.mark.asyncio
+async def test_an_active_agent_is_not_given_its_memories_twice(
+        _mocked_loop, mocker):
+    """#110 group 1, M13's direction. An active agent gets its memories
+    INSIDE system_prompt_for(); appending them again in run_agent_turn
+    would duplicate the tier on every agent turn."""
+    import core.loop as core_loop
+    from core.config_loader import AgentDef
+
+    mem_calls = []
+    real_with_memories = core_loop.with_memories
+
+    def _spy(prompt, *a, **kw):
+        mem_calls.append(1)
+        return real_with_memories(prompt, *a, **kw)
+
+    mocker.patch("tui.app.with_memories", side_effect=_spy)
+
+    agent = AgentDef(
+        name="sec", description="d", model=None, provider=None,
+        allowed_tools=None, approval_overrides={},
+        use_project_context=False, use_memory=True, max_steps=None,
+        body="BODY", tier="harness", path="/sec.md")
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        app.active_agent = agent
+        type_into_prompt(app, "hello")
+        await pilot.press("enter")
+        assert await settle(pilot, lambda: not app._busy)
+
+    assert mem_calls == [], \
+        "with_memories fired behind an active agent -- duplicated tier"
+
+
+def type_into_prompt(app, text):
+    app.query_one("#prompt").value = text
+
+
+@pytest.mark.asyncio
+async def test_ctrl_t_is_refused_mid_turn(fake_storage):
+    """#110 group 2. Swapping memory mid-turn leaves the worker writing
+    into the abandoned thread while rendering under the new one; /model
+    and /new have their guards pinned and ctrl+t did not."""
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        before = app.memory
+        app._busy = True
+        app.action_pick_thread()
+        await pump(pilot, 3)
+
+        assert app.memory is before, "memory was swapped mid-turn"
+        assert not isinstance(app.screen, ThreadPickerScreen), \
+            "the picker opened over a running turn"
+        assert any("Still working" in t for _r, t in
+                   app._transcript._entries)
+
+
+@pytest.mark.asyncio
+async def test_resuming_refreshes_the_todo_panel(fake_storage, mocker):
+    """#110 group 2. §23 added this call for §27's reason ("a resume
+    showed the previous thread's list"); deleting it was green because
+    the test covered the callback and stopped one line short."""
+    from uuid import uuid4
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        spy = mocker.spy(app, "refresh_todo_panel")
+        # A REAL thread: an unknown id would stop at the load guard
+        # (#104) and never reach the refresh at all.
+        app.switch_to_thread(app.memory.thread_id)
+        await pump(pilot, 3)
+        assert not [t for _r, t in app._transcript._entries
+                    if "Could not open" in t], "the resume never happened"
+
+    assert spy.called, "a resume kept the previous thread's checklist"
+
+
+def test_a_worker_error_is_reported_not_swallowed(mocker):
+    """/#110 group 3, AC3's second half. exit_on_error=False keeps the
+    app alive through a worker exception; on_worker_state_changed is what
+    makes that exception VISIBLE. Neutering the body was green."""
+    from textual.worker import WorkerState
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    seen = []
+    mocker.patch.object(app, "notify",
+                        side_effect=lambda *a, **k: seen.append(a))
+    event = SimpleNamespace(worker=SimpleNamespace(
+        state=WorkerState.ERROR, error=RuntimeError("boom")))
+    app.on_worker_state_changed(event)
+
+    assert seen, "the worker's exception was reported nowhere"
+    assert "boom" in str(seen[0])
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_copy_target_is_an_error_not_everything():
+    """#110 group 4. The unknown-OPTION check is pinned beside this; the
+    unknown-TARGET check is its twin. `_parse_copy_args` rejecting is what
+    stops `/copy repot` from silently falling through to the whole
+    session."""
+    from tui.app import _cmd_copy
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        sent = []
+        app.copy_to_clipboard = lambda text: sent.append(text)
+        _cmd_copy(app, "repot")
+        await pump(pilot, 3)
+
+        assert any("Unknown copy target" in t for _r, t in
+                   app._transcript._entries), "the typo passed silently"
+        assert sent == [], "/copy repot copied SOMETHING"
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_claims_id_is_contained(fake_storage):
+    """#110 group 4. Narrowing `_stored_claims`' except ValueError was
+    green: a malformed id reaching the message pump would take the app
+    down from a read-only command (#104's shape, one command along)."""
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        app.show_claims("not-a-uuid")
+        await pump(pilot, 3)
+
+        assert any(t.startswith("/claims:") for _r, t in
+                   app._transcript._entries), "the failure was silent"
+        assert app.is_running, \
+            "the malformed id reached the message pump and took the app down"
+
+
+@pytest.mark.asyncio
+async def test_the_tier_tally_keys_by_claim_id_not_by_event(mocker):
+    """#110 group 4, the app-side seam. The widget keys by claim id and
+    that IS pinned; this pins the handler FEEDING it the claim id. A
+    fresh id per event is exactly §26's stated failure -- 6c re-tiers the
+    same claim once per retry round, so counting reports more claims than
+    the run has and the number keeps climbing."""
+    from core.reasoning.events import PipelineEvent
+    from tui.app import PipelineEventMessage
+    from tui.widgets import ResearchProgress
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        panel = app.query_one(ResearchProgress)
+
+        def tiered(cid, tier):
+            return PipelineEventMessage(PipelineEvent(
+                kind="claim_tiered", claim_id=cid, tier=tier))
+
+        app.post_message(tiered("c1", "HIGH"))
+        await pump(pilot, 3)
+        app.post_message(tiered("c2", "HIGH"))
+        await pump(pilot, 3)
+        app.post_message(tiered("c1", "LOW"))   # 6c re-tiers it
+        await pump(pilot, 3)
+
+    assert set(panel._tiers) == {"c1", "c2"}, (
+        f"the tally counted events, not claims: {panel._tiers}")
+    assert panel._tiers["c1"] == "LOW", "a re-tier did not land"
+
+
+@pytest.mark.asyncio
+async def test_the_one_shot_answer_reloads_the_live_memory(
+        mocker, tmp_path, fake_storage):
+    """#110 group 4. on_one_shot_finished's docstring promises the reload
+    ("so the next streaming turn sees it too"); deleting it was green."""
+    from core import config_loader
+
+    config_loader.initialize(str(tmp_path))
+    mocker.patch("core.loop.RunAgentLoop.continue_conversation",
+                 return_value=make_model_response(text="grilled"))
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        before = app.memory
+        app.query_one("#prompt").value = "/grill-me"
+        await pilot.press("enter")
+        assert await settle(pilot,
+                            lambda: app._last_response == "grilled")
+
+        assert app.memory is not before, "the live memory was never reloaded"
+        assert app.memory.thread_id == before.thread_id
+
+
+@pytest.mark.asyncio
+async def test_a_failed_artifact_write_does_not_advertise_the_review_record(
+        fake_storage):
+    """#110 group 4, r4-3's transport. ResearchFinished carries
+    artifacts_ok so the summary cannot point at a 07_review.json that was
+    never written; posting without the flag was green."""
+    from core.reasoning.base import PipelineRun
+    from tui.app import ResearchFinished
+
+    def run_with_review():
+        run = PipelineRun(user_query="q")
+        run.final_report = "report"
+        run.subagent_reviews = [{"decision": "accept"}]
+        return run
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        app.on_research_finished(
+            ResearchFinished(run_with_review(), None, artifacts_ok=False))
+        await pump(pilot, 3)
+        failed_text = app._transcript.as_text()
+
+        app.on_research_finished(
+            ResearchFinished(run_with_review(), None, artifacts_ok=True))
+        await pump(pilot, 3)
+        ok_text = app._transcript.as_text()
+
+        assert "artifact write FAILED" in failed_text
+        assert "full record in 07_review.json" not in failed_text, (
+            "the summary pointed at a review record that was never written")
+        assert "no 07_review.json" in failed_text
+        assert "full record in 07_review.json" in ok_text
+
+
 # ===========================================================================
 # ---- #104: a storage failure must not take the shell down ------------------
 # ===========================================================================
@@ -1577,6 +2078,24 @@ def test_the_question_timeout_does_not_claim_nothing_was_written():
     lines = "\n".join(app._transcript.lines)
     assert "nobody answered" in lines
     assert "nothing was written" not in lines
+
+
+def test_after_a_quit_the_timeout_narration_stays_silent():
+    """#105's family. exit() releases the channel with a value, so a
+    timeout callback landing after it describes an app that no longer
+    exists -- and writes to widgets that may already be gone. The flag
+    that stops _forwarding silences this narration too."""
+    app = _timeout_app()
+    screen = _Screen()
+    app._stack = [screen]
+    app._shutting_down = True          # what exit() sets before releasing
+
+    app._timed_out_ask(screen, **PERMISSION)
+
+    assert screen.dismissed is None, \
+        "a post-quit timeout must not dismiss into a dead stack"
+    assert app._transcript.lines == [], \
+        "the shutdown narration must stay silent after a quit"
 
 REVIEW = dict(
     dismiss_with=("reject", ""),

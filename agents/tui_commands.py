@@ -1,10 +1,10 @@
 """
 agents/tui_commands.py
 
-ROADMAP_v2 §18, D6 user-initiated half: /agent, /goal and /grill-me
-register into §16's slash registry. The shell hosts the commands; this
+ROADMAP_v2 Â§18, D6 user-initiated half: /agent, /goal and /grill-me
+register into Â§16's slash registry. The shell hosts the commands; this
 section owns them -- the same mechanism-vs-policy split tools/registry.py
-uses for tools. TUI-only for now (CLI stays unchanged per the §18 scope
+uses for tools. TUI-only for now (CLI stays unchanged per the Â§18 scope
 decision); the model-initiated half lives in subagent_tool.py and works
 in every shell.
 
@@ -13,7 +13,6 @@ deliberately does NOT import tui.app, so app.py can import it without a
 cycle.
 """
 
-from core.loop import DEFAULT_SYSTEM_PROMPT
 from tui.commands import SlashCommand, registry as commands
 from agents.manager import manager
 
@@ -32,7 +31,7 @@ def _cmd_agent(app, args: str) -> None:
         return
     if args == "default":
         app.active_agent = None
-        app._transcript.write_system("Active agent cleared — default harness.")
+        app._transcript.write_system("Active agent cleared â€” default harness.")
         _note_skills_under_new_context(app)
         return
     agent = manager.get(args)
@@ -44,7 +43,7 @@ def _cmd_agent(app, args: str) -> None:
         return
     app.active_agent = agent
     app._transcript.write_system(
-        f"Active agent: {agent.name} — {agent.description}")
+        f"Active agent: {agent.name} â€” {agent.description}")
     _note_skills_under_new_context(app)
 
 
@@ -52,7 +51,7 @@ def _note_skills_under_new_context(app) -> None:
     """K2's activation note is computed against the context active at
     activation time; an /agent switch changes the context for every
     subsequent turn, so re-check active skills and say what is now
-    denied (review §19-20 f21). Advisory only -- enforcement still
+    denied (review Â§19-20 f21). Advisory only -- enforcement still
     happens per call via is_tool_allowed."""
     from skills.manager import manager as skill_manager
 
@@ -105,26 +104,26 @@ def _cmd_grill(app, args: str) -> None:
     prompt -- it reads the live history directly (no digest loss)."""
     if app._busy:
         app._transcript.write_error(
-            "Still working — wait for this turn to finish.")
+            "Still working â€” wait for this turn to finish.")
         return
     agent = manager.get("grill-me")
     if agent is None:
         app._transcript.write_error("grill-me agent not found.")
         return
     app._transcript.write_user("/grill-me")
+    # run_one_shot owns the WHOLE assembly (#170): the channel, the
+    # catalog facts and the run must come from one answer, so nothing is
+    # decided here. (Review f19's "no context, deliberately" answered a
+    # question Â§25 R15 replaced -- what matters now is not which policy
+    # governs but whether anything can answer, and only the run knows.)
     app.run_one_shot(
-        # No context, deliberately: run_one_shot passes none to
-        # continue_conversation, so this turn runs under global policy and
-        # both catalogs are genuinely callable. Passing the agent's own
-        # context here would suppress catalogs for a run that is not
-        # actually restricted (review f19, generalised).
-        manager.system_prompt_for(agent, DEFAULT_SYSTEM_PROMPT),
+        agent,
         "Grill this thread: surface what still needs a decision.",
     )
 
 
 def register_agent_commands() -> None:
-    """Idempotent — registering by name overwrites, matching §16's
+    """Idempotent â€” registering by name overwrites, matching Â§16's
     register_builtin_commands()."""
     for command in (
         SlashCommand("agent", "switch the active agent", _cmd_agent,

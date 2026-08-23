@@ -2750,3 +2750,19 @@ reverted line before its commit landed.
 | A CLI --ref stores the label /ref always did (#171) | Tests calling attach_cli_refs without a thread_preview double | storage.thread_preview() is new public API and on STORAGE_SYMBOLS, so the fake_storage fixture redirects it automatically. Rows written by older CLIs keep "(no preview)" -- no backfill, deliberately |
 
 Count 2328 -> 2346.
+
+## Batch 24 -- the twenty-fourth fix batch: unit 14a, the app (2026-08-23)
+
+Two production files changed (`tui/app.py`, `agents/tui_commands.py`). Every
+mutation below ran RED against its reverted line before its commit landed.
+
+| Change | What breaks | Symptom / fix |
+|---|---|---|
+| /grill-me is attended and assembles its own prompt (#109, #170) | Tests calling `run_one_shot(system_prompt, message)` | Signature is now `run_one_shot(agent, message)`: the method owns channel construction, catalog facts via `advertisement_facts`, the goal/refs/todos tiers, and the skills fragment -- prompt facts and run facts are one answer. `_cmd_grill` delegates. NO with_memories by design; test doubles in test_agents/test_skills updated |
+| Quitting mid-run abandons the pipeline (#105) | Nothing external | `_forwarding(app, events, outcome)` breaks on `_shutting_down`, closes the generator (§22 abandoned), and work() reports `ResearchFinished(..., abandoned=True)` instead of writing artifacts or "pipeline failed". `_consume` deliberately untouched |
+| `ResearchFinished` gains `abandoned` keyword | Positional callers unaffected | Fourth parameter, default False; a quit is not a failure and gets its own transcript line |
+| exit() narrates, timeout narration goes silent after shutdown (#105 D4) | Tests asserting exact transcript at exit with a modal up | The busy warning is best-effort: under a modal there is no #transcript to write to (§27), hence NoMatches caught. `_timed_out_ask` returns early once `_shutting_down` -- post-quit narration described an app that had closed |
+| `_shutting_down` is a class attribute default False | Bare-instance seams | Three test files build VenastineApp via __new__ for callback logic; instance-only assignment made the new reader raise there |
+| Twelve coverage pins (#110) | Mutations only | Zero production changes were needed -- even /copy's unknown-target check already existed. Each pin's mutation listed in DEVLOG |
+
+Count 2346 -> 2363.

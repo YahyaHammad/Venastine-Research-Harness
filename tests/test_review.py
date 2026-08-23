@@ -1517,6 +1517,9 @@ class _FakeTuiApp:
         self.provider_name = "ANTHROPIC"
         self._settings = {}
         self._busy = False
+        # #105: _forwarding reads this on every event. The real app gets
+        # it from VenastineApp; the double needs the quiet default.
+        self._shutting_down = False
         self._research_review = review
         self._transcript = _NullTranscript()
         self._raven = _NullRaven()
@@ -1596,23 +1599,33 @@ class TestTuiReviewLifecycle:
         assert captured["subagent_review"] is True
         assert isinstance(captured["review"], ResponseChannel)
 
-    def test_asks_after_exit_reject_instantly(self):
+    @pytest.mark.asyncio
+    async def test_asks_after_exit_reject_instantly(self):
         """r1-1: a walk that re-arms after exit()'s one-shot release must
-        not park a non-daemon worker on a queue nobody will answer."""
+        not park a non-daemon worker on a queue nobody will answer.
+
+        #110 group 2. The flag must be ARMED by exit() itself -- the
+        earlier version of this test set `_shutting_down` by hand on a
+        `__new__` instance, which proves ask_*_blocking READS the flag
+        and nothing proves anything WRITES it. Deleting the assignment in
+        exit() left the whole suite green while every shutdown guard went
+        inert together."""
         from tui.app import VenastineApp
 
-        app = VenastineApp.__new__(VenastineApp)
-        app._shutting_down = True
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test():
+            assert app._shutting_down is False
+            app.exit()
 
-        # §23: ask_review_blocking returns None after shutdown rather
-        # than a hand-built rejection, so that path uses the same decoder
-        # as every other. The DECODED answer is what the review stage
-        # sees, and it is still a rejection.
-        assert app.ask_review_blocking({}, 0) is None
-        assert interaction.decode(
-            interaction.Request(kind=interaction.REVIEW),
-            app.ask_review_blocking({}, 0)) == ("reject", "")
-        assert app.ask_permission_blocking("shell", {}, None) is False
+            # §23: ask_review_blocking returns None after shutdown rather
+            # than a hand-built rejection, so that path uses the same
+            # decoder as every other. The DECODED answer is what the
+            # review stage sees, and it is still a rejection.
+            assert app.ask_review_blocking({}, 0) is None
+            assert interaction.decode(
+                interaction.Request(kind=interaction.REVIEW),
+                app.ask_review_blocking({}, 0)) == ("reject", "")
+            assert app.ask_permission_blocking("shell", {}, None) is False
 
     def test_the_no_answer_line_only_prints_when_there_was_no_answer(self):
         """f15: printing '[no answer]' after the user already answered
