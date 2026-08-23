@@ -1121,3 +1121,96 @@ class TestCtrlDAtAStartupPrompt:
 
         cli_stdin("y")
         assert main._ask("Connect to it? [y/N]: ") == "y"
+
+
+# ===========================================================================
+# ---- #138: launch says what /model says ------------------------------------
+# ===========================================================================
+
+class TestTheLaunchProviderCheck:
+    """Both shells used to print "Provider: ANTHROPIC" and discover at the
+    FIRST MODEL CALL that no providers.json exists -- in a message naming
+    neither the file nor the key (#138). The check runs once, in main(),
+    before either shell starts, and says what /model's switch says.
+
+    The `startup` fixture chdirs to an empty tmp_path: a fresh clone's
+    actual state for the missing-file legs."""
+
+    def test_a_missing_file_warns_naming_it_before_chat_starts(
+            self, startup, capsys):
+        import main
+
+        main.main([])
+
+        out = capsys.readouterr().out
+        assert "[warning]" in out and "was not found" in out, out
+        assert "providers.json.example" in out, (
+            "the remedy is the one thing a fresh clone needs spelled out")
+
+    def test_the_pure_data_commands_stay_silent(self, startup, capsys):
+        """--memories and --forget run no model call; a provider warning
+        there is noise. --summary and --init DO make one, so the gate is
+        those two only."""
+        import main
+
+        main.main(["--memories"])
+
+        assert "[warning]" not in capsys.readouterr().out
+
+    def test_a_healthy_install_is_silent(self, startup, capsys):
+        """Silence is the healthy case's whole UX: /model does not
+        announce anything on success either."""
+        import main
+        import json
+
+        with open("providers.json", "w", encoding="utf-8") as f:
+            json.dump({"ANTHROPIC": {"API_KEY": "sk-test", "API_URL": "",
+                                     "is_v1_compatible": False,
+                                     "supports_stream_usage": True}}, f)
+
+        main.main([])
+
+        assert "[warning]" not in capsys.readouterr().out
+
+    def test_an_empty_key_warns_like_model_does(self, startup, capsys):
+        """/model warns rather than refuses on a missing key -- a local
+        OpenAI-compatible endpoint legitimately takes none. Launch makes
+        the same call on the same facts."""
+        import main
+        import json
+
+        with open("providers.json", "w", encoding="utf-8") as f:
+            json.dump({"ANTHROPIC": {"API_KEY": "", "API_URL": "",
+                                     "is_v1_compatible": False,
+                                     "supports_stream_usage": True}}, f)
+
+        main.main([])
+
+        out = capsys.readouterr().out
+        assert "has no API_KEY" in out and "local endpoint" in out, out
+
+    def test_the_tui_carries_the_warnings_instead_of_printing(
+            self, startup, monkeypatch, capsys):
+        """A pre-mount print vanishes under Textual's screen, and
+        TranscriptLogHandler attaches only at mount -- so printing on the
+        TUI path would be seen by nobody. The warnings travel into the
+        app and reach the transcript at mount instead."""
+        import json
+        import tui.app
+
+        seen = {}
+        monkeypatch.setattr(
+            tui.app, "run",
+            lambda provider, model, settings, startup_warnings=None:
+                seen.update(warnings=list(startup_warnings or ())))
+
+        with open("providers.json", "w", encoding="utf-8") as f:
+            json.dump({"OPENAI": {"API_KEY": "k", "API_URL": "",
+                                  "is_v1_compatible": True}}, f)
+
+        import main
+        main.main(["--tui"])
+
+        assert len(seen.get("warnings", [])) == 1, seen
+        assert "Unknown provider: ANTHROPIC" in seen["warnings"][0]
+        assert "[warning]" not in capsys.readouterr().out

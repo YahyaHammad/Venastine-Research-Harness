@@ -360,6 +360,25 @@ def list_threads(
 _PREVIEW_CHARS = 70
 
 
+def thread_preview(thread_id: UUID) -> str:
+    """The picker's preview for ONE thread (#171).
+
+    The same first-user-message text `list_threads()` computes -- read
+    from the ARCHIVE, so a compacted thread is labelled by what the user
+    actually said, never by §21a's synthesized summary (the reason T3
+    makes replay do the same) -- through the same one-row window query,
+    so a caller with a single id pays one row too.
+
+    A PUBLIC wrapper rather than a list_threads() scan because the CLI's
+    --ref takes ANY thread id (#171): the picker list is chat-kind-
+    filtered and capped at 200, and a pass thread or an older
+    conversation is exactly the thing worth referencing by name. Unknown
+    id -> "", which the reader renders as "(no preview)".
+    """
+    with Session(engine) as session:
+        return _first_user_messages(session, [thread_id]).get(thread_id, "")
+
+
 def _first_user_messages(session, thread_ids: List[UUID]) -> Dict[UUID, str]:
     """thread id -> truncated first user message, for the given threads.
 

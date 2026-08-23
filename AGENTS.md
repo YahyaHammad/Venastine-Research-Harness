@@ -42,7 +42,7 @@ python main.py --init --research-project           # §24: skip the type questio
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 2328 tests, offline, ~25-45s by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 2346 tests, offline, ~25-45s by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -51,7 +51,7 @@ pytest -m integration                             # opt-in; spawns a real stdio 
 
 Test dependencies (`pytest`, `pytest-mock`, `pytest-asyncio`) are now listed in `requirements.txt` — they had been missing since §14, which is why older docs warn about it.
 
-**A fresh clone needs `cp providers.json.example providers.json` before `pytest`.** The file is gitignored, and **12 tests across four files** fail with `ValueError: Unknown provider: ANTHROPIC` without it — 7 in `test_loop_tool_dispatch`, 3 in `test_loop_stop_conditions`, 1 in `test_agents` and 1 in `test_thread_legibility` (measured by moving the file aside and running the suite; the note used to say 11 across three, missing the §27 test written after it — audit #128) — `api_initialization()` needs the provider ENTRY to exist, even though the key inside it stays empty. "Offline, no API keys" is true; "no config file" is not. Also note `python3 -m pytest`: a `pytest` on PATH from a separate tool install runs in its own environment and sees none of the project's dependencies.
+**A fresh clone needs `cp providers.json.example providers.json` before `pytest`.** The file is gitignored, and **12 tests across four files** fail with `ValueError: No providers configured: ...` without it — 7 in `test_loop_tool_dispatch`, 3 in `test_loop_stop_conditions`, 1 in `test_agents` and 1 in `test_thread_legibility` (measured by moving the file aside and running the suite; the note used to say 11 across three, missing the §27 test written after it — audit #128) — `api_initialization()` needs the provider ENTRY to exist, even though the key inside it stays empty. Since #24 the message names the file and its remedy instead of reporting an unknown provider, and `AGENT_PROVIDERS_FILE` redirects it like every sibling path. "Offline, no API keys" is true; "no config file" is not. Also note `python3 -m pytest`: a `pytest` on PATH from a separate tool install runs in its own environment and sees none of the project's dependencies.
 
 MCP servers are a *third* config file again — `mcp.json`, user-level or `.venastine/`-level. Not `.env`, not `providers.json`, not `settings.json`.
 

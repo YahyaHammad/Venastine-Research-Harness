@@ -192,3 +192,108 @@ def test_the_trust_store_write_is_still_atomic(tmp_path, monkeypatch):
 
     assert store.exists()
     assert not (tmp_path / "trusted_projects.json.tmp").exists()
+
+
+# ---------------------------------------------------------------------------
+# ---- The path and its failures (#24) ---------------------------------------
+# ---------------------------------------------------------------------------
+
+def test_the_env_override_resolves_at_import():
+    """AGENT_PROVIDERS_FILE is read once, at import, exactly like
+    config.DB_PATH and the other three siblings -- so a launch-time env
+    var redirects every reader (load, save, messages) without any call
+    site changing. A subprocess because the value is frozen by the time
+    THIS process imported the module; importlib.reload would mutate
+    shared module state under the rest of the suite."""
+    import subprocess
+    import sys
+
+    code = (
+        "import os; os.environ['AGENT_PROVIDERS_FILE'] = 'elsewhere.json'; "
+        "import credentials; "
+        "assert credentials.LLM_PROVIDERS_FILE == 'elsewhere.json', "
+        "credentials.LLM_PROVIDERS_FILE"
+    )
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                       text=True,
+                       cwd=_project_root())
+    assert r.returncode == 0, r.stderr
+
+
+def _project_root() -> str:
+    """The directory whose import finds this project's credentials.py --
+    whatever a previous test did to the process cwd."""
+    return os.path.dirname(os.path.abspath(credentials.__file__))
+
+
+def test_the_default_stays_cwd_relative():
+    """Deliberate (#24): per-checkout state is what a repo-local tool
+    wants, and repo-relative would share one key file across clones. The
+    default equals the bare name, resolved against wherever python
+    runs."""
+    import subprocess
+    import sys
+
+    code = ("import credentials; "
+            "assert credentials.LLM_PROVIDERS_FILE == 'providers.json', "
+            "credentials.LLM_PROVIDERS_FILE")
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                       text=True, cwd=_project_root())
+    assert r.returncode == 0, r.stderr
+
+
+def test_api_initialization_names_the_file_when_it_is_absent(_in_tmp):
+    """The old failure surfaced as 'Unknown provider: ANTHROPIC' -- which
+    says nothing about a file, a path, or a working directory (#24's
+    founding complaint). The message names what was checked and the one-
+    line remedy. Still ValueError: callers catch the type, not the text."""
+    from core.client import api_initialization
+
+    with pytest.raises(ValueError, match="was not found in"):
+        api_initialization("ANTHROPIC")
+
+
+def test_api_initialization_lists_what_is_configured_on_a_typo(_in_tmp):
+    """/model refuses with the configured set for exactly this reason --
+    the typo is answered where it was made. The call path now agrees."""
+    (_in_tmp / "providers.json").write_text(
+        json.dumps({"OPENAI": {"API_KEY": "k", "API_URL": "",
+                               "is_v1_compatible": True}}),
+        encoding="utf-8")
+
+    from core.client import api_initialization
+
+    with pytest.raises(ValueError,
+                       match=r"Unknown provider: ANTHROPIC\. Configured: OPENAI"):
+        api_initialization("ANTHROPIC")
+
+
+def test_load_credentials_speaks_the_same_two_messages(_in_tmp):
+    """load_credentials has no production caller today, but it is public
+    API one grep away from being one -- mirroring through the same two
+    builders is what keeps its messages from drifting apart from the real
+    raiser's again."""
+    from credentials import load_credentials
+
+    with pytest.raises(ValueError, match="was not found in"):
+        load_credentials("ANTHROPIC")
+
+    (_in_tmp / "providers.json").write_text(
+        json.dumps({"OPENAI": {"API_KEY": "k", "API_URL": "",
+                               "is_v1_compatible": True}}),
+        encoding="utf-8")
+    with pytest.raises(ValueError,
+                       match=r"Configured: OPENAI \(file: providers\.json\)"):
+        load_credentials("ANTHROPIC")
+
+
+def test_an_empty_but_present_file_is_not_reported_as_missing(_in_tmp):
+    """A present-but-empty providers.json skips the missing-file branch:
+    'the file is not there' would be false, and 'Configured: none' in the
+    unknown-provider message describes it exactly."""
+    (_in_tmp / "providers.json").write_text("{}", encoding="utf-8")
+
+    from core.client import api_initialization
+
+    with pytest.raises(ValueError, match=r"Configured: none"):
+        api_initialization("ANTHROPIC")

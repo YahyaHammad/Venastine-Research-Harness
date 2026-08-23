@@ -829,6 +829,7 @@ def attach_cli_refs(thread_id, specs, provider_name: str, model: str) -> None:
     from core import compaction
     from core.loop import attach_ref
     from core.memory import ConversationMemory
+    from storage import thread_preview
 
     memory = ConversationMemory(thread_id=thread_id)
     for spec in specs:
@@ -850,7 +851,13 @@ def attach_cli_refs(thread_id, specs, provider_name: str, model: str) -> None:
         if notice is None:
             print(f"[--ref: nothing to summarise in {source}]")
             continue
-        ok, message = attach_ref(memory, source, notice["text"])
+        # #171. The label the TUI's picker has always attached: the same
+        # first-user-message preview, so both shells store identical rows
+        # and the prompt tier names what the material IS instead of
+        # "(no preview)". Computed only after the summarise succeeded --
+        # a failed reference stores no row to label.
+        ok, message = attach_ref(memory, source, notice["text"],
+                                 thread_preview(source))
         print(f"[--ref: {message}]")
 
 
@@ -1596,6 +1603,22 @@ def main(argv=None) -> int:
     settings = load_project_config(project_path, args.trust_project)
     provider, model = resolve_runtime_defaults(args, settings)
 
+    # #138. Say at launch what /model says on a switch -- the file, the
+    # provider, the key -- because both shells otherwise print
+    # "Provider: ANTHROPIC" and discover at the FIRST MODEL CALL that no
+    # providers.json exists, in a message that names neither the file nor
+    # the key. Warn-only, per /model's own split: a local endpoint takes
+    # no key, so refusing would block a real configuration. Skipped for
+    # the two pure-data commands that run no model call; kept for
+    # --summary and --init, which do.
+    startup_warnings: list[str] = []
+    if not (args.memories or args.forget):
+        from credentials import provider_startup_issues
+        startup_warnings = provider_startup_issues(provider)
+        if not args.tui:
+            for warning in startup_warnings:
+                print(f"[warning] {warning}")
+
     # §21b M15. AFTER load_project_config, because scoping needs the
     # resolved project path -- and before any MCP setup, since neither
     # command runs a model or needs a tool.
@@ -1676,7 +1699,13 @@ def main(argv=None) -> int:
             # a re-attach rather than a second stack.
             configure_logging(stderr=False)
             from tui.app import run as run_tui
-            run_tui(provider, model, settings)
+            # #138. The warnings travel INTO the app rather than being
+            # printed: anything on stdout before Textual takes the screen
+            # vanishes the moment it renders, and TranscriptLogHandler is
+            # attached only at mount -- so this pre-mount print would be
+            # seen by nobody. on_mount writes each into the transcript.
+            run_tui(provider, model, settings,
+                    startup_warnings=startup_warnings)
         elif args.mode == "research":
             # AFTER setup_mcp: the tools a grant can cover are named at
             # connection time, so asking any earlier would offer a list

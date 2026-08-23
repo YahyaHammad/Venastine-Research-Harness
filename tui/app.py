@@ -240,11 +240,18 @@ class VenastineApp(App):
     ]
 
     def __init__(self, provider_name: str = DEFAULT_PROVIDER,
-                 model: str = None, settings: dict | None = None):
+                 model: str = None, settings: dict | None = None,
+                 startup_warnings: list[str] | None = None):
         super().__init__()
         self.provider_name = provider_name
         self.model = model or config.MODEL_NAME
         self._settings = settings or {}
+        # #138. Launch-time provider findings, printed by main() on the
+        # CLI path and carried here on the TUI path -- a pre-mount print
+        # would vanish under Textual's screen and TranscriptLogHandler
+        # attaches only at mount, so this is the one route that reaches a
+        # user. Empty list is the healthy case and stays silent.
+        self._startup_warnings = list(startup_warnings or ())
         tui_settings = self._settings.get("tui", {})
         self._theme_name = themes.resolve(tui_settings.get("theme"))
         self._animations = tui_settings.get("animations", True)
@@ -324,6 +331,11 @@ class VenastineApp(App):
         self._transcript.write_system(
             f"{self.provider_name} | {self.model} | theme {self._theme_name}"
         )
+        # #138. Beside the status line it qualifies, before anything the
+        # user might type. write_error, matching /model: an unknown
+        # provider or a missing key is the same fact at both moments.
+        for warning in self._startup_warnings:
+            self._transcript.write_error(warning)
         self._transcript.write_system("Type /help for commands.")
         self.query_one("#prompt", Input).focus()
         if self.effort:
@@ -2093,7 +2105,9 @@ register_memory_commands()  # §21b: /memories, /forget
 register_init_commands()  # §24: /init
 
 
-def run(provider_name: str, model: str, settings: dict | None = None) -> None:
+def run(provider_name: str, model: str, settings: dict | None = None,
+        startup_warnings: list[str] | None = None) -> None:
     """Entry point used by main.py --tui."""
     config_loader_settings = settings if settings is not None else config_loader.get_settings()
-    VenastineApp(provider_name, model, config_loader_settings).run()
+    VenastineApp(provider_name, model, config_loader_settings,
+                 startup_warnings=startup_warnings).run()

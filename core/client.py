@@ -3,8 +3,11 @@ from typing import Optional
 from uuid import UUID, uuid4
 import json
 import logging
+import os
 
-from credentials import load_provider_data
+import credentials
+from credentials import load_provider_data, no_providers_message, \
+    unknown_provider_message
 import config
 
 # ROADMAP_v2 §33 W7 (#135). The three provider SDKs are NOT imported here.
@@ -39,8 +42,19 @@ def api_initialization(provider_name: str):
 
     provider_data = load_provider_data()
 
+    # #24. The file's absence and the provider's absence are different
+    # problems and now say so: the first names the path that was checked
+    # and its remedy, the second names what IS configured, like /model's
+    # refusal. Still ValueError either way -- callers (and tests) catch
+    # the type, not the text. The constant is read THROUGH the module,
+    # not imported: a from-import would freeze the value at this module's
+    # import time and a test's monkeypatch of credentials.LLM_PROVIDERS_FILE
+    # would not be seen here.
+    if not provider_data and not os.path.exists(
+            credentials.LLM_PROVIDERS_FILE):
+        raise ValueError(no_providers_message())
     if provider_name not in provider_data:
-        raise ValueError(f"Unknown provider: {provider_name}")
+        raise ValueError(unknown_provider_message(provider_name, provider_data))
 
     entry = provider_data[provider_name]
 
