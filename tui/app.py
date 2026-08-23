@@ -36,6 +36,7 @@ from uuid import UUID
 
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
+from textual.css.query import NoMatches
 from textual.message import Message
 from textual.widgets import Footer, Header, Input
 from textual.worker import Worker, WorkerState
@@ -158,13 +159,21 @@ class ResearchFinished(Message):
     artifacts_ok (review §19-20 r4-3): the worker swallows artifact-write
     failures so a disk error cannot discard a completed run -- but the
     summary line must not then point the user at a 07_review.json that
-    was never written."""
+    was never written.
+
+    abandoned (#105): the user quit while the run was going. The worker
+    stopped forwarding at its next event and closed the generator, which
+    is §22's abandoned-generator path -- the record stays status='running'
+    with every checkpoint it took, honestly neither complete nor failed.
+    That is a third outcome, distinct from both: reporting it through the
+    error branch would call the user's own quit a pipeline failure."""
 
     def __init__(self, run, error: BaseException | None,
-                 artifacts_ok: bool = True) -> None:
+                 artifacts_ok: bool = True, abandoned: bool = False) -> None:
         self.run = run
         self.error = error
         self.artifacts_ok = artifacts_ok
+        self.abandoned = abandoned
         super().__init__()
 
 
@@ -240,6 +249,15 @@ class VenastineApp(App):
         ("ctrl+l", "show_claims", "Claims"),
     ]
 
+    # Set by exit(); consulted by the blocking ask paths (review §19-20
+    # r1-1: a walk that re-arms AFTER the one-shot channel release must
+    # not park a non-daemon worker on a queue nobody will ever answer),
+    # by _forwarding (#105), and by the timeout narration. A CLASS
+    # attribute so a bare-instance seam built with __new__ -- which three
+    # test files use for exactly this callback logic -- reads False
+    # instead of raising.
+    _shutting_down = False
+
     def __init__(self, provider_name: str = DEFAULT_PROVIDER,
                  model: str = None, settings: dict | None = None,
                  startup_warnings: list[str] | None = None):
@@ -273,6 +291,8 @@ class VenastineApp(App):
         # new session starts clean. A LIST, not a set: activation order is
         # the order the bodies are pinned in.
         self.active_skills: list = []
+        # `_last_response` is the most
+        # recent model answer by any route (streamed turn, one-shot,
         # §26. What /copy and /claims read. `_last_response` is the most
         # recent model answer by any route (streamed turn, one-shot,
         # research report); `_last_run` is the finished PipelineRun, which
@@ -282,11 +302,6 @@ class VenastineApp(App):
         self._last_response: str = ""
         self._last_run = None
         self._live_claims: dict = {}
-        # Set by exit(); the blocking ask paths consult it so a walk that
-        # re-arms AFTER the one-shot channel release cannot park a
-        # non-daemon worker on a queue nobody will ever answer (review
-        # §19-20 r1-1).
-        self._shutting_down = False
 
     # -- layout --------------------------------------------------------------
 
@@ -831,6 +846,22 @@ class VenastineApp(App):
         # Every exit route funnels through here (action_quit, ctrl+c, and
         # any programmatic exit), which is why the release lives here
         # rather than on the quit binding alone.
+        if self._busy:
+            # #105, D4. Say what quitting does to a run rather than
+            # leaving it mysterious: the worker stops forwarding at its
+            # next event (#105's fix), so this is a bounded goodbye, and
+            # the line tells the user what became of the run.
+            #
+            # Best-effort twice over (#104's rule): quitting from under a
+            # modal means query_one finds no #transcript at all -- it
+            # searches the ACTIVE screen (§27) -- and an unrenderable
+            # goodbye must not block the goodbye.
+            try:
+                self._transcript.write_system(
+                    "[quitting — the active work is abandoned at its next "
+                    "event; its checkpoints are kept.]")
+            except NoMatches:
+                pass
         self._shutting_down = True
         self._release_permission_channel()
         return super().exit(*args, **kwargs)
@@ -1117,6 +1148,12 @@ class VenastineApp(App):
         review. interaction.decode is untouched; this method changes only
         what the human is told.
         """
+        # #105's family: after a quit there is nobody listening, and the
+        # widgets this writes to may already be gone -- exit() released
+        # the channel with a value, so the worker is not parked and the
+        # narration would only describe an app that has closed.
+        if self._shutting_down:
+            return
         # Only say "no answer" when there genuinely was none: if the user
         # clicked between the get() timeout and this callback, the screen
         # is gone and the message would contradict what they just did
@@ -1215,6 +1252,16 @@ class VenastineApp(App):
     def on_research_finished(self, message: ResearchFinished) -> None:
         self._busy = False
         self._raven.state = ravens.IDLE
+        if getattr(message, "abandoned", False):
+            # #105. A deliberate quit is not a pipeline failure: say what
+            # actually happened to the run. §22's wording -- abandoned,
+            # checkpoints kept, record left 'running' -- is the honest
+            # summary of the state the record is in.
+            self._transcript.write_system(
+                "[run abandoned — quit requested. Checkpoints so far are "
+                "kept; the run's record stays 'running' rather than "
+                "claiming completion.]")
+            return
         if message.error is not None:
             self._transcript.write_error(f"[pipeline failed: {message.error}]")
             return
@@ -1762,7 +1809,7 @@ def _review_consent_for(app: VenastineApp):
     return app.response_channel()
 
 
-def _forwarding(app: VenastineApp, events):
+def _forwarding(app: "VenastineApp", events, outcome: dict):
     """Post every PipelineEvent to the UI thread, then pass it on.
 
     A pass-through rather than a consumption loop, so the run's terminal
@@ -1770,8 +1817,20 @@ def _forwarding(app: VenastineApp, events):
     receiving a finished PipelineRun. Forwarding and draining in two
     separate loops would mean either buffering the whole run before
     rendering any of it, or reimplementing the drainer here.
+
+    #105: when the app is shutting down, stop at the NEXT event rather
+    than draining the remaining twenty minutes of pipeline. `outcome`
+    records the abandonment for work(), which cannot otherwise
+    distinguish this early StopIteration from a bug; closing the
+    generator HERE makes the §22 semantics deterministic -- GeneratorExit
+    at the current yield, so the record stays status='running' with every
+    checkpoint it took, neither complete nor failed.
     """
     for event in events:
+        if app._shutting_down:
+            outcome["abandoned"] = True
+            events.close()
+            return
         app.post_message(PipelineEventMessage(event))
         yield event
 
@@ -1809,8 +1868,22 @@ def _start_research(app: VenastineApp, query: str, authorization) -> None:
                 review=consent,
                 subagent_review=review_on,
             )
-            run = run_pipeline_to_completion(
-                _forwarding(app, events))
+            outcome = {}
+            run = None
+            try:
+                run = run_pipeline_to_completion(
+                    _forwarding(app, events, outcome))
+            except RuntimeError:
+                if not outcome.get("abandoned"):
+                    raise
+                # #105. The user quit; _forwarding stopped at its next
+                # event and closed the generator, so the drainer saw no
+                # terminal event -- §22's abandoned run, recorded
+                # honestly as status='running'. NOT an error.
+            if outcome.get("abandoned"):
+                app.post_message(ResearchFinished(None, None,
+                                                  abandoned=True))
+                return
             # §20 V9. write_run_artifacts had ONE production call site
             # (main.py), so a TUI research run produced no /output/<run_id>/
             # at all -- the shipped consequence of leaving a post-pipeline

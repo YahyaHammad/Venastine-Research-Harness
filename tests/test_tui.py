@@ -24,6 +24,7 @@ of pytest.ini, and per-test markers keep that true.
 """
 
 import queue
+import time
 
 from types import SimpleNamespace
 
@@ -1288,6 +1289,146 @@ async def test_the_one_shot_never_adds_the_memories_tier(
 
 
 # ===========================================================================
+# ---- #105: quitting while a research run is going --------------------------
+# ===========================================================================
+#
+# Textual runs thread workers on non-daemon executor threads, so App.run()
+# cannot return until the worker does -- and a /research worker is a
+# ten-pass pipeline. exit() already set _shutting_down; what was missing is
+# anything READING it on the forwarding path, so quitting waited for the
+# pipeline with no UI. The fix makes _forwarding stop at its next event and
+# close the generator -- §22's abandoned run, honestly neither complete nor
+# failed.
+
+class _ClosableEvents:
+    """An events iterable that records close(), like a generator would."""
+
+    def __init__(self, events):
+        self._it = iter(events)
+        self.closed = False
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return next(self._it)
+
+    def close(self):
+        self.closed = True
+
+
+def test_forwarding_stops_at_the_next_event_when_shutting_down():
+    """_forwarding is the consumer §22's abandonment semantics were
+    written for: stopping early leaves the record 'running' with its
+    checkpoints -- provided the underlying generator is actually closed,
+    deterministically, here rather than at GC's leisure."""
+    from types import SimpleNamespace
+
+    from core.reasoning.events import PipelineEvent
+    from tui.app import _forwarding
+
+    def ev(kind):
+        return PipelineEvent(kind=kind)
+
+    app = SimpleNamespace(_shutting_down=False, post_message=lambda m: None)
+    events = _ClosableEvents([ev("pass_start"), ev("trace_line"),
+                              ev("pass_complete")])
+    outcome = {}
+
+    got = list(_forwarding(app, events, outcome))
+    assert [e.kind for e in got] == ["pass_start", "trace_line",
+                                     "pass_complete"]
+    assert not outcome.get("abandoned"), "a full drain read as abandoned"
+    assert not events.closed
+
+    # Flip mid-run: nothing further is forwarded, the source IS closed,
+    # and work() can tell this apart from a bug.
+    app._shutting_down = True
+    events2 = _ClosableEvents([ev("pass_start"), ev("trace_line")])
+    outcome2 = {}
+    got2 = list(_forwarding(app, events2, outcome2))
+    assert got2 == [], "events kept flowing after quit"
+    assert outcome2.get("abandoned") is True
+    assert events2.closed, "the pipeline generator was left to the GC"
+
+
+@pytest.mark.asyncio
+async def test_quitting_mid_run_abandons_it_without_calling_it_a_failure(
+        mocker):
+    """/quit during a ten-pass run must release the terminal within an
+    event of the quit, skip artifacts (there is no finished run), and say
+    what happened -- NOT print '[pipeline failed]'. The flag is set by
+    hand here because THIS property is about the forwarding path reading
+    it; that exit() arms it is pinned in test_review.py's r1-1 rewrite."""
+    from core.reasoning.events import PipelineEvent
+
+    def fake_stream(**kw):
+        def gen():
+            yield PipelineEvent(kind="pass_start", pass_id="Pass 1")
+            for i in range(5000):
+                # A pass takes minutes; a trace line takes ~20ms. The
+                # pacing is what makes "quit mid-run" reachable at all --
+                # unpaced, the whole fake drains before the flag lands.
+                # Safe against close(): the generator executes on the
+                # WORKER's thread (the consumer drives next()), so close()
+                # always lands while it is suspended at this yield.
+                time.sleep(0.02)
+                yield PipelineEvent(kind="trace_line",
+                                    text=f"working {i}")
+            # No run_complete: a real quit lands mid-run.
+        return gen()
+
+    mocker.patch(
+        "core.reasoning.orchestrator.stream_deep_research_pipeline",
+        side_effect=fake_stream)
+    mocker.patch("core.reasoning.output_writer.write_run_artifacts",
+                 side_effect=AssertionError(
+                     "an abandoned run must not write artifacts"))
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        from tui.app import _cmd_research
+        _cmd_research(app, "what is entropy")
+        assert await settle(pilot, lambda: app._busy), \
+            "the run never started"
+
+        app._shutting_down = True   # what exit() sets; arming pinned elsewhere
+        assert await settle(pilot, lambda: not app._busy, timeout=10), \
+            "quit did not release the worker within an event"
+        await pump(pilot, 3)
+
+        text = app._transcript.as_text()
+        assert "abandoned" in text, \
+            "the abandoned run went unexplained"
+        assert "pipeline failed" not in text, \
+            "the user's own quit was reported as a failure"
+
+
+@pytest.mark.asyncio
+async def test_quitting_while_busy_says_what_happens_to_the_work(_mocked_loop):
+    """D4: with a turn running, every exit route says so instead of the
+    window just ending. And when idle, nothing is announced."""
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        app._busy = True
+        app.exit()
+        await pilot.pause()
+
+        busy_lines = app._transcript.as_text()
+        assert "quitting" in busy_lines, \
+            "exit said nothing about the work it abandons"
+
+    idle_app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with idle_app.run_test() as pilot:
+        idle_app.exit()
+        await pilot.pause()
+
+        idle_lines = idle_app._transcript.as_text()
+        assert "quitting" not in idle_lines, \
+            "an idle exit announced an abandonment that never happened"
+
+
+# ===========================================================================
 # ---- #104: a storage failure must not take the shell down ------------------
 # ===========================================================================
 #
@@ -1663,6 +1804,24 @@ def test_the_question_timeout_does_not_claim_nothing_was_written():
     lines = "\n".join(app._transcript.lines)
     assert "nobody answered" in lines
     assert "nothing was written" not in lines
+
+
+def test_after_a_quit_the_timeout_narration_stays_silent():
+    """#105's family. exit() releases the channel with a value, so a
+    timeout callback landing after it describes an app that no longer
+    exists -- and writes to widgets that may already be gone. The flag
+    that stops _forwarding silences this narration too."""
+    app = _timeout_app()
+    screen = _Screen()
+    app._stack = [screen]
+    app._shutting_down = True          # what exit() sets before releasing
+
+    app._timed_out_ask(screen, **PERMISSION)
+
+    assert screen.dismissed is None, \
+        "a post-quit timeout must not dismiss into a dead stack"
+    assert app._transcript.lines == [], \
+        "the shutdown narration must stay silent after a quit"
 
 REVIEW = dict(
     dismiss_with=("reject", ""),

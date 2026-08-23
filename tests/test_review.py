@@ -1517,6 +1517,9 @@ class _FakeTuiApp:
         self.provider_name = "ANTHROPIC"
         self._settings = {}
         self._busy = False
+        # #105: _forwarding reads this on every event. The real app gets
+        # it from VenastineApp; the double needs the quiet default.
+        self._shutting_down = False
         self._research_review = review
         self._transcript = _NullTranscript()
         self._raven = _NullRaven()
