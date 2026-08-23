@@ -743,3 +743,30 @@ class TestTwoTierClassification:
 
         assert classify_legacy_pass_threads(connection) == 1
         connection.close()
+
+
+class TestTheMissingKindColumnGuard:
+    """#86 item 8: unreachable in production (main.py always runs
+    create_all/ensure_columns first), but the docstring states the
+    contract -- 'a caller that skipped them gets a no-op rather than no
+    such column'. The pin keeps the stated contract honest."""
+
+    def test_a_database_without_the_kind_column_is_a_no_op(self, tmp_path):
+        from core.reasoning.pipeline_storage import classify_legacy_pass_threads
+
+        connection = sqlite3.connect(tmp_path / "no-kind-column.db")
+        connection.execute(
+            "CREATE TABLE conversationthread ("
+            " id VARCHAR PRIMARY KEY, created_at DATETIME)")
+        connection.execute(
+            "CREATE TABLE pipelinerunrecord ("
+            " id VARCHAR PRIMARY KEY, started_at DATETIME,"
+            " finished_at DATETIME, pass_threads_json TEXT)")
+        connection.execute(
+            "INSERT INTO pipelinerunrecord (id, started_at, finished_at)"
+            " VALUES ('r', '2026-08-01 12:00:00.000000',"
+            " '2026-08-01 12:00:30.000000')")
+        connection.commit()
+
+        assert classify_legacy_pass_threads(connection) == 0
+        connection.close()

@@ -352,3 +352,17 @@ class TestSupplementaryDegradation:
         _try_write_pdf("# Report", str(tmp_path))
 
         assert not os.path.exists(os.path.join(tmp_path, "report.pdf"))
+
+
+def test_pass_threads_json_is_written_even_when_empty(tmp_path, monkeypatch):
+    """#86 item 6 -- §27 AC6 chose unconditional deliberately: every run
+    has pass threads, and an empty file here would itself be the anomaly
+    worth noticing. Making it conditional was green across the suite; only
+    a pin keeps the choice."""
+    monkeypatch.setattr(config, "OUTPUT_DIR", str(tmp_path))
+    output_dir = write_run_artifacts(_make_full_run())
+
+    path = os.path.join(output_dir, "pass_threads.json")
+    assert os.path.isfile(path)
+    with open(path, encoding="utf-8") as f:
+        assert json.load(f) == []

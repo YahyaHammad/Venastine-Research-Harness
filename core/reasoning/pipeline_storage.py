@@ -132,12 +132,11 @@ def update_pipeline_run(
         record.claims_json = json.dumps([vars(c) for c in run.claims])
         record.trace_json = json.dumps(run.trace)
         record.coverage_gaps_json = json.dumps(run.coverage_gaps)
-        # getattr, not run.pass_threads: this function is called with test
+        record.pass_threads_json = json.dumps(run.pass_threads)
+        # getattr, not run.candidates: this function is called with test
         # doubles and with runs reconstructed elsewhere, and a checkpoint
         # that raises on a missing optional field would take down the pass
         # that was only trying to record its progress.
-        record.pass_threads_json = json.dumps(getattr(run, "pass_threads", []) or [])
-        # getattr, not run.candidates: same reason as pass_threads above.
         # `text` rides the in-memory entry (it feeds the artifacts and
         # Pass 3b) and is stripped HERE -- the database carries metadata
         # only; see PipelineRunRecord's column comment.
