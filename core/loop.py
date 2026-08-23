@@ -390,7 +390,10 @@ def _obtain_approval(response_channel, tool_name: str, params: dict,
 _ONCE_PER_RUN_NOTICES = (
     "compaction_warning",    # still approaching the threshold
     "compaction_blocked",    # the keep floors still protect everything
-    "compaction_failed",     # the provider is still down
+    "compaction_failed",     # provider down, or the compactor returned
+                             # nothing usable (#136) -- and since batch 20
+                             # this kind is also the LATCH: seen once, no
+                             # further compact() calls this turn
 )
 
 
@@ -451,10 +454,23 @@ def _maybe_compact(memory, model, provider_name, notices, mode):
                      Same defect `context_limit()` had before it learned
                      to warn once per model.
       no-progress /
-      reentrant /
-      empty-summary  no notice at all: ordinary non-events (nothing new
-                     to fold) or already carried by _summarize's own
-                     per-call warnings.
+      reentrant      no notice at all: ordinary non-events (nothing new
+                      to fold) or already carried by _summarize's own
+                      per-call warnings.
+
+    THE LATCH (#136, batch 20). compaction_failed is both a notice and a
+    STOP for the run: once this turn has seen one -- a provider error, or
+    an empty compactor response (compact() now reports that as
+    status="failed" with the same kind) -- _maybe_compact returns before
+    calling compact() again. Without the gate the dedup above only
+    silenced the MESSAGE while every step still spent a full compactor
+    model call on an attempt that had just failed; measured at seven
+    calls in one six-step turn on the thread's first crossing. The latch
+    is per-turn by construction -- `notices` dies with _run() -- so the
+    next turn retries cleanly and a transient provider hiccup costs one
+    wasted call, not one per step. Deliberately NOT latched: no-progress,
+    reentrant, blocked and all-pinned exit before any model call, cost
+    only storage reads, and are self-correcting if state shifts.
 
     Failure here is contained. Compaction is a model call, and a provider
     error during it must not take down a turn that was otherwise fine --
@@ -482,6 +498,13 @@ def _maybe_compact(memory, model, provider_name, notices, mode):
         }
         notices.append(notice)
         yield LoopEvent(notice=notice)
+        return
+    # THE LATCH (#136): a failed attempt already spent its model call this
+    # turn. Everything below the warn branch re-enters compact() on every
+    # step while the trigger stays open, so without this early return the
+    # dedup below only hides the message and the spend repeats. See the
+    # docstring's latch paragraph for why only compaction_failed gates.
+    if _already_said(notices, "compaction_failed"):
         return
     try:
         # The current-turn floor (M5), computed HERE rather than at the

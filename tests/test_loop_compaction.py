@@ -442,3 +442,95 @@ def test_a_real_compaction_still_reports_every_time(mocker, compacted):
     events = _events(_over_threshold(FakeMemory()), max_steps=3)
 
     assert [e.notice["kind"] for e in events if e.notice].count("compaction") > 1
+
+
+
+# ---------------------------------------------------------------------------
+# ---- #136: the latch --------------------------------------------------------
+# ---------------------------------------------------------------------------
+
+EMPTY = {"status": "failed", "kind": "compaction_failed",
+         "text": "The compactor returned nothing usable."}
+
+
+def test_an_empty_compactor_response_is_visible_and_spends_once(mocker):
+    """#136. Before the latch, compact() returning nothing usable spent a
+    FULL compactor model call on every step of the rest of the turn --
+    measured at seven calls in one six-step turn -- while carrying no
+    notice at all, so the spend was invisible in both shells. Now the
+    empty response rides compaction_failed (visible once) and the latch
+    makes it the LAST call of the turn."""
+    mocker.patch("core.compaction.compact", return_value=EMPTY)
+    tool_call = make_model_response(
+        text="", tool_calls=[{"id": "t1", "name": "get_time", "input": {}}],
+        usage={"input_tokens": 10_000_000, "output_tokens": 1})
+    mocker.patch("core.loop.call_model_stream",
+                 side_effect=make_stream_sequence(
+                     tool_call, tool_call, make_model_response(text="done")))
+
+    response = run_to_completion(RunAgentLoop._run(
+        memory=_over_threshold(FakeMemory()), system_prompt="s",
+        provider_name="ANTHROPIC", model="claude-sonnet-5", context=None,
+        max_steps=3))
+
+    assert compaction.compact.call_count == 1
+    assert [n["kind"] for n in response.notices] == ["compaction_failed"]
+    assert "nothing usable" in response.notices[0]["text"]
+
+
+def test_a_failed_attempt_also_latches_the_exception_path(mocker):
+    """The exception route already emitted compaction_failed once per run
+    (#44), but the dedup only silenced the MESSAGE -- a provider that is
+    down still took one failing model call per step for the whole turn.
+    The latch gates the CALL, so both failing shapes stop after one."""
+    mocker.patch("core.compaction.compact",
+                 side_effect=RuntimeError("provider down"))
+    tool_call = make_model_response(
+        text="", tool_calls=[{"id": "t1", "name": "get_time", "input": {}}],
+        usage={"input_tokens": 10_000_000, "output_tokens": 1})
+    mocker.patch("core.loop.call_model_stream",
+                 side_effect=make_stream_sequence(
+                     tool_call, tool_call, make_model_response(text="done")))
+
+    run_to_completion(RunAgentLoop._run(
+        memory=_over_threshold(FakeMemory()), system_prompt="s",
+        provider_name="ANTHROPIC", model="claude-sonnet-5", context=None,
+        max_steps=3))
+
+    assert compaction.compact.call_count == 1
+
+
+def test_the_latch_dies_with_the_turn(mocker):
+    """`notices` is created fresh inside _run(), so the gate reads this
+    turn's failures only. A transient provider outage costs ONE wasted
+    call per turn, not per step -- and not forever."""
+    mocker.patch("core.compaction.compact", return_value=EMPTY)
+    mocker.patch("core.loop.call_model_stream",
+                 side_effect=make_stream_sequence(make_model_response(text="hi")))
+
+    _events(_over_threshold(FakeMemory()))
+    _events(_over_threshold(FakeMemory()))
+
+    assert compaction.compact.call_count == 2  # once per turn, retried next turn
+
+
+def test_cheap_outcomes_are_deliberately_not_latched(mocker):
+    """Option 1's boundary, pinned so it cannot drift silently in either
+    direction. blocked/no-progress/reentrant exit BEFORE any model call;
+    re-evaluating them costs storage reads and stays self-correcting if
+    state shifts mid-turn. If this assertion ever fails because someone
+    latched them too, that is a design decision to record, not cleanup."""
+    mocker.patch("core.compaction.compact",
+                 return_value={"status": "blocked",
+                               "kind": "compaction_blocked",
+                               "text": "nothing foldable"})
+    tool_call = make_model_response(
+        text="", tool_calls=[{"id": "t1", "name": "get_time", "input": {}}],
+        usage={"input_tokens": 10_000_000, "output_tokens": 1})
+    mocker.patch("core.loop.call_model_stream",
+                 side_effect=make_stream_sequence(
+                     tool_call, tool_call, make_model_response(text="done")))
+
+    _events(_over_threshold(FakeMemory()), max_steps=3)
+
+    assert compaction.compact.call_count == 3

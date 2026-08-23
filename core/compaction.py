@@ -509,7 +509,14 @@ def compact(memory, model: str, provider_name: str,
         _compacting = False
 
     if summary is None:
-        return {"status": "empty-summary", "kind": None,
+        # #136, batch 20: this used to be kind=None -- invisible to both
+        # shells -- while its own WARNING fired inside _summarize on every
+        # evaluation. A compactor that returned nothing IS a failed
+        # compaction (AGENTS.md's containment rule says so), so it now
+        # rides compaction_failed: visible once per run through the loop's
+        # dedup, and the latch in _maybe_compact stops the per-step model
+        # calls the silence was hiding.
+        return {"status": "failed", "kind": "compaction_failed",
                 "text": "The compactor returned nothing usable."}
 
     if truncation_notice is not None:

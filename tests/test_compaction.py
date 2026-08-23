@@ -409,14 +409,18 @@ def test_an_empty_summary_skips_compaction(fake_storage, summaries):
     """Recording an empty checkpoint would replace real history with
     nothing at all -- the one outcome worse than not compacting. Batch 16
     (#44) turned the silent None into a named outcome so /compact can say
-    what happened instead of implying nothing was attempted."""
+    what happened instead of implying nothing was attempted. Batch 20
+    (#136) went further: status aligns with COMPACTION_OUTCOMES' own
+    "failed" vocabulary and the kind is compaction_failed, so the loop
+    both SHOWS it (once per run) and LATCHES on it."""
     memory = ConversationMemory()
     _thread(memory)
     summaries("")
 
     outcome = compaction.compact(memory, "claude-sonnet-5", "ANTHROPIC",
                                  overrides=OVERRIDES)
-    assert outcome["status"] == "empty-summary"
+    assert outcome["status"] == "failed"
+    assert outcome["kind"] == "compaction_failed"
     assert fake_storage.latest_checkpoint(memory.thread_id) is None
 
 
