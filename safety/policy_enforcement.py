@@ -30,9 +30,15 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import logging
+import os
 import re
 import socket
 from urllib.parse import urlparse
+
+import config
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # ---- Blocked domains ------------------------------------------------------
@@ -220,6 +226,132 @@ def redact_secrets(text: str) -> str:
     return text
 
 
+# ---------------------------------------------------------------------------
+# ---- Credential shapes (#167, batch 20) ------------------------------------
+# ---------------------------------------------------------------------------
+#
+# The seven patterns above are VENDOR TOKENS -- every one has a prefix some
+# company mints, so a match is high-confidence and a bare `[REDACTED]` loses
+# nothing structural. A credential that is just a password in a field has no
+# prefix, and nothing matched it (#167): batch 14 added five build manifests
+# to read_project_doc's allowlist (#94), whose credential conventions are
+# exactly the three unscrubbed shapes below.
+#
+# These are CONTEXT shapes, not tokens: each anchors on a credential FIELD
+# NAME (or URL userinfo), so an auth error code, a stack frame or an ARN
+# does not match, and the replacement is SURGICAL -- tag names, field names,
+# usernames and hosts survive, only the value goes. That structure is why
+# the false-positive cost is acceptable: documentation quoting an example
+# keeps its shape and loses only its example value.
+#
+# OUTPUT REDACTION ONLY. These never feed check_input_policy: refusing a
+# call because its arguments mention `password = "..."` would break every
+# legitimate call that carries build-file content the user asked for --
+# _SECRET_PATTERNS stay the input side's whole vocabulary. And the keyword
+# set is password|passwd ONLY, deliberately not token/secret/key: those
+# appear constantly in ordinary prose ("token bucket", JWT discussion) and
+# would redact aggressively.
+
+# Template placeholders survive untouched: `${PASSWORD}`, `$DB_PASS`,
+# `{{ secrets.DB_PW }}`, `<your-password-here>` name where a credential
+# WOULD go; they are what docs and templates contain, and redacting them
+# destroys the example while protecting nothing.
+_TEMPLATE_VALUE_RE = re.compile(
+    r"^(?:"
+    r"\$\{[^}]*\}"                 # ${PASSWORD}, ${secrets.DB}
+    r"|\$[A-Za-z_][A-Za-z0-9_]*"   # $PASSWORD
+    r"|\{\{[^}]*\}\}"              # {{ secrets.DB_PW }}
+    r"|<[^<>]+>"                   # <your-password-here>
+    r")$")
+
+# scheme://user:secret@host -> scheme://user:[REDACTED]@host. Credentials
+# in a URL's userinfo are never anything else, which makes this the cheapest
+# of the three; anchoring on `//` keeps bare `user:pass@host` fragments in
+# prose alone, and excluding `/ \s : @` from both sides means a host:port
+# path (`https://example.com:8080/x`) cannot masquerade as userinfo.
+_URL_USERINFO_RE = re.compile(r"(//[^/\s:@]+:)([^/\s@]+)(@)")
+
+# <password>s3cr3t</password> -> <password>[REDACTED]</password>, POM and
+# settings.xml convention. The backreference keeps the closing tag honest;
+# the value excludes `<`, so nested markup cannot be swallowed. Groups:
+# 1 opening tag, 2 tag name, 3 value.
+_XML_PASSWORD_RE = re.compile(
+    r"(?i)(<(password|passwd)>)([^<]{4,200})(</\2>)")
+
+# password = "hunter2" / password: "hunter2" / password "hunter2" ->
+# the value becomes [REDACTED] inside its quotes. The separator accepts
+# `=`, `:` AND Gradle's bare-space credentials-block form -- which is the
+# issue's own headline case and which a `[=:]`-only sketch misses. Quoted
+# values only, minimum 4 chars: unquoted .properties-style values are out
+# of scope by decision, and the value excludes newlines so a quote further
+# down a file cannot close a match opened lines above. Groups: 1 keyword,
+# 2 separator, 3 opening quote, 4 value.
+_ASSIGNMENT_RE = re.compile(
+    r"(?i)\b(password|passwd)\b(\s*(?:[=:][ \t]*|[ \t]))"
+    r"([\"'])([^\"'\n]{4,200})\3")
+
+
+def _redact_credential_shapes(text: str) -> str:
+    """Apply the three context shapes, preserving surrounding structure.
+
+    Each replacer checks the captured VALUE against the placeholder shapes
+    before substituting -- a template reference is exactly what docs and
+    build files are full of, and redacting it destroys the example while
+    protecting nothing."""
+    text = _URL_USERINFO_RE.sub(r"\1[REDACTED]\3", text)
+
+    def _xml(m):
+        if _TEMPLATE_VALUE_RE.match(m.group(3)):
+            return m.group(0)
+        return f"{m.group(1)}[REDACTED]{m.group(4)}"
+
+    text = _XML_PASSWORD_RE.sub(_xml, text)
+
+    def _assign(m):
+        if _TEMPLATE_VALUE_RE.match(m.group(4)):
+            return m.group(0)
+        return (f"{m.group(1)}{m.group(2)}{m.group(3)}"
+                f"[REDACTED]{m.group(3)}")
+
+    return _ASSIGNMENT_RE.sub(_assign, text)
+
+
+def redaction_enabled() -> bool:
+    """Whether pattern-based redaction of tool output is active.
+
+    Two switches, one question. config.REDACT_TOOL_OUTPUTS is the
+    permanent answer; VENASTINE_REDACT_OFF weakens it for one run --
+    a debugging session that needs the model to see real values --
+    without editing anything persistent. The environment can only ever
+    turn redaction OFF, never back on past the constant: an off-by-default
+    protection an environment variable could silently re-enable would not
+    be a switch but a coin flip.
+
+    What this does NOT govern, whichever way it reads: input refusals
+    (_input_leaf -- a denial is legible, not destructive), the depth-cap
+    substitution (fail-closed structural bound), and logging_setup's
+    formatter redaction (the second sink guards app.log regardless).
+    """
+    if not config.REDACT_TOOL_OUTPUTS:
+        return False
+    raw = os.environ.get("VENASTINE_REDACT_OFF", "")
+    return raw.strip().lower() in ("", "0", "false", "no", "off")
+
+
+def _redact_output_text(text: str) -> str:
+    """The one redaction path tool OUTPUT takes, under one switch.
+
+    Vendor tokens first, then credential shapes on what survives. Both are
+    substitutions of content the user chose to see raw when they flip the
+    switch off -- so this is where VENASTINE_REDACT_OFF bites. The depth
+    cap is NOT routed through here: it is structure, not content judgment,
+    and stays fail-closed unconditionally."""
+    if not redaction_enabled():
+        return text
+    return _redact_credential_shapes(redact_secrets(text))
+
+
+
 # How much of one tool parameter reaches a digest, and how much of the whole
 # digest reaches a consumer. A sidebar is 22 columns and a transcript line
 # wraps; the point is to say WHICH url or WHICH query, not to reproduce the
@@ -260,7 +392,13 @@ def param_digest(params) -> str:
     parts = []
     for value in params.values():
         text = value if isinstance(value, str) else json.dumps(value, default=str)
-        text = redact_secrets(text)
+        # The same redaction tool output takes -- shapes included (#167),
+        # so a fetch_url whose url carries userinfo does not print its
+        # password into the transcript, the CLI and (since §27) the
+        # replayed archive. Under VENASTINE_REDACT_OFF this shows raw,
+        # like every other pattern substitution; it stays display-only
+        # and never logs, whatever the switch reads.
+        text = _redact_output_text(text)
         if len(text) > _DIGEST_VALUE_CHARS:
             text = text[:_DIGEST_VALUE_CHARS - 1] + "…"
         parts.append(text)
@@ -387,13 +525,51 @@ def check_output_policy(tool_name: str, result: dict) -> dict:
     consumer sees, and a tool result's keys are harness- or
     server-declared names rather than free text. That asymmetry with
     `check_input_policy` is deliberate and predates this change.
+
+    NOTHING THIS FUNCTION DOES IS SILENT ANY MORE (#49). Every
+    alteration — a redacted value, a depth-cap substitution — produces
+    exactly ONE warning naming the tool, what was altered and how many
+    values were touched (and WHICH top-level key sat over a capped
+    container). The matched content is never echoed: this function
+    exists because something credential-shaped was found, so quoting it
+    to say so would leak it into app.log, the TUI transcript and every
+    place a WARNING travels — the same reasoning _input_leaf's refusal
+    already states. Before #49 the depth cap replaced a whole nested
+    container with a sentence and logged nothing, leaving truncated
+    output indistinguishable from complete output; `registry.schemas`
+    states the rule this was violating ("no quiet invisibility").
     """
+    redacted_values = 0
+    capped_keys = []
+
+    def _leaf(text: str) -> str:
+        nonlocal redacted_values
+        replacement = _redact_output_text(text)
+        if replacement != text:
+            redacted_values += 1
+        return replacement
+
     for key in list(result):
+        hit_cap = []
         result[key] = _walk(
             result[key],
-            redact_secrets,
-            lambda: "[REDACTED: nested beyond scan depth]",
+            _leaf,
+            lambda: (hit_cap.append(key),
+                     "[REDACTED: nested beyond scan depth]")[1],
         )
+        if hit_cap:
+            capped_keys.append(key)
+
+    if redacted_values or capped_keys:
+        parts = []
+        if redacted_values:
+            parts.append(f"{redacted_values} value(s) had credentials "
+                         f"replaced")
+        if capped_keys:
+            parts.append("nested content beyond scan depth was substituted "
+                         "under key(s): " + ", ".join(map(repr, capped_keys)))
+        logger.warning("Output policy altered %s result: %s.",
+                       tool_name, "; ".join(parts))
     return result
 
 

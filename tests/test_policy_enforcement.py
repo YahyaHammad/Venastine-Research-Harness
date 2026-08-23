@@ -10,12 +10,15 @@ import sys
 
 import pytest
 
+import config
+
 from safety.policy_enforcement import (
     BLOCKED_DOMAINS,
     check_input_policy,
     check_output_policy,
     is_domain_blocked,
     is_url_permitted,
+    param_digest,
     redact_secrets,
 )
 
@@ -586,6 +589,75 @@ class TestDepthCapFailsClosed:
 
 
 # ===========================================================================
+# ---- #49: no quiet invisibility --------------------------------------------
+# ===========================================================================
+#
+# Every comparable control in this layer is legible: dispatch() logs an
+# input-side refusal before raising, headless_hidden names what it hides,
+# and _input_leaf's reason travels to the model, the transcript and the
+# log. check_output_policy was the one path that altered a result --
+# redacting values, substituting a whole capped container -- and said
+# nothing anywhere. These tests pin the contract: ONE warning per altered
+# dispatch result, naming the tool, the alteration and (for caps) the key,
+# never the matched content.
+
+class TestOutputPolicyAlterationsAreVisible:
+
+    @pytest.fixture(autouse=True)
+    def _capture(self, caplog):
+        caplog.set_level("WARNING", logger="safety.policy_enforcement")
+        self.caplog = caplog
+
+    def _records(self):
+        return [r for r in self.caplog.records
+                if r.name == "safety.policy_enforcement"]
+
+    def test_a_redaction_logs_one_warning_naming_the_tool(self, caplog):
+        result = {"content": "key=sk-ant-abc123def456ghi789jkl012mno345pqr678"}
+        check_output_policy("my_tool", result)
+        records = self._records()
+        assert len(records) == 1
+        assert "my_tool" in records[0].getMessage()
+        assert "replaced" in records[0].getMessage()
+
+    def test_a_clean_result_stays_silent(self):
+        """A warning per CLEAN result would be noise on every dispatch
+        call; the contract is one warning per ALTERED result."""
+        check_output_policy("my_tool", {"content": "nothing secret here"})
+        assert self._records() == []
+
+    def test_a_depth_cap_substitution_names_the_key(self):
+        nested = {"leaf": "x"}
+        for _ in range(14):
+            nested = {"next": nested}
+        result = {"result": nested}
+        out = check_output_policy("mcp_server", result)
+        assert "[REDACTED: nested beyond scan depth]" in str(out)
+        records = self._records()
+        assert len(records) == 1
+        message = records[0].getMessage()
+        assert "mcp_server" in message
+        assert "'result'" in message
+
+    def test_the_matched_secret_is_never_echoed(self):
+        """Quoting the credential to say a credential was found would leak
+        it into app.log and every place a WARNING travels -- the same rule
+        _input_leaf's refusal already states."""
+        secret = "sk-ant-abc123def456ghi789jkl012mno345pqr678"
+        check_output_policy("t", {"content": f"key={secret}"})
+        for record in self._records():
+            assert secret not in record.getMessage()
+
+    def test_many_alterations_are_one_warning(self):
+        """Once per dispatch call, not once per occurrence: a hostile MCP
+        payload must not fill the transcript with a line per string."""
+        result = {"a": SECRET, "b": [SECRET, SECRET],
+                  "c": {"d": {"e": SECRET}}}
+        check_output_policy("t", result)
+        assert len(self._records()) == 1
+
+
+# ===========================================================================
 # ---- check_input_policy (ROADMAP_v2 §25, R5) -------------------------------
 # ===========================================================================
 #
@@ -733,3 +805,155 @@ class TestDispatchEnforcesItBeforeTheHandlerRuns:
             registry.dispatch("spy", {"text": SECRET},
                               approval_callback=lambda n, p: True)
         assert spy_tool == []
+
+
+
+# ===========================================================================
+# ---- #167: credential shapes -----------------------------------------------
+# ===========================================================================
+#
+# The seven vendor-token patterns above a password in a field: batch 14
+# put five build manifests on read_project_doc's allowlist, whose
+# credential conventions are exactly the shapes that nothing matched.
+# These tests drive all three shapes THROUGH check_output_policy (not the
+# helper), pin the structure the surgical replacement preserves, pin what
+# survives on purpose -- placeholders, short values, non-credential
+# keywords, error-code prose -- and pin that the INPUT side still refuses
+# none of it, since a refusal there would break every legitimate call
+# carrying build-file content.
+
+GRADLE_BLOCK = 'credentials { username "deploy"; password "hunter2" }'
+MAVEN_POM = '<server><username>ci</username><password>s3cr3t</password></server>'
+GEM_SOURCE = 'source "https://user:tok3n@gems.example.com"'
+
+
+class TestCredentialShapesInOutputs:
+
+    def test_gradle_credentials_block(self):
+        out = check_output_policy("read_project_doc",
+                                  {"content": GRADLE_BLOCK})
+        assert 'password "[REDACTED]"' in out["content"]
+        assert "hunter2" not in out["content"]
+        assert 'username "deploy"' in out["content"]
+
+    def test_maven_password_element(self):
+        out = check_output_policy("read_project_doc", {"content": MAVEN_POM})
+        assert "<password>[REDACTED]</password>" in out["content"]
+        assert "<username>ci</username>" in out["content"]
+
+    def test_url_userinfo(self):
+        out = check_output_policy("read_project_doc", {"content": GEM_SOURCE})
+        assert "https://user:[REDACTED]@gems.example.com" in out["content"]
+
+    def test_template_placeholders_survive(self):
+        for value in ('<password>${DB_PASSWORD}</password>',
+                      'password = "{{ secrets.DB_PW }}"',
+                      'password = "<your-password-here>"',
+                      'password = "$DB_PASS"'):
+            out = check_output_policy("t", {"content": value})
+            assert "REDACTED" not in out["content"], value
+
+    def test_short_values_are_not_worth_a_match(self):
+        out = check_output_policy("t",
+                                  {"content": 'password = "abc"'})
+        assert out["content"] == 'password = "abc"'
+
+    def test_non_credential_keywords_do_not_match(self):
+        text = 'token = "abcdef1234567890" and secret="zyxwvuts9876543"'
+        out = check_output_policy("t", {"content": text})
+        assert out["content"] == text
+
+    def test_host_port_is_not_userinfo(self):
+        text = "see https://example.com:8080/path and :8081/x"
+        out = check_output_policy("t", {"content": text})
+        assert out["content"] == text
+
+    def test_a_quote_lines_below_cannot_close_a_match(self):
+        """The value excludes newlines: without that, `password = x` at
+        the top of a file redacts everything up to the first quote in a
+        LATER line."""
+        text = 'password: get_value()\nprint("quoted later")'
+        out = check_output_policy("t", {"content": text})
+        assert out["content"] == text
+
+    def test_vendor_tokens_and_shapes_compose(self):
+        text = f'{SECRET} and {GRADLE_BLOCK}'
+        out = check_output_policy("t", {"content": text})
+        assert SECRET not in out["content"]
+        assert "hunter2" not in out["content"]
+
+    def test_the_input_side_refuses_none_of_it(self):
+        """The list separation is load-bearing: shapes are output-only,
+        because refusing a write whose CONTENT is a build file with a
+        credential breaks the call the user asked for. Redaction of what
+        comes back is the whole remedy."""
+        assert check_input_policy("write", {"content": GRADLE_BLOCK}) is None
+        assert check_input_policy("write", {"content": MAVEN_POM}) is None
+        assert check_input_policy("write", {"content": GEM_SOURCE}) is None
+
+
+class TestRedactionKillSwitch:
+    """On by default; off by config.REDACT_TOOL_OUTPUTS permanently or
+    VENASTINE_REDACT_OFF per run. The environment can only ever turn it
+    OFF. Three things never turn off: input refusals, the depth-cap
+    substitution, and logging_setup's formatter guard."""
+
+    @pytest.fixture(autouse=True)
+    def _env_clean(self, monkeypatch):
+        monkeypatch.delenv("VENASTINE_REDACT_OFF", raising=False)
+
+    def test_env_var_disables_both_kinds_of_substitution(self, monkeypatch):
+        monkeypatch.setenv("VENASTINE_REDACT_OFF", "1")
+        out = check_output_policy(
+            "t", {"content": f'{SECRET} and {GRADLE_BLOCK}'})
+        assert SECRET in out["content"]
+        assert "hunter2" in out["content"]
+
+    @pytest.mark.parametrize("value", ["0", "false", "no", "off", ""])
+    def test_falsy_spellings_keep_it_on(self, monkeypatch, value):
+        monkeypatch.setenv("VENASTINE_REDACT_OFF", value)
+        out = check_output_policy("t", {"content": GRADLE_BLOCK})
+        assert "hunter2" not in out["content"]
+
+    def test_the_constant_disables_it_permanently(self, monkeypatch):
+        monkeypatch.setattr(config, "REDACT_TOOL_OUTPUTS", False)
+        monkeypatch.delenv("VENASTINE_REDACT_OFF", raising=False)
+        out = check_output_policy("t", {"content": GRADLE_BLOCK})
+        assert "hunter2" in out["content"]
+
+    def test_env_cannot_re_enable_past_the_constant(self, monkeypatch):
+        """An off-by-default protection an env var could silently switch
+        back on would be a coin flip, not a switch."""
+        monkeypatch.setattr(config, "REDACT_TOOL_OUTPUTS", False)
+        monkeypatch.setenv("VENASTINE_REDACT_OFF", "")
+        out = check_output_policy("t", {"content": GRADLE_BLOCK})
+        assert "hunter2" in out["content"]
+
+    def test_depth_cap_still_fails_closed_with_redaction_off(
+            self, monkeypatch):
+        """Structure, not content judgment: making the cap optional would
+        recreate the deterministic bypass its own comment forbids."""
+        monkeypatch.setenv("VENASTINE_REDACT_OFF", "1")
+        nested = {"leaf": "x"}
+        for _ in range(14):
+            nested = {"next": nested}
+        out = check_output_policy("t", {"result": nested})
+        assert "[REDACTED: nested beyond scan depth]" in str(out)
+
+    def test_input_refusals_still_fire_with_redaction_off(self, monkeypatch):
+        monkeypatch.setenv("VENASTINE_REDACT_OFF", "1")
+        reason = check_input_policy("spy", {"text": SECRET})
+        assert reason is not None and "credential" in reason
+
+    def test_param_digest_redacts_userinfo_and_stays_silent(
+            self, caplog):
+        caplog.set_level("WARNING")
+        digest = param_digest({"url": GEM_SOURCE})
+        assert "tok3n" not in digest
+        assert "[REDACTED]" in digest
+        assert caplog.records == [], "display-only redaction never logs"
+
+    def test_param_digest_shows_raw_when_disabled(self, monkeypatch):
+        monkeypatch.setenv("VENASTINE_REDACT_OFF", "1")
+        digest = param_digest({"url": GEM_SOURCE})
+        assert "tok3n" in digest

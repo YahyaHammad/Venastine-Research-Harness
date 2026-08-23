@@ -2691,3 +2691,18 @@ reverted line before the fix commit landed.
 | `pass_complete` gains `ok`/`text`; widget's `pass_completed(pass_id, *, ok)` REQUIRED (#115/E14) | An old caller omitting ok now TypeErrors at the widget -- the lock against ticking a failed row done | Sequence tests pin ok=False before a fatal raise and around an ensemble skip; removing the emission turns both RED |
 
 Count 2232 -> 2241.
+
+## Batch 20 -- the twentieth fix batch: what the harness does silently (2026-08-23)
+
+Three production contracts changed, one of them behind a new switch. Every
+mutation below was run RED against its reverted line before its commit landed.
+
+| Change | What breaks | Symptom / fix |
+|---|---|---|
+| `check_output_policy` logs every alteration (#49) | A test asserting silence on an altered result | One WARNING per altered dispatch call naming tool/kind/count (+capped keys); five pins in `TestOutputPolicyAlterationsAreVisible`; silencing the block turns 3 RED |
+| Credential-shape redaction joins vendor tokens (#167) | Output containing `password "..."`, `<password>...</password>` or `scheme://user:pass@host` now reads `[REDACTED]` in that value | Shapes are OUTPUT-ONLY (input refusals keep vendor tokens alone — pinned); placeholders/short values/non-password keywords survive; three mutations sighted |
+| New kill switch: `config.REDACT_TOOL_OUTPUTS` + `VENASTINE_REDACT_OFF` | An environment or constant that used to do nothing now disables output redaction | Env can only turn it OFF; depth cap, input refusals and logging_setup's formatter stay unconditional — each pinned |
+| `compact()`'s empty-summary outcome is `status="failed"`, `kind="compaction_failed"` (#136) | Anything switching on `status == "empty-summary"` or expecting `kind is None` | Aligned with COMPACTION_OUTCOMES' own vocabulary; `/compact` renders text only |
+| The loop LATCHES on `compaction_failed` (#136) | A turn whose compaction failed once no longer retries on later steps — by design; next turn retries fresh | Spend pins assert `call_count == 1`; cheap outcomes deliberately not latched, pinned at 3 calls |
+
+Count 2241 -> 2272.

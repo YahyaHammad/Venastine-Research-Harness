@@ -42,7 +42,7 @@ python main.py --init --research-project           # §24: skip the type questio
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 2241 tests, offline, ~25-45s by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 2272 tests, offline, ~25-45s by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -172,6 +172,8 @@ Two things in `tui/app.py` are load-bearing and easy to break silently:
 **`mcp.json` accepts unknown keys** (unlike `settings.json`, which raises) so configs shared with Claude Desktop/Cursor work. Validation is by *connecting*; per-server failures are named and skipped, never fatal.
 
 **Redaction recurses now.** `check_output_policy()` used to scan top-level strings only; `structured_content` arrives under `result` as a dict, so third-party MCP output was the one unscanned path. Fixed in `safety/policy_enforcement.py`, not at the MCP boundary — any tool returning nested data had the same hole.
+
+**Nothing an output-policy pass alters is silent, and the redaction has an off switch (#49/#167, batch 20).** Every altered dispatch result logs ONE WARNING naming the tool and what changed — before #49 the depth cap replaced a whole container with a sentence and logged nothing. Credential *shapes* (`password "…"`, `<password>…</password>`, `scheme://user:pass@host`) join the vendor tokens, applied to `param_digest` too (a credentialed URL had been printing its password into both transcripts since §26). The shapes are OUTPUT-ONLY by pinned decision: `_SECRET_PATTERNS` stay `_input_leaf`'s whole vocabulary, because refusing a write whose content is a build file breaks the call the user asked for. `VENASTINE_REDACT_OFF` / `config.REDACT_TOOL_OUTPUTS` disable pattern substitution — never input refusals, never the depth-cap sentinel, never logging_setup's formatter; deliberately not a settings.json key (G7's reason).
 
 ### Reasoning effort
 
@@ -361,7 +363,12 @@ what makes an early, frequent trigger safe.
   invisible to the CLI and the pipeline. Third time this shape has come up (§20,
   §25), so it is a rule now.
 - **A failed compaction is contained**, like §20's review stage: the turn completes,
-  a `compaction_failed` notice says so, the thread stays uncompacted.
+  a `compaction_failed` notice says so, the thread stays uncompacted. And since #136
+  it LATCHES: one failed attempt per turn, not one per step — an empty compactor
+  response rides the same kind (status `"failed"`), and `_maybe_compact` returns before
+  calling `compact()` again once this turn has seen it. The cheap outcomes (blocked,
+  no-progress, reentrant) are deliberately not latched — they exit before any model
+  call — and a test pins them at three evaluations so that boundary cannot drift silently.
 - **`pin` is ungated deliberately** (D26). §13 does not merely deny an approval-gated
   tool where nothing can ask — it stops advertising it, so gating `pin` would make it
   invisible on the CLI and in every research pass. Its interface is ordinal

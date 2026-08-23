@@ -5322,3 +5322,61 @@ Unit 2's tracker (#34) retired at WP-0 — all six of its findings closed in bat
 - **#12** (route disagreement to verification) remains open by design — it needs
   its own section and decision record; E13/E14 deliberately touch neither D2 nor
   the penalty formula.
+## Audit Pass 1 — fix batch 20: what the harness does silently (2026-08-23)
+
+**#49, #167, #136** — three degradations you could not see: a depth cap that
+swallowed whole containers without a log line, credential shapes that no
+pattern matched, and an empty compactor response billed once per step for the
+rest of a turn. Five commits on `fix/batch-20-silent-costs`; per-change table
+in `tests/BREAKING_CHANGES.md` (batch 20).
+
+### The owner's answers that shaped it
+
+- **Q1(b) with two refinements we put in front of the issue's own sketch.**
+  The issue's `[=:]` assignment pattern MISSES its own headline case — Gradle's
+  credentials block is space-separated (`password "hunter2"`), so the separator
+  accepts bare space before the quote. And the keyword set is password|passwd
+  ONLY: `token`/`secret`/`key` appear constantly in ordinary prose and would
+  have redacted aggressively. Template placeholders (`${PASSWORD}`,
+  `{{ secrets.X }}`, `<your-password-here>`) survive untouched.
+- **The kill switch was the owner's call**, not ours: over-redaction is a
+  genuine possibility (docs lose example values; a stack trace quoting an AWS
+  key ID loses it), so redaction became opt-outable — on by default,
+  `VENASTINE_REDACT_OFF` for one run, `config.REDACT_TOOL_OUTPUTS` for good.
+  Deliberately NOT a settings.json key: project tier beats user tier there, so
+  a cloned repo could ship the off-switch past a trust prompt nobody reads —
+  G7's reason verbatim. The env var can only ever turn it OFF.
+- **Scope boundaries pinned by test**: input refusals keep vendor tokens alone
+  (a refusal on build-file content would break the call the user asked for);
+  the depth cap stays fail-closed whatever the switch reads; logging_setup's
+  formatter keeps its own guard. `param_digest` joins the shapes — a
+  credentialed URL in tool arguments had been printing its password into both
+  shells' transcripts since §26, which nobody had counted as a leak path.
+- **Q3 = Option 1, after elaboration.** The latch gates the CALL behind
+  `_already_said(notices, "compaction_failed")`; empty-summary rides that kind
+  now (visible once per run), so both spend paths — empty responses AND the
+  exception path, which also re-spent every step — stop after one attempt per
+  turn. Cheap outcomes stay unlatched deliberately, and a test pins them at
+  three evaluations so the boundary cannot drift silently either way.
+
+### Build findings worth keeping
+
+- **The vocabulary drift was already in the file**: COMPACTION_OUTCOMES named
+  this outcome "failed" while the code returned "empty-summary". The owner's
+  locked decision made kind/status coherent; the one status-pinning test moved
+  with it.
+- **A mutation that LOOKS like the danger is inert.** Applying the shapes
+  inside `_input_leaf` changes nothing — substitution there discards its own
+  output. The dangerous edit is refusal-style leakage (shape match raises),
+  and THAT mutation is what turns the separation pin red. Sight-check the
+  mutation you are afraid of, not its nearest neighbour.
+- **CRLF defeats multi-line string matching in Python patch scripts** — four
+  of this batch's five mutations needed `\r\n` normalisation before their
+  `old` strings matched. Normalize once at read, write back with the original.
+
+### Housekeeping
+
+Counts 2241 → 2272 (+27: five #49 visibility pins, twenty-two shape/switch
+pins, four latch pins minus one rewritten). Unit trackers untouched this time:
+#49 dents unit 5 (with #167 filed against it from outside), #136 retires X2's
+second finding but leaves #4 open, so tracker #137 stays.

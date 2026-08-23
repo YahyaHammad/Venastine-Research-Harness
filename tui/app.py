@@ -1864,9 +1864,10 @@ def _cmd_compact(app: VenastineApp, args: str) -> None:
             app.call_from_thread(setattr, app, "_busy", False)
         # Batch 16 (#44): compact() reports EVERY outcome as data now --
         # folded, blocked, all-pinned, missing-agent, no-progress,
-        # reentrant, empty-summary -- each carrying its own line, so a
-        # manual /compact can never answer "nothing happened" for five
-        # different reasons.
+        # reentrant, failed (#136: the empty-summary outcome, which also
+        # carries kind=compaction_failed now) -- each carrying its own
+        # line, so a manual /compact can never answer "nothing happened"
+        # for five different reasons.
         app.call_from_thread(app._transcript.write_system,
                              f"— {outcome['text']} —")
 

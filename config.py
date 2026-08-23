@@ -254,6 +254,33 @@ SANDBOX_MEMORY_MB = 1024
 SANDBOX_CPU_SECONDS = 30
 SANDBOX_MAX_PIDS = 200
 
+# ---------------------------------------------------------------------------
+# --- Output redaction (#167/#49, batch 20) ----------------------------------
+# ---------------------------------------------------------------------------
+
+# The PERMANENT master switch for pattern-based redaction of what leaves a
+# tool: vendor token substitution and credential-shape redaction, applied
+# by check_output_policy() to every tool result and by param_digest() to
+# what the shells display of an argument. On by default; a user whose
+# workflow needs the model to see real values (debugging their own
+# credentials, say) turns it off here, or per-run with
+# VENASTINE_REDACT_OFF in the environment -- see redaction_enabled().
+#
+# DELIBERATELY NOT a settings.json key (decision recorded in DEVLOG,
+# batch 20): project tier beats user tier there, so a cloned repo could
+# ship `.venastine/settings.json` switching the scrubbing off behind a
+# trust prompt nobody reads -- the exact shape G7 rejected
+# shell_approval_mode for and R12 rejected research.granted_tools for.
+# Permanent means editing this line.
+#
+# NEVER covers three things, whatever this is set to: check_input_policy's
+# refusals (a denial is legible, not destructive); check_output_policy's
+# depth-cap substitution (fail-closed structure bound -- making it optional
+# would recreate the deterministic bypass its comment forbids); and
+# logging_setup.py's formatter redaction (the second sink keeps its own
+# guard).
+REDACT_TOOL_OUTPUTS = True
+
 # ROADMAP_v2 §31 (H9). The wall clock on a BUDGET_COMPUTE tool call --
 # the six math tools, which are pure functions of their params and have
 # nothing bounding them from the inside. dispatch runs them in a
