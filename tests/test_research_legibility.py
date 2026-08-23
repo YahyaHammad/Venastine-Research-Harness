@@ -872,3 +872,76 @@ async def test_a_finished_run_advertises_its_claims():
         assert app._last_run is run
         assert app._last_response == "the report"
     assert any("ctrl+l" in line and "1 claim" in line for line in written)
+
+
+# ---- #117 group 2: the panel is built for passes that run twice ------------
+# ----------------------------------------------------------------------------
+
+def test_tool_counts_land_on_the_current_run_of_a_repeated_pass():
+    """6a/6c repeat once per retry round. A pre-drawn list would show rows
+    that never run and hide rows that run three times -- and a count that
+    lands on the FIRST run's row would report activity on a pass nobody
+    is waiting on while the retry reads silent."""
+    from tui.widgets import ResearchProgress
+
+    panel = ResearchProgress()
+    panel.pass_started("Pass 6a")
+    panel.tool_called("Pass 6a")
+    panel.tool_called("Pass 6a")
+    panel.pass_completed("Pass 6a", ok=True)
+
+    panel.pass_started("Pass 6a")
+    panel.tool_called("Pass 6a")
+    body = panel.renderable.plain
+
+    assert "> Pass 6a" in body, "the retry round never showed as running"
+    assert "x Pass 6a" in body, "the finished first run lost its tick"
+    assert "1 tool" in body, \
+        f"the retry's own call did not land on its row:\n{body}"
+    assert "2 tools" not in body, \
+        "the first run's count leaked onto the retry"
+
+    # Ensemble overlap: two UNRESOLVED rows sharing a label. The count
+    # belongs to the row started LAST -- a forward scan lands it on the
+    # earlier candidate, and only the detail line's position tells.
+    panel.reset()
+    panel.pass_started("Pass 1")
+    panel.pass_started("Pass 1")
+    panel.tool_called("Pass 1")
+    body = panel.renderable.plain
+    assert body.rindex("1 tool") > body.rindex("> Pass 1"), \
+        f"the call landed on the first-started candidate:\n{body}"
+
+
+def test_a_completion_tick_lands_on_the_run_that_just_finished():
+    """Ensemble mode starts Pass 1 once per candidate before any finishes,
+    so two unresolved rows can share a label. pass_completed correlates to
+    the most recent UNRESOLVED row -- scanning forward instead would tick
+    the first candidate and leave the one that actually returned showing
+    as still running."""
+    from tui.widgets import ResearchProgress
+
+    panel = ResearchProgress()
+    panel.pass_started("Pass 1")
+    panel.pass_started("Pass 1")
+    panel.pass_completed("Pass 1", ok=True)
+    body = panel.renderable.plain
+
+    assert body.index("> Pass 1") < body.index("x Pass 1"), \
+        f"the tick went to the first-started candidate:\n{body}"
+
+
+def test_a_zero_llm_stage_is_recorded_already_done():
+    """'It made no model call, so it has no observable running state.' A
+    stage rendered as RUNNING would show a state that never exists -- and
+    stay stuck there, because nothing will ever complete it."""
+    from tui.widgets import ResearchProgress
+
+    panel = ResearchProgress()
+    panel.stage_completed("Pass 4")
+    panel.stage_completed("D2")
+    body = panel.renderable.plain
+
+    assert "· Pass 4" in body and "· D2" in body
+    assert "> Pass 4" not in body and "> D2" not in body, \
+        "a zero-LLM stage rendered as running work"

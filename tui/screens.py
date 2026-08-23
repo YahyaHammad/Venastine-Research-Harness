@@ -56,9 +56,11 @@ class PermissionScreen(ModalScreen[bool]):
         self.dismiss(event.button.id == "allow")
 
     def action_deny(self) -> None:
-        # Escape denies rather than dismissing with no value: the worker
-        # thread is blocked on channel.get() and a dismissal carrying None
-        # would hang the loop rather than decline the call.
+        # Escape answers with the SAME value the No button produces.
+        # Since §23 a dismissal carrying None would be safe anyway --
+        # interaction.decode supplies APPROVAL's declining default -- so
+        # this is explicitness rather than hang-prevention: one screen
+        # should not have two ways to say no.
         self.dismiss(False)
 
 
@@ -294,10 +296,12 @@ class ReviewScreen(ModalScreen[object]):
 
     Dismisses with a (decision, notes) tuple. Every dismissal path carries
     one -- escape, the buttons, and the app's shutdown release -- because
-    the /research worker is blocked on a queue and a dismissal carrying
-    None would park it forever. That invariant now applies in a fifth
-    place; the decoder in tui/app.py treats anything malformed as a
-    rejection so a new path added later fails safe rather than silently.
+    the /research worker is blocked on a queue that must receive AN
+    answer. What the answer is matters less than that it arrives:
+    interaction.decode turns anything unusable (None, a bare False from
+    shutdown, malformed junk) into REVIEW's declining default, so a new
+    path added later fails safe -- an edit is never applied because
+    nobody answered.
 
     Four outcomes, not two. Reject and refine are different answers: "this
     is wrong" ends the finding, while "you missed something" sends it back

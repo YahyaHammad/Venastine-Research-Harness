@@ -2626,3 +2626,302 @@ def test_no_widget_or_screen_paints_a_literal_colour():
                     offenders.append(f"{rel}:{lineno}")
     assert offenders == [], \
         "hardcoded style literals returned: " + ", ".join(offenders)
+
+
+# ---- #117 group 1: the four consent modals' safe defaults ------------------
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_escape_on_the_grant_picker_cancels_the_run():
+    """The app-side half IS tested -- _cmd_research's None branch is
+    pinned by dismissing None BY HAND -- but nothing pinned that ESCAPE
+    produces one. decode(CHOICE, "software") passes a bare string
+    straight through, and set() is a legitimate 'run unattended', so a
+    cancel that dismissed either would START the run instead of stopping
+    it: the permissive direction, on the screen nobody is watching."""
+    from tui.screens import GrantPickerScreen
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        results = []
+        await app.push_screen(
+            GrantPickerScreen([("web_search", "Search the web.")]),
+            results.append)
+        assert await settle(
+            pilot, lambda: isinstance(app.screen, GrantPickerScreen))
+        await pilot.press("escape")
+        assert await settle(pilot, lambda: bool(results)), \
+            "escape produced no dismissal"
+
+    assert results == [None], \
+        f"escape must cancel outright; got {results!r}"
+
+
+@pytest.mark.asyncio
+async def test_escape_on_the_project_kind_picker_cancels_init():
+    """CHOICE decodes its option strings verbatim, so a cancel that
+    dismissed 'software' would scaffold the software document set when
+    the user meant to abandon /init entirely."""
+    from tui.screens import ProjectKindScreen
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        results = []
+        await app.push_screen(ProjectKindScreen(), results.append)
+        assert await settle(
+            pilot, lambda: isinstance(app.screen, ProjectKindScreen))
+        await pilot.press("escape")
+        assert await settle(pilot, lambda: bool(results)), \
+            "escape produced no dismissal"
+
+    assert results == [None], \
+        f"escape must abandon /init; got {results!r}"
+
+
+@pytest.mark.asyncio
+async def test_the_grant_picker_opens_with_every_option_unticked():
+    """Both consent lists carry the same docstring sentence -- a
+    pre-ticked list makes the convenient action the permissive one --
+    and neither was pinned. The grant picker exists precisely because
+    nobody will be watching afterwards."""
+    from textual.widgets import SelectionList
+
+    from tui.screens import GrantPickerScreen
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        await app.push_screen(GrantPickerScreen([
+            ("web_search", "Search the web."),
+            ("fetch_url", "Fetch a page."),
+        ]))
+        assert await settle(
+            pilot, lambda: isinstance(app.screen, GrantPickerScreen))
+        choices = app.screen.query_one(SelectionList)
+
+        states = [choices.get_option_at_index(i).initial_state
+                  for i in range(choices.option_count)]
+
+    assert states == [False, False], \
+        f"the grant picker opened pre-ticked: {states!r}"
+
+
+@pytest.mark.asyncio
+async def test_the_signoff_opens_with_every_option_unticked():
+    """Same sentence as the grant picker, same permissive direction: an
+    escape-happy user would delegate every gated tool to the subagent
+    without reading a row of it."""
+    from textual.widgets import SelectionList
+
+    from tui.screens import SubagentSignoffScreen
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        await app.push_screen(
+            SubagentSignoffScreen("researcher",
+                                  ["web_search", "fetch_url"]))
+        assert await settle(
+            pilot,
+            lambda: isinstance(app.screen, SubagentSignoffScreen))
+        choices = app.screen.query_one(SelectionList)
+
+        states = [choices.get_option_at_index(i).initial_state
+                  for i in range(choices.option_count)]
+
+    assert states == [False, False], \
+        f"the sign-off opened pre-ticked: {states!r}"
+
+
+# ---- #117 group 3: the transcript trio -------------------------------------
+# ---------------------------------------------------------------------------
+
+def test_flush_stream_returns_what_it_committed():
+    """§26's contract: the return value is how the app tracks the last
+    response for /copy without keeping a second buffer beside this one.
+    Returning '' silently reroutes /copy last to the PREVIOUS answer."""
+    from tui.widgets import Transcript
+
+    t = Transcript()
+    t.stream_delta("hello ")
+    t.stream_delta("world")
+    assert t.flush_stream() == "hello world"
+    assert t.flush_stream() == "", "an already-committed buffer re-flushed"
+    assert ("assistant", "hello world") in t._entries
+
+
+def test_as_text_labels_the_speakers():
+    """Dropping the label table is green today because nothing pins the
+    shape /copy all produces -- and an unlabeled paste reads as one
+    voice saying both halves of the conversation."""
+    from tui.widgets import Transcript
+
+    t = Transcript()
+    t.write_user("hi there")
+    t.write_answer("hello")
+    text = t.as_text()
+    assert text.startswith("you: hi there"), \
+        f"/copy all lost the user label: {text[:40]!r}"
+    assert "venastine: hello" in text, \
+        f"/copy all lost the assistant label: {text[-40:]!r}"
+
+
+def test_a_fenced_block_renders_as_syntax_not_plain_text(mocker):
+    """Transcript's docstring leads with fenced-code highlighting, and
+    replacing _split_fences with [text] was green -- nothing asserted
+    that the one rendering feature it advertises actually happens."""
+    from rich.syntax import Syntax
+    from rich.text import Text as RichText
+
+    from tui.widgets import Transcript
+
+    t = Transcript()
+    written = []
+    real_write = t.write
+    mocker.patch.object(
+        t, "write",
+        side_effect=lambda r, *a, **k: (
+            written.append(r), real_write(r, *a, **k))[1])
+
+    t.write_answer("prose before\n\n```python\nx = 1\n```\n\nprose after")
+    blocks = [r for r in written if isinstance(r, Syntax)]
+    assert blocks, "a fenced block rendered without Syntax"
+    assert getattr(blocks[0], "code", "").strip() == "x = 1"
+    plain = [r for r in written if isinstance(r, RichText)]
+    assert any("prose before" in p.plain for p in plain), \
+        "the prose around the fence vanished"
+    assert any("prose after" in p.plain for p in plain), \
+        "the prose after the fence vanished"
+
+
+# ---- #117 group 4: five one-offs --------------------------------------------
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_clearing_the_goal_hides_the_banner():
+    """GoalBanner's reactive-and-hide shape exists because a goal EMPTIES
+    as well as fills; display=True set once cannot take it back."""
+    from tui.widgets import GoalBanner
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        await pump(pilot, 2)
+        banner = app.query_one(GoalBanner)
+        app.memory.set_extra("goal", "ship the batch")
+        app.refresh_goal_banner()
+        await pilot.pause()
+        assert banner.display, "the goal never showed"
+
+        app.memory.set_extra("goal", None)
+        app.refresh_goal_banner()
+        await pilot.pause()
+        assert not banner.display, \
+            "a cleared goal left the banner on screen for the session"
+
+
+@pytest.mark.asyncio
+async def test_refine_carries_the_note_the_reviewer_typed():
+    """The note field is read on EVERY button path before dismissing;
+    dropping that read is green unless something pins Refine's payload --
+    and an empty note sends the reviewer back to fix finding #3 with no
+    idea what was objected to."""
+    from textual.widgets import Input
+
+    from tui.screens import ReviewScreen
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        results = []
+        await app.push_screen(
+            ReviewScreen({"kind": "text", "reason": "Overstates.",
+                          "proposed": "Soften."}, 1, 3),
+            results.append)
+        assert await settle(
+            pilot, lambda: isinstance(app.screen, ReviewScreen))
+
+        app.screen.query_one("#review-note", Input).value = \
+            "claim 3 cites the wrong table"
+        await pilot.click("#review-refine")
+        assert await settle(pilot, lambda: bool(results)), \
+            "refine produced no dismissal"
+
+    assert results == [("refine", "claim 3 cites the wrong table")], \
+        f"the note did not ride along: {results!r}"
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_slash_command_says_so():
+    """Suppressing the error leaves the user typing into a shell that
+    looks like it hung -- the message is the whole feedback loop."""
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        type_into_prompt(app, "/definitely-not-a-command")
+        await pilot.press("enter")
+        assert await settle(pilot, lambda: any(
+            "Unknown command" in txt
+            for _role, txt in app._transcript._entries)), \
+            "an unknown slash command produced no error line"
+
+
+@pytest.mark.asyncio
+async def test_the_skill_precondition_reads_the_active_agents_context(
+        mocker):
+    """/skill reports what the NEXT TURN will enforce, and the next turn
+    runs under the active agent's ToolContext when there is one. Reading
+    the global context instead reports tools as available that the agent
+    cannot call -- the divergence _current_context's docstring exists to
+    prevent."""
+    from core.config_loader import AgentDef
+    from skills.manager import manager as skills_manager
+    import skills.tui_commands as skill_cmds
+
+    mocker.patch.object(skills_manager, "get", return_value=type(
+        "S", (), {"name": "fixer", "description": "d",
+                  "additional_tools": ["web_search"]})())
+    activated = []
+
+    def fake_activate(name, active):
+        activated.append(name)
+        return [*active, name]
+
+    mocker.patch.object(skills_manager, "activate",
+                        side_effect=fake_activate)
+
+    agent = AgentDef(
+        name="locked", description="d", model=None, provider=None,
+        allowed_tools=[], approval_overrides={},
+        use_project_context=False, use_memory=False, max_steps=None,
+        body="BODY", tier="harness", path="/locked.md")
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        await pump(pilot, 2)
+        app.active_agent = agent
+        skill_cmds._cmd_skill(app, "fixer")
+        await pilot.pause()
+        entries = [txt for _role, txt in app._transcript._entries]
+
+    assert activated == ["fixer"], "the skill never activated"
+    assert any("expects web_search" in txt for txt in entries), \
+        "no missing-tools note under an agent whose whitelist denies " \
+        "every tool -- the check consulted the GLOBAL context"
+
+
+@pytest.mark.asyncio
+async def test_summary_refuses_to_start_mid_turn(mocker):
+    """A model call the user pays for is never silent, and it does not
+    stack on top of a running turn either."""
+    import memories.tui_commands as mem_cmds
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        await pump(pilot, 2)
+        app._busy = True
+        started = []
+        mocker.patch.object(app, "run_worker",
+                            side_effect=lambda *a, **k: started.append(1))
+
+        mem_cmds._cmd_summary(app, "")
+
+        assert any("Still working" in txt
+                   for _role, txt in app._transcript._entries), \
+            "mid-turn /summary gave no refusal"
+        assert started == [], "mid-turn /summary started a worker anyway"
