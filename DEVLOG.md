@@ -5878,5 +5878,7 @@ site-level reversions.)
 
 Counts 2419 → 2425 (+5 scanner file; review's collected count unchanged — its
 factory conversion reshaped fixtures, not tests). Open audit findings drop to
-six (#6, #8, #9, #12, #14) plus enhancement #183, uncounted per the tracker's
-own rule.
+five — #6, #8, #9, #12, #14 — plus enhancement #183, uncounted per the
+tracker's own rule. (A first draft of this entry and of the tracker edit both
+wrote "six" against a five-item list; caught on read-back, which is why the
+tracker header now enumerates instead of only counting.)
