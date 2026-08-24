@@ -34,6 +34,14 @@
     content-align: center middle;
 }
 
+/* #4 session usage line. Auto height and hidden until the first turn
+   gives it figures, like the research panel above. */
+#usage-line {
+    height: auto;
+    padding-top: 1;
+    color: $text-muted;
+}
+
 /* §22 live research view. Auto height so it takes no sidebar space
    until a run starts, and scrolls rather than pushing the ravens off
    screen on a long retry loop. */

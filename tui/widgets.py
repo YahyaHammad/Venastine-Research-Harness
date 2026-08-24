@@ -71,6 +71,65 @@ class EffortRaven(Static):
         self.update(ravens.effort_raven(self.effort))
 
 
+class UsageLine(Static):
+    """Session usage, batch 27 (#4): billed-since-resume and the thread's
+    current context size, one sidebar line.
+
+    TWO DIFFERENT INSTRUMENTS, labelled so nobody repeats item 9's
+    misreading. `ctx` is the provider's own count of what the last call
+    was SENT -- the size figure compaction acts on. `billed` accumulates
+    every input+output on this thread since it was (re)opened in this
+    session; it grows quadratically in a tool-using turn because that is
+    what the provider charges, and it is deliberately NOT persisted
+    (memory.record_billed for that decision). Neither figure is a price.
+
+    Hidden until the first turn puts numbers behind it, GoalBanner-style.
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.display = False
+        self._last = None
+
+    def _styles(self) -> dict:
+        # TodoPanel/Transcript shape (#116): resolve per draw against the
+        # active theme; bare-built widgets render unstyled.
+        try:
+            app = self.app
+        except Exception:  # noqa: BLE001 -- no running app; render unstyled
+            return {}
+        return themes.styles_for(app)
+
+    def _reset(self) -> None:
+        """A thread switch: hide until the new thread's first turn.
+        Session billing restarts at zero by construction; showing the
+        PREVIOUS thread's totals here would be §27's stale-state bug in
+        miniature."""
+        self._last = None
+        self.display = False
+        self.update("")
+
+    def update_usage(self, billed: int, ctx: int) -> None:
+        key = (billed, ctx)
+        if key == self._last or not (billed or ctx):
+            # Change-guard: on_loop_event fires per token delta during a
+            # stream; both figures only move at step boundaries, so this
+            # makes per-event calls nearly free.
+            return
+        self._last = key
+
+        def _k(n: int) -> str:
+            return f"{n / 1000:.0f}k" if n >= 1000 else str(n)
+
+        self.display = True
+        # `system` is the harness-talking-about-itself role -- the right
+        # meaning for a usage line, and the palette route the batch-26
+        # guard test demands (it caught this line as a literal within one
+        # commit of the widget existing).
+        self.update(Text(f"usage · ctx {_k(ctx)} · billed {_k(billed)}",
+                          style=self._styles().get("system", "")))
+
+
 class GoalBanner(Static):
     """Persistent-objective banner (§18 goal mode). Hidden when the
     thread has no goal; a one-line reminder of what the session is

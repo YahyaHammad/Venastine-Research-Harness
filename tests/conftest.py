@@ -117,6 +117,8 @@ def make_model_response(
     tool_calls: list = None,
     usage: dict = None,
     stop_reason: str = "complete",
+    turn_billed_tokens: int = None,
+    turn_new_tokens: int = None,
 ) -> ModelResponse:
     """Construct a ModelResponse directly, bypassing SDK mocking entirely.
 
@@ -130,6 +132,11 @@ def make_model_response(
     u = usage or {"input_tokens": 0, "output_tokens": 0}
     resp = ModelResponse(text=text, tool_calls=calls, usage=u)
     resp.stop_reason = stop_reason
+    # Batch 27 (#4): the per-turn figures ride responses like stop_reason.
+    if turn_billed_tokens is not None:
+        resp.turn_billed_tokens = turn_billed_tokens
+    if turn_new_tokens is not None:
+        resp.turn_new_tokens = turn_new_tokens
     return resp
 
 
@@ -489,6 +496,10 @@ class FakeMemory:
         # test is unaffected. A test that WANTS compaction sets this.
         self.last_input_tokens = 0
         self.recorded_tokens = []
+        # Batch 27 (#4): mirrors the real memory's session-scoped billing
+        # accumulator -- same shape, same scope (per object, never
+        # persisted), so growth tests can assert the thread total.
+        self.billed_tokens = 0
         self.checkpoints_applied = 0
 
     def add_user_message(self, text):
@@ -504,6 +515,9 @@ class FakeMemory:
         self.recorded_tokens.append(tokens)
         if tokens:
             self.last_input_tokens = tokens
+
+    def record_billed(self, tokens):
+        self.billed_tokens += int(tokens or 0)
 
     def apply_checkpoint(self):
         self.checkpoints_applied += 1

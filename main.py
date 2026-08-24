@@ -181,7 +181,21 @@ def run_chat(
 
         print(f"\nAgent: {response.text}")
         if response.stop_reason != "complete":
-            print(f"[stopped early: {response.stop_reason}]")
+            # #4: name the figures, not just the reason. A user who sees
+            # "token_budget_exceeded" reads it as a size problem -- the
+            # exact misreading item 9 recorded -- so the line now says
+            # what actually happened (spend this turn) alongside the
+            # thread's real size (the provider's own last count). Rare
+            # path, so a storage read for the ctx figure costs nothing.
+            billed = getattr(response, "turn_billed_tokens", None)
+            ctx = 0
+            if current_thread_id:
+                row = storage.get_thread(current_thread_id) or {}
+                ctx = int((row.get("extra_data") or {}).get(
+                    "last_input_tokens") or 0)
+            figures = f" — billed {billed:,} this turn · ctx ~{ctx:,}" \
+                if billed is not None else ""
+            print(f"[stopped early: {response.stop_reason}{figures}]")
         print()
 
 

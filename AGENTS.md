@@ -42,7 +42,7 @@ python main.py --init --research-project           # §24: skip the type questio
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 2400 tests, offline, ~25-45s by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 2419 tests, offline, ~25-45s by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -244,12 +244,13 @@ Invariants that look like simplification opportunities but are not:
   surfaced three passes later as `Claim.__init__() missing 3 required positional
   arguments`. The check runs BEFORE the JSON retry: a cut-off pass did not write
   malformed JSON, so nudging it spends more of an exhausted budget for nothing.
-- **Research passes run on `config.RESEARCH_PASS_TOKEN_BUDGET` (1M), not
-  `MAX_TOKEN_BUDGET` (250k).** The meter re-counts the whole prompt every step
-  (TECHNICAL_DEBT item 9), so a tool-heavy pass hits the chat ceiling long before
-  its context is a problem. The JSON retry carries the same budget for the same
-  reason it carries the `ToolContext` — a retry is the same pass continuing.
-  Chat's budget is unchanged, and item 9's real fix is still open.
+- **There is no default token budget anywhere** (batch 27 closed item 9). The
+  cumulative counter is a spend meter — correct as billing, useless as a size
+  limit — and both 1M envelopes died with the misreading that created them. A cap
+  exists only if settings.json sets `max_token_budget`; wrapper defaults are a
+  sentinel resolving it per call, and explicit `max_total_tokens=None` stays
+  genuinely uncapped. Size reasoning reads `turn_new_tokens`/`last_input_tokens`,
+  never the spend figure.
 - **The orchestrator CARRIES a `RunAuthorization`, it does not interpret one** (§25). Which tools may be granted is `core/reasoning/authorization.py`; enforcement is `core/loop.py`; building it from a human's answer is the shell's job. `authorization=None` is the default and means the pre-§25 behaviour: no grants, nobody to ask, every gated tool hidden from every pass.
 - **`run.granted_calls` IS the bundle's list, not a copy.** Sharing one object is what puts the audit trail on the failure path and every §5 checkpoint; copying at the end would lose it on exactly the runs most worth auditing.
 
@@ -290,16 +291,21 @@ returns every message ever written however many times this has run (AC1), which 
 what makes an early, frequent trigger safe.
 
 - **The trigger is a working-set target, not `context_limit - buffer`** (M1). §21
-  specified the latter and it can never fire: `core/loop.py` counts input tokens per
-  call and the prompt is resent on every step, so `MAX_TOKEN_BUDGET` makes a turn
-  unusable at well under half of any modern window. For compaction at `T` to fire and
-  leave `k` usable steps the budget must be ~`k·T` — hence a 40k trigger and a 250k
-  budget, with `config_loader.effective_compaction()` warning when a configured
-  trigger leaves too little headroom. `MODEL_CONTEXT_WINDOWS` now only feeds the
-  pipeline backstop, so a missing entry is cheap.
-- **`MAX_TOKEN_BUDGET` is a spend meter, not a context limit.** It re-counts the
-  whole prompt on every step — correct as billing, quadratic as anything else. Do not
-  read it as "how big a thread may get".
+  specified the latter and it can never fire: a window-derived threshold sits at a
+  size a working thread never reaches. The trigger reads measured context size and
+  has NEVER keyed off the billing meter; since batch 27 nothing else does either —
+  there is no default spend ceiling, so `effective_compaction()`'s headroom warning
+  speaks only when settings.json actually configures `max_token_budget`.
+  `MODEL_CONTEXT_WINDOWS` feeds only the pipeline backstop, so a missing entry is cheap.
+- **The spend meter is optional; the size instrument is not.** Batch 27 deleted the
+  constants: no default ceiling anywhere, and the only cap is the user's
+  `max_token_budget` setting. What every caller gains unconditionally is the size
+  instrument — `ModelResponse.turn_billed_tokens` (running spend) and
+  `.turn_new_tokens` (what this turn added to the thread: outputs plus positive
+  input deltas, inherited first call excluded, compaction shrinks clamped), both
+  unpriced counts — plus the TUI usage line (billed-since-resume · ctx) and CLI
+  early-stop figures. Do not read EITHER number as a price or the spend figure as
+  a size.
 - **The fold boundary is always a turn start** (M4). A summary that swallows an
   assistant message and leaves its `tool_result` rows is an HTTP 400 on Anthropic — a
   hard wire error, not a degraded answer.
@@ -844,10 +850,11 @@ the CLI has no command layer).
   `mcp.json` that arrived with a cloned repo, and granting as a side effect of
   `/init` would wave all of it through. `CONTEXT.md` is never special-cased out of
   the hash — that is the same hole with a smaller mouth.
-- **`/init` runs on its own budget** (I7). `INIT_TOKEN_BUDGET` for
-  `RESEARCH_PASS_TOKEN_BUDGET`'s reason (TECHNICAL_DEBT item 9's meter re-counts
-  the whole prompt every step), `INIT_READ_CHARS` well below `MAX_READ_CHARS`, and
-  `INIT_MAX_STEPS` because neither of those bounds the *number* of reads.
+- **`/init` runs bounded** (I7). Its separate 1M budget died in batch 27 with the
+  misreading that created it — the wrapper resolves the configured spend cap like
+  every other path. `INIT_READ_CHARS` (well below `MAX_READ_CHARS`: each read is
+  re-billed every following step) and `INIT_MAX_STEPS` remain, because neither
+  spend nor read size bounds the *number* of reads.
   I7 states three config bounds and two of them are read from `config`; the third
   is a FALLBACK. `generator._run_initializer` passes
   `agent.max_steps or config.INIT_MAX_STEPS`, and `agents/builtin/initializer.md`

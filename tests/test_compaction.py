@@ -83,11 +83,11 @@ OVERRIDES = {"keep_recent_turns": 2, "keep_recent_tokens": 1,
 # ---------------------------------------------------------------------------
 
 def test_the_trigger_is_a_working_set_target_not_the_window():
-    """M1. §21 put this at `context_limit - buffer`, which on this codebase
-    can never fire: MAX_TOKEN_BUDGET re-bills the whole prompt on every
-    step, so a thread is already unusable at well under half of any modern
-    window. A window-derived threshold sits at a size the thread cannot
-    reach in working order."""
+    """M1. §21 put this at `context_limit - buffer`, which can never fire:
+    a window-derived threshold sits at a size the thread cannot reach in
+    working order. (The old MAX_TOKEN_BUDGET collision that also argued
+    for this died with batch 27's uncapped default; the size-based reason
+    stands on its own.)"""
     _, compact_at = compaction.thresholds("claude-sonnet-5")
 
     assert compact_at == config.COMPACTION_TRIGGER_TOKENS
@@ -719,38 +719,62 @@ def test_an_incoherent_value_is_rejected(overrides, fragment):
         config_loader.effective_compaction(overrides)
 
 
-def test_a_trigger_too_close_to_the_budget_warns(caplog):
+def test_a_trigger_too_close_to_a_configured_cap_warns(caplog, mocker):
     """M1's arithmetic, enforced rather than left in a comment. A turn
-    re-sends its whole prompt each step, so a trigger near
-    MAX_TOKEN_BUDGET lets a thread reach a size where the budget stop ends
-    the turn after one response -- compaction would then only ever fire on
-    the turn AFTER the one it should have saved."""
+    re-sends its whole prompt each step, so a trigger near a CONFIGURED
+    spend cap lets a thread reach a size where the cap ends the turn after
+    one response -- compaction would then only ever fire on the turn
+    AFTER the one it should have saved."""
+    import core.config_loader as config_loader_module
+
+    mocker.patch.object(config_loader, "get_settings",
+                        return_value={"max_token_budget": 250_000})
     with caplog.at_level("WARNING", logger="core.config_loader"):
         config_loader.effective_compaction(
             {"trigger_tokens": 200_000}, warn=True)
 
-    assert "token_budget_exceeded" in caplog.text
+    assert "max_token_budget" in caplog.text
+
+
+def test_an_uncapped_run_never_warns_no_matter_how_tight(caplog, mocker):
+    """#4: the advisory compares the trigger against the CONFIGURED cap.
+    Uncapped -- the default -- nothing competes with compaction, and a
+    warning about a ceiling that does not exist is exactly how a real
+    warning becomes one nobody reads."""
+    import core.config_loader as config_loader_module
+
+    assert config_loader.spend_cap() is None
+    with caplog.at_level("WARNING", logger="core.config_loader"):
+        config_loader.effective_compaction(
+            {"trigger_tokens": 200_000}, warn=True)
+
+    assert "max_token_budget" not in caplog.text
 
 
 def test_the_shipped_defaults_leave_room_for_a_multi_step_turn(caplog):
     """The control for the test above: the values this harness actually
-    ships with must not themselves trip the warning."""
+    ships with must not themselves trip the warning (uncapped by default,
+    so it cannot)."""
     with caplog.at_level("WARNING", logger="core.config_loader"):
         config_loader.effective_compaction(warn=True)
 
-    assert "token_budget_exceeded" not in caplog.text
+    assert "max_token_budget" not in caplog.text
 
 
-def test_the_headroom_advisory_is_silent_off_the_startup_path(caplog):
+def test_the_headroom_advisory_is_silent_off_the_startup_path(caplog, mocker):
     """effective_compaction() sits on should_compact()'s path, so it runs
     once per step of every turn. An unconditional advisory there repeats a
     configuration complaint dozens of times per conversation, which is how
     a real warning becomes one nobody reads. initialize() passes
     warn=True; nothing else does."""
+    import core.config_loader as config_loader_module
+
+    mocker.patch.object(config_loader, "get_settings",
+                        return_value={"max_token_budget": 250_000})
     with caplog.at_level("WARNING", logger="core.config_loader"):
         config_loader.effective_compaction({"trigger_tokens": 200_000})
 
-    assert "token_budget_exceeded" not in caplog.text
+    assert "max_token_budget" not in caplog.text
 
 
 def test_validation_still_raises_off_the_startup_path():

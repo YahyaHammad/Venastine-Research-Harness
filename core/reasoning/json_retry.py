@@ -105,15 +105,15 @@ def retry_until_json(
                   re-advertise globally-allowed tools an agent-shaped
                   caller excluded on turn 1 (review §19-20 r2-1).
     max_total_tokens
-                  the caller's own budget, for exactly the same reason.
-                  A research pass runs on RESEARCH_PASS_TOKEN_BUDGET; its
-                  corrective retry re-enters that pass's ALREADY LARGE
-                  thread, so falling back to continue_conversation's chat
-                  default would cut the retry off almost immediately --
-                  and a budget stop returns the last response as it
-                  stands, which is how an empty pass gets produced in the
-                  first place. None keeps the wrapper's default, which is
-                  right for §20's agent-shaped reviewer.
+                  the caller's own spend ceiling, for exactly the same
+                  reason. #4: there is no separate pass constant any more
+                  -- a caller forwarding its ceiling keeps it; None omits
+                  the kwarg, so the wrapper resolves the configured
+                  settings.json max_token_budget (uncapped unless set),
+                  which is right for §20's agent-shaped reviewer too.
+                  A budget stop returns the last response as it stands,
+                  which is how an empty pass gets produced in the first
+                  place -- hence carrying the caller's figure at all.
     effort        batch 25 (#139): the caller's effort level. A retry is
                   the same pass continuing, so it carries the same level;
                   effort_for() re-validates against this thread's model.

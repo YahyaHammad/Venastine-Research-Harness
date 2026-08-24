@@ -7,10 +7,9 @@ MODEL_NAME = os.environ.get("AGENT_MODEL", "claude-sonnet-5")
 # Per-call output ceiling. Raised from 4096 in ROADMAP_v2 §16: on current
 # Anthropic models max_tokens caps THINKING PLUS RESPONSE TEXT together, so
 # 4096 truncated answers mid-sentence as soon as reasoning effort was
-# enabled. Interacts with MAX_TOKEN_BUDGET below, which is the cumulative
-# governor across a whole _run() -- at 16k per call roughly six calls fit in
-# the default budget. Raise both together if you run at xhigh/max effort,
-# where the provider guidance is 64k+ per call.
+# enabled. There is no default cumulative budget for it to interact with any
+# more (batch 27, #4): spend is uncapped unless settings.json
+# max_token_budget says otherwise.
 MAX_TOKENS = 16_000
 # --- Loop control ---
 # Raised from 20 in batch 16 (#45): this is THE default step ceiling -- the
@@ -29,53 +28,28 @@ MAX_PIPELINE_RETRIES = 2  # max revise/re-validate loop iterations per claim bef
 MAX_JSON_RETRIES = 2  # max corrective follow-up attempts when a pass returns malformed JSON
                       # (total attempts per pass = MAX_JSON_RETRIES + 1). See ROADMAP §3.
 
-# --- Cumulative token budget ---
-# New, separate from MAX_TOKENS (which caps a single call's output).
-# This caps TOTAL tokens (input+output, summed across every call) spent
-# within one RunAgentLoop._run() invocation -- applies to both regular
-# conversation and every research pass.
+# --- Spend cap (batch 27, #4) ---
+# There is NO default spend ceiling any more. The loop's cumulative
+# input+output counter is a BILLING meter -- the prompt is re-sent and
+# re-billed on every step of a tool-using turn, so it grows quadratically
+# in steps, which is correct as billing and meaningless as a size limit.
+# Reading it as "how large may a thread get" is the defect TECHNICAL_DEBT
+# item 9 recorded; size reasoning reads ModelResponse.turn_new_tokens and
+# memory.last_input_tokens now, and compaction keys off measured context
+# size (it never keyed off this number).
 #
-# IT IS A SPEND METER, NOT A CONTEXT LIMIT, and the difference is
-# load-bearing (ROADMAP_v2 §21, M1). The prompt is resent on every step of
-# a tool-using turn, so the provider bills it again and this counter adds
-# it again. That is correct as billing and quadratic as anything else: at
-# ~2k of tool result per step, a 20k-token thread gets about 9 steps, a
-# 50k thread about 2, and a 100k thread exactly one response with no tool
-# calls at all.
-#
-# Raised from 100_000 at §21. The old value was labelled a placeholder by
-# its own comment, and it was small enough that COMPACTION_TRIGGER_TOKENS
-# could not be reached: for compaction at threshold T to fire and still
-# leave k usable steps, this needs to be roughly k*T. At 250k a compacted
-# ~40k thread gets its full run of steps, and a genuine runaway still
-# stops well short of anything ruinous.
-#
-# core/config_loader.py WARNS if a configured trigger is too close to this
-# to leave room for a multi-step turn -- the relationship is validated
-# rather than left in a comment.
-MAX_TOKEN_BUDGET = 250_000
-
-# The same meter, for ONE research pass. Separate from the chat budget
-# because the two are used differently and the meter is quadratic: it
-# re-counts the entire prompt on every step (TECHNICAL_DEBT.md item 9),
-# so a pass that makes a dozen tool calls with large results burns the
-# ceiling far faster than its actual context growth suggests.
-#
-# This was found the hard way. A Pass 1 that made 14 tool calls -- mostly
-# fetch_url against URLs the model guessed and got 404s for -- crossed
-# 250k and returned a TOOL-CALLING response with empty text, because a
-# budget stop returns whatever the last response held. The orchestrator
-# stored "" as raw_response, Pass 2 correctly reported that it had been
-# given nothing to extract claims from, and the run died three passes
-# later with a TypeError about Claim's constructor. Raising the ceiling
-# is the immediate fix; _run_pass now also refuses to carry an empty
-# truncated pass forward, which is the durable one.
-#
-# NOT a fix for item 9 itself. That entry asks for the billing meter and
-# a per-turn size figure to be separated, in a change of its own with its
-# own revert checks; this only stops a legitimate pass being cut off by a
-# number that was never meant to bound it.
-RESEARCH_PASS_TOKEN_BUDGET = 1_000_000
+# A user who wants a hard ceiling sets settings.json `max_token_budget`
+# (int tokens per _run() invocation -- one user turn, one research pass,
+# one /init run). core/config_loader.spend_cap() resolves it, and the
+# headroom advisory in effective_compaction() speaks only when a cap is
+# configured. Hard limits at the provider remain the stronger instrument:
+# they see the same bill and cannot be forgotten by a code path. The three
+# constants this file used to carry (MAX_TOKEN_BUDGET 250k,
+# RESEARCH_PASS_TOKEN_BUDGET 1M for passes, INIT_TOKEN_BUDGET 1M) died
+# here -- the two 1M envelopes existed only because the 250k chat value
+# was misread as bounding pass context (the Pass-1-with-14-tool-calls
+# incident in DEVLOG), and with no default cap there is nothing to work
+# around.
 
 # Deferred for now (core sequential pipeline only, per current scope):
 #   (none remaining -- ensemble_mode/ensemble_n built in ROADMAP §10,
@@ -219,19 +193,16 @@ INITIALIZER_AGENT = "initializer"
 # over documentation that can run to hundreds of kilobytes -- this repo's own
 # root markdown is 721KB, with DEVLOG.md alone at 226KB.
 #
-# INIT_READ_CHARS is well below MAX_READ_CHARS because of TECHNICAL_DEBT item
-# 9: the budget meter re-counts the WHOLE prompt on every step, so each 50KB
-# read is re-billed for every step that follows it. 20KB keeps a dozen reads
-# affordable and still returns a useful span of a document per call.
+# INIT_READ_CHARS is well below MAX_READ_CHARS because of TECHNICAL_DEBT
+# item 9 (now closed, batch 27): the billing meter re-counts the WHOLE
+# prompt on every step, so each 50KB read is re-billed for every step that
+# follows it. 20KB keeps a dozen reads affordable and still returns a
+# useful span of a document per call. It stays even though the meter no
+# longer caps anything by default -- it bounds per-read VOLUME, which is a
+# different axis from spend and from the number of reads.
 INIT_READ_CHARS = 20_000
-# And the budget itself, for the same reason RESEARCH_PASS_TOKEN_BUDGET
-# exists (§26): a tool-heavy run hits the chat ceiling long before its
-# context is a problem. MAX_TOKEN_BUDGET is a spend meter, not a context
-# limit. Item 9's real fix -- counting incrementally -- is still open, and
-# would retire this constant along with the research one.
-INIT_TOKEN_BUDGET = 1_000_000
-# The number of reads, which the other two do not bound: a model can spend
-# an unbounded number of small reads inside a large budget.
+# The number of reads, which neither budget nor read size bounds: a model
+# can spend an unbounded number of small reads inside any ceiling.
 INIT_MAX_STEPS = 12
 
 # --- MCP teardown (ROADMAP_v2 §37 F6, #64) ---
@@ -403,11 +374,12 @@ MAX_REVIEW_REFINEMENTS = 3
 #
 # M1: NOT `context_limit - buffer`. §21 parameterized the trigger against
 # the model's context window on the assumption that the window is what a
-# long thread hits first. On this codebase it is not -- MAX_TOKEN_BUDGET
-# above makes a turn unusable at well under half of any modern window, so a
-# window-derived trigger sits at a size the thread can never reach in
-# working order. Compaction defends per-turn cost and step headroom; the
-# window is a backstop below.
+# long thread hits first. On this codebase it is not -- a window-derived
+# trigger sits at a size the thread can never reach in working order, and
+# (since batch 27) there is no default spend ceiling for it to collide with
+# either: the trigger is a CONTEXT-SIZE target, keyed off the provider's
+# own last_input_tokens measurement, and it has never read the billing
+# meter. The model's real window remains a backstop below.
 #
 # This also makes MODEL_CONTEXT_WINDOWS much less dangerous to get wrong,
 # which was a risk §21 flagged about its own design.

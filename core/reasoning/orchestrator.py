@@ -274,17 +274,24 @@ def _check_not_truncated(pass_id: str, response, trace: list[str] | None):
     if stop in (None, "complete"):
         return
     text = (getattr(response, "text", "") or "").strip()
+    # #4: the figures turn a bare reason into a diagnosis. A user who
+    # reads token_budget_exceeded as a context problem is repeating the
+    # exact misreading item 9 recorded.
+    billed = getattr(response, "turn_billed_tokens", None)
+    figures = (f" billed {billed:,} this turn"
+               if isinstance(billed, int) else "")
     if not text:
         raise ValueError(
-            f"{pass_id} ended on {stop!r} with no text. A stop condition "
-            f"returns the last response as it stands, so a pass cut off "
-            f"mid-tool-call yields an empty string -- and every later "
-            f"pass would be working from nothing. "
-            f"(config.RESEARCH_PASS_TOKEN_BUDGET / config.MAX_ITERATIONS "
-            f"are the two ceilings that produce this.)"
+            f"{pass_id} ended on {stop!r} with no text{figures}. A stop "
+            f"condition returns the last response as it stands, so a pass "
+            f"cut off mid-tool-call yields an empty string -- and every "
+            f"later pass would be working from nothing. "
+            f"(config.MAX_ITERATIONS and a configured settings.json "
+            f"max_token_budget spend cap are the two ceilings that "
+            f"produce this.)"
         )
-    message = (f"{pass_id}: TRUNCATED ({stop}) -- the pass was cut off but "
-               f"produced output; continuing with what it returned.")
+    message = (f"{pass_id}: TRUNCATED ({stop}{figures}) -- the pass was cut "
+               f"off but produced output; continuing with what it returned.")
     logger.warning("%s", message)
     if trace is not None:
         trace.append(message)
@@ -543,9 +550,10 @@ def _run_pass_with_json_retry(
             authorization=authorization,
             effort=effort,
             on_response=lambda r: _record_granted_calls(pass_id, r, authorization),
-            # The retry re-enters THIS pass's thread, so it runs on the pass's
-            # budget rather than continue_conversation's chat default.
-            max_total_tokens=config.RESEARCH_PASS_TOKEN_BUDGET,
+            # The retry re-enters THIS pass's thread. No separate pass
+            # ceiling any more (#4): omitting the kwarg lets the wrapper
+            # resolve the configured spend cap, exactly as the pass itself
+            # did.
             validate=lambda payload: _validate_payload(
                 pass_id, payload, claim_ids=claim_ids, ensemble=ensemble),
         )
@@ -1144,8 +1152,8 @@ def stream_deep_research_pipeline(
             # and 6a is one batched call across every flagged claim, which is
             # exactly the shape a model drops an item from. A claim it omitted
             # could never reach D2's cap, so `while flagged:` had no bound at
-            # all: two model calls per round, for ever, each on
-            # RESEARCH_PASS_TOKEN_BUDGET. An omission, an empty list and an
+            # all: two model calls per round, for ever. An omission, an empty
+            # list and an
             # unknown id are indistinguishable here -- the lookup returns None
             # and the `if claim:` skips in silence -- which is why the bound
             # cannot be data the model supplies.

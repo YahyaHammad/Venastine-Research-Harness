@@ -139,12 +139,13 @@ class TestTheJsonPassChecksBeforeRetrying:
         retried.assert_not_called()
 
 
-class TestTheResearchPassBudget:
+class TestTheSpendCap:
 
-    def test_a_pass_runs_on_the_research_budget_not_the_chat_one(self, mocker):
-        """The meter re-counts the whole prompt every step, so a pass
-        making a dozen tool calls with large results hits the chat
-        ceiling long before its context is anywhere near a problem."""
+    def test_a_pass_resolves_the_configured_spend_cap(self, mocker):
+        """#4: there is no separate research constant any more. A pass
+        that does not name a ceiling gets whatever settings.json
+        max_token_budget resolves to -- uncapped by default."""
+        import core.config_loader as config_loader
         from core.events import LoopEvent
 
         seen = {}
@@ -159,19 +160,45 @@ class TestTheResearchPassBudget:
                             stop_reason="complete")
 
         mocker.patch.object(RunAgentLoop, "_run", side_effect=_capture)
+        mocker.patch.object(config_loader, "get_settings",
+                            return_value={"max_token_budget": 777_000})
         RunAgentLoop.run_deep_research_mode(
             pass_input="in", model="m", pass_id="Pass 1")
 
-        assert seen["budget"] == config.RESEARCH_PASS_TOKEN_BUDGET
-        assert seen["budget"] > config.MAX_TOKEN_BUDGET, \
-            "the point is that a pass gets MORE headroom than a chat turn"
+        assert seen["budget"] == 777_000
 
-    def test_the_json_retry_carries_the_same_budget(self, mocker):
-        """The retry re-enters the pass's ALREADY LARGE thread. Falling
-        back to continue_conversation's chat default would cut it off
-        almost immediately -- and a budget stop returns the last response
-        as it stands, which is how an empty pass gets produced in the
-        first place."""
+    def test_an_explicit_none_is_uncapped_even_when_a_cap_is_configured(
+            self, mocker):
+        """The sentinel exists so that passing None KEEPS its old meaning:
+        genuinely uncapped. Settings must not override a caller that said
+        None on purpose."""
+        import core.config_loader as config_loader
+        from core.events import LoopEvent
+
+        seen = {}
+
+        def _capture(memory, system_prompt, provider_name, model, context,
+                     max_steps, max_total_tokens=None, **kw):
+            seen["budget"] = max_total_tokens
+            yield LoopEvent(final_response=make_model_response(text="x"),
+                            stop_reason="complete")
+
+        mocker.patch.object(RunAgentLoop, "_run", side_effect=_capture)
+        mocker.patch.object(config_loader, "get_settings",
+                            return_value={"max_token_budget": 777_000})
+        RunAgentLoop.run_deep_research_mode(
+            pass_input="in", model="m", pass_id="Pass 1",
+            max_total_tokens=None)
+
+        assert seen["budget"] is None
+
+    def test_the_json_retry_leaves_the_cap_to_the_wrapper(self, mocker):
+        """The retry re-enters the pass's thread. Orchestrator no longer
+        forwards a ceiling of its own (#4): omitting the kwarg means
+        continue_conversation resolves the same configured cap the pass
+        ran on -- and a budget stop returns the last response as it
+        stands, which is how an empty pass gets produced in the first
+        place, hence the wrapper rather than a fresh default."""
         _pass_returning(mocker, make_model_response(
             text="not json", stop_reason="complete"))
         seen = {}
@@ -182,13 +209,21 @@ class TestTheResearchPassBudget:
 
         drain(orchestrator._run_pass_with_json_retry("Pass 2", "in", "m", "p", []))
 
-        assert seen["max_total_tokens"] == config.RESEARCH_PASS_TOKEN_BUDGET
+        assert "max_total_tokens" not in seen
 
-    def test_chat_keeps_the_smaller_budget(self):
-        """Raising the research ceiling must not raise the chat spend cap
-        with it -- they are separate numbers for separate uses."""
+    def test_every_public_entry_defaults_to_the_sentinel(self):
+        """Not None: explicit-None means UNCAPPED, and only the sentinel
+        resolves settings.json. If a wrapper drifts back to a plain
+        default, either the configured cap stops applying or explicit-None
+        stops meaning uncapped -- both are contract breaks."""
         import inspect
 
-        signature = inspect.signature(RunAgentLoop.run_agent_conversation)
-        assert signature.parameters["max_total_tokens"].default == \
-            config.MAX_TOKEN_BUDGET
+        import core.loop as core_loop
+
+        for entry in (core_loop.RunAgentLoop.run_agent_conversation,
+                      core_loop.RunAgentLoop.continue_conversation,
+                      core_loop.RunAgentLoop.stream_deep_research_mode):
+            default = inspect.signature(entry).parameters[
+                "max_total_tokens"].default
+            assert default is core_loop._SPEND_UNSET, (
+                f"{entry.__name__}: default drifted to {default!r}")
