@@ -82,6 +82,10 @@ class ConversationMemory:
         `thread_id` is given, because resuming does not reclassify: a
         thread's kind was decided when it was created.
         """
+        # Session-scoped billing (#4): zero on EVERY construction, fresh or
+        # resumed -- see record_billed for why this one is deliberately not
+        # extra_data like its neighbour.
+        self.billed_tokens = 0
         if thread_id is None:
             self.thread_id = create_thread(kind=kind)
             self._messages: list[dict] = []
@@ -192,6 +196,20 @@ class ConversationMemory:
         a real earlier number."""
         if tokens:
             self.set_extra("last_input_tokens", int(tokens))
+
+    # -- session billing (#4) -------------------------------------------------
+
+    def record_billed(self, tokens: int) -> None:
+        """Accumulate this thread's billed input+output for the SESSION.
+
+        Deliberately NOT persisted, unlike last_input_tokens beside it:
+        the scope the TUI's usage line shows is THREAD-SINCE-RESUME. A
+        lifetime total would need a schema column to mean anything (a
+        resumed thread would silently restart at zero anyway, reading as
+        a reset), and #4's figure exists for relative reasoning about
+        this session, not as a ledger.
+        """
+        self.billed_tokens += int(tokens or 0)
 
     def completed_turns(self) -> int:
         """How many turns of this thread are already finished (§21 M5/M11).

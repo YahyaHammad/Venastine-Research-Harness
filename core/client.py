@@ -124,6 +124,24 @@ class ModelResponse:
     # generator, but the CLI and the pipeline drain it, so a notice with
     # only the event route would be invisible in two shells out of three.
     notices: list = field(default_factory=list)
+    # #4 (batch 27): the two per-turn figures the loop computes, set by
+    # _run() like stop_reason -- never by call_model(), which has no turn
+    # concept. UNPRICED APPROXIMATIONS, deliberately: raw provider counts,
+    # no cache-read/write pricing and no currency anywhere. Precise spend
+    # lives in the provider's dashboard; these exist for RELATIVE reasoning
+    # ("is this turn ballooning the context?"), not billing truth.
+    #
+    # turn_billed_tokens: cumulative input+output over this user-turn so
+    # far -- the spend meter's running total (the prompt is re-sent every
+    # step, so this grows quadratically in a tool-using turn, which is
+    # correct: that is what the provider bills).
+    # turn_new_tokens: what THIS TURN added to the thread -- output plus
+    # positive input deltas, the first call's inherited prompt excluded
+    # and mid-turn compaction shrinks clamped away. This is the figure
+    # anything reasoning about SIZE reads; the spend meter must never be
+    # read that way again (TECHNICAL_DEBT item 9, closed batch 27).
+    turn_billed_tokens: Optional[int] = None
+    turn_new_tokens: Optional[int] = None
 
 
 def _tool_arguments(raw_args: str, tool_name: str,

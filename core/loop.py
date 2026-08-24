@@ -558,6 +558,23 @@ def run_to_completion(gen) -> ModelResponse:
     return final
 
 
+# #4 (batch 27). The wrappers' default for max_total_tokens: resolve the
+# configured spend cap (settings.json max_token_budget) at CALL time. A
+# sentinel rather than a plain None default because explicit-None already
+# MEANS something in _run()'s signature -- genuinely uncapped -- and tests
+# pass it deliberately. Resolution lives at the call site, not at def time,
+# so a settings.json written after import is still honoured.
+_SPEND_UNSET = object()
+
+
+def _resolve_spend_cap(max_total_tokens) -> Optional[int]:
+    """_SPEND_UNSET -> the configured cap; anything else passes through."""
+    if max_total_tokens is _SPEND_UNSET:
+        from core.config_loader import spend_cap
+        return spend_cap()
+    return max_total_tokens
+
+
 def return_value_of(gen):
     """Drains a generator and returns what it RETURNED, not what it yielded.
 
@@ -716,6 +733,17 @@ class RunAgentLoop:
                     ", ".join(hidden),
                 )
         total_tokens_used = 0
+        # #4: the size instrument, kept strictly beside the spend meter.
+        # turn_baseline_input is the FIRST call's prompt -- the thread as
+        # this turn inherited it, which this turn did not add. Every later
+        # step contributes its output plus whatever NEW material entered
+        # the context (positive input deltas; a mid-turn compaction SHRINKS
+        # the prompt, and clamping at zero keeps that shrink from being
+        # read as negative growth). turn_billed/turn_new ride every
+        # response; memory.record_billed accumulates thread-since-resume.
+        turn_baseline_input: Optional[int] = None
+        turn_prev_input = 0
+        turn_new_tokens = 0
         # §25 audit trail. Attached to the response object below rather
         # than at each of the three return points, so a stop condition
         # added later cannot forget to carry it -- the list is shared by
@@ -750,10 +778,20 @@ class RunAgentLoop:
                     "call_model_stream completed without yielding a final response"
                 )
 
-            total_tokens_used += (
-                response.usage.get("input_tokens", 0)
-                + response.usage.get("output_tokens", 0)
-            )
+            usage_in = response.usage.get("input_tokens", 0)
+            usage_out = response.usage.get("output_tokens", 0)
+            total_tokens_used += usage_in + usage_out
+            if turn_baseline_input is None:
+                # First call of the turn: its prompt IS the inherited
+                # thread, so only this step's OUTPUT counts as new.
+                turn_baseline_input = usage_in
+            else:
+                turn_new_tokens += max(0, usage_in - turn_prev_input)
+            turn_new_tokens += usage_out
+            turn_prev_input = usage_in
+            memory.record_billed(usage_in + usage_out)
+            response.turn_billed_tokens = total_tokens_used
+            response.turn_new_tokens = turn_new_tokens
 
             # D20: persist EVERY assistant turn BEFORE any branching.
             memory.add_assistant_message(response)
@@ -1042,7 +1080,7 @@ class RunAgentLoop:
         model: str,
         provider_name: str = DEFAULT_PROVIDER,
         max_steps: int = config.MAX_ITERATIONS,
-        max_total_tokens: int = config.MAX_TOKEN_BUDGET,
+        max_total_tokens: Optional[int] = _SPEND_UNSET,
         thread_id: Optional[UUID] = None,
         temperature: Optional[float] = None,
         effort: Optional[str] = None,
@@ -1146,7 +1184,8 @@ class RunAgentLoop:
         response = run_to_completion(RunAgentLoop._run(
             memory, prompt,
             provider_name, model, context,
-            max_steps, max_total_tokens, temperature=temperature, effort=effort,
+            max_steps, _resolve_spend_cap(max_total_tokens),
+            temperature=temperature, effort=effort,
             response_channel=response_channel, **auth_kwargs,
         ))
         response.thread_id = memory.thread_id
@@ -1159,13 +1198,12 @@ class RunAgentLoop:
         pass_id: str,
         provider_name: str = DEFAULT_PROVIDER,
         max_steps: int = config.MAX_ITERATIONS,
-        # A pass gets its OWN, larger ceiling. The meter re-counts the whole
-        # prompt every step, so a pass making a dozen tool calls with large
-        # results hits the chat budget long before its context is anywhere
-        # near a problem -- and a budget stop returns the last response as
-        # it stands, which for a tool-calling step means EMPTY TEXT. See
-        # config.RESEARCH_PASS_TOKEN_BUDGET for the run that found this.
-        max_total_tokens: int = config.RESEARCH_PASS_TOKEN_BUDGET,
+        # #4: _SPEND_UNSET resolves the configured settings.json cap; a
+        # pass has no separate ceiling any more. The old constant existed
+        # because the chat budget was misread as a size limit -- with the
+        # meter correctly a spend meter and uncapped by default, the
+        # workaround's reason is gone (TECHNICAL_DEBT item 9, closed).
+        max_total_tokens: Optional[int] = _SPEND_UNSET,
         temperature: Optional[float] = None,
         effort: Optional[str] = None,
         context: Optional[ToolContext] = None,
@@ -1203,7 +1241,7 @@ class RunAgentLoop:
         pass_id: str,
         provider_name: str = DEFAULT_PROVIDER,
         max_steps: int = config.MAX_ITERATIONS,
-        max_total_tokens: int = config.RESEARCH_PASS_TOKEN_BUDGET,
+        max_total_tokens: Optional[int] = _SPEND_UNSET,
         temperature: Optional[float] = None,
         effort: Optional[str] = None,
         context: Optional[ToolContext] = None,
@@ -1253,7 +1291,8 @@ class RunAgentLoop:
         response = None
         for event in RunAgentLoop._run(
             memory, system_prompt, provider_name, model, context,
-            max_steps, max_total_tokens, temperature=temperature, effort=effort,
+            max_steps, _resolve_spend_cap(max_total_tokens),
+            temperature=temperature, effort=effort,
             # §21 M6. A pass is headless and unattended and already returns
             # a distillation, so routine compaction here would spend on a
             # judgment call nobody is watching. The backstop still fires
@@ -1284,7 +1323,7 @@ class RunAgentLoop:
         model: str,
         provider_name: str = DEFAULT_PROVIDER,
         max_steps: int = config.MAX_ITERATIONS,
-        max_total_tokens: int = config.MAX_TOKEN_BUDGET,
+        max_total_tokens: Optional[int] = _SPEND_UNSET,
         temperature: Optional[float] = None,
         effort: Optional[str] = None,
         context: Optional[ToolContext] = None,
@@ -1314,7 +1353,8 @@ class RunAgentLoop:
         memory.add_user_message(message)
         response = run_to_completion(RunAgentLoop._run(
             memory, system_prompt, provider_name, model, context,
-            max_steps, max_total_tokens, temperature=temperature, effort=effort,
+            max_steps, _resolve_spend_cap(max_total_tokens),
+            temperature=temperature, effort=effort,
             **_authorization_kwargs(authorization),
         ))
         response.thread_id = thread_id

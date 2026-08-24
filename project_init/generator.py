@@ -152,10 +152,8 @@ def _run_initializer(project_path: str, kind: str, existing: Optional[str],
         model=agent.model or model,
         provider_name=agent.provider or provider_name,
         max_steps=agent.max_steps or config.INIT_MAX_STEPS,
-        # §26's reasoning, second instance: a tool-heavy run on the chat
-        # budget is cut off by a meter that re-counts the whole prompt every
-        # step, long before its context is a problem.
-        max_total_tokens=config.INIT_TOKEN_BUDGET,
+        # #4: no separate /init ceiling any more -- the wrapper resolves the
+        # configured spend cap, same as every other path.
         context=context,
         system_prompt=system_prompt,
         # §27: the initializer is a SIXTH thread source. Left unlabelled it

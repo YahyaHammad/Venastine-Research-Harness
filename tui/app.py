@@ -632,7 +632,11 @@ class VenastineApp(App):
             model,
             context,
             max_steps,
-            config.MAX_TOKEN_BUDGET,
+            # #4: the TUI turn runs on the configured spend cap, same as
+            # every other path. _SPEND_UNSET would resolve it too; passing
+            # the resolved value explicitly keeps this direct-_run call
+            # honest about what it is doing.
+            config_loader.spend_cap(),
             effort=self.effort,
             response_channel=self.response_channel(),
         )

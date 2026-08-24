@@ -848,13 +848,13 @@ class TestGenerating:
         _generate()
         assert fake_agent[0]["thread_kind"] == THREAD_KIND_SUBAGENT
 
-    def test_the_run_gets_its_own_budget_not_the_chat_one(self, project,
-                                                          fake_agent):
-        """I7 / §26's reasoning: a tool-heavy run on MAX_TOKEN_BUDGET is cut
-        off by a meter that re-counts the whole prompt every step."""
+    def test_the_run_inherits_the_configured_spend_cap(self, project,
+                                                       fake_agent):
+        """#4: there is no separate /init ceiling any more. Omitting the
+        kwarg lets the wrapper resolve settings.json max_token_budget --
+        uncapped by default -- exactly as every other path does."""
         _generate()
-        assert fake_agent[0]["max_total_tokens"] == config.INIT_TOKEN_BUDGET
-        assert config.INIT_TOKEN_BUDGET > config.MAX_TOKEN_BUDGET
+        assert "max_total_tokens" not in fake_agent[0]
 
     def test_the_agent_can_only_read(self, project, fake_agent):
         """The initializer writes nothing itself (I8) — the shell does."""

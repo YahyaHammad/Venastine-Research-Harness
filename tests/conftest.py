@@ -489,6 +489,10 @@ class FakeMemory:
         # test is unaffected. A test that WANTS compaction sets this.
         self.last_input_tokens = 0
         self.recorded_tokens = []
+        # Batch 27 (#4): mirrors the real memory's session-scoped billing
+        # accumulator -- same shape, same scope (per object, never
+        # persisted), so growth tests can assert the thread total.
+        self.billed_tokens = 0
         self.checkpoints_applied = 0
 
     def add_user_message(self, text):
@@ -504,6 +508,9 @@ class FakeMemory:
         self.recorded_tokens.append(tokens)
         if tokens:
             self.last_input_tokens = tokens
+
+    def record_billed(self, tokens):
+        self.billed_tokens += int(tokens or 0)
 
     def apply_checkpoint(self):
         self.checkpoints_applied += 1

@@ -57,6 +57,13 @@ _KNOWN_SETTINGS = {
     # can do here is make runs think harder and spend more tokens, which is
     # compaction-settings territory, not granted-tools territory.
     "effort": str,
+    # Batch 27 (#4). The optional per-run SPEND ceiling, in billed
+    # input+output tokens. None/absent -- the default -- means UNCAPPED:
+    # hard spend limits are the provider's dashboard's job, and a harness
+    # cap that misreads as a context limit is the exact defect #4 records.
+    # Cost knob, not authority, so effort's merge rule applies (normal
+    # tiers; deliberately NOT an R12 by-name rejection).
+    "max_token_budget": (int, type(None)),
     "ensemble_mode": bool,
     "ensemble_n": int,
     "compaction": dict,
@@ -89,12 +96,12 @@ _KNOWN_COMPACTION = {
     "keep_recent_tokens": int,
     # ROADMAP_v2 §21 (M1). This was `buffer_tokens` while §21 was specified
     # as "headroom before the model's context window". It is not headroom:
-    # the trigger is a WORKING-SET TARGET, because MAX_TOKEN_BUDGET makes a
-    # turn unusable at well under half of any modern window and a
-    # window-derived threshold sits at a size the thread can never reach in
-    # working order. Renamed rather than redefined -- a key that keeps its
-    # name and changes its meaning is worse than one that moves, and these
-    # keys have been inert since §14 so nothing depends on the old spelling.
+    # the trigger is a WORKING-SET TARGET -- a window-derived threshold
+    # sits at a size a working thread never reaches, while ~40k keeps turns
+    # cheap and their tool steps intact. Renamed rather than redefined -- a
+    # key that keeps its name and changes its meaning is worse than one
+    # that moves, and these keys have been inert since §14 so nothing
+    # depends on the old spelling.
     "trigger_tokens": int,
     "warning_margin_tokens": int,
     # §21 M5 / M2 / retry bound.
@@ -540,12 +547,21 @@ def _discover(kind: str, project_path: str, trusted: bool) -> dict:
 
 def _type_ok(value, expected) -> bool:
     # bool is a subclass of int in Python, so int-typed keys must reject
-    # booleans explicitly, and bool-typed keys must reject ints.
-    if expected is bool:
-        return isinstance(value, bool)
-    if expected is int:
-        return isinstance(value, int) and not isinstance(value, bool)
-    return isinstance(value, expected)
+    # booleans explicitly, and bool-typed keys must reject ints -- including
+    # through a tuple expected-type: isinstance(True, (int, type(None))) is
+    # True, and max_token_budget=True would otherwise sail through as 1.
+    expecteds = expected if isinstance(expected, tuple) else (expected,)
+    if isinstance(value, bool):
+        return bool in expecteds
+    ok = False
+    for e in expecteds:
+        if e is bool:
+            continue          # a non-bool value can never match bool
+        if e is int:
+            ok = ok or isinstance(value, int)
+        else:
+            ok = ok or isinstance(value, e)
+    return ok
 
 
 def _validate_settings(data, source: str) -> None:
@@ -600,8 +616,10 @@ def _validate_settings(data, source: str) -> None:
             raise ValueError(f"settings.json at {source}: unknown key {key!r}")
         expected = _KNOWN_SETTINGS[key]
         if not _type_ok(value, expected):
+            expected_name = getattr(expected, "__name__", None) \
+                or "an int or null"
             raise ValueError(
-                f"settings.json at {source}: key {key!r} must be {expected.__name__}, "
+                f"settings.json at {source}: key {key!r} must be {expected_name}, "
                 f"got {type(value).__name__}")
     for section, known_keys in _NESTED_SETTINGS.items():
         block = data.get(section)
@@ -736,26 +754,34 @@ def effective_compaction(overrides: Optional[dict] = None,
 
     # M1's arithmetic, enforced rather than left in a comment. The prompt
     # is re-billed on every step of a tool-using turn, so a turn starting
-    # at T tokens and running k steps spends roughly k*T against
-    # MAX_TOKEN_BUDGET. A trigger too close to the budget lets a thread
-    # reach a size where the budget stop ends the turn after one response
-    # -- compaction would then only ever fire on the turn AFTER the one it
-    # should have saved.
+    # at T tokens and running k steps spends roughly k*T against the
+    # CONFIGURED spend cap (settings.json max_token_budget). A trigger too
+    # close to that cap lets a thread reach a size where the cap ends the
+    # turn after one response -- compaction would then only ever fire on
+    # the turn AFTER the one it should have saved.
+    #
+    # ONLY MEANINGFUL WHEN A CAP EXISTS (#4). Uncapped -- the default --
+    # nothing competes with compaction: the trigger is a context-size
+    # target and always was; the billing meter never gated it and now
+    # gates nothing at all by default.
     # WARN ONLY WHEN ASKED, which is once at startup. This function is
     # on should_compact()'s path, so it runs once per step of every
     # turn -- an unconditional warning here would repeat a
     # configuration complaint dozens of times per conversation, which
     # is how a real warning becomes one nobody reads. The VALIDATION
     # above still raises on every call; only the advisory is gated.
-    headroom = config.MAX_TOKEN_BUDGET / max(values["trigger_tokens"], 1)
-    if warn and headroom < 3:
-        logger.warning(
-            "compaction.trigger_tokens (%s) leaves room for only ~%.1f model "
-            "calls within MAX_TOKEN_BUDGET (%s), because a tool-using turn "
-            "re-sends its whole prompt each step. Turns on a nearly-full "
-            "thread will stop early with token_budget_exceeded before "
-            "compaction gets a chance. Lower the trigger or raise the budget.",
-            values["trigger_tokens"], headroom, config.MAX_TOKEN_BUDGET)
+    cap = spend_cap()
+    if warn and cap is not None:
+        headroom = cap / max(values["trigger_tokens"], 1)
+        if headroom < 3:
+            logger.warning(
+                "compaction.trigger_tokens (%s) leaves room for only ~%.1f model "
+                "calls within your configured spend cap max_token_budget (%s), "
+                "because a tool-using turn re-sends its whole prompt each "
+                "step. Turns on a nearly-full thread will stop early with "
+                "token_budget_exceeded before compaction gets a chance. "
+                "Lower the trigger or raise the cap.",
+                values["trigger_tokens"], headroom, cap)
     return values
 
 
@@ -918,6 +944,24 @@ def get_settings() -> dict:
     if _state is None:
         return {}  # pre-init consumers fall through to config.py defaults
     return dict(_state["settings"])
+
+
+def spend_cap() -> Optional[int]:
+    """The configured per-run spend ceiling (#4), or None for uncapped.
+
+    The single resolution point every path reaches through the loop
+    wrappers' `_SPEND_UNSET` sentinel: chat turns, each research pass,
+    /init, the reviewer and its retries. One number applies per _run()
+    invocation -- a user turn, a pass, an init run -- because that is what
+    a spend ceiling means; nothing here reasons about context size, which
+    is thresholds()/context_limit()'s instrument (compaction has NEVER
+    keyed off this figure).
+
+    None -- the default, with or without the key present -- runs uncapped:
+    #4's whole point is that the harness's cumulative counter is a billing
+    meter, and hard spend limits belong to the provider's dashboard.
+    """
+    return get_settings().get("max_token_budget")
 
 
 def get_project_path() -> Optional[str]:
