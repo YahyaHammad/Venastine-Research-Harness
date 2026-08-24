@@ -66,7 +66,7 @@ Venastine Research Harness/
 │   ├── test_streaming_loop.py      # 16 tests -- ROADMAP §13 generator event ordering, exception propagation, D20 persistence, permission_channel, and #158's actionable headless denial (name-gated vs argument-gated)
 │   ├── test_workspace_trust.py     # 22 tests -- ROADMAP_v2 §14 AC1/AC2 + hash-control properties (path-in-hash, determinism)
 │   ├── test_config_loader.py       # 69 tests -- ROADMAP_v2 §14 frontmatter AC4, tier precedence D8/D18, settings merge, CONTEXT opt-in AC5, catalog, #45's repair-not-reject max_steps
-│   ├── test_load_skill.py          # 7 tests -- load_skill view-only retrieval, D24 permission declaration, catalog prompt injection
+│   ├── test_load_skill.py          # 8 tests -- load_skill view-only retrieval, D24 permission declaration, catalog prompt injection
 │   ├── test_orchestrator.py        # 37 tests -- full pipeline mocked + JSON-retry + §5 failure/success/acceptance
 │   ├── test_registry_permissions.py# 11 tests -- allow/deny/approval
 │   ├── test_tool_budgets.py        # 33 tests -- ROADMAP_v2 §31 what a tool call may cost: the declaration and its import-time assert, the killable child, and the evidence-on-disk test that a timed-out call is STOPPED rather than abandoned
