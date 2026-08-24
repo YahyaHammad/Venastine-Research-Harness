@@ -1,7 +1,11 @@
 """
 tui/themes.py
 
-ROADMAP_v2 §16. Eight themes: dark/light x plain/red/green/blue.
+Fourteen themes: the eight-theme neutral grid (dark/light x
+plain/red/green/blue) plus six standalone tinted themes (matrix,
+nightmare, ember, midnight, glassy-lapis, paper) whose PANELS carry the
+identity -- background/surface/panel are theirs, not the grid's shared
+neutrals.
 
 Pure presentation -- no import of core/, no harness state. The only thing
 outside this module that knows a theme name is the persisted `tui.theme`
@@ -17,7 +21,8 @@ from textual.theme import Theme
 
 # Shared neutrals. The accent variants below change only the three hue
 # slots (primary/secondary/accent), so a colour tweak to the base surfaces
-# lands in all eight themes at once rather than eight near-copies drifting.
+# lands in all eight grid themes at once rather than eight near-copies
+# drifting.
 _DARK_BASE = {
     "background": "#0f1115",
     "surface": "#171a21",
@@ -42,11 +47,18 @@ _LIGHT_BASE = {
 
 # (primary, secondary, accent) per variant. Dark and light get separate
 # values because a hue readable on #0f1115 is usually too pale on #f7f7f5.
+#
+# The four DARK secondaries were lifted in batch 29 (#14): the pass role
+# renders in `secondary`, and every original value sat below 3.5:1 against
+# the shared dark background -- plain at 3.37 was the filed defect, red
+# ~2.7 and blue ~3.0 were the same defect nobody had measured. The floor
+# is pinned in tests/test_themes.py; these are the minimal luminance moves
+# that clear it.
 _ACCENTS_DARK = {
-    "plain": ("#8a93a3", "#5f6879", "#a9b2c3"),
-    "red": ("#d4674f", "#96422f", "#e8917b"),
-    "green": ("#5fa876", "#3d7350", "#8ecba1"),
-    "blue": ("#5b90cc", "#3a6294", "#8bb6e6"),
+    "plain": ("#8a93a3", "#8792a2", "#a9b2c3"),
+    "red": ("#d4674f", "#b0513c", "#e8917b"),
+    "green": ("#5fa876", "#4d8f63", "#8ecba1"),
+    "blue": ("#5b90cc", "#4a76b3", "#8bb6e6"),
 }
 
 _ACCENTS_LIGHT = {
@@ -55,6 +67,65 @@ _ACCENTS_LIGHT = {
     "green": ("#3f7f57", "#2b5a3c", "#5d9c74"),
     "blue": ("#3f6fa8", "#2b4d76", "#6091c7"),
 }
+
+# Standalone tinted themes (batch 29). Each OVERRIDES the shared base
+# outright -- that is their identity: the panels themselves carry the
+# palette, not just borders and text. Severity slots default to the grid
+# trio and are overridden ONLY where contrast against the theme's own
+# tint demands it, keeping the semantic hue family (danger stays
+# red-ish); every override carries its reason, and the floors live in
+# tests/test_themes.py (foreground >= 7:1, severity >= 4:1, identity
+# >= 3.5:1, all against the theme's own background).
+_STANDALONE = [
+    dict(
+        name="matrix", dark=True,
+        background="#0a120c", surface="#0f1a12", panel="#14231a",
+        foreground="#c8e6d0",
+        primary="#3dd968", secondary="#2f9e52", accent="#7dffb0",
+        # success overridden: the shared #5aa86f dissolves into matrix's
+        # own green-dark background.
+        success="#4ee08a",
+    ),
+    dict(
+        name="nightmare", dark=True,
+        background="#140b0e", surface="#1c0f14", panel="#251318",
+        foreground="#e8d5d8",
+        primary="#c94f5f", secondary="#a8556a", accent="#e88a96",
+        # error overridden: red-on-red -- the shared #cf5c4a loses the
+        # alarm against nightmare's blood background.
+        error="#ff7b6b",
+    ),
+    dict(
+        name="ember", dark=True,
+        background="#16100a", surface="#1f1610", panel="#291d13",
+        foreground="#ecdfd0",
+        primary="#e08a3c", secondary="#a86228", accent="#f2b06a",
+        # warning overridden yellower: the shared amber sat on top of
+        # ember's primary orange and read as emphasis, not as caution.
+        warning="#d9b83f",
+    ),
+    dict(
+        name="midnight", dark=True,
+        background="#0a0f1e", surface="#101830", panel="#16203c",
+        foreground="#d5dcea",
+        primary="#6f9fe8", secondary="#4a6fb0", accent="#9dbdf2",
+    ),
+    dict(
+        name="glassy-lapis", dark=True,
+        background="#14243f", surface="#1c2f52", panel="#243a63",
+        foreground="#e2ecf8",
+        primary="#7fb4ff", secondary="#5a8ac9", accent="#a8ccff",
+        # error overridden: lapis is the lightest dark background, and
+        # the shared #cf5c4a fell just under the severity floor on it.
+        error="#e06a58",
+    ),
+    dict(
+        name="paper", dark=False,
+        background="#f4efe6", surface="#fbf8f2", panel="#eae3d5",
+        foreground="#2b2620",
+        primary="#7a5c2e", secondary="#5c4a32", accent="#9c7b45",
+    ),
+]
 
 
 def _build(variant: str, dark: bool) -> Theme:
@@ -71,11 +142,20 @@ def _build(variant: str, dark: bool) -> Theme:
     )
 
 
-ALL_THEMES = [
-    _build(variant, dark)
-    for dark in (True, False)
-    for variant in ("plain", "red", "green", "blue")
-]
+def _build_standalone(spec: dict) -> Theme:
+    base = _DARK_BASE if spec["dark"] else _LIGHT_BASE
+    merged = {**base, **{k: v for k, v in spec.items() if k != "name"}}
+    return Theme(name=spec["name"], **merged)
+
+
+ALL_THEMES = (
+    [
+        _build(variant, dark)
+        for dark in (True, False)
+        for variant in ("plain", "red", "green", "blue")
+    ]
+    + [_build_standalone(spec) for spec in _STANDALONE]
+)
 
 THEME_NAMES = [t.name for t in ALL_THEMES]
 DEFAULT_THEME = "dark-plain"
@@ -97,17 +177,22 @@ def register_all(app) -> None:
 #
 # WHY THIS IS A FUNCTION OF A THEME rather than a table of colour names.
 # Everything else in the TUI styles itself through app.tcss, which uses
-# theme variables ($panel, $primary) and so restyles across all eight themes
-# without edits. A RichLog cannot do that -- it renders Rich Text objects,
-# and a Rich style needs a concrete colour, not a variable to resolve later.
-# So the resolution happens here, against the Theme object, and the same
-# property holds: no literal appears below, and a new theme needs no change
-# in this section.
+# theme variables ($panel, $primary) and so restyles across all fourteen
+# themes without edits. A RichLog cannot do that -- it renders Rich Text
+# objects, and a Rich style needs a concrete colour, not a variable to
+# resolve later. So the resolution happens here, against the Theme
+# object, and the same property holds: no literal appears below, and a
+# new theme needs no change in this section.
 #
-# Only THREE colours are guaranteed to mean the same thing in every theme --
-# warning, error and success are shared by _DARK_BASE and _LIGHT_BASE, while
-# primary/secondary/accent are the per-variant hues. So severity roles use
-# the shared three and identity roles use the hues, rather than the reverse.
+# Severity colours. Across the eight GRID themes, warning/error/success
+# are shared by _DARK_BASE and _LIGHT_BASE and mean the same thing
+# everywhere; primary/secondary/accent are the per-variant hues. A
+# STANDALONE theme may override a severity slot when its own panel tint
+# would swallow the shared value (matrix's success, nightmare's error,
+# ember's warning, glassy-lapis's error -- each with its reason above),
+# keeping the semantic hue family. Either way severity uses the
+# theme-resolved trio and identity uses the hues, rather than the
+# reverse. Floors are pinned in tests/test_themes.py.
 
 def role_styles(theme: Theme) -> dict[str, str]:
     """Rich style strings keyed by transcript role, for one theme.
