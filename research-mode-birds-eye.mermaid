@@ -1,0 +1,67 @@
+%% Venastine research mode — bird's eye view of the CURRENT pipeline.
+%% Companion to the detailed set in claude/research-mode/ (files 00-05).
+%% Dashed = off by default. Stages that make no model call say so.
+%% NOTE on labels: bold and line-break tags render everywhere tested. The small
+%% tag does not — some viewers escape it into visible text, others ignore it —
+%% so hierarchy here comes from bold headers, never from font size.
+%%{init: {"flowchart": {"wrappingWidth": 420, "nodeSpacing": 35, "rankSpacing": 45}}}%%
+flowchart TD
+    ORIGQ["<b>Original query</b>"]
+    P0["<b>Pass 0 · Preliminary plan</b><br/>reads the query alone · what needs establishing,<br/>which entities matter"]
+    P1["<b>Pass 1 · Initial generation</b><br/>query + plan as LOOSE context<br/>prose only — no self-hedging, no self-tagging"]
+    ENS["<b>Ensemble mode</b><br/>one candidate per entry in ENSEMBLE_MODELS —<br/>DIFFERENT MODELS, not resampling<br/>a failed candidate is traced and skipped"]
+    P2["<b>Pass 2 · Claim extraction</b><br/>reads the raw response ONLY<br/>JSON list of atomic claims, INDEPENDENTLY classified<br/>factual · synthesis · speculative<br/>ensemble: union of claims + asserted_by_candidates"]
+    D0{"<b>Claim type?</b><br/>pure code"}
+    P3a["<b>3a · Source grounding</b><br/>critic model · entities deduplicated IN CODE<br/>one search per unique ENTITY, not per claim<br/>query re-derived from the entity, not the phrasing<br/>into grounded · partial · ungrounded"]
+    P3b["<b>3b · Critic pass</b><br/>critic model · reads the raw response and the<br/>grounded claims, returns fallacies, contradictions,<br/>severity"]
+    P3c["<b>3c · Completeness</b><br/>reads the ORIGINAL QUERY AND PLAN ONLY,<br/>never Pass 1's answer, returns gaps + coverage_score"]
+    P5["<b>Pass 5 · Assumption audit</b><br/>ALL claims + grounding + critic + completeness<br/>hidden premises · framing · domain gaps<br/>runs BEFORE Pass 4, by design"]
+    P4["<b>Pass 4 · Confidence tiers</b><br/>PURE CODE, ZERO MODEL CALLS<br/>0.5 x grounding + 0.35 x (1 - severity) - 0.15 per flag<br/>- 0.15 x (1 - consistency) when ensemble is on<br/>non-factual capped at 0.65 · thresholds .8 / .55 / .3<br/>ungrounded factual is UNVERIFIED whatever the score<br/>gaps become UNVERIFIED_COVERAGE, not claims"]
+    D1{"<b>Tier in LOW<br/>or UNVERIFIED?</b><br/>pure code"}
+    P6a["<b>Pass 6a · Revise</b><br/>ONE batched call over every flagged claim<br/>each paired with the feedback that flagged it<br/>retry_count increments for the ROUND, not per reply"]
+    P6c["<b>Pass 6c · Re-validate</b><br/>critic model · the revised subset only<br/>re-runs 3a + 3b, then Pass 4 re-scores THAT batch<br/>does NOT re-run Pass 5 — assumption flags never clear"]
+    D1b{"<b>Still flagged?</b><br/>pure code"}
+    D2{"<b>Retry cap reached?</b><br/>pure code · MAX_PIPELINE_RETRIES = 2"}
+    FB["<b>Fallback</b><br/>templated · tier forced to UNVERIFIED + a note"]
+    P6b["<b>Pass 6b · Annotate</b><br/>templated, no model call<br/>final_text and a [TIER] tag on every claim"]
+    MRG["<b>Merge</b><br/>pure code · claim set + coverage gaps"]
+    FIN["<b>Final synthesis</b><br/>writes the report FROM the tiered claims,<br/>so it cannot assert what the claim set does not carry"]
+    REV["<b>Post-pipeline review</b><br/>off by default · a subagent reads the DISTILLED<br/>artifacts and proposes corrections<br/>every change needs consent; no consent route means<br/>nothing applied · an accepted fix re-runs synthesis"]
+    OUT["<b>PipelineRun</b><br/>final_report · claims (tier + score_breakdown) ·<br/>assumptions · coverage_gaps · trace · granted_calls ·<br/>pass_threads, plus the /output/RUN_ID/ directory"]
+
+    ORIGQ --> P0 --> P1
+    ORIGQ -. "query + plan, never Pass 1's answer" .-> P3c
+    P0 -.-> P3c
+    P1 -. optional .-> ENS
+    ENS -. "candidates concatenated as labelled input" .-> P2
+    P1 --> P2
+    P2 -. "asserted_by_candidates" .-> P4
+    P2 --> D0
+    D0 -- "factual" --> P3a --> P3b --> P3c
+    D0 -- "synthesis / speculative<br/>(never grounded)" --> P3c
+    P3c --> P5 --> P4 --> D1
+    D1 -- "flagged" --> P6a --> P6c --> D1b
+    D1b -- "still flagged" --> D2
+    D2 -- "no · loop" --> P6a
+    D2 -- "yes · exhausted" --> FB --> P6b
+    D1b -- "now clean" --> P6b
+    D1 -- "clean" --> P6b
+    P6b --> MRG --> FIN --> REV --> OUT
+
+    classDef teal fill:#0d5c4e,stroke:#0d5c4e,color:#a7e8d4
+    classDef purple fill:#463a8f,stroke:#463a8f,color:#c9c0f0
+    classDef blue fill:#1f5f8b,stroke:#1f5f8b,color:#bcdcf0
+    classDef brown fill:#8a3f10,stroke:#8a3f10,color:#f2c396
+    classDef maroon fill:#7a1f4b,stroke:#7a1f4b,color:#f0b8d4
+    classDef olive fill:#4a6b1f,stroke:#4a6b1f,color:#d4e8b0
+    classDef gray fill:#4a4a4a,stroke:#4a4a4a,color:#e0e0e0
+    classDef dashed fill:#2e2e2e,stroke:#888,stroke-dasharray: 4 3,color:#cfcfcf
+
+    class P0,P1,FIN,MRG,OUT teal
+    class P2,P5 purple
+    class P3a,P6c blue
+    class P3b,P6a brown
+    class P3c maroon
+    class P4 olive
+    class D0,D1,D1b,D2,FB,P6b gray
+    class ORIGQ,ENS,REV dashed

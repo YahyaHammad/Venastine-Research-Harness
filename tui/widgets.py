@@ -152,7 +152,7 @@ class GoalBanner(Static):
             self.display = True
             # The palette, not a literal (#116): `warning` is one of the
             # three theme-invariant roles, so the hue means the same thing
-            # on all eight themes. The WEIGHT stays bold -- composing it
+            # on every theme. The WEIGHT stays bold -- composing it
             # here is what role_styles itself does ("bold {theme.primary}")
             # -- but guarded, because a bare-built widget has no styles
             # dict to draw the colour from.
@@ -316,6 +316,14 @@ class ResearchProgress(Static):
         was: it made no model call, so it has no observable running
         state."""
         self._passes.append([pass_id, True, False, True, 0, 0])
+        self._redraw()
+
+    def restyle(self) -> None:
+        """Re-render under the current theme (#183).
+
+        Public wrapper over _redraw: the panel renders through Rich
+        styles resolved per draw, so a /theme switch cannot reach it via
+        tcss -- the same reason Transcript needs rerender()."""
         self._redraw()
 
     def tool_called(self, pass_id: str) -> None:

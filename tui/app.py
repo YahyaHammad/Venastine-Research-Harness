@@ -823,6 +823,22 @@ class VenastineApp(App):
         self.query_one("#usage-line", UsageLine).update_usage(
             self._memory.billed_tokens, self._memory.last_input_tokens)
 
+    def restyle_sidebar(self) -> None:
+        """Re-render the Rich-styled sidebar widgets after a /theme
+        (#183).
+
+        tcss-styled surfaces (the ravens, borders, the prompt) restyle
+        the moment app.theme changes; the Rich-rendering ones do not --
+        Transcript has rerender() for the same reason, and these are the
+        sidebar's equivalent. UsageLine is deliberately absent: its only
+        role is `system` -- dim italic, colourless -- so there is nothing
+        to restyle, and a guard-skipped update would be machinery
+        pretending to work.
+        """
+        self.refresh_goal_banner()
+        self.refresh_todo_panel()
+        self.query_one("#research-progress", ResearchProgress).restyle()
+
     def on_loop_event_message(self, message: LoopEventMessage) -> None:
         event = message.event
         transcript = self._transcript
@@ -1557,6 +1573,11 @@ def _cmd_theme(app: VenastineApp, args: str) -> None:
         app._transcript.write_system(
             f"Current theme: {app.theme}. Available: {', '.join(themes.THEME_NAMES)}"
         )
+        # #14's discoverability note. With standalone tinted themes this
+        # is truer than ever: /theme is not a border tweak.
+        app._transcript.write_system(
+            "Themes restyle panels, transcript roles, and code blocks."
+        )
         return
     if args not in themes.THEME_NAMES:
         app._transcript.write_error(
@@ -1569,6 +1590,11 @@ def _cmd_theme(app: VenastineApp, args: str) -> None:
     # which would leave the session split between two colour schemes at
     # the exact line this command was typed.
     app._transcript.rerender()
+    # #183. The sidebar's Rich-styled widgets are in the same boat as the
+    # transcript -- resolved per draw, invisible to tcss -- so they get
+    # the same treatment instead of keeping the old palette until their
+    # next event happened to fire.
+    app.restyle_sidebar()
     app._transcript.write_system(f"Theme set to {args}.")
 
 

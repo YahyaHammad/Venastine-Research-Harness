@@ -5882,3 +5882,80 @@ five — #6, #8, #9, #12, #14 — plus enhancement #183, uncounted per the
 tracker's own rule. (A first draft of this entry and of the tracker edit both
 wrote "six" against a five-item list; caught on read-back, which is why the
 tracker header now enumerates instead of only counting.)
+## Batch 29 — the TUI themes: six standalone palettes, and #14 pinned shut (2026-08-24)
+
+Two commits on `fix/batch-29-tui-themes` (WP-A a6af325, WP-B a30fd34). No
+BREAKING_CHANGES rows — presentation plus test pins; the only production
+values that changed are four hexes the new contrast floor required.
+
+### What the owner asked for, and what the code said
+
+Five tinted themes by name (matrix, nightmare, ember, midnight,
+glassy-lapis) + paper by suggestion. The mechanism finding that kept this
+small: textual's Theme carries background/surface/panel directly and `App {
+background: $background }` paints everything, so tinted panels are PURE
+DATA — a `_BASE_OVERRIDES`-style standalone list merged over the shared
+base in `_build_standalone`, with the shipped eight untouched except the
+four hexes below. No `.tcss` changes at all.
+
+### The owner's calls
+
+Verbatim names (hyphenated glassy-lapis); standalone overrides allowed to
+touch the severity trio where the theme's own tint would swallow the shared
+value (amending the old "shared across all eight" invariant — each override
+carries its reason in themes.py); bundle #183 AND #14; paper added, other
+suggested names taken.
+
+### #14, resolved by generalizing remedy 2
+
+The issue was about dark-plain's pass role at 3.37:1. Measuring before
+choosing: ALL FOUR dark grid secondaries failed a 3.5:1 identity floor
+(red ~2.7, blue ~3.0, green ~3.4). So remedy 2 (widen the tonal spread)
+applied to the whole dark grid — four secondary nudges (plain #5f6879 ->
+#8792a2, red #96422f -> #b0513c, green #3d7350 -> #4d8f63, blue #3a6294 ->
+#4a76b3) — with DEFAULT_THEME deliberately unchanged (remedy 1 rejected:
+the understated default was a choice, and chromatic-everything is now a
+/theme away). Remedy 3 rejected: rearchitecture with no defect left.
+
+The floors are two-tier on purpose: identity >= 3.5 on dark backgrounds,
+>= 3.0 on light (WCAG large-text AA) — the first contrast run failed five
+LIGHT accents at a flat 3.5 floor, which would have nudged the entire
+light grid to satisfy a defect that only existed on dark. Foreground >=
+7:1 and severity >= 4:1 are flat. One override beyond the planned four:
+glassy-lapis's error (#cf5c4a sat at 3.87 on the lightest dark background;
+-> #e06a58).
+
+### Build findings worth keeping
+
+- **The contrast checker is the test.** tests/test_themes.py computes WCAG
+  ratios from the Theme objects, so a fifteenth theme inherits every pin
+  for free. Its first mutant lesson: the M3 "violating" hex #1f7a3d
+  computed 3.54 — just PASSES. Mutants need arithmetic, not vibes; the
+  darkened #19632f (2.61) is the honest red.
+- **A flat contrast floor would have failed five shipped light accents**
+  (3.02-3.46). Two-tier floors are not fence-sitting; they are what stops
+  a legitimate fix from demanding unrelated churn.
+- **Class-level mock binding, second occurrence** (batch 26's GoalBanner
+  lesson): patching ResearchProgress.restyle at class level made the
+  non-descriptor mock drop self. Instance-level after mount, every time.
+- `git add -A` swept the owner's still-untracked
+  research-mode-birds-eye.mermaid into WP-A's commit; amended out before
+  anything was shared. The mermaid + README work stays with the owner's
+  separate follow-up, per their note.
+- UsageLine is deliberately NOT in restyle_sidebar: its only role is
+  `system` — dim italic, colourless — so a restyle there would be
+  machinery pretending to work.
+
+### Mutation ledger (all RED)
+
+WP-A: matrix fell back to grid base · success slot deleted · matrix
+secondary below floor. WP-B: restyle_sidebar call removed · theme hint
+removed.
+
+### Housekeeping
+
+Counts 2425 -> 2545 (+120 test_themes.py). Docs: themes.py docstring and
+severity-invariant comment, AGENTS §26 bullet, widgets.py TodoPanel
+comment, ARCHITECTURE tree + provenance list (75 files), README aggregate.
+#14 and #183 close with evidence; tracker drops to FOUR open audit
+findings (#6, #8, #9, #12).
