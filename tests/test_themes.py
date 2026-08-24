@@ -28,6 +28,7 @@ Three pins, each one of the ways this file could silently regress:
 
 import pytest
 
+from tests.conftest import pump
 from tui import themes
 from tui.themes import ALL_THEMES, THEME_NAMES, role_styles
 
@@ -164,3 +165,87 @@ def test_standalone_panels_are_tinted_not_grid_neutral():
     paper = by_name["paper"]
     assert paper.background != themes._LIGHT_BASE["background"]
     assert paper.surface != themes._LIGHT_BASE["surface"]
+
+
+# ---- #183: a theme switch reaches the whole sidebar -------------------------
+# ------------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_a_theme_switch_restyles_the_goal_banner(mocker):
+    """The banner resolves per draw (#116), so the MECHANISM was always
+    there -- what was missing was the poke. Without restyle_sidebar()
+    the banner kept the old palette until the next goal change, which
+    on the tinted standalone themes is a half-recoloured session."""
+    from tui.app import VenastineApp
+    from tui.widgets import GoalBanner
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        await pump(pilot, 2)
+        banner = app.query_one(GoalBanner)
+        captured = []
+        real_update = banner.update
+        mocker.patch.object(
+            banner, "update",
+            side_effect=lambda content="": (
+                captured.append(content), real_update(content))[1])
+
+        app.memory.set_extra("goal", "ship the themes")
+        app.refresh_goal_banner()
+        await pilot.pause()
+        assert captured[-1].style == "bold #d9a441", \
+            "dark-plain's warning hue expected first"
+
+        app.query_one("#prompt").value = "/theme light-red"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert captured[-1].style == "bold #9a6d10", \
+            f"banner kept the old palette after /theme: {captured[-1].style!r}"
+
+
+@pytest.mark.asyncio
+async def test_a_theme_switch_pokes_every_rich_sidebar_widget(mocker):
+    """Wiring pin: the visual test above proves the banner's path; this
+    proves the call fans out to the research panel too (the todo panel
+    shares refresh_todo_panel with the banner's path, and the usage line
+    is deliberately absent -- see restyle_sidebar's docstring)."""
+    from tui.app import VenastineApp
+    from tui.widgets import ResearchProgress
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        await pump(pilot, 2)
+        # INSTANCE-level patch (the batch-26 lesson: a class-level mock is
+        # not a descriptor, so self.restyle() would skip the binding and
+        # the lambda would miss its argument).
+        panel = app.query_one(ResearchProgress)
+        poked = []
+        real_restyle = panel.restyle
+        mocker.patch.object(
+            panel, "restyle",
+            side_effect=lambda: (poked.append(1), real_restyle())[1])
+
+        app.query_one("#prompt").value = "/theme matrix"
+        await pilot.press("enter")
+        await pilot.pause()
+
+    assert poked, "the research panel was never restyled by /theme"
+
+
+@pytest.mark.asyncio
+async def test_bare_theme_command_says_what_a_theme_restyles():
+    """#14's discoverability note. With tinted panels, 'theme' is no
+    longer a border tweak -- the bare listing is where a user finds
+    that out."""
+    from tui.app import VenastineApp
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        await pump(pilot, 2)
+        app.query_one("#prompt").value = "/theme"
+        await pilot.press("enter")
+        await pilot.pause()
+        entries = [txt for _r, txt in app._transcript._entries]
+
+    assert any("restyle panels" in txt for txt in entries), entries[-3:]

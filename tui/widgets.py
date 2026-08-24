@@ -318,6 +318,14 @@ class ResearchProgress(Static):
         self._passes.append([pass_id, True, False, True, 0, 0])
         self._redraw()
 
+    def restyle(self) -> None:
+        """Re-render under the current theme (#183).
+
+        Public wrapper over _redraw: the panel renders through Rich
+        styles resolved per draw, so a /theme switch cannot reach it via
+        tcss -- the same reason Transcript needs rerender()."""
+        self._redraw()
+
     def tool_called(self, pass_id: str) -> None:
         """Counted here rather than carried on an event of its own -- see
         the note in core/reasoning/events.py about why there is no step
