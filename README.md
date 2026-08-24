@@ -51,6 +51,8 @@ python main.py --tui                              # the full-screen interface
 
 The line-based CLI is the default and is never going away — every feature is reachable from it. The TUI is a nicer shell over the same code.
 
+Every launch flag is tabulated in the [CLI flag reference](#cli-flag-reference) below; every slash command under [The TUI](#the-tui).
+
 Ctrl+C or Ctrl+D exits. The thread id is printed after the first response so you can resume later — and resuming **replays the conversation**, so you can see what you are picking up. Tool calls replay as one line each; their results do not, since a single research turn can carry hundreds of kilobytes of fetched pages.
 
 ---
@@ -122,6 +124,8 @@ where *nothing* matched is treated as a failure. Every number in `04_confidence.
 ### Different models can check each other
 
 Set `CRITIC_MODEL` and passes 3a, 3b and 6c run on a *different* provider and model from the one that wrote the answer. A model checking its own output brings its own blind spots to the inspection.
+
+**Ensemble mode** extends the same idea to the answer itself. List `{provider_name, model}` pairs in `ENSEMBLE_MODELS` in `config.py` (a settings.json key is deliberately absent — choosing providers multiplies spend, so it stays in code you own) and Pass 1 runs once per entry, each candidate on its own provider and model. Fewer than two *distinct* pairs is refused: N copies of one model agree most confidently on that model's systematic errors, which is exactly where agreement has to mean something. Claims extracted from all candidates are pooled, and factual claims take a disagreement penalty of `0.15 × (1 − consistency)` before tiering — unanimity costs nothing, dissent demotes. A candidate that fails mid-run is named and skipped; if only one survives, the run degrades to the ordinary single-response path rather than scoring an "ensemble of one". Artifacts come out as `01_candidate_1.md`, `01_candidate_2.md`, … numbered to match each claim's `asserted_by_candidates` tags.
 
 ### What you get out
 
@@ -256,6 +260,8 @@ The auto-approved set is narrower than the `read` tool's, which is already unpro
 
 If your workspace contains a `.venastine/` directory, it is bind-mounted **read-only** inside the container, so a sandboxed command cannot rewrite the context and MCP definitions that feed later prompts. This covers writes on the Docker path only — not reads, and not the subprocess fallback.
 
+**From approval to execution, one answer throughout.** The classification is computed once per call and the same profile is handed to both the approval check and the sandbox, so what was approved is what runs. Inert commands never touch Docker — they are plain subprocesses on the host. Anything else probes Docker once per call and shares the result between gate and runner: if Docker was up when the call was approved but down when it executes, and the only route left is the fallback, the call returns an error telling the model to retry rather than silently downgrading onto the host. With Docker unavailable and `ALLOW_INSECURE_SANDBOX_FALLBACK = True` in `config.py`, non-inert commands fall back to a weakly-isolated host subprocess — prompted per run unless `AUTO_APPROVE_SANDBOX_FALLBACK = True` opts that prompt away. Inside the container the workspace is mounted at `/workspace` and output comes back truncated at 50,000 characters (`MAX_READ_CHARS`); the container runs under a 60-second wall clock, 1024 MB of memory, a single CPU core and a 200-process cap, while the weak fallback enforces its own rlimits instead — 30 CPU-seconds and the same memory ceiling. Two environment knobs affect the mechanics: `AGENT_SHELL` overrides the detected host shell (bash on Linux/macOS, PowerShell on Windows), and `AGENT_SANDBOX_IMAGE` swaps the default `python:3.13-slim` image.
+
 ### "Headless" means *unable to ask*, not "not a GUI"
 
 When nothing can put a question in front of a human, approval-gated tools are **hidden from the model entirely** rather than offered and then denied. This is not cosmetic. A tool that is advertised and always refused gets chosen again and again, and the only trace is a denial string buried in a tool result — that exact bug shipped once here, in which `fetch_url` was registered, documented as working, and denied on every call for its whole life. Registering a tool without declaring its permissions now raises at import time instead.
@@ -332,6 +338,20 @@ Whichever you configure (`compaction.strategy` in settings.json), a span too lar
 
 `pin` keeps recent turns out of any summary (capped at half the compaction trigger per call — a pin is a permanent floor, so refusing beats trimming); `unpin` releases it again when pinned detail goes stale. `/compact` in the TUI triggers a compaction by hand. **When compaction runs depends on what the thread is**: chat threads use an ordinary working-set trigger (40k tokens by default); research passes and subagents compact only at a hard backstop near the real context window, wherever they are resumed — spending a model call on a judgement nobody is watching is not worth it mid-run.
 
+The knobs, all under `compaction` in `settings.json`, each overriding a default in `config.py`:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `trigger_tokens` | `40000` | Measured context size that fires automatic compaction |
+| `warning_margin_tokens` | `8000` | How far before the trigger you are warned — room to pin something or wrap up first |
+| `keep_recent_tokens` | `4000` | Most-recent tokens that always stay verbatim |
+| `keep_recent_turns` | `3` | Turn floor beside the token floor — whichever protects more wins, plus the current turn, which never folds |
+| `strength` | `3` | Target compression ratio, 1–5: keep ~40% at 1 down to ~5% at 5 |
+| `max_retries` | `2` | Corrective re-asks when a summary misses its target ratio |
+| `strategy` | `"chain"` | Or `"rederive"`, as above |
+
+`/compact --strength N` overrides strength for that one invocation and persists nothing; an unknown flag there is an error rather than an ignored typo, because compacting at the default while you believe you asked otherwise looks exactly like a compaction that obeyed you. The relationships between these values are validated rather than trusted — the warning margin must sit strictly below the trigger, and the keep-recent floor strictly below it too — so an incoherent set is refused at startup instead of firing compaction at nonsense times.
+
 A replayed thread always shows what you originally said, never the summary — the archive is what is replayed, so a compacted conversation reads back the way you had it.
 
 ### Durable memory
@@ -353,6 +373,26 @@ A skill declaring `additional_tools` is stating a *need*, not granting anything 
 
 An agent declares `spawnable` — whether the `spawn_subagent` tool can actually feed it. A task string in a fresh thread is all a spawn can pass, and an agent that needs a transcript, a thread or a finished research run cannot be given one; spawning it anyway produces a confident answer about nothing. The four built-in agents each have a real caller that supplies what they need, so none of them is spawnable, and the catalog no longer offers them as a route that cannot work. Your own agents are not spawnable unless they say so.
 
+#### Writing your own
+
+Drop `.md` files into `~/.config/venastine/agents/` or `.../skills/` for yours, or into the project's `.venastine/agents/` once trusted. Skills may also sit in category folders — the folder is grouping metadata; the name stays global. Same-name collisions resolve harness > user > project, and a harness name can never be shadowed at all.
+
+Agent frontmatter fields:
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `name` | string | *required* | Catalog identity, global across tiers |
+| `description` | string | `""` | One line into every system prompt — collapsed to a single line and capped at 300 characters (see below) |
+| `model`, `provider` | string | inherit session | Pin this agent's own model/provider; `/model` tells you when one is active |
+| `allowed_tools` | list | everything allowed | A whitelist that only ever narrows — nothing can widen it |
+| `approval_overrides` | mapping | `{}` | Can only ever *add* prompts, never remove one |
+| `use_project_context` | bool | `false` | Inject `.venastine/CONTEXT.md` into the system prompt |
+| `use_memory` | bool | `true` | Inject durable memories (plain chat counts as opted in) |
+| `max_steps` | int ≥ 1 | caller's ceiling | May narrow a run's step budget, never widen it; an invalid value is repaired to the default with a warning naming what it read |
+| `spawnable` | bool | `false` for your files | Whether `spawn_subagent` may feed this agent |
+
+Skill frontmatter fields: `name` (required), `description`, and `additional_tools` — a list of tool names stating what the skill's methodology *depends on*. It grants nothing: activation proceeds and tells you what is missing under the current agent.
+
 ### A description is text, and the prompt treats it as one line
 
 An agent's or a skill's `name` and `description` go straight into the system prompt, so they are collapsed to a single line and capped at 300 characters when the file is read. Without that, a description written as a multi-line YAML block escapes its bullet and renders as a section of the prompt in its own right — indistinguishable from one this harness wrote. The cap is generous next to real ones: the longest description shipped here is 171 characters.
@@ -367,16 +407,48 @@ Configured in `mcp.json`, at `~/.config/venastine/mcp.json` or `.venastine/mcp.j
 
 Tools are namespaced `mcp__<server>__<tool>`. A server that fails to connect is named and skipped, never fatal.
 
+Per-server entry fields:
+
+| Field | Transports | Meaning |
+|---|---|---|
+| `command`, `args` | stdio | Spawn this local process |
+| `env`, `cwd` | stdio | Extra environment variables; working directory |
+| `url` | http, sse | Remote endpoint |
+| `type` | http, sse | `"sse"` selects Server-Sent Events; a bare `url` without `type` is always streamable HTTP |
+| `headers` | http, sse | Extra HTTP headers — `Authorization` is where a hosted server's credential usually rides |
+| `autoApprove` (or `auto_approve`) | both | Skip per-call approval for this server's tools. Must be a real JSON boolean — the string `"false"` warns and stays gated |
+| `disabled` | both | Load nothing from this entry |
+
+The first connection to a **user-level** server asks once, showing the resolved command line or URL, whether it auto-approves, and the *names* of its env vars and headers — never their values. The acknowledgement is keyed to the entry's contents, so editing a server later re-asks; project-level servers ride the workspace trust prompt instead. Set `VENASTINE_MCP_ACK_FULL=1` to append the raw JSON entry to that prompt, for audits.
+
 ### The TUI
 
-```
-/help          /theme [name]        /effort [level|auto]     /model [[PROVIDER] name]
-/research      /claims [run id]     /copy [last|report|claims|all] [--file <path>]
-/compact       /threads             /resume <thread-id>      /quit
-/agent         /goal                /grill-me                /skill
-/memories      /forget               /summary                 /ref [--list|--clear]
-/init [--software|--research]
-```
+| Command | What it does |
+|---|---|
+| `/help` | List every registered command with its usage |
+| `/theme [name]` | Restyle panels, transcript roles and code blocks — not just borders. Bare shows the current theme and all fourteen names. Session-only; persist with `tui.theme` in settings.json |
+| `/effort [level\|auto]` | Switch reasoning effort, offering only levels this model accepts (Anthropic's are queried live). Session-only (`tui.effort` persists) |
+| `/model [[PROVIDER] name]` | Switch provider and/or model for the session. Refuses mid-turn, warns on a missing key, revalidates effort against the new model, and notes if an active agent pins its own. Persist via launch flags or `default_provider`/`default_model` |
+| `/research [--attended] [--review\|--no-review] [--grant[=a,b]] <query>` | Run the pipeline live from the TUI. Leading flags compose in any order before the query; bare `--grant` opens the picker, `--grant=a,b` names them (`--grant-tools=` works as an alias); without flags, `research.*` settings apply |
+| `/compact [--strength 1-5]` | Fold older turns now instead of waiting for the trigger. Recent turns keep exactly the protection an automatic compaction gives them |
+| `/claims [run id]` | Open the claims view — tier, grounding status, assumption flags, score breakdown per claim — during a run or afterwards (**ctrl+l**) |
+| `/copy [last\|report\|claims\|all] [--file <path>]` | Copy out of the session. Defaults to the last response; `all` is transcript plus report plus claims. Clipboard delivery cannot be confirmed, so `--file <path>` is the route that provably worked |
+| `/threads` | Conversations-only picker — research runs' internal threads excluded — most recently active first, capped at 200 with a notice (**ctrl+t**) |
+| `/resume <thread-id>` | Open any thread by id, however old |
+| `/new` | Start a fresh thread; created lazily on your next message, so `/new` twice leaves nothing behind |
+| `/agent [name\|default]` | Make an agent active for subsequent turns; `default` clears. Active skills are re-checked against the new agent's tool policy |
+| `/goal [text\|clear]` | Persistent objective for this thread — injected into every turn in either shell, mirrored in a banner |
+| `/grill-me` | One turn under the grill-me agent inside the current thread, reading the live history rather than a digest of it |
+| `/skill [name\|off <name>\|clear]` | Activate a skill — its full body pins into every subsequent turn until deactivated — report tools it needs but can't have, or deactivate one/all |
+| `/memories` | List durable memories visible from here, with ids for `/forget` |
+| `/forget <id>` | Delete one memory by id — never by substring |
+| `/summary` | Distil this conversation and show it. Describes; does **not** fold — that is `/compact` |
+| `/ref [--list\|--clear]` | Pick another conversation and attach its summary to this one as standing context; `--list` and `--clear` manage attachments |
+| `/init [--software\|--research]` | Scaffold the project documentation set |
+
+Keys: **ctrl+c** quit · **ctrl+t** thread picker · **ctrl+l** claims view.
+
+Three behaviours worth knowing: an unknown slash command is an error, never a chat turn — a mistyped command cannot silently burn a request. The switching commands (`/theme`, `/effort`, `/model`) persist nothing; make a choice stick through settings.json or launch flags. And the commands that spend money or swap models mid-session (`/compact`, `/summary`, `/research`, `/init`, `/model`, `/grill-me`) refuse while a turn is still running rather than acting underneath it.
 
 When a subagent is spawned, you are asked which of its approval-gated tools it may use without asking again — per tool, all unticked by default. Running it with none selected is fine, and refusing the spawn entirely is a separate answer from granting it nothing. Before this, approving a spawn authorised the child's whole set.
 
@@ -424,17 +496,185 @@ single flag.
 `--review` and `--no-review` in chat mode are refused rather than ignored, matching
 `--grant`/`--grant-tools`/`--attended`. Inside the TUI, use `/research --review <query>`.
 
-### Configuration files
+### CLI flag reference
+
+Everything `python main.py` accepts. Wherever a value can come from more than one place, precedence is explicit flag > `settings.json` > built-in default.
+
+| Argument | Effect |
+|---|---|
+| `query` (positional) | Research mode: the question the pipeline runs on — required there. Chat mode: sent as the first message, then the interactive loop continues |
+
+| Flag | Effect |
+|---|---|
+| `--thread UUID` | Resume a stored conversation; what you said replays so you can see what you are picking up |
+| `--mode chat\|research` | Which loop to run. Chat is the default |
+| `--tui` | Launch the full-screen interface instead of the line-based CLI |
+| `--provider NAME` | Any entry from `providers.json` — `ANTHROPIC`, `OPENAI`, or an OpenAI-compatible endpoint you added |
+| `--model NAME` | Model id as the provider knows it |
+| `--effort LEVEL` | Reasoning effort for chat *and* research — typically `low`, `medium`, `high`; `xhigh`/`max` on models that offer them; `auto` sends no effort parameter at all. See [Reasoning effort](#reasoning-effort) below |
+| `--grant` | Research only. Pick approval-gated tools to pre-authorise, interactively — needs a terminal; a piped run prints the candidates instead. Empty unless an MCP server offers grantable tools |
+| `--grant-tools NAMES` | Research only. Same as `--grant`, but takes an explicit comma-separated list of tool names and works without a terminal |
+| `--attended` | Research only. Ask about every gated call as it happens; 600s with no answer denies that call and the run continues. Composes with grants — granted tools aren't asked about, everything else is |
+| `--review` / `--no-review` | Research only. Post-pipeline review on/off for this run; `--no-review` is the escape from a persisted setting |
+| `--memories` | List durable memories visible from this directory — id, scope, content — and exit |
+| `--forget ID` | Delete one memory by id — never by substring — and exit |
+| `--summary [THREAD]` | Print one thread's distilled summary and exit; falls back to `--thread`. A summary still current costs no model call — staleness is detected, not assumed |
+| `--ref THREAD` | Attach another thread's summary to this session at launch. Repeatable up to three; past the cap the extra reference is refused and named, not silently dropped |
+| `--trust-project` | Grant workspace trust non-interactively for scripts/CI, printing what it trusts as it does so |
+| `--init` | Generate this project's documentation set and exit. On a pipe there is no consent route, so it reports what it would write and writes nothing |
+| `--software-project` / `--research-project` | With `--init`: choose the document set without asking. At most one of the two |
+
+**Combinations the parser refuses** (rather than ignoring):
+
+- `--mode research` without a positional query.
+- `--tui` with `--mode research` — use `/research` inside the TUI.
+- `--tui` with a positional query — start the TUI and type.
+- Any of `--grant`, `--grant-tools`, `--attended`, `--review`, `--no-review` outside research mode, including under `--tui`.
+- Both kind flags with `--init`.
+
+**Scripting notes.** Startup prompts degrade instead of hanging when stdin is not a terminal: project content is skipped with a notice unless `--trust-project`, newly seen user-level MCP servers are skipped and named, the grant picker prints its candidates instead of asking, the review records findings but applies nothing, and chat-mode approvals do not exist — gated tools stay hidden entirely. Exit codes: `0` success; `1` operational failure (a failed pipeline, a bad memory id, nothing to summarise); `2` argparse misuse. `--help` and a mistyped flag touch nothing at all — no database, no log directory.
+
+### Reasoning effort
+
+Effort asks a reasoning model how long to think before answering. It rides every chat turn, every research pass, every JSON-retry correction, the reviewer and its re-synthesis — a retry is the same pass continuing, so it inherits the level rather than dropping it.
+
+Where a level comes from, in order: `--effort` > top-level `effort` in `settings.json` > `config.DEFAULT_EFFORT` (shipped `"high"`). Inside the TUI, `tui.effort` persists separately and wins there. `auto` is the off switch at either layer — with the default now high, `--effort auto` restores send-nothing behaviour.
+
+A level is validated against the model that will **receive** it, not the one it was chosen for:
+
+| Provider | Levels | Where the set comes from |
+|---|---|---|
+| Anthropic | `low`, `medium`, `high`, `xhigh`, `max` — whichever the model reports supported | Queried live from the Models API, so newly released Anthropic models need no entry anywhere |
+| OpenAI-compatible | `low`, `medium`, `high` assumed for unknown models | Static table (`config.MODEL_EFFORT_LEVELS`). Known non-reasoning models — gpt-4o family, gpt-3.5 — ship with *empty* lists, meaning "takes no effort parameter": a requested level is dropped cleanly instead of 400ing every call. An unlisted model gets the assumption plus a WARNING naming it |
+| Google | Levels map to integer thinking budgets, `low`→2,048 through `max`→dynamic | Mapped at the boundary. The pinned `google-genai` has no budget field, so Google currently reports no levels and effort drops regardless of the default |
+
+A verification that *fails* — a network blip during the query — passes your level through unverified with a warning rather than silently downgrading a deliberate choice. `/effort` in the TUI offers only levels the mounted model accepts, and `/model` revalidates after a switch, since effort is per-model. An agent pinning its own provider/model wins over the session's choice for chat turns, and says so.
+
+### Budgets and stop conditions
+
+There is **no default spend ceiling**. The cumulative input+output counter is a billing meter — the prompt is re-sent and re-billed on every step of a tool-using turn, so it grows quadratically in steps: correct as billing, meaningless as a size limit. A hard cap exists only if settings.json sets `max_token_budget` (billed tokens per run — one user turn, one research pass, one `/init`). Limits at the provider remain the stronger instrument: they see the same bill and cannot be forgotten by a code path.
+
+Three things can end a turn or pass early:
+
+| Stop reason | When |
+|---|---|
+| `complete` | The model answered without calling another tool |
+| `max_steps_reached` | Step ceiling hit — 50 by default; an agent's own `max_steps` narrows it |
+| `token_budget_exceeded` | Only when `max_token_budget` is configured: cumulative billed spend crossed it |
+
+The CLI names the figures behind an early stop — billed this turn, and the thread's measured context size — rather than a bare reason, because "budget exceeded" invites exactly the misreading that there is a size problem.
+
+Other ceilings worth knowing: the six maths tools run in killable subprocesses under a 15-second wall clock (`TOOL_COMPUTE_TIMEOUT_S`) and are told which tool and which limit stopped them; pre-granted tool calls cap at 150 per research run (`MAX_GRANTED_TOOL_CALLS`), degrading to asking when exhausted; subagent nesting stops at depth 2 (`SUBAGENT_MAX_DEPTH`); attended prompts expire after 600 seconds (`ATTENDED_APPROVAL_TIMEOUT_S`), denying that one call while the run continues.
+
+### Logging
+
+Two sinks from startup: stderr, and a rotating file — `logs/app.log` in the working directory, 1 MB per file, three backups kept. `AGENT_LOG_LEVEL` sets verbosity (a name like `INFO` or a number like `20`; garbage is a startup error rather than a silent fallback) and `AGENT_LOG_FILE` moves the file, creating the parent directory if needed. The file formatter redacts secret-shaped strings on the way out — the same patterns tool outputs get — because a failing tool's traceback routinely carries the request that produced it, and for an HTTP client that is a URL with the key in it.
+
+In the TUI stderr is detached before the screen is taken (anything written there would paint over the rendered UI and vanish on the next repaint); the rotating file keeps everything, and WARNING-and-above is routed into the transcript so warnings stay visible where you are looking.
+
+### Configuration reference
 
 | File | Holds | Notes |
 |---|---|---|
-| `providers.json` | LLM provider keys | gitignored |
+| `providers.json` | LLM provider keys | gitignored; path movable with `AGENT_PROVIDERS_FILE` |
 | `.env` | tool API keys | gitignored |
-| `settings.json` | defaults and modes | unknown keys **raise** |
-| `mcp.json` | MCP servers | unknown keys ignored |
-| `CONTEXT.md` | project context for the model | |
+| `settings.json` | defaults and modes | unknown keys **raise**; user copy at `~/.config/venastine/settings.json`, project copy at `.venastine/settings.json` (loaded only when trusted) |
+| `mcp.json` | MCP servers | unknown keys ignored; same two locations |
+| `trusted_projects.json` | workspace-trust store | user-level (`~/.config/venastine/`); written by the trust prompt or `--trust-project`, keyed to resolved path + content hash |
+| `CONTEXT.md` | project context for the model | lives in `.venastine/` |
 
-Precedence for provider and model is CLI flag > `settings.json` > `config.py`.
+Precedence for provider and model is CLI flag > `settings.json` > `config.py`. Two different merge orders, deliberately:
+
+- **Inside `settings.json`, project beats user** — this is the one file where "more specific wins" holds, which is exactly why the two authority-bearing keys below are rejected there by name. Nested objects merge key-by-key across tiers.
+- **MCP servers, agents and skills run harness > user > project**, inverted from the usual rule, because there "more specific" means "arrived with a repository you cloned".
+
+#### Every `settings.json` key
+
+An unknown key raises at startup, naming the file and the key — a typo must never read as a setting.
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `default_provider` | string | `"ANTHROPIC"` | Used unless `--provider` overrides |
+| `default_model` | string | `claude-sonnet-5` | Used unless `--model` overrides |
+| `effort` | string | `"high"` | Reasoning effort for chat and research; `"auto"` clears even this. See [Reasoning effort](#reasoning-effort) |
+| `max_token_budget` | int \| null | null — uncapped | Per-run billed-spend ceiling. See [Budgets and stop conditions](#budgets-and-stop-conditions) |
+| `ensemble_mode` | bool | `false` | Master switch for ensemble Pass 1; the roster lives in `config.py` |
+| `ensemble_n` | int | — | Accepted with a warning; vestigial — the count now derives from the roster |
+| `compaction` | object | — | Seven keys tabulated in [the compaction section](#long-conversations-condense-themselves) above |
+| `tui.theme` | string | — | One of the fourteen theme names; validated at use and falls back rather than blocking startup |
+| `tui.animations` | bool | `true` | Master switch for the raven and transitions |
+| `tui.effort` | string | — | Persisted TUI effort level; beats top-level `effort` inside the TUI |
+| `tui.todo_position` | string | — | `top`, `bottom` or `side`; validated at load |
+| `research.approval_mode` | string | `"none"` | `"attended"` makes research runs ask about every gated call, as if launched with `--attended` |
+| `research.subagent_review` | bool | `false` | Review on by default, as if launched with `--review`; escaped per run with `--no-review` |
+
+Two keys are rejected **by name** — well-formed shapes that will never load, because a project tier that could set them would decide what runs without being asked:
+
+| Rejected key | Why |
+|---|---|
+| `shell_approval_mode` | Decides whether shell commands are asked about at all; set `SHELL_APPROVAL_MODE` in `config.py` instead |
+| `research.granted_tools` | A persisted grant list could only ever *remove* prompts — standing authorisation carried by any repo you clone. Grants are per-run flags precisely so they cannot be |
+
+#### `config.py`-only settings
+
+Deliberately not settings.json keys: editing these means editing the file in your checkout, so nothing a cloned repository carries can reach them.
+
+| Constant | Default | Controls |
+|---|---|---|
+| `CRITIC_MODEL` | `None` | Routes passes 3a/3b/6c to a different `{provider_name, model}` |
+| `ENSEMBLE_MODELS` (with `ENSEMBLE_MODE`) | `None` (off) | Pass-1 roster; fewer than two distinct pairs is refused |
+| `DEFAULT_EFFORT` | `"high"` | Effort when neither flag nor settings speaks |
+| `MODEL_EFFORT_LEVELS` | see file | Per-model level lists for non-Anthropic providers; an entry mapped to an *empty* list means "takes no effort parameter" and drops the level cleanly |
+| `GOOGLE_THINKING_BUDGETS` | low→2,048 … max→dynamic | Google level→thinking-token map |
+| `MODELS_REJECTING_SAMPLING_PARAMS` | current Anthropic models | These 400 on temperature/top_p/top_k; such parameters are dropped with a WARNING rather than sent |
+| `MODEL_CONTEXT_WINDOWS` / `DEFAULT_CONTEXT_WINDOW` | 128k fallback | Feeds the research-pass compaction backstop only; an unknown model warns and assumes the default |
+| `SHELL_APPROVAL_MODE` | `"tiered"` | The shell gate: `always` / `tiered` / `never`; a bad value raises at import. Rejected in settings.json by name, see above |
+| `NETWORK_ALLOWED_COMMANDS` | pip, curl, git, npm, … | First words granted network access inside the sandbox |
+| `INERT_COMMANDS` | ls, cat, grep, wc, … | Read-only commands that run as plain host subprocesses, skipping Docker entirely |
+| Sandbox bounds | image `python:3.13-slim`; 60 s, 1024 MB, 30 CPU-s, 200 pids | `SANDBOX_DOCKER_IMAGE`, `SANDBOX_TIMEOUT_SECONDS`, `SANDBOX_MEMORY_MB`, `SANDBOX_CPU_SECONDS`, `SANDBOX_MAX_PIDS` |
+| `ALLOW_INSECURE_SANDBOX_FALLBACK` / `AUTO_APPROVE_SANDBOX_FALLBACK` | `False` / `False` | Enable, then de-prompt, the weak host-subprocess fallback |
+| `REDACT_TOOL_OUTPUTS` | `True` | Master switch for output redaction. Never affects input refusals, the depth-cap bound, or the log formatter's own guard |
+| `TOOL_COMPUTE_TIMEOUT_S` | 15 | Wall clock per maths-tool subprocess |
+| `MAX_GRANTED_TOOL_CALLS` | 150 | Pre-granted calls per research run before it must ask again |
+| `ATTENDED_APPROVAL_TIMEOUT_S` | 600 | Attended prompt deadline; expiry denies that call while the run continues |
+| `SUBAGENT_REVIEW` | `False` | Shipped default for the post-pipeline review |
+| `MAX_REVIEW_FINDINGS` / `MAX_REVIEW_REFINEMENTS` | 25 / 3 | Consent-fatigue caps on the review stage |
+| `MAX_PIPELINE_RETRIES` / `MAX_JSON_RETRIES` | 2 / 2 | Revise/re-validate rounds per claim; corrective attempts per malformed pass payload |
+| `MAX_ITERATIONS` | 50 | Step ceiling for a turn or pass absent an agent's own `max_steps` |
+| `SUBAGENT_MAX_DEPTH` | 2 | `spawn_subagent` nesting limit |
+| `PIN_MAX_TRIGGER_FRACTION` | 0.5 | Largest share of the trigger one pin may protect |
+| `MAX_INJECTED_MEMORIES` / `MAX_INJECTED_REFS` / `MAX_TODO_ITEMS` | 50 / 3 / 50 | Prompt-injection caps; refs and todos refuse past the cap rather than trimming silently |
+| `SUMMARY_TARGET_CHARS` | 2000 | Size cap on whole-thread summaries injected via `/ref` |
+| `MAX_CATALOG_TEXT_CHARS` | 300 | Cap on an agent/skill `name` + `description` entering system prompts |
+| `INIT_READ_CHARS` / `INIT_MAX_STEPS` | 20,000 / 12 | `/init` per-read volume; step-ceiling fallback (the initializer agent's own frontmatter sets 12, which wins) |
+| `TEARDOWN_BUDGET_S` | 10 | Shared wall clock for MCP shutdown; stragglers are named in a WARNING |
+
+#### Environment variables
+
+| Variable | Default | Controls |
+|---|---|---|
+| `AGENT_MODEL` | `claude-sonnet-5` | Built-in default model (`config.MODEL_NAME`) — still loses to settings.json and `--model` |
+| `AGENT_PROVIDERS_FILE` | `providers.json` | Credential-file location |
+| `APP_DB_PATH` | `app.db` | SQLite database path |
+| `AGENT_OUTPUT_DIR` | `./output` | Research artifacts root |
+| `AGENT_WORKSPACE` | `./workspace` | File-tools and sandbox workspace root |
+| `AGENT_SHELL` | auto-detect | Host shell binary for the `shell` tool |
+| `AGENT_SANDBOX_IMAGE` | `python:3.13-slim` | Sandbox container image |
+| `AGENT_LOG_LEVEL` | `INFO` | Log verbosity — name or numeric level |
+| `AGENT_LOG_FILE` | `logs/app.log` | Rotating log location |
+| `VENASTINE_REDACT_OFF` | unset | Truthy value disables tool-output pattern redaction for one run. The environment can only ever weaken redaction, never restore it past the constant — and input refusals, the depth-cap bound and the log formatter's guard stay on regardless |
+| `VENASTINE_MCP_ACK_FULL` | unset | `=1` appends the raw mcp.json entry to a server's acknowledgement prompt |
+
+#### `providers.json` entries
+
+| Field | Meaning |
+|---|---|
+| `API_URL` | Endpoint base URL; empty for ANTHROPIC and GOOGLE, which use their SDKs' defaults |
+| `API_KEY` | The credential, stored directly |
+| `is_v1_compatible` | `true` routes the provider through the OpenAI-compatible translation |
+| `supports_stream_usage` | Promises streamed responses carry token usage. If a stream then ends with none, the harness **raises** rather than accounting zero tokens — a silent zero would disable the budget stop condition while looking healthy. Endpoints that don't return streaming usage ship with `false` |
+
+`mcp.json` entries are tabulated under [MCP servers](#mcp-servers).
 
 ---
 
