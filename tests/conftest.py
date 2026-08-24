@@ -365,13 +365,18 @@ def cli_stdin(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def clear_client_cache():
-    """core.client caches SDK clients keyed by provider name. Reset
-    between tests so a previous test's queued fake responses don't leak
-    into the next one."""
+    """core.client caches SDK clients keyed by provider name, and queried
+    context windows keyed by (provider, model). Reset both between tests so
+    a previous test's queued fake responses -- or a window it primed -- do
+    not leak into the next one."""
     import core.client
     core.client._client_cache.clear()
+    core.client._context_window_cache.clear()
+    core.client._context_window_failures.clear()
     yield
     core.client._client_cache.clear()
+    core.client._context_window_cache.clear()
+    core.client._context_window_failures.clear()
 
 
 @pytest.fixture(autouse=True)

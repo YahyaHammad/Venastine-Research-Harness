@@ -84,15 +84,61 @@ class _FakeOpenAIChat:
         self.completions = _FakeOpenAICompletions()
 
 
+class _FakeModelInfo:
+    """What a `models.retrieve` / `models.get` returns.
+
+    Mirrors the ONE property core/client.py:context_window_for depends on
+    across three real SDKs: a declared field if the SDK models it, and
+    `.model_extra` for a provider field it does not. openai.types.Model is
+    declared extra="allow", which is what makes that reachable and is
+    pinned in test_sdk_conformance.py.
+
+    Reports NOTHING by default, deliberately -- that is OpenAI's, DeepSeek's
+    and Perplexity's real behaviour, and it keeps every pre-existing test on
+    the static-table path it was written against. A test that wants the
+    query to answer says so.
+    """
+
+    def __init__(self, capabilities=None, model_extra=None, **fields):
+        self.capabilities = capabilities
+        self.model_extra = dict(model_extra or {})
+        for name, value in fields.items():
+            setattr(self, name, value)
+
+
+class _FakeModels:
+    """A settable `models` endpoint for the OpenAI and Anthropic fakes.
+
+    EXISTS BECAUSE OF #35. `_FakeAnthropicClient` had no `.models` at all,
+    so core/client.py's capability query raised AttributeError, was caught
+    by its own `except Exception`, and fell back silently -- with the suite
+    green. Any second query copying that shape would have hidden the same
+    way, so the fakes now carry the surface the real SDKs expose.
+    """
+
+    def __init__(self):
+        self._info = None
+
+    def set_info(self, info):
+        self._info = info
+
+    def retrieve(self, model):
+        return self._info if self._info is not None else _FakeModelInfo()
+
+    def get(self, *, model):
+        return self._info if self._info is not None else _FakeModelInfo()
+
+    def list(self):
+        return types.SimpleNamespace(data=[])
+
+
 class _FakeOpenAIClient:
     """Fake of OpenAI(...) construction. Returns a client with .chat
-    and a .models.list() that returns an empty model list by default."""
+    and a .models endpoint that reports no context window by default."""
 
     def __init__(self, **kwargs):
         self.chat = _FakeOpenAIChat()
-        self.models = types.SimpleNamespace(
-            list=lambda: types.SimpleNamespace(data=[])
-        )
+        self.models = _FakeModels()
 
 
 def _build_fake_openai_module():
@@ -156,6 +202,9 @@ class _FakeAnthropicMessages:
 class _FakeAnthropicClient:
     def __init__(self, **kwargs):
         self.messages = _FakeAnthropicMessages()
+        # See _FakeModels: the absence of this attribute is how #35 stayed
+        # invisible for the whole life of the effort query.
+        self.models = _FakeModels()
 
 
 def _build_fake_anthropic_module():

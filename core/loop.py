@@ -33,7 +33,8 @@ from uuid import UUID
 import config
 import prompts.system_prompts as system_prompts
 from core.client import (
-    api_initialization, call_model_stream, effort_for, ModelResponse,
+    api_initialization, call_model_stream, context_window_for, effort_for,
+    ModelResponse,
 )
 from core.events import LoopEvent
 from core import interaction
@@ -485,7 +486,8 @@ def _maybe_compact(memory, model, provider_name, notices, mode):
     from core import compaction
 
     used = memory.last_input_tokens or compaction.estimated_tokens(memory.messages)
-    action = compaction.should_compact(used, model, mode)
+    action = compaction.should_compact(used, model, mode,
+                                       provider_name=provider_name)
     if not action:
         return
     if action == "warn":
@@ -682,6 +684,16 @@ class RunAgentLoop:
         # correct by construction: an agent declaring its own model is
         # validated against THAT model, not the one the parent was using.
         effort = effort_for(client, provider_name, model, effort)
+        # Prime the context-window cache on the same one-per-process
+        # footing, and HERE for effort_for's reason: this is the one place
+        # every send crosses, so a new caller cannot forget it. On
+        # ANTHROPIC it is a pure cache hit -- effort_for's own retrieve
+        # already recorded the window off the ModelInfo it fetched -- so
+        # the only providers this actually calls for are Google and the
+        # v1-compatible roster. The result is read back, without a client,
+        # by compaction.context_limit(); a failure here is warned and
+        # simply leaves the static table answering.
+        context_window_for(client, provider_name, model)
         # §18 headless callability rule (user-widened from approval-only):
         # with no way to ask, a tool that needs approval is uncallable in
         # this configuration, so it is not advertised -- but named once in

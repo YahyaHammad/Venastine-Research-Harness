@@ -37,6 +37,7 @@ import contextlib
 import inspect
 import os
 import sys
+from types import SimpleNamespace as _SimpleNamespace
 
 import pytest
 
@@ -260,6 +261,111 @@ def test_the_effort_query_succeeds_against_REAL_sdk_objects():
     assert authoritative, (
         "the query fell back to the static table against REAL SDK objects, "
         "which is #35 exactly: it cannot succeed, and nothing says so")
+
+
+# ---------------------------------------------------------------------------
+# ---- Context windows, across all three SDKs --------------------------------
+# ---------------------------------------------------------------------------
+#
+# ROADMAP_v2 §21 recorded "no per-provider context-window query" as closed by
+# verification, on the premise that no provider in the roster exposed one.
+# These three tests ARE that premise, asked of the pinned packages rather
+# than assumed -- so if a future SDK bump removes what the query reads, the
+# fallback becomes permanent and this goes red instead of going quiet. That
+# is the #35 failure mode, and #35 is why this file exists.
+
+def test_the_anthropic_window_field_is_on_the_pinned_ModelInfo():
+    """The claim that makes the Anthropic query free.
+
+    core/client.py retrieves this object ANYWAY, to read
+    capabilities.effort. `max_input_tokens` riding along on it is the
+    entire reason the window query costs no additional call -- and the
+    claim config.py's comment now makes in prose.
+    """
+    with real_package("anthropic", "httpx"):
+        from anthropic.types.model_info import ModelInfo
+
+        assert "max_input_tokens" in ModelInfo.model_fields, (
+            "anthropic's ModelInfo no longer carries max_input_tokens; "
+            "core/client.py:context_window_for reads it off the same object "
+            "the effort query retrieves, and config.py's comment claims "
+            "that costs no extra call")
+
+
+def test_the_google_window_field_is_on_the_pinned_Model():
+    """Google's half: one field, reached through models.get."""
+    with real_package("google", "httpx"):
+        from google.genai import types as genai_types
+
+        assert "input_token_limit" in genai_types.Model.model_fields, (
+            "google-genai's Model no longer carries input_token_limit; "
+            "core/client.py:context_window_for reads it for the GOOGLE "
+            "branch")
+
+
+def test_openai_models_keep_unknown_provider_fields():
+    """THE LOAD-BEARING ONE, and the least obvious.
+
+    openai.types.Model declares exactly id/created/object/owned_by. Groq
+    returns context_window, Together and OpenRouter return context_length,
+    Mistral returns max_context_length -- none of which the SDK models. They
+    are readable only because the SDK's base model is `extra="allow"`, which
+    keeps unmodelled fields on the parsed object and exposes them at
+    `.model_extra`.
+
+    That single property is what collapses the OpenAI-compatible half of the
+    roster from thirteen adapters to one alias sniff, which is the specific
+    argument §21 rejected the design on. If a bump ever sets extra="ignore",
+    every one of those providers silently starts reporting no window and
+    quietly falls back to the static table -- invisibly, exactly like #35.
+    """
+    with real_package("openai", "httpx"):
+        from openai.types import Model
+
+        assert Model.model_config.get("extra") == "allow", (
+            "openai.types.Model no longer keeps unknown fields. "
+            "core/client.py:context_window_for reads provider-specific "
+            "context-window fields off .model_extra; with extra ignored, "
+            "Groq/Mistral/Together/OpenRouter all fall silently back to "
+            "config.MODEL_CONTEXT_WINDOWS")
+
+        # And the sniff genuinely needs model_extra: none of these four
+        # names is a declared field, so a "declared fields only" reader
+        # would find nothing on any of them.
+        declared = set(Model.model_fields)
+        from core.client import _WINDOW_FIELD_ALIASES
+        assert not declared & set(_WINDOW_FIELD_ALIASES), (
+            f"openai.types.Model now declares one of "
+            f"{_WINDOW_FIELD_ALIASES}; re-read context_window_for's "
+            f"declared-field-first ordering against the new shape")
+
+
+def test_the_window_query_succeeds_against_a_REAL_openai_model_object():
+    """The end-to-end version, on a real parsed SDK object rather than a
+    SimpleNamespace -- #35's lesson being that a double agreeing with
+    production proves nothing about the SDK."""
+    import core.client as client_module
+
+    with real_package("openai", "httpx"):
+        from openai.types import Model
+
+        # Exactly what Groq's /models returns, parsed by the real SDK.
+        model = Model.construct(
+            id="llama-3.3-70b", created=1, object="model", owned_by="groq",
+            context_window=131_072)
+
+        client = _SimpleNamespace(models=_SimpleNamespace(
+            retrieve=lambda name: model))
+        try:
+            window, authoritative = client_module.context_window_for(
+                client, "GROQ", "llama-3.3-70b")
+        finally:
+            client_module._context_window_cache.clear()
+
+    assert window == 131_072, (
+        f"reading a REAL openai Model object produced {window!r}; the "
+        f"alias sniff cannot see provider fields, which is #35's shape")
+    assert authoritative
 
 
 # ---------------------------------------------------------------------------

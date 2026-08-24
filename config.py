@@ -182,7 +182,7 @@ OUTPUT_DIR = os.environ.get("AGENT_OUTPUT_DIR", "./output")
 
 # --- File-ops workspace (ROADMAP §6) ---
 WORKSPACE_DIR = os.environ.get("AGENT_WORKSPACE", "./workspace")
-MAX_FILE_SIZE_BYTES = 10_000_000   # 10 MB — hard reject before opening
+MAX_FILE_SIZE_BYTES = 25_000_000   # 25 MB — hard reject before opening
 MAX_READ_LINES = 500               # max lines per read call
 MAX_READ_CHARS = 50_000            # max chars per read call
 
@@ -244,8 +244,8 @@ AUTO_APPROVE_SANDBOX_FALLBACK = False    # auto-approve fallback runs (no per-ru
 SHELL_APPROVAL_MODE = "tiered"
 SHELL_APPROVAL_MODES = ("always", "tiered", "never")
 SANDBOX_DOCKER_IMAGE = os.environ.get("AGENT_SANDBOX_IMAGE", "python:3.13-slim")
-SANDBOX_TIMEOUT_SECONDS = 60
-SANDBOX_MEMORY_MB = 1024
+SANDBOX_TIMEOUT_SECONDS = 120
+SANDBOX_MEMORY_MB = 2048
 SANDBOX_CPU_SECONDS = 30
 SANDBOX_MAX_PIDS = 200
 
@@ -291,7 +291,7 @@ REDACT_TOOL_OUTPUTS = True
 # want different answers, and a per-tool budget makes each a judgement
 # call at the registration site. It sits beside SANDBOX_TIMEOUT_SECONDS
 # because that is the constant a reader would compare it against.
-TOOL_COMPUTE_TIMEOUT_S = 15
+TOOL_COMPUTE_TIMEOUT_S = 20
 
 # WARNING: commands matching these words get network access inside the
 # sandbox. A compromised package or script can exfiltrate data or
@@ -539,25 +539,67 @@ MAX_TODO_ITEMS = 50
 # error mid-pipeline, not a working-set policy.
 COMPACTION_PIPELINE_BACKSTOP_TOKENS = 20_000
 
-# The backstop's source, and M1's remaining use for a window table.
+# The backstop's source, the summarizer's input budget, and M1's remaining
+# use for a window table.
 #
-# Deliberately NOT a per-provider API query: providers.json.example ships a
-# roster of fifteen, most reaching the same OpenAI-compatible path, and there
-# is no uniform endpoint exposing context length across them -- fifteen
-# adapters to avoid a fallback constant they would all still need. (This
-# said "APICredentials lists thirteen providers"; the class was dead and the
-# number was wrong in both directions -- audit #23. The argument is
-# unchanged, since fifteen adapters is as unreasonable as thirteen.) A static table is
-# honest about being incomplete, and under M1 an incomplete entry costs
-# much less than it would have: the working-set trigger does not consult
-# this at all.
+# NOW A FALLBACK, NOT THE ONLY SOURCE. This said "deliberately NOT a
+# per-provider API query", on the grounds that the roster of fifteen had no
+# uniform endpoint and a query would need fifteen adapters to avoid a
+# fallback constant they would all still need. The premise was measured
+# against the PINNED SDKs and did not survive:
+#
+#   anthropic 0.116.0    ModelInfo.max_input_tokens -- on the SAME object
+#                        core/client.py already retrieves to read
+#                        capabilities.effort. The answer was in hand and
+#                        being dropped; reading it costs no extra call.
+#   google-genai 1.0.0   types.Model.input_token_limit, one field.
+#   openai 2.45.0        Model is declared extra="allow", so a provider's
+#                        own field survives onto .model_extra. That makes
+#                        the OpenAI-compatible side ONE alias reader --
+#                        context_window (Groq), context_length (Together,
+#                        OpenRouter, Cohere), max_context_length (Mistral)
+#                        -- rather than thirteen adapters.
+#
+# So it is two attribute reads and one sniff, not fifteen adapters. The
+# query lives in core/client.py:context_window_for, beside the effort query
+# it mirrors; core/compaction.py:context_limit prefers it and falls back
+# here. (The old note also corrected itself on a provider count from the
+# dead APICredentials class -- audit #23. Fifteen is right; the count was
+# never what was wrong with the argument.)
+#
+# THE CONCLUSION OUTLIVED THE PREMISE, which is why this table stays: OpenAI,
+# DeepSeek and Perplexity answer /models with id/created/object/owned_by and
+# nothing else, and Grok, Fireworks, Qwen and Z.AI publish no model-metadata
+# endpoint at all. A fallback constant is still needed at the end of it.
+#
+# KEYS ARE STORED NORMALIZED -- no date suffix, no `vendor/` or `region.`
+# prefix. core/compaction.py:_normalized reduces an incoming id to this form
+# before looking it up, so a dated key here would be UNREACHABLE. That is
+# also the bug this fixed: matching was exact, so `claude-sonnet-5-20260724`
+# missed a million-token entry and silently took the default.
+#
+# Under M1 an incomplete entry costs less than §21 feared -- the working-set
+# trigger never consults this -- but it is not free: it also sets the
+# summarizer's one-call input budget, which gates the lossy truncation in
+# summarize_thread().
 MODEL_CONTEXT_WINDOWS: dict[str, int] = {
-    "claude-opus-5": 200_000,
-    "claude-sonnet-5": 200_000,
-    "claude-fable-5": 200_000,
-    "claude-opus-4-8": 200_000,
-    "claude-opus-4-7": 200_000,
-    "claude-haiku-4-5-20251001": 200_000,
+    # UNVERIFIED AGAINST A LIVE ENDPOINT, and erring in the dangerous
+    # direction. 1M on these models is beta-gated behind the
+    # context-1m-2025-08-07 header, which this harness does not send, so
+    # the baseline an ordinary account actually gets is 200_000. By the
+    # qwen entry's own rule below -- record the SMALLER number, because
+    # erring high means a hard context-limit error mid-run -- these want
+    # to be 200_000 here, with the query supplying 1M to the accounts that
+    # really have it. Left as set pending an owner decision; see DEVLOG.
+    "claude-opus-5": 1_000_000,
+    "claude-sonnet-5": 1_000_000,
+    "claude-fable-5": 1_000_000,
+    "claude-opus-4-8": 1_000_000,
+    "claude-opus-4-7": 1_000_000,
+    # Dateless, per the normalization note above: this was keyed
+    # "claude-haiku-4-5-20251001" while its five siblings were dateless,
+    # which is the inconsistency that exposed the exact-match bug.
+    "claude-haiku-4-5": 200_000,
     "gpt-5.1": 400_000,
     "gemini-2.5-pro": 1_000_000,
     # Alibaba markets "1M"; the documented input limit is 983,616, and
@@ -568,10 +610,15 @@ MODEL_CONTEXT_WINDOWS: dict[str, int] = {
     # means a hard context-limit error from the provider mid-run.
     "qwen3.8-max-preview": 983_616,
 }
-# Logged at WARNING when used, per §21 -- a wrong-by-default window means
-# the backstop fires at the wrong time in whichever direction the guess is
-# wrong, and silent guessing turns a tuning problem into a mystery.
-DEFAULT_CONTEXT_WINDOW = 128_000
+# Logged at WARNING ONCE PER MODEL, per §21 -- a wrong-by-default window
+# means the backstop fires at the wrong time in whichever direction the
+# guess is wrong, and silent guessing turns a tuning problem into a
+# mystery. Once per model rather than once per use, because context_limit()
+# is on should_compact()'s path and that runs at the top of every step of
+# every turn; the dedup set lives in core/compaction.py. A long session
+# therefore says this once and is then silent, which is the trade -- the
+# line is actionable exactly once.
+DEFAULT_CONTEXT_WINDOW = 200_000
 
 
 # APICredentials was here and is deleted (audit #23). It was dead -- nothing

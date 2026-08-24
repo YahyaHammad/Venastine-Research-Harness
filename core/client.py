@@ -450,6 +450,25 @@ def _messages_for_provider(provider_name: str, neutral_messages: list[dict]) -> 
 # Anthropic branch queries the API once per process rather than per call.
 _effort_levels_cache: dict[tuple[str, str], list[str]] = {}
 
+# (provider_name, model) -> context window in tokens, or None for "asked,
+# and this provider does not report one". Same lazy, once-per-process
+# posture as the effort cache above; see context_window_for() for why None
+# is cached and a raised query is not.
+_context_window_cache: dict[tuple[str, str], Optional[int]] = {}
+
+# (provider_name, model) -> how many times the query has RAISED.
+#
+# The middle ground between #35's two bad options. Caching a failure makes
+# one transient error suppress the query for the life of the process;
+# never caching one means a provider with no /models endpoint at all --
+# Grok, Fireworks, Z.AI -- is asked again on every turn, which across a
+# ten-pass research run is ten failing HTTP calls to learn the same thing.
+# So a failure is retried, and after this many it settles on the table and
+# says so once. Transient blips still recover; a permanent 404 costs three
+# calls per process, not one per turn.
+_context_window_failures: dict[tuple[str, str], int] = {}
+MAX_CONTEXT_WINDOW_QUERY_ATTEMPTS = 3
+
 
 def _sampling_kwargs(provider_name: str, model: str, temperature) -> dict:
     """Sampling parameters for this call, or {} when the model rejects them.
@@ -587,7 +606,19 @@ def _effort_levels(client, provider_name: str, model: str) -> tuple:
             # pins anthropic exactly, and test_sdk_conformance.py exists
             # to go red when the pinned shape moves -- which is a better
             # signal than a fallback that silently keeps guessing.
-            capabilities = client.models.retrieve(model).capabilities
+            info = client.models.retrieve(model)
+            # ONE retrieve, TWO readings (§21's revisit). The context
+            # window is on this SAME ModelInfo as `max_input_tokens`, so
+            # recording it here IS the entire Anthropic half of the
+            # window query: no second call, no second failure mode, and
+            # it lands on the path every send already crosses
+            # (core/loop.py calls effort_for before the wire). §21
+            # rejected a window query on the belief that there was
+            # nothing to ask; for this provider the answer was already
+            # in hand and being dropped. See context_window_for below.
+            _record_window(provider_name, model,
+                           getattr(info, "max_input_tokens", None))
+            capabilities = info.capabilities
             effort = capabilities.effort
             levels = [
                 name for name in ("low", "medium", "high", "xhigh", "max")
@@ -625,6 +656,133 @@ def _effort_levels(client, provider_name: str, model: str) -> tuple:
 
     _effort_levels_cache[key] = levels
     return levels, True
+
+
+# The field names a provider might report a context window under, in the
+# order they are tried. ONE reader covers every OpenAI-compatible provider
+# rather than one adapter each, because openai.types.Model is declared
+# `extra="allow"` -- a field the SDK does not model survives on the parsed
+# object and reaches `.model_extra`. Verified against the pinned openai
+# 2.45.0 in test_sdk_conformance.py, because that permissiveness is the
+# whole reason this is one function.
+#
+#   context_window      Groq
+#   context_length      Together, OpenRouter, Cohere (native /v1 only)
+#   max_context_length  Mistral
+#   max_input_tokens    Anthropic's spelling, accepted here so a gateway
+#                       proxying Anthropic through an OpenAI-shaped API
+#                       is not silently unreadable
+#
+# OpenAI, DeepSeek and Perplexity report NONE of these -- they answer with
+# id/created/object/owned_by and nothing else. That is not a failure, it is
+# the answer, and it is why config.MODEL_CONTEXT_WINDOWS still exists.
+_WINDOW_FIELD_ALIASES = (
+    "context_window",
+    "context_length",
+    "max_context_length",
+    "max_input_tokens",
+)
+
+
+def _record_window(provider_name: str, model: str, value) -> Optional[int]:
+    """Cache a queried window, coercing anything unusable to None.
+
+    A POSITIVE int or nothing. The Anthropic Models API types
+    `max_input_tokens` as nullable and its own documented example carries
+    a placeholder 0, so "present" is not "usable" -- and a 0 reaching
+    compaction would make `context_limit - backstop` clamp to the floor
+    and compact continuously. Anything that is not a positive int is
+    recorded as None, which means "asked, got no usable answer" and sends
+    the caller to the static table.
+    """
+    window = value if isinstance(value, int) and not isinstance(value, bool) else None
+    if window is not None and window <= 0:
+        window = None
+    _context_window_cache[(provider_name, model)] = window
+    return window
+
+
+def known_context_window(provider_name: str, model: str) -> Optional[int]:
+    """The queried window for (provider, model), or None if none is known.
+
+    CACHE ONLY -- this never makes a call, which is what lets
+    core/compaction.py ask the question without holding a client or
+    importing an SDK. The cache is primed by context_window_for() on the
+    path core/loop.py already crosses before every send, so by the time a
+    compaction check runs the answer is there if the provider had one.
+    """
+    return _context_window_cache.get((provider_name, model))
+
+
+def context_window_for(client, provider_name: str, model: str) -> tuple:
+    """(window_or_None, authoritative). Queries the provider once per process.
+
+    §21 rejected this as needing "fifteen adapters" for a roster where no
+    uniform endpoint existed. Re-measured against the PINNED SDKs, that
+    premise did not hold, and the shape below is what it actually costs:
+
+      ANTHROPIC   already answered. _effort_levels retrieves the ModelInfo
+                  to read capabilities.effort and max_input_tokens rides
+                  along on it, so this branch is usually a cache hit and
+                  makes no call at all.
+      GOOGLE      models.get(...).input_token_limit, one field on the
+                  pinned google-genai type.
+      v1-compat   ONE alias sniff over model_extra, not thirteen adapters,
+                  because openai.types.Model allows extra fields.
+
+    §21's CONCLUSION survives intact and is why the table remains: OpenAI,
+    DeepSeek and Perplexity report nothing, so a fallback constant is
+    still needed at the end of it.
+
+    THE FAILURE/SILENCE SPLIT IS THE POINT, and it is _effort_levels'
+    query_failed rule (#35's lesson) applied to a second query. A call
+    that RAISED is warned and NOT cached: a transient network error must
+    not permanently suppress the query for the life of the process. A
+    call that SUCCEEDED and reported no window IS cached as None, because
+    that is a real and stable answer, and re-asking it on every
+    compaction evaluation would spend a request per step to learn the
+    same thing.
+    """
+    key = (provider_name, model)
+    if key in _context_window_cache:
+        return _context_window_cache[key], True
+
+    try:
+        if provider_name == "GOOGLE":
+            info = client.models.get(model=model)
+            return _record_window(
+                provider_name, model,
+                getattr(info, "input_token_limit", None)), True
+        info = client.models.retrieve(model)
+        # Declared fields first, then model_extra -- the same object may
+        # carry either depending on whether the installed SDK models the
+        # field. ATTRIBUTES not subscripts, for #35's reason: these are
+        # pydantic objects on every pinned SDK here.
+        extra = getattr(info, "model_extra", None) or {}
+        for name in _WINDOW_FIELD_ALIASES:
+            value = getattr(info, name, None)
+            if value is None:
+                value = extra.get(name)
+            if value is not None:
+                return _record_window(provider_name, model, value), True
+        # Asked and answered: this provider reports no window.
+        return _record_window(provider_name, model, None), True
+    except Exception as e:
+        # Network failure, a provider with no models endpoint at all, or a
+        # model the endpoint does not know. Not cached as an ANSWER -- see
+        # the docstring -- but counted, so a permanent failure stops being
+        # re-asked once it has proved it is not a blip.
+        attempts = _context_window_failures.get(key, 0) + 1
+        _context_window_failures[key] = attempts
+        giving_up = attempts >= MAX_CONTEXT_WINDOW_QUERY_ATTEMPTS
+        logger.warning(
+            "Could not read a context window for %r from %s (%s); "
+            "config.MODEL_CONTEXT_WINDOWS will answer instead.%s",
+            model, provider_name, e,
+            " Not asking again this session." if giving_up else "")
+        if giving_up:
+            _record_window(provider_name, model, None)
+        return None, False
 
 
 _google_budget_support: Optional[bool] = None

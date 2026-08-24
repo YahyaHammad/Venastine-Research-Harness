@@ -164,6 +164,133 @@ def test_the_qwen_entry_stops_the_fallback_entirely(caplog):
     assert "MODEL_CONTEXT_WINDOWS" not in caplog.text
 
 
+def test_the_backstop_fires_at_the_window_minus_the_margin():
+    """The boundary itself, which nothing asserted.
+
+    The pass-only test above probes at `used == context_limit(...)` --
+    COMPACTION_PIPELINE_BACKSTOP_TOKENS ABOVE the real threshold -- so
+    dropping the subtraction entirely, or getting it wrong by any amount
+    up to the whole margin, still left that test green. This pins the
+    arithmetic: fires AT the boundary, silent one token below it.
+    """
+    window = compaction.context_limit("claude-sonnet-5")
+    compact_at = window - config.COMPACTION_PIPELINE_BACKSTOP_TOKENS
+
+    assert compaction.should_compact(
+        compact_at, "claude-sonnet-5", mode="backstop") == "compact"
+    assert compaction.should_compact(
+        compact_at - 1, "claude-sonnet-5", mode="backstop") == ""
+
+
+def test_the_backstop_never_warns_because_it_cannot():
+    """warn_at == compact_at in backstop mode, so "warn" is unreachable
+    there. Deliberate -- a headless pass has nobody to warn -- but it is an
+    asymmetry with working-set mode that nothing stated."""
+    warn_at, compact_at = compaction.thresholds("claude-sonnet-5",
+                                                mode="backstop")
+    assert warn_at == compact_at
+
+
+# ---------------------------------------------------------------------------
+# ---- Model-name normalization ---------------------------------------------
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("model,expected", [
+    # A dated id resolves to its dateless entry. This is the bug: exact
+    # matching sent claude-sonnet-5-20260724 to the 200k default while
+    # claude-sonnet-5 sat in the table at a million.
+    ("claude-sonnet-5-20260724", "claude-sonnet-5"),
+    ("claude-haiku-4-5-20251001", "claude-haiku-4-5"),
+    # Gateway decorations.
+    ("anthropic/claude-opus-5", "claude-opus-5"),
+    ("us.anthropic.claude-opus-5", "claude-opus-5"),
+    ("eu.anthropic.claude-opus-5", "claude-opus-5"),
+    # THE CASES THAT MUST NOT MOVE. Both contain a dot inside the model
+    # name itself, which is why the region rule is an allowlist and not a
+    # split on the first dot.
+    ("gpt-5.1", "gpt-5.1"),
+    ("qwen3.8-max-preview", "qwen3.8-max-preview"),
+    # Unrecognised shapes are returned untouched, so they still MISS and
+    # still warn. A loud miss beats a silently wrong window.
+    ("some-new-model", "some-new-model"),
+    ("gpt-5.1-2026", "gpt-5.1-2026"),
+])
+def test_normalization_strips_decorations_and_nothing_else(model, expected):
+    assert compaction._normalized(model) == expected
+
+
+def test_a_dated_model_id_resolves_to_its_table_entry(caplog):
+    """The 5x undershoot, end to end. Before normalization this returned
+    DEFAULT_CONTEXT_WINDOW and warned; it reaches summarize_thread()'s
+    truncation gate, so the cost was discarded thread content and not
+    merely a mistimed backstop."""
+    with caplog.at_level("WARNING", logger="core.compaction"):
+        assert compaction.context_limit("claude-sonnet-5-20260724") == 1_000_000
+
+    assert "MODEL_CONTEXT_WINDOWS" not in caplog.text
+
+
+def test_every_table_key_is_already_normalized():
+    """Keys are looked up AFTER normalization, so a decorated key would be
+    unreachable -- which is exactly what claude-haiku-4-5-20251001 was once
+    normalization existed. This is the guard against re-adding one."""
+    unreachable = [key for key in config.MODEL_CONTEXT_WINDOWS
+                   if compaction._normalized(key) != key]
+    assert not unreachable, (
+        f"these MODEL_CONTEXT_WINDOWS keys can never be matched: "
+        f"{unreachable}")
+
+
+# ---------------------------------------------------------------------------
+# ---- The queried window beats the table -----------------------------------
+# ---------------------------------------------------------------------------
+
+def test_a_queried_window_wins_over_the_table(caplog):
+    """Source 1 of three. What the provider SAID is what THIS account has;
+    the table can only record what a model can have."""
+    from core import client as client_module
+
+    client_module._context_window_cache[("ANTHROPIC", "claude-sonnet-5")] = 250_000
+    with caplog.at_level("WARNING", logger="core.compaction"):
+        assert compaction.context_limit(
+            "claude-sonnet-5", "ANTHROPIC") == 250_000
+
+    assert "MODEL_CONTEXT_WINDOWS" not in caplog.text
+
+
+def test_a_queried_window_rescues_a_model_absent_from_the_table(caplog):
+    """The point of querying: a newly released model needs no entry here,
+    which is the same argument that made Anthropic's effort levels a query
+    rather than a table."""
+    from core import client as client_module
+
+    client_module._context_window_cache[("ANTHROPIC", "claude-brand-new")] = 512_000
+    with caplog.at_level("WARNING", logger="core.compaction"):
+        assert compaction.context_limit(
+            "claude-brand-new", "ANTHROPIC") == 512_000
+
+    assert caplog.text == ""
+
+
+def test_a_provider_reporting_no_window_falls_back_to_the_table():
+    """OpenAI, DeepSeek and Perplexity answer /models with no window at
+    all. That is cached as None -- a real answer -- and must send the
+    caller to the table rather than being mistaken for one."""
+    from core import client as client_module
+
+    client_module._context_window_cache[("OPENAI", "gpt-5.1")] = None
+    assert compaction.context_limit("gpt-5.1", "OPENAI") == 400_000
+
+
+def test_the_query_is_not_consulted_without_a_provider():
+    """Every pre-existing caller omits the provider, and must keep getting
+    exactly the behaviour that predated the query."""
+    from core import client as client_module
+
+    client_module._context_window_cache[("ANTHROPIC", "claude-sonnet-5")] = 250_000
+    assert compaction.context_limit("claude-sonnet-5") == 1_000_000
+
+
 def test_the_reentrancy_guard_stops_the_compactor_compacting():
     """M3. The compactor is an agent, so compacting runs the loop, which
     evaluates the trigger, which could compact. `allowed_tools: []` stops

@@ -5959,3 +5959,125 @@ severity-invariant comment, AGENTS §26 bullet, widgets.py TodoPanel
 comment, ARCHITECTURE tree + provenance list (75 files), README aggregate.
 #14 and #183 close with evidence; tracker drops to FOUR open audit
 findings (#6, #8, #9, #12).
+
+
+## Batch 30 — the context window stops being a guess (2026-08-24)
+
+`config.MODEL_CONTEXT_WINDOWS` had one reader, `compaction.context_limit()`, and
+anything it did not know became `DEFAULT_CONTEXT_WINDOW`. The owner asked a
+two-part question: does the code blindly take the default, and can the providers
+in `providers.json.example` be asked instead? Both halves turned out to have
+answers the docs did not.
+
+### What was actually wrong
+
+**The match was exact, on the model name, with no normalization.** So
+`claude-sonnet-5-20260724` missed a million-token entry and took 200k — a 5x
+undershoot, silent after the first warning. The table demonstrated the bug on
+itself: five Claude entries were dateless and `claude-haiku-4-5-20251001` was
+not, so whichever spelling a caller used, one of them missed.
+
+**The blast radius was bigger than three documents said.** ARCHITECTURE, AGENTS
+and README all said "feeds the pipeline backstop only". It also feeds
+`_input_budget()`, which gates the forced chain switch and the **lossy
+truncation** in `summarize_thread()`. A wrong window there discards the oldest
+thread content; it does not merely mistime a trigger.
+
+**The warning was narrower than advertised.** `config.py` said "Logged at
+WARNING when used". It is once per model per process — deliberately, and for a
+good reason recorded at the dedup set — but a long session says it once and is
+then silent, which is not what the comment promised.
+
+### §21's rejection: right conclusion, wrong premise
+
+§21 and the Open Questions section recorded "no per-provider query" as CLOSED BY
+VERIFICATION: "no uniform endpoint exposing context length across them — fifteen
+adapters to avoid a fallback constant they would all still need." Measured
+against the **pinned** SDKs rather than assumed:
+
+    anthropic 0.116.0    ModelInfo.max_input_tokens
+    google-genai 1.0.0   types.Model.input_token_limit
+    openai 2.45.0        Model: id/created/object/owned_by,
+                         model_config {'extra': 'allow'}
+
+The first line is the one that matters. `core/client.py:590` **already calls**
+`client.models.retrieve(model)` to read `capabilities.effort`, and
+`max_input_tokens` is on that same object — the harness's own default provider
+had been reporting its window all along, into a variable nobody read. The third
+line kills the adapter count: `extra="allow"` keeps unmodelled provider fields
+on the parsed object, so Groq's `context_window`, Together's and OpenRouter's
+`context_length` and Mistral's `max_context_length` are all reachable through
+ONE alias sniff. Two attribute reads and a sniff, not fifteen adapters.
+
+**The conclusion survived, which is why this is an amendment and not a
+reversal.** OpenAI, DeepSeek and Perplexity answer `/models` with
+id/created/object/owned_by and nothing else; Grok, Fireworks, Qwen and Z.AI
+publish no model-metadata endpoint at all. The fallback constant is still needed
+at the end of it, exactly as §21 said. Querying and tabulating were never
+alternatives.
+
+### The owner's calls
+
+Tiered query with the table kept as the floor; normalize-then-exact matching
+(over longest-prefix, which can let one entry shadow a future sibling — a
+silently wrong window, where a miss is merely early); refresh the table.
+
+### What was built
+
+`client.context_window_for(client, provider, model) -> (window, authoritative)`,
+beside `_effort_levels` and shaped like it. Anthropic is a cache hit off the
+effort retrieve; Google reads `input_token_limit`; everything else sniffs four
+aliases over `.model_extra`. `known_context_window()` is a cache-only read, which
+is what lets `core/compaction.py` ask without holding a client or importing an
+SDK. **No plumbing was needed** — `_maybe_compact`, `compact()` and
+`summarize_thread()` all already carried `provider_name`; the new parameters are
+optional and trailing, so every existing caller kept working.
+
+`compaction._normalized()` strips a `vendor/` prefix, an allowlisted `region.`
+prefix and a trailing `-YYYYMMDD`. The region rule is an ALLOWLIST rather than a
+split on the first dot precisely because `gpt-5.1` and `qwen3.8-max-preview`
+carry dots inside the model name; a general rule would corrupt the two entries it
+was meant to protect. Unrecognised shapes pass through untouched, so they still
+miss and still warn — a loud miss beats a silently wrong window when the number
+gates a truncation. `claude-haiku-4-5-20251001` was re-keyed dateless, because
+normalization would otherwise make it unreachable, and a test now fails on any
+future key that cannot be matched.
+
+### The caching rule is #35's, paid for once already
+
+A query that RAISED is warned and **not** cached: caching a failure-derived
+answer made one transient error permanently suppress the query for the life of
+the process. A query that SUCCEEDED and reported nothing IS cached, because that
+is a real and stable answer and re-asking it would spend a request per
+compaction check per step. That split is the whole difference between the two
+cases and did not exist as a distinction before.
+
+### The trap this walked into on purpose
+
+`_FakeAnthropicClient` had **no `.models` attribute at all**, and
+`_FakeOpenAIClient` had `models.list` but no `retrieve`. A second query copying
+the existing `except Exception` fallback would have raised AttributeError, fallen
+back silently and shown green — which is #35's failure mode exactly, and #35 cost
+eight green tests over a query that could never succeed. So the fakes grew the
+surface the real SDKs expose, and `test_sdk_conformance.py` now pins all three
+premises against the REAL packages: `ModelInfo.max_input_tokens`,
+`Model.input_token_limit`, and `openai.types.Model` being `extra="allow"`. If a
+future bump sets `extra="ignore"`, four providers would silently start reporting
+no window; that test goes red instead.
+
+### Left for the owner
+
+The five Claude entries read 1_000_000. That is beta-gated behind
+`context-1m-2025-08-07`, which this harness does not send, so an ordinary
+account gets 200k — and by the `qwen3.8-max-preview` entry's own rule (record the
+SMALLER number; erring high means a hard context-limit error mid-run) they want
+to be 200_000, with the query supplying 1M to accounts that really have it. The
+values were left as found and flagged in place rather than changed silently,
+since the table is now only consulted when the query cannot answer.
+
+Counts 2545 -> 2581 (+15 test_context_window.py, +17 test_compaction.py, +4
+test_sdk_conformance.py). Eight mutations run against the new tests, all killed.
+Docs: config.py's comment rewritten (it argued against what now exists),
+ARCHITECTURE tree + client API + §21 section, AGENTS M1 bullet, README config
+table, ROADMAP_v2's Open Questions entry amended in place with a dated
+correction, BREAKING_CHANGES rows.

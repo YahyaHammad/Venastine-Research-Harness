@@ -227,7 +227,7 @@ def test_a_research_pass_asks_in_backstop_mode(mocker):
     is the way this rule would actually get lost."""
     seen = []
     mocker.patch("core.compaction.should_compact",
-                 side_effect=lambda used, model, mode: seen.append(mode) or "")
+                 side_effect=lambda used, model, mode, **kw: seen.append(mode) or "")
     mocker.patch("core.loop.call_model_stream",
                  side_effect=make_stream_sequence(make_model_response(text="hi")))
     mocker.patch("core.loop.ConversationMemory", FakeMemory)
@@ -241,7 +241,7 @@ def test_an_ordinary_turn_asks_in_working_set_mode(mocker):
     """The control for the test above."""
     seen = []
     mocker.patch("core.compaction.should_compact",
-                 side_effect=lambda used, model, mode: seen.append(mode) or "")
+                 side_effect=lambda used, model, mode, **kw: seen.append(mode) or "")
     mocker.patch("core.loop.call_model_stream",
                  side_effect=make_stream_sequence(make_model_response(text="hi")))
 
@@ -265,7 +265,7 @@ def test_a_re_entered_machinery_thread_asks_in_backstop_mode(mocker, kind):
 
     seen = []
     mocker.patch("core.compaction.should_compact",
-                 side_effect=lambda used, model, mode: seen.append(mode) or "")
+                 side_effect=lambda used, model, mode, **kw: seen.append(mode) or "")
     mocker.patch("core.loop.call_model_stream",
                  side_effect=make_stream_sequence(make_model_response(text="hi")))
     memory = FakeMemory(thread_id=mocker.sentinel.tid,
@@ -291,7 +291,7 @@ def test_a_resumed_chat_thread_keeps_the_working_set_trigger(mocker):
     the defect, and #172 is what makes its notices visible."""
     seen = []
     mocker.patch("core.compaction.should_compact",
-                 side_effect=lambda used, model, mode: seen.append(mode) or "")
+                 side_effect=lambda used, model, mode, **kw: seen.append(mode) or "")
     mocker.patch("core.loop.call_model_stream",
                  side_effect=make_stream_sequence(make_model_response(text="hi")))
     memory = FakeMemory(thread_id=mocker.sentinel.tid, kind="chat")
@@ -310,7 +310,7 @@ def test_an_explicit_mode_beats_the_derivation(mocker):
     mode is never second-guessed by what the thread happens to be."""
     seen = []
     mocker.patch("core.compaction.should_compact",
-                 side_effect=lambda used, model, mode: seen.append(mode) or "")
+                 side_effect=lambda used, model, mode, **kw: seen.append(mode) or "")
     mocker.patch("core.loop.call_model_stream",
                  side_effect=make_stream_sequence(make_model_response(text="hi")))
     memory = FakeMemory(kind="chat")   # derivation would say working_set
@@ -329,7 +329,7 @@ def test_a_spawned_subagent_thread_derives_backstop_without_being_told(mocker):
 
     seen = []
     mocker.patch("core.compaction.should_compact",
-                 side_effect=lambda used, model, mode: seen.append(mode) or "")
+                 side_effect=lambda used, model, mode, **kw: seen.append(mode) or "")
     mocker.patch("core.loop.call_model_stream",
                  side_effect=make_stream_sequence(make_model_response(text="hi")))
 

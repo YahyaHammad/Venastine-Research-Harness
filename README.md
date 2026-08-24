@@ -627,7 +627,7 @@ Deliberately not settings.json keys: editing these means editing the file in you
 | `MODEL_EFFORT_LEVELS` | see file | Per-model level lists for non-Anthropic providers; an entry mapped to an *empty* list means "takes no effort parameter" and drops the level cleanly |
 | `GOOGLE_THINKING_BUDGETS` | low→2,048 … max→dynamic | Google level→thinking-token map |
 | `MODELS_REJECTING_SAMPLING_PARAMS` | current Anthropic models | These 400 on temperature/top_p/top_k; such parameters are dropped with a WARNING rather than sent |
-| `MODEL_CONTEXT_WINDOWS` / `DEFAULT_CONTEXT_WINDOW` | 128k fallback | Feeds the research-pass compaction backstop only; an unknown model warns and assumes the default |
+| `MODEL_CONTEXT_WINDOWS` / `DEFAULT_CONTEXT_WINDOW` | 200k fallback | The **fallback** for the window, not the only source: Anthropic and Google report it on their model endpoints, and the OpenAI-compatible providers that carry it (Groq, Mistral, Together, OpenRouter) are read through one alias sniff. This table answers for the ones that report nothing (OpenAI, DeepSeek, Perplexity). Feeds the research-pass compaction backstop **and** the summarizer's one-call input budget; an unknown model warns once and assumes the default. Keys are stored normalized — no date suffix, no `vendor/` prefix |
 | `SHELL_APPROVAL_MODE` | `"tiered"` | The shell gate: `always` / `tiered` / `never`; a bad value raises at import. Rejected in settings.json by name, see above |
 | `NETWORK_ALLOWED_COMMANDS` | pip, curl, git, npm, … | First words granted network access inside the sandbox |
 | `INERT_COMMANDS` | ls, cat, grep, wc, … | Read-only commands that run as plain host subprocesses, skipping Docker entirely |
@@ -696,7 +696,7 @@ classifier is described under *Security model* above. If you have a fork or a lo
 note that `ToolApprovals.shell` now ships `False` and `SHELL_APPROVAL_MODE` is the gate — see
 `tests/BREAKING_CHANGES.md` §24.
 
-Run the test suite with `pytest` — 2545 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
+Run the test suite with `pytest` — 2581 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
 
 ## Documentation
 

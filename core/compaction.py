@@ -31,6 +31,7 @@ ratio check needs -- it is never compared against a provider's count.
 """
 
 import logging
+import re
 from typing import Optional
 
 import config
@@ -83,15 +84,83 @@ def estimated_tokens(messages) -> int:
 _context_window_warned: set = set()
 
 
-def context_limit(model: str) -> int:
+# A trailing release date, as Anthropic and Google spell it.
+_DATE_SUFFIX = re.compile(r"-\d{8}$")
+
+# Region prefixes an inference gateway prepends, as an ALLOWLIST rather
+# than a dot-split. Two entries in the table -- `gpt-5.1` and
+# `qwen3.8-max-preview` -- contain dots inside the model name itself, so a
+# general "strip up to the first dot" rule would corrupt exactly the names
+# it was meant to preserve. Matching a known set cannot.
+_REGION_PREFIXES = ("us.", "eu.", "apac.", "us-gov.")
+
+
+def _normalized(model: str) -> str:
+    """A model id reduced to the form MODEL_CONTEXT_WINDOWS is keyed in.
+
+    LOOKUP ONLY. This never touches what is sent on the wire -- the model
+    string the provider receives is always the one the caller supplied.
+
+    Exact matching alone is why `claude-sonnet-5-20260724` used to resolve
+    to the 200k default while `claude-sonnet-5` sat in the table at a
+    million: a 5x undershoot that is silent after the first warning, and
+    which reaches summarize_thread()'s truncation gate, not just the
+    backstop. The table itself demonstrated the problem -- it keyed one
+    Claude entry with a date suffix and five without.
+
+    Deliberately narrow, and the rules only ever REMOVE a decoration that
+    a gateway added:
+
+      anthropic/claude-opus-5      -> claude-opus-5     (OpenRouter style)
+      us.anthropic.claude-opus-5   -> claude-opus-5     (Bedrock style)
+      claude-sonnet-5-20260724     -> claude-sonnet-5
+      gpt-5.1                      -> gpt-5.1           (untouched)
+      qwen3.8-max-preview          -> qwen3.8-max-preview
+
+    An id that fits no rule is returned unchanged, so an unrecognised name
+    still MISSES and still warns. That direction is deliberate: a loud
+    miss costs an early compaction, a wrong prefix match costs a silently
+    wrong window, and this table feeds a lossy truncation.
+    """
+    name = model.strip()
+    if "/" in name:
+        name = name.rsplit("/", 1)[-1]
+    for prefix in _REGION_PREFIXES:
+        if name.startswith(prefix):
+            name = name[len(prefix):]
+            break
+    # Bedrock spells the vendor as a dotted segment after the region.
+    if name.startswith("anthropic."):
+        name = name[len("anthropic."):]
+    return _DATE_SUFFIX.sub("", name)
+
+
+def context_limit(model: str, provider_name: Optional[str] = None) -> int:
     """The model's context window, for the pipeline backstop (M6).
+
+    THREE SOURCES, most authoritative first:
+
+      1. What the provider SAID, via core.client.known_context_window --
+         a cache-only read, primed by core/loop.py before every send. §21
+         rejected querying on the belief that no provider in the roster
+         could answer; re-measured, Anthropic reports max_input_tokens on
+         the very ModelInfo the effort query already fetches, Google
+         reports input_token_limit, and Groq/Mistral/Together/OpenRouter
+         report a window under one of four field names. A queried answer
+         also beats the table on a point the table cannot reach: it is
+         what THIS account actually has, not what the model can have.
+      2. config.MODEL_CONTEXT_WINDOWS, normalized (see _normalized), which
+         still answers for OpenAI, DeepSeek and Perplexity -- they report
+         nothing, which is why §21's conclusion outlived its premise.
+      3. DEFAULT_CONTEXT_WINDOW, warned.
 
     Warned on fallback, per §21: a wrong-by-default window means the
     backstop fires at the wrong time in whichever direction the guess is
     wrong, and silent guessing turns a tuning problem into a mystery. Much
     less load-bearing than §21 assumed, though -- M1 moved the ordinary
     trigger off this table entirely, so a missing entry costs a mistimed
-    backstop rather than mistimed compaction.
+    backstop and a mistimed summarizer input budget rather than mistimed
+    compaction.
 
     ONCE PER MODEL. This is called from thresholds(), which
     should_compact() calls on EVERY evaluation -- and _maybe_compact runs
@@ -100,21 +169,44 @@ def context_limit(model: str) -> int:
     user can do nothing more about after reading it once is how a warning
     that matters gets trained past, and on the TUI it was also painting
     over the screen.
+
+    `provider_name` is optional so that every existing caller keeps
+    working; without it only sources 2 and 3 are available, which is
+    exactly the behaviour that predated the query.
     """
-    window = config.MODEL_CONTEXT_WINDOWS.get(model)
+    if provider_name:
+        # Imported HERE, not at module scope. core/client.py defers its SDK
+        # imports to keep `--help` fast (see its header), and this module is
+        # reached from agents.manager, so a top-level import would both undo
+        # that and add an import cycle. Guarded because a failure to read a
+        # cache must never be the reason a thread cannot compact.
+        try:
+            from core import client as _client
+
+            queried = _client.known_context_window(provider_name, model)
+        except Exception:  # pragma: no cover - defensive
+            queried = None
+        if queried:
+            return queried
+
+    window = config.MODEL_CONTEXT_WINDOWS.get(_normalized(model))
     if window is None:
         if model not in _context_window_warned:
             _context_window_warned.add(model)
             logger.warning(
-                "No context window known for model %r; assuming %s. Add it to "
-                "config.MODEL_CONTEXT_WINDOWS -- the compaction backstop fires "
-                "against this number.", model, config.DEFAULT_CONTEXT_WINDOW)
+                "No context window known for model %r%s; assuming %s. Add it "
+                "to config.MODEL_CONTEXT_WINDOWS -- the compaction backstop "
+                "and the summarizer's input budget both fire against this "
+                "number.", model,
+                f" on {provider_name}" if provider_name else "",
+                config.DEFAULT_CONTEXT_WINDOW)
         return config.DEFAULT_CONTEXT_WINDOW
     return window
 
 
 def thresholds(model: str, mode: str = "working_set",
-               overrides: Optional[dict] = None) -> tuple:
+               overrides: Optional[dict] = None,
+               provider_name: Optional[str] = None) -> tuple:
     """(warn_at, compact_at) in tokens, for this mode.
 
     TWO MODES, because a research pass and a chat turn want different
@@ -129,14 +221,16 @@ def thresholds(model: str, mode: str = "working_set",
     settings = config_loader.effective_compaction(overrides)
     if mode == "backstop":
         compact_at = max(
-            1, context_limit(model) - config.COMPACTION_PIPELINE_BACKSTOP_TOKENS)
+            1, context_limit(model, provider_name)
+            - config.COMPACTION_PIPELINE_BACKSTOP_TOKENS)
         return compact_at, compact_at
     compact_at = settings["trigger_tokens"]
     return compact_at - settings["warning_margin_tokens"], compact_at
 
 
 def should_compact(used: int, model: str, mode: str = "working_set",
-                   overrides: Optional[dict] = None) -> str:
+                   overrides: Optional[dict] = None,
+                   provider_name: Optional[str] = None) -> str:
     """"" | "warn" | "compact", from a measured context size.
 
     `used` is ModelResponse.usage["input_tokens"] from the most recent
@@ -152,7 +246,7 @@ def should_compact(used: int, model: str, mode: str = "working_set",
     """
     if _compacting:
         return ""
-    warn_at, compact_at = thresholds(model, mode, overrides)
+    warn_at, compact_at = thresholds(model, mode, overrides, provider_name)
     if used >= compact_at:
         return "compact"
     if used >= warn_at:
@@ -320,7 +414,7 @@ def pin_measurements(thread_id, last_n: int) -> dict:
     }
 
 
-def _input_budget(model: str) -> int:
+def _input_budget(model: str, provider_name: Optional[str] = None) -> int:
     """One-call INPUT ceiling for a summarizer prompt, in proxy tokens.
 
     context_limit minus the pipeline backstop margin -- generous by
@@ -332,7 +426,7 @@ def _input_budget(model: str) -> int:
     oversized send, which is a provider error mid-compaction on exactly
     the thread that can least afford one.
     """
-    return max(1_000, context_limit(model)
+    return max(1_000, context_limit(model, provider_name)
                - config.COMPACTION_PIPELINE_BACKSTOP_TOKENS)
 
 
@@ -470,7 +564,7 @@ def compact(memory, model: str, provider_name: str,
     # summary to chain onto; VERBOSE because a configured strategy
     # quietly doing the other thing is exactly what "(traced)" in the
     # spec was about.
-    budget = _input_budget(model)
+    budget = _input_budget(model, provider_name)
     forced_chain_note = ""
     if (not chaining and previous is not None
             and len(segment_text) // CHARS_PER_TOKEN > budget):
@@ -628,7 +722,7 @@ def summarize_thread(thread_id, model: str, provider_name: str,
     # the summary this call is meant to PRODUCE, then truncate the oldest
     # material with the cut stated in the instruction AND in the stored
     # row, so every referencing thread sees it.
-    budget = max(1_000, _input_budget(model)
+    budget = max(1_000, _input_budget(model, provider_name)
                  - config.SUMMARY_TARGET_CHARS // CHARS_PER_TOKEN)
     truncation_notice = None
     if original // CHARS_PER_TOKEN > budget:

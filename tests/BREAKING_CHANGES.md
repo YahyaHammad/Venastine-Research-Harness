@@ -745,6 +745,16 @@ ten-pass run, and every warning it logged scribbled over the Textual screen.
 | Route INFO to the transcript too | `test_info_is_not_routed_to_the_transcript` | Noise in a chat transcript; the rotating file already has it with timestamps |
 | Warn per call in `context_limit()` | `test_the_unknown_model_warning_is_said_once_per_model` | `thresholds()` is called on every evaluation and `_maybe_compact` runs at the top of every step, so an unknown model warned twice a step across ten passes |
 | Dedupe on a single boolean instead of the model | `test_a_second_unknown_model_is_still_reported` | A run that switches model, or a pipeline whose critic model differs (§11), must still hear about the second one |
+| Look the model up without normalizing it | `test_a_dated_model_id_resolves_to_its_table_entry` | Exact matching sent `claude-sonnet-5-20260724` to the 200k default while `claude-sonnet-5` sat in the table at a million — a 5x undershoot that reaches `summarize_thread()`'s truncation gate |
+| Re-key a `MODEL_CONTEXT_WINDOWS` entry with a date or a `vendor/` prefix | `test_every_table_key_is_already_normalized` | Lookup normalizes the incoming id first, so a decorated key can never be matched. This is what `claude-haiku-4-5-20251001` became the moment normalization existed |
+| Split on the first dot instead of an allowlist in `_normalized` | `test_normalization_strips_decorations_and_nothing_else` | `gpt-5.1` and `qwen3.8-max-preview` carry dots inside the model name; a general rule corrupts the two entries it was meant to protect |
+| Prefer the table over a queried window | `test_a_queried_window_wins_over_the_table` | The provider's answer is what THIS account has; the table can only record what a model can have |
+| Drop the backstop's margin subtraction | `test_the_backstop_fires_at_the_window_minus_the_margin` | Nothing asserted the boundary — the pass-only test probes a full margin ABOVE it, so removing the subtraction entirely stayed green |
+| Cache a context-window query that raised | `test_a_failed_query_is_warned_and_NOT_cached` | #35's rule, second application: one transient error would permanently suppress the query for the life of the process |
+| Cache nothing when a provider legitimately reports no window | `test_a_provider_that_reports_nothing_answers_None_authoritatively` | That is an ANSWER, not a failure. Re-asking spends a request per compaction check per step |
+| Read the Anthropic window with its own `models.retrieve` | `test_the_anthropic_window_rides_along_on_the_effort_retrieve` | It is on the ModelInfo the effort query already fetches; a second call makes config.py's "no extra call" claim false |
+| Read only declared fields instead of `.model_extra` | `test_one_reader_covers_every_v1_compatible_spelling`, `test_openai_models_keep_unknown_provider_fields` | `openai.types.Model` declares none of the four aliases. Without the extra-field read, Groq/Mistral/Together/OpenRouter all fall silently back to the table |
+| Give `_FakeAnthropicClient` no `.models`, as it had | `test_a_client_with_no_models_endpoint_fails_loudly_not_silently` | The #35 shape: the query raises AttributeError, its own `except` swallows it, and the suite stays green over a query that cannot succeed |
 
 ### Standing: `compaction._context_window_warned` is module state
 

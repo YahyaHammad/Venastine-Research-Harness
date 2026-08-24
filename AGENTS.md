@@ -42,7 +42,7 @@ python main.py --init --research-project           # §24: skip the type questio
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 2545 tests, offline, ~25-45s by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 2581 tests, offline, ~25-45s by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -296,7 +296,12 @@ what makes an early, frequent trigger safe.
   has NEVER keyed off the billing meter; since batch 27 nothing else does either —
   there is no default spend ceiling, so `effective_compaction()`'s headroom warning
   speaks only when settings.json actually configures `max_token_budget`.
-  `MODEL_CONTEXT_WINDOWS` feeds only the pipeline backstop, so a missing entry is cheap.
+  `MODEL_CONTEXT_WINDOWS` is the FALLBACK, not the only source: `context_limit()`
+  prefers the provider's own answer (`client.context_window_for`, primed before
+  every send) and normalizes the model id — a dated or `vendor/`-prefixed name used
+  to miss the table entirely and take the 200k default silently. A missing entry is
+  cheaper than §21 feared but not free: it also sets `_input_budget()`, which gates
+  the lossy truncation in `summarize_thread()`.
 - **The spend meter is optional; the size instrument is not.** Batch 27 deleted the
   constants: no default ceiling anywhere, and the only cap is the user's
   `max_token_budget` setting. What every caller gains unconditionally is the size
