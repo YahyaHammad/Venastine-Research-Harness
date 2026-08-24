@@ -92,6 +92,53 @@ def test_prompt_unchanged_before_initialize():
     assert system_prompts.with_skill_catalog("BASE") == "BASE"
 
 
+# ---------------------------------------------------------------------------
+# ---- The shared real-harness fixture (#5 / TECHNICAL_DEBT item 10) --------
+# ---------------------------------------------------------------------------
+
+def test_the_shared_fixture_loads_real_and_isolates_everything_else(
+        real_harness_tier):
+    """The pin for the conftest fixture nineteen sites lean on. Three
+    properties, each one of the ways a future edit could quietly break
+    them:
+
+    - ISOLATED PROJECT: get_project_path() is the tmp project, never the
+      checkout's working directory -- a trusted `.venastine/` appearing
+      in a developer's tree must stay invisible to these suites.
+    - REAL HARNESS TIER: agents actually load from the repo's builtins.
+      Redirecting HARNESS_ROOT (as test_config_loader._redirect_roots
+      rightly does for loader unit tests -- which is why this pin lives
+      here and not there) would empty the tier this fixture exists to
+      load and turn every harness-honesty site into a vacuous pass.
+    - EMPTY USER TIER: _user_config_dir resolves under the tmp home, so
+      a developer's own ~/.config/venastine cannot leak in either."""
+    import os
+
+    from core import workspace_trust
+
+    config_loader.initialize(str(real_harness_tier))
+
+    assert config_loader.get_project_path() == str(real_harness_tier)
+    assert os.path.realpath(config_loader.get_project_path()) != \
+        os.path.realpath(os.getcwd())
+
+    agents = config_loader.get_agents()
+    assert agents, "harness tier loaded empty -- HARNESS_ROOT was redirected"
+
+    assert config_loader._user_config_dir().startswith(
+        str(real_harness_tier.parent))
+    assert workspace_trust._trust_store_path().startswith(
+        str(real_harness_tier.parent))
+
+    # And the redirected store fails CLOSED: untrusted project content
+    # present, empty store -> not trusted.
+    skills = real_harness_tier / ".venastine" / "skills"
+    skills.mkdir(parents=True)
+    (skills / "sneaky.md").write_text(
+        "---\nname: sneaky\ndescription: d\n---\nBody.\n", encoding="utf-8")
+    assert not workspace_trust.is_trusted(str(real_harness_tier))
+
+
 def test_missing_name_returns_an_error_not_a_keyerror(_user_skill):
     """No provider validates tool inputs against the schema, so a call
     with the key missing or misspelled raised a bare KeyError -- and

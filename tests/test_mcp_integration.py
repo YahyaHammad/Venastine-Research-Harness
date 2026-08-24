@@ -70,8 +70,24 @@ def _child_pids() -> set:
                 f"leak from a clean shutdown: {result.stderr.strip()}")
         return {int(t) for t in result.stdout.split() if t.isdigit()}
 
-    out = subprocess.run(["ps", "-eo", "pid,args"],
-                         capture_output=True, text=True).stdout
+    # #10. `ww` disables procps' line-width heuristic, which resolves to 80
+    # columns in some environments (COLUMNS unset + no terminal inside
+    # pytest) and truncates the args column BEFORE the fixture's name --
+    # the child is spawned and visible to every other observer while this
+    # function reports an empty set. Verified in a container: the same
+    # invocation with `ww` returns full-length lines regardless of
+    # COLUMNS.
+    result = subprocess.run(["ps", "-eo", "pid,args", "ww"],
+                            capture_output=True, text=True)
+    # Mirror of the Windows branch above: a failed query returns empty
+    # stdout, indistinguishable from "no children" -- so the spawn
+    # assertion would fail and blame mcp_client/ for a leak that is not
+    # happening.
+    if result.returncode != 0:
+        pytest.fail(
+            "could not enumerate processes, so this test cannot tell a "
+            f"leak from a clean shutdown: {result.stderr.strip()}")
+    out = result.stdout
     pids = set()
     for line in out.splitlines():
         if "stdio_server_fixture" in line:

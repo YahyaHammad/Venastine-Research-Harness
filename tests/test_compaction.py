@@ -33,12 +33,13 @@ class _Resp:
 
 
 @pytest.fixture(autouse=True)
-def _real_agents():
+def _real_agents(real_harness_tier):
     """The compactor is a real harness-tier agent, and conftest resets the
     loader before every test. Initializing for real (rather than stubbing
     manager.get) is what keeps this suite honest about the agent file
-    existing and parsing."""
-    config_loader.initialize(".")
+    existing and parsing -- against a tmp project, never the checkout's
+    working directory (#5)."""
+    config_loader.initialize(str(real_harness_tier))
     yield
     config_loader.reset()
 

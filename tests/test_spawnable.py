@@ -197,11 +197,11 @@ class TestTheCatalogListsOnlyWhatCanBeSpawned:
 
 class TestWhatTheDefaultInstallActuallyAdvertises:
 
-    def test_every_shipped_agent_declares_spawnable(self):
+    def test_every_shipped_agent_declares_spawnable(self, real_harness_tier):
         """A3 asserted against the real files rather than a fixture. This
         is what would fail if someone added agents/builtin/x.md without
         thinking about it -- which is the entire point of the field."""
-        config_loader.initialize(".")
+        config_loader.initialize(str(real_harness_tier))
 
         agents = config_loader.get_agents()
         assert agents, "no agents discovered, so this cannot discriminate"
@@ -209,7 +209,7 @@ class TestWhatTheDefaultInstallActuallyAdvertises:
             assert agent.spawnable is not None, (
                 f"{name} does not declare spawnable")
 
-    def test_none_of_the_four_shipped_agents_is_spawnable(self):
+    def test_none_of_the_four_shipped_agents_is_spawnable(self, real_harness_tier):
         """A4 stated as a test rather than only in the record.
 
         D6's model-initiated half therefore advertises NOTHING in the
@@ -219,7 +219,7 @@ class TestWhatTheDefaultInstallActuallyAdvertises:
         so the day somebody ships a spawnable agent, this test is what
         tells them the situation changed.
         """
-        config_loader.initialize(".")
+        config_loader.initialize(str(real_harness_tier))
 
         spawnable = [n for n, a in config_loader.get_agents().items()
                      if a.spawnable]

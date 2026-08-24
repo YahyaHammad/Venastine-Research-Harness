@@ -325,7 +325,7 @@ this entry was right at both budgets; two of its three numbers were simply copie
 from the older one. Consumers: TUI usage line, CLI early-stop figures, orchestrator
 truncation messages.
 
-## 10. `config_loader.initialize(".")` in tests is CWD-dependent (open, latent)
+## 10. `config_loader.initialize(".")` in tests is CWD-dependent (closed, batch 28)
 
 Found by the §21a review sweep, **not fixed**, and the reason is scope rather than
 difficulty.
@@ -348,6 +348,22 @@ another section's fixtures inside a §21a review is the kind of scope creep that
 a focused pass unreviewable. The fix is a shared fixture that initializes against a
 tmp_path project with the harness root pointed at the real one —
 `tests/test_config_loader.py`'s `_redirect_roots` is most of it already.
+
+**RESOLVED (batch 28, #5).** The shared fixture is `real_harness_tier` in root
+conftest: HOME/USERPROFILE redirected to tmp — which empties BOTH the user tier
+and the trust store, since both resolve through `expanduser("~")` at call time —
+HARNESS_ROOT deliberately left real so the shipped `.md` files still parse, and a
+fresh tmp project returned for each site's own `initialize(str(project))`, kept
+in place rather than folded into the fixture because several sites initialize at
+a specific moment relative to writing files. All literal `"."` sites converted.
+One correction to this entry's own numbers: it said twelve sites across five
+files; an in-issue re-measure found sixteen across seven; at fix time the count
+was **nineteen across eight** — the pattern kept spreading after being recorded,
+which is the strongest argument for having fixed it rather than re-counting
+again. The pin lives in test_load_skill.py
+(`test_the_shared_fixture_loads_real_and_isolates_everything_else`) because
+test_config_loader.py's own `_redirect_roots` is autouse and points HARNESS_ROOT
+at an empty dir — exactly the state the pin exists to forbid.
 
 ## 11. Two provider facts about sampling parameters are unverified (open, needs network)
 

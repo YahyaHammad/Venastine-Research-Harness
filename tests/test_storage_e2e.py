@@ -142,11 +142,11 @@ class _ToolCall:
 
 
 @pytest.fixture
-def compactor(mocker):
+def compactor(mocker, real_harness_tier):
     """The compactor agent, stubbed at the model call. Returns a short
     summary and counts how many times it ran."""
     from core import config_loader
-    config_loader.initialize(".")
+    config_loader.initialize(str(real_harness_tier))
 
     calls = []
 

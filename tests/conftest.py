@@ -386,6 +386,43 @@ def clear_config_loader_state():
     config_loader.reset()
 
 
+@pytest.fixture
+def real_harness_tier(tmp_path, monkeypatch):
+    """A project tier in tmp with the HARNESS TIER LEFT REAL (#5).
+
+    For tests that call config_loader.initialize() to load the shipped
+    agents and skills -- the honest instinct, per TECHNICAL_DEBT item 10:
+    those sites exist so the real .md files are parsed, not stubbed. What
+    they must NOT do is point at the working directory, where a trusted
+    `.venastine/` on some developer's checkout would silently feed every
+    one of them configuration nobody wrote for the tests.
+
+    Redirects HOME/USERPROFILE only. That single mechanism is sufficient
+    by construction: BOTH remaining paths resolve through expanduser("~")
+    at call time -- config_loader._user_config_dir() and the trust store
+    (workspace_trust._trust_store_path) -- so a fresh tmp home empties
+    the user tier AND un-trusts everything with two lines. The explicit
+    `_user_config_dir` lambda some fixtures also patch adds nothing here;
+    it exists for tests that want the user tier somewhere HOME would not
+    put it.
+
+    DELIBERATELY does NOT touch HARNESS_ROOT: redirecting it (as
+    _redirect_roots does for loader unit tests) would empty the very tier
+    this fixture exists to load for real. Returns the tmp PROJECT dir --
+    callers keep their own initialize(str(project)) exactly where it was,
+    because several of them initialize at a specific moment relative to
+    writing files.
+    """
+    from core import config_loader
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("HOME", str(home))
+    project = tmp_path / "project"
+    project.mkdir()
+    return project
+
+
 # ---------------------------------------------------------------------------
 # ---- Fake provider client builders (for tests that drive call_model) ---
 # ---------------------------------------------------------------------------

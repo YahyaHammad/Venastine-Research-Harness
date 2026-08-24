@@ -89,10 +89,10 @@ def test_pin_is_hidden_when_there_is_no_compactor(mocker):
     assert "pin" not in names and "unpin" not in names
 
 
-def test_pin_is_offered_when_the_compactor_exists():
+def test_pin_is_offered_when_the_compactor_exists(real_harness_tier):
     """The control. Without it the test above passes against a build where
     `pin` is never advertised at all."""
-    config_loader.initialize(".")
+    config_loader.initialize(str(real_harness_tier))
     try:
         assert pin.available() is True
         names = [s["name"] for s in registry.schemas(None)]
