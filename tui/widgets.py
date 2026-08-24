@@ -109,8 +109,18 @@ class UsageLine(Static):
         self.display = False
         self.update("")
 
-    def update_usage(self, billed: int, ctx: int) -> None:
-        key = (billed, ctx)
+    def update_usage(self, billed: int, ctx: int,
+                     ceiling: int = 0, overridden: bool = False) -> None:
+        """`ceiling` is the compaction trigger this thread is measured
+        against, shown as a denominator so `ctx` has a scale. `overridden`
+        marks it with a `*` when a session /trigger set it -- ephemeral
+        state that changes when compaction fires should not be invisible,
+        which is the same rule M14 states for injected memories.
+
+        Both are optional so a caller that has no threshold to hand still
+        gets the batch-27 two-instrument line unchanged.
+        """
+        key = (billed, ctx, ceiling, overridden)
         if key == self._last or not (billed or ctx):
             # Change-guard: on_loop_event fires per token delta during a
             # stream; both figures only move at step boundaries, so this
@@ -122,11 +132,12 @@ class UsageLine(Static):
             return f"{n / 1000:.0f}k" if n >= 1000 else str(n)
 
         self.display = True
+        scale = f"/{_k(ceiling)}{'*' if overridden else ''}" if ceiling else ""
         # `system` is the harness-talking-about-itself role -- the right
         # meaning for a usage line, and the palette route the batch-26
         # guard test demands (it caught this line as a literal within one
         # commit of the widget existing).
-        self.update(Text(f"usage · ctx {_k(ctx)} · billed {_k(billed)}",
+        self.update(Text(f"usage · ctx {_k(ctx)}{scale} · billed {_k(billed)}",
                           style=self._styles().get("system", "")))
 
 

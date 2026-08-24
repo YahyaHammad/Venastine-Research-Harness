@@ -35,7 +35,7 @@ import re
 from typing import Optional
 
 import config
-from core import config_loader
+from core import config_loader, session
 from storage import THREAD_KIND_SUBAGENT
 
 logger = logging.getLogger(__name__)
@@ -138,8 +138,14 @@ def _normalized(model: str) -> str:
 def context_limit(model: str, provider_name: Optional[str] = None) -> int:
     """The model's context window, for the pipeline backstop (M6).
 
-    THREE SOURCES, most authoritative first:
+    FOUR SOURCES, most local first:
 
+      0. A session override, bound to this exact (provider, model) --
+         core/session.py. Ephemeral, unpersisted, cleared by /model. It
+         wins because it is the one source a human set on purpose, and
+         because the query it overrides can be wrong in the direction
+         that matters: a beta-gated 1M window reports as 200k until the
+         account is asked with the right header.
       1. What the provider SAID, via core.client.known_context_window --
          a cache-only read, primed by core/loop.py before every send. §21
          rejected querying on the belief that no provider in the roster
@@ -174,6 +180,10 @@ def context_limit(model: str, provider_name: Optional[str] = None) -> int:
     working; without it only sources 2 and 3 are available, which is
     exactly the behaviour that predated the query.
     """
+    override = session.window_for(provider_name, model)
+    if override:
+        return override
+
     if provider_name:
         # Imported HERE, not at module scope. core/client.py defers its SDK
         # imports to keep `--help` fast (see its header), and this module is
@@ -218,6 +228,16 @@ def thresholds(model: str, mode: str = "working_set",
     each one already returns a distillation, so routine compaction there
     would spend on a judgment call nobody is watching.
     """
+    # The session tier, resolved HERE because this is the only place the
+    # working-set trigger is read and the only place that knows the pair
+    # to match it against. effective_compaction stays model-agnostic, and
+    # D27's four-tier chain is unchanged -- the session value arrives
+    # through the existing per-invocation slot rather than adding a fifth
+    # tier. An explicit `overrides` (a `/compact --strength N`) still
+    # wins, since nearest is meant to win and the caller is nearer.
+    trigger = session.trigger_for(provider_name, model)
+    if trigger is not None:
+        overrides = {"trigger_tokens": trigger, **(overrides or {})}
     settings = config_loader.effective_compaction(overrides)
     if mode == "backstop":
         compact_at = max(
@@ -393,8 +413,19 @@ def pin_measurements(thread_id, last_n: int) -> dict:
     from core import config_loader
 
     settings = config_loader.effective_compaction()
-    max_tokens = int(
-        config.PIN_MAX_TRIGGER_FRACTION * settings["trigger_tokens"])
+    # THE MINIMUM, and the min() is load-bearing rather than defensive.
+    # This function has no (provider, model) to match a session override
+    # against, so it reads the binding-free one -- and takes whichever
+    # trigger is SMALLER, which is safe under every binding. A raised
+    # session trigger leaves the cap stricter than it needs to be; a
+    # lowered one pulls the cap down with it. Reading the configured
+    # trigger alone would let `/trigger 12k` leave this cap at 20k, so a
+    # pin could protect more than the whole trigger and floor the thread
+    # permanently above it -- which is the exact defect #89 exists to
+    # prevent, reintroduced through a number typed in a different command.
+    trigger = min(settings["trigger_tokens"],
+                  session.trigger_any() or settings["trigger_tokens"])
+    max_tokens = int(config.PIN_MAX_TRIGGER_FRACTION * trigger)
 
     rows = _ordered_rows(thread_id)
     starts = [i for i, row in enumerate(rows) if row["role"] == "user"]

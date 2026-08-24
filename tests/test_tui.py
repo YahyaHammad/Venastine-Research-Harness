@@ -30,6 +30,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import config
 from tests.conftest import (make_model_response, make_stream_sequence,
                             pump, settle)
 from tui.app import VenastineApp
@@ -922,6 +923,281 @@ async def test_model_is_refused_mid_turn(_mocked_loop, mocker):
         await pilot.pause()
 
     assert (app.provider_name, app.model) == ("ANTHROPIC", "claude-sonnet-5")
+
+
+# ---------------------------------------------------------------------------
+# ---- §21 batch 31: /window and /trigger -----------------------------------
+# ---------------------------------------------------------------------------
+
+def _capture(app) -> tuple:
+    """(system lines, error lines) written by a command handler."""
+    system, errors = [], []
+    app._transcript.write_system = lambda text: system.append(str(text))
+    app._transcript.write_error = lambda text: errors.append(str(text))
+    return system, errors
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("40000", 40_000),
+    ("40k", 40_000),
+    ("40K", 40_000),
+    ("1m", 1_000_000),
+    ("1.5m", 1_500_000),
+])
+def test_token_counts_parse(text, expected):
+    from tui.app import _parse_token_count
+
+    assert _parse_token_count(text) == (expected, None)
+
+
+@pytest.mark.parametrize("text", ["", "abc", "40kb", "-5", "0", "1e", "k"])
+def test_a_token_count_it_does_not_fully_understand_is_refused(text):
+    """Rejected rather than salvaged. Reading `40kb` as 40k would set a
+    number the user did not ask for and then report success."""
+    from tui.app import _parse_token_count
+
+    tokens, error = _parse_token_count(text)
+    assert tokens is None and error
+
+
+@pytest.mark.asyncio
+async def test_trigger_sets_a_session_override_and_moves_the_threshold():
+    from core import compaction, session
+    from tui.app import _cmd_trigger
+
+    app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
+    async with app.run_test() as pilot:
+        system, errors = _capture(app)
+        _cmd_trigger(app, "80k")
+        await pilot.pause()
+
+    assert not errors
+    assert session.trigger_for("ANTHROPIC", "claude-sonnet-5") == 80_000
+    _, compact_at = compaction.thresholds(
+        "claude-sonnet-5", provider_name="ANTHROPIC")
+    assert compact_at == 80_000
+    assert any("this session only" in line for line in system)
+    session.clear()
+
+
+@pytest.mark.asyncio
+async def test_a_trigger_below_its_dependent_floors_is_REFUSED():
+    """Eagerly, against the same function the automatic path uses.
+
+    Without this the value is accepted here and raises ValueError later
+    inside should_compact() -- on the hot path, mid-turn, a long way from
+    the command that caused it. The message must name the floor.
+    """
+    from core import session
+    from tui.app import _cmd_trigger
+
+    app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
+    async with app.run_test() as pilot:
+        system, errors = _capture(app)
+        _cmd_trigger(app, "5k")
+        await pilot.pause()
+
+    assert session.trigger_for("ANTHROPIC", "claude-sonnet-5") is None
+    assert errors and "warning_margin" in errors[0]
+    session.clear()
+
+
+@pytest.mark.asyncio
+async def test_lowering_the_trigger_under_the_thread_says_a_fold_is_coming():
+    """The fold is legitimate and bounded -- compact() returns no-progress
+    on every evaluation after the first -- but arriving unannounced would
+    read as the command having done something it did not."""
+    from core import session
+    from tui.app import _cmd_trigger
+
+    app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
+    async with app.run_test() as pilot:
+        app._memory = SimpleNamespace(last_input_tokens=35_000)
+        system, errors = _capture(app)
+        _cmd_trigger(app, "20k")
+        await pilot.pause()
+
+    assert not errors
+    assert any("expect one compaction" in line for line in system)
+    session.clear()
+
+
+@pytest.mark.asyncio
+async def test_a_trigger_above_the_thread_says_nothing_about_folding():
+    from core import session
+    from tui.app import _cmd_trigger
+
+    app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
+    async with app.run_test() as pilot:
+        app._memory = SimpleNamespace(last_input_tokens=12_000)
+        system, errors = _capture(app)
+        _cmd_trigger(app, "80k")
+        await pilot.pause()
+
+    assert not any("expect one compaction" in line for line in system)
+    session.clear()
+
+
+@pytest.mark.asyncio
+async def test_window_warns_but_does_not_refuse_above_the_reported_window():
+    """Raising it is the best reason to have the command -- a beta-gated
+    1M window reads as 200k until the account is asked with the right
+    header -- so refusing would block exactly the case it exists for."""
+    from core import client as client_module
+    from core import session
+    from tui.app import _cmd_window
+
+    client_module._context_window_cache[("ANTHROPIC", "claude-sonnet-5")] = 200_000
+
+    app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
+    async with app.run_test() as pilot:
+        system, errors = _capture(app)
+        _cmd_window(app, "1m")
+        await pilot.pause()
+
+    assert session.window_for("ANTHROPIC", "claude-sonnet-5") == 1_000_000
+    assert errors and "200,000" in errors[0]
+    session.clear()
+    client_module._context_window_cache.clear()
+
+
+@pytest.mark.asyncio
+async def test_a_window_at_or_below_the_backstop_margin_is_REFUSED():
+    """compact_at would clamp to its floor of 1 and every evaluation of a
+    research pass would compact."""
+    from core import session
+    from tui.app import _cmd_window
+
+    app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
+    async with app.run_test() as pilot:
+        system, errors = _capture(app)
+        _cmd_window(app, str(config.COMPACTION_PIPELINE_BACKSTOP_TOKENS))
+        await pilot.pause()
+
+    assert session.window_for("ANTHROPIC", "claude-sonnet-5") is None
+    assert errors and "backstop" in errors[0]
+    session.clear()
+
+
+@pytest.mark.asyncio
+async def test_off_clears_one_override_and_says_so():
+    from core import session
+    from tui.app import _cmd_window
+
+    app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
+    async with app.run_test() as pilot:
+        session.set_window("ANTHROPIC", "claude-sonnet-5", 400_000)
+        session.set_trigger("ANTHROPIC", "claude-sonnet-5", 80_000)
+        system, errors = _capture(app)
+        _cmd_window(app, "off")
+        await pilot.pause()
+
+    assert session.window_for("ANTHROPIC", "claude-sonnet-5") is None
+    assert session.trigger_for("ANTHROPIC", "claude-sonnet-5") == 80_000
+    assert any("cleared" in line for line in system)
+    session.clear()
+
+
+@pytest.mark.asyncio
+async def test_the_bare_form_reports_the_value_and_its_provenance():
+    """Provenance is the point: four sources can answer for the window, and
+    a number with no source attached is what makes someone edit the wrong
+    one."""
+    from core import session
+    from tui.app import _cmd_window
+
+    app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
+    async with app.run_test() as pilot:
+        system, _ = _capture(app)
+        _cmd_window(app, "")
+        await pilot.pause()
+        assert any("MODEL_CONTEXT_WINDOWS" in line for line in system)
+
+        session.set_window("ANTHROPIC", "claude-sonnet-5", 400_000)
+        system2, _ = _capture(app)
+        _cmd_window(app, "")
+        await pilot.pause()
+
+    assert any("session override" in line and "400,000" in line
+               for line in system2)
+    session.clear()
+
+
+@pytest.mark.asyncio
+async def test_switching_model_clears_both_overrides_and_says_so(mocker):
+    """A window tuned for one model feeds the summarizer's truncation gate
+    on the next. Cleared rather than carried, and SAID rather than dropped
+    quietly -- the same call the effort revalidation makes two lines
+    below."""
+    mocker.patch("credentials.load_provider_data", return_value=_TWO_PROVIDERS)
+    from core import session
+    from tui.app import _cmd_model
+
+    app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
+    async with app.run_test() as pilot:
+        session.set_window("ANTHROPIC", "claude-sonnet-5", 400_000)
+        session.set_trigger("ANTHROPIC", "claude-sonnet-5", 80_000)
+        system, _ = _capture(app)
+        _cmd_model(app, "OPENAI gpt-4o")
+        await pilot.pause()
+
+    assert session.state() == {}
+    assert any("cleared by the switch" in line for line in system)
+
+    # ...and coming back does NOT restore them (the owner's rule).
+    assert session.window_for("ANTHROPIC", "claude-sonnet-5") is None
+    session.clear()
+
+
+@pytest.mark.asyncio
+async def test_switching_model_says_nothing_when_no_override_was_set(mocker):
+    """A switch on a session that never touched these must not print a
+    line about state it did not have."""
+    mocker.patch("credentials.load_provider_data", return_value=_TWO_PROVIDERS)
+    from tui.app import _cmd_model
+
+    app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
+    async with app.run_test() as pilot:
+        system, _ = _capture(app)
+        _cmd_model(app, "OPENAI gpt-4o")
+        await pilot.pause()
+
+    assert not any("cleared by the switch" in line for line in system)
+
+
+@pytest.mark.asyncio
+async def test_setting_a_trigger_before_the_first_message_makes_no_thread():
+    """Setting one before any message is half of what the command is for.
+
+    `app.memory` is a property that CREATES and persists a
+    ConversationThread row on first use, so reading it here would leave
+    the phantom empty thread its own docstring describes having fixed --
+    launch the TUI, type /trigger, quit, and the Ctrl+T picker fills with
+    a row carrying nothing but an id.
+    """
+    from core import session
+    from tui.app import _cmd_trigger
+
+    app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
+    async with app.run_test() as pilot:
+        assert app._memory is None
+        system, errors = _capture(app)
+        _cmd_trigger(app, "80k")
+        await pilot.pause()
+
+    assert not errors
+    assert session.trigger_for("ANTHROPIC", "claude-sonnet-5") == 80_000
+    assert app._memory is None, "the command created a thread"
+    session.clear()
+
+
+def test_both_commands_are_registered():
+    """/help is generated from the registry, so registration is what makes
+    them discoverable at all."""
+    from tui.commands import registry
+
+    names = {c.name for c in registry.all()}
+    assert {"window", "trigger"} <= names
 
 
 @pytest.mark.asyncio

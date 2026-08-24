@@ -6081,3 +6081,105 @@ Docs: config.py's comment rewritten (it argued against what now exists),
 ARCHITECTURE tree + client API + §21 section, AGENTS M1 bullet, README config
 table, ROADMAP_v2's Open Questions entry amended in place with a dated
 correction, BREAKING_CHANGES rows.
+
+
+## Batch 31 — two numbers you can move for one session (2026-08-24)
+
+Batch 30 made the context window a queried value. This adds `/window` and
+`/trigger`: ephemeral overrides, bound to a `(provider, model)`, cleared by
+`/model`, never written anywhere.
+
+### The misreading the whole design turned on
+
+The request was "override this number, so compaction triggers on the new one".
+Those are two different numbers, and finding that out is most of what this
+batch was:
+
+```
+working_set (chat)     compact_at = trigger_tokens          -- FLAT 40,000
+backstop  (passes)     compact_at = context_limit - 20,000  -- window - margin
+```
+
+`trigger_tokens` is an **absolute prompt size, not a margin below the window**.
+A 200k model and a 1M model compact at the identical 40k in chat, and
+`context_limit()` is not called on that branch at all (M1). The `window - margin`
+shape everyone reaches for is the backstop's, where the margin is
+`COMPACTION_PIPELINE_BACKSTOP_TOKENS`. So overriding the *window* would have
+changed nothing about when a chat compacts — which is exactly what the owner
+expected it to change. Two commands, not one, and M1 stands.
+
+Two more facts had to be established before the lowering rule could be settled,
+because both were being guessed at:
+
+* **What is measured after a compaction** is the derived view — the summary,
+  pinned rows from inside the folded span, and everything after the watermark
+  (`core/memory.py:127`). Not the archive, which keeps every message ever and is
+  never sent. And `used` is `usage["input_tokens"]`, so it is the WHOLE prompt:
+  system prompt, tool schemas, catalogs, memories, then the conversation.
+* **`compact()` never writes `last_input_tokens`**, so for exactly one step after
+  a fold `used` is stale-high. What prevents a re-fold is not the number, it is
+  `compact()` returning `"no-progress"` before any model call.
+
+### The lowering case turned out not to need a rule
+
+The owner pushed back on the first framing — "it already compacted, so it is no
+longer 60k" — and was right. Tracing it: a lowered number costs at most ONE real
+fold, on a thread that has never been compacted; every evaluation after that is
+`no-progress`, silent and free; and on an already-compacted thread nothing fires
+at all. So the value is simply in force from the next evaluation, with the
+confirmation saying a fold is coming when the thread is already above it. No new
+guard, nothing to test beyond what the existing ones cover. **The design question
+dissolved once the mechanics were actually read**, which is the argument for
+reading them first.
+
+### The binding, and why clearing is a separate rule
+
+An override is stored with the pair it was set against and applies only to that
+pair. A read from any other pair returns None **without clearing** — so an agent
+pinning its own model (§18) or a critic-routed pass (§11) uses that model's own
+value, and one routine critic pass cannot silently destroy an override set for
+the chat. Propagation into research passes and subagents is then a consequence
+rather than a mechanism: they run in-process on the same pair, so they match.
+
+`/model` clears outright, and that is a SECOND rule doing a different job. The
+binding alone would leave the value stored against the original pair, so
+switching away and back would restore it — and the owner's requirement was
+explicitly the opposite.
+
+### #89, nearly reintroduced through a different command
+
+`pin_measurements()` computes the pin cap as `PIN_MAX_TRIGGER_FRACTION x
+trigger_tokens` and has no model in scope. Read the configured trigger while a
+session set 12k and the cap stays at 20k — so a pin could protect more than the
+entire trigger and floor the thread permanently above it, which is precisely the
+defect #89 exists to prevent. Fixed with `min(configured, session_any)`, which is
+safe under every binding: raised leaves the cap stricter than needed, lowered
+pulls it down. This is the reason `session.trigger_any()` exists and the only
+caller allowed to use it.
+
+### Placement
+
+`core/session.py` is a new module rather than state inside `config_loader`,
+because "what is session-scoped and what clears it" wants one home. **D27's tier
+chain is unchanged** — the session trigger arrives at `thresholds()` through the
+existing per-invocation slot, so `effective_compaction` stays model-agnostic and
+there is no fifth tier to document. An explicit `/compact --strength N` still
+wins, since nearest is meant to win.
+
+`/trigger` validates eagerly through `effective_compaction`, copying `/compact`'s
+pre-flight. Without it a too-small value is accepted at the command and raises
+`ValueError` later inside `should_compact()` — on the hot path, mid-turn, a long
+way from the command that caused it.
+
+`/window` refuses at or below the backstop margin (compact_at would clamp to 1
+and every pass evaluation would fold) but only WARNS above the reported window,
+because raising it is the best reason to have the command: a beta-gated 1M window
+reads as 200k until the account is asked with the right header.
+
+The usage line grew a denominator — `ctx 12k/80k*`, the `*` marking a session
+override — so the number is not invisible state.
+
+Counts 2581 -> 2622 (+17 test_session_overrides.py, +24 test_tui.py). Ten
+mutations run against the new tests, all killed with the rest of each file still
+passing. Docs: README command table and the compaction prose, AGENTS layer table
+and M1 bullet, ARCHITECTURE tree and §21 source order, BREAKING_CHANGES.

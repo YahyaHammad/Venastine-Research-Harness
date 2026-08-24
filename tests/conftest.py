@@ -373,10 +373,19 @@ def clear_client_cache():
     core.client._client_cache.clear()
     core.client._context_window_cache.clear()
     core.client._context_window_failures.clear()
+    # §21's session overrides are module state too, and the order
+    # dependency they would otherwise create is the same one
+    # _context_window_warned's fixture exists for: a test that sets a
+    # trigger would silently change the threshold every LATER test
+    # measures against.
+    import core.session
+
+    core.session.clear()
     yield
     core.client._client_cache.clear()
     core.client._context_window_cache.clear()
     core.client._context_window_failures.clear()
+    core.session.clear()
 
 
 @pytest.fixture(autouse=True)

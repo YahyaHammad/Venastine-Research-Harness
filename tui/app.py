@@ -820,8 +820,23 @@ class VenastineApp(App):
         """
         if self._memory is None:
             return
+        # The threshold this thread is actually measured against, resolved
+        # through the same function _maybe_compact uses so the denominator
+        # can never disagree with the number that fires. working_set by
+        # construction: this line renders the CHAT thread the user is
+        # looking at, and a chat thread is never in backstop mode.
+        # Contained -- a usage line must not be the reason a turn dies.
+        from core import compaction, session
+
+        try:
+            _, ceiling = compaction.thresholds(
+                self.model, provider_name=self.provider_name)
+        except Exception:  # noqa: BLE001 -- see above
+            ceiling = 0
+        overridden = session.trigger_for(self.provider_name, self.model) is not None
         self.query_one("#usage-line", UsageLine).update_usage(
-            self._memory.billed_tokens, self._memory.last_input_tokens)
+            self._memory.billed_tokens, self._memory.last_input_tokens,
+            ceiling, overridden)
 
     def restyle_sidebar(self) -> None:
         """Re-render the Rich-styled sidebar widgets after a /theme
@@ -1662,6 +1677,21 @@ def _cmd_model(app: VenastineApp, args: str) -> None:
     app.refresh_status()
     app._transcript.write_system(f"Now using {provider} | {model}.")
 
+    # §21's session overrides are per-model numbers, and a window tuned
+    # for one model feeds the summarizer's truncation gate on the next.
+    # Cleared rather than carried, and SAID rather than dropped quietly --
+    # the same call the effort revalidation below makes, for the same
+    # reason. Switching back does not restore them: that is the point of
+    # clearing here rather than relying on the (provider, model) binding
+    # alone, which would make them reappear.
+    from core import session as _session
+
+    dropped = _session.clear()
+    if dropped:
+        app._transcript.write_system(
+            f"Session {' and '.join(dropped)} override(s) cleared by the "
+            f"switch — set them again if this model wants them.")
+
     # WARN, don't refuse, on a missing key. An OpenAI-compatible endpoint
     # running locally legitimately takes no key, so refusing would block a
     # real configuration -- but every call to a hosted provider will fail
@@ -2022,6 +2052,225 @@ def _cmd_new(app: VenastineApp, args: str) -> None:
     app._transcript.write_system("Started a new thread.")
 
 
+def _parse_token_count(text: str):
+    """(tokens, error). Accepts 40000, 40k, 1m -- case-insensitively.
+
+    ONE parser for both commands, because two spellings of "how many
+    tokens" is exactly how `/window 200k` and `/trigger 200000` end up
+    meaning different things. Rejects anything it does not fully
+    understand rather than salvaging a prefix: `/trigger 40kb` is a typo,
+    and reading it as 40k would set a number the user did not ask for and
+    then report success.
+    """
+    raw = text.strip().lower()
+    if not raw:
+        return None, "needs a number of tokens, e.g. 200000, 200k or 1m."
+    multiplier = 1
+    if raw[-1] in ("k", "m"):
+        multiplier = 1_000 if raw[-1] == "k" else 1_000_000
+        raw = raw[:-1]
+    try:
+        value = float(raw) if "." in raw else int(raw)
+    except ValueError:
+        return None, f"needs a number of tokens, got {text.strip()!r}."
+    tokens = int(value * multiplier)
+    if tokens < 1:
+        return None, f"needs a positive number of tokens, got {tokens}."
+    return tokens, None
+
+
+def _k(n: int) -> str:
+    """Token counts the way the usage line writes them."""
+    if n >= 1_000_000 and n % 100_000 == 0:
+        return f"{n / 1_000_000:g}m"
+    if n >= 1_000 and n % 100 == 0:
+        return f"{n / 1_000:g}k"
+    return f"{n:,}"
+
+
+def _cmd_window(app: VenastineApp, args: str) -> None:
+    """Override the model's context window for this session.
+
+    EPHEMERAL AND BOUND TO THIS (provider, model). Nothing is written to
+    disk; /model clears it; switching away and back gives the derived
+    value again, not this one. A run on any other model -- an agent that
+    pins its own (§18), a critic-routed pass (§11) -- uses that model's
+    own window rather than this number.
+
+    WHAT IT ACTUALLY MOVES, stated because it is easy to expect more: the
+    research-pass backstop (context_limit - COMPACTION_PIPELINE_BACKSTOP_
+    TOKENS) and the summarizer's one-call input budget. It does NOT change
+    when an ordinary chat compacts -- that is the working-set trigger,
+    which is a flat number with no window in it at all (M1). /trigger is
+    the command for that.
+    """
+    from core import session
+
+    if not args:
+        _report_override(app, session.WINDOW)
+        return
+    if args.strip().lower() in ("off", "clear", "auto"):
+        dropped = session.clear(session.WINDOW)
+        app._transcript.write_system(
+            "Context-window override cleared." if dropped
+            else "No context-window override was set.")
+        return
+
+    tokens, error = _parse_token_count(args)
+    if error:
+        app._transcript.write_error(f"/window {error}")
+        return
+
+    # Refused rather than warned: at or below the backstop margin,
+    # compact_at clamps to its floor of 1 and every evaluation of a
+    # research pass compacts. That is not a window anyone means to set.
+    if tokens <= config.COMPACTION_PIPELINE_BACKSTOP_TOKENS:
+        app._transcript.write_error(
+            f"/window must exceed the pipeline backstop margin "
+            f"({config.COMPACTION_PIPELINE_BACKSTOP_TOKENS:,}), or a research "
+            f"pass would compact on every step. Got {tokens:,}.")
+        return
+
+    session.set_window(app.provider_name, app.model, tokens)
+    app._transcript.write_system(
+        f"Context window {_k(tokens)} for {app.provider_name} | {app.model}, "
+        f"this session only.")
+
+    # WARN, never refuse, above what the provider reports. Raising it is
+    # the best reason to have this command -- a beta-gated 1M window reads
+    # as 200k until the account is asked with the right header -- so
+    # refusing would block precisely the case it exists for. The risk is
+    # named in the same terms config.py uses for the qwen entry.
+    reported = _reported_window(app)
+    if reported and tokens > reported:
+        app._transcript.write_error(
+            f"{app.provider_name} reports {reported:,} for this model. Above "
+            f"the real window a run can fail with a hard context-limit error "
+            f"mid-pass rather than compacting.")
+
+    app._transcript.write_system(
+        "Cleared by /model, or by /window off. Never saved.")
+
+
+def _cmd_trigger(app: VenastineApp, args: str) -> None:
+    """Override the working-set compaction ceiling for this session.
+
+    THE NUMBER THAT DECIDES WHEN THIS CHAT COMPACTS, and an ABSOLUTE size
+    rather than a margin below the window (M1): the default 40k is the
+    same on a 200k model and a 1M one. It is measured against the whole
+    prompt the provider was sent -- system prompt, tool schemas, catalogs,
+    memories, then the conversation -- not against the conversation alone.
+
+    Same lifetime rules as /window: ephemeral, bound to this
+    (provider, model), cleared by /model, never written to disk.
+    """
+    from core import session
+
+    if not args:
+        _report_override(app, session.TRIGGER)
+        return
+    if args.strip().lower() in ("off", "clear", "auto"):
+        dropped = session.clear(session.TRIGGER)
+        app._transcript.write_system(
+            "Compaction-trigger override cleared." if dropped
+            else "No compaction-trigger override was set.")
+        return
+
+    tokens, error = _parse_token_count(args)
+    if error:
+        app._transcript.write_error(f"/trigger {error}")
+        return
+
+    # Validated EAGERLY, against the same function the automatic path
+    # uses, exactly as /compact does. Without this a too-small value is
+    # accepted here and raises ValueError later inside should_compact() --
+    # on the hot path, mid-turn, a long way from the command that caused
+    # it. The message names which dependent floor blocks it.
+    try:
+        config_loader.effective_compaction({"trigger_tokens": tokens})
+    except ValueError as e:
+        app._transcript.write_error(f"/trigger {tokens:,} rejected: {e}")
+        return
+
+    session.set_trigger(app.provider_name, app.model, tokens)
+    app._transcript.write_system(
+        f"Compaction trigger {_k(tokens)} for {app.provider_name} | "
+        f"{app.model}, this session only.")
+
+    # Say it out loud when the thread is ALREADY over the new number. The
+    # fold is legitimate and costs one compaction -- compact() returns
+    # "no-progress" on every evaluation after it, so there is no runaway --
+    # but arriving unannounced would read as the command having done
+    # something it did not.
+    # app._memory, NOT app.memory: the property CREATES a thread on first
+    # use and persists a ConversationThread row. Setting a trigger before
+    # the first message is a supported thing to do -- it is half of what
+    # this command is for -- and doing it through the property would leave
+    # the phantom empty thread that property's own docstring exists to
+    # describe having fixed.
+    used = app._memory.last_input_tokens if app._memory is not None else 0
+    if used and used >= tokens:
+        app._transcript.write_system(
+            f"This thread is at {_k(used)}, so expect one compaction on the "
+            f"next step.")
+
+    app._transcript.write_system(
+        "Cleared by /model, or by /trigger off. Never saved.")
+
+
+def _reported_window(app: VenastineApp):
+    """What the provider said for the mounted model, or None.
+
+    Cache-only (batch 30's known_context_window), so this never makes a
+    call from a command handler on the UI thread.
+    """
+    try:
+        from core.client import known_context_window
+
+        return known_context_window(app.provider_name, app.model)
+    except Exception:  # noqa: BLE001 -- a report must not fail the command
+        return None
+
+
+def _report_override(app: VenastineApp, key: str) -> None:
+    """The bare `/window` and `/trigger` form: the value AND where it came
+    from.
+
+    Provenance is the point. Four sources can answer for the window and
+    three for the trigger, and a number with no source attached is what
+    makes someone edit the wrong one.
+    """
+    from core import compaction, session
+
+    entry = session.state().get(key)
+    if key == session.WINDOW:
+        effective = compaction.context_limit(app.model, app.provider_name)
+        if entry:
+            source = f"session override for {entry[0]} | {entry[1]}"
+        elif _reported_window(app) is not None:
+            source = f"reported by {app.provider_name}"
+        elif compaction._normalized(app.model) in config.MODEL_CONTEXT_WINDOWS:
+            source = "config.MODEL_CONTEXT_WINDOWS"
+        else:
+            source = "config.DEFAULT_CONTEXT_WINDOW (no entry for this model)"
+        app._transcript.write_system(
+            f"Context window: {effective:,} — {source}.")
+        app._transcript.write_system(
+            "Usage: /window <tokens|off>. Moves the research-pass backstop "
+            "and the summarizer's input budget, not the chat trigger.")
+        return
+
+    _, compact_at = compaction.thresholds(
+        app.model, provider_name=app.provider_name)
+    source = (f"session override for {entry[0]} | {entry[1]}" if entry
+              else "config/settings default")
+    app._transcript.write_system(
+        f"Compaction trigger: {compact_at:,} — {source}.")
+    app._transcript.write_system(
+        "Usage: /trigger <tokens|off>. An absolute prompt size, not a "
+        "margin below the window.")
+
+
 def _parse_compact_args(args: str) -> tuple:
     """(overrides, error). ROADMAP_v2 §21's per-invocation override --
     applies to this one run and persists nothing, which is the last step
@@ -2265,6 +2514,10 @@ def register_builtin_commands() -> None:
                      "[--grant[=a,b]] <query>"),
         SlashCommand("compact", "summarize this conversation's older turns now",
                      _cmd_compact, "[--strength 1-5]"),
+        SlashCommand("window", "override this model's context window for the session",
+                     _cmd_window, "[tokens|off]"),
+        SlashCommand("trigger", "override when this chat compacts, for the session",
+                     _cmd_trigger, "[tokens|off]"),
         SlashCommand("claims", "show a research run's claims and their tiers",
                      _cmd_claims, "[run id]"),
         SlashCommand("copy", "copy text out of the session", _cmd_copy,

@@ -755,6 +755,14 @@ ten-pass run, and every warning it logged scribbled over the Textual screen.
 | Read the Anthropic window with its own `models.retrieve` | `test_the_anthropic_window_rides_along_on_the_effort_retrieve` | It is on the ModelInfo the effort query already fetches; a second call makes config.py's "no extra call" claim false |
 | Read only declared fields instead of `.model_extra` | `test_one_reader_covers_every_v1_compatible_spelling`, `test_openai_models_keep_unknown_provider_fields` | `openai.types.Model` declares none of the four aliases. Without the extra-field read, Groq/Mistral/Together/OpenRouter all fall silently back to the table |
 | Give `_FakeAnthropicClient` no `.models`, as it had | `test_a_client_with_no_models_endpoint_fails_loudly_not_silently` | The #35 shape: the query raises AttributeError, its own `except` swallows it, and the suite stays green over a query that cannot succeed |
+| Let a session override apply to a model it was not set for | `test_another_model_or_provider_does_not_see_it` | The window feeds `_input_budget()`, which gates `summarize_thread()`'s truncation — a 1M number reaching a 200k critic model discards thread content |
+| Clear a session override on a pair MISMATCH | `test_a_mismatched_read_does_not_clear_the_override` | One routine critic pass mid-research would silently destroy an override set for the chat, with nothing naming which command did it |
+| Rely on the (provider, model) binding instead of clearing on `/model` | `test_switching_away_and_back_gives_the_default_not_the_old_value` | The value stays stored against the original pair, so switching back restores it — the opposite of what was asked for. Both rules are needed and neither is redundant |
+| Read the configured trigger in `pin_measurements` | `test_the_pin_cap_follows_a_LOWERED_session_trigger` | `/trigger 12k` leaves the cap at 20k, so one pin can protect more than the whole trigger and floor the thread permanently above it — #89 reintroduced through a different command |
+| Let the session tier beat an explicit `/compact` override | `test_an_explicit_compact_override_still_wins` | D27's chain is nearest-wins, and a caller passing its own value is nearer than session state |
+| Drop `/trigger`'s eager validation | `test_a_trigger_below_its_dependent_floors_is_REFUSED` | The `ValueError` surfaces later inside `should_compact()` — hot path, mid-turn, far from the command that caused it |
+| Refuse a `/window` above the reported window | `test_window_warns_but_does_not_refuse_above_the_reported_window` | Raising it is the command's best use: a beta-gated 1M window reads as 200k until the account is asked with the right header |
+| Add `context_window` to `_KNOWN_COMPACTION` | `test_nothing_reaches_the_settings_schema` | A settings key makes it persistable, so a cloned project could ship one behind a trust prompt — the shape G7 and R12 both rejected |
 
 ### Standing: `compaction._context_window_warned` is module state
 

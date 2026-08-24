@@ -42,7 +42,7 @@ python main.py --init --research-project           # §24: skip the type questio
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 2581 tests, offline, ~25-45s by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 2622 tests, offline, ~25-45s by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -105,6 +105,7 @@ That qualifier is load-bearing, not pedantry (audit #128). This file used to say
 | `database.py` | The engine/connection only | Table classes, CRUD, awareness of what data exists |
 | `storage.py` | Schema (table classes) + CRUD | Active conversation state, provider-specific shapes |
 | `core/memory.py` | Active in-run state, provider-neutral, write-through | SQL, table classes, provider shapes |
+| `core/session.py` | Ephemeral per-session number overrides, and what clears them | Resolving those numbers; persisting anything, ever |
 | `core/client.py` | One call + provider format translation | Looping, retry, tool dispatch, bookkeeping |
 | `core/loop.py` | Call-dispatch-repeat control flow | Provider formats, tool policy, pipeline state |
 | `security/permissions.py` | Policy (`is_tool_allowed`, `requires_approval`) | Dispatch mechanics |
@@ -296,6 +297,13 @@ what makes an early, frequent trigger safe.
   has NEVER keyed off the billing meter; since batch 27 nothing else does either —
   there is no default spend ceiling, so `effective_compaction()`'s headroom warning
   speaks only when settings.json actually configures `max_token_budget`.
+  A SESSION override (`/window`, `core/session.py`) is checked before all of
+  it, bound to the `(provider, model)` it was set for and cleared by `/model`;
+  `/trigger` does the same for the working-set ceiling, injected at
+  `thresholds()` through D27's existing per-invocation slot rather than as a
+  fifth tier. **`trigger_tokens` is an ABSOLUTE prompt size, not a margin below
+  the window** -- the `window - margin` shape is the BACKSTOP's, and misreading
+  the two as one is what made this feature hard to specify. Under all of that,
   `MODEL_CONTEXT_WINDOWS` is the FALLBACK, not the only source: `context_limit()`
   prefers the provider's own answer (`client.context_window_for`, primed before
   every send) and normalizes the model id — a dated or `vendor/`-prefixed name used

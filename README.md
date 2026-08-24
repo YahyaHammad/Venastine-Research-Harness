@@ -350,7 +350,7 @@ The knobs, all under `compaction` in `settings.json`, each overriding a default 
 | `max_retries` | `2` | Corrective re-asks when a summary misses its target ratio |
 | `strategy` | `"chain"` | Or `"rederive"`, as above |
 
-`/compact --strength N` overrides strength for that one invocation and persists nothing; an unknown flag there is an error rather than an ignored typo, because compacting at the default while you believe you asked otherwise looks exactly like a compaction that obeyed you. The relationships between these values are validated rather than trusted — the warning margin must sit strictly below the trigger, and the keep-recent floor strictly below it too — so an incoherent set is refused at startup instead of firing compaction at nonsense times.
+`/trigger` and `/window` override the two numbers above for the session and nothing longer: they are never written to disk, they are bound to the `(provider, model)` they were set for — so an agent pinning its own model or a critic-routed pass uses that model's own value rather than a number tuned for a different one — and `/model` clears them outright, so switching away and back gives you the derived value rather than the old override. `/compact --strength N` overrides strength for that one invocation and persists nothing; an unknown flag there is an error rather than an ignored typo, because compacting at the default while you believe you asked otherwise looks exactly like a compaction that obeyed you. The relationships between these values are validated rather than trusted — the warning margin must sit strictly below the trigger, and the keep-recent floor strictly below it too — so an incoherent set is refused at startup instead of firing compaction at nonsense times.
 
 A replayed thread always shows what you originally said, never the summary — the archive is what is replayed, so a compacted conversation reads back the way you had it.
 
@@ -431,6 +431,8 @@ The first connection to a **user-level** server asks once, showing the resolved 
 | `/model [[PROVIDER] name]` | Switch provider and/or model for the session. Refuses mid-turn, warns on a missing key, revalidates effort against the new model, and notes if an active agent pins its own. Persist via launch flags or `default_provider`/`default_model` |
 | `/research [--attended] [--review\|--no-review] [--grant[=a,b]] <query>` | Run the pipeline live from the TUI. Leading flags compose in any order before the query; bare `--grant` opens the picker, `--grant=a,b` names them (`--grant-tools=` works as an alias); without flags, `research.*` settings apply |
 | `/compact [--strength 1-5]` | Fold older turns now instead of waiting for the trigger. Recent turns keep exactly the protection an automatic compaction gives them |
+| `/trigger [tokens\|off]` | Override **when this chat compacts**, for this session only. An absolute prompt size (`80k`), not a margin below the window. A value below the warning margin or the keep-recent floor is refused naming it; a value below the thread's current size is accepted and says a fold is coming |
+| `/window [tokens\|off]` | Override this model's **context window**, for this session only. Moves the research-pass backstop and the summarizer's input budget — not the chat trigger. Above what the provider reports it warns rather than refusing, because raising it is the point (a 1M window reads as 200k until the account is asked for it) |
 | `/claims [run id]` | Open the claims view — tier, grounding status, assumption flags, score breakdown per claim — during a run or afterwards (**ctrl+l**) |
 | `/copy [last\|report\|claims\|all] [--file <path>]` | Copy out of the session. Defaults to the last response; `all` is transcript plus report plus claims. Clipboard delivery cannot be confirmed, so `--file <path>` is the route that provably worked |
 | `/threads` | Conversations-only picker — research runs' internal threads excluded — most recently active first, capped at 200 with a notice (**ctrl+t**) |
@@ -696,7 +698,7 @@ classifier is described under *Security model* above. If you have a fork or a lo
 note that `ToolApprovals.shell` now ships `False` and `SHELL_APPROVAL_MODE` is the gate — see
 `tests/BREAKING_CHANGES.md` §24.
 
-Run the test suite with `pytest` — 2581 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
+Run the test suite with `pytest` — 2622 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
 
 ## Documentation
 
