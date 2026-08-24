@@ -42,7 +42,7 @@ python main.py --init --research-project           # §24: skip the type questio
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 2425 tests, offline, ~25-45s by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 2545 tests, offline, ~25-45s by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -620,11 +620,15 @@ run rather than by reading the code.
 - **`D2` emits once per retry ROUND**, outside the per-claim loop — inside it, a round
   exhausting six claims reads as six separate stages.
 - **Colour resolves from the `Theme` object** (`themes.role_styles`), because a `RichLog`
-  renders Rich `Text` and cannot use `app.tcss`'s variables. Only
-  `warning`/`error`/`success` are shared across all eight themes, so severity uses those
-  and identity uses the per-variant hues. A widget with no running app renders
-  **unstyled rather than raising** — `self.app` raises `NoActiveAppError`, and widgets are
-  built bare throughout the suite.
+  renders Rich `Text` and cannot use `app.tcss`'s variables. Severity uses
+  `warning`/`error`/`success` and identity uses the per-variant hues. Across the eight
+  grid themes the severity trio is shared; a standalone tinted theme (batch 29) may
+  override a severity slot when its own panel tint would swallow the shared value,
+  keeping the semantic hue family — each override carries its reason in `themes.py`,
+  and the contrast floors (foreground ≥ 7:1, severity ≥ 4:1, identity ≥ 3.5 dark / 3.0
+  light) are pinned in `tests/test_themes.py`. A widget with no running app renders
+  **unstyled rather than raising** — `self.app` raises `NoActiveAppError`, and widgets
+  are built bare throughout the suite.
 - **`Transcript._entries` serves the replay and `/copy`.** `RichLog` stores rendered
   segments, so `/theme` needs `rerender()`. Every write path must go through `_emit()`,
   or a line reaches the screen and neither the replay nor the copy.
