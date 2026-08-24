@@ -91,6 +91,15 @@ class UsageLine(Static):
         self.display = False
         self._last = None
 
+    def _styles(self) -> dict:
+        # TodoPanel/Transcript shape (#116): resolve per draw against the
+        # active theme; bare-built widgets render unstyled.
+        try:
+            app = self.app
+        except Exception:  # noqa: BLE001 -- no running app; render unstyled
+            return {}
+        return themes.styles_for(app)
+
     def _reset(self) -> None:
         """A thread switch: hide until the new thread's first turn.
         Session billing restarts at zero by construction; showing the
@@ -113,8 +122,12 @@ class UsageLine(Static):
             return f"{n / 1000:.0f}k" if n >= 1000 else str(n)
 
         self.display = True
+        # `system` is the harness-talking-about-itself role -- the right
+        # meaning for a usage line, and the palette route the batch-26
+        # guard test demands (it caught this line as a literal within one
+        # commit of the widget existing).
         self.update(Text(f"usage · ctx {_k(ctx)} · billed {_k(billed)}",
-                          style="dim"))
+                          style=self._styles().get("system", "")))
 
 
 class GoalBanner(Static):
