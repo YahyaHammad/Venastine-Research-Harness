@@ -72,7 +72,7 @@ from tui.screens import (
 )
 from tui.widgets import (
     EffortRaven, GoalBanner, RavenPanel, ResearchProgress, TodoPanel,
-    Transcript,
+    Transcript, UsageLine,
 )
 
 logger = logging.getLogger(__name__)
@@ -342,6 +342,9 @@ class VenastineApp(App):
             with Vertical(id="sidebar"):
                 yield RavenPanel(animations=self._animations, id="raven")
                 yield EffortRaven(id="effort-raven")
+                # #4: billed-since-resume and current context size, one
+                # line. Hidden until a turn produces figures.
+                yield UsageLine(id="usage-line")
                 if self._todo_position not in ("top", "bottom"):
                     yield TodoPanel(id="todo-panel")
                 yield ResearchProgress(id="research-progress")
@@ -498,6 +501,14 @@ class VenastineApp(App):
     @memory.setter
     def memory(self, value) -> None:
         self._memory = value
+        # #4: per-thread state follows the thread (§27's lesson). A new or
+        # resumed thread starts session billing at zero; the line hides
+        # until that thread's first turn rather than keeping the previous
+        # thread's totals. Pre-mount setter calls have no widget yet.
+        try:
+            self.query_one("#usage-line", UsageLine)._reset()
+        except Exception:  # noqa: BLE001 -- not mounted; nothing to reset
+            pass
 
     def refresh_goal_banner(self) -> None:
         # self._memory, NOT self.memory: reading the banner must not be
@@ -799,9 +810,24 @@ class VenastineApp(App):
         self._transcript.write_answer(message.text or "")
         self._last_response = message.text or ""
 
+    def refresh_usage_line(self) -> None:
+        """#4: repaint the sidebar usage line from thread state.
+
+        The same split as refresh_todo_panel -- the event says when, the
+        memory says what. on_loop_event_message calls this per event;
+        update_usage's change-guard makes per-token-delta calls nearly
+        free, since both figures only move at step boundaries.
+        """
+        if self._memory is None:
+            return
+        self.query_one("#usage-line", UsageLine).update_usage(
+            self._memory.billed_tokens, self._memory.last_input_tokens)
+
     def on_loop_event_message(self, message: LoopEventMessage) -> None:
         event = message.event
         transcript = self._transcript
+
+        self.refresh_usage_line()
 
         if event.token_delta:
             # Pause the mascot while tokens stream: a redraw loop competing

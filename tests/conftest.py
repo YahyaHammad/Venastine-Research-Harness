@@ -117,6 +117,8 @@ def make_model_response(
     tool_calls: list = None,
     usage: dict = None,
     stop_reason: str = "complete",
+    turn_billed_tokens: int = None,
+    turn_new_tokens: int = None,
 ) -> ModelResponse:
     """Construct a ModelResponse directly, bypassing SDK mocking entirely.
 
@@ -130,6 +132,11 @@ def make_model_response(
     u = usage or {"input_tokens": 0, "output_tokens": 0}
     resp = ModelResponse(text=text, tool_calls=calls, usage=u)
     resp.stop_reason = stop_reason
+    # Batch 27 (#4): the per-turn figures ride responses like stop_reason.
+    if turn_billed_tokens is not None:
+        resp.turn_billed_tokens = turn_billed_tokens
+    if turn_new_tokens is not None:
+        resp.turn_new_tokens = turn_new_tokens
     return resp
 
 

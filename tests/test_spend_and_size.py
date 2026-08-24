@@ -34,7 +34,8 @@ import pytest
 from core.events import LoopEvent
 from core.loop import RunAgentLoop, run_to_completion
 from tests.conftest import FakeMemory, make_model_response, \
-    make_stream_from_response
+    make_stream_from_response, make_stream_sequence, pump, settle
+from uuid import uuid4
 
 
 def _resp(inp, out, *, tool=False):
@@ -253,3 +254,147 @@ class TestSettingsKey:
 
         assert cl.spend_cap() is None or isinstance(
             cl.spend_cap(), int)
+
+
+# ---- Consumers: the figures reach the person who needs them -----------------
+# ------------------------------------------------------------------------------
+
+class TestCliEarlyStopLine:
+    """CLI gets the figures ONLY here -- no live counter (owner decision).
+    The enriched line exists because 'token_budget_exceeded' reads as a
+    size problem, which is item 9's misreading surviving into the UI."""
+
+    def test_the_early_stop_line_names_billed_this_turn(self, mocker,
+                                                        capsys, fake_storage,
+                                                        cli_stdin):
+        from uuid import uuid4
+
+        import main
+
+        response = make_model_response(
+            text="cut", stop_reason="token_budget_exceeded",
+            turn_billed_tokens=70_020)
+        response.thread_id = uuid4()
+        mocker.patch.object(main.RunAgentLoop, "run_agent_conversation",
+                            return_value=response)
+        cli_stdin("hello")
+        main.run_chat(response.thread_id, "ANTHROPIC", "m")
+
+        out = capsys.readouterr().out
+        assert "billed 70,020 this turn" in out, out[-300:]
+
+    def test_a_complete_turn_prints_no_early_stop_line(self, mocker,
+                                                       capsys, fake_storage,
+                                                       cli_stdin):
+        from uuid import uuid4
+
+        import main
+
+        response = make_model_response(text="fine",
+                                       stop_reason="complete")
+        response.thread_id = uuid4()
+        mocker.patch.object(main.RunAgentLoop, "run_agent_conversation",
+                            return_value=response)
+        cli_stdin("hello")
+        main.run_chat(response.thread_id, "ANTHROPIC", "m")
+
+        assert "stopped early" not in capsys.readouterr().out
+
+
+class TestOrchestratorFigures:
+
+    def test_truncation_trace_cites_the_billed_figure(self):
+        from core.reasoning import orchestrator
+
+        response = make_model_response(
+            text="partial answer", stop_reason="token_budget_exceeded",
+            turn_billed_tokens=980_000)
+        trace = []
+        orchestrator._check_not_truncated("Pass 1", response, trace)
+
+        assert any("980,000" in line for line in trace), trace
+
+    def test_empty_truncation_error_cites_the_billed_figure(self):
+        from core.reasoning import orchestrator
+
+        response = make_model_response(
+            text="", stop_reason="token_budget_exceeded",
+            turn_billed_tokens=250_010)
+        with pytest.raises(ValueError, match="250,010"):
+            orchestrator._check_not_truncated("Pass 1", response, [])
+
+
+class TestTheTuiUsageLine:
+    """Thread-since-resume billed + current ctx, one sidebar line, hidden
+    until a turn produces figures."""
+
+    @pytest.mark.asyncio
+    async def test_hidden_at_mount_then_follows_thread_state_and_resets(
+            self):
+        """The reset half is §27's lesson in miniature: a thread switch
+        must take the previous thread's session totals off screen, not
+        leave them up until some later event happened to fire."""
+        from types import SimpleNamespace
+
+        from tui.app import VenastineApp
+        from tui.widgets import UsageLine
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pump(pilot, 2)
+            line = app.query_one("#usage-line", UsageLine)
+            assert not line.display, "mount showed an empty usage line"
+
+            app._memory = SimpleNamespace(billed_tokens=118_000,
+                                          last_input_tokens=41_000)
+            app.refresh_usage_line()
+            await pilot.pause()
+            assert line.display
+            body = line.renderable.plain
+            assert "ctx 41k" in body and "billed 118k" in body
+
+            # Same values again: the change-guard keeps it a no-op.
+            app.refresh_usage_line()
+            assert line.display
+
+            # A thread switch resets -- even to another memory with
+            # figures of its own, the line hides until ITS first turn.
+            app.memory = SimpleNamespace(billed_tokens=5,
+                                         last_input_tokens=6)
+            assert not line.display
+
+    @pytest.mark.asyncio
+    async def test_a_turn_updates_the_line_from_real_loop_events(
+            self, mocker):
+        """Wired through on_loop_event_message, reading MEMORY -- so a
+        test that only calls refresh_usage_line() by hand proves nothing
+        about the wiring. This drives a real two-step turn."""
+        from tui.app import VenastineApp
+        from tui.widgets import UsageLine
+
+        from tests.test_tui import type_into_prompt
+
+        mocker.patch("core.loop.api_initialization", return_value=object())
+        with_tool = make_model_response(
+            text="", tool_calls=[{"id": "t1", "name": "web_search",
+                                  "input": {"query": "x"}}],
+            usage={"input_tokens": 30_000, "output_tokens": 10})
+        done = make_model_response(
+            text="done", usage={"input_tokens": 40_000, "output_tokens": 10})
+        mocker.patch("core.loop.call_model_stream",
+                     side_effect=make_stream_sequence(with_tool, done))
+        mocker.patch("core.loop.registry.dispatch",
+                     return_value={"result": "ok"})
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pump(pilot, 2)
+            type_into_prompt(app, "go")
+            await pilot.press("enter")
+            assert await settle(pilot, lambda: not app._busy), \
+                "the turn never finished"
+
+            line = app.query_one("#usage-line", UsageLine)
+            assert line.display, "a finished turn produced no usage line"
+            body = line.renderable.plain
+            assert "billed 70k" in body and "ctx 40k" in body, body
