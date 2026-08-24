@@ -5733,3 +5733,74 @@ removed.
 
 Counts 2381 → 2400 (+19: tui 112→128, research_legibility 39→42). Open findings drop to 8;
 units standing: X2 only.
+## Audit Pass 1 — fix batch 27: the spend meter and the size instrument separate (#4) (2026-08-24)
+
+Four commits on `fix/batch-27-spend-vs-size` (WP-A 8378268, WP-B 055a878 +
+0155021); per-change rows in `tests/BREAKING_CHANGES.md` (batch 27 — this batch
+EARNS them, unlike 26: defaults changed and three constants died). X2 retires;
+zero standing units remain.
+
+### The owner's answers that shaped it
+
+The meter stays a SPEND cap (cumulative billed input+output per `_run()`), but it
+is **uncapped by default on every path** — hard limits belong to the provider's
+dashboard. The only cap is settings.json `max_token_budget` (int|null, cost-knob
+merge rules, effort precedent). The size side gained real instruments:
+`ModelResponse.turn_billed_tokens`/`.turn_new_tokens` (unpriced counts — the
+owner's own framing: cached/uncached/output pricing differs per provider, precise
+spend lives in dashboards, these figures exist for relative reasoning).
+Consumers: a TUI sidebar usage line (thread-SINCE-RESUME billed · ctx; no CLI
+live counter), CLI/orchestrator early-stop and truncation figures. No new stop
+condition; compaction warnings only at checkpoints. INIT_READ_CHARS stayed (it
+bounds read VOLUME, an axis neither budget nor spend ever governed).
+
+### The conflation the owner caught in review
+
+Mid-planning I proposed keeping effective_compaction()'s headroom warning keyed
+to MAX_TOKEN_BUDGET conditionally. The owner split it correctly: if the number
+is context length (count-once), keep it for compaction; if it is billing,
+compaction must never read it. The resolving fact: **compaction already reads
+measured context size** (`last_input_tokens`, M1) and never read the billing
+meter — the warning was the one place the two instruments touched, and under an
+uncapped default its premise dissolved. It now speaks only when a cap is
+actually configured. TECHNICAL_DEBT item 9's stale worked numbers are corrected
+in its closure note (20k->9 / 50k->5 / 100k->3 at §21a's 250k; the entry's model
+was right, two of its three numbers were copied from the pre-§21a budget).
+
+### Build findings worth keeping
+
+- **The sentinel exists to protect explicit-None.** `max_total_tokens=None`
+  already MEANT "uncapped" in `_run()`'s signature and tests pass it on
+  purpose; a plain None default would have made settings override callers who
+  said None deliberately. `_SPEND_UNSET` resolves at CALL time, so a
+  settings.json written after import still applies.
+- **Two first-form mutations were inert, both for real reasons.** M2 mutated a
+  write-only assignment (`turn_baseline_input = usage_in`) — the property lives
+  in SKIPPING the delta on step one, so the mutation now deletes the branch
+  itself. M4 had no covering test: nothing drove a WRAPPER default end-to-end
+  (`_drive` bypasses wrappers), so `test_the_wrapper_default_itself_is_uncapped`
+  runs 440k through `run_agent_conversation` with no budget argument.
+- **A nullable settings key re-opened the bool trap.** `_type_ok`'s int guard
+  rejects booleans, but `isinstance(True, (int, type(None)))` is True — the
+  tuple form sailed True past the old check. The fix normalises tuple vs scalar
+  expecteds into one loop where bool matches ONLY bool.
+- **The batch-26 guard test caught this batch within one commit.**
+  `UsageLine.update_usage` reached for `style="dim"` and
+  `test_no_widget_or_screen_paints_a_literal_colour` went RED before the WP-B
+  commit could be called done. Fixed at the producer with the palette's
+  `system` role ("the harness talking about itself" — the right meaning anyway).
+
+### Mutation ledger (all RED)
+
+WP-A: shrink clamp removed · baseline exclusion removed · sentinel resolution
+bypassed · uncapped default reverted to literal · headroom advisory made
+unconditional. WP-B: cli figures dropped · orchestrator figures dropped · event
+wiring removed · reset-on-switch removed.
+
+### Housekeeping
+
+Counts 2400 → 2419 (+17 new file, +1 compaction, +1 truncated_pass). Docs:
+ARCHITECTURE tree/aggregates/§config-list/M1/pipeline-budget paragraphs;
+AGENTS pytest line + four rewritten bullets; README aggregate; TECHNICAL_DEBT
+item 9 closed. ROADMAP.md's §1/§3 spec sketches still name the old constant —
+locked historical specs, superseded here and in AGENTS, not rewritten.

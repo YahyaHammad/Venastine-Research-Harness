@@ -2784,3 +2784,15 @@ landed.
 | TUI mount probes only NAMED efforts (`_effort_named`) | Tests asserting a probe for every mount | A default-derived level validated at call time instead -- probing it fired fallback WARNINGs on every launch and broke #138's healthy-mount silence (found by the suite going racy: process-global logging landed one app's warnings in another app's transcript) |
 
 Count 2363 -> 2381.
+## Batch 27 — the spend meter stops being a size limit (#4) (2026-08-24)
+
+| Change | What breaks | Symptom / fix |
+|---|---|---|
+| Wrapper defaults: `max_total_tokens` is now `_SPEND_UNSET` on all four entry points | Any caller or test assuming the old `config.MAX_TOKEN_BUDGET` (250k chat / 1M pass) default now runs UNCAPPED unless settings.json sets `max_token_budget` | Deliberate (#4, owner decision). Explicit `None` still means genuinely uncapped — only the sentinel resolves settings. `test_spend_and_size.py::TestUncappedByDefault` pins both halves |
+| `config.MAX_TOKEN_BUDGET`, `RESEARCH_PASS_TOKEN_BUDGET`, `INIT_TOKEN_BUDGET` deleted | `AttributeError` on any remaining reference | Production refs rewritten (orchestrator reviewer/retry, project_init, TUI direct `_run` call via `config_loader.spend_cap()`); ROADMAP.md's locked §1/§3 spec sketches still name the constant and are superseded, not edited |
+| New top-level settings.json key `max_token_budget` (int \| null) | Unknown-key tests listing `_KNOWN_SETTINGS` may need updating; a wrong-typed value raises at load with "must be an int or null" | Cost knob, effort's merge rules. `spend_cap()` in config_loader is the single resolution point |
+| `ModelResponse.turn_billed_tokens` / `.turn_new_tokens` (new fields, None until set by `_run()`) | Dataclass equality unaffected (both sides default None); exact-kwargs response assertions that construct expected objects gain nothing to change | Set per step by `_run()`; unpriced counts. `conftest.make_model_response` accepts both kwargs |
+| `effective_compaction()` headroom advisory fires ONLY when a cap is configured | Tests asserting the advisory against the old unconditional budget (`test_compaction.py`) needed cap-configured mocks | Uncapped means nothing competes with compaction; the warning text names `max_token_budget` |
+| TUI sidebar gains `UsageLine` (id `usage-line`); memory setter resets it | The batch-26 no-literal guard applies to its styling too (`system` role, not `style="dim"`) | Hidden until first turn; thread-since-resume billed · ctx; reset on every memory swap |
+
+Count 2400 -> 2419.

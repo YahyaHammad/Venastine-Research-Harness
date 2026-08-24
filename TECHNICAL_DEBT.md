@@ -280,7 +280,7 @@ failing. An autouse fixture shrinks it under test.
 > so it is rare -- rare enough that a fix applied without understanding it
 > will look like it worked.
 
-## 9. `MAX_TOKEN_BUDGET` counts the prompt once per step (open)
+## 9. `MAX_TOKEN_BUDGET` counts the prompt once per step (closed, batch 27)
 
 Raised while building §21a, **deliberately not fixed there**.
 
@@ -309,6 +309,21 @@ why it was left here. Whoever takes it should decide first whether
 `token_budget_exceeded` is meant to mean "this turn cost too much" or "this turn got
 too big", because the current code answers the first while every caller reads it as
 the second.
+
+**RESOLVED (batch 27, #4).** The owner answered the question: it means cost, and it
+should usually mean nothing at all — the counter is now uncapped by default on every
+path, the three config constants died (both 1M envelopes existed only because the
+250k chat value was misread as bounding pass context), and the only cap is the
+user's settings.json `max_token_budget`, resolved through a sentinel default so an
+explicit `None` stays genuinely uncapped. The size side gained real instruments:
+`ModelResponse.turn_new_tokens` (outputs plus positive input deltas, inherited first
+prompt excluded, mid-turn compaction shrinks clamped) and `.turn_billed_tokens`,
+plus `memory.billed_tokens` for thread-since-resume display. The entry's stale
+worked numbers were from the pre-§21a budget: measured at 100k they read
+20k->5 / 50k->2 / 100k->1; at §21a's 250k, 20k->9 / 50k->5 / 100k->3 — the model in
+this entry was right at both budgets; two of its three numbers were simply copied
+from the older one. Consumers: TUI usage line, CLI early-stop figures, orchestrator
+truncation messages.
 
 ## 10. `config_loader.initialize(".")` in tests is CWD-dependent (open, latent)
 
