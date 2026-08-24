@@ -5804,3 +5804,79 @@ ARCHITECTURE tree/aggregates/§config-list/M1/pipeline-budget paragraphs;
 AGENTS pytest line + four rewritten bullets; README aggregate; TECHNICAL_DEBT
 item 9 closed. ROADMAP.md's §1/§3 spec sketches still name the old constant —
 locked historical specs, superseded here and in AGENTS, not rewritten.
+## Audit Pass 1 — fix batch 28: tests stop lying about their environment (#5 + #10) (2026-08-24)
+
+Two commits on `fix/batch-28-test-environment` (WP-A f0d0537, WP-B 1575257).
+No BREAKING_CHANGES rows — test infrastructure only; the conftest fixture is
+not a production contract.
+
+### #5 — `initialize(".")` is CWD-dependent
+
+The owner locked: preserve each site's ordering (fixture does NOT initialize),
+convert all 19 sites across 8 files, env-vars-only isolation. The fixture is
+`real_harness_tier` in root conftest. The isolation insight that made it two
+lines instead of four: `_user_config_dir()` and the trust store BOTH resolve
+through `expanduser("~")` at call time, so redirecting HOME/USERPROFILE empties
+both at once — the explicit `_user_config_dir` lambda other fixtures patch adds
+nothing here and was dropped. HARNESS_ROOT stays REAL on purpose: these sites
+exist so the shipped `.md` files parse, and `_redirect_roots`'s empty-dir
+redirect would turn them vacuous.
+
+Build findings worth keeping:
+
+- **The pin cannot live in test_config_loader.py** — its own `_redirect_roots`
+  is autouse and points HARNESS_ROOT at an empty dir, exactly the state the pin
+  forbids. It lives in test_load_skill.py instead, with a comment saying why.
+- **`is_trusted(empty project) is True` by design** ("nothing to trust"). The
+  pin originally asserted `not is_trusted(project)` and failed for the right
+  reason in the wrong shape; it now asserts the STORE PATH resolves under tmp
+  home plus a fail-closed arm (untrusted content present + empty store → not
+  trusted).
+- **test_review.py's `_stage` became a factory fixture** (`make_stage`). A
+  plain helper with one environment choice baked in had thirty-eight callers
+  that could not see it; as a fixture every caller inherits the isolated
+  project without per-site edits. Two mechanical fallouts, both caught by the
+  suite: a blanket rename corrupted `orchestrator._review_stage(` at ONE call
+  site (restored), and ten tests whose NESTED closures called the helper needed
+  the fixture injected explicitly — pytest's "fixture called directly" guard
+  found every one.
+- Site-level mutations are unverifiable on a clean checkout by nature (they
+  only bite machines with a trusted `.venastine/`); recorded rather than faked.
+  The fixture-level mutations are deterministic and both ran RED.
+
+### #10 — the pid detector was blind, and said "leak"
+
+POSIX `_child_pids` gained procps' `ww` (wide output, no width heuristic — the
+container-verified fix) plus a returncode guard mirroring the Windows branch's:
+a failed enumeration says "could not enumerate" instead of reading as "no
+children" and blaming mcp_client/ for an orphan that is not happening.
+
+The branch reads sys.platform AT CALL TIME, so the new default-suite file
+tests/test_pid_scanner.py drives it from Windows via a platform monkeypatch
+and an argv-aware fake ps — argv-aware because the fake must BEHAVE like
+procps (truncate at 80 without ww) or the width mutation would pass vacuously.
+Both mutations RED locally; the real integration test also ran green here on
+the CIM branch (`pytest -m integration`, 1 passed).
+
+### A tracker correction this batch owes
+
+Batch 26's tick set the header to "**2 findings still open** across 1 unit"
+when the true unit-scoped count after closing #116/#117 was **1**; batch 27's
+edit relabelled that number as "**1 finding still open** outside any unit"
+while seven outside-unit findings were open — compounding a miscount into a
+mislabeled scope. The header historically counted unit-scoped findings only
+(batch 25's "3 across 2 units" was correct). Fixed this batch to state both
+numbers explicitly; recorded here rather than quietly overwritten.
+
+### Mutation ledger (all RED)
+
+WP-A: HARNESS_ROOT redirected after all · env redirect dropped. WP-B: ww
+dropped · rc guard dropped. (Plus the ledger note above on unverifiable
+site-level reversions.)
+
+### Housekeeping
+
+Counts 2419 → 2425 (+5 scanner file; review's collected count unchanged — its
+factory conversion reshaped fixtures, not tests). Open audit findings drop to
+six (#6, #8, #9, #12, #14) plus enhancement #183, uncounted per the tracker's
+own rule.
