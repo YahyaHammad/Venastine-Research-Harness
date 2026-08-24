@@ -164,9 +164,9 @@ class TestAgentConversationCarriesAuthorization:
 class TestReviewerAgentDefinition:
 
     @pytest.fixture
-    def reviewer(self):
+    def reviewer(self, real_harness_tier):
         from core import config_loader
-        config_loader.initialize(".")
+        config_loader.initialize(str(real_harness_tier))
         agent = config_loader.get_agent("pipeline-reviewer")
         assert agent is not None, "pipeline-reviewer must ship in agents/builtin/"
         return agent
@@ -203,7 +203,7 @@ class TestReviewerAgentDefinition:
         ]
         assert unavailable == []
 
-    def test_it_does_not_read_project_context_or_thread_memory(self, reviewer):
+    def test_it_does_not_read_project_context_or_thread_memory(self, reviewer, make_stage):
         """The reviewer judges one run's artifacts. Project CONTEXT.md is
         untrusted-by-default content (D17) and thread memory is another
         conversation -- neither is evidence about whether a claim is true,
@@ -325,26 +325,35 @@ def _explode(*args, **kwargs):
     raise RuntimeError("reviewer exploded")
 
 
-def _stage(run, mocker, consent=None, authorization=None, enabled=False,
-           effort=None):
+@pytest.fixture
+def make_stage(real_harness_tier):
+    """Drives the §20 review stage end to end with the reviewer agent's
+    lookup kept REAL -- a stubbed manager.get() would let the reviewer's
+    .md drift from what the stage actually loads, which is half of what
+    these tests are for. A FACTORY fixture so all callers inherit the
+    isolated tmp project (#5); the plain-function shape this replaced had
+    exactly one environment choice baked in where thirty-eight callers
+    could not see it."""
     from core import config_loader
     from core.reasoning import orchestrator
 
-    # conftest's autouse fixture resets discovery before every test, and
-    # the stage looks the reviewer agent up by name. Initialising here
-    # rather than in each test keeps the lookup REAL -- a stubbed
-    # manager.get() would let the reviewer's .md drift from what the stage
-    # actually loads, which is half of what these tests are for.
-    config_loader.initialize(".")
-    mocker.patch.object(orchestrator, "update_pipeline_run")
-    # §22: the stage is a generator now, and it takes the run's _Progress
-    # so review.py's trace lines land on the same watermark as the
-    # pipeline's own. DRAINED here -- an undrained generator runs nothing
-    # at all, which would make every assertion below pass vacuously.
-    events = list(orchestrator._review_stage(
-        run, orchestrator._Progress(run), "m", "ANTHROPIC", authorization,
-        consent, enabled=enabled, effort=effort))
-    return events
+    def _stage(run, mocker, consent=None, authorization=None,
+               enabled=False, effort=None):
+        # conftest's autouse fixture resets discovery before every test,
+        # and the stage looks the reviewer agent up by name.
+        config_loader.initialize(str(real_harness_tier))
+        mocker.patch.object(orchestrator, "update_pipeline_run")
+        # §22: the stage is a generator now, and it takes the run's
+        # _Progress so review.py's trace lines land on the same watermark
+        # as the pipeline's own. DRAINED here -- an undrained generator
+        # runs nothing at all, which would make every assertion below
+        # pass vacuously.
+        events = list(orchestrator._review_stage(
+            run, orchestrator._Progress(run), "m", "ANTHROPIC",
+            authorization, consent, enabled=enabled, effort=effort))
+        return events
+
+    return _stage
 
 
 TEXT_FINDING = {"kind": "text", "claim_id": "c1",
@@ -358,22 +367,22 @@ class TestTheStageIsOptIn:
     """D9. It is one more model call plus a re-synthesis, and it needs
     someone present to consent to anything it changes."""
 
-    def test_no_flag_and_no_consent_means_no_reviewer_call(self, mocker):
+    def test_no_flag_and_no_consent_means_no_reviewer_call(self, mocker, make_stage):
         run = _reviewed_run()
         called = mocker.patch.object(RunAgentLoop, "run_agent_conversation")
-        _stage(run, mocker)
+        make_stage(run, mocker)
 
         called.assert_not_called()
         assert run.subagent_reviews == []
 
-    def test_a_consent_route_alone_enables_it(self, mocker):
+    def test_a_consent_route_alone_enables_it(self, mocker, make_stage):
         """A shell that offered the user a consent route should not ALSO
         need the config flag set -- the user already opted in by being
         asked."""
         run = _reviewed_run()
         _stub_reviewer(mocker, [])
         _stub_resynthesis(mocker)
-        _stage(run, mocker, consent=_consent())
+        make_stage(run, mocker, consent=_consent())
 
         assert any("Review:" in line for line in run.trace)
 
@@ -383,13 +392,13 @@ class TestNobodyToAskAppliesNothing:
     security stance. A piped CLI or a cron job gets the findings and an
     unmodified report."""
 
-    def test_findings_are_recorded_but_nothing_is_applied(self, mocker):
+    def test_findings_are_recorded_but_nothing_is_applied(self, mocker, make_stage):
         run = _reviewed_run()
         before = run.final_report
         _stub_reviewer(mocker, [TEXT_FINDING])
         resynth = _stub_resynthesis(mocker)
 
-        _stage(run, mocker, consent=None, enabled=True)
+        make_stage(run, mocker, consent=None, enabled=True)
 
         assert run.claims[0].final_text == "original text"
         assert run.final_report == before
@@ -416,30 +425,30 @@ class TestNobodyToAskAppliesNothing:
 
 class TestAcceptedCorrections:
 
-    def test_accept_rewrites_the_claim_and_re_runs_synthesis(self, mocker):
+    def test_accept_rewrites_the_claim_and_re_runs_synthesis(self, mocker, make_stage):
         run = _reviewed_run()
         _stub_reviewer(mocker, [TEXT_FINDING])
         resynth = _stub_resynthesis(mocker)
-        _stage(run, mocker, consent=_consent(("accept", "")))
+        make_stage(run, mocker, consent=_consent(("accept", "")))
 
         assert run.claims[0].final_text == "corrected text"
         assert len(resynth) == 1
         assert resynth[0]["pass_id"] == "Final synthesis"
         assert run.final_report == "REPORT v2"
 
-    def test_reject_leaves_everything_alone(self, mocker):
+    def test_reject_leaves_everything_alone(self, mocker, make_stage):
         """The other half of the pair. Without it the test above passes
         against a version that always re-synthesises."""
         run = _reviewed_run()
         _stub_reviewer(mocker, [TEXT_FINDING])
         resynth = _stub_resynthesis(mocker)
-        _stage(run, mocker, consent=_consent(("reject", "")))
+        make_stage(run, mocker, consent=_consent(("reject", "")))
 
         assert run.claims[0].final_text == "original text"
         assert run.final_report == "REPORT v1"
         assert resynth == []
 
-    def test_the_re_synthesis_reads_the_CORRECTED_claims(self, mocker):
+    def test_the_re_synthesis_reads_the_CORRECTED_claims(self, mocker, make_stage):
         """The synthesis input is REBUILT, not the string built before the
         review. Reusing it would regenerate the report from the
         uncorrected claims -- a report that changed for no reason while
@@ -447,11 +456,11 @@ class TestAcceptedCorrections:
         run = _reviewed_run()
         _stub_reviewer(mocker, [TEXT_FINDING])
         resynth = _stub_resynthesis(mocker)
-        _stage(run, mocker, consent=_consent(("accept", "")))
+        make_stage(run, mocker, consent=_consent(("accept", "")))
 
         assert "corrected text" in resynth[0]["input"]
 
-    def test_a_tier_override_marks_the_score_breakdown(self, mocker):
+    def test_a_tier_override_marks_the_score_breakdown(self, mocker, make_stage):
         """Pass 4's breakdown was computed from data the review did not
         change, so it still describes the OLD tier. Unmarked,
         04_confidence.json shows a 0.91 raw_score beside a downgraded LOW
@@ -459,7 +468,7 @@ class TestAcceptedCorrections:
         run = _reviewed_run()
         _stub_reviewer(mocker, [TIER_FINDING])
         _stub_resynthesis(mocker)
-        _stage(run, mocker, consent=_consent(("accept", "")))
+        make_stage(run, mocker, consent=_consent(("accept", "")))
 
         assert run.claims[0].confidence_tier == "LOW"
         assert run.claims[0].score_breakdown["review_override"] == "LOW"
@@ -469,14 +478,14 @@ class TestAcceptedCorrections:
         )
 
     def test_a_synthesis_finding_steers_the_re_run_without_editing_claims(
-            self, mocker):
+            self, mocker, make_stage):
         run = _reviewed_run()
         _stub_reviewer(mocker, [{
             "kind": "synthesis", "claim_id": None,
             "proposed": "Stop asserting a causal link the claims do not make.",
             "reason": "the report overstates c1", "severity": "high"}])
         resynth = _stub_resynthesis(mocker)
-        _stage(run, mocker, consent=_consent(("accept", "")))
+        make_stage(run, mocker, consent=_consent(("accept", "")))
 
         assert run.claims[0].final_text == "original text"
         assert "causal link" in resynth[0]["input"]
@@ -486,7 +495,8 @@ class TestRefinement:
     """V5. The note goes back into the reviewer's OWN thread, so it sees
     its own wording and the objection to it."""
 
-    def test_refine_re_enters_the_reviewers_thread(self, mocker):
+    def test_refine_re_enters_the_reviewers_thread(self, mocker,
+            make_stage):
         thread = uuid4()
         run = _reviewed_run()
         _stub_reviewer(mocker, [TEXT_FINDING], thread_id=thread)
@@ -501,7 +511,7 @@ class TestRefinement:
 
         mocker.patch.object(RunAgentLoop, "continue_conversation",
                             side_effect=_continue)
-        _stage(run, mocker,
+        make_stage(run, mocker,
                consent=_consent(("refine", "the source is dated 2019"),
                                 ("accept", "")))
 
@@ -510,7 +520,7 @@ class TestRefinement:
         assert "dated 2019" in calls[0]["message"]
         assert run.claims[0].final_text == "better text"
 
-    def test_the_refined_proposal_is_what_gets_recorded(self, mocker):
+    def test_the_refined_proposal_is_what_gets_recorded(self, mocker, make_stage):
         run = _reviewed_run()
         _stub_reviewer(mocker, [TEXT_FINDING])
         _stub_resynthesis(mocker)
@@ -518,7 +528,7 @@ class TestRefinement:
             RunAgentLoop, "continue_conversation",
             return_value=make_model_response(
                 text=json.dumps([dict(TEXT_FINDING, proposed="better text")])))
-        _stage(run, mocker,
+        make_stage(run, mocker,
                consent=_consent(("refine", "note"), ("accept", "")))
 
         assert run.subagent_reviews[0]["proposed"] == "better text", (
@@ -526,7 +536,7 @@ class TestRefinement:
             "first proposal"
         )
 
-    def test_refinement_touches_only_its_own_finding(self, mocker):
+    def test_refinement_touches_only_its_own_finding(self, mocker, make_stage):
         """A note about #1 must not silently redraft #2 -- the user
         consented to reconsidering one thing."""
         run = _reviewed_run()
@@ -540,13 +550,13 @@ class TestRefinement:
                 dict(TEXT_FINDING, proposed="one refined"),
                 dict(second, proposed="two SILENTLY CHANGED"),
             ])))
-        _stage(run, mocker, consent=_consent(
+        make_stage(run, mocker, consent=_consent(
             ("refine", "note"), ("accept", ""), ("accept", "")))
 
         assert run.claims[0].final_text == "one refined"
         assert run.claims[1].final_text == "rewrite two"
 
-    def test_the_refinement_limit_declines_rather_than_applying(self, mocker):
+    def test_the_refinement_limit_declines_rather_than_applying(self, mocker, make_stage):
         """Past the cap the honest answer is that the proposal was never
         agreed to -- applying the last unrefined version would treat 'make
         this better' as 'apply this'."""
@@ -557,13 +567,13 @@ class TestRefinement:
             RunAgentLoop, "continue_conversation",
             return_value=make_model_response(text=json.dumps([TEXT_FINDING])))
         consent = _consent(*[("refine", "again")] * 10)
-        _stage(run, mocker, consent=consent)
+        make_stage(run, mocker, consent=consent)
 
         assert run.claims[0].final_text == "original text"
         assert run.subagent_reviews[0]["decision"] == "reject"
         assert len(consent.asked) == config.MAX_REVIEW_REFINEMENTS + 1
 
-    def test_an_unavailable_thread_records_reject_not_apply(self, mocker):
+    def test_an_unavailable_thread_records_reject_not_apply(self, mocker, make_stage):
         """f18: fail-closed branch. A refactor that read 'make this
         better' as 'apply this' would put an unconsented correction into
         the report with the suite green."""
@@ -571,12 +581,12 @@ class TestRefinement:
         _stub_reviewer(mocker, [TEXT_FINDING], thread_id=None)
         _stub_resynthesis(mocker)
 
-        _stage(run, mocker, consent=_consent(("refine", "note")))
+        make_stage(run, mocker, consent=_consent(("refine", "note")))
 
         assert run.claims[0].final_text == "original text"
         assert run.subagent_reviews[0]["decision"] == "reject"
 
-    def test_a_failed_refinement_records_reject_not_apply(self, mocker):
+    def test_a_failed_refinement_records_reject_not_apply(self, mocker, make_stage):
         """f18: the other fail-closed branch -- a refinement that raises
         must reject, never fall through to an accept of the unrefined or
         half-revised proposal."""
@@ -586,7 +596,7 @@ class TestRefinement:
         mocker.patch.object(RunAgentLoop, "continue_conversation",
                             side_effect=RuntimeError("thread gone"))
 
-        _stage(run, mocker, consent=_consent(("refine", "note")))
+        make_stage(run, mocker, consent=_consent(("refine", "note")))
 
         assert run.claims[0].final_text == "original text"
         assert run.subagent_reviews[0]["decision"] == "reject"
@@ -594,7 +604,7 @@ class TestRefinement:
 
 class TestConsentEdges:
 
-    def test_reject_all_stops_asking(self, mocker):
+    def test_reject_all_stops_asking(self, mocker, make_stage):
         """The escape a long review needs. Safe by construction: it only
         ever DECLINES, so consent fatigue cannot turn into a reflexive
         accept."""
@@ -607,22 +617,23 @@ class TestConsentEdges:
         _stub_reviewer(mocker, [TEXT_FINDING, second, third])
         resynth = _stub_resynthesis(mocker)
         consent = _consent(("reject_all", ""))
-        _stage(run, mocker, consent=consent)
+        make_stage(run, mocker, consent=consent)
 
         assert len(consent.asked) == 1
         assert len(run.subagent_reviews) == 3
         assert all(d["decision"] == "reject" for d in run.subagent_reviews)
         assert resynth == []
 
-    def test_an_unrecognised_answer_is_a_rejection(self, mocker):
+    def test_an_unrecognised_answer_is_a_rejection(self, mocker, make_stage):
         run = _reviewed_run()
         _stub_reviewer(mocker, [TEXT_FINDING])
         _stub_resynthesis(mocker)
-        _stage(run, mocker, consent=_consent(("maybe later", "")))
+        make_stage(run, mocker, consent=_consent(("maybe later", "")))
 
         assert run.claims[0].final_text == "original text"
 
-    def test_a_consent_callback_that_raises_is_a_rejection(self, mocker):
+    def test_a_consent_callback_that_raises_is_a_rejection(
+            self, mocker, make_stage):
         """A shell torn down mid-prompt must not have its silence read as
         approval -- the same rule tui/app.py applies to a permission modal
         dismissed with None."""
@@ -633,7 +644,7 @@ class TestConsentEdges:
         def boom(finding, round_index):
             raise RuntimeError("the UI went away")
 
-        _stage(run, mocker, consent=ResponseChannel(ask=boom))
+        make_stage(run, mocker, consent=ResponseChannel(ask=boom))
 
         assert run.claims[0].final_text == "original text"
         assert run.subagent_reviews[0]["decision"] == "reject"
@@ -644,33 +655,33 @@ class TestFindingsAreValidatedBeforeAnyoneIsAsked:
     asking solicits consent for something that then silently does
     nothing."""
 
-    def test_an_unknown_claim_id_is_dropped(self, mocker):
+    def test_an_unknown_claim_id_is_dropped(self, mocker, make_stage):
         run = _reviewed_run()
         _stub_reviewer(mocker, [dict(TEXT_FINDING, claim_id="nope")])
         _stub_resynthesis(mocker)
         consent = _consent()
-        _stage(run, mocker, consent=consent)
+        make_stage(run, mocker, consent=consent)
 
         assert consent.asked == []
 
-    def test_a_tier_that_is_not_a_tier_is_dropped(self, mocker):
+    def test_a_tier_that_is_not_a_tier_is_dropped(self, mocker, make_stage):
         run = _reviewed_run()
         _stub_reviewer(mocker, [dict(TIER_FINDING, proposed="VERY HIGH")])
         _stub_resynthesis(mocker)
         consent = _consent()
-        _stage(run, mocker, consent=consent)
+        make_stage(run, mocker, consent=consent)
 
         assert consent.asked == []
 
-    def test_a_non_array_response_is_not_a_crash(self, mocker):
+    def test_a_non_array_response_is_not_a_crash(self, mocker, make_stage):
         run = _reviewed_run()
         _stub_reviewer(mocker, {"findings": []})
         _stub_resynthesis(mocker)
-        _stage(run, mocker, consent=_consent())
+        make_stage(run, mocker, consent=_consent())
 
         assert run.subagent_reviews == []
 
-    def test_findings_past_the_cap_are_dropped_and_traced(self, mocker):
+    def test_findings_past_the_cap_are_dropped_and_traced(self, mocker, make_stage):
         """No silent caps. A truncation nobody is told about reads as 'the
         reviewer found twenty-five things'."""
         run = _reviewed_run()
@@ -687,7 +698,7 @@ class TestFindingsAreValidatedBeforeAnyoneIsAsked:
         _stub_reviewer(mocker, many)
         _stub_resynthesis(mocker)
         consent = _consent()
-        _stage(run, mocker, consent=consent)
+        make_stage(run, mocker, consent=consent)
 
         assert len(consent.asked) == config.MAX_REVIEW_FINDINGS
         assert any("MAX_REVIEW_FINDINGS" in line for line in run.trace)
@@ -699,14 +710,14 @@ class TestReviewHardening:
     deferred-commit ordering."""
 
     def test_a_reviewer_call_failure_skips_the_review_not_the_run(
-            self, mocker):
+            self, mocker, real_harness_tier):
         """f1: an optional stage must not flip a finished run to failed.
         A transient reviewer failure is a traced skip, like the
         missing-agent branch."""
         from core import config_loader
         from core.reasoning import review as review_module
 
-        config_loader.initialize(".")
+        config_loader.initialize(str(real_harness_tier))
         run = _reviewed_run()
         mocker.patch.object(RunAgentLoop, "run_agent_conversation",
                             side_effect=RuntimeError("429 rate limited"))
@@ -717,7 +728,8 @@ class TestReviewHardening:
         assert thread_id is None
         assert any("reviewer call failed" in line for line in run.trace)
 
-    def test_refinement_makes_exactly_max_send_backs(self, mocker):
+    def test_refinement_makes_exactly_max_send_backs(
+            self, mocker, make_stage):
         """f2 + r4-2: MAX refinements for MAX+1 asks (the extra send-back
         spent a grant on a revision nobody was shown), and the refinement
         process lands in the decision record."""
@@ -736,7 +748,7 @@ class TestReviewHardening:
         mocker.patch.object(RunAgentLoop, "continue_conversation",
                             side_effect=_continue)
         consent = _consent(*[("refine", "note")] * 10)
-        _stage(run, mocker, consent=consent)
+        make_stage(run, mocker, consent=consent)
 
         assert calls["n"] == config.MAX_REVIEW_REFINEMENTS
         assert len(consent.asked) == config.MAX_REVIEW_REFINEMENTS + 1
@@ -748,7 +760,7 @@ class TestReviewHardening:
         assert record["refinements"][0]["note"] == "note"
 
     def test_a_prose_wrapped_refinement_gets_the_corrective_retry(
-            self, mocker):
+            self, mocker, make_stage):
         """f5: refine responses go through retry_until_json, so a
         prose-wrapped revision recovers instead of permanently rejecting
         the engaged finding."""
@@ -766,7 +778,7 @@ class TestReviewHardening:
 
         mocker.patch.object(RunAgentLoop, "continue_conversation",
                             side_effect=_continue)
-        _stage(run, mocker, consent=_consent(("refine", "n"), ("accept", "")))
+        make_stage(run, mocker, consent=_consent(("refine", "n"), ("accept", "")))
 
         assert run.claims[0].final_text == "better"
         assert any("retrying with corrective" in line for line in run.trace)
@@ -883,7 +895,7 @@ class TestReviewHardening:
         assert review_module._describe(
             dict(out[0], decision=review_module.ACCEPT)) == "synthesis correction to report"
 
-    def test_a_tier_override_rewrites_the_annotation(self, mocker):
+    def test_a_tier_override_rewrites_the_annotation(self, mocker, make_stage):
         """r3-1: the stale '[HIGH]' tag beside a corrected tier
         contradicts it inside the re-synthesis input and every vars(c)
         dump."""
@@ -891,26 +903,26 @@ class TestReviewHardening:
         _stub_reviewer(mocker, [TIER_FINDING])
         _stub_resynthesis(mocker)
 
-        _stage(run, mocker, consent=_consent(("accept", "")))
+        make_stage(run, mocker, consent=_consent(("accept", "")))
 
         assert run.claims[0].confidence_tier == "LOW"
         assert run.claims[0].annotation == "[LOW]"
         assert run.claims[0].score_breakdown["review_override"] == "LOW"
 
-    def test_an_equal_value_correction_is_a_no_op(self, mocker):
+    def test_an_equal_value_correction_is_a_no_op(self, mocker, make_stage):
         """r4-1: accepting a 'correction' equal to the current value must
         not spend a re-synthesis nor claim to have applied anything."""
         run = _reviewed_run()
         _stub_reviewer(mocker, [dict(TEXT_FINDING, proposed="original text")])
         resynth = _stub_resynthesis(mocker)
 
-        _stage(run, mocker, consent=_consent(("accept", "")))
+        make_stage(run, mocker, consent=_consent(("accept", "")))
 
         assert resynth == []
         assert any("no longer applicable" in line for line in run.trace)
 
     def test_a_failed_re_synthesis_leaves_claims_and_report_unchanged(
-            self, mocker):
+            self, mocker, make_stage):
         """f4: deferred commit. A re-synthesis failure must not persist
         corrected claims beside the stale report.
 
@@ -927,7 +939,7 @@ class TestReviewHardening:
 
         # No pytest.raises: the stage returns normally, so the pipeline's
         # terminal update_pipeline_run(status='complete') is reached.
-        _stage(run, mocker, consent=_consent(("accept", "")))
+        make_stage(run, mocker, consent=_consent(("accept", "")))
 
         assert run.claims[0].final_text == "original text"
         assert run.final_report == "REPORT v1"
@@ -936,7 +948,8 @@ class TestReviewHardening:
         # record has to agree with the claims it sits beside.
         assert not any("accepted and applied" in line for line in run.trace)
 
-    def test_retry_continuations_carry_the_reviewer_context(self, mocker):
+    def test_retry_continuations_carry_the_reviewer_context(
+            self, mocker, make_stage):
         """r2-1: the restriction binds on EVERY turn of the review, not
         just turn 1 -- a context-less retry would re-advertise
         spawn_subagent."""
@@ -958,13 +971,14 @@ class TestReviewHardening:
 
         mocker.patch.object(RunAgentLoop, "continue_conversation",
                             side_effect=_continue)
-        _stage(run, mocker, consent=_consent())
+        make_stage(run, mocker, consent=_consent())
 
         ctx = captured.get("context")
         assert ctx is not None
         assert not registry.is_allowed("spawn_subagent", ctx)
 
-    def test_the_reviewer_prompt_carries_no_catalogs(self, mocker):
+    def test_the_reviewer_prompt_carries_no_catalogs(
+            self, mocker, make_stage):
         """f19: the catalogs invite load_skill / spawn_subagent, two tools
         the reviewer's allowed_tools excludes."""
         run = _reviewed_run()
@@ -980,7 +994,7 @@ class TestReviewHardening:
                             side_effect=_conv)
         _stub_resynthesis(mocker)
 
-        _stage(run, mocker, consent=_consent())
+        make_stage(run, mocker, consent=_consent())
 
         assert "load_skill" not in captured["system_prompt"]
         assert "spawn_subagent" not in captured["system_prompt"]
@@ -1005,34 +1019,35 @@ class TestTheReviewerInheritsTheRunsAuthorization:
         _stub_resynthesis(mocker)
         return captured
 
-    def test_the_same_bundle_object_reaches_the_reviewer(self, mocker):
+    def test_the_same_bundle_object_reaches_the_reviewer(self, mocker, make_stage):
         run = _reviewed_run()
         budget = GrantBudget(7)
         auth = RunAuthorization(granted_tools={"web_search"}, budget=budget)
         captured = self._capture(mocker)
-        _stage(run, mocker, consent=_consent(), authorization=auth)
+        make_stage(run, mocker, consent=_consent(), authorization=auth)
 
         assert captured["authorization"] is auth
         # Identity on the BUDGET too: a rebuilt one with the same limit
         # would multiply the run's ceiling and read as if it enforced one.
         assert captured["authorization"].budget is budget
 
-    def test_the_reviewer_runs_under_the_reviewer_agents_context(self, mocker):
+    def test_the_reviewer_runs_under_the_reviewer_agents_context(self, mocker, real_harness_tier, make_stage):
         """Not the global tool set. The reviewer's .md excludes
         spawn_subagent, and that exclusion only binds if the context built
         from it is the one the run actually uses."""
         from core import config_loader
         from tools.registry import registry
 
-        config_loader.initialize(".")
+        config_loader.initialize(str(real_harness_tier))
         run = _reviewed_run()
         captured = self._capture(mocker)
-        _stage(run, mocker, consent=_consent())
+        make_stage(run, mocker, consent=_consent())
 
         assert not registry.is_allowed("spawn_subagent", captured["context"])
         assert "pipeline-reviewer" in captured["system_prompt"]
 
-    def test_the_reviewers_granted_calls_join_the_runs_audit_trail(self, mocker):
+    def test_the_reviewers_granted_calls_join_the_runs_audit_trail(
+            self, mocker, make_stage):
         """ONE list, by reference. §25 keeps a single granted_calls list
         precisely so a call cannot be authorised in one place and recorded
         in another -- and the reviewer is the newest thing that can spend
@@ -1051,7 +1066,7 @@ class TestTheReviewerInheritsTheRunsAuthorization:
         mocker.patch.object(RunAgentLoop, "run_agent_conversation",
                             side_effect=_conv)
         _stub_resynthesis(mocker)
-        _stage(run, mocker, consent=_consent(), authorization=auth)
+        make_stage(run, mocker, consent=_consent(), authorization=auth)
 
         assert run.granted_calls == [
             {"pass": "Review", "tool": "web_search", "params": {"q": "x"}}]
@@ -1186,7 +1201,7 @@ def _canned_for(pass_id):
     return _CANNED[pass_id]
 
 
-def test_a_missing_reviewer_agent_skips_rather_than_failing(mocker):
+def test_a_missing_reviewer_agent_skips_rather_than_failing(mocker, real_harness_tier, make_stage):
     """A broken install or a discovery failure must not cost a completed
     ten-pass run. The stage is optional; losing the pipeline output over
     the absence of an optional stage would be the wrong trade."""
@@ -1194,7 +1209,7 @@ def test_a_missing_reviewer_agent_skips_rather_than_failing(mocker):
     from core.reasoning import orchestrator
 
     run = _reviewed_run()
-    config_loader.initialize(".")
+    config_loader.initialize(str(real_harness_tier))
     mocker.patch.object(orchestrator, "update_pipeline_run")
     mocker.patch("agents.manager.manager.get", return_value=None)
     called = mocker.patch.object(RunAgentLoop, "run_agent_conversation")
@@ -1218,11 +1233,11 @@ class TestRequestedIsSeparateFromCanBeAsked:
     enables the stage would skip the review entirely -- reporting nothing
     on exactly the run the user asked to have checked."""
 
-    def test_enabled_with_no_consent_still_runs_and_reports(self, mocker):
+    def test_enabled_with_no_consent_still_runs_and_reports(self, mocker, make_stage):
         run = _reviewed_run()
         _stub_reviewer(mocker, [TEXT_FINDING])
         _stub_resynthesis(mocker)
-        _stage(run, mocker, consent=None, enabled=True)
+        make_stage(run, mocker, consent=None, enabled=True)
 
         assert len(run.subagent_reviews) == 1
         assert run.claims[0].final_text == "original text"
@@ -1815,7 +1830,7 @@ from tools.context import ToolContext
 class TestCatalogsFollowTheContext:
 
     @pytest.fixture(autouse=True)
-    def _discovered(self, monkeypatch):
+    def _discovered(self, monkeypatch, real_harness_tier):
         """The real discovery, PLUS one agent that is actually spawnable.
 
         §32 A4 made every shipped agent `spawnable: false`, so
@@ -1828,7 +1843,7 @@ class TestCatalogsFollowTheContext:
         """
         from core import config_loader
 
-        config_loader.initialize(".")
+        config_loader.initialize(str(real_harness_tier))
         real = dict(config_loader.get_agents())
         real["catalog-fixture"] = config_loader.AgentDef(
             name="catalog-fixture", description="a spawnable fixture",
@@ -1891,7 +1906,7 @@ class TestCatalogsFollowTheContext:
         )
 
     def test_a_spawned_subagent_inherits_the_PARENTS_suppression(
-            self, mocker, fake_storage):
+            self, mocker, fake_storage, make_stage):
         """C6 intersects with the parent, so a parent that excluded
         spawn_subagent must not have the catalog re-invite its child to
         spawn one. This is why the call site passes `child` and not the
@@ -1958,14 +1973,15 @@ class TestUnpinnedReviewProperties:
         assert "REPORT v1" in text                          # the report
         assert "- Pass 4: tiered 2 claim(s)." in text       # and the trace
 
-    def test_a_refinement_retargeting_another_claim_is_dropped(self, mocker):
+    def test_a_refinement_retargeting_another_claim_is_dropped(
+            self, mocker, real_harness_tier):
         """V5's re-target check (#86 item 4): a note about #3 must not
         silently redraft #7. This is the one mutating stage, so it is the
         one place unit 6's delete-the-guard rule applies."""
         from core.reasoning import review as review_module
         from core import config_loader
 
-        config_loader.initialize(".")
+        config_loader.initialize(str(real_harness_tier))
         run = _reviewed_run()
         hijacked = [dict(TEXT_FINDING, claim_id="c2", proposed="hijacked")]
         response = make_model_response(text=json.dumps(hijacked))
@@ -1993,7 +2009,8 @@ class TestEffortInheritance:
     stage -> walk_consent -> _refine -> continue_conversation, and
     stage -> re-synthesis."""
 
-    def test_the_reviewer_call_carries_the_effort(self, mocker):
+    def test_the_reviewer_call_carries_the_effort(self, mocker,
+            make_stage):
         run = _reviewed_run()
         captured = []
 
@@ -2004,12 +2021,13 @@ class TestEffortInheritance:
         mocker.patch.object(RunAgentLoop, "run_agent_conversation",
                             side_effect=side_effect)
         _stub_resynthesis(mocker)
-        _stage(run, mocker, consent=_consent(("reject", "")), effort="high")
+        make_stage(run, mocker, consent=_consent(("reject", "")), effort="high")
 
         assert captured == ["high"], (
             f"the reviewer must inherit the run's effort, got {captured}")
 
-    def test_the_refinement_carries_the_effort(self, mocker):
+    def test_the_refinement_carries_the_effort(self, mocker,
+            make_stage):
         """stage -> walk_consent -> _decide_one -> _refine ->
         continue_conversation: every hop in the chain must forward, or a
         refine round quietly drops to None while the review around it
@@ -2028,7 +2046,7 @@ class TestEffortInheritance:
 
         mocker.patch.object(RunAgentLoop, "continue_conversation",
                             side_effect=_continue)
-        _stage(run, mocker,
+        make_stage(run, mocker,
                consent=_consent(("refine", "note"), ("accept", "")),
                effort="high")
 
@@ -2036,7 +2054,8 @@ class TestEffortInheritance:
             f"a refinement must carry the run's effort, got {captured}")
         assert run.claims[0].final_text == "better text"
 
-    def test_the_re_synthesis_carries_the_effort(self, mocker):
+    def test_the_re_synthesis_carries_the_effort(self, mocker,
+            make_stage):
         """The re-synthesis is _run_pass like any other pass; D4 names it
         explicitly because nothing about 'review' suggests it runs another
         generation pass at all."""
@@ -2051,7 +2070,7 @@ class TestEffortInheritance:
 
         mocker.patch.object(RunAgentLoop, "stream_deep_research_mode",
                             side_effect=pass_stream(side_effect))
-        _stage(run, mocker, consent=_consent(("accept", "")), effort="high")
+        make_stage(run, mocker, consent=_consent(("accept", "")), effort="high")
 
         assert calls == ["high"], (
             f"the re-synthesis must carry the run's effort, got {calls}")

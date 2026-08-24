@@ -75,7 +75,8 @@ class TestWhatEachPathCreates:
         assert created == ["research_pass"]
 
     @pytest.mark.parametrize("caller", ["subagent", "reviewer", "compactor"])
-    def test_the_agent_shaped_callers_create_subagent_threads(self, caller, mocker):
+    def test_the_agent_shaped_callers_create_subagent_threads(
+            self, caller, mocker, real_harness_tier):
         """spawn_subagent, §20's reviewer and §21a's compactor all reach the
         same entry point, so all three are checked at it.
 
@@ -107,11 +108,11 @@ class TestWhatEachPathCreates:
                      side_effect=spy)
 
         if caller == "subagent":
-            _invoke_subagent(mocker)
+            _invoke_subagent(mocker, real_harness_tier)
         elif caller == "reviewer":
-            _invoke_reviewer(mocker)
+            _invoke_reviewer(mocker, real_harness_tier)
         else:
-            _invoke_compactor(mocker)
+            _invoke_compactor(mocker, real_harness_tier)
 
         assert captured.get("thread_kind") == "subagent", (
             f"{caller} still creates a thread that the picker will offer as "
@@ -123,21 +124,21 @@ class TestWhatEachPathCreates:
 # same shape test_review.py's own tests use. A hand-built manager double
 # would let this file pass while the production lookup was broken.
 
-def _invoke_subagent(mocker):
+def _invoke_subagent(mocker, project):
     from core import config_loader
     from agents import subagent_tool
-    config_loader.initialize(".")
+    config_loader.initialize(str(project))
     try:
         subagent_tool.run({"agent_name": "grill-me", "task": "do it"})
     finally:
         config_loader.reset()
 
 
-def _invoke_reviewer(mocker):
+def _invoke_reviewer(mocker, project):
     from core import config_loader
     from core.reasoning import review
     from core.reasoning.base import PipelineRun
-    config_loader.initialize(".")
+    config_loader.initialize(str(project))
     try:
         review.run_review(PipelineRun(user_query="q"), model="m",
                           provider_name="ANTHROPIC")
@@ -145,11 +146,11 @@ def _invoke_reviewer(mocker):
         config_loader.reset()
 
 
-def _invoke_compactor(mocker):
+def _invoke_compactor(mocker, project):
     from core import compaction, config_loader
     from core.loop import RunAgentLoop
     from agents.manager import manager
-    config_loader.initialize(".")
+    config_loader.initialize(str(project))
     try:
         import config
         agent = manager.get(config.COMPACTOR_AGENT)

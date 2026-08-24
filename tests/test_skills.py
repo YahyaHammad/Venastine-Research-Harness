@@ -272,8 +272,8 @@ class TestShippedDefaults:
     first, so their frontmatter has to be exemplary -- and a skill whose
     declared tools are globally unavailable would teach the wrong thing."""
 
-    def test_all_four_are_discovered_with_categories(self):
-        config_loader.initialize(".")
+    def test_all_four_are_discovered_with_categories(self, real_harness_tier):
+        config_loader.initialize(str(real_harness_tier))
         skills = config_loader.get_skills()
 
         for name, category in (
@@ -286,18 +286,18 @@ class TestShippedDefaults:
             assert skills[name].tier == "harness"
             assert skills[name].category == category
 
-    def test_their_declared_tools_are_actually_available(self):
+    def test_their_declared_tools_are_actually_available(self, real_harness_tier):
         """Each shipped skill declares only tools that are allowed under
         default config. A builtin that reports a missing tool on every
         activation would read as the feature being broken."""
-        config_loader.initialize(".")
+        config_loader.initialize(str(real_harness_tier))
         for name in ("cybersecurity-research", "cryptography-verification",
                      "proof-writing", "literature-review"):
             skill = config_loader.get_skill(name)
             assert manager.missing_tools(skill, None) == [], name
 
-    def test_each_has_a_description_and_a_body(self):
-        config_loader.initialize(".")
+    def test_each_has_a_description_and_a_body(self, real_harness_tier):
+        config_loader.initialize(str(real_harness_tier))
         for name in ("cybersecurity-research", "cryptography-verification",
                      "proof-writing", "literature-review"):
             skill = config_loader.get_skill(name)
