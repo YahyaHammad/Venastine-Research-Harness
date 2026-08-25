@@ -6183,3 +6183,78 @@ Counts 2581 -> 2622 (+17 test_session_overrides.py, +24 test_tui.py). Ten
 mutations run against the new tests, all killed with the rest of each file still
 passing. Docs: README command table and the compaction prose, AGENTS layer table
 and M1 bullet, ARCHITECTURE tree and §21 source order, BREAKING_CHANGES.
+
+
+## Batch 32 — the range pin that made CI test something nobody runs (2026-08-25)
+
+CI went red on main for the batch-30 commit, on
+`test_mcp_client.py::test_ac6_is_error_becomes_the_error_convention_without_raising`
+-- a test with nothing to do with context windows. The whole suite was green
+locally, and stayed green on re-runs.
+
+### What actually differed
+
+`requirements.txt` carried `mcp>=2.0,<3`. The local environment has 2.0.0; CI
+resolved **2.1.0**, and the two disagree about one line:
+
+```
+# 2.0.0  server/mcpserver/tools/base.py:180
+except Exception as e:
+    raise ToolError(f"Error executing tool {self.name}: {e}") from e     # text forwarded
+
+# 2.1.0  server/mcpserver/tools/base.py:210
+except Exception as exc:
+    # A crash: the exception's own text stays on the server.
+    raise UnexpectedToolError(f"Error executing tool {self.name}") from exc
+```
+
+2.1.0 introduced a deliberate split. A tool raising `ToolError` ON PURPOSE still
+has its message forwarded; a tool that CRASHES has its text withheld from the
+client. The probe server's `boom` raises `ValueError("tool exploded")` -- a crash
+-- so `"exploded"` stopped arriving and the assertion failed.
+
+Verified by measurement rather than from the traceback: mcp 2.1.0 was installed
+into an isolated directory and shadowed onto `PYTHONPATH`, and the ORIGINAL
+assertion was re-run against both. It passes on 2.0.0 and fails on 2.1.0, which
+both reproduces the CI failure locally and proves the shadow was exercising the
+changed path rather than quietly falling back to the installed copy.
+
+### Scope, checked rather than assumed
+
+Test-only. `mcp_client/client.py` imports just `MCPError` from
+`mcp.shared.exceptions` and otherwise catches broadly; `UnexpectedToolError` is a
+SERVER-side type this project never references. CI agreed -- 2620 passed, one
+failed. And AC6's actual contract held throughout: the failure arrived in band as
+`{"error": ...}` rather than raising, which is the thing the loop depends on.
+
+### The real defect was not the assertion
+
+**A range pin meant CI's result depended on when it ran, and CI was not testing
+what anyone runs locally.** That is the more serious half. D22's upper bound did
+its job -- no accidental major migration -- but `<3` still let a minor change
+observable behaviour underneath it, and the first anyone knew was a red main.
+
+So `mcp` is pinned exactly, as `anthropic`, `openai` and `google-genai` already
+are. 2.0.0 rather than 2.1.0, by owner decision: it makes CI and local agree
+today with no behaviour change anywhere, and it turns adopting 2.1.0 into a
+deliberate step instead of something that happened on a Tuesday.
+
+### The test was asserting the wrong layer's policy
+
+Kept and split, rather than relaxed. It used to assert that a CRASHED tool's own
+message reached the client -- but that is the SERVER's policy, not this client's
+contract, and in production the server belongs to someone else and is configured
+by them. So:
+
+  * `boom` (a `ValueError` crash) asserts the in-band `{"error": ...}` convention
+    and that the error names the failing tool. That is AC6's claim.
+  * `fails` (a deliberate `ToolError`) asserts the message survives, which is the
+    part that matters to the MODEL -- an error it cannot act on is barely better
+    than none.
+
+`ToolError` is the spelling both pinned versions honour: 2.0.0 through its
+catch-all, 2.1.0 through the explicit arm it added. So the file now passes on
+2.0.0 AND 2.1.0 -- measured on both, not argued -- and the next bump cannot land
+this particular surprise again.
+
+Counts 2622 -> 2623 (+1 test_mcp_client.py). No production code changed.

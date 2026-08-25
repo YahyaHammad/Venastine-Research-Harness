@@ -59,7 +59,24 @@ def _build_server():
 
     @srv.tool()
     def boom() -> str:
+        # A CRASH -- an exception the tool did not plan to raise. Whether
+        # its text reaches the client is the SERVER's policy and it
+        # changed under us: 2.0.0 forwards it, 2.1.0 withholds it ("the
+        # exception's own text stays on the server"). So the crash case
+        # asserts the CONVENTION only; `fails` below owns the message.
         raise ValueError("tool exploded")
+
+    @srv.tool()
+    def fails() -> str:
+        # A DELIBERATE failure, in MCP's own vocabulary. Both pinned
+        # versions forward a ToolError's message -- 2.0.0 through its
+        # catch-all, 2.1.0 through the explicit `except ToolError` arm it
+        # added -- so this is the spelling that says "a tool failure must
+        # arrive with something the model can act on" without depending on
+        # which minor is installed.
+        from mcp.server.mcpserver.exceptions import ToolError
+
+        raise ToolError("tool exploded")
 
     @srv.tool()
     async def hang() -> str:
@@ -258,8 +275,33 @@ def test_ac6_call_tool_returns_a_plain_dict_never_a_calltoolresult(client):
 def test_ac6_is_error_becomes_the_error_convention_without_raising(client):
     """MCP signals tool failure IN BAND. It has to land on the same
     {"error": ...} shape _run() already understands for ToolCallDenied,
-    or the loop needs a second error channel."""
+    or the loop needs a second error channel.
+
+    THE CONVENTION ONLY, and that is the fix for the CI break this test
+    caused (batch 32). It used to assert the crashed tool's own message
+    reached the client, which is the SERVER's policy rather than this
+    client's contract -- mcp 2.1.0 stopped forwarding it, and a green
+    local suite went red on main under a range pin. What AC6 actually
+    claims is that a failure does not RAISE, and that is asserted here.
+    The message half moved to the test below, where it is expressed in a
+    way both versions honour.
+    """
     result = client.call_tool("probe", "boom", {})
+    assert "error" in result
+    assert "boom" in result["error"], (
+        "the error must at least name the tool that failed")
+
+
+def test_ac6_a_deliberate_tool_failure_carries_its_message(client):
+    """The half that matters to the model rather than to the loop.
+
+    An error the model cannot act on is barely better than none, so a
+    failure raised ON PURPOSE has to arrive with its text. Written against
+    ToolError because that is MCP's own spelling for it and because both
+    pinned versions forward it -- unlike a crash, whose text 2.1.0
+    deliberately withholds.
+    """
+    result = client.call_tool("probe", "fails", {})
     assert "error" in result and "exploded" in result["error"]
 
 

@@ -46,7 +46,21 @@ rich>=13,<16
 # removed, and httpx/httpx-sse are replaced by httpx2 -- which is why
 # there are now two HTTP stacks installed. httpx stays; anthropic, openai
 # and ddgs all still need it.
-mcp>=2.0,<3
+# EXACT, not the `>=2.0,<3` range this used to carry (batch 32, CI run
+# 32778904550). D22's upper bound did its job -- no major migration -- but a
+# MINOR still changed observable behaviour underneath it: 2.1.0 stopped
+# passing a crashed tool's exception text back to the client ("the
+# exception's own text stays on the server"), so a test asserting the
+# message went red on main while every local run stayed green. The range
+# meant CI's result depended on WHEN it ran, and CI was not testing what
+# anyone runs locally -- which is the more serious half of that.
+#
+# So this is pinned the way anthropic, openai and google-genai already are.
+# Moving it is now a deliberate step: read 2.1.0's split first -- a tool
+# raising ToolError on purpose keeps its message, a tool that CRASHES has
+# its text withheld -- and re-run tests/test_mcp_client.py, which is written
+# to hold on both versions.
+mcp==2.0.0
 
 # --- Test dependencies -------------------------------------------------
 # Previously absent, which the docs recorded as a known open item since

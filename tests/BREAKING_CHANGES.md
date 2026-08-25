@@ -763,6 +763,9 @@ ten-pass run, and every warning it logged scribbled over the Textual screen.
 | Drop `/trigger`'s eager validation | `test_a_trigger_below_its_dependent_floors_is_REFUSED` | The `ValueError` surfaces later inside `should_compact()` — hot path, mid-turn, far from the command that caused it |
 | Refuse a `/window` above the reported window | `test_window_warns_but_does_not_refuse_above_the_reported_window` | Raising it is the command's best use: a beta-gated 1M window reads as 200k until the account is asked with the right header |
 | Add `context_window` to `_KNOWN_COMPACTION` | `test_nothing_reaches_the_settings_schema` | A settings key makes it persistable, so a cloned project could ship one behind a trust prompt — the shape G7 and R12 both rejected |
+| Loosen `mcp==2.0.0` back to a range | `test_ac6_is_error_becomes_the_error_convention_without_raising` (the batch-32 CI break) | A minor bump changed server behaviour underneath the range: 2.1.0 withholds a crashed tool's text. CI then depended on when it ran, and was not testing what anyone runs locally |
+| Assert a CRASHED tool's own message reaches the client | `test_ac6_is_error_becomes_the_error_convention_without_raising` | That is the SERVER's policy, not this client's contract, and in production the server is someone else's. AC6 claims the failure does not RAISE |
+| Make the deliberate-failure probe raise a bare exception | `test_ac6_a_deliberate_tool_failure_carries_its_message` | Only `ToolError` has its message forwarded on both pinned versions; a bare exception is a crash and 2.1.0 withholds its text, so the assertion would pass on one version and fail on the other |
 
 ### Standing: `compaction._context_window_warned` is module state
 
