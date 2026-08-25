@@ -161,7 +161,7 @@ MODEL_EFFORT_LEVELS: dict[str, list[str]] = {
     "gpt-4.1-nano": [],
     "gpt-3.5-turbo": [],
 }
-DEFAULT_EFFORT_LEVELS = ["low", "medium", "high"]
+DEFAULT_EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"]
 
 # Google expresses reasoning depth as an integer token budget rather than an
 # enum, so a level has to be mapped to a number at the boundary. -1 is the
