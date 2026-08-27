@@ -6647,3 +6647,129 @@ resolved.
 2. Rotate the OpenRouter key in the local `providers.json` (`C2`, carried).
 3. Decide whether to start signing off commits, or leave the softened
    "requested, not enforced" wording as shipped.
+
+
+## Batch 34 — a NOTICE nobody required, and a licence I could not verify (2026-08-27)
+
+### Context
+
+The owner asked for a `NOTICE` file and an `ATTRIBUTION` file "to satisfy legal
+requirements". Neither is a legal requirement here, and establishing that changed
+most of the work — so what was measured comes first.
+
+### What the repository actually owes, measured
+
+* **166 tracked Python files carry zero foreign copyright headers.** No
+  `SPDX-License-Identifier`, no third-party `Copyright` line anywhere outside
+  `LICENSE`.
+* **No vendored or copied code.** A sweep for `adapted from|copied from|derived
+  from|taken from|vendored|borrowed from` returns only this project's own design
+  prose plus the Contributor Covenant credit in `CODE_OF_CONDUCT.md`.
+* **No third-party assets.** The only tracked files that are neither `.py` nor
+  `.md` are `LICENSE`, `prompts/universal_system_prompt`,
+  `prompts/untrusted_content`, `research-mode-birds-eye.mermaid` and
+  `tui/app.tcss` — all first-party. No fonts, images or data files.
+* **`LICENSE` is the canonical 201-line Apache-2.0 text**, appendix boilerplate
+  filled in at `LICENSE:189`.
+* **Dependencies are never redistributed.** `pip` resolves them from PyPI, and
+  `[tool.setuptools] packages = []` means even `pip install -e .` installs no
+  module.
+
+**So no inbound NOTICE obligation exists.** Apache-2.0 §4(d) is conditional --
+*"If the Work includes a `NOTICE` text file…"* -- it obliges propagating a NOTICE
+you RECEIVED, not authoring one. None was received.
+
+### Owner decisions
+
+* **Add a minimal `NOTICE` anyway**, for practical rather than legal reasons:
+  scanners and legal reviewers look for it, GitHub renders it beside `LICENSE`,
+  and it gives the copyright assertion a canonical home (it previously lived only
+  inside the `LICENSE` appendix, `README.md` and `pyproject.toml`). Minimal is
+  not laziness -- **every downstream redistributor must carry NOTICE's contents
+  forward**, so anything put in it is added to their burden. The dependency list
+  deliberately stays out.
+* **No separate `ATTRIBUTION.md`.** It would duplicate `THIRD_PARTY_NOTICES.md`,
+  which is the one thing `AGENTS.md` forbids most explicitly. Extended that file
+  instead.
+* **Name kept as `THIRD_PARTY_NOTICES.md`**, with the owner's permission to
+  rename declined on grounds: it is the scanner-recognised convention, the
+  expanded content is still literally third-party notices (the Covenant IS a
+  third party), and batch 33 had just added links to it from `README.md`,
+  `CONTRIBUTING.md` and `DEVLOG.md` -- a rename re-breaks the cross-references
+  that batch existed to fix.
+
+### The claim that did not survive checking
+
+Mid-task I told the owner the Contributor Covenant is **CC BY 4.0**, and that its
+missing licence link was the one genuine attribution gap in the repo. **That was
+recollection, not verification, and three checks contradict it:**
+
+| Source | Date checked | What it says |
+|---|---|---|
+| `EthicalSource/contributor_covenant` → `LICENSE.md` | 2026-08-27 | Hippocratic License 3.0 (covers the site and its code) |
+| contributor-covenant.org footer | 2026-08-27 | Copyright, Organization for Ethical Source. No Creative Commons statement |
+| raw `content/version/2/1/code_of_conduct.md` | 2026-08-27 | No licence statement of any kind |
+
+Upstream publishes no explicit licence for the document *text*. The planned edit
+adding a "CC BY 4.0" link to `CODE_OF_CONDUCT.md` was therefore **dropped**:
+asserting an unverified licence inside a legal-notices file is worse than
+omitting one. `CODE_OF_CONDUCT.md`'s Attribution section is left exactly as it
+stands, because it is verbatim the attribution upstream prescribes in its own
+boilerplate -- the best available evidence of what they ask adopters to provide.
+
+The general rule this batch is recorded for: **a notices file is the last place
+to write something from memory.** `grep -rn "CC BY\|Creative Commons" *.md` now
+returns nothing outside this entry, and that is deliberate.
+
+### What was built
+
+**`NOTICE`** — new, extensionless at the repo root (the Apache convention, and
+what GitHub and scanners detect). Project, copyright, the "includes software
+developed by" line, the Apache-2.0 pointer, and one sentence delegating
+dependency detail to `THIRD_PARTY_NOTICES.md`. Fourteen lines.
+
+**`pyproject.toml`** — `license-files = ["LICENSE"]` → `["LICENSE", "NOTICE"]`.
+This is the step that makes the file real rather than decorative: a NOTICE absent
+from `license-files` exists in a checkout and ships in **no** sdist or wheel, and
+nothing warns about it. Comment added recording why.
+
+**`THIRD_PARTY_NOTICES.md`** — new section *Non-code third-party material*,
+opening with the measured statement that **no third-party source code is included
+in this repository** (the fact a reviewer most wants and cannot get from a
+dependency table), then a table covering the Contributor Covenant v2.1, Mozilla's
+enforcement ladder (`mozilla/diversity`, reported MPL-2.0) and the Apache licence
+text itself. Carries the licence caveat above in full. The *Scope* note now says
+the file covers non-code material too; *What this means* now distinguishes the
+absent **inbound** NOTICE obligation from the **voluntary** NOTICE this project
+publishes.
+
+**`CONTRIBUTING.md`** — a `NOTICE` row in the doc table whose update instruction
+is "keep it minimal", with the reason; the `LICENSE` row notes the two travel
+together; the `THIRD_PARTY_NOTICES.md` row now mentions the new section and adds
+the rule **never assert a licence identifier you have not verified at the
+source**.
+
+**`README.md`** — the *License* section names `NOTICE` alongside `LICENSE` and
+states that no third-party source is bundled.
+
+### Verification
+
+* `python -m pytest -q` → **2605 passed, 18 skipped, 1 deselected** — the batch-33
+  baseline, unchanged.
+* **Metadata build (the check that would otherwise fail silently):**
+  `METADATA` carries `License-Expression: Apache-2.0` plus **two** `License-File:`
+  entries, and the staged dist-info contains both
+  `licenses/LICENSE` and `licenses/NOTICE`. Zero licence warnings.
+* `git check-ignore -v NOTICE` → no match; `.gitattributes` has no `NOTICE`
+  rule, so it ships in `git archive` and "Download ZIP" as well as in wheels.
+* Markdown table integrity: `THIRD_PARTY_NOTICES.md` 24 data rows,
+  `CONTRIBUTING.md` 17 — 0 mismatched.
+* All 19 relative links across the six root markdown files resolve, `./NOTICE`
+  included.
+* `grep -rn "CC BY\|Creative Commons" *.md` → no hits outside this entry.
+
+### Still open, carried from batch 33
+
+1. Enable **Private vulnerability reporting** when the repo goes public.
+2. Rotate the OpenRouter key in the local `providers.json` (`C2`).
+3. Decide whether to start signing off commits.

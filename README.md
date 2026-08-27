@@ -722,4 +722,8 @@ This file is the user-facing one. For working on the code:
 
 ## License
 
-Apache-2.0 — see [LICENSE](./LICENSE). Copyright 2026 Yahya Hammad.
+Apache-2.0 — see [LICENSE](./LICENSE) and [NOTICE](./NOTICE). Copyright 2026 Yahya Hammad.
+
+No third-party source code is bundled here; dependencies are resolved from PyPI at install time
+under their own licenses. [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md) records the
+assessment of each one, and of the third-party text the repository reproduces.

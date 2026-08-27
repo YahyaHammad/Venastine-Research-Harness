@@ -27,7 +27,11 @@ requires-python = ">=3.11"
 # both. `license-files` is declared rather than left to the backend's default glob so the file
 # that ships is the one named here.
 license = "Apache-2.0"
-license-files = ["LICENSE"]
+# NOTICE ships WITH the licence, not beside it in the repo only: a NOTICE that
+# is not listed here exists in a checkout and is absent from every sdist and
+# wheel, which defeats the reason for having one. Apache-2.0 4(d) is what makes
+# the pairing meaningful downstream.
+license-files = ["LICENSE", "NOTICE"]
 authors = [{ name = "Yahya Hammad" }]
 maintainers = [{ name = "Yahya Hammad" }]
 classifiers = [
