@@ -144,6 +144,8 @@ In ensemble mode the Pass-1 slot is `01_candidate_1.md`, `01_candidate_2.md`, �
 
 Runs are also persisted to the database, so a run that crashes halfway still leaves a record populated through its last completed pass — and so does one you kill with Ctrl+C.
 
+**Source use and publishing:** Fetched pages (`web_search`, `fetch_url`, `arxiv_search`, and MCP servers) are subject to their origin's terms, including `robots.txt` and Terms of Service — the harness does not bypass paywalls or ignore rate limits. `report.md` / `report.pdf` may quote third-party pages; do not republish them with large verbatim excerpts without rights — quote, paraphrase, and cite, and verify any claim that matters. See `PRIVACY.md` for what leaves your machine.
+
 ### Watching it happen
 
 A ten-pass run takes minutes. It reports as it goes, in both shells: pass boundaries, the tools each pass is calling, code-only stages, claim tiers as they land, retry rounds, and warnings.

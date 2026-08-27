@@ -6412,3 +6412,39 @@ Contributor Covenant 2.1 verbatim for `Venastine Research Harness` (`CODE_OF_CON
 ### Verification
 
 `gh issue list --state all --limit 100` → 100 listed (open: `15` tracker + `6`/`8`/`9`/`12` still open; closed: `S1` `#157`/`#156`, `S2` `#133` etc. used as samples). `gh issue view 157` / `133` / `6` bodies used to derive title/body template verbatim. `CONTRIBUTING.md:151` ends with DCO `Not a Contribution` escape. `CODE_OF_CONDUCT.md` / `PRIVACY.md` untracked before this entry, `THIRD_PARTY_NOTICES.md` already tracked after `c7bda06` (so `git status` now shows only the three community docs). No code change — docs only; `pytest` not re-run for this batch (metadata only), prior `2605 passed` still in force.
+
+
+## Security policy + source-use note (2026-08-27) — closes H2 + M3
+
+Not a roadmap section. Final two items from the same licensing review: `H2` (no `SECURITY.md` + disclosure window) and `M3` (fetch/ToS/verbatim-quote risk in a research harness that persists `report.md`).
+
+Owner decisions locked before drafting: **no monetary incentives/bounty** (independent project, no funding), **full 90-day coordinated disclosure window**, **GitHub Private Vulnerability Reporting as the reporting channel** (owner noted it cannot be enabled while the repo is private but will be enabled immediately on public — that contingency is now in the file).
+
+### What was built
+
+**`SECURITY.md` — `H2` closed.**
+Created as `SECURITY.md:1` `Security Policy` per GitHub's expected filename:
+
+* `SECURITY.md:5` `Supported Versions` — `main` (0.1.x) only; no LTS branches.
+* `SECURITY.md:10` `Reporting a Vulnerability` — **Do not open a public issue…** (third place this line appears: `CONTRIBUTING.md:46`, `PRIVACY.md`, now `SECURITY.md:10` — redundancy intentional, as requested: a vuln filed publicly is the failure mode `M3` exists to prevent). Channel: `Security` → `Report a vulnerability` → `Private vulnerability reporting` (private fork, encrypted thread). Notes the private-repo contingency: button invisible while private, will be enabled on public; until then fallback is the `CODE_OF_CONDUCT.md` contact (`[SECURITY] Venastine — <title>`) — still private, still not a public issue.
+* `SECURITY.md:18` *What to include* — file:line, concrete trigger (not "could be"), offline repro + commit, impact/scope (needs `shell` opt-in or default-reachable).
+* `SECURITY.md:28` *What to expect* — ack in 5 business days, triage in 14, **90-day coordinated disclosure** — fix ships on a private branch, public disclosure (GHSA + `DEVLOG.md` entry + `tests/BREAKING_CHANGES.md` row) after the fix or 90 days whichever first, unless mutually extended; updates at least every 14 days; credit if desired, anonymous otherwise.
+* `SECURITY.md:38` *Scope* — in-scope: `security/permissions.py`/`safety/policy_enforcement.py` bypass, sandbox escape/egress (`security/sandbox.py`/`security/capability.py`), workspace trust (`core/workspace_trust.py`/`core/config_loader.py` tier), credential exfiltration (`param_digest`/logs), MCP `autoApprove`/`mcp.json` trust. Out-of-scope: social/physical, provider API compromise, upstream dep without harness trigger, documented `never` unbounded risk (still want the report, closed as documented).
+* `SECURITY.md:50` *No bounty* — plainly states no monetary rewards/swag; credit only. `SECURITY.md:54` *Disclosure and credit* — GHSA + CVE if warranted, no identity without permission, no public disclosure (fork/gist/write-up) before window closes. `SECURITY.md:62` footer notes private reporting flow appears only after public.
+
+No code change; no new dependency; `SECURITY.md` is display-only until the repo is public and the toggle is flipped in `Settings → Code security → Private vulnerability reporting`.
+
+**`README.md:146` — `M3` closed.**
+Checked first (`grep -n "robots\|verbatim"` on `README.md` before edit — no hit, so the paragraph had not been added earlier despite the owner remembering it). Added one paragraph at `README.md:146` between *What you get out* (`output/<run>/` persists + `report.md`) and *Watching it happen*:
+
+> **Source use and publishing:** Fetched pages (`web_search`, `fetch_url`, `arxiv_search`, and MCP servers) are subject to their origin's terms, including `robots.txt` and Terms of Service — the harness does not bypass paywalls or ignore rate limits. `report.md` / `report.pdf` may quote third-party pages; do not republish them with large verbatim excerpts without rights — quote, paraphrase, and cite, and verify any claim that matters. See `PRIVACY.md` for what leaves your machine.
+
+Closes the user-facing half of `M3`; the other half was already in `PRIVACY.md:18` *If you publish a report…* — now both shells warn in the place a user actually reads before publishing.
+
+### What remains open (from that same review)
+
+All doc items now closed (`C1`, `M2`, `L1`, `M1`, `H1`, `M4`, `H2`, `M3`, `C2`/`H3` mitigated via `.gitattributes`). Remaining originally-flagged items that are **intentionally left open**: `C2` key rotation (owner action, `providers.json:76` live `sk-or-v1-…` still on disk — not a doc fix) and the broader audit tracker `#15` still-open findings `6`/`8`/`9`/`12` (not licensing).
+
+### Verification
+
+`SECURITY.md` exists, no `SECURITY.md` existed before (`git ls-files` missed it before this batch, `git status` → `?? SECURITY.md` before write). `README.md:146` now contains `robots.txt` (grep hit), before edit grep missed. `CONTRIBUTING.md:46` / `SECURITY.md:10` / `PRIVACY.md` now all carry the *Do not open a public issue* line — three places, as requested. Docs only; `pytest` not re-run (metadata only), prior `2605 passed, 18 skipped` still in force. `git status` after this entry → `?? SECURITY.md` replaced by tracked `SECURITY.md` plus the three community docs now pending commit (`CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `PRIVACY.md` from prior batch, plus this `SECURITY.md` + `README.md` + `DEVLOG.md`).
