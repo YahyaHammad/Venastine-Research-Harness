@@ -105,7 +105,9 @@ def _tool_marker(call: dict) -> str:
     """
     name = call.get("name") or "tool"
     digest = param_digest(call.get("input"))
-    return f"⟩ {name}  {digest}".rstrip() if digest else f"⟩ {name}"
+    # Standardised to ▸ like the live transcript (tui/app.py both modes).
+    # Replay stays redacted via param_digest, same producer as live.
+    return f"▸ {name}  {digest}".rstrip() if digest else f"▸ {name}"
 
 
 def _as_text(value: Optional[object]) -> str:

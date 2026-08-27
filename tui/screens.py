@@ -23,7 +23,16 @@ from textual.widgets.selection_list import Selection
 
 
 class PermissionScreen(ModalScreen[bool]):
-    """Approve or deny one tool call. Dismisses with the decision."""
+    """Approve or deny one tool call. Dismisses with the decision.
+
+    The payload is shown FULL and UNREDACTED: the user must see the exact
+    path/command/URL they are being asked to authorise, and truncation or
+    redaction here would make the consent uninformed (the param_digest
+    truncation is for the transcript only). Logs redact via
+    logging_setup._RedactingFormatter and safety/policy_enforcement's
+    check_output_policy, so the full value never reaches disk unguarded —
+    do not add redaction here to "match" the transcript.
+    """
 
     BINDINGS = [("escape", "deny", "Deny")]
 
@@ -35,6 +44,8 @@ class PermissionScreen(ModalScreen[bool]):
         # here: what approving authorises is the TOOL's knowledge.
         # spawn_subagent uses it to list the tools the subagent could then
         # run unprompted, which the params alone never say.
+        # DISPLAYED FULL above — see class docstring for why this stays
+        # unredacted while the transcript's `▸` digest and the log do not.
         self._notice = notice
 
     def compose(self) -> ComposeResult:

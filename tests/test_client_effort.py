@@ -307,9 +307,13 @@ def test_effort_for_keeps_the_level_when_the_lookup_fails(caplog):
     """A transient network blip must not silently downgrade a deliberate
     choice. A genuinely wrong level still fails at the provider, which is
     the honest outcome; a silently-dropped one is not."""
+    # "mega" is outside config.DEFAULT_EFFORT_LEVELS (which now includes
+    # low/medium/high/xhigh/ultra/max), so the fallback does not contain it
+    # and the unverified-warning path is exercised. "ultra" is now a valid
+    # fallback level and would take the early-return path.
     with caplog.at_level(logging.WARNING, logger="core.client"):
-        out = client_module.effort_for(_failing_client(), "ANTHROPIC", "m", "xhigh")
-    assert out == "xhigh"
+        out = client_module.effort_for(_failing_client(), "ANTHROPIC", "m", "mega")
+    assert out == "mega"
     assert any("Could not verify effort" in r.getMessage() for r in caplog.records)
 
 

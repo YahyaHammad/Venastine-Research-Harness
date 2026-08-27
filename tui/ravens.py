@@ -123,6 +123,7 @@ EFFORT_PLUMAGE = {
     "medium": "▃",
     "high": "▅",
     "xhigh": "▇",
+    "ultra": "▇",
     "max": "█",
 }
 

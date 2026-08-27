@@ -63,6 +63,8 @@ from core.replay import last_assistant_text, replay_entries
 # instances would look identical and behave differently.
 from core.reasoning.authorization import GRANT_PICKER, NOTHING_TO_GRANT
 from prompts import system_prompts
+from safety.policy_enforcement import param_digest, redact_secrets
+
 from tui import ravens, themes
 from tui.commands import SlashCommand, registry as commands
 from tui.screens import (
@@ -319,6 +321,12 @@ class VenastineApp(App):
         self._last_response: str = ""
         self._last_run = None
         self._live_claims: dict = {}
+        # Chat-mode tool_call id -> name, so a failed tool_result can be
+        # rendered as `✗ {tool} {error}` like research does (orchestrator
+        # keeps an identical map per pass). Cleared per turn in
+        # on_turn_finished; unbounded growth here would be a leak on a
+        # long-lived app.
+        self._tool_names: dict = {}
 
     # -- layout --------------------------------------------------------------
 
@@ -872,12 +880,23 @@ class VenastineApp(App):
             self._raven.resume_animation()
             name = event.tool_call_start["name"]
             self._raven.state = ravens.state_for_tool(name)
-            transcript.write_system(f"→ {name}")
+            call_id = event.tool_call_start.get("id")
+            if call_id:
+                self._tool_names[call_id] = name
+            digest = param_digest(event.tool_call_start.get("input"))
+            detail = f"  {digest}" if digest else ""
+            transcript.write_role("tool", f"▸ {name}{detail}")
 
         if event.tool_result:
             result = event.tool_result["result"]
             if isinstance(result, dict) and "error" in result:
-                transcript.write_error(f"  {result['error']}")
+                call_id = event.tool_result.get("id")
+                tool_name = self._tool_names.get(call_id) if call_id else None
+                error_text = redact_secrets(str(result["error"]))
+                if tool_name:
+                    transcript.write_role("tool_error", f"  ✗ {tool_name}  {error_text}")
+                else:
+                    transcript.write_error(f"  ✗ {error_text}")
 
         if event.notice:
             # ROADMAP_v2 §21's "no silent compaction, ever". Flushed first
@@ -1250,6 +1269,7 @@ class VenastineApp(App):
     def on_turn_finished(self, message: TurnFinished) -> None:
         self._busy = False
         self._permission_channel = None
+        self._tool_names.clear()
         # flush_stream returns what it committed (§26), so /copy tracks the
         # last answer without a second buffer shadowing the transcript's.
         flushed = self._transcript.flush_stream()
@@ -1465,6 +1485,7 @@ class VenastineApp(App):
         self._last_run = None
         self._live_claims = {}
         self._last_response = ""
+        self._tool_names.clear()
         # CLEAR, then replay. Swapping memory without clearing left the
         # previous conversation on screen beneath the new thread's id --
         # bug 1's worst half, since a blank panel is merely unhelpful
