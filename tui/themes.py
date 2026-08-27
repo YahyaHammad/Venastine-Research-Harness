@@ -7,9 +7,14 @@ nightmare, ember, midnight, glassy-lapis, paper) whose PANELS carry the
 identity -- background/surface/panel are theirs, not the grid's shared
 neutrals.
 
-Pure presentation -- no import of core/, no harness state. The only thing
-outside this module that knows a theme name is the persisted `tui.theme`
-setting, validated by core/config_loader.py's _KNOWN_TUI.
+Pure presentation -- no import of core/, no harness state. Two things
+outside this module carry a theme name: the persisted `tui.theme` setting,
+validated by core/config_loader.py's _KNOWN_TUI, and tui/preferences.py's
+remembered choice. The second deliberately does NOT validate against
+THEME_NAMES -- it stores an opaque string and lets the App decide whether
+it still resolves, because ctrl+p's command palette can select one of
+Textual's own built-in themes and a whitelist here would silently forget
+it.
 
 Built on textual.theme.Theme (verified against the pinned textual 1.0.0,
 per D22's rule about not assuming a dependency's API shape). Textual

@@ -23,6 +23,7 @@ to asyncio_mode=auto: ARCHITECTURE §4.13 records "no asyncio" as a property
 of pytest.ini, and per-test markers keep that true.
 """
 
+import json
 import queue
 import time
 
@@ -520,6 +521,199 @@ async def test_unknown_theme_in_settings_falls_back_rather_than_crashing():
     async with app.run_test() as pilot:
         await pilot.pause()
         assert app.theme == "dark-plain"
+
+
+# ---------------------------------------------------------------------------
+# ---- The remembered theme -------------------------------------------------
+# ---------------------------------------------------------------------------
+#
+# A theme chosen in one session is the theme the next one mounts on. The
+# store is a user-tier file BESIDE settings.json (tui/preferences.py), not
+# a write into it: settings.json is the one config file where a trusted
+# project tier beats the user tier (D29), so a session rewriting it is a
+# decision rather than a convenience. That rule is unchanged here.
+#
+# `isolate_ui_preferences` is autouse, so every test in this file already
+# has its own disposable store; the ones below take it by name only when
+# they want to look at the file.
+
+
+@pytest.mark.asyncio
+async def test_theme_command_is_remembered_for_the_next_launch(
+        isolate_ui_preferences):
+    """The reported defect: /theme applied, and then the next launch came
+    up on the default again."""
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        app.query_one("#prompt").value = "/theme ember"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.theme == "ember"
+
+    stored = json.loads(isolate_ui_preferences.read_text(encoding="utf-8"))
+    assert stored["theme"] == "ember"
+    assert stored["settings_theme"] is None, \
+        "settings.json named no theme, and that has to be recorded as a " \
+        "fact rather than as the resolved default"
+
+    nextrun = VenastineApp("ANTHROPIC", "test-model", {})
+    async with nextrun.run_test() as pilot:
+        await pilot.pause()
+        assert nextrun.theme == "ember"
+
+
+@pytest.mark.asyncio
+async def test_a_theme_set_outside_the_slash_command_is_remembered():
+    """ctrl+p's command palette sets App.theme directly, and offers
+    Textual's own built-ins beside this project's fourteen. Hooking
+    _cmd_theme alone would have made that route a silent no-op, so the
+    hook is watch_theme -- and the restore then has to accept a name
+    themes.resolve() has never heard of."""
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.theme = "nord"
+        await pilot.pause()
+
+    nextrun = VenastineApp("ANTHROPIC", "test-model", {})
+    async with nextrun.run_test() as pilot:
+        await pilot.pause()
+        assert nextrun.theme == "nord"
+
+
+@pytest.mark.asyncio
+async def test_an_edited_tui_theme_outranks_a_remembered_choice():
+    """The staleness rule. A remembered theme wins only while tui.theme
+    still says what it said when the choice was made -- otherwise editing
+    settings.json would be a permanent silent no-op for anyone who had
+    ever typed /theme."""
+    first = VenastineApp("ANTHROPIC", "test-model",
+                         {"tui": {"theme": "dark-blue"}})
+    async with first.run_test() as pilot:
+        first.query_one("#prompt").value = "/theme matrix"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert first.theme == "matrix"
+
+    edited = VenastineApp("ANTHROPIC", "test-model",
+                          {"tui": {"theme": "dark-green"}})
+    async with edited.run_test() as pilot:
+        await pilot.pause()
+        assert edited.theme == "dark-green", \
+            "tui.theme changed since the choice was recorded, so the file " \
+            "re-asserts itself"
+
+    unchanged = VenastineApp("ANTHROPIC", "test-model",
+                             {"tui": {"theme": "dark-blue"}})
+    async with unchanged.run_test() as pilot:
+        await pilot.pause()
+        assert unchanged.theme == "matrix", \
+            "tui.theme is what it was, so the live choice still stands"
+
+
+@pytest.mark.asyncio
+async def test_adding_tui_theme_to_settings_re_asserts_it():
+    """None and "dark-plain" must not compare equal. The staleness key is
+    the RAW settings value, so ADDING tui.theme -- not only changing an
+    existing one -- outranks an older /theme."""
+    first = VenastineApp("ANTHROPIC", "test-model", {})
+    async with first.run_test() as pilot:
+        first.query_one("#prompt").value = "/theme matrix"
+        await pilot.press("enter")
+        await pilot.pause()
+
+    added = VenastineApp("ANTHROPIC", "test-model",
+                         {"tui": {"theme": "dark-plain"}})
+    async with added.run_test() as pilot:
+        await pilot.pause()
+        assert added.theme == "dark-plain"
+
+
+@pytest.mark.asyncio
+async def test_a_remembered_theme_that_no_longer_exists_falls_back(
+        isolate_ui_preferences):
+    """App.theme VALIDATES against available_themes and raises
+    InvalidThemeError on a name it does not know, so a store written by a
+    build whose themes have since changed would be a crash at mount rather
+    than a preference nobody can honour."""
+    isolate_ui_preferences.write_text(json.dumps(
+        {"version": 1, "theme": "retired-theme", "settings_theme": None}),
+        encoding="utf-8")
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert app.theme == "dark-plain"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("content", [
+    "{not json at all",
+    "[]",
+    '{"version": 99, "theme": "ember", "settings_theme": null}',
+    '{"version": 1, "settings_theme": null}',
+])
+async def test_an_unreadable_preference_store_is_ignored(
+        isolate_ui_preferences, content):
+    """Fails soft in every direction: the worst consequence of forgetting
+    a colour scheme is mounting on the configured one. The trust store
+    fails CLOSED for a security reason; there is no such property here."""
+    isolate_ui_preferences.write_text(content, encoding="utf-8")
+
+    app = VenastineApp("ANTHROPIC", "test-model", {"tui": {"theme": "paper"}})
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert app.theme == "paper"
+
+
+@pytest.mark.asyncio
+async def test_mounting_without_choosing_a_theme_writes_nothing(
+        isolate_ui_preferences):
+    """App.theme is a Reactive with init on, so its watcher fires during
+    mount as well as on a choice. Without the _theme_persisting guard
+    every launch would record the theme it merely restored, and a default
+    would become indistinguishable from a decision."""
+    app = VenastineApp("ANTHROPIC", "test-model", {"tui": {"theme": "paper"}})
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert app.theme == "paper"
+
+    assert not isolate_ui_preferences.exists()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_save_still_switches_the_theme_and_claims_nothing(
+        mocker):
+    """A write that cannot land must not cost the user the switch, and
+    must not be reported as remembered -- the WARNING preferences.remember
+    logs reaches the transcript through TranscriptLogHandler, so saying
+    nothing here is neither silent nor a duplicate."""
+    mocker.patch("tui.app.preferences.remember", return_value=False)
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        app.query_one("#prompt").value = "/theme ember"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.theme == "ember"
+        assert not [t for _role, t in app._transcript._entries
+                    if "Remembered" in t], \
+            "a save that failed was reported as a save that worked"
+
+
+def test_remember_reports_a_write_it_could_not_make(tmp_path, mocker):
+    """The store level of the same fact. A file where the directory should
+    be is the cheapest real OSError to produce, and it has to come back as
+    False rather than out of the TUI as an exception."""
+    from tui import preferences
+
+    blocker = tmp_path / "not-a-directory"
+    blocker.write_text("", encoding="utf-8")
+    mocker.patch.object(preferences, "store_path",
+                        lambda: str(blocker / "ui_preferences.json"))
+
+    assert preferences.remember("ember", None) is False
+    assert preferences.load() is None
 
 
 @pytest.mark.asyncio

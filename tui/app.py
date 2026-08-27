@@ -65,7 +65,7 @@ from core.reasoning.authorization import GRANT_PICKER, NOTHING_TO_GRANT
 from prompts import system_prompts
 from safety.policy_enforcement import param_digest, redact_secrets
 
-from tui import ravens, themes
+from tui import preferences, ravens, themes
 from tui.commands import SlashCommand, registry as commands
 from tui.screens import (
     ClaimsScreen, ConfirmScreen, GrantPickerScreen, PermissionScreen,
@@ -274,7 +274,22 @@ class VenastineApp(App):
         # user. Empty list is the healthy case and stays silent.
         self._startup_warnings = list(startup_warnings or ())
         tui_settings = self._settings.get("tui", {})
-        self._theme_name = themes.resolve(tui_settings.get("theme"))
+        # RAW, not themes.resolve()'d, because this is half the staleness
+        # key the remembered theme is recorded against (see
+        # _startup_theme). None -- "settings.json names no theme" -- has
+        # to stay distinguishable from an explicit "dark-plain", or
+        # ADDING tui.theme to a settings file would fail to re-assert
+        # itself against an older /theme.
+        self._settings_theme = tui_settings.get("theme")
+        self._theme_name = themes.resolve(self._settings_theme)
+        # Armed at the END of on_mount. App.theme is a Reactive with init
+        # on, so its watcher fires during mount as well as on a user's
+        # choice, and an unarmed flag is what keeps a launch that
+        # selected nothing from writing a store entry.
+        self._theme_persisting = False
+        # Whether the last remembered theme reached disk. Read by /theme
+        # so its confirmation cannot claim a save that failed.
+        self._theme_remembered = False
         self._animations = tui_settings.get("animations", True)
         # Batch 25 (#139): tui.effort still wins INSIDE the TUI -- it
         # predates the top-level key and changing its meaning would
@@ -367,7 +382,13 @@ class VenastineApp(App):
         logging.getLogger().addHandler(self._log_handler)
 
         themes.register_all(self)
+        # AFTER register_all: _startup_theme consults available_themes,
+        # which is empty of this project's fourteen until they are
+        # registered. The flag arms AFTER the assignment, so mounting is
+        # not itself a selection.
+        self._theme_name = self._startup_theme()
         self.theme = self._theme_name
+        self._theme_persisting = True
         self.query_one("#effort-raven", EffortRaven).effort = self.effort
         self.refresh_goal_banner()
         self.refresh_todo_panel()
@@ -392,6 +413,60 @@ class VenastineApp(App):
             # the app. Gated on _effort_named: see its comment in
             # __init__ for why a default-derived level does not probe.
             self.start_effort_lookup(None, validate_only=True)
+
+    def _startup_theme(self) -> str:
+        """The theme to mount on: the last one selected, unless
+        settings.json has changed its mind since.
+
+        Three fallbacks to the configured theme, and the third is the one
+        that is easy to miss. App.theme VALIDATES against
+        available_themes and raises InvalidThemeError on a name it does
+        not know (verified against the pinned textual 1.0.0, per D22), so
+        a store written by a build with a theme this one has retired --
+        or by a future build with more of them -- would be a crash at
+        mount rather than a preference nobody could honour. themes.resolve
+        cannot cover it: its whitelist is this project's fourteen, and a
+        theme picked from ctrl+p's palette is one of Textual's own.
+
+        The staleness rule is the second branch. A remembered choice
+        outranks settings.json only while tui.theme still says what it
+        said when the choice was made; edit it (or add it, or remove it)
+        and the file re-asserts itself. Same shape as workspace_trust's
+        content hash and the MCP store's entry digest -- an edited config
+        is re-read rather than silently outranked forever, which is the
+        alternative that would make editing tui.theme a silent no-op.
+        """
+        remembered = preferences.load()
+        if remembered is None:
+            return themes.resolve(self._settings_theme)
+        if remembered["settings_theme"] != self._settings_theme:
+            return themes.resolve(self._settings_theme)
+        if remembered["theme"] not in self.available_themes:
+            return themes.resolve(self._settings_theme)
+        return remembered["theme"]
+
+    def watch_theme(self, theme: str) -> None:
+        """Remember every theme change, whatever route made it.
+
+        Textual's reactive machinery calls _watch_theme (its own restyle)
+        and THEN a subclass's watch_theme, so this covers /theme and
+        ctrl+p's command palette alike -- the palette is enabled here and
+        offers Textual's built-ins beside this project's fourteen, and a
+        selection it made that vanished at the next launch would be
+        exactly the silent no-op this feature exists to remove. Hooking
+        _cmd_theme instead would have missed it.
+
+        One parameter, so Textual passes the NEW value (invoke_watcher
+        dispatches on parameter count). Nothing is written before
+        on_mount arms the flag: App.theme is a Reactive with init on, so
+        without that guard every launch would record the theme it merely
+        restored, and a default would become indistinguishable from a
+        choice.
+        """
+        if not self._theme_persisting:
+            return
+        self._theme_remembered = preferences.remember(
+            theme, self._settings_theme)
 
     def on_unmount(self) -> None:
         handler = getattr(self, "_log_handler", None)
@@ -1632,6 +1707,15 @@ def _cmd_theme(app: VenastineApp, args: str) -> None:
     # next event happened to fire.
     app.restyle_sidebar()
     app._transcript.write_system(f"Theme set to {args}.")
+    # Only on a write that actually landed. The save happened up at
+    # `app.theme = args`, which fires watch_theme synchronously, so the
+    # answer is already in; a failure WARNED there and reaches the
+    # transcript through TranscriptLogHandler. Saying nothing here is
+    # therefore neither silent nor a duplicate, and claiming a save that
+    # did not happen is the one thing this must not do. The theme itself
+    # applies either way.
+    if app._theme_remembered:
+        app._transcript.write_system("Remembered for the next launch.")
 
 
 def _cmd_model(app: VenastineApp, args: str) -> None:

@@ -448,7 +448,7 @@ The first connection to a **user-level** server asks once, showing the resolved 
 | Command | What it does |
 |---|---|
 | `/help` | List every registered command with its usage |
-| `/theme [name]` | Restyle panels, transcript roles and code blocks — not just borders. Bare shows the current theme and all fourteen names. Session-only; persist with `tui.theme` in settings.json |
+| `/theme [name]` | Restyle panels, transcript roles and code blocks — not just borders. Bare shows the current theme and all fourteen names. **Remembered for the next launch**, unless `tui.theme` in settings.json has changed since |
 | `/effort [level\|auto]` | Switch reasoning effort, offering only levels this model accepts (Anthropic's are queried live). Session-only (`tui.effort` persists) |
 | `/model [[PROVIDER] name]` | Switch provider and/or model for the session. Refuses mid-turn, warns on a missing key, revalidates effort against the new model, and notes if an active agent pins its own. Persist via launch flags or `default_provider`/`default_model` |
 | `/research [--attended] [--review\|--no-review] [--grant[=a,b]] <query>` | Run the pipeline live from the TUI. Leading flags compose in any order before the query; bare `--grant` opens the picker, `--grant=a,b` names them (`--grant-tools=` works as an alias); without flags, `research.*` settings apply |
@@ -472,7 +472,7 @@ The first connection to a **user-level** server asks once, showing the resolved 
 
 Keys: **ctrl+c** quit · **ctrl+t** thread picker · **ctrl+l** claims view.
 
-Three behaviours worth knowing: an unknown slash command is an error, never a chat turn — a mistyped command cannot silently burn a request. The switching commands (`/theme`, `/effort`, `/model`) persist nothing; make a choice stick through settings.json or launch flags. And the commands that spend money or swap models mid-session (`/compact`, `/summary`, `/research`, `/init`, `/model`, `/grill-me`) refuse while a turn is still running rather than acting underneath it.
+Three behaviours worth knowing: an unknown slash command is an error, never a chat turn — a mistyped command cannot silently burn a request. `/effort` and `/model` persist nothing, so make those stick through settings.json or launch flags; `/theme` is the exception — it is remembered for the next launch, in a file of its own beside settings.json rather than by rewriting it. And the commands that spend money or swap models mid-session (`/compact`, `/summary`, `/research`, `/init`, `/model`, `/grill-me`) refuse while a turn is still running rather than acting underneath it.
 
 When a subagent is spawned, you are asked which of its approval-gated tools it may use without asking again — per tool, all unticked by default. Running it with none selected is fine, and refusing the spawn entirely is a separate answer from granting it nothing. Before this, approving a spawn authorised the child's whole set.
 
@@ -625,7 +625,7 @@ An unknown key raises at startup, naming the file and the key — a typo must ne
 | `ensemble_mode` | bool | `false` | Master switch for ensemble Pass 1; the roster lives in `config.py` |
 | `ensemble_n` | int | — | Accepted with a warning; vestigial — the count now derives from the roster |
 | `compaction` | object | — | Seven keys tabulated in [the compaction section](#long-conversations-condense-themselves) above |
-| `tui.theme` | string | — | One of the fourteen theme names; validated at use and falls back rather than blocking startup |
+| `tui.theme` | string | — | One of the fourteen theme names; validated at use and falls back rather than blocking startup. Outranked by a theme you picked with `/theme` — until you change this value, which re-asserts it |
 | `tui.animations` | bool | `true` | Master switch for the raven and transitions |
 | `tui.effort` | string | — | Persisted TUI effort level; beats top-level `effort` inside the TUI |
 | `tui.todo_position` | string | — | `top`, `bottom` or `side`; validated at load |
@@ -721,7 +721,7 @@ classifier is described under *Security model* above. If you have a fork or a lo
 note that `ToolApprovals.shell` now ships `False` and `SHELL_APPROVAL_MODE` is the gate — see
 `tests/BREAKING_CHANGES.md` §24.
 
-Run the test suite with `pytest` — 2630 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
+Run the test suite with `pytest` — 2642 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
 
 ## Documentation
 

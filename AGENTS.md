@@ -42,7 +42,7 @@ python main.py --init --research-project           # §24: skip the type questio
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 2630 tests, offline, ~25-45s by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 2642 tests, offline, ~25-45s by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -199,7 +199,40 @@ A **shell**, not a feature home. D12 makes the CLI a permanent fallback, so anyt
 - **Active bodies are appended outside `with_catalogs()`** (K6) — see the progressive-disclosure note in ARCHITECTURE §4. This is the one cross-shell leak the design can have.
 - **Schemas need no mid-loop refresh** (K7, settling ROADMAP_v2's Rev. 3 verification item). Activation happens between turns, and `_run()` recomputes `registry.schemas()` at the top of every call.
 
-`/model [[PROVIDER] name]` switches provider/model for the session and persists nothing (matching `/theme` and `/effort`, which read `settings.json` and never write to it). It refuses while `_busy`, re-runs the mount-time effort validation because effort is per-model, and warns rather than refuses on an empty `API_KEY` so a local OpenAI-compatible endpoint stays usable.
+`/model [[PROVIDER] name]` switches provider/model for the session and persists nothing (matching `/effort`, which reads `settings.json` and never writes to it). It refuses while `_busy`, re-runs the mount-time effort validation because effort is per-model, and warns rather than refuses on an empty `API_KEY` so a local OpenAI-compatible endpoint stays usable.
+
+**Nothing writes to `settings.json`; the theme is remembered BESIDE it** (batch 36).
+`/theme` used to persist nothing either, and a colour scheme chosen in one session was gone
+in the next. The rule that stopped it is about the FILE, not about the preference: a project's
+`settings.json` beats the user's (D29), and it is hand-authored, so a session rewriting it is a
+decision rather than a convenience. So the theme is remembered in `tui/preferences.py`'s
+`~/.config/venastine/ui_preferences.json` — user tier only, which no project can reach —
+following `trusted_projects.json` and `known_mcp_servers.json`: `expanduser` at call time,
+versioned, failing soft on anything unreadable. `/effort` and `/model` are unchanged.
+
+Three things there are load-bearing:
+- **The store records the theme AND the `tui.theme` value it was chosen against.** A remembered
+  choice outranks `settings.json` only while that value still says what it said; edit it, add it
+  or remove it and the file re-asserts itself. Same staleness rule as `workspace_trust`'s content
+  hash and the MCP store's entry digest. The key is the RAW settings value, so `None` (no theme
+  named) stays distinguishable from an explicit `"dark-plain"` — collapse them and *adding*
+  `tui.theme` becomes a silent no-op.
+- **The hook is `watch_theme`, not `_cmd_theme`.** ctrl+p's command palette is enabled and sets
+  `App.theme` directly, offering Textual's own built-ins beside the fourteen. Textual calls
+  `_watch_theme` (its restyle) and then a subclass's `watch_theme`, so one hook covers both
+  routes — and the restore therefore validates against `self.available_themes`, not
+  `themes.resolve()`'s whitelist, which knows only this project's names.
+- **`_theme_persisting` arms at the END of `on_mount`.** `App.theme` is a `Reactive` with `init`
+  on, so its watcher fires during mount as well: without the guard every launch records the theme
+  it merely restored, and a default becomes indistinguishable from a decision. `App.theme` also
+  RAISES `InvalidThemeError` on an unregistered name, which is why a stored theme this build no
+  longer has falls back rather than crashing at mount.
+
+`tui/themes.py` is untouched and stays "pure presentation -- no import of core/, no harness
+state"; the store is its own module. `tests/conftest.py`'s autouse `isolate_ui_preferences` is
+not optional hygiene: the mount path READS the store, so without it
+`test_theme_preference_from_settings_is_applied_at_mount` passes or fails depending on whether
+the person running the suite had ever typed `/theme`.
 
 **Logging and Textual cannot share the terminal.** `main.py` calls `configure_logging(stderr=False)` immediately before `run_tui()` — not at the top of `main()`, because pre-mount messages (db creation, the trust prompt, MCP connections) genuinely want stderr. `TranscriptLogHandler` routes WARNING+ into the transcript so dropping stderr does not just make warnings invisible; it is attached in `on_mount` and **removed in `on_unmount`**, or it keeps a dead app alive and stacks one handler per instance across the test suite. Anything written to stderr while Textual is up paints over the rendered screen and disappears on the next repaint.
 

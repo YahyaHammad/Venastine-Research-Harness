@@ -6937,3 +6937,139 @@ redistribute any of them") is unchanged and still true.
    the repository is public either way.
 3. Carried from batch 33: enable Private Vulnerability Reporting at launch; rotate
    the OpenRouter key in the local `providers.json`; decide on `git commit -s`.
+
+## Batch 36 — the theme you picked is the theme you get back (2026-08-27)
+
+One user-reported defect: the TUI came up on `dark-plain` every launch, whatever
+`/theme` had been set to during the last session. Nothing was broken — `/theme`
+was documented as session-only in three places — so this is a feature, and the
+interesting part is that the rule it appears to violate turned out to be about
+something else.
+
+### The rule, and why it does not forbid this
+
+`AGENTS.md`, `ARCHITECTURE.md` and `README.md` all said `/theme`, `/effort` and
+`/model` read `settings.json` at startup and **never write to it**, because
+`settings.json` is the one config file where a trusted project tier beats the
+user tier (D29) — so a session rewriting it is a decision rather than a
+convenience. It is also hand-authored, and rewriting a hand-authored file
+reorders and reformats what somebody wrote.
+
+That reasoning is entirely about the FILE. It says nothing about whether a
+colour scheme may be remembered. So the theme is remembered **beside**
+`settings.json` and not in it: `tui/preferences.py` writes
+`~/.config/venastine/ui_preferences.json`, at the user tier only, where no
+project tier can reach it. The repo already had two stores of exactly that
+shape — `core/workspace_trust.py`'s `trusted_projects.json` and
+`mcp_client/config.py`'s `known_mcp_servers.json` — so this one copies their
+posture rather than inventing one: `expanduser` at CALL time (a moved HOME is
+picked up, and tests redirect without a restart), a version field, atomic
+temp-file-plus-`os.replace` on write, and failing soft on anything unreadable.
+
+It fails soft in the OPEN direction, unlike the trust store, and that asymmetry
+is deliberate: the trust store fails closed because forgetting a consent must
+re-ask, whereas forgetting a colour scheme costs one launch on the default.
+`/effort` and `/model` are unchanged; three doc statements were narrowed rather
+than deleted.
+
+### Three owner decisions
+
+Asked and answered before any code was written:
+
+1. **Precedence** — a remembered theme wins over `tui.theme` *unless
+   settings.json has changed since*. The store records the theme AND the
+   `tui.theme` value it was chosen against; a differing value today means the
+   file was edited, and the file re-asserts itself. Same staleness rule as
+   `workspace_trust`'s content hash and the MCP store's entry digest, applied
+   to a preference rather than to a consent. The alternative — remembered
+   always wins — makes editing `tui.theme` a permanent silent no-op for anyone
+   who has ever typed `/theme`, and the reverse (settings always wins) makes
+   the whole feature a silent no-op for anyone who has set it.
+2. **Scope** — every route that changes the theme is remembered, including
+   ctrl+p's command palette and Textual's own built-in themes.
+3. **No opt-out switch.** Editing `tui.theme` already pins a choice, so a
+   `tui.remember_theme` key would be a schema change buying nothing.
+
+### What is load-bearing
+
+- **The staleness key is the RAW settings value, not `themes.resolve()`'s
+  output.** `None` — "settings.json named no theme" — has to stay
+  distinguishable from an explicit `"dark-plain"`. Collapse them and *adding*
+  `tui.theme` to a settings file fails to re-assert against an older `/theme`,
+  while changing one still works: a half-working precedence rule, which is
+  worse than either whole one. Pinned by
+  `test_adding_tui_theme_to_settings_re_asserts_it`.
+- **The hook is `watch_theme`, not `_cmd_theme`.** `ENABLE_COMMAND_PALETTE` is
+  True here and `Input` does not bind ctrl+p, so the palette is genuinely
+  reachable and sets `App.theme` directly. Textual's reactive machinery calls
+  `_watch_theme` (its own restyle) and THEN a subclass's `watch_theme`, so one
+  hook covers both routes. Hooking the command would have left the palette as a
+  selection that vanished at the next launch — the exact defect being fixed,
+  surviving on a second path, which is a failure shape this project has
+  produced before (#156, #159).
+- **The restore validates against `self.available_themes`, not
+  `THEME_NAMES`.** Two reasons, one per direction: a palette-chosen built-in is
+  not in the whitelist and must still come back, and `App.theme` RAISES
+  `InvalidThemeError` on a name it does not know — so a store written by a build
+  whose themes have since changed would be a crash at mount rather than a
+  preference nobody can honour. `themes.resolve()` stays exactly as it was; it
+  is still correct for `tui.theme`, whose documented vocabulary is the fourteen.
+- **`_theme_persisting` arms at the END of `on_mount`.** `App.theme` is a
+  `Reactive` with `init` on, so its watcher fires during mount as well as on a
+  choice. Without the guard every launch records the theme it merely restored,
+  and a default becomes indistinguishable from a decision.
+- **A failed write WARNS and returns False; `/theme` then claims nothing.**
+  `TranscriptLogHandler` routes WARNING+ into the transcript, so the user is
+  told. The "Remembered for the next launch." line is printed only on a write
+  that landed — a confirmation that cannot be checked is worse than none. Not
+  latched to once per session, unlike `context_limit()`'s per-model warning:
+  this fires only on a human's own action, so someone switching again after a
+  failure should hear that it failed again.
+
+### The test fixture that is not hygiene
+
+`tests/conftest.py` gains an autouse `isolate_ui_preferences`. The obvious
+reason is that the suite would otherwise write to the developer's real
+`~/.config/venastine/`. The real reason is that the mount path READS the store
+and a remembered theme outranks settings, so
+`test_theme_preference_from_settings_is_applied_at_mount` — which predates this
+batch — would pass or fail depending on whether the person running the suite
+had ever typed `/theme`. `real_harness_tier` redirects HOME but is opt-in and
+does not cover it.
+
+It patches `preferences.store_path` rather than HOME (blast radius of one
+module) and takes its path from `tmp_path_factory.getbasetemp()` rather than
+`tmp_path`, so no directory is created for the ~2600 tests that never touch the
+store and the suite's runtime is unchanged.
+
+### Files
+
+- `tui/preferences.py` (NEW, 121 lines) — `store_path` / `load` / `remember`.
+- `tui/app.py` — `_settings_theme` + two flags in `__init__`; `_startup_theme()`
+  and `watch_theme()`; `on_mount` resolves AFTER `register_all` and arms AFTER
+  the assignment; `_cmd_theme` gains the conditional confirmation line.
+- `tui/themes.py` — docstring only: two things outside the module now carry a
+  theme name, and the second deliberately does not validate against
+  `THEME_NAMES`.
+- `tests/conftest.py`, `tests/test_tui.py` (+12).
+
+### Verification
+
+* `python -m pytest -q` — **2642 collected**, up 12 from 2630, all green. Counts
+  updated in `README.md`, `AGENTS.md` and `ARCHITECTURE.md`, plus
+  `test_tui.py`'s per-file tree count (152 → 164).
+* **Every textual API fact was checked against the installed 1.0.0, not
+  assumed** (D22): `App.theme` is `Reactive(constants.DEFAULT_THEME)` with
+  `init` on; `Reactive._check_watchers` invokes `_watch_{name}` then
+  `watch_{name}`, and a sync watcher runs immediately rather than being
+  scheduled (which is why `_cmd_theme` can read the result on the next line);
+  `App._validate_theme` raises `InvalidThemeError`; `ENABLE_COMMAND_PALETTE` is
+  True and unset here.
+* The three narrowed doc statements were edited **together**. Two documents
+  disagreeing about one rule is the defect `AGENTS.md`'s own preamble is about.
+
+### Still open
+
+Unchanged from batch 35: `npm login` + the `NPM_TOKEN` secret; whether the
+channel opens at `0.1.0` or `1.0.0`; and batch 33's carried three (Private
+Vulnerability Reporting, the OpenRouter key rotation, `git commit -s`).
