@@ -12,10 +12,11 @@ No long-term support branches yet. If you are on a fork, rebase on `main` before
 
 **Do not open a public issue, discussion, or pull request for a security vulnerability.**
 
-**Use GitHub Private Vulnerability Reporting:**
+**Email the maintainer at YahyaHammad@proton.me**, with the subject `[SECURITY] Venastine — <title>`.
 
-`Security` tab → `Report a vulnerability` → `Private vulnerability reporting`
-If Private Vulnerability Reporting is unavailable, email the maintainer at YahyaHammad@proton.me with subject "[SECURITY] Venastine — <title>". Send a high-level summary first; do not include full exploit code in plaintext until a secure transfer method is established.
+Send a high-level summary first. Do not include full exploit code in plaintext until a secure transfer method has been agreed.
+
+**Or use GitHub Private Vulnerability Reporting, where it is enabled:** *Security* tab → *Report a vulnerability*. It is the better channel when available, because the report, the fix and the advisory stay in one place — but it is a public-repository feature, so email is the channel that always works. Use email if you do not see the button.
 
 
 ### What to include
@@ -49,7 +50,9 @@ In scope (examples):
 * Credential exfiltration via tool arguments/results, logs, or `param_digest` display
 * MCP `autoApprove` / `mcp.json` trust bypass
 
-Out of scope: social engineering, physical access, compromise of a provider's own API, vulnerabilities in upstream dependencies without a harness-specific trigger, or issues that require `ToolPermissions.shell=True` + `SHELL_APPROVAL_MODE=never` *and* are already documented as "unbounded by design" in `README.md` (we still want the report, but it will be closed as documented risk).
+Out of scope: social engineering, physical access, compromise of a provider's own API, vulnerabilities in upstream dependencies without a harness-specific trigger, or issues that require `ToolPermissions.shell=True` together with `config.SHELL_APPROVAL_MODE = "never"` *and* are already documented as deliberate. `README.md` § *"`shell` is classified, not just approved"* records that `never` "is the old unbounded behaviour, kept on purpose" — in that mode `cat ~/.aws/credentials` runs on the host unprompted, and reaching it takes writing the word `never` in `config.py`. We still want such a report, but it will be closed as documented risk.
+
+Note that both settings live in `config.py` (`SHELL_APPROVAL_MODE` at `config.py:245`, `ToolPermissions` at `config.py:640`) — neither has a `settings.json` key or an environment override, by design.
 
 ## No bounty
 
@@ -57,9 +60,9 @@ This is an independent research project with no funding — **we cannot offer mo
 
 ## Disclosure and credit
 
-* We will publish a GitHub Security Advisory (GHSA) 7 days after the fix ships to main (or at the 90-day mark), requesting a CVE if the severity warrants it..
+* We will publish a GitHub Security Advisory (GHSA) 7 days after the fix ships to main (or at the 90-day mark), requesting a CVE if the severity warrants it.
 * We will not disclose your identity without permission.
-* Please do not disclose the issue publicly (including in a fork, gist, or write-up) before public disclosure or advisory publication—this protects users who have not yet updated.
+* Please do not disclose the issue publicly (including in a fork, gist, or write-up) before public disclosure or advisory publication — this protects users who have not yet updated.
 
 ## Questions
 

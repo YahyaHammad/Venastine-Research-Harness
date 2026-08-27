@@ -2,7 +2,9 @@
 
 This project is licensed under the **Apache License 2.0** — see [LICENSE](./LICENSE) (Copyright 2026 Yahya Hammad).
 
-The dependencies listed below are **not** part of the project's own source but are required at install/runtime. All are permissive and **Apache-2.0 compatible** per the table you provided (2026-08-27). This file records that assessment so a scanner/reviewer does not have to re-derive it.
+The dependencies listed below are **not** part of the project's own source but are required at install/runtime. All are permissive and **Apache-2.0 compatible**; the assessment was made on 2026-08-27. This file records it so a scanner or reviewer does not have to re-derive it.
+
+> **Scope.** This file assesses the project's **declared direct** dependencies — the pins in `requirements.txt` and the extras in `pyproject.toml`. The transitive closure is *not* enumerated here: `matplotlib` alone pulls numpy, pillow, kiwisolver and fonttools, and `mcp==2.0.0` brings `httpx2` (see the note at `requirements.txt:47`). For the full closure, run `pip-licenses` against a resolved environment — see *How to regenerate* below.
 
 > Versions shown are the pins from `requirements.txt` / `pyproject.toml` at the time this file was created. Where a range is used (e.g. `textual>=1.0,<2.0`) the exact resolved version will vary.
 
@@ -33,8 +35,6 @@ The dependencies listed below are **not** part of the project's own source but a
 | pytest-mock | `>=3.14` | MIT | Yes |
 | pytest-asyncio | `>=1.0` | Apache-2.0 | Yes |
 
-Grouped as `pytest / plugins, MIT / Apache-2.0, Yes` per your table.
-
 ## Optional dependencies (`pyproject.toml` extras)
 
 | Package | Version (as pinned) | Primary License | Apache 2.0 Compatible | Notes |
@@ -44,12 +44,12 @@ Grouped as `pytest / plugins, MIT / Apache-2.0, Yes` per your table.
 | markdown | unpinned (extra `pdf`) | BSD-3-Clause | Yes | Permissive |
 | weasyprint | unpinned (extra `pdf`) | BSD-3-Clause (package) | Yes (with caveats) | Package itself BSD-3-Clause; transitive deps include LGPL (e.g. `pango`/`cairo` via system libs). See weasyprint docs. |
 
-As you noted: `weasyprint = BSD-3-Clause, Yes (with caveats), Permissive (Package) / LGPL (Dependencies)`. If you later pin `markdown`/`weasyprint`, update the version column here.
+`weasyprint` is BSD-3-Clause itself; the caveat is its **system** dependencies (`pango`, `cairo`, `harfbuzz`), which are LGPL and are linked at runtime rather than vendored into this project. If `markdown` or `weasyprint` is later pinned, update the version column above.
 
 ## What this means
 
-* All listed licenses are **permissive** (MIT / BSD-3-Clause / PSF / Apache-2.0). None are copyleft (GPL/AGPL) and none impose source-disclosure on this Apache-2.0 work.
-* No `NOTICE` file is required by any of these dependencies for a source distribution. If you later distribute a binary/wheel that vendors them, include their `LICENSE` files as shipped on PyPI.
+* All licenses **listed above** are **permissive** (MIT / BSD-3-Clause / PSF / Apache-2.0). None are copyleft (GPL/AGPL) and none impose source-disclosure on this Apache-2.0 work. This is a statement about the direct dependencies in the tables, not about the full transitive closure — see *Scope* at the top.
+* This project does not redistribute any of them: it is run from a checkout, and `pip` fetches each dependency from PyPI under its own license. No `NOTICE` file obligation therefore arises here. The trigger is **redistribution**, not source-vs-binary — if a build that vendors these packages is ever distributed, ship their `LICENSE` and `NOTICE` files as received (Apache-2.0 §4(d) applies to `openai`, `google-genai` and `pytest-asyncio`).
 * Full license texts: `pip show <package>` or `pip-licenses --format plain --with-urls`, or the PyPI links above.
 
 ## How to regenerate
@@ -60,7 +60,7 @@ pip-licenses --format markdown --with-urls --with-license-file
 pip install pip-licenses && pip-licenses --format plain
 ```
 
-If you add/pin a new dependency, add a row here with its SPDX identifier and re-check the `Apache 2.0 Compatible` column. CI does not enforce this file today — it's documentation for reviewers.
+When a dependency is added or re-pinned, add a row here with its SPDX identifier and re-check the `Apache 2.0 Compatible` column. CI does not enforce this file today — it is documentation for reviewers.
 
 ---
-*Last updated: 2026-08-27 — assessment provided by maintainer; no assumptions made beyond the table above. If any row's upstream re-licenses, this file must be updated.*
+*Last updated: 2026-08-27. If any row's upstream re-licenses, this file must be updated.*

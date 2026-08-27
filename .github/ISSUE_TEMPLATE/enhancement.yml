@@ -1,0 +1,54 @@
+name: Enhancement
+description: Polish or a new capability where nothing behaves wrongly today. No severity.
+title: "[enhancement] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For non-audit work: a capability that does not exist yet, or polish on one that does.
+        If something is actually *wrong*, use the **Audit finding** form instead so it gets a
+        severity and an area.
+
+        **Large or design changes need an issue before code.** Anything that adds a new `§` or
+        D-number, changes a file-level contract in `ARCHITECTURE.md`, or touches
+        `core/loop.py` / `core/client.py` / `tools/registry.py` / `security/` boundaries should be
+        agreed here first — see
+        [CONTRIBUTING.md](https://github.com/YahyaHammad/Venastine-Research-Harness/blob/main/CONTRIBUTING.md#proposing-a-large-or-design-change).
+        That is what this form is for.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What you want
+      description: The behavior you are asking for, concretely. What would you type, and what would happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: why
+    attributes:
+      label: Why
+      description: >-
+        What is hard or impossible today. If you have a workaround, describe it — a workaround that
+        already works is useful information about how much this is worth.
+    validations:
+      required: true
+
+  - type: textarea
+    id: shape
+    attributes:
+      label: Suggested shape (not a patch)
+      description: >-
+        Optional. If you have a view on where this belongs, say which files would change and what a
+        test would assert. Words, not a diff.
+    validations:
+      required: false
+
+  - type: textarea
+    id: not-doing
+    attributes:
+      label: Not doing
+      description: Optional. What you are deliberately leaving out of this request.
+    validations:
+      required: false

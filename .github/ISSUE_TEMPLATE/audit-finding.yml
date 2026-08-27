@@ -1,0 +1,115 @@
+name: Audit finding
+description: A security, correctness, coherence, test-quality, docs-drift, performance, ux or stability finding, with a concrete trigger.
+title: "[S?][area] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Not for vulnerabilities.** If this is a security hole an attacker could use, close this
+        form and follow [SECURITY.md](https://github.com/YahyaHammad/Venastine-Research-Harness/blob/main/SECURITY.md) instead — a public issue notifies
+        every watcher and gets indexed before a fix can ship.
+
+        Edit the title to match `[S<severity>][<area>] concise imperative summary`, using the two
+        values you pick below. Example:
+        `[S1][security] shell auto-approval is unbounded: inert commands run on the host with unrestricted arguments`
+
+        The four sections below are the format described in
+        [CONTRIBUTING.md](https://github.com/YahyaHammad/Venastine-Research-Harness/blob/main/CONTRIBUTING.md#issue-format--how-we-file-and-triage-reproducible).
+        They exist so a finding can be triaged without re-reading the code.
+
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Severity
+      description: >-
+        Audit severity, per the #15 tracker. Use the LOWEST that still describes the impact.
+        Unrelated to the S1-S4 design-decision family in ROADMAP_v2.md — if unsure, pick S3 and
+        the maintainer will relabel. Do not block on taxonomy.
+      options:
+        - S1 — critical
+        - S2 — high
+        - S3 — medium
+        - S4 — low
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Pick the closest. Do not invent a new one without discussion.
+      options:
+        - security
+        - correctness
+        - coherence
+        - test-quality
+        - docs-drift
+        - performance
+        - ux
+        - stability
+    validations:
+      required: true
+
+  - type: input
+    id: context
+    attributes:
+      label: Found during
+      description: The issue, unit or batch this came out of, and the files/lines it touches.
+      placeholder: "Found during #15 / Unit 4 (security/permissions.py:106-140)."
+    validations:
+      required: false
+
+  - type: textarea
+    id: what-happens
+    attributes:
+      label: What happens
+      description: >-
+        The concrete trigger — never "could be a problem". Show the exact call, file:line, and the
+        filesystem / network / model state that reaches it. A minimal code block or an
+        inputs-to-outputs table helps.
+      placeholder: |
+        Calling `foo(bar=True)` at tools/registry.py:187 with `providers.json` absent reaches
+        `_dispatch()` before `is_tool_allowed()` runs, so ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: why-wrong
+    attributes:
+      label: Why it's wrong / Severity
+      description: >-
+        Which invariant it breaks (a D-number, a layer boundary from AGENTS.md, a pinned test) and
+        the real harm. Restate the severity you picked above and say why that level and not the one
+        below it. Cite file:line for code.
+    validations:
+      required: true
+
+  - type: textarea
+    id: suggested-shape
+    attributes:
+      label: Suggested shape (not a patch)
+      description: >-
+        Describe the fix in words — the data shape or boundary that closes it structurally, not a
+        diff. Name the files that would change and what a test would assert. Keep any sketch small.
+        This is deliberately not a PR, so the shape can be accepted without bikeshedding the diff.
+    validations:
+      required: true
+
+  - type: textarea
+    id: not-doing
+    attributes:
+      label: Not doing
+      description: >-
+        What is explicitly out of scope here, so a reviewer knows you considered it. This is what
+        stops scope creep between the audit and the fix batch.
+    validations:
+      required: true
+
+  - type: input
+    id: measured-against
+    attributes:
+      label: Measured against
+      description: The commit and branch that were in force when you checked.
+      placeholder: "Measured against f16869d on main."
+    validations:
+      required: false

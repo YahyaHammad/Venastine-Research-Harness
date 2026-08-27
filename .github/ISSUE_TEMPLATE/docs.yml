@@ -1,0 +1,47 @@
+name: Documentation
+description: A doc that is unclear, missing, or has drifted from the code.
+title: "[docs] "
+labels: ["documentation"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Drift between the code and `README.md` / `ARCHITECTURE.md` / `ROADMAP*.md` / `AGENTS.md`,
+        or anything in the docs that is simply unclear.
+
+        If the drift is itself a finding you want tracked with a severity, use the
+        **Audit finding** form with area `docs-drift` instead.
+
+        Note which document owns a given fact: this project keeps **one copy, several filenames**,
+        so the fix is usually to correct the owning document rather than to add the fact
+        somewhere else. The table in
+        [CONTRIBUTING.md](https://github.com/YahyaHammad/Venastine-Research-Harness/blob/main/CONTRIBUTING.md#project-documentation--what-lives-where)
+        says which document owns what.
+
+  - type: input
+    id: where
+    attributes:
+      label: Which document
+      description: File, and the section heading (not a line number — those drift).
+      placeholder: "README.md § CLI flag reference"
+    validations:
+      required: true
+
+  - type: textarea
+    id: says
+    attributes:
+      label: What it says
+      description: Quote the passage as it stands today.
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: What is actually true
+      description: >-
+        The correct fact, and how you established it — the file:line, the command you ran, or the
+        test that demonstrates it. "I think it changed" is hard to act on; "config.py:245 says
+        tiered" is not.
+    validations:
+      required: true

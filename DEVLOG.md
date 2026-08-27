@@ -6448,3 +6448,202 @@ All doc items now closed (`C1`, `M2`, `L1`, `M1`, `H1`, `M4`, `H2`, `M3`, `C2`/`
 ### Verification
 
 `SECURITY.md` exists, no `SECURITY.md` existed before (`git ls-files` missed it before this batch, `git status` → `?? SECURITY.md` before write). `README.md:146` now contains `robots.txt` (grep hit), before edit grep missed. `CONTRIBUTING.md:46` / `SECURITY.md:10` / `PRIVACY.md` now all carry the *Do not open a public issue* line — three places, as requested. Docs only; `pytest` not re-run (metadata only), prior `2605 passed, 18 skipped` still in force. `git status` after this entry → `?? SECURITY.md` replaced by tracked `SECURITY.md` plus the three community docs now pending commit (`CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `PRIVACY.md` from prior batch, plus this `SECURITY.md` + `README.md` + `DEVLOG.md`).
+
+
+## Batch 33 — the launch docs, checked against the code rather than proofread (2026-08-27)
+
+### Context
+
+`SECURITY.md`, `CONTRIBUTING.md`, `PRIVACY.md`, `CODE_OF_CONDUCT.md` and
+`THIRD_PARTY_NOTICES.md` were written across batches 32a/32b for the open-source
+launch. This batch reviewed them by **verifying each factual claim against the
+code, `git ls-files`, the issue tracker and the upstream Contributor Covenant** —
+not by reading them for tone. Most claims held. The ones that did not are below.
+
+The repo is still `private` (`gh api` → `{"private": true, "security_and_analysis": null}`),
+so none of this had shipped.
+
+### Owner decisions locked before editing
+
+* **Scope: everything** — the five docs, plus `README.md` drift, plus `.github/`
+  templates, plus the `pyproject.toml` license form.
+* **Keep `SECURITY.md`'s 2-business-day acknowledgment** and raise
+  `CONTRIBUTING.md` to match, rather than relaxing `SECURITY.md`.
+  * ⚠️ Note for a later reader: batch 32b's entry above records this as *"ack in 5
+    business days, triage in 14"*. The shipped `SECURITY.md` says **2 / 7**. The
+    file drifted from the record at some point between drafting and commit. The
+    append-only rule means that entry stays as written; **2 / 7 is the live
+    decision**, re-confirmed by the owner in this batch.
+* **The doc table cites section headings, not line numbers** — see C8 below.
+
+### What was wrong, and how it was measured
+
+**Blockers.**
+
+* `THIRD_PARTY_NOTICES.md` still addressed the maintainer in the second person —
+  "per the table **you provided**", "per **your** table", "**As you noted:**", "no
+  assumptions made beyond the table above". A licence-notice file that reads as a
+  chat reply is the first thing a licence reviewer opens. Rewritten in third
+  person.
+* `CODE_OF_CONDUCT.md` told harassment reporters to *"open a confidential issue"*
+  at the **public** issue tracker. Following it would publish the complaint.
+  Removed; email is now stated as the only private channel, with an explicit
+  warning against the tracker.
+* `SECURITY.md`'s primary channel did not exist:
+  `gh api repos/…/private-vulnerability-reporting` → **404**. PVR is a
+  public-repository feature. Email is now first-class and PVR is the
+  "where enabled" alternative, so the file is correct in both states.
+  **Still an owner action: flip PVR on at the moment the repo goes public.**
+* `CODE_OF_CONDUCT.md` claimed Covenant **2.1** but shipped the **2.0** pledge.
+  Fetched the upstream 2.1 text: it reads "race, **caste, color**, religion". The
+  file read "race, religion". Those two words are exactly what 2.1 added. Fixed.
+
+**Claims that contradicted the code.**
+
+* `PRIVACY.md` listed a SQLite table `PipelineRun`. There is no such table — the
+  six are the five in `storage.py` plus `PipelineRunRecord`
+  (`core/reasoning/pipeline_storage.py:46`). `PipelineRun`
+  (`core/reasoning/base.py:140`) is an in-memory dataclass that is never
+  persisted. The count of six was right; the name was not.
+* `PRIVACY.md` said `logs/app.log` holds a "WARNING+" transcript.
+  `logging_setup.py:34` is `_DEFAULT_LEVEL = "INFO"`, applied to the root logger
+  at `:137`; WARNING+ is only what `tui/app.py` routes to the *on-screen*
+  transcript (`:130`). Understating log verbosity in a privacy document is the
+  wrong direction to be wrong. Now "INFO and above by default
+  (`AGENT_LOG_LEVEL` overrides)". The `1 MB × 3` rotation was correct
+  (`:40`, `:41`).
+* `SECURITY.md` wrote `SHELL_APPROVAL_MODE=never` in env-var form. It is
+  `config.SHELL_APPROVAL_MODE` (`config.py:245`) with no env and no
+  `settings.json` override — `core/config_loader.py:613` redirects users to
+  `config.py` explicitly. Rewritten, with both settings' locations named.
+* `SECURITY.md` scoped out issues documented as *"unbounded by design"* in
+  `README.md`. That phrase is not in `README.md`; the real sentence is at
+  `README.md:259` — "`never` is the old unbounded behaviour, kept on purpose."
+  A reporter checking the exclusion could not have found it. Now quotes the real
+  sentence and names the section.
+* `CONTRIBUTING.md` cited `#6` as a *closed* example issue. `#6` is **open**.
+  Replaced with `#4`.
+* `CONTRIBUTING.md`'s label rule ("coherence/correctness → `bug`") is contradicted
+  by every open issue in those areas — `#12`, `#9`, `#6` are all labelled
+  `enhancement`. Restated as the rule actually practised: `S1`/`S2` → `bug`,
+  `S3`/`S4` → `enhancement` unless behaviour is wrong today.
+* `CONTRIBUTING.md` used `S1`–`S4` for **audit severities** at one point and for
+  the **§14–§18 design-decision family** at another, with no disambiguation —
+  precisely the silent cross-reference failure `AGENTS.md` legislates against, in
+  the one document a newcomer reads *before* `AGENTS.md`. Both sites now name
+  their namespace, and the severity list carries an explicit warning.
+* **C8 — six of twelve line citations in the doc table had already drifted**:
+  `AGENTS.md:91`→99, `:60`→62, `:10`→12, `README.md:424`→427, `:500`→503,
+  `pyproject.toml:40`→46. Rather than correct numbers that would drift again on
+  the next edit, that table now cites **section headings**. `file:line` remains
+  the convention everywhere else in the repo, including inside issue bodies,
+  where it is exact and expected — the table is the one place whose whole job is
+  to outlive those lines.
+
+**Consistency.** `CONTRIBUTING.md` raised to `SECURITY.md`'s 2-business-day /
+7-day numbers and made to *cite* rather than restate them; its PR-review "few
+days" line disambiguated as PR review, since it was never in conflict. Typos
+fixed (`warrants it..`, an unspaced em dash, a space before a period). DCO
+sign-off softened to "requested, not enforced" — **0 of the last 15 commits carry
+a `Signed-off-by`** and CI runs only `pytest`, so the doc and the history
+disagreed; the Apache-2.0 §5 paragraph is what actually establishes the inbound
+licence either way.
+
+**`README.md`.** It never linked four of the five new documents — only
+`PRIVACY.md` (inline, `:147`) and `LICENSE`. Added a *Contributing and policies*
+list. And its audit numbers were badly stale: **"102 open, of which 3 are S1 and
+18 are S2"** against a measured **149 of 154 closed, 5 open** — every `S1` (8),
+`S2` (30) and `S4` (9) closed, 75 of 79 `S3`s closed, 32 batches not "eight".
+`CONTRIBUTING.md` sends contributors to that tracker to learn the issue format,
+so the stale count was load-bearing.
+
+### The one that was not a doc bug
+
+Verification step 7 (`prepare_metadata_for_build_wheel`) failed with:
+
+```
+configuration error: `project.urls.dynamic` must be string
+```
+
+Reproduced against **unmodified `HEAD`**, so it pre-dated this batch:
+`dynamic = ["dependencies"]` sat *below* the `[project.urls]` header, and TOML
+scopes a bare key to the most recent table. It had been parsing as
+`project.urls.dynamic` and setuptools rejected the whole file.
+
+Consequences, all silent until now:
+
+* `pip install -e .` and `pip install -e ".[documents]"` failed outright — both
+  documented in `CONTRIBUTING.md` as supported commands.
+* `requires-python = ">=3.11"` was **never enforced**, because the install never
+  got far enough to check it. That floor is the entire reason `#144` was filed.
+* D22's "one dependency list" mechanism never actually ran.
+
+Fixed by moving the key inside `[project]`, above the sub-tables, with a comment
+recording why its position is load-bearing. Verified by rebuilding metadata:
+`Requires-Python: >=3.11`, all 17 pins present as `Requires-Dist`, both extras
+resolved.
+
+### Also done
+
+* **`pyproject.toml` licence modernised (PEP 639).**
+  `license = { text = "Apache-2.0" }` → `license = "Apache-2.0"`, the
+  `License :: OSI Approved ::` classifier dropped, `license-files = ["LICENSE"]`
+  declared, and `setuptools>=68` → `>=77` because the SPDX string is only read as
+  an expression from that release. Metadata now emits
+  `License-Expression: Apache-2.0` + `License-File: LICENSE` with no deprecation
+  warning.
+* **`.github/ISSUE_TEMPLATE/` + `PULL_REQUEST_TEMPLATE.md` created.**
+  `CONTRIBUTING.md` specified a precise four-section body and a machine-sortable
+  title and argued that this is what makes triage reproducible — but nothing
+  enforced it. `audit-finding.yml` carries severity and area dropdowns whose
+  values are exactly the taxonomy in `CONTRIBUTING.md`, with the four sections
+  required; `enhancement.yml` and `docs.yml` cover the no-severity shapes;
+  `config.yml` sets `blank_issues_enabled: false` and routes security and conduct
+  reports **off** the tracker, which is what makes `SECURITY.md`'s "do not open a
+  public issue" enforceable rather than advisory. A doc-table row now names the
+  templates so the prose and the forms move together.
+* **`THIRD_PARTY_NOTICES.md` scoped.** Its "none are copyleft" line read as a
+  claim about the whole dependency closure; only declared direct dependencies are
+  assessed (`matplotlib` alone pulls numpy/pillow/kiwisolver/fonttools, and
+  `mcp==2.0.0` brings `httpx2`). A *Scope* note now says so, and the NOTICE
+  paragraph now names **redistribution** as the trigger rather than
+  source-vs-binary.
+* **`PRIVACY.md`** gained a `<project>/.venastine/` row (the project config tier
+  was missing entirely) and PowerShell deletion commands alongside the `rm` ones.
+* **A broken table row in `CONTRIBUTING.md`, also pre-existing.** The
+  `tests/BREAKING_CHANGES.md` row described that file's table by writing its
+  header inline with literal pipes, which GFM reads as cell separators — the row
+  rendered with seven cells against a three-column header. Confirmed against
+  `HEAD` before touching it. Reworded to name the columns without pipes rather
+  than escaping them, and a column-integrity check now runs over every table in
+  the changed docs (`CONTRIBUTING`, `PRIVACY`, `THIRD_PARTY_NOTICES`,
+  `SECURITY`): 45 data rows, 0 mismatched.
+
+### Verification
+
+* `python -m pytest -q` → **2605 passed, 18 skipped, 1 deselected** in 90.53s —
+  identical to the batch-32 baseline, so nothing here moved a test.
+* All four issue-form YAMLs parse and satisfy GitHub's schema (types, unique ids,
+  dropdown options, no `validations` on a `markdown` block) — checked
+  programmatically, because a malformed form is *silently disabled* rather than
+  rejected.
+* Metadata build: `License-Expression: Apache-2.0`, `License-File: LICENSE`, no
+  `Classifier: License ::`, `Requires-Python: >=3.11`, 17 `Requires-Dist`, both
+  extras. Zero licence warnings.
+* Every relative link in the six markdown files resolves (0 missing).
+* Secret hygiene, checked rather than assumed: `providers.json` and `.env` are
+  gitignored and **untracked**; `providers.json` appears in two historical commits
+  but every `API_KEY` field in them is **empty**; a sweep of all revisions for
+  secret-shaped tokens returns only synthetic test fixtures (`AAAA…`, `ghp_abcdef…`).
+  The `sk-or-v1-…` mention in batch 32b's entry is a redacted prefix, not a key.
+  **Still an owner action, carried from batch 32b:** the live OpenRouter key in the
+  working-copy `providers.json` should be rotated regardless, since it has been on
+  disk for a while.
+
+### Owner actions remaining before public
+
+1. Enable **Private vulnerability reporting** (Settings → Code security) — the
+   only item in `SECURITY.md` that a file edit cannot satisfy.
+2. Rotate the OpenRouter key in the local `providers.json` (`C2`, carried).
+3. Decide whether to start signing off commits, or leave the softened
+   "requested, not enforced" wording as shipped.

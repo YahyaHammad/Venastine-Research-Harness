@@ -9,8 +9,11 @@
 # `pip install -r requirements.txt` reported success. requires-python turns
 # that into a refusal at install time.
 
+# setuptools>=77 is the floor for PEP 639: the SPDX `license = "Apache-2.0"` string below is
+# read as a classifier expression only from that release on. An older backend treats it as a
+# path and fails the build rather than warning, so this floor and that line move together.
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -19,11 +22,15 @@ version = "0.1.0"
 description = "A from-scratch agentic harness: tool-using chat plus a ten-pass self-critiquing research pipeline."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "Apache-2.0" }
+# PEP 639: a bare SPDX expression, not the deprecated `{ text = ... }` table, and no
+# `License :: OSI Approved ::` classifier -- PEP 639 supersedes those and setuptools warns on
+# both. `license-files` is declared rather than left to the backend's default glob so the file
+# that ships is the one named here.
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 authors = [{ name = "Yahya Hammad" }]
 maintainers = [{ name = "Yahya Hammad" }]
 classifiers = [
-    "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -32,18 +39,26 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 
-[project.urls]
-Homepage = "https://github.com/YahyaHammad/Venastine-Research-Harness"
-Repository = "https://github.com/YahyaHammad/Venastine-Research-Harness"
-Issues = "https://github.com/YahyaHammad/Venastine-Research-Harness/issues"
-
 # ONE dependency list, and it stays in requirements.txt -- the file that
 # already carries the D22 rationale comments explaining why `textual` and
 # `mcp` are upper-bounded. Inlining the list here would create a second
 # hand-maintained copy of the same fact, which is the shape #144 was filed
 # about in the first place ("a hand-maintained list is only as complete as
 # the file it lives in"). setuptools strips comments and blank lines.
+#
+# THIS KEY MUST STAY INSIDE [project], above the sub-tables. TOML scopes a
+# bare key to the most recent table header, so when this sat below
+# [project.urls] it parsed as `project.urls.dynamic` and setuptools refused
+# the whole file: "`project.urls.dynamic` must be string". `pip install -e .`
+# failed outright, which also meant requires-python -- the entire point of
+# #144 -- was never enforced, because the install never got far enough to
+# check it. Moving a key past a table header here is not cosmetic.
 dynamic = ["dependencies"]
+
+[project.urls]
+Homepage = "https://github.com/YahyaHammad/Venastine-Research-Harness"
+Repository = "https://github.com/YahyaHammad/Venastine-Research-Harness"
+Issues = "https://github.com/YahyaHammad/Venastine-Research-Harness/issues"
 
 [project.optional-dependencies]
 # markitdown's only consumer is tools/builtin/file_ops.py, which implements

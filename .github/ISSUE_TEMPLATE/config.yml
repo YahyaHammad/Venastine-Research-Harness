@@ -1,0 +1,18 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability (do not open an issue)
+    url: https://github.com/YahyaHammad/Venastine-Research-Harness/security/advisories/new
+    about: >-
+      Report privately. A public issue notifies every watcher and is indexed before a fix can
+      ship. If private reporting is unavailable, email YahyaHammad@proton.me with the subject
+      "[SECURITY] Venastine — <title>". See SECURITY.md for scope and the disclosure timeline.
+  - name: Code of Conduct report (do not open an issue)
+    url: https://github.com/YahyaHammad/Venastine-Research-Harness/blob/main/CODE_OF_CONDUCT.md
+    about: >-
+      Email YahyaHammad@proton.me. Issues on this repository are public, so filing one would
+      publish your own complaint.
+  - name: Question about the project
+    url: https://github.com/YahyaHammad/Venastine-Research-Harness/blob/main/README.md
+    about: >-
+      README.md is the user-facing guide — setup, the research pipeline, the security model, and
+      the full CLI/TUI reference. If it does not answer your question, that gap is a [docs] issue.

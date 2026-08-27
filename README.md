@@ -691,9 +691,10 @@ Deliberately not settings.json keys: editing these means editing the file in you
 **Not finished, though: an audit is open.** Both roadmaps being built is not the same as the
 code being clean, and saying only the first would be the "built and runs are different claims"
 mistake this project keeps recording against itself. Audit Pass 1 is tracked in GitHub issues —
-**102 open**, of which 3 are S1 and 18 are S2 — and is being worked in numbered fix batches
-(eight merged or pending so far, each recorded in `DEVLOG.md` and `tests/BREAKING_CHANGES.md`
-with what was measured and what would break the fix).
+**149 of 154 closed, 5 open**, those five being four `S3`s plus the `#15` tracker itself. Every
+`S1` (8 of them), `S2` (30) and `S4` (9) finding is closed, and 75 of 79 `S3`s are. It has been
+worked in numbered fix batches — 32 so far, each recorded in `DEVLOG.md` and
+`tests/BREAKING_CHANGES.md` with what was measured and what would break the fix.
 
 **#157 — `shell`'s unbounded auto-approval — is closed** by batch 8 and ROADMAP_v2 §28; the
 classifier is described under *Security model* above. If you have a fork or a local `config.py`,
@@ -710,6 +711,14 @@ This file is the user-facing one. For working on the code:
 - **[ARCHITECTURE.md](./ARCHITECTURE.md)** — file-by-file contracts, what belongs where, and the known gotchas. Read before changing anything non-trivial, especially around persistence (`database.py` / `storage.py` / `core/memory.py` are three distinct and easily confused responsibilities).
 - **[ROADMAP.md](./ROADMAP.md)** and **[ROADMAP_v2.md](./ROADMAP_v2.md)** — implementation specs plus the locked Design Decisions Record that most of the reasoning above traces back to.
 - **[DEVLOG.md](./DEVLOG.md)** — what was followed, what was deviated from, and why.
+
+### Contributing and policies
+
+- **[CONTRIBUTING.md](./CONTRIBUTING.md)** — inbound license (Apache-2.0 + DCO), the setup and test loop, the issue and PR format, and a table of which document to update for what.
+- **[SECURITY.md](./SECURITY.md)** — how to report a vulnerability privately, what is in and out of scope, and the coordinated-disclosure timeline. **Do not open a public issue for one.**
+- **[PRIVACY.md](./PRIVACY.md)** — what is stored locally, what leaves your machine, and how to delete it. No telemetry.
+- **[CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md)** — Contributor Covenant 2.1, and the private channel for reporting a violation.
+- **[THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md)** — the dependency license assessment: every declared direct dependency, its license, and its Apache-2.0 compatibility.
 
 ## License
 

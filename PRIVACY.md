@@ -10,12 +10,13 @@ All state is in files in the repository's working directory (or the paths you co
 
 | File / directory | What it holds | Created when |
 |---|---|---|
-| `app.db` (`APP_DB_PATH`) | SQLite: `MessageLog`, `ConversationThread`, `PipelineRun`, `CompactionCheckpoint`, `ThreadSummary`, `UserMemory` — every chat turn, every research pass, and any `remember` memories | First `python main.py` run creates it |
-| `logs/app.log` (`AGENT_LOG_FILE`, 1 MB × 3 rotated) | WARNING+ transcript + provider/HTTP traces. Redacted via `safety/policy_enforcement.redact_secrets` (same patterns as tool output) but may still contain query text | Every run appends |
+| `app.db` (`APP_DB_PATH`) | SQLite: `MessageLog`, `ConversationThread`, `CompactionCheckpoint`, `ThreadSummary`, `UserMemory` (`storage.py`) and `PipelineRunRecord` (`core/reasoning/pipeline_storage.py`) — every chat turn, every research pass, and any `remember` memories | First `python main.py` run creates it |
+| `logs/app.log` (`AGENT_LOG_FILE`, 1 MB × 3 rotated) | **INFO and above** by default (`AGENT_LOG_LEVEL` overrides), including provider/HTTP traces. Redacted via `safety/policy_enforcement.redact_secrets` (same patterns as tool output) but may still contain query text | Every run appends |
 | `output/<run_id>/` (`AGENT_OUTPUT_DIR`) | Per-run artifacts: `report.md`, `report.pdf` (if `weasyprint`), `00_plan.md` … `07_review.json`, `sources/`, `trace.md` | Every ` --mode research` run |
 | `providers.json` (`AGENT_PROVIDERS_FILE`) & `.env` | Your local secrets (LLM provider keys + tool API keys). Gitignored + `export-ignore`; never sent except as described below | You create via `cp *.example` |
 | `~/.config/venastine/settings.json` & `~/.config/venastine/mcp.json` | Your user-tier settings/MCP servers | On first trust / settings save |
 | `~/.config/venastine/trusted_projects.json` | Workspace trust store (path + content hash) | After you answer the trust prompt |
+| `<project>/.venastine/` | Project-tier config — `settings.json`, `mcp.json`, `CONTEXT.md`, plus any project `agents/` and `skills/`. Loaded only after you trust the workspace (`core/workspace_trust.py`) | You create it, or `/init` does |
 
 Everything above is **local-only** by default. `git` does not track `app.db`/`logs/`/`output/`/`providers.json`/`.env` (see `.gitignore` + `.gitattributes` `export-ignore`).
 
@@ -34,6 +35,7 @@ Fetched content is subject to its origin's terms (including `robots.txt` / ToS).
 No automatic expiry — a thread lives until you delete it.
 
 * **Wipe everything:** `rm app.db` + `rm -rf output/` + `rm logs/app.log*` — next run recreates an empty DB.
+  On Windows PowerShell: `Remove-Item app.db, logs/app.log* ; Remove-Item -Recurse -Force output/`
 * **One thread:** there is no single-thread delete command; wiping the DB is the intended granularity (threads are cheap and local).
 * **Durable memories:** `python main.py --memories` to list, `python main.py --forget <id>` to delete one by id (never by substring, by design).
 * **Settings/trust:** delete `~/.config/venastine/settings.json` or `trusted_projects.json` entries directly.
