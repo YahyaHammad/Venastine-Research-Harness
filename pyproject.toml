@@ -19,6 +19,23 @@ version = "0.1.0"
 description = "A from-scratch agentic harness: tool-using chat plus a ten-pass self-critiquing research pipeline."
 readme = "README.md"
 requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Yahya Hammad" }]
+maintainers = [{ name = "Yahya Hammad" }]
+classifiers = [
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.urls]
+Homepage = "https://github.com/YahyaHammad/Venastine-Research-Harness"
+Repository = "https://github.com/YahyaHammad/Venastine-Research-Harness"
+Issues = "https://github.com/YahyaHammad/Venastine-Research-Harness/issues"
 
 # ONE dependency list, and it stays in requirements.txt -- the file that
 # already carries the D22 rationale comments explaining why `textual` and

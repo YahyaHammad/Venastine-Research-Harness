@@ -708,3 +708,7 @@ This file is the user-facing one. For working on the code:
 - **[ARCHITECTURE.md](./ARCHITECTURE.md)** — file-by-file contracts, what belongs where, and the known gotchas. Read before changing anything non-trivial, especially around persistence (`database.py` / `storage.py` / `core/memory.py` are three distinct and easily confused responsibilities).
 - **[ROADMAP.md](./ROADMAP.md)** and **[ROADMAP_v2.md](./ROADMAP_v2.md)** — implementation specs plus the locked Design Decisions Record that most of the reasoning above traces back to.
 - **[DEVLOG.md](./DEVLOG.md)** — what was followed, what was deviated from, and why.
+
+## License
+
+Apache-2.0 — see [LICENSE](./LICENSE). Copyright 2026 Yahya Hammad.
