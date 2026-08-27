@@ -1,2 +1,14 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Never include local secrets / runtime artifacts in `git archive` (H3/C2).
+# .gitignore already keeps them out of `git push`; this keeps them out of
+# `git archive` tarballs and GitHub "Download ZIP".
+providers.json export-ignore
+.env export-ignore
+*.db export-ignore
+logs/ export-ignore
+output/ export-ignore
+CLAUDE-SECURITY-* export-ignore
+.qwen/ export-ignore
+.ipynb_checkpoints/ export-ignore
