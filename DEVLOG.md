@@ -6336,3 +6336,44 @@ Not a roadmap section. A design-phase numbering mistake left the pipeline execut
 ### Verification
 
 `pytest tests/test_orchestrator.py tests/test_payload_validation.py tests/test_confidence_scoring.py tests/test_output_writer.py` 158 passed (was 33 failed before bulk swap). Full suite `2605 passed, 18 skipped` after both batches (was `2603 + 2` untrusted-content mismatches).
+
+
+## Open-source launch prep — LICENSE / .gitattributes / pyproject / README / THIRD_PARTY_NOTICES (2026-08-27)
+
+Not a roadmap section. Follow-up to the licensing review (read-only) that flagged `C1` (LICENSE placeholder), `M2` (pyproject holder mismatch), `L1` (README missing license anchor), `M1` (no third-party notices), and `C2`/`H3` (`providers.json`/`*.db`/`logs/`/`output/` reachable via `git archive`/`zip -r` even though `git push` was already safe via `.gitignore`).
+
+This entry groups the three pushed commits since the TUI batches plus the new notices file that has not yet been pushed.
+
+### What was already pushed
+
+**`8011893 Update LICENSE` — `C1` closed.**
+`LICENSE:189` `Copyright [yyyy] [name of copyright owner]` → `Copyright 2026 Yahya Hammad`. Remote edit, then local sync. No other line changed. GitHub license detector now reports `Apache-2.0` with a real holder; `pyproject`/`README` can reference it without drift.
+
+**`66a4f86 Updated .gitattributes to avoid leaking local secrets` — `C2`/`H3` mitigated.**
+`.gitattributes:4` added seven `export-ignore` lines:
+
+```
+providers.json  .env  *.db  logs/  output/  CLAUDE-SECURITY-*  .qwen/  .ipynb_checkpoints/
+```
+
+`.gitignore:7` already kept them out of `git push`; `export-ignore` keeps them out of `git archive` / GitHub "Download ZIP". Verified: `git ls-files` shows only `providers.json.example` tracked; `git check-ignore -v app.db` still hits `*.db`; `git archive --format tar HEAD | tar tf -` contains none of the seven. Does not clean the working tree — `providers.json:76` still holds the live `sk-or-v1-…` on disk; rotation is still the owner's follow-up.
+
+**`e3a3bbe Further preparations for open source launch` — `M2` + `L1` closed.**
+`pyproject.toml:22-38` `license = {text="Apache-2.0"}`, `authors`/`maintainers = [{name="Yahya Hammad"}]`, `classifiers` (Apache + Python 3.11-13 + Research/AI), `[project.urls]` Homepage/Repository/Issues → `https://github.com/YahyaHammad/Venastine-Research-Harness`. `tomllib` parses; closes `M2` (holder now in LICENSE and pyproject). `README.md:712` added `## License — Apache-2.0 — see LICENSE. Copyright 2026 Yahya Hammad.` — `L1` closed.
+
+### What is new in the working tree (this commit)
+
+**`THIRD_PARTY_NOTICES.md` — `M1` closed.**
+Created from exactly the maintainer-provided table (2026-08-27), no licenses inferred:
+
+* 14 runtime deps (`anthropic==0.116.0` … `mcp==2.0.0`, `textual>=1.0,<2.0`, `rich>=13,<16`) + 3 test deps (`pytest>=8.0`, `pytest-mock>=3.14`, `pytest-asyncio>=1.0`) + 4 optional (`markitdown==0.1.6`, `protobuf==7.35.1`, `markdown` unpinned, `weasyprint` unpinned) — all listed `MIT`/`BSD-3-Clause`/`PSF`/`Apache-2.0`, all `Apache-2.0 Compatible: Yes`, all `Permissive`. Weasyprint kept as `BSD-3-Clause, Yes (with caveats), Permissive (Package) / LGPL (Dependencies)` verbatim.
+* Versions are the pins from `requirements.txt`/`pyproject.toml:61` where pinned; `markdown`/`weasyprint` left `unpinned` because `pyproject.toml:67` `pdf = ["markdown","weasyprint"]` has no pins — no assumption made; asked to pin later if desired.
+* No `pyproject.toml` change needed for `M1` beyond the `M2` addition — `THIRD_PARTY_NOTICES.md` is documentation for scanners; `license = {text="Apache-2.0"}` already declares the project's own license.
+
+### What remains open (from that same review)
+
+`H1` no `CONTRIBUTING.md` (inbound = Apache-2.0 + DCO), `H2` no `SECURITY.md` + output disclaimer, `M3` scrape/ToS/verbatim-quote note, `M4` `CODE_OF_CONDUCT`/`PRIVACY` — all still open, none blocking `git push` (tracked below as next checklist). `C2` key rotation still open as owner action.
+
+### Verification
+
+`python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['license'])"` → `{'text':'Apache-2.0'}`. `git log --oneline -3` → `e3a3bbe`, `66a4f86`, `8011893` as above. `git status` → only `THIRD_PARTY_NOTICES.md` untracked before this entry. No test change expected — docs/metadata only; `pytest -q` still `2605 passed, 18 skipped` (measured before).
