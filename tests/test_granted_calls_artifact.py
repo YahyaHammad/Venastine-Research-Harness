@@ -42,13 +42,13 @@ class TestTheArtifact:
         mocker.patch("core.reasoning.output_writer._try_write_pdf")
         mocker.patch("core.reasoning.output_writer.write_confidence_chart",
                      create=True, side_effect=lambda *a, **kw: None)
-        run = _run_with([{"pass": "Pass 5", "tool": "mcp__lib__search",
+        run = _run_with([{"pass": "Pass 4", "tool": "mcp__lib__search",
                           "params": {"q": "x"}}])
         path = os.path.join(write_run_artifacts(run), "granted_calls.json")
 
         assert os.path.exists(path)
         recorded = json.loads(open(path, encoding="utf-8").read())
-        assert recorded[0]["pass"] == "Pass 5"
+        assert recorded[0]["pass"] == "Pass 4"
         assert recorded[0]["tool"] == "mcp__lib__search"
         # The PARAMS matter as much as the name: "the search tool ran 40
         # times" is not an audit trail, "it searched for these things" is.

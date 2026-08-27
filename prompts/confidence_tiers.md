@@ -1,6 +1,6 @@
-# Pass 4 — Confidence Tiers (documentation only, NOT a live prompt)
+# Pass 5 — Confidence Tiers (documentation only, NOT a live prompt)
 
-This file is not loaded as a system prompt. Pass 4 makes zero LLM calls by
+This file is not loaded as a system prompt. Pass 5 makes zero LLM calls by
 design — see `core/reasoning/confidence_scoring.py` for the actual
 deterministic scoring logic. This file exists purely to document, for a
 human reader, what that module computes and why.

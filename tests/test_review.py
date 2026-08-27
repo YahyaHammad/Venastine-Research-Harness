@@ -461,9 +461,9 @@ class TestAcceptedCorrections:
         assert "corrected text" in resynth[0]["input"]
 
     def test_a_tier_override_marks_the_score_breakdown(self, mocker, make_stage):
-        """Pass 4's breakdown was computed from data the review did not
+        """Pass 5's breakdown was computed from data the review did not
         change, so it still describes the OLD tier. Unmarked,
-        04_confidence.json shows a 0.91 raw_score beside a downgraded LOW
+        05_confidence.json shows a 0.91 raw_score beside a downgraded LOW
         and reads as a bug in the scoring formula."""
         run = _reviewed_run()
         _stub_reviewer(mocker, [TIER_FINDING])
@@ -1192,7 +1192,7 @@ _CANNED = {
     "Pass 0": '{"key_entities_or_subjects": []}',
     "Pass 2": "[]",
     "Pass 3c": '{"gaps": [], "coverage_score": 1}',
-    "Pass 5": '{"per_claim_flags": {}}',
+    "Pass 4": '{"per_claim_flags": {}}',
 }
 
 
@@ -1963,7 +1963,7 @@ class TestUnpinnedReviewProperties:
         from core.reasoning.review import _review_input
 
         run = _reviewed_run()
-        run.log("Pass 4: tiered 2 claim(s).")
+        run.log("Pass 5: tiered 2 claim(s).")
 
         text = _review_input(run)
 
@@ -1971,7 +1971,7 @@ class TestUnpinnedReviewProperties:
         assert '"id": "c1"' in text                         # each claim,
         assert '"confidence_tier": "HIGH"' in text          # with its tier
         assert "REPORT v1" in text                          # the report
-        assert "- Pass 4: tiered 2 claim(s)." in text       # and the trace
+        assert "- Pass 5: tiered 2 claim(s)." in text       # and the trace
 
     def test_a_refinement_retargeting_another_claim_is_dropped(
             self, mocker, real_harness_tier):

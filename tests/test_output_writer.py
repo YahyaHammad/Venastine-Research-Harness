@@ -88,8 +88,8 @@ def test_write_run_artifacts_creates_all_expected_files(tmp_path, monkeypatch):
         "03_grounding.json",
         "03_critic.json",
         "03_completeness.json",
-        "04_confidence.json",
-        "05_assumptions.json",
+        "04_assumptions.json",
+        "05_confidence.json",
         "06_revisions.json",  # C2 has revision_text
         "trace.md",
         "report.md",
@@ -148,8 +148,8 @@ def test_write_run_artifacts_file_contents(tmp_path, monkeypatch):
     with open(os.path.join(output_dir, "report.md"), encoding="utf-8") as f:
         assert f.read() == "# Report\n\nThe answer is 42."
 
-    # 04_confidence.json: tier + score_breakdown per claim.
-    with open(os.path.join(output_dir, "04_confidence.json"), encoding="utf-8") as f:
+    # 05_confidence.json: tier + score_breakdown per claim.
+    with open(os.path.join(output_dir, "05_confidence.json"), encoding="utf-8") as f:
         confidence = json.load(f)
     assert confidence[0] == {"claim_id": "C1", "tier": "HIGH", "score_breakdown": {"base": 0.9}}
 

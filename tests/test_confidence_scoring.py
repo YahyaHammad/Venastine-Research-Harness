@@ -1,7 +1,7 @@
 """
 test_confidence_scoring.py
 
-Pass 4 -- deterministic, pure-Python scoring. Zero LLM calls, zero
+Pass 5 -- deterministic, pure-Python scoring. Zero LLM calls, zero
 mocking required at all; this file imports only confidence_scoring and
 the Claim dataclass.
 
@@ -682,7 +682,7 @@ class TestTheBreakdownRecordsWhatWasApplied:
 
 
 class TestPassFourSaysWhatItHadToCorrect:
-    """Pass 4 makes no model call, so a value it worked around has nowhere
+    """Pass 5 makes no model call, so a value it worked around has nowhere
     else to surface. run.trace is the artifact base.py calls as trustworthy
     as the report -- and silently scoring around a bad value is exactly
     what #75 measured."""
@@ -717,7 +717,7 @@ class TestPassFourSaysWhatItHadToCorrect:
         assert any("scored on the factual formula" in line for line in run.trace)
 
     def test_an_ordinary_claim_traces_nothing(self):
-        """THE CONTROL, and the one that matters most here: a Pass 4 that
+        """THE CONTROL, and the one that matters most here: a Pass 5 that
         logged on every claim would make the four lines above worthless
         precisely when a run has hundreds of claims."""
         run = self._run_with(grounding_status="grounded",

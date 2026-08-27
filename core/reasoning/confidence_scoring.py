@@ -1,7 +1,7 @@
 """
 core/reasoning/confidence_scoring.py
 
-Pass 4 -- confidence tiering. ZERO LLM calls, by design: this is a
+Pass 5 -- confidence tiering. ZERO LLM calls, by design: this is a
 deterministic, documented weighted formula over already-computed data
 (grounding status, critic severity, assumption flags). Kept as its own
 module, separate from orchestrator.py, so the weights can be tuned later
@@ -235,12 +235,12 @@ def run_confidence_tiering(
     run: PipelineRun, ensemble_n: int = 0,
     claims: list[Claim] | None = None,
 ) -> None:
-    """The actual Pass 4 entry point the orchestrator calls. Mutates
+    """The actual Pass 5 entry point the orchestrator calls. Mutates
     the claims in place; zero LLM calls. Pass ensemble_n > 0 to use
     the ensemble formula variant (ROADMAP §10).
 
     `claims` narrows WHICH claims are re-tiered, and defaults to all of
-    them -- which is Pass 4 itself, where every claim is in play. The
+    them -- which is Pass 5 itself, where every claim is in play. The
     6a/6c loop passes its current batch instead: it calls this once per
     round, and re-tiering the whole run there recomputes claims that are
     already finished. A claim D2 had exhausted got its tier restored from
@@ -264,12 +264,12 @@ def run_confidence_tiering(
 
 def _report_coercions(run: PipelineRun, claim: Claim, breakdown: dict,
                       ensemble_n: int) -> None:
-    """ROADMAP_v2 §30. Pass 4 makes no model call, so a value it had to
+    """ROADMAP_v2 §30. Pass 5 makes no model call, so a value it had to
     correct has nowhere else to surface.
 
     Every line here describes something that should have been impossible:
     the payload boundary rejects each of these at the pass that sent it and
-    re-asks. Reaching Pass 4 means the value survived §3's retries, or the
+    re-asks. Reaching Pass 5 means the value survived §3's retries, or the
     claim did not come through Pass 2 at all. `run.trace` is the artifact
     base.py calls as trustworthy as the report -- silently scoring around a
     bad value is precisely what #75 measured, so the correction is stated
@@ -277,27 +277,27 @@ def _report_coercions(run: PipelineRun, claim: Claim, breakdown: dict,
     """
     if "consistency_reported" in breakdown:
         run.log(
-            f"Pass 4: claim {claim.id} was asserted by candidates "
+            f"Pass 5: claim {claim.id} was asserted by candidates "
             f"{claim.asserted_by_candidates} against a denominator of "
             f"{ensemble_n} -- consistency clamped to 1.0. A numerator above "
             f"the denominator means Pass 2 misread the candidate labelling."
         )
     if ensemble_n > 0 and breakdown.get("consistency_score") is None:
         run.log(
-            f"Pass 4: claim {claim.id} carries no asserted_by_candidates on "
+            f"Pass 5: claim {claim.id} carries no asserted_by_candidates on "
             f"an ensemble run -- scored WITHOUT a disagreement penalty, "
             f"since an unreported numerator is not a numerator of zero."
         )
     if "unrecognised_grounding_status" in breakdown:
         run.log(
-            f"Pass 4: claim {claim.id} has grounding_status="
+            f"Pass 5: claim {claim.id} has grounding_status="
             f"{breakdown['unrecognised_grounding_status']!r}, which is not "
             f"one of {', '.join(sorted(GROUNDING_STATUSES))} -- scored as "
             f"ungrounded."
         )
     if "unrecognised_type" in breakdown:
         run.log(
-            f"Pass 4: claim {claim.id} has type="
+            f"Pass 5: claim {claim.id} has type="
             f"{breakdown['unrecognised_type']!r}, which is not one of "
             f"{', '.join(sorted(CLAIM_TYPES))} -- scored on the factual "
             f"formula."

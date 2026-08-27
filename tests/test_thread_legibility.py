@@ -654,7 +654,7 @@ class TestTwoTierClassification:
         self._add_run(legacy_db, "modern", "2026-09-01 12:00:00.000000",
                       "2026-09-01 12:00:30.000000",
                       [{"pass": "Pass 0", "thread_id": "pass-zero"},
-                       {"pass": "Pass 4", "thread_id": "pass-four"}])
+                       {"pass": "Pass 5", "thread_id": "pass-four"}])
         for thread_id in ("pass-zero", "pass-four", "my-conversation"):
             created = ("2026-09-01 12:00:05.000000" if thread_id
                        != "my-conversation"

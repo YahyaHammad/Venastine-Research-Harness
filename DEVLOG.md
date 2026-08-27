@@ -6258,3 +6258,81 @@ catch-all, 2.1.0 through the explicit arm it added. So the file now passes on
 this particular surprise again.
 
 Counts 2622 -> 2623 (+1 test_mcp_client.py). No production code changed.
+
+
+## TUI tool payload parity + effort ultra (2026-08-27) — `bc1aa4c`
+
+Not a roadmap section. Two small inconsistencies found by using both shells, and one follow-up from `26393ef`.
+
+### What was reported
+
+1. **Research shows `▸ tool + digest` on every call, chat shows `→ tool` with no payload.** Research `tui/app.py:1294` / `orchestrator._translate:230` renders `param_digest(input)`; chat `tui/app.py:870` rendered only the name. Successful results are suppressed in *both* shells already — the difference is only the call.
+2. **Permission pop-up shows only the tool name.** `tui/screens.py:25` `PermissionScreen` did show `json.dumps(params)`, but the transcript `→ tool` line a user could see without opening the modal did not, so a decision based on the transcript alone was uninformed.
+3. **`26393ef` added `xhigh`/`max` to `config.DEFAULT_EFFORT_LEVELS` (was 3 → 5) and the `test_client_effort` suite still expected `xhigh` to be outside the fallback.** `test_effort_for_keeps_the_level_when_the_lookup_fails` now took the `in levels` early-return and never hit the `Could not verify effort` branch.
+
+### Decisions locked before building
+
+| Question | Choice | Why |
+|---|---|---|
+| Successful tool results — show or keep suppressed? | **Keep suppressed** | `tui/themes.py:217` `tool` vs `tool_error` already conveys failure via hue + `✗`; absence = success. Research deliberately suppresses for the same reason; volume would double otherwise. |
+| Permission modal — show digest or full payload? | **Full in TUI, redacted only in logs** | Informed consent needs the exact path/command/URL. `logging_setup._RedactingFormatter` + `check_output_policy` already redact the log sink; modal stays `json.dumps(params)` unredacted with a guard comment. |
+| Chat verbosity — mirror research or stay minimal? | **Chat like research, still suppressed** | Pass trace and TUI panel both use `param_digest` (redacted-before-truncation, 60/140 caps). |
+| Glyph | `▸` everywhere | Chosen by owner; `→` retired. Replay `⟩` also → `▸`. |
+| `xhigh`/`max` + `ultra` | **Keep `xhigh`/`max`, add `ultra` as sixth** | `GOOGLE_THINKING_BUDGETS` needs a budget per level; `tui/ravens.EFFORT_PLUMAGE` needs a glyph. `ultra` sits after `max` by owner cosmetic choice (pure order). Test probe moves to `mega` (outside any fallback). |
+
+### What was built
+
+- `tui/app.py:31` `from safety.policy_enforcement import param_digest, redact_secrets`; `VenastineApp._tool_names: dict` id→name map (parallel to `orchestrator._translate:199` per-pass map), cleared on `on_turn_finished:1272` and `switch_to_thread:1478`; `on_loop_event_message:874` `▸ {name}  {digest}` via `write_role("tool")`, `tool_result` `✗ {tool}  {error}` via `write_role("tool_error")` + `redact_secrets`.
+- `tui/screens.py:25` `PermissionScreen` docstring + inline guard: *full and unredacted by design; logs redact*.
+- `core/replay.py:108` `⟩ → ▸` — replay now matches live transcript (same `param_digest` producer).
+- `config.py:164,172` `DEFAULT_EFFORT_LEVELS` `["low","medium","high","xhigh","max","ultra"]`, `GOOGLE_THINKING_BUDGETS["ultra"]=32_768`; `tui/ravens.py:125` `ultra:▇`.
+- `tests/test_client_effort.py:310` probe `xhigh→mega` (outside fallback), comment notes `ultra` is now valid. `config` order `ultra` after `max` is cosmetic — membership check is order-agnostic.
+
+### Why the log split matters
+
+`PermissionScreen` shows the user the exact value they are asked to authorise. `_RedactingFormatter.format` and `check_output_policy` already redact the same value on the two sinks that persist (`logs/app.log` and `MessageLog`). Adding redaction to the modal would make the consent uninformed; adding the full value to the log would make the secret durable.
+
+### Verification
+
+`pytest tests/test_client_effort.py` `test_effort_for_keeps_the_level...` — `mega` now hits the `Could not verify effort` warning as intended; `tests/test_tui.py` 152 passed (no glyph pin), full suite `2605 passed, 18 skipped` (was `2604 + 1 failed` before fix).
+
+
+## Pass rename 5↔4, 6b↔6c + central PASS_LABELS (2026-08-27)
+
+Not a roadmap section. A design-phase numbering mistake left the pipeline executing `Pass 5: Assumptions` *before* `Pass 4: Tier` and `Pass 6c: Re-validate` inside the `6a/6c` retry loop with `Pass 6b: Annotate` after it. Execution order was correct; numbers were not. The TUI side panel showed `Pass 4` bare with no verb, same as the transcript.
+
+### What was kept
+
+**Mechanics untouched, only names.** The assumption-audit LLM call stays immediately after `3c` and before tiering; the tiering pure-code `run_confidence_tiering` stays after it; the `while flagged:` loop stays `6a → 6b(re-validate) → D2`, with `6c(annotate)` templated after the loop. One string rename, thirty sites.
+
+### Why central
+
+`prompts/system_prompts.py:29-50` now owns `PASS_LABELS: dict[str,str]` + `pass_label(id)→"Pass n: Label"` (15 entries, single-word values for the 22-col sidebar). Both `tui/widgets.py:387` `ResearchProgress._redraw` and `tui/app.py:1293-1312` transcript (`→/←/·`) render via it, so a future rename touches one table, not two renderers plus three markdown tables. Dict order is execution order `0,1,2,3a,3b,3c,4,6a,6b`.
+
+### What was built
+
+- `prompts/system_prompts.py:12-21` `passes_source_files` keys `Pass 5→Pass 4` (`assumption_audit.md`), `Pass 6c→Pass 6b` (`revalidate.md`); comment `Pass 5 and Pass 6c are absent` (was `4/6b`); dict order `4` before `6a` before `6b`. Filenames kept — they are functional (`assumption_audit`, `revalidate`, `confidence_tiers`, `annotate`), not numeric, so a file rename would be `annotate.md` with re-validation content.
+- Prompt headers `assumption_audit.md:1` `# Pass 4`, `confidence_tiers.md:1` `# Pass 5`, `revalidate.md:1` `# Pass 6b`, `annotate.md:1` `# Pass 6c`.
+- `core/reasoning/orchestrator.py:1-5` docstring, `L1116-1130` `Pass 4` audit + `Pass 5` tier + `D1+6a/6b/D2→6c` comments, `_stage`/`_tier_events` comments `Pass 5`/`6b`, `D0` routing `Pass 5→4`, ensemble error `Pass 5`.
+- `core/reasoning/base.py:5,83,91,167-168` tiering `Pass 4→5`, audit `Pass 5→4`, `coverage_gaps` derived `Pass 4→5`.
+- `core/reasoning/confidence_scoring.py:4,238,243,267,272,280,287,293,300` `Pass 4→5` logs + docstring.
+- `core/reasoning/events.py:81,85` `Pass 4→5`, `6c→6b` plus `6b→6c`.
+- `core/reasoning/payload_validation.py` `SPECS` keys `Pass 5→Pass 4`, `Pass 6c→Pass 6b` and `Pass 4↔5` tier comments via placeholder swap.
+- `core/reasoning/output_writer.py:73-74` `04_assumptions.json`/`05_confidence.json` (was `05/04`), `06_revisions` comment `6a/6b`, claim-serialization comment `3a/3b/4/6a/6b`.
+- `config.py:60,88` ensemble penalty `Pass 4→5`.
+- `core/reasoning/review.py:593` `04_confidence→05_confidence` + `Pass 4→5`.
+- `research-mode-birds-eye.mermaid:18-49` nodes `P4/P5` swapped, `P6b/P6c` swapped, edges `P2→P5`, `P3c→P4→P5`, `P6a→P6b→D1b`, `FB→P6c`, classes `P2,P4` purple / `P3a,P6b` blue / `P5` olive / `P6c` gray.
+- `README.md:72-83` table `4 Assumptions` before `5 Tier`, `6b Re-validate` before `6c Annotate`, `Pass 5, Pass 6c` zero-LLM line.
+- `ARCHITECTURE.md:24,152,169-174,383,1158-1176,1188-1203,1218,1224` same swaps + table rows `4` before `5`, `6b` before `6c`.
+- `AGENTS.md:222,227,229,231` `Pass 5`/`Pass 6c` zero-LLM + tiering docs.
+- `tui/widgets.py:1,387` import `pass_label`, `ResearchProgress._redraw` `f"{marker} {pass_label(pass_id)}"`.
+- `tui/app.py:1293-1312` transcript `→/←/· {pass_label(pass_id)}`.
+- Tests bulk-swapped via placeholder `Pass 4↔5`, `Pass 6b↔6c`, artifacts `04_confidence↔05_confidence` in `tests/test_output_writer.py:91`; `conftest.py:105,107` `Pass 4/6b` specs; `test_untrusted_content.py:43,45` digests `Pass 4 14de…→744f6b…`, `Pass 6b 6d0fb…→da805a…` (recomputed verbatim from current prompts).
+
+### The digest re-pinning, and why it matters
+
+`tests/test_untrusted_content.py` pins every pass prompt by `sha256(passes_prompts[pass_id])[:16]`. Swapping two keys changes two digests even though no prompt text changed — the guard correctly flagged the rename as a prompt change. New digests `Pass 4 744f6b116d0a352b` (was `14de…`) and `Pass 6b da805a6d5e12df4a` (was `6d0fb…`) were re-measured, not argued.
+
+### Verification
+
+`pytest tests/test_orchestrator.py tests/test_payload_validation.py tests/test_confidence_scoring.py tests/test_output_writer.py` 158 passed (was 33 failed before bulk swap). Full suite `2605 passed, 18 skipped` after both batches (was `2603 + 2` untrusted-content mismatches).

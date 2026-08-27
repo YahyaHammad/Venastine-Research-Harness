@@ -2,11 +2,11 @@
 core/reasoning/base.py
 
 Structured claim-level data model for the deep-research pipeline. This
-REPLACES the earlier free-text PipelineContext/PassResult design -- Pass 4
+REPLACES the earlier free-text PipelineContext/PassResult design -- Pass 5
 (confidence tiering), gate D0 (claim-type routing), and D1/D2 (threshold and
 retry-cap checks) all need to reason about individual claims, not a
 concatenated paragraph of prior-pass prose. Passes that produce
-structured output (2, 3a, 3b, 5) mutate Claim objects in place; passes
+structured output (2, 3a, 3b, 4) mutate Claim objects in place; passes
 that produce free text (0, 1, 3c, final synthesis) populate the
 corresponding PipelineRun fields directly.
 """
@@ -80,7 +80,7 @@ class Claim:
     contradictions: list[str] = field(default_factory=list)
     critic_severity: float = 0.0
 
-    # Populated by Pass 5 (ALL claims, factual or not).
+    # Populated by Pass 4 (ALL claims, factual or not).
     assumption_flags: list[str] = field(default_factory=list)
 
     # Populated by Pass 2 in ensemble mode (ROADMAP §10). Lists the
@@ -88,15 +88,15 @@ class Claim:
     # Empty/unused when ensemble mode is off.
     asserted_by_candidates: list[int] = field(default_factory=list)
 
-    # Populated by Pass 4 (pure code, no LLM call) -- see confidence_scoring.py.
+    # Populated by Pass 5 (pure code, no LLM call) -- see confidence_scoring.py.
     confidence_tier: Optional[ConfidenceTier] = None
     score_breakdown: dict = field(default_factory=dict)
 
-    # Populated by the D1/6a/6c/D2/fallback retry loop.
+    # Populated by the D1/6a/6b/D2/fallback retry loop.
     revision_text: Optional[str] = None
     retry_count: int = 0
 
-    # Populated by 6b (annotate) / fallback -- the actual final text and
+    # Populated by 6c (annotate) / fallback -- the actual final text and
     # confidence tag a claim carries into the merged output.
     final_text: Optional[str] = None
     annotation: Optional[str] = None
@@ -162,10 +162,10 @@ class PipelineRun:
     # did not use ensemble mode -- raw_response alone is that run's
     # record, exactly as before this field existed.
     candidates: list[dict] = field(default_factory=list)
-    claims: list[Claim] = field(default_factory=list)          # Pass 2, mutated by 3a/3b/5/4/6a/6c/6b
+    claims: list[Claim] = field(default_factory=list)          # Pass 2, mutated by 3a/3b/4/5/6a/6b/6c
     completeness: dict = field(default_factory=dict)           # Pass 3c: {"gaps": [...], "coverage_score": ...}
-    coverage_gaps: list[dict] = field(default_factory=list)    # Pass 4-derived: gaps tagged UNVERIFIED_COVERAGE
-    assumptions: dict = field(default_factory=dict)            # Pass 5
+    coverage_gaps: list[dict] = field(default_factory=list)    # Pass 5-derived: gaps tagged UNVERIFIED_COVERAGE
+    assumptions: dict = field(default_factory=dict)            # Pass 4
     trace: list[str] = field(default_factory=list)
     # §25: tool calls that ran on a PRE-FLIGHT grant rather than a live
     # approval, one dict per call ({"pass", "tool", "params"}). Empty for

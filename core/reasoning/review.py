@@ -590,9 +590,9 @@ def _apply_one(run, decision) -> bool:
         # review_override marker below was added for, one field over
         # (review r3-1).
         claim.annotation = f"[{decision['proposed']}]"
-        # Pass 4's breakdown was computed from grounding and critic data
+        # Pass 5's breakdown was computed from grounding and critic data
         # that the review did not change, so it still describes the OLD
-        # tier. Without this marker 04_confidence.json shows a 0.91
+        # tier. Without this marker 05_confidence.json shows a 0.91
         # raw_score beside a reviewer-downgraded LOW and reads as a bug in
         # the scoring formula. score_breakdown is already a dict, so this
         # adds no field to Claim and triggers no vars(c) migration (V8).

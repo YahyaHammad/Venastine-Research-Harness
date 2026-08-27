@@ -21,7 +21,7 @@ These recur throughout the codebase. When you're unsure which file something bel
 
 - **Mechanism vs. policy.** `config.py` holds values; `security/permissions.py` holds the logic that decides things based on those values. `tools/registry.py` holds dispatch mechanics; it never defines policy itself.
 - **One file, one clearly-named job.** If a file's job needs "and" to describe it, it's probably two files.
-- **Deterministic code over LLM calls, wherever a check is actually mechanical.** Pass 4 (confidence scoring) makes zero LLM calls. Thresholds, retry counts, and dedup logic are Python, never prompts.
+- **Deterministic code over LLM calls, wherever a check is actually mechanical.** Pass 5 (confidence scoring) makes zero LLM calls. Thresholds, retry counts, and dedup logic are Python, never prompts.
 - **Translate at the boundary, once.** Provider-specific formats (Anthropic vs. OpenAI message/tool shapes) are translated in exactly one place — `core/client.py` — never scattered across callers.
 - **Passes distill, they don't share raw history.** Each research pass gets its own fresh conversation thread and produces a compact structured result; the NEXT pass is seeded with that distillation, not the previous pass's full transcript. This keeps context lean and keeps each pass's concerns from leaking into another's.
 - **Persistence is layered, not merged.** "How do I connect to a database" (`database.py`), "what's the schema and how do I read/write rows" (`storage.py`), and "what does the agent loop actually hold in memory this turn" (`core/memory.py`) are three different concerns in three different files. This is the exact boundary that got confused before — see §4.4–4.6 below for the precise contract of each.
@@ -149,7 +149,7 @@ Venastine Research Harness/
 │       ├── base.py                # Claim / PipelineRun data model for the research pipeline (now carries run_id + §25 granted_calls + §20 subagent_reviews + §27 pass_threads)
 │       ├── authorization.py       # ROADMAP_v2 §25: the pipeline's grant POLICY -- candidates(), parse_grant_spec(), NOTHING_TO_GRANT. Shared by both shells so they cannot drift. Per-tool exclusions live on ToolSpec.grant_policy (R13), which the §18 sign-off reads too
 │       ├── events.py              # §22: PipelineEvent -- kind-discriminated, SEPARATE from core/events.py's LoopEvent (P1). PIPELINE_EVENT_KINDS names all eleven kinds (§26 added stage / tool_call / tool_result / pass_activity)
-│       ├── confidence_scoring.py  # Pass 4 -- deterministic scoring, ZERO LLM calls
+│       ├── confidence_scoring.py  # Pass 5 -- deterministic scoring, ZERO LLM calls
 │       ├── orchestrator.py        # sequences all 10 passes + D0/D1/D2 + _run_pass_with_json_retry + §5 per-pass checkpoints + §11 critic-model routing + §25 authorization passthrough + §20's _review_stage. §22: a GENERATOR (stream_deep_research_pipeline) with run_pipeline_to_completion draining it for the unchanged public entry point
 │       ├── review.py              # ROADMAP_v2 §20: the post-pipeline review -- propose (run_review) / consent (walk_consent) / correct (apply), three functions so the mutating one has no model in it
 │       ├── json_retry.py          # ROADMAP §3's malformed-JSON recovery, shared by the ten passes and §20's reviewer. Takes an ALREADY-OBTAINED response; each caller starts its own first attempt
@@ -166,12 +166,12 @@ Venastine Research Harness/
 │   ├── source_grounding.md        # Pass 3a
 │   ├── critic_pass.md             # Pass 3b
 │   ├── completeness.md            # Pass 3c
-│   ├── assumption_audit.md        # Pass 5
+│   ├── assumption_audit.md        # Pass 4
 │   ├── revise.md                  # Pass 6a
-│   ├── revalidate.md              # Pass 6c
+│   ├── revalidate.md              # Pass 6b
 │   ├── final_synthesis.md         # Final synthesis
-│   ├── confidence_tiers.md        # documentation ONLY -- Pass 4 has no live prompt
-│   └── annotate.md                # documentation ONLY -- Pass 6b is templated, not a live prompt
+│   ├── confidence_tiers.md        # documentation ONLY -- Pass 5 has no live prompt
+│   └── annotate.md                # documentation ONLY -- Pass 6c is templated, not a live prompt
 │
 ├── security/
 │   ├── capability.py              # ROADMAP_v2 §28: CommandProfile + containment + the one auto-approval rule -- generic, reads no config, knows no tool
@@ -380,7 +380,7 @@ This section exists specifically because earlier drafts of this project put pers
 
 ### 4.9 `core/reasoning/base.py`, `confidence_scoring.py`, `orchestrator.py` — the research pipeline
 
-Covered in full in §7 below. The short version of the file boundary: `base.py` is data only (`Claim`, `PipelineRun`), `confidence_scoring.py` is Pass 4's pure-Python formula (must remain zero LLM calls), `orchestrator.py` sequences everything and is the only one of the three that calls `RunAgentLoop`. Since §22 (see §4.22) the sequencing is a generator, and `base.py` is still data only — the event watermark deliberately lives on the orchestrator, not on `PipelineRun`.
+Covered in full in §7 below. The short version of the file boundary: `base.py` is data only (`Claim`, `PipelineRun`), `confidence_scoring.py` is Pass 5's pure-Python formula (must remain zero LLM calls), `orchestrator.py` sequences everything and is the only one of the three that calls `RunAgentLoop`. Since §22 (see §4.22) the sequencing is a generator, and `base.py` is still data only — the event watermark deliberately lives on the orchestrator, not on `PipelineRun`.
 
 ### 4.10 `security/permissions.py` vs. `tools/registry.py`
 
@@ -1155,8 +1155,8 @@ class Claim:
     fallacies: list[str]                # Pass 3b (factual claims only)
     contradictions: list[str]
     critic_severity: float
-    assumption_flags: list[str]         # Pass 5 (ALL claims)
-    confidence_tier: Optional[str]      # Pass 4 (pure code)
+    assumption_flags: list[str]         # Pass 4 (ALL claims)
+    confidence_tier: Optional[str]      # Pass 5 (pure code)
     score_breakdown: dict
     revision_text: Optional[str]        # 6a
     retry_count: int
@@ -1172,8 +1172,8 @@ class PipelineRun:
     raw_response: str           # Pass 1
     claims: list[Claim]         # Pass 2, mutated throughout
     completeness: dict          # Pass 3c
-    coverage_gaps: list[dict]   # Pass 4-derived, tagged UNVERIFIED_COVERAGE
-    assumptions: dict           # Pass 5
+    coverage_gaps: list[dict]   # Pass 5-derived, tagged UNVERIFIED_COVERAGE
+    assumptions: dict           # Pass 4
     trace: list[str]            # human-readable audit log
     final_report: str
 ```
@@ -1189,21 +1189,21 @@ class PipelineRun:
 | 3a — Source grounding | Yes (batched, w/ tools) | factual claims, deduped entity list | grounding status per claim |
 | 3b — Critic | Yes | raw response, factual claims + grounding | fallacies/contradictions/severity |
 | 3c — Completeness | Yes | **original query + plan only, NOT raw_response** | gaps + coverage_score |
-| 5 — Assumption audit | Yes | query, ALL claims, grounding, critic, **completeness** | hidden premises, per-claim flags |
-| **4 — Confidence tiering** | **No (pure code)** | grounding, critic, completeness, assumptions | tier + score_breakdown per claim |
+| 4 — Assumption audit | Yes | query, ALL claims, grounding, critic, **completeness** | hidden premises, per-claim flags |
+| **5 — Confidence tiering** | **No (pure code)** | grounding, critic, completeness, assumptions | tier + score_breakdown per claim |
 | **D1 — threshold check** | **No (pure code)** | tiers | flagged = tier in `{LOW, UNVERIFIED}` |
 | 6a — Revise | Yes (ONE batched call, all flagged claims) | flagged claims + their specific feedback | revised text per claim |
-| 6c — Re-validate | Yes (batched, re-runs 3a/3b logic) | revised claims only | fresh grounding + critic for that subset |
+| 6b — Re-validate | Yes (batched, re-runs 3a/3b logic) | revised claims only | fresh grounding + critic for that subset |
 | **D2 — retry cap check** | **No (pure code)** | retry_count vs `MAX_PIPELINE_RETRIES` | loop back to 6a, or fallback |
 | ↳ *where retry_count comes from* | **No (pure code)** | every claim still in `flagged` after 6a returns — the ROUND, not 6a's response (#74) | the cap above is reachable without the model's cooperation |
 | Fallback | No (template) | — | tier forced to UNVERIFIED, templated note |
-| 6b — Annotate | No (templated in this version) | clean claims | `[TIER]` tag attached |
+| 6c — Annotate | No (templated in this version) | clean claims | `[TIER]` tag attached |
 | Merge | No (pure code) | — | final claim set assembled |
 | Final synthesis | Yes | merged annotated claims + coverage gaps | human-facing report |
 
 **Important non-obvious behaviors, found via testing, not assumed:**
 
-- **Pass 6c does NOT re-run Pass 5.** It only re-runs 3a/3b logic on the revised subset. This means a claim flagged *purely* for an assumption-audit issue has no mechanism to clear during the retry loop — `assumption_flags` is never reassessed after revision — and will typically exhaust `MAX_PIPELINE_RETRIES` and land in fallback (`UNVERIFIED`), even if the revision genuinely addressed the assumption. This was confirmed via a full mocked pipeline run, not assumed. If you want assumption-flagged claims to be able to clear, Pass 6c (or a new step) needs to explicitly re-check assumption flags on the revised text — this is a real design decision, not yet made.
+- **Pass 6b does NOT re-run Pass 4.** It only re-runs 3a/3b logic on the revised subset. This means a claim flagged *purely* for an assumption-audit issue has no mechanism to clear during the retry loop — `assumption_flags` is never reassessed after revision — and will typically exhaust `MAX_PIPELINE_RETRIES` and land in fallback (`UNVERIFIED`), even if the revision genuinely addressed the assumption. This was confirmed via a full mocked pipeline run, not assumed. If you want assumption-flagged claims to be able to clear, Pass 6b (or a new step) needs to explicitly re-check assumption flags on the revised text — this is a real design decision, not yet made.
 - **Each pass gets its own fresh `ConversationMemory` / thread** — passes do NOT share raw conversation history. What carries forward is the distilled JSON each pass produces, explicitly folded into the next pass's opening message by `orchestrator.py`. This is deliberate (keeps context lean, keeps each pass's concerns from leaking) — do not "simplify" this into one shared thread without understanding the tradeoff (see the reasoning discussion this design came from).
 - **The scoring formula in `confidence_scoring.py` has a documented, tested subtlety:** for non-factual claims, the score cap (`NON_FACTUAL_SCORE_CAP`) is applied to the critic component BEFORE subtracting the assumption-flag penalty, not after. Applying it after would let the cap silently swallow the penalty whenever the pre-penalty score already exceeded it — this was a real bug, caught by testing two claims (one flagged, one not) that landed on the identical tier before the fix. Don't "simplify" this back to capping the final score.
 
@@ -1215,13 +1215,13 @@ def run_deep_research_pipeline(user_query: str, model: str, provider_name: str =
 
 Returns the full `PipelineRun` (not just the final report) — every intermediate pass's output, the trace log, and every claim's final tier are all inspectable, not just the finished prose.
 
-**Malformed-JSON recovery (ROADMAP §3):** the eight JSON-emitting passes (0, 2, 3a, 3b, 3c, 5, 6a, 6c) go through `_run_pass_with_json_retry()` instead of bare `_run_pass()`. On a parse failure it re-enters the SAME pass-thread via `RunAgentLoop.continue_conversation()` with a corrective follow-up (parse error + first 200 chars of the failed output + "respond with ONLY valid JSON"); the model sees its own failed turn because `_run()`'s always-persist behavior already wrote it to the thread. Up to `config.MAX_JSON_RETRIES` corrective attempts; an unrecoverable failure raises `ValueError`. The two plain-text passes (1, Final synthesis) stay on bare `_run_pass()` — they have nothing to parse.
+**Malformed-JSON recovery (ROADMAP §3):** the eight JSON-emitting passes (0, 2, 3a, 3b, 3c, 4, 6a, 6b) go through `_run_pass_with_json_retry()` instead of bare `_run_pass()`. On a parse failure it re-enters the SAME pass-thread via `RunAgentLoop.continue_conversation()` with a corrective follow-up (parse error + first 200 chars of the failed output + "respond with ONLY valid JSON"); the model sees its own failed turn because `_run()`'s always-persist behavior already wrote it to the thread. Up to `config.MAX_JSON_RETRIES` corrective attempts; an unrecoverable failure raises `ValueError`. The two plain-text passes (1, Final synthesis) stay on bare `_run_pass()` — they have nothing to parse.
 
 **Pipeline persistence wrap (ROADMAP §5 minimal core):** the whole pass sequence runs inside a try/except. On entry, `create_pipeline_run()` inserts a `PipelineRunRecord` (`status='running'`) and its id is stored on `run.run_id`. On clean completion, `update_pipeline_run(run.run_id, run, status='complete')` persists the final state into the record's separate columns (`claims_json` / `trace_json` / `coverage_gaps_json` / `final_report`). On any exception, the except block calls `update_pipeline_run(..., status='failed')` with the partial state before re-raising; if that storage write itself fails, the failure is logged at ERROR via the module logger (not `run.trace`, which would be inert once persistence has failed) and the original exception still propagates — the status update is best-effort and never masks the real error.
 
 **Ensemble roster guard (ROADMAP §10, as revisited):** `_ensemble_roster(ensemble_mode)` raises `ValueError` before any work on three conditions — ensemble mode on with an empty `config.ENSEMBLE_MODELS`, a malformed entry, or fewer than two **distinct** `(provider_name, model)` pairs. A separate function so every refusal is testable without running a pipeline.
 
-This *replaces* §16's sampling-parameter refusal, which guarded a mechanism that no longer exists: ensemble mode raised `temperature` on N runs of one model, and current Anthropic models reject that parameter, so §10 was built, documented as working, and could not run against `config.MODEL_NAME`'s default. What carries over is the reason. Refusing beats running degraded, because a degraded ensemble run does not fail — it generates N near-identical candidates, spends N times the tokens, and reports maximal cross-candidate consistency for every claim, feeding a falsely confident number into Pass 4.
+This *replaces* §16's sampling-parameter refusal, which guarded a mechanism that no longer exists: ensemble mode raised `temperature` on N runs of one model, and current Anthropic models reject that parameter, so §10 was built, documented as working, and could not run against `config.MODEL_NAME`'s default. What carries over is the reason. Refusing beats running degraded, because a degraded ensemble run does not fail — it generates N near-identical candidates, spends N times the tokens, and reports maximal cross-candidate consistency for every claim, feeding a falsely confident number into Pass 5.
 
 **The distinctness check is that reason restated for the new mechanism.** Repeating one entry N times is exactly how the original defect can be recreated through the new config, since no sampling variation remains to make the candidates differ. Counting entries instead of distinct pairs is a pinned mutation.
 
@@ -1339,7 +1339,7 @@ The single-payload test (`__import__('os').system(...)`) is kept, and was itself
 - **`tools/registry.py` at one point only registered 1 of 5 imported tools**, and separately had a dead/wrong import line (`import builtin.fetch_url as fetch_url`) alongside a correct one a few lines below. When adding a tool: import it, register it with `registry.register(ToolSpec(...))`, and confirm the registration line actually exists — importing a tool module is not the same as making it callable.
 - **`fetch_url` was registered, documented as Working, and denied on every call for its entire life**, because it had no field in `config.ToolPermissions` and `getattr(permissions, name, False)` therefore returned `False`. Nothing logged and nothing raised: the schema was still advertised to the model, so the model kept choosing the tool, and the only trace was a denial string inside a tool result it then worked around. This is the same shape as the gotcha above — a tool that is *nearly* wired — one layer further down, which is why §15/D24 replaced the defensive `getattr` default with an import-time check (`assert_permissions_declared`) rather than just adding the missing field. **Adding a tool is now four steps: import it, register it, add a boolean to BOTH `config.ToolPermissions` and `config.ToolApprovals`, and the import-time check enforces the third.** The general lesson, recorded in ROADMAP_v2's *Why these calls*: a defensive default is only safe where absence is impossible.
 - **Ensemble mode (ROADMAP §10) was built, documented as Working, and could not execute against the harness's own default model.** Its diversity mechanism is a raised `temperature`, which current Anthropic models reject outright; `config.MODEL_NAME` defaults to `claude-sonnet-5`. Nothing caught it because `ENSEMBLE_MODE = False`, so the failing request was never made — and ROADMAP_v2 §14 then shipped the first convenient way to enable it. **This is the third instance of one shape** (after `fetch_url` registered-but-denied, and §14's argparse-defaults gap that made settings.json inert): a feature that is wired, documented, and has never been executed end to end on the shipped configuration. The recurring lesson is that "built" and "runs" are different claims, and only the second one is worth writing down. **Fixed in two stages.** §16 stopped the crash: `_sampling_kwargs()` drops the rejected parameter with a WARNING instead of sending it, and the pipeline refused outright rather than generating N identical candidates and reporting maximal cross-candidate consistency for all of them. §10's revisit then removed the mechanism: diversity comes from a roster of different models, so no sampling parameter is involved and no model is excluded.
-  **Reading the code for that revisit found the defect was wider than "broken on Anthropic".** `ENSEMBLE_TEMPERATURE = 1.0` was an ABSOLUTE value used as though it were a raise — `_sampling_kwargs` sends `temperature` only when explicitly given, so omitting it means "provider default", and 1.0 is the documented default on OpenAI Chat Completions and Google's `GenerateContentConfig`. On the two providers the revisit note said ensemble "works only on", the diversity knob plausibly sent the value the provider would have used anyway, and across the 14 providers in `providers.json.example` the default differs — so what "2 of 3 agreed" meant varied by provider with no way for Pass 4 to know. Two live checks are recorded as still open: those provider defaults, and whether OpenAI's reasoning models belong in `MODELS_REJECTING_SAMPLING_PARAMS` (the set lists only Anthropic names, so §16's guard likely never fired for `gpt-5.1` — the model AGENTS.md's own example command names). **The generalisable half: a config value that reads as a delta but is sent as an absolute is not checkable by any test that mocks the provider.**
+  **Reading the code for that revisit found the defect was wider than "broken on Anthropic".** `ENSEMBLE_TEMPERATURE = 1.0` was an ABSOLUTE value used as though it were a raise — `_sampling_kwargs` sends `temperature` only when explicitly given, so omitting it means "provider default", and 1.0 is the documented default on OpenAI Chat Completions and Google's `GenerateContentConfig`. On the two providers the revisit note said ensemble "works only on", the diversity knob plausibly sent the value the provider would have used anyway, and across the 14 providers in `providers.json.example` the default differs — so what "2 of 3 agreed" meant varied by provider with no way for Pass 5 to know. Two live checks are recorded as still open: those provider defaults, and whether OpenAI's reasoning models belong in `MODELS_REJECTING_SAMPLING_PARAMS` (the set lists only Anthropic names, so §16's guard likely never fired for `gpt-5.1` — the model AGENTS.md's own example command names). **The generalisable half: a config value that reads as a delta but is sent as an absolute is not checkable by any test that mocks the provider.**
 - **A fresh database was missing `pipelinerunrecord` entirely, so ROADMAP §5's pipeline persistence did not work on a clean install.** SQLModel table classes register on `SQLModel.metadata` at module-IMPORT time, and `create_db_and_tables()` creates only what is registered when it runs. `storage` reached metadata by luck (`main.py` → `core.loop` → `core.memory` → `storage`); `pipeline_storage` did not, because `main.py` imports the orchestrator lazily inside `run_research()` — after `create_db_and_tables()` has already run. It looked fine only because a long-lived local `app.db` already had the table, and `*.db` is gitignored, so a clone got nothing. **Fixed:** `main.py` now imports both table modules explicitly for the side effect (do not "tidy" those imports away — they are load-bearing), and `create_db_and_tables()` raises if no table classes are registered at all. `database.py` still knows nothing about which tables exist, per §4.4; declaring them is the entry point's job.
 - **`prompts/system_prompts.py`'s loader once built a local `passes_prompts` dict and returned it without ever assigning it back to the module-level variable of the same name** — the module-level dict stayed permanently empty. If you see a function that constructs a local variable shadowing a module-level one, check that the return value is actually being used, not just implicitly expected to "just work" via the shared name.
 - **Resuming a thread loaded it correctly and displayed nothing — and left the PREVIOUS thread's transcript on screen under the new thread's id.** `ConversationMemory(thread_id=...)` reads the full history at construction, so every layer below the shell was right; the TUI's picker callback swapped the object, refreshed the goal banner, wrote `Resumed thread <uuid>.` and stopped, and `main.py --thread` printed one line and dropped into the prompt. **This is the same shape as the ensemble-mode and `fetch_url` gotchas above — wired, documented, never executed end to end — with one addition worth recording: the failure was not "nothing happens" but "the wrong thing is shown confidently", and no test in a 1028-test suite could fail on it, because every one of them asserted on state rather than on what reached the screen.** Fixed in §27 by `core/replay.py` plus `Transcript.reset()`. The generalisable rule: when a fix is "display the state we already have", the test has to assert on the rendered output, since a call-count assertion passes for the version that renders the new thread under the old thread's transcript.

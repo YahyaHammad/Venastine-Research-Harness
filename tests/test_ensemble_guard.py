@@ -17,7 +17,7 @@ involved and no model is excluded. What survives is the reason the guard
 existed. Refusing beats running degraded, because a degraded ensemble run does
 not fail -- it generates N near-identical candidates, spends N times the
 tokens doing it, and reports maximal cross-candidate consistency for every
-claim, feeding a falsely confident number into Pass 4. A wrong answer arrived
+claim, feeding a falsely confident number into Pass 5. A wrong answer arrived
 at expensively is worse than an error.
 
 So the refusals moved to the roster, and the sharpest of them (E5) exists
@@ -77,7 +77,7 @@ def test_one_distinct_model_repeated_is_refused(monkeypatch):
     """E5, and the load-bearing one. Two entries naming the SAME model is
     not an ensemble: there is no sampling variation left to make the
     candidates differ, so they arrive near-identical, every claim scores
-    maximal consistency, and Pass 4 reads that as corroboration.
+    maximal consistency, and Pass 5 reads that as corroboration.
 
     That is the original §10 defect exactly, reachable through the new
     config. Counting entries instead of distinct pairs is the mutation this

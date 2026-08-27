@@ -69,18 +69,18 @@ Pass 2   Extract         break that answer into individually checkable claims
 Pass 3a  Ground          check each factual claim against real sources
 Pass 3b  Critique        attack each factual claim on its merits
 Pass 3c  Completeness    what did the answer never address at all?
-Pass 5   Assumptions     what is being taken for granted and never stated?
-  Pass 4 Tier            score and tier every claim (pure code, no model)
+Pass 4   Assumptions     what is being taken for granted and never stated?
+  Pass 5 Tier            score and tier every claim (pure code, no model)
   D1     Route           which claims are flagged? (pure code)
 Pass 6a  Revise          rewrite only the flagged claims
-Pass 6c  Re-validate     re-ground and re-critique them
+Pass 6b  Re-validate     re-ground and re-critique them
   D2     Route           retries exhausted → fall back to UNVERIFIED (pure code)
-Pass 6b  Annotate        attach tier labels to claim text (templated, no model)
+Pass 6c  Annotate        attach tier labels to claim text (templated, no model)
   Merge  Assemble        final claim set (pure code)
 Final    Synthesise      the report, written from the tiered claims
 ```
 
-**Six of those stages make no model call at all.** Pass 4, Pass 6b, D0, D1, D2 and the merge are ordinary Python. That is the point: the step that decides how confident to be is a formula you can read, not a judgement call the model gets to make about its own work.
+**Six of those stages make no model call at all.** Pass 5, Pass 6c, D0, D1, D2 and the merge are ordinary Python. That is the point: the step that decides how confident to be is a formula you can read, not a judgement call the model gets to make about its own work.
 
 ### Confidence tiers
 

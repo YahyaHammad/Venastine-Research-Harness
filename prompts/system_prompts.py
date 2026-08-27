@@ -2,11 +2,11 @@ import os
 
 # passes_source_files maps pass_id -> the .md file holding its system
 # prompt. Dict order = execution order (Python dicts preserve insertion
-# order): 0 -> 1 -> 2 -> 3a -> 3b -> 3c -> 5 -> 6a -> 6c -> final_synthesis.
+# order): 0 -> 1 -> 2 -> 3a -> 3b -> 3c -> 4 -> 6a -> 6b -> final_synthesis.
 #
-# Pass 4 and Pass 6b are DELIBERATELY ABSENT from this dict -- neither
-# makes an LLM call in this implementation. Pass 4 is pure Python (see
-# confidence_scoring.py); Pass 6b is a template, not a generation (see
+# Pass 5 and Pass 6c are DELIBERATELY ABSENT from this dict -- neither
+# makes an LLM call in this implementation. Pass 5 is pure Python (see
+# confidence_scoring.py); Pass 6c is a template, not a generation (see
 # orchestrator.py). Their .md files still exist on disk as human-readable
 # documentation of intent, not as prompts that get loaded here.
 passes_source_files = {
@@ -16,11 +16,47 @@ passes_source_files = {
     "Pass 3a": "source_grounding.md",      # Source grounding using web/arxiv sources, batched by deduplicated entity
     "Pass 3b": "critic_pass.md",           # Checking for fallacies and contradictions, severity-weighted by grounding
     "Pass 3c": "completeness.md",          # Checking for expectation coverage relative to the ORIGINAL query, independent of Pass 1
-    "Pass 5": "assumption_audit.md",       # (Comes before Pass 4 intentionally) hidden premises, framing issues, domain gaps
+    "Pass 4": "assumption_audit.md",       # Hidden premises, framing issues, domain gaps (assumption audit)
     "Pass 6a": "revise.md",                # Batched rewrite of every currently-flagged claim in one call
-    "Pass 6c": "revalidate.md",            # Batched re-grounding + re-critique of the revised claim subset only
+    "Pass 6b": "revalidate.md",            # Batched re-grounding + re-critique of the revised claim subset only
     "Final synthesis": "final_synthesis.md",  # Reads the merged, annotated claim set -- writes the human-facing report
 }
+
+# Central single-word labels for every pass/stage the TUI shows. One
+# source so transcript and side panel cannot drift, and a rename touches
+# one table rather than two renderers plus docs. Kept short for the
+# 22-column sidebar (pass_id + ": " + label must still fit).
+PASS_LABELS: dict[str, str] = {
+    "Pass 0": "Plan",
+    "Pass 1": "Generate",
+    "Pass 2": "Extract",
+    "Pass 3a": "Ground",
+    "Pass 3b": "Critique",
+    "Pass 3c": "Completeness",
+    "Pass 4": "Assumptions",
+    "Pass 5": "Tier",
+    "Pass 6a": "Revise",
+    "Pass 6b": "Re-validate",
+    "Pass 6c": "Annotate",
+    "D0": "D0",
+    "D1": "D1",
+    "D2": "D2",
+    "Merge": "Merge",
+    "Final synthesis": "Synthesis",
+}
+
+
+def pass_label(pass_id: str) -> str:
+    """Human label for a pass_id: 'Pass 4: Assumptions' or bare id for
+    unknown ids. Central so the TUI transcript and ResearchProgress cannot
+    diverge, and adding a pass touches one table rather than two renderers
+    plus docs."""
+    label = PASS_LABELS.get(pass_id)
+    if label and label != pass_id:
+        return f"{pass_id}: {label}"
+    if label:
+        return pass_id
+    return pass_id
 
 
 # ROADMAP_v2 §32 (A8), #72. The injection defence, in ONE copy.

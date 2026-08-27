@@ -8,7 +8,7 @@ the code:
 
   1. Passes 4 and 6b never appeared anywhere, because _run_pass is what
      emits a boundary and it wraps a model call -- so every zero-LLM
-     stage (D0, Pass 4, D1, D2, Pass 6b, Merge) was invisible by
+     stage (D0, Pass 5, D1, D2, Pass 6c, Merge) was invisible by
      construction. Covered here.
   2. A pass was opaque while it ran: §22's P2 kept its LoopEvents from
      escaping, so fourteen tool calls over several minutes looked exactly
@@ -76,7 +76,7 @@ def _two_exhausted_claims():
              "entities": [], "source_span": ""},
         ]),
         "Pass 3c": json.dumps({"coverage_score": 0.9, "gaps": []}),
-        "Pass 5": json.dumps({"per_claim_flags": {
+        "Pass 4": json.dumps({"per_claim_flags": {
             "C2": ["unsupported claim", "circular reasoning"],
             "C4": ["unsupported claim", "circular reasoning"],
         }}),
@@ -85,7 +85,7 @@ def _two_exhausted_claims():
                         {"claim_id": "C4", "revised_text": f"r{i}"}])
             for i in range(rounds)
         ],
-        "Pass 6c": [json.dumps({"grounding": [], "critic": []})
+        "Pass 6b": [json.dumps({"grounding": [], "critic": []})
                     for _ in range(rounds)],
         "Final synthesis": "Both remain uncertain.",
     }
@@ -322,8 +322,8 @@ class TestCodeStages:
         saw them."""
         stages = self._stages(mocker)
 
-        assert "Pass 4" in stages
-        assert "Pass 6b" in stages
+        assert "Pass 5" in stages
+        assert "Pass 6c" in stages
 
     def test_every_code_stage_is_announced_in_order(self, mocker):
         """Not just the two that were noticed. D0, D1 and Merge were
@@ -332,7 +332,7 @@ class TestCodeStages:
         none."""
         stages = self._stages(mocker)
 
-        assert stages == ["D0", "Pass 4", "D1", "Pass 6b", "Merge"], \
+        assert stages == ["D0", "Pass 5", "D1", "Pass 6c", "Merge"], \
             "the clean-payload run flags no claim, so D2 does not fire " \
             "and 3a/3b run for real"
 
@@ -468,7 +468,7 @@ class TestTheCliRendersThemToo:
         assert "404 Not Found" in output, "the failure"
         # A code stage, in the same column as a pass but not with an arrow:
         # it is over by the time it is announced.
-        assert ".. Pass 4" in output
+        assert ".. Pass 5" in output
         assert ".. Merge" in output
         assert "-> Pass 1" in output, "the pre-§26 pass line still prints"
 
@@ -491,7 +491,7 @@ class TestTheCliRendersThemToo:
         output = self._output(mocker, [])
 
         assert "--- Trace ---" not in output
-        assert output.count("Pass 4: confidence tiers assigned") == 1
+        assert output.count("Pass 5: confidence tiers assigned") == 1
 
 
 # ===========================================================================
@@ -637,7 +637,7 @@ def test_a_widget_renders_without_a_running_app():
     panel = ResearchProgress()
     panel.pass_started("Pass 1")
     panel.tool_called("Pass 1")
-    panel.stage_completed("Pass 4")          # must not raise
+    panel.stage_completed("Pass 5")          # must not raise
 
 
 def test_the_panel_marks_code_stages_apart_from_passes():
@@ -647,11 +647,11 @@ def test_the_panel_marks_code_stages_apart_from_passes():
 
     panel = ResearchProgress()
     panel.pass_started("Pass 6a")
-    panel.stage_completed("Pass 4")
+    panel.stage_completed("Pass 5")
     body = panel.renderable.plain
 
     assert "> Pass 6a" in body, "a running pass"
-    assert "· Pass 4" in body, "a code stage"
+    assert "· Pass 5" in body, "a code stage"
 
 
 def test_the_panel_counts_tool_calls_on_the_running_pass():
@@ -938,10 +938,10 @@ def test_a_zero_llm_stage_is_recorded_already_done():
     from tui.widgets import ResearchProgress
 
     panel = ResearchProgress()
-    panel.stage_completed("Pass 4")
+    panel.stage_completed("Pass 5")
     panel.stage_completed("D2")
     body = panel.renderable.plain
 
-    assert "· Pass 4" in body and "· D2" in body
-    assert "> Pass 4" not in body and "> D2" not in body, \
+    assert "· Pass 5" in body and "· D2" in body
+    assert "> Pass 5" not in body and "> D2" not in body, \
         "a zero-LLM stage rendered as running work"

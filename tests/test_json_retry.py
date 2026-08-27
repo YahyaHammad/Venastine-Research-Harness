@@ -470,12 +470,12 @@ def test_corrective_message_contains_parse_error_excerpt_and_instruction(mocker)
     mocker.patch.object(RunAgentLoop, "stream_deep_research_mode",
                         side_effect=pass_stream(fake_run_dr_mode))
 
-    valid_text = well_shaped("Pass 5")
+    valid_text = well_shaped("Pass 4")
     retry_response = make_model_response(text=valid_text)
     continue_calls = _stub_continue_returning_sequence(mocker, [retry_response])
 
     drain(_run_pass_with_json_retry(
-        "Pass 5", "input", "claude-test", "ANTHROPIC", [],
+        "Pass 4", "input", "claude-test", "ANTHROPIC", [],
     ))
 
     assert len(continue_calls) == 1

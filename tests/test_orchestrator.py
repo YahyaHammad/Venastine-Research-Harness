@@ -199,8 +199,8 @@ def _clean_pipeline_payloads():
         ]),
         # Pass 3c - completeness (JSON dict with gaps + coverage_score)
         "Pass 3c": json.dumps({"coverage_score": 0.95, "gaps": []}),
-        # Pass 5 - assumption audit (JSON dict with per_claim_flags)
-        "Pass 5": json.dumps({"per_claim_flags": {}}),
+        # Pass 4 - assumption audit (JSON dict with per_claim_flags)
+        "Pass 4": json.dumps({"per_claim_flags": {}}),
         # Final synthesis - plain text
         "Final synthesis": "Post-quantum risks include Shor's algorithm and RSA weakness. NIST is responding.",
     }
@@ -239,7 +239,7 @@ def _one_claim_stuck_through_retry_payloads():
         # below LOW threshold (cap 0.65 - 0.3 = 0.35 -> LOW tier).
         # It lands in FLAGGED_TIERS.
         "Pass 3c": json.dumps({"coverage_score": 0.9, "gaps": []}),
-        "Pass 5": json.dumps({"per_claim_flags": {"C2": ["unsupported claim", "circular reasoning"]}}),
+        "Pass 4": json.dumps({"per_claim_flags": {"C2": ["unsupported claim", "circular reasoning"]}}),
         # Pass 6a returns revisions for the currently-flagged claim (C2).
         # We give one revision round; the claim then gets re-validated at 6c.
         # The claim stays flagged through MAX_RETRIES rounds, so we supply
@@ -251,7 +251,7 @@ def _one_claim_stuck_through_retry_payloads():
         # 6c returns grounding + critic sub-dicts. C2 has no factual data
         # (it's speculative) so grounding doesn't apply -- but the new flags
         # continue so C2 stays flagged.
-        "Pass 6c": [
+        "Pass 6b": [
             json.dumps({
                 "grounding": [],
                 "critic": [],
@@ -298,10 +298,10 @@ def test_pipeline_runs_all_passes_in_expected_order(mocker):
         "Pass 0", "Pass 1", "Pass 2",
         # 3a and 3b run for factual claims (all three are factual here).
         "Pass 3a", "Pass 3b",
-        "Pass 3c", "Pass 5",
-        # Pass 4 is pure code -- no model call.
+        "Pass 3c", "Pass 4",
+        # Pass 5 is pure code -- no model call.
         # D1 found 0 flagged -> 6a/6c don't run.
-        # Pass 6b is templated -- no model call.
+        # Pass 6c is templated -- no model call.
         "Final synthesis",
     ]
     assert call_log == expected_order, (
@@ -346,7 +346,7 @@ def test_pipeline_6a6c_retry_loop_continues_until_max_retries_then_fallback(mock
 
     # The retry loop ran MAX_RETRIES times: 6a + 6c back-to-back.
     six_a_count = call_log.count("Pass 6a")
-    six_c_count = call_log.count("Pass 6c")
+    six_c_count = call_log.count("Pass 6b")
     assert six_a_count == config.MAX_PIPELINE_RETRIES, (
         f"Expected exactly MAX_PIPELINE_RETRIES={config.MAX_PIPELINE_RETRIES} "
         f"Pass 6a calls, got {six_a_count}"
@@ -389,12 +389,12 @@ def _two_claims_stuck_through_retry_payloads(six_a_rounds: list):
             {"claim_id": "C1", "fallacies": [], "contradictions": [], "severity": 0.0},
         ]),
         "Pass 3c": json.dumps({"coverage_score": 0.9, "gaps": []}),
-        "Pass 5": json.dumps({"per_claim_flags": {
+        "Pass 4": json.dumps({"per_claim_flags": {
             "C2": ["unsupported claim", "circular reasoning"],
             "C4": ["unsupported claim", "circular reasoning"],
         }}),
         "Pass 6a": six_a_rounds,
-        "Pass 6c": [json.dumps({"grounding": [], "critic": []})
+        "Pass 6b": [json.dumps({"grounding": [], "critic": []})
                     for _ in range(max_retries)],
         "Final synthesis": "A is well-supported; B and D remain uncertain.",
     }
@@ -457,7 +457,7 @@ def test_a_claim_pass_6a_omits_still_exhausts_its_retries(mocker):
 
     # Both exhaust on the SAME round, because `flagged` only ever shrinks.
     assert call_log.count("Pass 6a") == max_retries
-    assert call_log.count("Pass 6c") == max_retries
+    assert call_log.count("Pass 6b") == max_retries
 
 
 def test_a_pass_6a_response_naming_nothing_still_exhausts_the_loop(mocker):
@@ -488,7 +488,7 @@ def test_a_pass_6a_response_naming_nothing_still_exhausts_the_loop(mocker):
 def test_a_retry_round_does_not_re_tier_a_claim_outside_its_batch(mocker):
     """#74 defect 2. run_confidence_tiering() re-tiered the WHOLE run once
     per round, so a 6c response naming a claim outside the current batch
-    could recompute one that was already finished -- and Pass 6b then leaves
+    could recompute one that was already finished -- and Pass 6c then leaves
     the result alone, because `if claim.annotation is None` is false.
 
     C1 is clean at D1 and never enters the batch. 6c names it anyway, as
@@ -501,7 +501,7 @@ def test_a_retry_round_does_not_re_tier_a_claim_outside_its_batch(mocker):
     """
     max_retries = config.MAX_PIPELINE_RETRIES
     payloads = _one_claim_stuck_through_retry_payloads()
-    payloads["Pass 6c"] = [
+    payloads["Pass 6b"] = [
         json.dumps({
             "grounding": [{"claim_id": "C1", "sources": [], "status": "ungrounded"}],
             "critic": [],
@@ -571,7 +571,7 @@ def test_pipeline_trace_contains_expected_lines_in_order(mocker):
     # synthesis complete." (no colon).
     expected_pass_starts = [
         "Pass 0:", "Pass 1:", "Pass 2:", "D0:", "Pass 3a:", "Pass 3b:",
-        "Pass 3c:", "Pass 5:", "Pass 4:", "D1:", "Pass 6b:", "Merge:",
+        "Pass 3c:", "Pass 4:", "Pass 5:", "D1:", "Pass 6c:", "Merge:",
         "Final synthesis",
     ]
     actual_starts = []
@@ -1023,7 +1023,7 @@ def _ensemble_payloads(candidates):
             {"claim_id": "C2", "fallacies": [], "contradictions": [], "severity": 0.0},
         ]),
         "Pass 3c": json.dumps({"coverage_score": 0.9, "gaps": []}),
-        "Pass 5": json.dumps({"per_claim_flags": {}}),
+        "Pass 4": json.dumps({"per_claim_flags": {}}),
         "Final synthesis": "Ensemble report.",
     }
 
@@ -1287,8 +1287,8 @@ def test_pass_3b_keeps_the_single_candidate_shape_outside_ensemble(mocker):
             {"claim_id": "C1", "fallacies": [], "contradictions": [], "severity": 0.0},
         ]),
         "Pass 3c": json.dumps({"coverage_score": 0.9, "gaps": []}),
-        "Pass 5": json.dumps({"per_claim_flags": {}}),
-        "Pass 6b": json.dumps({}),
+        "Pass 4": json.dumps({"per_claim_flags": {}}),
+        "Pass 6c": json.dumps({}),
         "Final synthesis": "Report.",
     }
     inner = _build_pass_mock([], payloads)
@@ -1433,7 +1433,7 @@ def test_pipeline_ensemble_mode_passes_1_runs_n_times(monkeypatch, mocker):
             {"claim_id": "C2", "fallacies": [], "contradictions": [], "severity": 0.0},
         ]),
         "Pass 3c": json.dumps({"coverage_score": 0.9, "gaps": []}),
-        "Pass 5": json.dumps({"per_claim_flags": {}}),
+        "Pass 4": json.dumps({"per_claim_flags": {}}),
         "Final synthesis": "Ensemble report.",
     }
     call_log: list[str] = []
@@ -1583,7 +1583,7 @@ def _partly_wrong_payloads(pass_id, entries):
     payloads = _clean_pipeline_payloads()
     payloads[pass_id] = json.dumps(entries)
     payloads["Pass 6a"] = [json.dumps([]) for _ in range(config.MAX_PIPELINE_RETRIES)]
-    payloads["Pass 6c"] = [json.dumps({"grounding": [], "critic": []})
+    payloads["Pass 6b"] = [json.dumps({"grounding": [], "critic": []})
                            for _ in range(config.MAX_PIPELINE_RETRIES)]
     return payloads
 
@@ -1635,7 +1635,7 @@ class TestTheCheckpointReportsWhatWasApplied:
         """Before §30 this interpolated len(per_claim_flags) -- the keys the
         model SENT. A payload naming three claims that do not exist reported
         three flagged and flagged none."""
-        payloads = _partly_wrong_payloads("Pass 5", {"per_claim_flags": {
+        payloads = _partly_wrong_payloads("Pass 4", {"per_claim_flags": {
             "C1": ["a hidden premise"],
             "not-a-claim": ["another"],
         }})
@@ -1646,8 +1646,8 @@ class TestTheCheckpointReportsWhatWasApplied:
         run = run_deep_research_pipeline(
             user_query="q", model="claude-test", provider_name="ANTHROPIC")
 
-        assert _trace_line(run, "Pass 5:") == (
-            "Pass 5: assumption audit complete, 1 of 3 claim(s) flagged."
+        assert _trace_line(run, "Pass 4:") == (
+            "Pass 4: assumption audit complete, 1 of 3 claim(s) flagged."
         )
 
     def test_a_fully_applied_pass_reports_the_full_count(self, mocker):
@@ -1787,7 +1787,7 @@ def test_effort_reaches_every_model_call_in_the_pipeline(mocker):
 
 
     expected = ["Pass 0", "Pass 1", "Pass 2", "Pass 3a", "Pass 3b",
-                "Pass 3c", "Pass 5", "Final synthesis"]
+                "Pass 3c", "Pass 4", "Final synthesis"]
     assert len(efforts) == len(expected), (
         f"expected {len(expected)} model calls, saw {len(efforts)}")
     assert efforts == ["high"] * len(expected), (

@@ -2,12 +2,12 @@
 core/reasoning/orchestrator.py
 
 Sequences the deep-research pipeline: Pass 0 -> 1 -> 2 -> gate D0 -> (3a -> 3b
-for factual claims) -> 3c -> 5 (all claims) -> Pass 4 (code) -> D1 -> the
-6a/6c/D2 retry loop -> 6b (template) -> merge -> final synthesis.
+for factual claims) -> 3c -> 4 (all claims) -> Pass 5 (code) -> D1 -> the
+6a/6b/D2 retry loop -> 6c (template) -> merge -> final synthesis.
 
 SCOPE OF THIS VERSION: core sequential pipeline with optional ensemble
 mode (ROADMAP §10: N-candidate Pass 1 generation + cross-candidate
-consistency check feeding Pass 4's scoring). No filesystem output yet
+consistency check feeding Pass 5's scoring). No filesystem output yet
 (returns a PipelineRun object; the /output/<run_id>/ file-writing system
 is a separate, later piece of work).
 
@@ -338,7 +338,7 @@ def _ensemble_roster(ensemble_mode: bool) -> list[dict]:
     # DISTINCT pairs, not merely two entries. Repeating one model N times
     # would generate N near-identical candidates -- there is no sampling
     # variation left to make them differ -- and then report maximal
-    # cross-candidate consistency for every claim, which Pass 4 reads as
+    # cross-candidate consistency for every claim, which Pass 5 reads as
     # confidence. That is precisely the failure §16's guard was added to
     # prevent, and this config is the way to recreate it.
     distinct = {(e["provider_name"], e["model"]) for e in roster}
@@ -347,7 +347,7 @@ def _ensemble_roster(ensemble_mode: bool) -> list[dict]:
             f"Ensemble mode needs at least two DISTINCT models; "
             f"config.ENSEMBLE_MODELS resolves to {len(distinct)} "
             f"({sorted(distinct)}). One model cannot disagree with itself, so "
-            f"every claim would score maximal consistency and Pass 4 would "
+            f"every claim would score maximal consistency and Pass 5 would "
             f"read that as confidence."
         )
     return list(roster)
@@ -765,13 +765,13 @@ def _stage(pass_id: str):
     A separate kind from pass_start/pass_complete rather than a pair of
     those, because a code stage cannot meaningfully be "running": it
     completes in the time it takes to yield, and a consumer that showed it
-    as in-progress would be showing a state that never exists. Pass 4 and
-    Pass 6b are passes by the pipeline's numbering and stages by their
+    as in-progress would be showing a state that never exists. Pass 5 and
+    Pass 6c are passes by the pipeline's numbering and stages by their
     cost, and this is the field that says which.
 
     Before this, every zero-LLM stage was invisible to both shells -- not
     by decision but because _run_pass was the only thing that emitted a
-    boundary, and it wraps a model call. So a sidebar showed Pass 5
+    boundary, and it wraps a model call. So a sidebar showed Pass 4
     followed by Pass 6a with the tiering that decided which claims were
     flagged in between, unmentioned.
     """
@@ -781,7 +781,7 @@ def _stage(pass_id: str):
 def _tier_events(run: PipelineRun):
     """One claim_tiered event per claim, after a tiering pass.
 
-    Called after EVERY run_confidence_tiering() -- Pass 4 and each 6c
+    Called after EVERY run_confidence_tiering() -- Pass 5 and each 6b
     round -- so a consumer sees a claim's tier change rather than only
     its first value. Repeats are by design: the events are a stream of
     "this is the tier now", and a panel re-renders from the latest.
@@ -1059,7 +1059,7 @@ def stream_deep_research_pipeline(
         yield from _stage("D0")
         yield from progress.checkpoint(
             f"D0: {len(factual_claims)} factual claim(s) routed to 3a/3b, "
-            f"{len(non_factual_claims)} synthesis/speculative claim(s) routed directly to Pass 5."
+            f"{len(non_factual_claims)} synthesis/speculative claim(s) routed directly to Pass 4."
         )
 
         # --- Pass 3a + 3b: only for factual claims, batched by deduplicated entity ---
@@ -1113,23 +1113,23 @@ def stream_deep_research_pipeline(
             f"{len(run.completeness.get('gaps', []))} gap(s) identified."
         )
 
-        # --- Pass 5: assumption audit -- ALL claims, plus completeness ---
-        pass5_input = (
+        # --- Pass 4: assumption audit -- ALL claims, plus completeness ---
+        pass4_input = (
             f"Original query:\n{user_query}\n\n"
             f"All claims:\n{json.dumps([vars(c) for c in run.claims])}\n\n"
             f"Completeness findings:\n{json.dumps(run.completeness)}"
         )
-        run.assumptions = _parse_json_response((yield from _run_pass_with_json_retry("Pass 5", pass5_input, model, provider_name, run.trace, authorization=authorization, pass_threads=run.pass_threads, claim_ids=[c.id for c in run.claims], effort=effort)))
+        run.assumptions = _parse_json_response((yield from _run_pass_with_json_retry("Pass 4", pass4_input, model, provider_name, run.trace, authorization=authorization, pass_threads=run.pass_threads, claim_ids=[c.id for c in run.claims], effort=effort)))
         flagged_count = _apply_assumption_flags(run.claims, run.assumptions)
-        yield from progress.checkpoint(f"Pass 5: assumption audit complete, {flagged_count} of {len(run.claims)} claim(s) flagged.")
+        yield from progress.checkpoint(f"Pass 4: assumption audit complete, {flagged_count} of {len(run.claims)} claim(s) flagged.")
 
-        # --- Pass 4: confidence tiering (0 LLM calls) ---
+        # --- Pass 5: confidence tiering (0 LLM calls) ---
         run_confidence_tiering(run, ensemble_n=effective_n)
-        yield from _stage("Pass 4")
+        yield from _stage("Pass 5")
         yield from _tier_events(run)
-        yield from progress.checkpoint("Pass 4: confidence tiers assigned (pure code, zero LLM calls).")
+        yield from progress.checkpoint("Pass 5: confidence tiers assigned (pure code, zero LLM calls).")
 
-        # --- D1 + the 6a/6c/D2 retry loop ---
+        # --- D1 + the 6a/6b/D2 retry loop ---
         flagged = [c for c in run.claims if c.confidence_tier in FLAGGED_TIERS]
         yield from _stage("D1")
         yield from progress.checkpoint(f"D1: {len(flagged)} claim(s) flagged for revision, {len(run.claims) - len(flagged)} already clean.")
@@ -1184,23 +1184,23 @@ def stream_deep_research_pipeline(
                                         attempt=claim.retry_count)
             yield from progress.checkpoint(f"Pass 6a: revised {revised} of {len(flagged)} claim(s) in this retry round.")
 
-            # --- Pass 6c: re-validate the revised subset only (batched, reuses Pass 4's code) ---
-            pass6c_input = json.dumps([vars(c) for c in flagged])
-            revalidation = _parse_json_response((yield from _run_pass_with_json_retry("Pass 6c", pass6c_input, critic_model, critic_provider, run.trace, authorization=authorization, pass_threads=run.pass_threads, claim_ids=[c.id for c in run.claims], effort=effort)))
+            # --- Pass 6b: re-validate the revised subset only (batched, reuses Pass 5's code) ---
+            pass6b_input = json.dumps([vars(c) for c in flagged])
+            revalidation = _parse_json_response((yield from _run_pass_with_json_retry("Pass 6b", pass6b_input, critic_model, critic_provider, run.trace, authorization=authorization, pass_threads=run.pass_threads, claim_ids=[c.id for c in run.claims], effort=effort)))
             _apply_grounding(run.claims, revalidation.get("grounding", []))
             _apply_critic(run.claims, revalidation.get("critic", []))
-            # 6c's own checkpoint below already reports an EFFECT -- how
+            # 6b's own checkpoint below already reports an EFFECT -- how
             # many claims came out clean -- rather than what it was asked
             # about, so it needs no count from these two.
-            # Pass 4's function again -- code, not a call. Scoped to THIS
-            # round's batch: 6c is only asked about `flagged`, and re-tiering
+            # Pass 5's function again -- code, not a call. Scoped to THIS
+            # round's batch: 6b is only asked about `flagged`, and re-tiering
             # the whole run once per round recomputes claims that are already
             # finished, from score data those rounds did not change.
             run_confidence_tiering(run, ensemble_n=effective_n, claims=flagged)
             yield from _tier_events(run)
 
             still_flagged = [c for c in flagged if c.confidence_tier in FLAGGED_TIERS]
-            yield from progress.checkpoint(f"Pass 6c: {len(flagged) - len(still_flagged)} claim(s) now clean, {len(still_flagged)} still flagged.")
+            yield from progress.checkpoint(f"Pass 6b: {len(flagged) - len(still_flagged)} claim(s) now clean, {len(still_flagged)} still flagged.")
 
             # --- D2: retry cap check (pure code) ---
             exhausted = [c for c in still_flagged if c.retry_count >= MAX_RETRIES]
@@ -1219,14 +1219,14 @@ def stream_deep_research_pipeline(
 
             flagged = [c for c in still_flagged if c.retry_count < MAX_RETRIES]
 
-        # --- Pass 6b: annotate (templated, 0 LLM calls) ---
+        # --- Pass 6c: annotate (templated, 0 LLM calls) ---
         for claim in run.claims:
             if claim.final_text is None:
                 claim.final_text = claim.revision_text or claim.text
             if claim.annotation is None:
                 claim.annotation = f"[{claim.confidence_tier}]"
-        yield from _stage("Pass 6b")
-        yield from progress.checkpoint("Pass 6b: annotation complete (templated, zero LLM calls).")
+        yield from _stage("Pass 6c")
+        yield from progress.checkpoint("Pass 6c: annotation complete (templated, zero LLM calls).")
 
         # --- Merge (pure code) ---
         yield from _stage("Merge")

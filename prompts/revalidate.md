@@ -1,4 +1,4 @@
-# Pass 6c — Re-validate
+# Pass 6b — Re-validate
 
 You will receive the revised claims from Pass 6a — ONLY the claims that were just rewritten, not the full original claim set.
 

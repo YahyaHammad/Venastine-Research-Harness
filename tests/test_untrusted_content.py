@@ -40,9 +40,9 @@ PASS_DIGESTS = {
     # digest moving is the guard confirming the change was seen.
     "Pass 3b": "bb6fb3a830b52583",
     "Pass 3c": "8f2bc9b1231ea65f",
-    "Pass 5": "14de2769e3ff5454",
+    "Pass 4": "744f6b116d0a352b",
     "Pass 6a": "6cd6acf94d4c898f",
-    "Pass 6c": "6d0fb29c2a620c3f",
+    "Pass 6b": "da805a6d5e12df4a",
     "Final synthesis": "80ef84e07a41a225",
 }
 

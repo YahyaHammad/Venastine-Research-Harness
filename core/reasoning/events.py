@@ -78,12 +78,12 @@ PIPELINE_EVENT_KINDS = (
                         # before its exception propagates.
     "trace_line",       # text -- one line appended to PipelineRun.trace
     "claim_extracted",  # claim_id + text -- Pass 2 produced a claim
-    "claim_tiered",     # claim_id + tier -- Pass 4 (or a 6c round) scored it
+    "claim_tiered",     # claim_id + tier -- Pass 5 (or a 6b round) scored it
     "retry",            # claim_id + attempt -- Pass 6a revised a claim
     "run_complete",     # run -- the terminal event, carrying the PipelineRun
     # --- §26 ---------------------------------------------------------
-    "stage",            # pass_id -- a ZERO-LLM stage completed. Pass 4 and
-                        # 6b are passes by the pipeline's numbering and
+    "stage",            # pass_id -- a ZERO-LLM stage completed. Pass 5 and
+                        # 6c are passes by the pipeline's numbering and
                         # stages by their cost: they make no model call,
                         # so they complete instantly and can never be
                         # meaningfully "running". Consumers distinguish

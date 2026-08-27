@@ -17,7 +17,7 @@ so they correlate.
 
 Claims are serialized with vars(c), matching every other
 claim-serialization call site in this codebase (orchestrator.py passes
-3a/3b/5/6a/6c/final synthesis, pipeline_storage.update_pipeline_run,
+3a/3b/4/6a/6b/final synthesis, pipeline_storage.update_pipeline_run,
 and this module's write_run_artifacts). If a nested-dataclass field is
 ever added to Claim, ALL of those sites migrate to asdict(c) together
 -- see the note on Claim in core/reasoning/base.py.
@@ -57,22 +57,22 @@ def write_run_artifacts(run: PipelineRun) -> str:
       00_plan.md              Pass 0 plan (JSON)
       01_raw_response.md      Pass 1 raw generation (single-candidate runs)
       01_candidate_N.md       E13/#77: per-candidate generation, one file
-                              per SURVIVOR, written instead of
+                               per SURVIVOR, written instead of
                               01_raw_response.md whenever two or more
-                              survived -- the N matches the trace's
-                              candidate-N lines and the claims'
-                              asserted_by_candidates tags, so the record
-                              can substantiate its own consistency scores.
-                              A run degraded to one survivor names its
-                              file 01_raw_response.md like any other
-                              single-candidate run.
+                               survived -- the N matches the trace's
+                               candidate-N lines and the claims'
+                               asserted_by_candidates tags, so the record
+                               can substantiate its own consistency scores.
+                               A run degraded to one survivor names its
+                               file 01_raw_response.md like any other
+                               single-candidate run.
       02_claims.json          Pass 2 extracted claims (full vars(c))
       03_grounding.json       Pass 3a grounding per claim
       03_critic.json          Pass 3b critic per claim
       03_completeness.json    Pass 3c completeness findings
-      04_confidence.json      Pass 4 tier + score breakdown per claim
-      05_assumptions.json     Pass 5 assumption audit
-      06_revisions.json       6a/6c revisions (only if any claim was revised)
+      04_assumptions.json     Pass 4 assumption audit
+      05_confidence.json      Pass 5 tier + score breakdown per claim
+      06_revisions.json       6a/6b revisions (only if any claim was revised)
       07_review.json          §20 review findings + decisions (only if reviewed)
       granted_calls.json      §25 audit trail (only if a grant was spent)
       pass_threads.json       §27 one entry per pass, {"pass", "thread_id"}
@@ -127,8 +127,8 @@ def write_run_artifacts(run: PipelineRun) -> str:
         indent=2,
     ))
     write("03_completeness.json", json.dumps(run.completeness, indent=2))
-    write("05_assumptions.json", json.dumps(run.assumptions, indent=2))
-    write("04_confidence.json", json.dumps(
+    write("04_assumptions.json", json.dumps(run.assumptions, indent=2))
+    write("05_confidence.json", json.dumps(
         [{"claim_id": c.id, "tier": c.confidence_tier, "score_breakdown": c.score_breakdown}
          for c in run.claims],
         indent=2,

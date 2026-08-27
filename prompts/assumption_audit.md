@@ -1,8 +1,8 @@
-# Pass 5 — Assumption Audit
+# Pass 4 — Assumption Audit
 
 You will receive: the original query, every extracted claim (both those that went through source grounding/critique and those that didn't, since this pass covers ALL claims regardless of type), the grounding results, the critic findings, and the completeness findings.
 
-This pass runs deliberately BEFORE confidence tiering — a hidden assumption or framing issue you identify here should be able to downgrade a claim's eventual confidence tier, which would be impossible if tiering had already happened.
+This pass runs BEFORE confidence tiering (Pass 5) — a hidden assumption or framing issue you identify here should be able to downgrade a claim's eventual confidence tier, which would be impossible if tiering had already happened.
 
 Check for:
 - **Hidden premises**: unstated assumptions baked into the original query itself, or into how the response answered it, that aren't obviously true.

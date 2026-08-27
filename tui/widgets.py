@@ -10,6 +10,8 @@ from rich.text import Text
 from textual.reactive import reactive
 from textual.widgets import RichLog, Static
 
+from prompts.system_prompts import pass_label
+
 from tui import ravens, themes
 
 # Animation cadence. Slow enough to read, and paused outright while tokens
@@ -394,7 +396,7 @@ class ResearchProgress(Static):
                 marker, role = "✗", "error"
             else:
                 marker, role = ("x", "pass_done") if done else (">", "pass")
-            body.append(f"{marker} {pass_id}\n", styles.get(role, ""))
+            body.append(f"{marker} {pass_label(pass_id)}\n", styles.get(role, ""))
             if not done:
                 detail = []
                 if tools:

@@ -89,7 +89,7 @@ class TestEveryJsonPassHasASpec:
             if spec.ids or spec.ids_in_keys
             or any(n.ids for n in spec.nested.values())
         )
-        assert needs_ids == ["Pass 3a", "Pass 3b", "Pass 5", "Pass 6a", "Pass 6c"]
+        assert needs_ids == ["Pass 3a", "Pass 3b", "Pass 4", "Pass 6a", "Pass 6b"]
         for pass_id in needs_ids:
             call = re.search(
                 r'_run_pass_with_json_retry\(\s*"' + re.escape(pass_id)
@@ -140,7 +140,7 @@ class TestTheTopLevelType:
         with pytest.raises(PayloadShapeError, match="expected a JSON array"):
             validate(pass_id, {"claims": []}, claim_ids=["c1"])
 
-    @pytest.mark.parametrize("pass_id", ["Pass 0", "Pass 3c", "Pass 5", "Pass 6c"])
+    @pytest.mark.parametrize("pass_id", ["Pass 0", "Pass 3c", "Pass 4", "Pass 6b"])
     def test_an_array_where_an_object_was_promised_is_rejected(self, pass_id):
         with pytest.raises(PayloadShapeError, match="expected a JSON object"):
             validate(pass_id, ["a gap"], claim_ids=["c1"])
@@ -151,9 +151,9 @@ class TestTheTopLevelType:
         ("Pass 3a", []),
         ("Pass 3b", []),
         ("Pass 3c", {"gaps": [], "coverage_score": 0.0}),
-        ("Pass 5", {"per_claim_flags": {}}),
+        ("Pass 4", {"per_claim_flags": {}}),
         ("Pass 6a", []),
-        ("Pass 6c", {"grounding": [], "critic": []}),
+        ("Pass 6b", {"grounding": [], "critic": []}),
     ])
     def test_the_minimal_valid_payload_is_accepted(self, pass_id, payload):
         """The control for every rejection above. An empty answer is a real
@@ -192,7 +192,7 @@ class TestRequiredKeys:
         "0 claim(s) flagged" -- which is what it would say for a clean
         run."""
         with pytest.raises(PayloadShapeError, match="per_claim_flags"):
-            validate("Pass 5", {"c001": ["a premise"]}, claim_ids=["c001"])
+            validate("Pass 4", {"c001": ["a premise"]}, claim_ids=["c001"])
 
     def test_an_extra_key_is_not_an_error(self):
         """The control. _claim_from_json filters unknown keys deliberately
@@ -210,8 +210,8 @@ class TestRequiredKeys:
 class TestDeclaredValueTypes:
 
     def test_a_string_severity_is_rejected_at_the_pass_that_sent_it(self):
-        """#76's sharpest row: this survived Pass 3c and Pass 5 and
-        surfaced in Pass 4's PURE-CODE tiering, two passes downstream, as
+        """#76's sharpest row: this survived Pass 3c and Pass 4 and
+        surfaced in Pass 5's PURE-CODE tiering, two passes downstream, as
         `unsupported operand type(s) for -: 'float' and 'str'` -- in the
         one stage that makes no model call and so has nothing to retry."""
         with pytest.raises(PayloadShapeError, match="severity"):
@@ -301,7 +301,7 @@ class TestTheEnums:
         functions -- so 6c must not be able to drift from the passes it
         re-runs."""
         with pytest.raises(PayloadShapeError, match=r"under 'grounding'"):
-            validate("Pass 6c",
+            validate("Pass 6b",
                      {"grounding": [{"claim_id": "c1", "status": "verified"}],
                       "critic": []},
                      claim_ids=["c1"])
@@ -382,10 +382,10 @@ class TestTheIdCrossCheck:
     def test_an_empty_payload_is_not_a_mismatch(self):
         """assumption_audit.md asks the model to "omit claims with no
         issues rather than including them with an empty list", so no flags
-        at all is the ORDINARY answer for a clean run. Pass 5's
+        at all is the ORDINARY answer for a clean run. Pass 4's
         demonstrated defect was the top-level key being absent, which the
         required-key check catches instead."""
-        validate("Pass 5", {"per_claim_flags": {}}, claim_ids=["C1"])
+        validate("Pass 4", {"per_claim_flags": {}}, claim_ids=["C1"])
         validate("Pass 3a", [], claim_ids=["C1"])
 
     def test_no_claim_ids_supplied_means_no_check(self):
@@ -396,7 +396,7 @@ class TestTheIdCrossCheck:
 
     def test_pass_5_cross_checks_the_KEYS_of_per_claim_flags(self):
         with pytest.raises(PayloadShapeError, match="key of 'per_claim_flags'"):
-            validate("Pass 5", {"per_claim_flags": {"999": ["a flag"]}},
+            validate("Pass 4", {"per_claim_flags": {"999": ["a flag"]}},
                      claim_ids=["C1"])
 
     def test_pass_6a_resolves_within_the_flagged_batch(self):

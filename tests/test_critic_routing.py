@@ -68,12 +68,12 @@ def _payloads_with_retry_loop():
             {"claim_id": "C3", "fallacies": [], "contradictions": [], "severity": 0.0},
         ]),
         "Pass 3c": json.dumps({"coverage_score": 0.9, "gaps": []}),
-        "Pass 5": json.dumps({"per_claim_flags": {"C2": ["unsupported claim", "circular reasoning"]}}),
+        "Pass 4": json.dumps({"per_claim_flags": {"C2": ["unsupported claim", "circular reasoning"]}}),
         "Pass 6a": [
             json.dumps([{"claim_id": "C2", "revised_text": f"Revision {i+1}"}])
             for i in range(max_retries)
         ],
-        "Pass 6c": [
+        "Pass 6b": [
             json.dumps({"grounding": [], "critic": []})
             for i in range(max_retries)
         ],
@@ -85,8 +85,8 @@ def _payloads_with_retry_loop():
 # ---- Tests ----------------------------------------------------------------
 # ===========================================================================
 
-CRITIC_PASS_IDS = {"Pass 3a", "Pass 3b", "Pass 6c"}
-MAIN_PASS_IDS = {"Pass 0", "Pass 1", "Pass 2", "Pass 3c", "Pass 5", "Pass 6a", "Final synthesis"}
+CRITIC_PASS_IDS = {"Pass 3a", "Pass 3b", "Pass 6b"}
+MAIN_PASS_IDS = {"Pass 0", "Pass 1", "Pass 2", "Pass 3c", "Pass 4", "Pass 6a", "Final synthesis"}
 
 
 def test_critic_routing_sends_3a_3b_6c_to_critic_model(mocker):

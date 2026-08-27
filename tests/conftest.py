@@ -102,9 +102,9 @@ def well_shaped(pass_id: str) -> str:
         "Pass 3a": [],
         "Pass 3b": [],
         "Pass 3c": {"gaps": [], "coverage_score": 0.0},
-        "Pass 5": {"per_claim_flags": {}},
+        "Pass 4": {"per_claim_flags": {}},
         "Pass 6a": [],
-        "Pass 6c": {"grounding": [], "critic": []},
+        "Pass 6b": {"grounding": [], "critic": []},
     }[pass_id])
 
 

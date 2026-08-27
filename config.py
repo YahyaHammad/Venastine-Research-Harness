@@ -57,7 +57,7 @@ MAX_JSON_RETRIES = 2  # max corrective follow-up attempts when a pass returns ma
 
 # --- Ensemble mode (ROADMAP §10, as redesigned by its revisit) ---
 # Run Pass 1 once per entry below, then extract the union of claims across
-# candidates and subtract a disagreement penalty in Pass 4. Off by default.
+# candidates and subtract a disagreement penalty in Pass 5. Off by default.
 #
 # DIVERSITY COMES FROM DIFFERENT MODELS, NOT DIFFERENT SAMPLING (E1). §10
 # originally raised `temperature` on N runs of one model. That could not work
@@ -85,7 +85,7 @@ MAX_JSON_RETRIES = 2  # max corrective follow-up attempts when a pass returns ma
 #
 # Fewer than two DISTINCT (provider_name, model) pairs is refused, not
 # tolerated: one model cannot disagree with itself, so every claim would
-# score maximal consistency and Pass 4 would read that as confidence. That
+# score maximal consistency and Pass 5 would read that as confidence. That
 # is the original defect, and repeating the same entry N times is the way to
 # recreate it through this config.
 ENSEMBLE_MODE = False

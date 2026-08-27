@@ -7,7 +7,7 @@ ROADMAP_v2 §30 (B1). One shape boundary for the ten research passes.
 what parsed was the SHAPE the pass promised, so the same defect appeared
 in six places at once (audit #76): a wrapped list crashed with
 `'str' object has no attribute 'items'`, a bad `severity` survived two
-passes and surfaced in Pass 4's pure-code tiering, and two shapes
+passes and surfaced in Pass 5's pure-code tiering, and two shapes
 completed a run and reported a false outcome.
 
 WHY THIS IS ITS OWN MODULE, AND WHY IT LOOKS FAMILIAR. §20 already built
@@ -35,10 +35,10 @@ demonstrated consequence in #76's table, and nothing else does:
 
     the top-level type          {"claims": [...]} instead of [...]
     the required keys per entry a claim with no `id`, a revision with no
-                                `revised_text`, Pass 5 with no
+                                `revised_text`, Pass 4 with no
                                 `per_claim_flags`
     a declared value type       `"severity": "0.0"` -- a string that
-                                fails two passes later, in Pass 4
+                                fails two passes later, in Pass 5
     that entry ids resolve      3a/3b answering about ids Pass 2 never
                                 issued, which grounded nothing while the
                                 trace said it had grounded everything
@@ -98,7 +98,7 @@ class Spec:
                       the claims the apply step will resolve against
     unique            entry key that must not repeat (Pass 2's `id`)
     ensemble_required entry keys required only on an ensemble run (B7)
-    ids_in_keys       top-level key whose KEYS are claim ids (Pass 5)
+    ids_in_keys       top-level key whose KEYS are claim ids (Pass 4)
     nested            top-level key -> Spec for the array beneath it
     """
 
@@ -115,7 +115,7 @@ class Spec:
     nested: dict = field(default_factory=dict)
 
 
-# The 3a and 3b entry shapes are named, because Pass 6c is documented in
+# The 3a and 3b entry shapes are named, because Pass 6b is documented in
 # revalidate.md as returning exactly those two lists under two keys --
 # and _apply_grounding/_apply_critic are literally the same two functions.
 # Writing them twice would let 6c drift from the passes it re-runs.
@@ -130,7 +130,7 @@ _GROUNDING_ENTRY = Spec(
 _CRITIC_ENTRY = Spec(
     top="array",
     entry_required=frozenset({"claim_id", "severity"}),
-    # `severity` is the arithmetic one: Pass 4 computes `1.0 - severity`,
+    # `severity` is the arithmetic one: Pass 5 computes `1.0 - severity`,
     # so a string here raises a TypeError two passes downstream, in the
     # one stage that makes no model call and has nothing to retry.
     entry_types={"claim_id": str, "severity": NUMBER},
@@ -177,7 +177,7 @@ SPECS = {
         key_types={"gaps": list},
     ),
 
-    "Pass 5": Spec(
+    "Pass 4": Spec(
         top="object",
         required=frozenset({"per_claim_flags"}),
         key_types={"per_claim_flags": dict},
@@ -191,7 +191,7 @@ SPECS = {
         ids="claim_id",
     ),
 
-    "Pass 6c": Spec(
+    "Pass 6b": Spec(
         top="object",
         required=frozenset({"grounding", "critic"}),
         key_types={"grounding": list, "critic": list},
@@ -359,7 +359,7 @@ def _check_ids(pass_id, supplied, claim_ids, field_name) -> None:
     An EMPTY collection is not a mismatch. assumption_audit.md asks the
     model to "omit claims with no issues rather than including them with
     an empty list", so no flags at all is the ordinary answer for a clean
-    run -- and Pass 5's demonstrated defect was the top-level key being
+    run -- and Pass 4's demonstrated defect was the top-level key being
     absent, which the required-key check above catches instead.
     """
     if claim_ids is None or not supplied:

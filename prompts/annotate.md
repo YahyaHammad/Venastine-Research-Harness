@@ -1,6 +1,6 @@
-# Pass 6b — Annotate (documentation only, NOT a live prompt)
+# Pass 6c — Annotate (documentation only, NOT a live prompt)
 
-This file is not loaded as a system prompt. Pass 6b is implemented as a
+This file is not loaded as a system prompt. Pass 6c is implemented as a
 template in `core/reasoning/orchestrator.py` -- attaching a claim's
 confidence tier as a fixed-format tag (`[TIER]`) -- rather than a
 generation, per the build spec's own guidance to prefer a template over
