@@ -50,7 +50,7 @@ Venastine Research Harness/
 ├── CLAUDE.md / QWEN.md             # pointers to AGENTS.md, so a harness that auto-loads one of those names finds the context instead of a second copy of it
 ├── DEVLOG.md                       # implementation notes for built ROADMAP sections -- see §0
 │
-├── tests/                          # 2642 tests, all offline, ~25-45s depending on the machine (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
+├── tests/                          # 2686 tests, all offline, ~25-45s depending on the machine (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
 │   ├── conftest.py                 # fixtures: make_model_response, make_stream_from_response, make_stream_sequence, FakeStorage, ...
 │   ├── BREAKING_CHANGES.md         # what-breaks-it / symptom / fix per area
 │   ├── test_cli.py                 # 87 tests -- ROADMAP §1 thread_id passthrough + UUID validation + §14 parser defaults/resolution/trust flow + §29 N1-N8 the one stdin reader, N2's channel deadline, every request kind rendered, and the startup block main(argv) made reachable + #102's four declining defaults
@@ -77,7 +77,7 @@ Venastine Research Harness/
 │   ├── test_payload_validation.py  # 59 tests -- ROADMAP_v2 §30 the pass payload boundary: the spec table, the three properties, the id cross-check and its partial-match control
 │   ├── test_pipeline_storage.py    # 12 tests -- ROADMAP §5 create/update/load_pipeline_run + inner-failure caplog
 │   ├── test_file_ops.py            # 40 tests -- ROADMAP §6 path resolution, approval, read/write/edit, registry
-│   ├── test_shell.py               # 96 tests -- ROADMAP §7 sandbox routing, inert/network classification, approval, backend internals; §28 the capability classifier, the three modes, the .venastine mount
+│   ├── test_shell.py               # 140 tests -- ROADMAP §7 sandbox routing, inert/network classification, approval, backend internals; §28 the capability classifier, the three modes, the .venastine mount; batch 37 the quoting bypass and the protected-path workspace guard
 │   ├── test_policy_enforcement.py  # 101 tests -- ROADMAP §8 secret redaction, domain blocking (#48 normalisation + suffix match), is_url_permitted's address guard (#54), output policy, registry integration
 │   ├── test_critic_routing.py      # 2 tests -- ROADMAP §11 critic-model routing (3a/3b/6c to critic, rest to main)
 │   ├── test_permission_context.py  # 21 tests -- ROADMAP_v2 §15 AC1-AC7 (stricter wins, mcp default, redaction survives, D24, unregister) + schemas filtering
@@ -176,6 +176,7 @@ Venastine Research Harness/
 ├── security/
 │   ├── capability.py              # ROADMAP_v2 §28: CommandProfile + containment + the one auto-approval rule -- generic, reads no config, knows no tool
 │   ├── permissions.py             # is_tool_allowed() / requires_approval() -- reads config's dataclasses
+│   ├── protected_paths.py         # batch 37: the trees a sandboxed command may never write -- the install tree and ~/.config/venastine refuse a workspace; providers.json / app.db / logs are ro-bound when nested
 │   └── sandbox.py                 # ROADMAP §7 + §28: hybrid Docker/subprocess sandbox, classify_command(), inert fast-path, network allowlist
 │
 ├── safety/
@@ -1384,7 +1385,7 @@ The single-payload test (`__import__('os').system(...)`) is kept, and was itself
 - **A surviving mutant with a confident explanation is the one to distrust** (§28). Deleting the nested-path guard on the `.venastine` mount changed nothing, and the explanation was ready: `os.path.join(ws, ".venastine")` always produces a path under `ws`, so the guard is unreachable. True, and irrelevant — `realpath` resolves **symlinks**, so a `.venastine` symlinked at `/etc` escapes, which is the exact escape §14 had already found once in the trust hash. The explanation was as unverified as the guard it excused. Its test needs directory symlinks, so it **skips on Windows** and the guard stayed unverified until the mutation ran in `python:3.11-slim` — §21's rule, met literally.
 - **A test's premise can be the thing you are changing** (§28). `test_ac3_context_false_does_not_suppress_tool_approval_check` pinned D14's ratchet with `rm -rf /`, and its docstring said it worked *because* `ToolApprovals.shell` defaulted `True` and returned before anything read the command. Flipping that default made `rm -rf /` genuinely contained, so the test would have gone on passing while asserting the override rather than the tool. **When a docstring names the config value it depends on, changing that value is a search key** — grep for the field, not just for the code you edited.
 - **An approval gate sees raw model output; the executor sees validated params** (§28). `registry.approval_needed` is handed the tool-call input verbatim, and `ShellParams` does not validate until `run()`, which is *after* approval. So `command.strip()` in the approval path was an `AttributeError` on `{"command": ["ls"]}` — escaping the check and then the loop. It had been unreachable only because a config default returned first. **Anything reachable from `approval_needed` must be total over arbitrary JSON**, not merely correct on well-formed input.
-- **`security/` imports `config` and the stdlib, and nothing else** (§28). The obvious reuse for "is this path inside the workspace" was `file_ops._is_within_workspace`, which would have been the first runtime `security/ → tools/` edge and inverted the layering. It also captures `WORKSPACE_ROOT` at **import** time, so it cannot follow a workspace a caller passes in — three lines written locally beat a shared helper that answers a slightly different question.
+- **`security/` imports `config`, `credentials` and the stdlib, and nothing else** (§28, amended batch 37). The obvious reuse for "is this path inside the workspace" was `file_ops._is_within_workspace`, which would have been the first runtime `security/ → tools/` edge and inverted the layering. It also captures `WORKSPACE_ROOT` at **import** time, so it cannot follow a workspace a caller passes in — three lines written locally beat a shared helper that answers a slightly different question. `security/protected_paths.py` adds exactly one edge, to `credentials` (a leaf: `json` and `os`), and re-derives the other two paths it needs rather than importing their owners: `logging_setup` pulls in `safety.policy_enforcement`, so importing it would have been the first `security/ → safety/` edge. The duplication is pinned by `test_the_log_directory_matches_logging_setup`, so drift is a test failure rather than a silent hole.
 
 - **A second reader on one stdin is invisible to the test suite, by construction.** pytest's stdin is
   a capture object, and the chat tests supplied lines by patching `builtins.input`, so nothing ever

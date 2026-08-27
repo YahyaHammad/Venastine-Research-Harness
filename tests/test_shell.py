@@ -10,6 +10,7 @@ All tests run offline — subprocess and Docker are mocked.
 
 import os
 import platform
+import shlex
 import subprocess
 from unittest.mock import MagicMock, patch
 
@@ -46,6 +47,7 @@ from security.sandbox import (
     is_docker_available,
     run_sandboxed,
 )
+from security import protected_paths
 from tools.builtin.shell import _shell_approval_check, _shell_approval_notice
 
 
@@ -176,7 +178,12 @@ class TestIsInert:
         try:
             assert _is_inert("find . -delete") is False
             assert _is_inert("find . -exec rm {} +") is False
-            assert _is_inert("find . -name '*.py'") is True  # safe flags OK
+            assert _is_inert("find . -name test.py") is True  # safe flags
+            # Quoting is rejected outright now (see _SHELL_METACHARACTERS),
+            # so the quoted spelling of the same call is no longer inert.
+            # That is this batch's intended tier change, not a regression in
+            # the flag denylist -- which is what the line above still tests.
+            assert _is_inert("find . -name '*.py'") is False
         finally:
             config.INERT_COMMANDS[:] = original
 
@@ -908,3 +915,352 @@ class TestShellApprovalModeIsRejectedBySettingsJson:
         """The by-name branch must not swallow the ordinary typo case."""
         with pytest.raises(ValueError, match="unknown key"):
             self._validate({"shell_approval_mod": "never"})
+# ===========================================================================
+# ---- Batch 37: quoting, and what the workspace may point at ---------------
+# ===========================================================================
+
+
+class TestQuotingCannotHideAnEscape:
+    """This module tokenises a command TWICE, in two different ways.
+
+    `_escapes_workspace` reads raw `.split()` tokens; `_run_inert` execs
+    `shlex.split()` tokens, and shlex STRIPS quotes. While quotes were
+    accepted, `cat "/etc/passwd"` was ONE token that joined onto the
+    workspace root and read as inside it -- classified INERT, silently
+    auto-approved, no prompt -- and then ran on the host as
+    `['cat', '/etc/passwd']`. #157 again, arriving through the gap between
+    two tokenisers rather than through the gate.
+    """
+
+    QUOTED_ESCAPES = [
+        'cat "/etc/passwd"',
+        "cat '/etc/passwd'",
+        'cat "../../../etc/passwd"',
+        'grep --file="/etc/passwd" notes.txt',
+        'stat "/root/.ssh/id_rsa"',
+    ]
+
+    @pytest.mark.parametrize("command", QUOTED_ESCAPES)
+    def test_a_quoted_escape_is_no_longer_inert(self, command, _tiered):
+        assert _is_inert(command) is False
+        assert classify_command(command, _tiered).tier == SANDBOXED
+
+    @pytest.mark.parametrize("command", QUOTED_ESCAPES)
+    def test_reaching_the_host_now_costs_a_human(
+            self, command, _tiered, monkeypatch):
+        """With the fallback on -- the only configuration in which a
+        non-inert command reaches the host at all -- the answer is ASK.
+        Asserted against containment rather than against `_asks` alone,
+        because with the fallback OFF the same call returns False for the
+        opposite reason: nothing can run it, so there is nothing to
+        approve."""
+        monkeypatch.setattr(config, "ALLOW_INSECURE_SANDBOX_FALLBACK", True)
+        monkeypatch.setattr(config, "AUTO_APPROVE_SANDBOX_FALLBACK", False)
+        profile = classify_command(command, _tiered)
+        assert containment_for(profile, docker_available=False) == UNCONTAINED
+        assert _asks(command, docker=False) is True
+
+    @pytest.mark.parametrize("command", QUOTED_ESCAPES)
+    def test_and_with_docker_up_it_is_simply_contained(self, command, _tiered):
+        """The cost of the fix, measured. In the DEFAULT posture a quoted
+        command is still auto-approved -- it just runs in the container,
+        where `/etc/passwd` is the container's own."""
+        profile = classify_command(command, _tiered)
+        assert containment_for(profile, docker_available=True) == CONTAINED
+        assert _asks(command, docker=True) is False
+
+    def test_a_legitimate_quoted_workspace_path_still_works(self, _tiered):
+        """The friction this fix actually costs someone: none, under
+        Docker. A workspace file whose name has a space in it is
+        SANDBOXED rather than INERT, and still runs without a prompt."""
+        assert _asks('cat "my notes.txt"', docker=True) is False
+
+    def test_the_classifier_and_the_executor_agree_on_every_token(
+            self, _tiered):
+        """The invariant the fix restores, stated once and over a corpus
+        rather than over the three spellings that happened to be found.
+
+        Anything the classifier is willing to call INERT must still be
+        inside the workspace AFTER the executor has done its own
+        tokenisation. `posix=True` deliberately, on every platform: it is
+        what `_run_inert` uses on Linux and macOS, and it is the stricter
+        of the two, so the property holds everywhere rather than only
+        where the test happens to run.
+        """
+        corpus = self.QUOTED_ESCAPES + [
+            'cat notes.txt', 'ls -la', 'grep -r pattern .',
+            'cat "my notes.txt"', 'wc -l "../secret"',
+            'head -n 5 notes.txt', 'cat --file="/etc/x"',
+            'diff "a b.txt" "../../c.txt"',
+        ]
+        for command in corpus:
+            if classify_command(command, _tiered).tier != INERT:
+                continue
+            try:
+                argv = shlex.split(command, posix=True)
+            except ValueError:  # unbalanced quotes -- never inert anyway
+                pytest.fail("%r was classified INERT but does not tokenise"
+                            % command)
+            for token in argv[1:]:
+                assert _within(_tiered, token), (command, token)
+
+
+class TestTheWorkspaceCannotBeTheHarness:
+    """`_run_docker` binds the workspace read-write at /workspace, and a
+    SANDBOXED command under CONTAINED with no network is AUTO-APPROVED --
+    so a workspace overlapping the harness's own tree was unattended
+    write access to the code about to be executed next, and a workspace
+    at a home directory was the same for `~/.config/venastine/`, where
+    trusted_projects.json (the D17 gate) and mcp.json (which names the
+    commands the harness spawns) live."""
+
+    def test_the_default_layout_is_allowed(self):
+        root = protected_paths.harness_root()
+        assert protected_paths.check_workspace(
+            os.path.join(root, "workspace")) is None
+        assert protected_paths.check_workspace(
+            os.path.join(root, "output")) is None
+        assert protected_paths.check_workspace(
+            os.path.join(root, "workspace", "nested")) is None
+
+    def test_the_install_tree_itself_is_refused(self):
+        reason = protected_paths.check_workspace(
+            protected_paths.harness_root())
+        assert reason is not None
+        assert "install tree" in reason
+        assert "./workspace" in reason   # says what to do instead
+
+    @pytest.mark.parametrize("name", ["core", "security", "tools", "tests"])
+    def test_a_source_directory_inside_it_is_refused(self, name):
+        """The case a blanket "inside the install tree is fine" rule would
+        have allowed, which is the original escalation with an extra
+        path component."""
+        assert protected_paths.check_workspace(
+            os.path.join(protected_paths.harness_root(), name)) is not None
+
+    def test_the_allowlist_fails_closed(self):
+        """A directory added to the install tree in a later batch is
+        protected the day it lands. A denylist of known source
+        directories would leave it mounted read-write until somebody
+        remembered to extend the list."""
+        assert protected_paths.check_workspace(os.path.join(
+            protected_paths.harness_root(), "a_module_added_next_year"
+        )) is not None
+
+    def test_the_user_config_directory_is_refused(self):
+        reason = protected_paths.check_workspace(
+            protected_paths.user_config_dir())
+        assert reason is not None
+        assert "user config directory" in reason
+
+    def test_an_unrelated_project_is_allowed(self, tmp_path):
+        assert protected_paths.check_workspace(str(tmp_path)) is None
+
+    def test_a_sibling_sharing_a_prefix_is_not_inside(self):
+        """`<harness>-evil` must not read as inside `<harness>`, which is
+        what a bare startswith would say. test_file_ops.py:314 records the
+        same bug in `_is_within_workspace`, where it survived 1406 tests --
+        this is the over-refusal direction of it, and it would make a
+        legitimate sibling directory unusable as a workspace."""
+        assert protected_paths.check_workspace(
+            protected_paths.harness_root() + "-evil") is None
+        assert protected_paths.check_workspace(
+            protected_paths.user_config_dir() + "-backup") is None
+
+    def test_a_separate_clone_of_the_harness_is_allowed(self, tmp_path):
+        """The guard names the RUNNING install, not every copy of the
+        source. An npm-installed harness pointed at a development clone
+        sees two disjoint trees and allows it: writing to a clone you are
+        not executing cannot escalate the privileges of the process doing
+        the writing."""
+        clone = tmp_path / "venastine-dev"
+        (clone / "security").mkdir(parents=True)
+        (clone / "main.py").write_text("# a clone, not the running install")
+        assert protected_paths.check_workspace(str(clone)) is None
+
+    def test_a_sensitive_path_never_refuses_a_workspace(self, monkeypatch):
+        """The two-class split. AGENT_LOG_FILE can legitimately point
+        into $HOME, and letting that refuse a $HOME workspace would turn
+        a logging preference into a launch failure."""
+        home = os.path.realpath(os.path.expanduser("~"))
+        monkeypatch.setattr(protected_paths, "harness_root",
+                            lambda: os.path.realpath("/nowhere/harness"))
+        monkeypatch.setattr(protected_paths, "user_config_dir",
+                            lambda: os.path.realpath("/nowhere/config"))
+        monkeypatch.setenv("AGENT_LOG_FILE", os.path.join(home, "app.log"))
+        assert protected_paths.check_workspace(home) is None
+
+
+class TestTheHarnessTreesAreBoundReadOnly:
+    """The other half: when a protected path is NESTED inside the
+    workspace there is nothing to refuse, so it is bound read-only at its
+    place in the container -- Docker resolves overlapping binds by mount
+    depth, which is what `_venastine_readonly_mount` already relies on."""
+
+    @pytest.fixture
+    def _ws(self, tmp_path, monkeypatch):
+        """A workspace with a fake user config dir nested inside it, and
+        the real protected paths pointed somewhere harmless."""
+        ws = tmp_path / "ws"
+        (ws / ".config" / "venastine").mkdir(parents=True)
+        monkeypatch.setattr(protected_paths, "harness_root",
+                            lambda: os.path.realpath(str(tmp_path / "away")))
+        monkeypatch.setattr(
+            protected_paths, "user_config_dir",
+            lambda: os.path.realpath(str(ws / ".config" / "venastine")))
+        monkeypatch.setattr(protected_paths, "sensitive_paths", lambda: [])
+        return os.path.realpath(str(ws))
+
+    def test_a_nested_protected_path_becomes_a_readonly_bind(self, _ws):
+        args = protected_paths.readonly_mounts(_ws)
+        assert args[0] == "-v"
+        assert args[1].endswith(":/workspace/.config/venastine:ro")
+
+    def test_a_missing_protected_path_mounts_nothing(
+            self, tmp_path, monkeypatch):
+        """Docker CREATES a missing bind source, as a root-owned
+        directory on the HOST -- so an unconditional mount would conjure
+        a `.config/venastine/` into the user's tree, or an `app.db` that
+        is a DIRECTORY where the harness expects a SQLite file. Same trap
+        `_venastine_readonly_mount`'s isdir guard exists for."""
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        monkeypatch.setattr(protected_paths, "harness_root",
+                            lambda: os.path.realpath(str(tmp_path / "away")))
+        monkeypatch.setattr(
+            protected_paths, "user_config_dir",
+            lambda: os.path.realpath(str(ws / ".config" / "venastine")))
+        monkeypatch.setattr(protected_paths, "sensitive_paths", lambda: [])
+        assert protected_paths.readonly_mounts(
+            os.path.realpath(str(ws))) == []
+
+    def test_nested_protected_paths_collapse_to_the_outermost(
+            self, tmp_path, monkeypatch):
+        """On a global install the database and the log directory both
+        live under `~/.config/venastine`. A second read-only bind
+        underneath a read-only one buys nothing."""
+        ws = tmp_path / "ws"
+        cfg = ws / ".config" / "venastine"
+        cfg.mkdir(parents=True)
+        (cfg / "logs").mkdir()
+        monkeypatch.setattr(protected_paths, "harness_root",
+                            lambda: os.path.realpath(str(tmp_path / "away")))
+        monkeypatch.setattr(protected_paths, "user_config_dir",
+                            lambda: os.path.realpath(str(cfg)))
+        monkeypatch.setattr(
+            protected_paths, "sensitive_paths",
+            lambda: [(os.path.realpath(str(cfg / "logs")), "the log dir")])
+        args = protected_paths.readonly_mounts(os.path.realpath(str(ws)))
+        assert args.count("-v") == 1
+        assert args[1].endswith(":/workspace/.config/venastine:ro")
+
+    def test_the_docker_command_carries_them(self, _ws):
+        """Wiring, not logic: the mounts have to reach `docker run`."""
+        with patch("subprocess.Popen") as popen:
+            popen.return_value.communicate.return_value = ("", "")
+            popen.return_value.returncode = 0
+            _run_docker("echo hi", _ws, "/bin/bash")
+        argv = popen.call_args[0][0]
+        assert any(a.endswith(":/workspace/.config/venastine:ro")
+                   for a in argv)
+
+
+class TestEveryBackendRefusesARefusedWorkspace:
+    """One check at the top of run_sandboxed rather than one inside
+    `_run_docker`, so the inert path and the subprocess fallback -- which
+    mount nothing and would otherwise be exempt by accident -- refuse it
+    too."""
+
+    @pytest.mark.parametrize("command", ["cat notes.txt", "python x.py"])
+    def test_no_backend_will_run_it(self, command):
+        with pytest.raises(SandboxUnavailable, match="AGENT_WORKSPACE"):
+            run_sandboxed(command, protected_paths.harness_root())
+
+    def test_the_fallback_refuses_it_too(self, monkeypatch):
+        monkeypatch.setattr(config, "ALLOW_INSECURE_SANDBOX_FALLBACK", True)
+        with pytest.raises(SandboxUnavailable, match="AGENT_WORKSPACE"):
+            run_sandboxed("python evil.py",
+                          protected_paths.harness_root(),
+                          docker_available=False)
+
+    def test_a_refused_workspace_is_not_created(self):
+        """The check sits ABOVE audit #50's makedirs on purpose: creating
+        the directory is already the wrong move, and a refusal that first
+        conjures a directory into the harness's own tree is not a refusal.
+
+        Asserted against the CALL rather than against the filesystem, and
+        that is not a style choice. The filesystem version passes or fails
+        on what an earlier run left behind: while this batch's mutation
+        testing was running, the mutation that removes the refusal let
+        makedirs through, and the real directory it created then failed
+        this test under every LATER mutation -- five kills that were
+        actually one, scored against tests that had nothing to do with it.
+        A test that writes into the tree it is defending cannot be run
+        twice."""
+        ghost = os.path.join(protected_paths.harness_root(),
+                             "ghost_workspace_dir")
+        with patch("security.sandbox.os.makedirs") as makedirs:
+            with pytest.raises(SandboxUnavailable, match="AGENT_WORKSPACE"):
+                run_sandboxed("cat notes.txt", ghost)
+        makedirs.assert_not_called()
+        assert not os.path.exists(ghost)
+
+
+class TestTheMirroredResolversMatchTheirOwners:
+    """protected_paths re-derives three paths their real owners also
+    derive, rather than importing them: logging_setup pulls in
+    safety.policy_enforcement, and importing it would be the first
+    `security/ -> safety/` edge in the project. Duplication is only safe
+    while it stays true, so this is a test and not a comment."""
+
+    def test_the_user_config_directory_matches_config_loader(self):
+        from core import config_loader
+        assert (os.path.realpath(config_loader._user_config_dir())
+                == protected_paths.user_config_dir())
+
+    def test_the_log_directory_matches_logging_setup(self, monkeypatch):
+        import logging_setup
+        monkeypatch.delenv("AGENT_LOG_FILE", raising=False)
+        assert (os.path.realpath(
+            os.path.dirname(logging_setup._DEFAULT_LOG_FILE))
+            == protected_paths._log_dir())
+
+    def test_the_log_directory_follows_the_env_override(self, monkeypatch):
+        monkeypatch.setenv("AGENT_LOG_FILE", os.path.join("var", "x.log"))
+        assert protected_paths._log_dir() == os.path.realpath("var")
+
+    def test_the_providers_file_matches_credentials(self):
+        import credentials
+        paths = [p for p, _ in protected_paths.sensitive_paths()]
+        assert os.path.realpath(credentials.LLM_PROVIDERS_FILE) in paths
+
+    def test_the_database_matches_config(self):
+        paths = [p for p, _ in protected_paths.sensitive_paths()]
+        assert os.path.realpath(config.DB_PATH) in paths
+
+
+class TestTheWorkspaceBoundaryIsNotEnvironmentControlled:
+    """The audit that produced this batch asked whether a compromised
+    agent could `export AGENT_WORKSPACE` and move the permission
+    boundary. It cannot: config binds the value once at import, and a
+    child shell's export dies with the subprocess that ran it.
+
+    Pinned because the fix someone would reach for -- "resolve it at call
+    time so tests can redirect it", which is genuinely the right posture
+    for the trust store and for tui/preferences.py -- would make the
+    answer yes for a value that is a PERMISSION BOUNDARY rather than a
+    storage location."""
+
+    def test_mutating_the_environment_does_not_move_the_workspace(
+            self, monkeypatch):
+        before = config.WORKSPACE_DIR
+        monkeypatch.setenv("AGENT_WORKSPACE", os.path.join("somewhere",
+                                                           "else"))
+        assert config.WORKSPACE_DIR == before
+
+    def test_file_ops_root_is_bound_at_import_too(self, monkeypatch):
+        from tools.builtin import file_ops
+        before = file_ops.WORKSPACE_ROOT
+        monkeypatch.setenv("AGENT_WORKSPACE", os.path.join("somewhere",
+                                                           "else"))
+        assert file_ops.WORKSPACE_ROOT == before

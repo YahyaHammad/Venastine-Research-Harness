@@ -36,6 +36,7 @@ import uuid
 from typing import Callable, Optional
 
 import config
+from security import protected_paths
 from security.capability import (
     CONTAINED,
     UNAVAILABLE,
@@ -125,7 +126,21 @@ def is_docker_available() -> bool:
 # ---- Command classification -----------------------------------------------
 # ---------------------------------------------------------------------------
 
-_SHELL_METACHARACTERS = re.compile(r'[;|&$`><(){}!#~]')
+# The two quote characters are here for a reason that is NOT "they are
+# shell syntax": this module tokenises a command twice, in two different
+# ways, and they have to agree. This classifier reads raw `.split()`
+# tokens; `_run_inert` execs `shlex.split()` tokens, and shlex STRIPS
+# quotes. So `cat "/etc/passwd"` was ONE token that joined onto the
+# workspace root and read as inside it -- classified INERT, silently
+# auto-approved -- and was then executed as `['cat', '/etc/passwd']` on
+# the host. Audit #157 again, arriving through the gap between two
+# tokenisers rather than through the gate.
+#
+# Rejecting the character keeps this module's actual soundness argument
+# (reject syntax, never interpret it). Teaching the classifier to unquote
+# would close the same hole by making it the shell parser
+# `_escapes_workspace` explains it must never become.
+_SHELL_METACHARACTERS = re.compile(r"""[;|&$`><(){}!#~'"]""")
 
 # Dangerous flags for commands that remain in INERT_COMMANDS.
 # Even though find/sort were removed, this denylist provides
@@ -139,8 +154,14 @@ _DANGEROUS_FLAGS: dict[str, frozenset[str]] = {
 
 def _is_inert(command: str) -> bool:
     """True if the command is a read-only inspection command with no
-    shell metacharacters, no path-qualified binary, and no dangerous
-    flags — safe to run without full sandbox isolation."""
+    shell metacharacters, no quoting, no path-qualified binary, and no
+    dangerous flags — safe to run without full sandbox isolation.
+
+    "No quoting" is load-bearing rather than tidy, and
+    _SHELL_METACHARACTERS carries the whole reason. A quoted argument
+    means this function and `_run_inert` disagree about where one token
+    ends, and a disagreement between the classifier and the executor is a
+    command approved as one thing and run as another."""
     stripped = command.strip()
     if not stripped:
         return False
@@ -217,6 +238,14 @@ def _escapes_workspace(command: str, workspace_dir: str) -> bool:
     like `-la` passes only because it is RELATIVE and therefore lands
     inside the workspace on its own -- not because anything recognised it
     as a flag.
+
+    The corollary, learned the hard way: because this reads RAW tokens,
+    every caller has to guarantee the raw tokens are the real ones.
+    `_is_inert` does that by rejecting quotes outright. Without it,
+    `cat "/etc/passwd"` is one token that lands inside the workspace here
+    and two tokens naming the host's file by the time shlex has finished
+    with it. Refusing to parse is only sound while nothing downstream
+    parses either.
 
     The `=` clause is the one place a token needs splitting: `--file=/etc/x`
     is inside the workspace read whole (there is no such file, but the
@@ -483,6 +512,12 @@ def _run_docker(
         docker_args.append("none")
 
     docker_args.extend(_venastine_readonly_mount(workspace_real))
+    # Kept separate from the line above because the two answer different
+    # questions: that one protects a PROJECT's `.venastine/`, this one
+    # protects the HARNESS -- its source, and the user-tier state that
+    # decides what it trusts and what it spawns. See
+    # security/protected_paths.py for the geometry and its limits.
+    docker_args.extend(protected_paths.readonly_mounts(workspace_real))
 
     docker_args.extend(["-e", "PATH=/usr/bin:/bin:/usr/local/bin"])
     docker_args.append(config.SANDBOX_DOCKER_IMAGE)
@@ -641,6 +676,16 @@ def run_sandboxed(
 
     Returns ``{"stdout": str, "stderr": str, "return_code": int}``.
     """
+    # BEFORE makedirs, and before any backend is chosen. A workspace
+    # overlapping the harness's own tree is a configuration error, and
+    # CREATING such a directory is already the wrong move. One check here
+    # rather than one inside _run_docker, so the inert path and the
+    # subprocess fallback -- which mount nothing and would otherwise be
+    # exempt by accident -- refuse it too.
+    refusal = protected_paths.check_workspace(workspace_dir)
+    if refusal:
+        raise SandboxUnavailable(refusal)
+
     if shell_binary is None:
         shell_binary = detect_shell()
 

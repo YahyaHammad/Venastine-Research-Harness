@@ -33,6 +33,7 @@ from core.reasoning.authorization import GRANT_PICKER
 from core.replay import replay_entries
 from database import create_db_and_tables, engine
 from logging_setup import configure_logging
+from security import protected_paths
 
 # Importing these for their SIDE EFFECT, and the side effect is load-bearing:
 # a SQLModel table class registers on SQLModel.metadata when its module is
@@ -1642,6 +1643,23 @@ def main(argv=None) -> int:
     # DIRECTORY, so --help left one behind too. Nothing above logs
     # anything -- argparse reports its own errors on stderr and exits.
     configure_logging()
+
+    # A workspace overlapping the harness's own tree -- or the user-tier
+    # state that decides what it trusts and what it spawns -- is refused
+    # here AND inside the sandbox. security/sandbox.py is the boundary,
+    # because it is the one thing no tool can route around; this is the
+    # legibility half. Finding out that AGENT_WORKSPACE is misconfigured
+    # through a failed tool call in the middle of a task is a bad way to
+    # learn it, so it is a launch failure as well.
+    #
+    # Below configure_logging so the reason can be logged, and above
+    # create_db_and_tables so a refused launch does not leave a database
+    # behind -- the same argument audit #101 makes one line down.
+    workspace_refusal = protected_paths.check_workspace(config.WORKSPACE_DIR)
+    if workspace_refusal:
+        logger.error("%s", workspace_refusal)
+        print(f"[error] {workspace_refusal}", file=sys.stderr)
+        return 2
 
     # §29 (N6), audit #101. BELOW parse_args, which is where --help and a
     # typo'd flag exit -- both of which used to create a 77 KB six-table

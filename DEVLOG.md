@@ -7073,3 +7073,212 @@ store and the suite's runtime is unchanged.
 Unchanged from batch 35: `npm login` + the `NPM_TOKEN` secret; whether the
 channel opens at `0.1.0` or `1.0.0`; and batch 33's carried three (Private
 Vulnerability Reporting, the OpenRouter key rotation, `git commit -s`).
+## Batch 37 — the classifier and the executor stopped agreeing (2026-08-28)
+
+A security review asked whether a compromised agent could `export
+AGENT_WORKSPACE`, move the permission boundary, and end up rewriting the
+harness's own source — which, since this ships as a folder of Python rather
+than a binary, would be privilege escalation relative to what the harness
+intends. The reported mechanism does not exist. Two others, neither of them
+reported, do.
+
+### The three verdicts, each measured rather than argued
+
+**`export AGENT_WORKSPACE` cannot move anything.** `config.py:185` binds
+`WORKSPACE_DIR` once at import and `file_ops.py:50` realpaths it at import;
+mutating `os.environ` INSIDE the process leaves both unchanged, and a child
+shell's `export` dies with the subprocess that ran it. `bin/venastine.mjs`
+never sets it either, pinned since batch 35. Pinned again here, from the
+other side, by `TestTheWorkspaceBoundaryIsNotEnvironmentControlled` — because
+the "fix" someone would reach for (resolve it at call time so tests can
+redirect it, which is genuinely right for the trust store and for
+`tui/preferences.py`) would make the answer yes for a value that is a
+PERMISSION BOUNDARY rather than a storage location.
+
+**Writing the harness's source under the insecure fallback is real, and
+already gated.** No env trick is needed — the fallback has no filesystem
+isolation and says so. But a write needs a metacharacter or a non-inert
+binary, which is `SANDBOXED` + `UNCONTAINED` + `writes=True`, which asks a
+human. It is unprompted only with `AUTO_APPROVE_SANDBOX_FALLBACK = True` as
+well, or `SHELL_APPROVAL_MODE = "never"`. Documented in `SECURITY.md` beside
+the existing `never` entry rather than fixed, and the reason is that it
+cannot be fixed from here: an uncontained host shell cannot be bounded from
+inside the same process. A path check stops `echo x > ../config.py` and a
+`python -c` payload walks past it, which is a control that reads as safety
+without being one. Docker is the boundary.
+
+**Banning `export` — the review's own suggested fix — is the wrong lever
+twice.** It cannot reach the harness anyway, and a word denylist inside a
+classifier whose soundness rests on NOT parsing is the "a parser that is
+wrong auto-approves" trap `_escapes_workspace` exists to avoid. `env X=y
+cmd`, `X=y cmd`, `$env:` and `os.environ` all arrive at the same place.
+
+### Finding 1: two tokenisers, one of which strips quotes
+
+```
+cat /etc/passwd     -> HOST_READ,  asked about
+cat "/etc/passwd"   -> INERT,      auto-approved, ran on the HOST
+```
+
+`_escapes_workspace` reads raw `.split()` tokens, so `"/etc/passwd"` joins
+onto the workspace root as a RELATIVE name and lands inside it. `_run_inert`
+then execs `shlex.split(posix=True)` tokens, which strip the quotes, and runs
+`['cat', '/etc/passwd']`. Verified end to end: the argv resolves and a real
+out-of-workspace file came back.
+
+This is audit #157 again, and the interesting part is where it came back.
+§28's fix was "one classification, two consumers" — the profile the gate
+approved is the profile the executor runs. That still holds. What did not
+hold is one level down: the gate and the executor were tokenising the same
+string differently, so they agreed about the PROFILE while disagreeing about
+what the command's arguments even were. A shared decision does not help when
+the two sides disagree about the input to it.
+
+Reachable at the shipped `tiered` default with Docker healthy, needing only
+`ToolPermissions.shell = True`. The approval prompt even said "every argument
+inside the workspace ... Runs on the HOST" in one breath. Read-only — `INERT`
+requires a read-only binary and no metacharacters — and `check_output_policy`
+redacts vendor tokens and `password` fields, but not SSH keys, not source,
+not arbitrary file content.
+
+**The platform split is not the one it first looks like.** On Linux and macOS
+it lands fully. On Windows `_run_inert` splits with `posix=False`, so the
+quotes survive into argv -- and the DOUBLE-quoted spelling then fails,
+because `subprocess`'s `list2cmdline` escapes them on the way to the command
+line. The SINGLE-quoted spelling still lands, because `cat` on a developer's
+Windows box is usually Git for Windows' MSYS2 `cat.exe`, and MSYS binaries
+re-parse the Windows command line with POSIX quoting rules of their own --
+so the BINARY strips the quotes that Python had carefully preserved. Most of
+`INERT_COMMANDS` comes from the same place on Windows: `grep`, `head`,
+`tail`, `wc`, `stat`, `du`, `df`, `uniq`, `diff`, `md5sum`, `sha256sum`.
+
+Measured rather than reasoned, with the fix reverted: `cat '<host path>'`
+returned the marker file and exited 0, while `cat "<host path>"` exited 1.
+The first pass of this analysis called Windows unaffected on the strength of
+the double-quoted case alone -- a two-sample conclusion about a question with
+more than two answers, and exactly the sampling error the corpus-shaped test
+above exists to prevent. It also means the tokenisation this classifier has
+to agree with is not one function's: it is `shlex`, THEN whatever the invoked
+binary does to the command line it is handed. Which is the argument for
+rejecting the character outright rather than modelling any of it.
+
+The fix is one character class. Quotes join `_SHELL_METACHARACTERS`, which
+keeps the module's actual soundness argument — reject syntax, never
+interpret it — where teaching the classifier to unquote would have closed
+the same hole by making it the shell parser it must never become. Measured
+cost in the default posture: none. A quoted command is `SANDBOXED`, and with
+Docker up that is `CONTAINED` and still auto-approved; `cat "my notes.txt"`
+runs without a prompt, in the container, where `/etc/passwd` is the
+container's own.
+
+Why the tests missed it: `test_shell.py` covered unquoted absolutes, `..`
+escapes, `--file=`, drive letters and UNC paths. Every case was unquoted.
+The new pin is therefore written as an invariant over a corpus — anything
+classified `INERT` must still be inside the workspace after the EXECUTOR's
+tokenisation — rather than as three more spellings.
+
+### Finding 2: nobody asked what was on the other side of the mount
+
+`_run_docker` binds `config.WORKSPACE_DIR` read-write at `/workspace`, and a
+`SANDBOXED` command under `CONTAINED` with no network is AUTO-APPROVED. So:
+
+- workspace at the install tree -> the whole Python source, read-write,
+  unprompted, persisting into the next run;
+- workspace at a home directory -> `~/.config/venastine/` in the mount,
+  read-write: `trusted_projects.json` (the D17 gate — a write marks arbitrary
+  projects trusted) and `mcp.json`, which NAMES COMMANDS the harness spawns
+  at startup.
+
+The existing `_venastine_readonly_mount` guards `<workspace>/.venastine`, so
+with the workspace at `$HOME` it fires on `~/.venastine` and misses
+`~/.config/venastine` entirely. Its own docstring already named the gap:
+"does not cover ... the harness's own `agents/builtin` when the workspace is
+the harness repo." `_run_docker` mounts nothing else — no docker socket, no
+second bind — so this was the only hole.
+
+`security/protected_paths.py` generalises that precedent. The geometry, per
+protected path P against workspace W:
+
+| relation | action |
+|---|---|
+| `W == P`, or `W` inside `P` | refuse — unless W is inside `<harness>/workspace` or `<harness>/output` |
+| `P` inside `W` | read-only bind at its nested container path |
+| disjoint | allow, unchanged |
+
+**The allowlist is the load-bearing part, and it went in after the first
+draft was wrong.** The rule as first written allowed anything inside the
+install tree, justified on the default `<harness>/workspace`. That is a DATA
+directory the harness creates; `<harness>/core` is not, and would have been
+mounted read-write — the original escalation, arriving through the fix for
+it. Naming the two artifact directories and refusing the rest fails closed:
+a module added in a later batch is protected the day it lands, where a
+denylist of source directories would leave it exposed until somebody
+remembered.
+
+**Two classes, not one.** The install tree and the user config dir refuse a
+workspace. `providers.json`, the database and the log directory are only ever
+ro-bound, never refuse — each is user-configurable to anywhere, and letting
+`AGENT_LOG_FILE` point into `$HOME` turn a `$HOME` workspace into a launch
+failure would be a logging preference vetoing a workspace.
+
+**It names the RUNNING install**, derived from `security/`'s own `__file__`
+rather than the cwd. An npm-installed harness pointed at a development clone
+of its own source sees two disjoint trees and allows it, because writing to a
+clone you are not executing cannot escalate the privileges of the process
+doing the writing. Only aiming the workspace at the tree currently executing
+is refused.
+
+Enforced at the top of `run_sandboxed`, above audit #50's `makedirs`, so all
+three backends are covered by one check — the inert path and the fallback
+mount nothing and would otherwise have been exempt by accident — and a
+refused workspace is not created on the way to being refused. `main.py`
+repeats it at startup, because finding out through a failed tool call in the
+middle of a task is a bad way to learn about a configuration error.
+
+### The mutation run that scored five fake kills
+
+Seven mutations, each removing one thing this batch added. All seven were
+caught — but `test_a_refused_workspace_is_not_created` failed under every
+one of them, including four it has nothing to do with. The mutation that
+removes the refusal let `makedirs` run, which created a real
+`ghost_workspace_dir` in the repo, which then failed the test on every
+subsequent run. The test now asserts against the `makedirs` CALL instead of
+against the filesystem, and the rerun attributes every kill to the test whose
+subject it is. Recorded because the shape recurs: a test that writes into the
+tree it is defending cannot be run twice, and a mutation harness makes that
+look like coverage.
+
+### CVSS 4.0
+
+Computed with FIRST's reference implementation. Neither is reachable on a
+default install — `ToolPermissions.shell` ships `False`, which is what `AT:P`
+records.
+
+- Finding 1: `CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:P/VC:H/VI:N/VA:N/SC:N/SI:N/SA:N`
+  — **6.0 Medium**. `VI:N` because `INERT` cannot write.
+- Finding 2: `CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:P/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N`
+  — **7.7 High**, scoping harness-plus-host as the vulnerable system.
+
+`AV:N` because the trigger is content the harness fetches. `UI:P` because the
+operator starts a task that ingests it and takes no action aimed at the
+exploit. Defensible variants, recorded so the choice is visible: finding 1 at
+`UI:N` (an unattended research run) is 8.2; at `SC:H`, counting the automatic
+egress of file contents to the model provider, 7.0; finding 2 with the host
+as a subsequent system, 9.0.
+
+### Files
+
+- `security/protected_paths.py` (NEW) — `harness_root`, `user_config_dir`,
+  `critical_paths` / `sensitive_paths`, `check_workspace`, `readonly_mounts`.
+- `security/sandbox.py` — the character class; `_is_inert` and
+  `_escapes_workspace` docstrings; the workspace check in `run_sandboxed`;
+  the extra binds in `_run_docker`.
+- `main.py` — the startup refusal, exit 2.
+- `tests/test_shell.py` — six new classes; one existing assertion flipped.
+- `README.md`, `SECURITY.md`, `ARCHITECTURE.md`, `tests/BREAKING_CHANGES.md`.
+
+### Still open
+
+Unchanged from batch 36: `npm login` + the `NPM_TOKEN` secret; whether the
+channel opens at `0.1.0` or `1.0.0`; and batch 33's carried three (Private
+Vulnerability Reporting, the OpenRouter key rotation, `git commit -s`).
