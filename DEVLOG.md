@@ -6377,3 +6377,38 @@ Created from exactly the maintainer-provided table (2026-08-27), no licenses inf
 ### Verification
 
 `python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['license'])"` → `{'text':'Apache-2.0'}`. `git log --oneline -3` → `e3a3bbe`, `66a4f86`, `8011893` as above. `git status` → only `THIRD_PARTY_NOTICES.md` untracked before this entry. No test change expected — docs/metadata only; `pytest -q` still `2605 passed, 18 skipped` (measured before).
+
+
+## Community docs — CONTRIBUTING / CODE_OF_CONDUCT / PRIVACY + issue format (2026-08-27)
+
+Not a roadmap section. Follow-up to the same licensing review — closes the remaining community items it flagged as `H1` (no inbound terms) and `M4` (no conduct/privacy), and standardizes the issue shape the repo actually uses. `H2` (`SECURITY.md`) and `M3` (scrape/ToS note) stay open by owner choice (security file deferred).
+
+### What was built
+
+**`CONTRIBUTING.md` — `H1` closed, then evolved.**
+
+*Created `c7bda06` had only tracked `THIRD_PARTY_NOTICES.md`; the three new docs were still untracked (`git status` → `?? CODE_OF_CONDUCT.md`, `?? CONTRIBUTING.md`, `?? PRIVACY.md`). This batch creates `CONTRIBUTING.md` as the inbound + workflow file:*
+
+* `CONTRIBUTING.md:5-13` inbound = `Apache-2.0 §5` verbatim (`LICENSE`) + `Not a Contribution` escape. `CONTRIBUTING.md:15-27` DCO 1.1 via `git commit -s` (`Signed-off-by:`) — no CLA, sign-off is the record. `CONTRIBUTING.md:29-44` How to contribute 1–7: fork/branch, `pip install -r requirements.txt` + `cp providers.json.example providers.json` (gitignored, suite fakes SDKs via `conftest.py` but needs the file, `AGENTS.md:54`), `python -m pytest -q` offline, `read AGENTS.md → ARCHITECTURE.md` before touching `core/loop.py`/`core/client.py`/`tools/registry.py`/`security/`, test stays green, `Update Project Docs` step 5, `git commit -s`, PR `what/why` + linked issue. `CONTRIBUTING.md:70-78` What to expect (single-threaded review, small PRs) + `CODE_OF_CONDUCT.md` link.
+
+*Evolved in two passes after owner edits to step 5:*
+
+* `CONTRIBUTING.md:42` step 5 now reads "update the project docs — see the table below for what lives where" and `CONTRIBUTING.md:46-68` adds the **15-row doc table** — every maintained markdown doc currently on disk (`README.md`, `AGENTS.md` (+`CLAUDE.md`/`QWEN.md` pointers), `ARCHITECTURE.md`, `ROADMAP.md`/`ROADMAP_v2.md`, `DEVLOG.md`, `TECHNICAL_DEBT.md`, `tests/BREAKING_CHANGES.md`, `CONTRIBUTING.md` (self), `CODE_OF_CONDUCT.md`, `PRIVACY.md`, `THIRD_PARTY_NOTICES.md`, `LICENSE`, `.github/workflows/tests.yml`, `pyproject.toml`/`requirements.txt`, `prompts/*.md`/`agents/builtin/*.md`/`skills/builtin/**/*.md`) — each with *what it is for* and *where the update instructions live* (`AGENTS.md:60` map, `ARCHITECTURE.md:32`, `CONTRIBUTING.md:68` rule of thumb "one copy, several filenames" `AGENTS.md:10`). `SECURITY.md` intentionally omitted — not yet available (H2).
+
+* `CONTRIBUTING.md:46-57` added the two redundancy lines the owner asked for: `## Reporting a vulnerability` — **Do not open a public issue…** (explicitly redundant with `SECURITY.md`, redundancy is the point) → private report via `CODE_OF_CONDUCT.md`/`SECURITY.md` contact or GitHub *Private vulnerability reporting*, with file:line + concrete trigger. `## Proposing a large or design change` — open an issue first for any new `§`/`D-number`, `ARCHITECTURE.md` contract, or `core/loop.py`/`core/client.py`/`tools/registry.py`/`security/` boundary; small bugfixes skip it; large PRs without prior issue are asked to split (decision record is append-only, `DEVLOG.md`).
+
+* `CONTRIBUTING.md:58-114` added **`## Issue format — how we file and triage (reproducible)`** — reverse-engineered from live `gh issue list --state all` (100+ audit findings, tracker `#15`, units `X1`–`X15`). Title: `[S<1-4>][<area>] concise imperative` (`S1` critical … `S4` low, from `#15`; `<area>` = `security`, `correctness`, `coherence`, `test-quality`, `docs-drift`, `performance`, `ux`, `stability` — don't invent) plus other shapes `[tracker]`, `[unit X<n>]`, `[enhancement]`/`[docs]`. Labels: `bug` (security/correctness/coherence/test-quality), `enhancement` (perf/ux), `documentation` (drift). Body template (copy-paste): `Found during #… / Unit … (files:lines).` → `## What happens` (concrete trigger, not "could be"), → `## Why it's wrong / Severity` (which invariant `D14`, etc.), → `## Suggested shape (not a patch)` (words, not diff, with test assertion), → `## Not doing` (out of scope), → footer `Measured against <commit>`. References live examples `#157` (`[S1][security] shell…`), `#133`, `#6`. Reproducibility notes: title sorts by severity→area, body always trigger→invariant, `Suggested shape` vs PR, `Not doing` prevents scope creep. Unknown severity/area → file as `S3`/`coherence`, maintainer relabels.
+
+**`CODE_OF_CONDUCT.md` — `M4b` closed.**
+Contributor Covenant 2.1 verbatim for `Venastine Research Harness` (`CODE_OF_CONDUCT.md:1`), with pledge/standards/scope/enforcement ladder intact. Reporting initially `**[INSERT CONTACT EMAIL]**` placeholder (`CODE_OF_CONDUCT.md:48`) — owner then replaced it via external editor with the real contact (not re-read here; placeholder gone on the pushed file). GitHub issue `https://github.com/YahyaHammad/Venastine-Research-Harness/issues` listed as interim channel. No legal change — social contract only (see the `CODE_OF_CONDUCT.md` vs `LICENSE` discussion: CoC is harassment-free process, LICENSE is code rights). Keeping vs deleting is now an explicit choice; this batch keeps it.
+
+**`PRIVACY.md` — `M4a` closed.**
+`PRIVACY.md:1` `No telemetry. No analytics.` Local-only table (`PRIVACY.md:8-14`): `app.db` (`APP_DB_PATH`), `logs/app.log` (1 MB ×3, redacted via `safety/policy_enforcement.py`, but may hold query text), `output/<run_id>/`, `providers.json`/`AGENT_PROVIDERS_FILE` + `.env` (gitignored + `export-ignore`), `~/.config/venastine/settings.json`/`mcp.json`/`trusted_projects.json` — all not tracked (`git ls-files` clean, `git check-ignore` hits). What leaves: LLM provider (`providers.json` → API) + tool fetches (`web_search` via `ddgs`, `fetch_url`, `arxiv_search`, MCP `command`/`url`) only. Retention/deletion: `rm app.db` + `rm -rf output/` + `rm logs/app.log*` wipes; memories `python main.py --memories` / `--forget <id>` (by id, never substring, `M15`). Publish warning for verbatim quotes (ties to still-open `M3`).
+
+### What remains open (from that same review)
+
+`H2` no `SECURITY.md` + output disclaimer (owner deferred — `CONTRIBUTING.md:46` vulnerability line is the interim redundancy), `M3` scrape/ToS/verbatim-quote note (one paragraph for `README.md` grounding, not yet added). `C2` key rotation still open as owner action. `M4` now closed by these two files; `H1` closed by `CONTRIBUTING.md`.
+
+### Verification
+
+`gh issue list --state all --limit 100` → 100 listed (open: `15` tracker + `6`/`8`/`9`/`12` still open; closed: `S1` `#157`/`#156`, `S2` `#133` etc. used as samples). `gh issue view 157` / `133` / `6` bodies used to derive title/body template verbatim. `CONTRIBUTING.md:151` ends with DCO `Not a Contribution` escape. `CODE_OF_CONDUCT.md` / `PRIVACY.md` untracked before this entry, `THIRD_PARTY_NOTICES.md` already tracked after `c7bda06` (so `git status` now shows only the three community docs). No code change — docs only; `pytest` not re-run for this batch (metadata only), prior `2605 passed` still in force.
