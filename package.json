@@ -1,0 +1,72 @@
+{
+  "name": "@yahyahammad/venastine",
+  "version": "0.1.0",
+  "description": "A from-scratch agentic harness: tool-using chat plus a ten-pass self-critiquing research pipeline.",
+  "keywords": [
+    "agent",
+    "llm",
+    "research",
+    "anthropic",
+    "openai",
+    "mcp"
+  ],
+  "homepage": "https://github.com/YahyaHammad/Venastine-Research-Harness#readme",
+  "bugs": {
+    "url": "https://github.com/YahyaHammad/Venastine-Research-Harness/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/YahyaHammad/Venastine-Research-Harness.git"
+  },
+  "license": "Apache-2.0",
+  "author": "Yahya Hammad",
+  "type": "module",
+  "bin": {
+    "venastine": "bin/venastine.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "prepublishOnly": "node scripts/prepublish-check.mjs",
+    "check-pack": "node scripts/prepublish-check.mjs"
+  },
+  "files": [
+    "bin/",
+    "main.py",
+    "config.py",
+    "storage.py",
+    "database.py",
+    "credentials.py",
+    "env_secrets.py",
+    "logging_setup.py",
+    "core/",
+    "tools/",
+    "tui/",
+    "agents/",
+    "skills/",
+    "prompts/",
+    "mcp_client/",
+    "security/",
+    "safety/",
+    "memories/",
+    "project_init/",
+    "requirements.txt",
+    "pyproject.toml",
+    "README.md",
+    "LICENSE",
+    "NOTICE",
+    "THIRD_PARTY_NOTICES.md",
+    "SECURITY.md",
+    "PRIVACY.md",
+    "providers.json.example",
+    ".env.example",
+    "!**/__pycache__",
+    "!**/*.pyc",
+    "!**/.ipynb_checkpoints",
+    "!**/.pytest_cache"
+  ]
+}

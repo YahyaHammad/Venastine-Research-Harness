@@ -48,6 +48,7 @@ via _was_narrowed. The ones that are pure text do not, so they still run
 under `pytest tests/test_foo.py` while you are mid-change.
 """
 
+import json
 import os
 import re
 from collections import Counter
@@ -887,3 +888,145 @@ def test_a_range_citation_does_not_report_its_own_endpoint():
     assert found == ["C1", "I9"], (
         f"a range citation reported {found}; only the leading id of a range "
         f"is a citation, and the trailing one is an endpoint.")
+
+
+# ---------------------------------------------------------------------------
+# ---- The npm distribution channel (batch 35) ------------------------------
+# ---------------------------------------------------------------------------
+#
+# This file's rule is that a claim earns a check by having ALREADY drifted,
+# and only if the truth is something the suite can compute. The version pair
+# below does not qualify on the first half, and is here anyway, because batch
+# 35 is the change that CREATES the hand-maintained duplicate: one release now
+# states its version in package.json and in pyproject.toml. That is the shape
+# D22 exists to prevent ("one dependency list, not two") and the shape this
+# file's own summary names -- THE CLAIMS THAT DRIFT ARE THE ONES SOMEBODY HAD
+# TO COUNT BY HAND. Pinning it at the moment the duplicate is introduced is
+# cheaper than pinning it after the first mismatched publish, which cannot be
+# un-published.
+#
+# What is deliberately NOT here: an audit of the real tarball. That needs
+# `npm pack`, and npm is not a dependency of this suite -- the suite is
+# offline, Python-only, and runs in a container that has no Node. The tarball
+# audit lives in scripts/prepublish-check.mjs, which runs from
+# `prepublishOnly` on a machine that by definition has npm. These three check
+# the allowlist as TEXT, which is what a Python suite can honestly verify.
+
+_PACKAGE_JSON = os.path.join(ROOT, "package.json")
+
+
+def _package_json() -> dict:
+    with open(_PACKAGE_JSON, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def test_the_npm_package_and_pyproject_state_the_same_version():
+    """One release, two files that have to say so.
+
+    npm cannot replace a published version, only deprecate it, so a mismatch
+    discovered after the fact is permanent: the tarball would carry Python
+    metadata claiming a different version than the package it shipped as.
+    scripts/prepublish-check.mjs repeats this at publish time; this is the
+    copy that fails in CI, before anyone types the command.
+    """
+    with open(os.path.join(ROOT, "pyproject.toml"), encoding="utf-8") as f:
+        pyproject = f.read()
+
+    versions = re.findall(r'^\s*version\s*=\s*"([^"]+)"', pyproject, re.MULTILINE)
+    assert len(versions) == 1, (
+        f"pyproject.toml states {len(versions)} bare `version = \"...\"` lines; "
+        f"this check reads it by pattern, and two would make the comparison "
+        f"meaningless. Found: {versions}")
+
+    assert _package_json()["version"] == versions[0], (
+        f"package.json says {_package_json()['version']!r} and pyproject.toml "
+        f"says {versions[0]!r}. They describe one release -- bump both.")
+
+
+def test_every_npm_allowlist_entry_exists():
+    """A `files` entry naming nothing ships nothing, and says nothing.
+
+    npm does not warn about an allowlist entry that matches no file, so a
+    renamed or moved module leaves a tarball quietly missing part of the
+    harness -- which presents to the user as an ImportError on first run,
+    one layer away from the packaging mistake that caused it.
+    """
+    missing = []
+    for entry in _package_json()["files"]:
+        if entry.startswith("!"):        # negation guard, checked below
+            continue
+        if not os.path.exists(os.path.join(ROOT, entry.rstrip("/"))):
+            missing.append(entry)
+
+    assert not missing, (
+        f"package.json `files` names paths that do not exist: {missing}. "
+        f"Either the file moved and the allowlist did not, or the entry is a "
+        f"typo -- both ship a tarball with a hole in it.")
+
+
+def test_the_npm_allowlist_cannot_ship_a_secret():
+    """The third copy of "keep local secrets out of a distribution".
+
+    .gitignore covers `git push`, `.gitattributes export-ignore` covers
+    `git archive` (H3/C2), and `files` covers npm. The three are separate
+    mechanisms for one rule, and npm's is the one that fails OPEN: with no
+    `files` key npm falls back to .gitignore, at which point providers.json is
+    excluded by accident rather than by decision. An allowlist makes the
+    decision explicit, and this asserts it stayed that way.
+
+    Two halves, because the risk has two shapes. A root-level secret can only
+    ship if something NAMES it. A subdirectory artifact -- __pycache__, an
+    .ipynb_checkpoints copy of a prompt file -- ships because a directory
+    entry swept it in, so the negation guards are what stop those.
+    """
+    files = _package_json()["files"]
+
+    never_named = {"providers.json", ".env", "app.db", "logs", "logs/",
+                   "output", "output/", "conftest.py", "tests", "tests/"}
+    named = sorted(set(f.rstrip("/") for f in files if not f.startswith("!"))
+                   & set(n.rstrip("/") for n in never_named))
+    assert not named, (
+        f"package.json `files` names {named}, which would put local state or "
+        f"credentials in a published tarball. A published npm version cannot "
+        f"be withdrawn, only deprecated.")
+
+    required_guards = {"!**/__pycache__", "!**/*.pyc", "!**/.ipynb_checkpoints"}
+    assert required_guards <= set(files), (
+        f"package.json `files` is missing negation guards: "
+        f"{sorted(required_guards - set(files))}. Directory entries like "
+        f"`core/` and `prompts/` sweep in whatever is inside them -- npm does "
+        f"not skip __pycache__ or .ipynb_checkpoints on its own, and "
+        f"test_no_notebook_checkpoint_file_is_committed above exists because "
+        f"a checkpoint copy of a prompt file is a real thing in this tree.")
+
+
+def test_the_launcher_never_sets_the_two_variables_that_would_break_it():
+    """bin/venastine.mjs composes the child's environment, and there are two
+    variables it must never put in there. Both are load-bearing and neither is
+    obvious from the launcher's own point of view.
+
+    PYTHONPATH: tools/isolation.py builds its child's PYTHONPATH from the
+    PARENT's resolved sys.path, deliberately -- "handing the child the paths
+    the parent actually resolved is deterministic". A value injected by the
+    launcher would be inherited into that computation.
+
+    AGENT_WORKSPACE: WORKSPACE_DIR is a PERMISSION BOUNDARY, not a storage
+    path. file_ops auto-approves writes inside it and requires approval
+    outside. Redirecting it to a shared home directory -- the obvious "make
+    it work from anywhere" move, and the one a future reader will reach for
+    after seeing APP_DB_PATH handled that way -- would silently auto-approve
+    writes there from every project.
+    """
+    launcher = os.path.join(ROOT, "bin", "venastine.mjs")
+    with open(launcher, encoding="utf-8") as f:
+        source = f.read()
+
+    # An assignment into the child env, not a mention: the file documents both
+    # names in comments on purpose, and this must not read those.
+    for name in ("PYTHONPATH", "AGENT_WORKSPACE"):
+        assignment = re.search(rf"env\.{name}\s*=(?!=)", source)
+        assert assignment is None, (
+            f"bin/venastine.mjs assigns env.{name}. See this test's docstring: "
+            f"both variables are inherited by machinery that computes its own "
+            f"value from the parent process, and setting either from the "
+            f"launcher breaks that quietly rather than loudly.")

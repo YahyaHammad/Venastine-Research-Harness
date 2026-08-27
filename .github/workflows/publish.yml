@@ -1,0 +1,127 @@
+# Batch 35 -- the npm channel, BUILT BUT NOT ARMED.
+#
+# This workflow can publish @yahyahammad/venastine to the npm registry. It is
+# deliberately incapable of doing so today, and turning it on takes three
+# separate deliberate acts, not one:
+#
+#   1. TRIGGER. `workflow_dispatch` only. There is no push trigger and no tag
+#      trigger -- the tag form is written out below, commented, so that
+#      enabling it is an edit somebody makes on purpose. No commit, merge or
+#      tag can start this run.
+#   2. INPUT. The `dry_run` input defaults to TRUE, so the default dispatch
+#      packs and validates and uploads nothing.
+#   3. SECRET. Publishing authenticates with NODE_AUTH_TOKEN, from an
+#      NPM_TOKEN repository secret that does not exist yet. Without it the
+#      run reports that the channel is unarmed and downgrades itself to a dry
+#      run rather than failing red.
+#
+# WHY THE CARE: publishing to npm makes this source public regardless of the
+# GitHub repository's visibility, and a published npm version can never be
+# replaced -- only deprecated. The npm channel therefore cannot open before
+# the repository does, and these three brakes are what enforce that ordering.
+#
+# NOTE ON PROVENANCE: `npm publish --provenance` attests the tarball to this
+# repository and commit, which is the answer to "how do I know the npm folder
+# is the GitHub folder". It requires a PUBLIC repository, so it will only
+# work once the repo is public -- which is the same precondition as
+# publishing at all.
+
+name: publish (npm)
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Pack and validate without uploading (leave checked unless you mean it)"
+        type: boolean
+        default: true
+        required: true
+
+# DO NOT UNCOMMENT until the repository is public and NPM_TOKEN is set.
+# Uncommenting this is what turns a manual, supervised release into an
+# automatic one.
+#
+#   push:
+#     tags:
+#       - "v*"
+
+# Least privilege. `id-token: write` exists only so provenance can be minted;
+# nothing here writes to the repository.
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      # The tarball is Python source, so the suite is what says it is
+      # publishable. Mirrors tests.yml deliberately -- same pin, same
+      # fresh-clone step, same `python -m pytest` rather than a bare pytest.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Provide providers.json
+        run: cp providers.json.example providers.json
+
+      - name: Run the suite
+        run: python -m pytest -q
+
+      # Defence in depth. `files` in package.json is an allowlist that does not
+      # name providers.json, so the step above cannot leak into the tarball --
+      # but the file is sitting in the working directory at pack time, and
+      # "it cannot happen because of a list somewhere else" is exactly the
+      # assumption worth not making about a credential file.
+      - name: Remove the test credentials file before packing
+        run: rm -f providers.json
+
+      # Version parity + secret/licence audit of the actual tarball. Also runs
+      # automatically via prepublishOnly; running it explicitly means a failure
+      # is reported as its own red step rather than inside npm's output.
+      - name: Prepublish check
+        run: node scripts/prepublish-check.mjs
+
+      - name: Is the channel armed?
+        id: armed
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "$NPM_TOKEN" ]; then
+            echo "armed=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Channel not armed::No NPM_TOKEN secret is configured, so this run cannot publish. Falling back to a dry run."
+          else
+            echo "armed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish (dry run)
+        if: ${{ inputs.dry_run || steps.armed.outputs.armed != 'true' }}
+        run: |
+          npm publish --dry-run
+          echo "::notice title=Nothing was uploaded::dry_run=${{ inputs.dry_run }}, armed=${{ steps.armed.outputs.armed }}"
+
+      - name: Publish
+        if: ${{ !inputs.dry_run && steps.armed.outputs.armed == 'true' }}
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

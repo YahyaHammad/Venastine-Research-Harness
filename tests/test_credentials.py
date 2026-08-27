@@ -297,3 +297,108 @@ def test_an_empty_but_present_file_is_not_reported_as_missing(_in_tmp):
 
     with pytest.raises(ValueError, match=r"Configured: none"):
         api_initialization("ANTHROPIC")
+
+
+# ---------------------------------------------------------------------------
+# ---- Batch 35: resolution once the harness stops living in the cwd ---------
+# ---------------------------------------------------------------------------
+
+
+def test_the_env_file_is_found_from_the_working_directory(tmp_path):
+    """The npm channel's one genuine code fix, pinned.
+
+    `env_secrets` used a bare `load_dotenv()`, which calls
+    `find_dotenv(usecwd=False)` -- and that walks up from THE CALLING FRAME'S
+    FILE, i.e. env_secrets.py's own directory, not from cwd. In a checkout
+    those are the same directory, which is the entire reason this looked
+    correct for the project's whole life. Installed anywhere else (npm puts
+    the harness under node_modules/) the walk starts in the wrong tree: it
+    never reaches the user's .env, and it can pick up a stray one sitting
+    above the install prefix.
+
+    THIS TEST MUST RUN A SCRIPT FILE, NOT `python -c`. dotenv's
+    `_is_interactive()` is true when `__main__` has no `__file__`, which is
+    exactly the case under -c, and it sends find_dotenv down its os.getcwd()
+    branch. A -c version of this test passes against the BUG -- it was
+    written that way first and reported a false green. The subprocess also
+    has to be fresh, because load_dotenv runs at import and this suite has
+    already imported env_secrets.
+    """
+    import subprocess
+    import sys
+
+    (tmp_path / ".env").write_text("VENASTINE_ENV_PROBE=found\n", encoding="utf-8")
+    script = tmp_path / "probe.py"
+    script.write_text(
+        "import os, sys\n"
+        f"sys.path.insert(0, {_project_root()!r})\n"
+        "import env_secrets\n"
+        "print(os.environ.get('VENASTINE_ENV_PROBE', 'MISSING'))\n",
+        encoding="utf-8")
+
+    r = subprocess.run([sys.executable, str(script)], capture_output=True,
+                       text=True, cwd=str(tmp_path))
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "found", (
+        f"a .env in the working directory was not loaded (got "
+        f"{r.stdout.strip()!r}). load_dotenv() must be given an explicit "
+        f"path -- see this test's docstring; the bare call resolves from "
+        f"env_secrets.py's directory and only looks right from a checkout.")
+
+
+def test_agent_env_file_overrides_the_working_directory(tmp_path):
+    """AGENT_ENV_FILE is the escape hatch, named to match
+    AGENT_PROVIDERS_FILE and resolved at import for the same reason. It has
+    to beat a .env sitting in cwd, or it is not an override."""
+    import subprocess
+    import sys
+
+    (tmp_path / ".env").write_text("VENASTINE_ENV_PROBE=from_cwd\n", encoding="utf-8")
+    chosen = tmp_path / "elsewhere.env"
+    chosen.write_text("VENASTINE_ENV_PROBE=from_override\n", encoding="utf-8")
+
+    script = tmp_path / "probe.py"
+    script.write_text(
+        "import os, sys\n"
+        f"sys.path.insert(0, {_project_root()!r})\n"
+        "import env_secrets\n"
+        "print(os.environ.get('VENASTINE_ENV_PROBE', 'MISSING'))\n",
+        encoding="utf-8")
+
+    env = dict(os.environ, AGENT_ENV_FILE=str(chosen))
+    r = subprocess.run([sys.executable, str(script)], capture_output=True,
+                       text=True, cwd=str(tmp_path), env=env)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "from_override", (
+        f"AGENT_ENV_FILE did not win over the cwd .env (got "
+        f"{r.stdout.strip()!r}).")
+
+
+def test_an_absolute_providers_path_does_not_name_a_directory_it_never_checked(
+        monkeypatch, tmp_path):
+    """#24's own defect, in the shape the npm launcher introduced.
+
+    The message hardcoded os.getcwd(). AGENT_PROVIDERS_FILE has always
+    accepted an absolute path, and the launcher sets one when the working
+    directory has no providers.json -- at which point the error named a
+    directory the code never looked in and told the user to create the file
+    there. That is the same "says nothing about what was actually checked"
+    failure #24 was filed for.
+
+    The relative case keeps the cwd clause, because there it is the missing
+    half of the answer rather than a wrong one. Both existing matchers in
+    this file cover that direction.
+    """
+    absolute = tmp_path / "nested" / "providers.json"
+    monkeypatch.setattr(credentials, "LLM_PROVIDERS_FILE", str(absolute))
+
+    message = credentials.no_providers_message()
+
+    assert str(absolute) in message
+    assert "was not found in" not in message, (
+        f"an absolute path still reports a working directory: {message!r}. "
+        f"The path is the whole answer; naming cwd beside it points at the "
+        f"wrong place to create the file.")
+    assert "Copy providers.json.example" in message, (
+        "the remedy must survive -- it is the half of #24 that made the "
+        "message actionable.")

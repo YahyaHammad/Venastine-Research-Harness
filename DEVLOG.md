@@ -6773,3 +6773,167 @@ states that no third-party source is bundled.
 1. Enable **Private vulnerability reporting** when the repo goes public.
 2. Rotate the OpenRouter key in the local `providers.json` (`C2`).
 3. Decide whether to start signing off commits.
+
+## Batch 35 — npm as a second distribution channel, and the bug it exposed (2026-08-27)
+
+### Context
+
+The owner asked for npm as a distribution channel for the harness, shipped **as a
+folder of source rather than prebuilt binaries**. npm is the delivery mechanism;
+Python still runs the code.
+
+### What made this cheap, measured before anything was designed
+
+* **Every shipped asset already resolves from `__file__`**, never from cwd:
+  `HARNESS_ROOT` (`core/config_loader.py:42`), `_package_root()`
+  (`tools/isolation.py:86`), `prompts/system_prompts.py:82,114`. A grep for
+  hardcoded relative `open(...)`/`Path(...)` reads across all non-test Python
+  returns **zero hits**.
+* **Every piece of state is cwd-relative with an env override** -- `DB_PATH`,
+  `OUTPUT_DIR`, `WORKSPACE_DIR`, `logs/app.log`.
+* **The subprocess path carries its own import surface**: `tools/isolation.py:259`
+  spawns with `cwd=_package_root()` and a `PYTHONPATH` built from the parent's
+  resolved `sys.path`.
+
+So the harness was already relocatable. Verified rather than assumed: run from an
+empty scratch directory, `python <repo>/main.py --help` and `--memories` both work,
+create their state in the cwd, and load prompts from the install.
+
+### The claim that did not survive checking -- twice, and the second time was mine
+
+**First:** the premise that `.env` "already works from anywhere". It does not.
+`env_secrets.py` used a bare `load_dotenv()`, which calls
+`find_dotenv(usecwd=False)` -- and that walks up from **the calling frame's file**,
+i.e. `env_secrets.py`'s own directory, not from the working directory. In a
+checkout those are the same directory, which is the only reason this has ever
+looked like cwd resolution. Installed under `node_modules/` the walk starts in the
+wrong tree entirely.
+
+**Second, and worth recording as a method failure:** the first measurement of that
+bug used `python -c`, and it **passed** -- appearing to disprove the defect.
+dotenv's `_is_interactive()` returns true when `__main__` has no `__file__`, which
+is exactly the case under `-c`, and it sends resolution down its `os.getcwd()`
+branch. The probe was rewritten as a real script file and the defect appeared
+immediately: `.env` in cwd, `get_env_secret()` saw `None`.
+
+**A test harness that cannot reproduce the bug is not evidence that the bug is
+absent.** The regression pins were then verified RED against the bare call before
+being accepted, and their docstrings carry the `-c` trap explicitly, because the
+"simplification" that breaks them is one edit away.
+
+### Owner decisions
+
+* **Scoped package `@yahyahammad/venastine`**, command `venastine`. Both bare names
+  were free on the registry; scoped was chosen anyway.
+* **Bootstrap on first run, with consent** -- not an npm `postinstall`. `postinstall`
+  is silently skipped under `--ignore-scripts`, breaks the install when pip fails,
+  and runs a network install unannounced. Asking first is D17/D31's rule applied to
+  the one action the launcher takes on its own initiative.
+* **Runtime + policy docs in the tarball** (117 files, 1.5 MB unpacked); no `tests/`,
+  no `DEVLOG`/`ROADMAP*`/`ARCHITECTURE`/`AGENTS`.
+* **State global, artifacts local.** `app.db` and the log go to `~/.config/venastine/`;
+  `output/` and `workspace/` stay in cwd.
+* **Publish pipeline built but inert**, at the owner's explicit instruction: the repo
+  is still private and must not publish on the next commit.
+
+### Why state went global, and why `output/` and `workspace/` did not
+
+`main.py:1663` sets `project_path = os.getcwd()`, and `UserMemory` carries **two**
+scope columns (`scope` and `project_path`, M12/D25) precisely so ONE database can
+tell projects apart. Per-directory databases stack an accidental scoping axis on
+that deliberate one: `--thread <uuid>` stops resolving outside the directory it was
+created in, and a memory saved `scope="global"` is global only inside one folder.
+
+Three measured facts made the split clean rather than a compromise:
+
+* **`OUTPUT_DIR` is write-only.** Nothing reads it back -- the only consumers are
+  `output_writer` writing and `main.py:1053` printing the path. `final_report`,
+  `claims_json` and `trace_json` live in the `PipelineRunRecord` ROW, so `/claims`
+  and `/copy report` read the database. No record can point at a report directory
+  the user walked away from.
+* **`WORKSPACE_DIR` is a permission boundary, not storage.** `file_ops` auto-approves
+  writes inside it (`tools/builtin/file_ops.py:11-13`) and `shell.py:129` classifies
+  commands against it. Redirecting it would auto-approve writes into a shared home
+  directory from every project. **This is the live trap** -- it is the obvious next
+  move after seeing `APP_DB_PATH` redirected two lines above -- so it is test-pinned.
+* **The env overrides already existed**, so this is launcher configuration and not a
+  change to any Python default. A checkout behaves exactly as it did.
+
+Proven end to end rather than argued: a `scope="global"` memory written while
+working in `dirA` was listed by `--memories` from `dirB`, both directories stayed
+empty, and the row lived in `~/.config/venastine/app.db`.
+
+### What was built
+
+**`bin/venastine.mjs`** -- zero npm dependencies, Node stdlib only. Finds Python
+>=3.11 (refusing with #144's own reasoning, not a generic version error), keys its
+venv on `<version>-<sha256(requirements.txt)[:12]>` so a version bump *or* a pin
+edit gets a clean environment, asks before installing, refuses to install
+unattended when there is no TTY, and hands off with `spawnSync(..., {stdio:
+'inherit'})` so the Textual TUI gets a real terminal. `main.py` is passed **by
+path** so its directory becomes `sys.path[0]`.
+
+The stamp file, not the directory, is what "ready" means: a venv whose `pip install`
+died half way exists on disk and would otherwise read as installed, then fail on a
+missing import at the first model call. A failed bootstrap removes the directory.
+
+**`package.json`** -- `files` is an **allowlist**, deliberately. Without it npm falls
+back to `.gitignore`, at which point `providers.json` is excluded by accident rather
+than by decision. This is the **third** copy of "keep local secrets out of a
+distribution" (`.gitignore` -> `git push`, `.gitattributes export-ignore` ->
+`git archive`, `files` -> npm). The negation guards are not optional: directory
+entries sweep in whatever is inside them, and npm skips neither `__pycache__` nor
+`.ipynb_checkpoints` -- and this tree contains a checkpoint copy of a prompt module.
+
+**`scripts/prepublish-check.mjs`** -- refuses to publish on a version mismatch, on a
+missing `LICENSE`/`NOTICE`, or on any secret in the tarball. Verified in both
+directions: passes clean, and refuses on a deliberately mismatched version.
+
+**`.github/workflows/publish.yml`** -- three independent brakes: `workflow_dispatch`
+only (the tag trigger is present but commented), `dry_run` defaults true, and no
+`NPM_TOKEN` secret exists. Arming it takes three separate deliberate acts.
+
+### The licence question the owner asked twice, answered
+
+**The bootstrap** pip-installs from PyPI onto the user's machine, exactly as
+`pip install -r requirements.txt` always has. Nothing is redistributed, so
+`THIRD_PARTY_NOTICES.md`'s assessment is unchanged. The rule that keeps it true is
+now written down in `CONTRIBUTING.md`: **never vendor wheels into the tarball**, or
+Apache-2.0 4(d) starts applying to `openai`, `google-genai` and `pytest-asyncio`.
+
+**The tarball** is entirely first-party, and the launcher has zero npm dependencies,
+so the npm channel adds **no third-party licence surface at all**.
+
+What publishing *does* change: it is distribution of the Work under Apache-2.0
+section 4, where "run from a checkout" was not. So `LICENSE` (4a) and `NOTICE` (4d)
+must ship -- and **npm auto-includes `LICENSE` and not `NOTICE`**, the same trap as
+`license-files` in batch 34, one channel over. `THIRD_PARTY_NOTICES.md` ships too,
+because `NOTICE` names it. The sentence at `THIRD_PARTY_NOTICES.md:84` that read
+"it is run from a checkout" was corrected: the load-bearing half ("does not
+redistribute any of them") is unchanged and still true.
+
+### Verification
+
+* `python -m pytest -q` -- **2630 collected**, up 7 from 2623. Counts updated in
+  `README.md`, `AGENTS.md` and `ARCHITECTURE.md`, plus the two per-file tree counts.
+* **Both `.env` pins verified RED** against the bare `load_dotenv()` and green after.
+* `npm pack --dry-run` audited by path: `LICENSE`, `NOTICE`, `THIRD_PARTY_NOTICES.md`,
+  the two `.example` files and the extensionless prompt files present; `providers.json`,
+  `.env`, `*.db`, `logs/`, `output/`, `tests/`, `__pycache__`, `*.pyc`,
+  `.ipynb_checkpoints`, `.github/` and `CLAUDE-SECURITY-*` all absent.
+* **A real bootstrap ran end to end**: venv built from a foreign cwd, 17 packages
+  installed, `main.py --help` served through it, second run skipped the bootstrap.
+* **Unattended refusal confirmed**: stdin from `/dev/null` exits 1, prints the manual
+  command, and creates nothing.
+* **State scoping proven**: memory written from `dirA` listed from `dirB`; both
+  directories left empty; the checkout's own `./app.db` still wins there.
+* `prepublish-check` passes clean and refuses a mismatched version.
+
+### Still open
+
+1. `npm login` + 2FA on the `@yahyahammad` scope, and the `NPM_TOKEN` secret --
+   both deliberately undone, since either arms the pipeline.
+2. Whether the channel opens at `0.1.0` or waits for `1.0.0`. It cannot open before
+   the repository is public either way.
+3. Carried from batch 33: enable Private Vulnerability Reporting at launch; rotate
+   the OpenRouter key in the local `providers.json`; decide on `git commit -s`.

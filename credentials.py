@@ -18,10 +18,26 @@ def no_providers_message() -> str:
     ONE wording, used by both raisers -- api_initialization (the one
     every user actually meets) and load_credentials below -- so the two
     cannot drift apart the way their old messages already had.
+
+    Batch 35: the LOCATION clause is conditional now, because the path is
+    no longer always cwd-relative. AGENT_PROVIDERS_FILE has always accepted
+    an absolute path, and the npm launcher sets one when the working
+    directory has no providers.json of its own. Naming os.getcwd()
+    unconditionally then reported a directory the code never looked in and
+    sent the user to create the file in the wrong place -- the exact class
+    of defect #24 was filed about, reintroduced by a path it did not
+    anticipate. An absolute path is already the whole answer and needs no
+    second location.
     """
+    if os.path.isabs(LLM_PROVIDERS_FILE):
+        found = f"No providers configured: {LLM_PROVIDERS_FILE} was not found."
+    else:
+        found = (
+            f"No providers configured: {LLM_PROVIDERS_FILE} was not found in "
+            f"{os.getcwd()!r}."
+        )
     return (
-        f"No providers configured: {LLM_PROVIDERS_FILE} was not found in "
-        f"{os.getcwd()!r}. Copy providers.json.example to "
+        f"{found} Copy providers.json.example to "
         f"{LLM_PROVIDERS_FILE} and add your API key."
     )
 

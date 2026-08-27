@@ -13,11 +13,31 @@ The design premise is that a model's own confidence is not evidence. Everything 
 
 ## Setup
 
-**Python 3.11 or newer.** `mcp_client/client.py` uses `asyncio.timeout`, which is 3.11+, and 27 sites use runtime `X | Y` annotations (3.10+). `pyproject.toml` declares the floor, so `pip install -e .` refuses an older interpreter rather than failing later from inside the MCP connect path.
+**Python 3.11 or newer**, either way in. `mcp_client/client.py` uses `asyncio.timeout`, which is 3.11+, and 27 sites use runtime `X | Y` annotations (3.10+). `pyproject.toml` declares the floor, so an install refuses an older interpreter rather than failing later from inside the MCP connect path.
+
+### From npm
+
+```bash
+npm install -g @yahyahammad/venastine
+venastine
+```
+
+**npm handles the setup for you.** It delivers the harness as a folder of source — there is no bundled binary — and Python still runs it, so the only prerequisite you provide is an interpreter on PATH. Everything after that happens on first launch: the launcher finds a suitable Python, tells you which one and what it is about to install, and builds an isolated environment with the pinned dependencies once you agree. It asks every time it would install something, never installs during `npm install` itself, and refuses rather than proceeding when there is no terminal to ask in.
+
+Two things differ from a clone, both to make a command you run from anywhere behave sensibly:
+
+* **Credentials** fall back to `~/.config/venastine/providers.json` when the directory you are in has no `providers.json` of its own. A local one still wins, so per-project keys keep working.
+* **Conversation state** — `app.db` and the log — lives in `~/.config/venastine/`, so threads and memories follow you between directories instead of each folder getting its own silo. Research reports still land in `./output` beside the work that produced them, and the file-ops workspace stays in the current directory because it is a permission boundary. An existing `./app.db` always wins, so running the command inside a clone uses that clone's data.
+
+`venastine --venastine-doctor` prints every one of those resolved paths, plus the interpreter and environment it found.
+
+### From a clone
 
 ```bash
 pip install -r requirements.txt
 ```
+
+This is the contributor path and what the rest of this document assumes.
 
 `markitdown` is an optional extra (`pip install -e ".[documents]"`) — its only consumer is behind `read`/`write`/`edit`, which are denied by default and cannot be enabled at runtime. The PDF export path is likewise optional: `pip install -e ".[pdf]"`.
 
@@ -701,7 +721,7 @@ classifier is described under *Security model* above. If you have a fork or a lo
 note that `ToolApprovals.shell` now ships `False` and `SHELL_APPROVAL_MODE` is the gate — see
 `tests/BREAKING_CHANGES.md` §24.
 
-Run the test suite with `pytest` — 2623 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
+Run the test suite with `pytest` — 2630 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
 
 ## Documentation
 

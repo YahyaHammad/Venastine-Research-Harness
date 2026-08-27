@@ -50,14 +50,14 @@ Venastine Research Harness/
 ├── CLAUDE.md / QWEN.md             # pointers to AGENTS.md, so a harness that auto-loads one of those names finds the context instead of a second copy of it
 ├── DEVLOG.md                       # implementation notes for built ROADMAP sections -- see §0
 │
-├── tests/                          # 2623 tests, all offline, ~25-45s depending on the machine (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
+├── tests/                          # 2630 tests, all offline, ~25-45s depending on the machine (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
 │   ├── conftest.py                 # fixtures: make_model_response, make_stream_from_response, make_stream_sequence, FakeStorage, ...
 │   ├── BREAKING_CHANGES.md         # what-breaks-it / symptom / fix per area
 │   ├── test_cli.py                 # 87 tests -- ROADMAP §1 thread_id passthrough + UUID validation + §14 parser defaults/resolution/trust flow + §29 N1-N8 the one stdin reader, N2's channel deadline, every request kind rendered, and the startup block main(argv) made reachable + #102's four declining defaults
 │   ├── test_fetch_url.py           # 31 tests -- audit #120/#58: fetch_url's whole surface, which no test had ever executed. #53/#54's per-hop policy check, twice: once on the fake httpx and once on REAL httpx through a MockTransport
 │   ├── test_e2e.py                 # 5 tests -- e2e chat (multi-turn + tool use), research mode, error handling ×3
 │   ├── test_logging_setup.py       # 7 tests -- configure_logging fallback on bad log path, stderr=False, and #132's redacting formatter (message, traceback, and a real dispatch)
-│   ├── test_credentials.py         # 15 tests -- audit #19: providers.json and the trust store created 0600, asserted under umask 0. The mode cases skip off POSIX; the round-trip cases do not
+│   ├── test_credentials.py         # 18 tests -- audit #19: providers.json and the trust store created 0600, asserted under umask 0. The mode cases skip off POSIX; the round-trip cases do not. Plus batch 35's resolution pins: a .env in the working directory, AGENT_ENV_FILE over it, and the absent-file message on an absolute path
 │   ├── test_output_writer.py       # 12 tests -- ROADMAP §12 artifact file layout, contents, chart PNG, None guard, tier counts
 │   ├── test_confidence_scoring.py  # 50 tests (3 ROADMAP verbatim regressions)
 │   ├── test_client_translation.py  # 37 tests -- all three provider translation branches + batching + Google request/response parsing + §33's W7 guard that importing core.client pulls in no provider SDK
@@ -100,7 +100,7 @@ Venastine Research Harness/
 │   ├── test_granted_calls_artifact.py # 5 tests -- ROADMAP_v2 §25 audit artifact + R7 provenance framing in the universal preamble
 │   ├── test_review.py              # 96 tests -- ROADMAP_v2 §20 V1-V9: the reviewer agent, consent as data, the accept/reject/refine walk, both shells, 07_review.json, plus the 2026-08-04 hardening class (containment, deferred commit, sanitisation, shell lifecycle)
 │   ├── test_skills.py              # 37 tests -- ROADMAP_v2 §19 K1-K6: stateless manager, body pinning (incl. one-shot turns), precondition check (incl. registration), /skill, the pass-prompt boundary
-│   ├── test_docs_consistency.py    # 17 tests -- the documented counts, ROADMAP_v2's status markers, README's approval table, and the decision record's index against its citations
+│   ├── test_docs_consistency.py    # 21 tests -- the documented counts, ROADMAP_v2's status markers, README's approval table, the decision record's index against its citations, and the npm allowlist (version parity, no secret can ship)
 │   ├── test_sdk_conformance.py     # 9 tests -- audit #143: the REAL pinned SDKs asked offline (google-genai fields, the thinking_budget pin note, httpx's redirect default). #35's capability chain is asserted here, and driven against real SDK objects -- the test the dict-shaped doubles could not be. Also the three context-window facts §21 assumed away: anthropic's ModelInfo.max_input_tokens, google's Model.input_token_limit, and openai.types.Model being extra="allow" (the property that makes the v1-compatible sniff one function rather than thirteen adapters)
 │   ├── test_prompt_tier_boundary.py # 11 tests -- audit #146: K6 as a RULE. A pass prompt is invariant under every session tier, parametrised over a canary table so a tier added later is covered
 │   ├── test_fake_storage_mirror.py # 16 tests -- audit #123: FakeStorage._reconstruct / _split_at compared against storage._to_neutral / _split_at, which two docstrings and AGENTS.md claimed and nothing checked

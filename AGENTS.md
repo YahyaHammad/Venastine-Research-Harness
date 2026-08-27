@@ -42,7 +42,7 @@ python main.py --init --research-project           # §24: skip the type questio
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 2623 tests, offline, ~25-45s by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 2630 tests, offline, ~25-45s by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -56,6 +56,59 @@ Test dependencies (`pytest`, `pytest-mock`, `pytest-asyncio`) are now listed in 
 MCP servers are a *third* config file again — `mcp.json`, user-level or `.venastine/`-level. Not `.env`, not `providers.json`, not `settings.json`.
 
 **Credentials are two separate mechanisms, deliberately.** LLM provider keys → `providers.json` (managed by `credentials.py`, gitignored, template at `providers.json.example`). Misc tool API keys (GitHub, NVD) → `.env` (managed by `env_secrets.py`, template at `.env.example`). Never mix them.
+
+## Distribution (npm, batch 35)
+
+The project ships through two channels: `git clone`, and npm as **a folder of source** — no binary,
+no bundle. `bin/venastine.mjs` is the only thing npm can execute; its whole job is to find a Python
+≥3.11, make sure the dependencies exist, and spawn `python <root>/main.py` with the user's argv,
+cwd and stdio. The harness itself did not have to change to support this, because every shipped
+asset already resolves from `__file__` (`HARNESS_ROOT`, `_package_root()`, `prompts/system_prompts.py`)
+and every piece of state from cwd with an env override.
+
+**The launcher must never set `PYTHONPATH` or `AGENT_WORKSPACE`** (test-pinned,
+`test_the_launcher_never_sets_the_two_variables_that_would_break_it`). `tools/isolation.py` builds
+its child's `PYTHONPATH` from the *parent's resolved `sys.path`* on purpose, so an injected value is
+inherited into that computation and poisons it. `WORKSPACE_DIR` is a **permission boundary**, not a
+storage path — `file_ops` auto-approves writes inside it — so pointing it at a shared home directory
+would silently auto-approve writes there from every project. That second one is the trap: it is the
+obvious next move after seeing `APP_DB_PATH` redirected two lines above, and it is wrong.
+
+**State is global, artifacts are local.** The launcher sets `APP_DB_PATH` and `AGENT_LOG_FILE` to
+`~/.config/venastine/` — together, on one decision, because a global database writing to a local log
+is worse than either. `main.py` sets `project_path = os.getcwd()` and `UserMemory` carries `scope`
+*and* `project_path` (M12/D25) precisely so ONE database can tell projects apart; per-directory
+databases would stack an accidental scoping axis on that deliberate one. `AGENT_OUTPUT_DIR` is left
+alone: `output/` is write-only (nothing reads it back — the report and claims live in the
+`PipelineRunRecord` row), so artifacts belong beside the work. An existing `./app.db` always wins.
+
+**`~/.config/venastine` on every platform, Windows included.** The Python half already resolves its
+user tier with `os.path.expanduser` in three modules; a Node-idiomatic `%APPDATA%` would split one
+config directory across two locations.
+
+**`.env` resolution was genuinely broken outside a checkout** and is now fixed at
+`env_secrets.py`. A bare `load_dotenv()` walks up from *that module's own directory*, not from cwd —
+identical in a checkout, wrong everywhere else. It is `find_dotenv(usecwd=True)` now, with
+`AGENT_ENV_FILE` as the override. Do not simplify it back.
+
+**Three lists exclude local secrets from three channels, and they must agree**: `.gitignore` for
+`git push`, `.gitattributes export-ignore` for `git archive` (H3/C2), and `files` in `package.json`
+for npm. npm's is the one that fails *open* — with no `files` key it falls back to `.gitignore`, so
+`providers.json` would be excluded by accident rather than decision. It is an allowlist for that
+reason, and it needs its `!**/__pycache__` / `!**/*.pyc` / `!**/.ipynb_checkpoints` guards because a
+directory entry sweeps in whatever is inside it.
+
+**Never vendor wheels into the tarball.** The package is first-party source and the launcher has
+zero npm dependencies, which is what lets `THIRD_PARTY_NOTICES.md` say the npm channel adds no
+licence surface at all. Bundling `openai`, `google-genai` or `pytest-asyncio` would trigger
+Apache-2.0 §4(d) and oblige shipping their `LICENSE`/`NOTICE` files as received. Publishing *is*
+distribution under §4 where running from a checkout was not, which is why `LICENSE` and `NOTICE` are
+in the allowlist — npm auto-includes the first and **not** the second.
+
+**The publish workflow is built and unarmed.** `.github/workflows/publish.yml` has no push or tag
+trigger, defaults `dry_run` to true, and cannot authenticate without an `NPM_TOKEN` secret that does
+not exist. Publishing makes the source public regardless of the repository's visibility, and a
+published npm version can never be replaced — only deprecated.
 
 ## Documentation map
 

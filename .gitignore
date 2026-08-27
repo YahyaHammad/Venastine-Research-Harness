@@ -14,3 +14,11 @@ output/
 *.egg-info/
 build/
 dist/
+
+# npm channel (batch 35). node_modules/ never appears in a normal checkout --
+# the launcher has zero dependencies -- but `npm install` in this directory
+# creates it, and `npm pack` drops a .tgz beside it. Neither belongs in a
+# commit, and the `files` allowlist in package.json is what keeps them out of
+# the tarball.
+node_modules/
+*.tgz
