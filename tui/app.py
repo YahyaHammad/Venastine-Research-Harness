@@ -73,8 +73,8 @@ from tui.screens import (
     ThreadPickerScreen,
 )
 from tui.widgets import (
-    EffortRaven, GoalBanner, RavenPanel, ResearchProgress, TodoPanel,
-    Transcript, UsageLine,
+    EffortRaven, GoalBanner, RavenPanel, ResearchProgress, ThinkingIndicator,
+    TodoPanel, Transcript, UsageLine,
 )
 
 logger = logging.getLogger(__name__)
@@ -291,6 +291,12 @@ class VenastineApp(App):
         # so its confirmation cannot claim a save that failed.
         self._theme_remembered = False
         self._animations = tui_settings.get("animations", True)
+        # §38 (O6). Render a turn's reasoning inline, or collapse it to the
+        # animated one-line indicator. Defaulted HERE rather than in
+        # config.py, following `animations` immediately above: config.py
+        # holds no TUI values and is plain-values-only. /thinking flips it
+        # for the session and persists nothing, matching /effort.
+        self._show_thinking = tui_settings.get("show_thinking", True)
         # Batch 25 (#139): tui.effort still wins INSIDE the TUI -- it
         # predates the top-level key and changing its meaning would
         # surprise existing configs -- then the universal key, then the
@@ -359,6 +365,12 @@ class VenastineApp(App):
                 if self._todo_position == "top":
                     yield TodoPanel(id="todo-panel")
                 yield Transcript(id="transcript")
+                # §38. Between the transcript and the prompt, so the
+                # collapsed thinking line reads as the bottom of the
+                # conversation. Hidden until a span starts, TodoPanel-style,
+                # so it costs no rows when show_thinking is on.
+                yield ThinkingIndicator(animations=self._animations,
+                                        id="thinking-indicator")
                 if self._todo_position == "bottom":
                     yield TodoPanel(id="todo-panel")
                 yield Input(placeholder="Message, or /help", id="prompt")
@@ -624,6 +636,27 @@ class VenastineApp(App):
     @property
     def _research_progress(self) -> ResearchProgress:
         return self.query_one("#research-progress", ResearchProgress)
+
+    @property
+    def _thinking_indicator(self) -> ThinkingIndicator:
+        return self.query_one("#thinking-indicator", ThinkingIndicator)
+
+    def _end_thinking(self) -> None:
+        """Close a thinking span, whichever form it is being shown in
+        (§38). Called by every non-thinking event, so both forms end at
+        the same moment and a flipped tui.show_thinking cannot leave one
+        of them running.
+
+        Best-effort, #104's rule: a modal on top means query_one searches
+        the ACTIVE screen and finds neither widget (§27), and an
+        undrawable indicator must not be the reason an event handler
+        dies mid-turn.
+        """
+        try:
+            self._transcript.end_thinking()
+            self._thinking_indicator.stop()
+        except NoMatches:
+            pass
 
     # -- input ---------------------------------------------------------------
 
@@ -943,14 +976,26 @@ class VenastineApp(App):
 
         self.refresh_usage_line()
 
+        if event.thinking_delta:
+            # §38. Same mascot handling as a token delta -- reasoning is
+            # streaming output too, and the redraw loop costs the same.
+            self._raven.pause_animation()
+            self._raven.state = ravens.THINKING
+            if self._show_thinking:
+                transcript.thinking_delta(event.thinking_delta)
+            else:
+                self._thinking_indicator.start()
+
         if event.token_delta:
             # Pause the mascot while tokens stream: a redraw loop competing
             # with deltas is the one place animation costs responsiveness.
+            self._end_thinking()
             self._raven.pause_animation()
             self._raven.state = ravens.THINKING
             transcript.stream_delta(event.token_delta)
 
         if event.tool_call_start:
+            self._end_thinking()
             transcript.flush_stream()
             self._raven.resume_animation()
             name = event.tool_call_start["name"]
@@ -978,10 +1023,12 @@ class VenastineApp(App):
             # so the marker lands between messages rather than inside a
             # half-streamed reply. Rendering lives in _render_notice, the
             # one branch the one-shot path (#172) drives too.
+            self._end_thinking()
             transcript.flush_stream()
             self._render_notice(event.notice)
 
         if event.permission_request:
+            self._end_thinking()
             # §23: informational only. The modal is opened by the response
             # channel from the worker thread, so this no longer pushes one
             # -- doing both would stack two modals for one question.
@@ -989,6 +1036,7 @@ class VenastineApp(App):
             self._raven.state = ravens.WAITING
 
         if event.final_response is not None:
+            self._end_thinking()
             transcript.flush_stream()
             if event.stop_reason and event.stop_reason != "complete":
                 transcript.write_system(f"[stopped early: {event.stop_reason}]")
@@ -1345,6 +1393,10 @@ class VenastineApp(App):
         self._busy = False
         self._permission_channel = None
         self._tool_names.clear()
+        # §38: close a thinking span before the answer's, so a turn that
+        # ends mid-reasoning (a stop condition, an error) still gets its
+        # closing delimiter and drops the indicator.
+        self._end_thinking()
         # flush_stream returns what it committed (§26), so /copy tracks the
         # last answer without a second buffer shadowing the transcript's.
         flushed = self._transcript.flush_stream()
@@ -2600,6 +2652,42 @@ def _copy_payload(app: VenastineApp, target: str):
     return ("".join(parts).strip() or None), "this session"
 
 
+def _cmd_thinking(app: VenastineApp, args: str) -> None:
+    """Show or hide reasoning inline for this session (§38).
+
+    Persists nothing, matching /effort and /model -- `tui.show_thinking`
+    in settings.json is the durable answer, and batch 36's rule is that
+    nothing writes to that file. Unlike /effort this is safe mid-turn, so
+    there is no _busy refusal: it takes effect on the next span, and the
+    current one is closed cleanly in whichever form it was being shown.
+    """
+    word = args.strip().lower()
+    if not word:
+        state = "shown" if app._show_thinking else "hidden"
+        app._transcript.write_system(
+            f"[thinking is {state} — /thinking on|off]")
+        return
+    if word in ("on", "show", "true"):
+        wanted = True
+    elif word in ("off", "hide", "false"):
+        wanted = False
+    else:
+        app._transcript.write_error(
+            f"[unknown option {word!r} — /thinking [on|off]]")
+        return
+    if wanted == app._show_thinking:
+        app._transcript.write_system(
+            f"[thinking already {'shown' if wanted else 'hidden'}]")
+        return
+    # Close the live span BEFORE the flag moves, so it ends in the form it
+    # was drawn in rather than half in each.
+    app._end_thinking()
+    app._show_thinking = wanted
+    app._transcript.write_system(
+        f"[thinking {'shown' if wanted else 'hidden'} for this session; "
+        f"set tui.show_thinking in settings.json to keep it]")
+
+
 def _cmd_quit(app: VenastineApp, args: str) -> None:
     app.exit()
 
@@ -2611,6 +2699,8 @@ def register_builtin_commands() -> None:
         SlashCommand("help", "list commands", _cmd_help),
         SlashCommand("theme", "switch colour theme", _cmd_theme, "[name]"),
         SlashCommand("effort", "switch reasoning effort", _cmd_effort, "[level|auto]"),
+        SlashCommand("thinking", "show or hide reasoning inline",
+                     _cmd_thinking, "[on|off]"),
         SlashCommand("model", "switch provider and/or model for this session",
                      _cmd_model, "[[PROVIDER] name]"),
         SlashCommand("research", "run the deep-research pipeline",

@@ -269,6 +269,14 @@ QuestionScreen {
     overflow-y: auto;
 }
 
+/* §38's collapsed thinking line. `height: auto` and hidden until a span
+   starts, so it costs no rows when tui.show_thinking is on -- the same
+   arrangement the checklist below uses for its unfilled slots. */
+#thinking-indicator {
+    height: auto;
+    padding: 0 1;
+}
+
 /* §23 slice 2's checklist. `height: auto` so an empty list costs no rows in
    whichever slot tui.todo_position put it in -- the widget hides itself, and
    this is what makes the unused slots free. */

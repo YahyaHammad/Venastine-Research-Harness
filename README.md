@@ -454,6 +454,7 @@ The first connection to a **user-level** server asks once, showing the resolved 
 | `/help` | List every registered command with its usage |
 | `/theme [name]` | Restyle panels, transcript roles and code blocks — not just borders. Bare shows the current theme and all fourteen names. **Remembered for the next launch**, unless `tui.theme` in settings.json has changed since |
 | `/effort [level\|auto]` | Switch reasoning effort, offering only levels this model accepts (Anthropic's are queried live). Session-only (`tui.effort` persists) |
+| `/thinking [on\|off]` | Show or hide reasoning inline for this session. Session-only (`tui.show_thinking` persists) |
 | `/model [[PROVIDER] name]` | Switch provider and/or model for the session. Refuses mid-turn, warns on a missing key, revalidates effort against the new model, and notes if an active agent pins its own. Persist via launch flags or `default_provider`/`default_model` |
 | `/research [--attended] [--review\|--no-review] [--grant[=a,b]] <query>` | Run the pipeline live from the TUI. Leading flags compose in any order before the query; bare `--grant` opens the picker, `--grant=a,b` names them (`--grant-tools=` works as an alias); without flags, `research.*` settings apply |
 | `/compact [--strength 1-5]` | Fold older turns now instead of waiting for the trigger. Recent turns keep exactly the protection an automatic compaction gives them |
@@ -576,6 +577,8 @@ A level is validated against the model that will **receive** it, not the one it 
 | OpenAI-compatible | `low`, `medium`, `high` assumed for unknown models | Static table (`config.MODEL_EFFORT_LEVELS`). Known non-reasoning models — gpt-4o family, gpt-3.5 — ship with *empty* lists, meaning "takes no effort parameter": a requested level is dropped cleanly instead of 400ing every call. An unlisted model gets the assumption plus a WARNING naming it |
 | Google | Levels map to integer thinking budgets, `low`→2,048 through `max`→dynamic | Mapped at the boundary. The pinned `google-genai` has no budget field, so Google currently reports no levels and effort drops regardless of the default |
 
+**Seeing the thinking is separate from doing it.** Effort is what makes the model reason; whether the API hands those thoughts back to the client is a different question, and the answer varies by provider. Reasoning streams into the transcript on **Anthropic** and on OpenAI-compatible providers that send it — DeepSeek, Qwen, Z.AI, OpenRouter. It is absent on **OpenAI**, whose Chat Completions endpoint returns no reasoning text at all, and on **Google**, whose request deliberately does not ask for thought summaries: those would be billed as extra output for something the model produces either way. On those two the turn still thinks; you just do not see it. `tui.show_thinking` and `/thinking` control the display, never the reasoning.
+
 A verification that *fails* — a network blip during the query — passes your level through unverified with a warning rather than silently downgrading a deliberate choice. `/effort` in the TUI offers only levels the mounted model accepts, and `/model` revalidates after a switch, since effort is per-model. An agent pinning its own provider/model wins over the session's choice for chat turns, and says so.
 
 ### Budgets and stop conditions
@@ -633,6 +636,7 @@ An unknown key raises at startup, naming the file and the key — a typo must ne
 | `tui.animations` | bool | `true` | Master switch for the raven and transitions |
 | `tui.effort` | string | — | Persisted TUI effort level; beats top-level `effort` inside the TUI |
 | `tui.todo_position` | string | — | `top`, `bottom` or `side`; validated at load |
+| `tui.show_thinking` | bool | `true` | Render a turn's reasoning inline in the transcript. Off collapses it to an animated `thinking…` line. Absent on providers that return no reasoning — see below |
 | `research.approval_mode` | string | `"none"` | `"attended"` makes research runs ask about every gated call, as if launched with `--attended` |
 | `research.subagent_review` | bool | `false` | Review on by default, as if launched with `--review`; escaped per run with `--no-review` |
 
@@ -725,7 +729,7 @@ classifier is described under *Security model* above. If you have a fork or a lo
 note that `ToolApprovals.shell` now ships `False` and `SHELL_APPROVAL_MODE` is the gate — see
 `tests/BREAKING_CHANGES.md` §24.
 
-Run the test suite with `pytest` — 2686 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
+Run the test suite with `pytest` — 2742 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
 
 ## Documentation
 

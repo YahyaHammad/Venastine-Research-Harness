@@ -42,7 +42,7 @@ python main.py --init --research-project           # §24: skip the type questio
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 2686 tests, offline, ~25-45s by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 2742 tests, offline, ~25-45s by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -115,7 +115,7 @@ published npm version can never be replaced — only deprecated.
 Read these before changing anything non-trivial — they carry design decisions that are locked, not defaults to re-derive.
 
 - **ARCHITECTURE.md** — what's built, file-by-file contracts ("what belongs here / what does NOT"), known gotchas (§11).
-- **ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **ROADMAP_v2.md** (§13–§36, all built) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I13 from §24, J1–J14 from §23, E1–E12 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A11 from §32, W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36 and F1–F8 from §37). Section and D-numbers are stable and cross-referenced everywhere.
+- **ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **ROADMAP_v2.md** (§13–§36, all built) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I13 from §24, J1–J14 from §23, E1–E12 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A11 from §32, W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37 and O1–O8 from §38). Section and D-numbers are stable and cross-referenced everywhere.
 
 **Six namespaces use the same `LETTER+NUMBER` shape, and only the first is the
 record.** An id that resolves to two places is a cross-reference that fails
@@ -236,6 +236,35 @@ the person running the suite had ever typed `/theme`.
 
 **Logging and Textual cannot share the terminal.** `main.py` calls `configure_logging(stderr=False)` immediately before `run_tui()` — not at the top of `main()`, because pre-mount messages (db creation, the trust prompt, MCP connections) genuinely want stderr. `TranscriptLogHandler` routes WARNING+ into the transcript so dropping stderr does not just make warnings invisible; it is attached in `on_mount` and **removed in `on_unmount`**, or it keeps a dead app alive and stacks one handler per instance across the test suite. Anything written to stderr while Textual is up paints over the rendered screen and disappears on the next repaint.
 
+**The transcript renders progressively, and it computes its own line boundaries** (§38, O7).
+`Transcript.stream_delta` used to do nothing but `self._pending += delta`, so a plain answer
+with no tool calls showed nothing until `TurnFinished` — the widget's own docstring had said
+so since §26, and nobody read it as a bug report. `RichLog` appends and cannot rewrite a drawn
+row, so a chunk is committed only when it ends where a rendered row ends: everything through
+the last newline, and past that a tail longer than one row up to its last space. That second
+rule is why the wrap has to be ours — Rich would soft-wrap the row still being appended to —
+and it is what makes a single long paragraph stream instead of arriving whole.
+
+An open ``` fence is held until it closes, checked against `_stream_text + chunk` rather than
+the whole buffer: a block whose closing fence has no newline after it yet puts the last
+newline *inside* the fence, so an otherwise-committable prefix would render an unterminated
+opener as plain text and leave `_split_fences` counting from the wrong place for the rest of
+the answer. **`_entries` still holds ONE entry per span, updated in place** — §26's "every
+write path goes through `_emit()`" obligation kept by a different route, because appending per
+chunk splits a copied answer across `as_text()`'s joins and draws a `venastine ›` label per
+fragment.
+
+**Thinking has two forms and one closing path** (§38, O6/O8). `tui.show_thinking` (default
+`True`, defaulted in `tui/app.py` beside `animations` rather than in `config.py`) renders
+reasoning inline as a bar-prefixed block; off, it collapses to `ThinkingIndicator`, a `Static`
+under the transcript with an animated ellipsis — an ellipsis cannot animate inside a `RichLog`.
+Both end through `VenastineApp._end_thinking()`, which every non-thinking event calls, so a
+flipped setting cannot leave one of them running. `_write_thinking_chunk` closes an open answer
+through `_close_answer()` and **not** `flush_stream()`: the latter re-enters `end_thinking()`
+at a point where `_thinking_pending` already holds the rest of the chunk being committed, which
+emits that remainder as a second entry and then drops it. `/thinking [on|off]` is the session
+toggle and persists nothing, matching `/effort`.
+
 Two things in `tui/app.py` are load-bearing and easy to break silently:
 - **`run_worker(..., exit_on_error=False)` + `on_worker_state_changed`.** Textual's default tears the whole app down on a transient worker exception.
 - **Every permission dismissal path must put a boolean on the channel.** The worker blocks inside `_run()` on `permission_channel.get()`; a dismissal carrying `None`, or one that puts nothing, hangs it forever. That is why the AC2 tests assert on the *dispatched tool*, not on the modal rendering.
@@ -299,7 +328,11 @@ Provider wire formats exist in **exactly two functions**: `_tools_for_provider()
 
 Anthropic, OpenAI-compatible (any `is_v1_compatible` provider), and Google are all fully implemented. The load-bearing differences (system prompt placement, tool-result batching, `assistant` vs `model` role, `max_tokens` vs `max_completion_tokens` vs `max_output_tokens`, response parsing) are enumerated in ARCHITECTURE.md §4.7.
 
-**D21 — streaming must not silently degrade token accounting.** `supports_stream_usage` is read from `providers.json`; the Google and OpenAI streaming branches *raise* if the flag is set but the stream ends with zero usage. A silently-zero budget disables the budget stop condition. Do not soften this to a `getattr(..., 0)` default.
+**D21 — streaming must not silently degrade token accounting.** `supports_stream_usage` is read from `providers.json`; all three streaming branches *raise* if the flag is set but the stream ends with zero usage (audit #40 brought Anthropic in line). A silently-zero budget disables the budget stop condition. Do not soften this to a `getattr(..., 0)` default. **The flag has nothing to do with whether text streams** — deltas are yielded on every branch regardless of it, and §38 records that misreading because it is where anyone chasing streaming latency looks first.
+
+**Thinking is captured and is DISPLAY-ONLY** (§38, O1–O3). `StreamToken`/`LoopEvent` carry a `thinking_delta` beside `token_delta`; it never joins `ModelResponse.text`, is never persisted and never goes back on the wire, so every branch returns byte-identical responses to the pre-§38 ones. The Anthropic branch iterates the `MessageStream` rather than `stream.text_stream` — the two share one underlying iterator, so a caller gets text or both, never text plus thinking — matching the SDK's synthetic `TextEvent`/`ThinkingEvent`. The OpenAI-compatible branch reads `reasoning_content` **or** `reasoning`, because there is no standard name and `ChoiceDelta` is `extra="allow"`.
+
+**Two providers show no thinking, by construction rather than by bug** (O2). `OPENAI`'s Chat Completions endpoint returns no reasoning text at all, and `GOOGLE`'s request deliberately does not ask for thought summaries — `ThinkingConfig(include_thoughts=True)` exists on the pin, and setting it is an owner decision (it changes a verified provider's request and bills the summaries), not an omission to fix. Both SDK shapes are asserted against the REAL packages in `tests/test_sdk_conformance.py`: a field rename here fails *silently*, since `getattr` returns `None` and every stream then looks like it carried nothing.
 
 **The empty assistant turn is dropped ABOVE the branch split (#13, #36).** A turn with neither text nor tool calls — a safety filter, a truncation, an empty pass response — is persisted by D20 and so reaches translation on every resume. It used to produce three different results from one neutral input: `content: null` on OpenAI (#13, which killed a live Pass 2), `content: []` on Anthropic (#36, on the *default* provider), and a skip on Google — guarded only because Google was the provider being debugged when it surfaced. `_is_empty_assistant_turn` now filters once at the top of `_messages_for_provider`, so a fourth branch inherits the fix instead of re-deriving it, and Google's local `if parts:` is gone. **Both halves must be empty**: a tool-call-only turn legitimately has no text, and a guard keyed on text alone drops the `tool_use` and orphans the `tool_result` after it. Dropping the turn can leave two consecutive `user` messages, which is the shape Google's branch has always produced here.
 

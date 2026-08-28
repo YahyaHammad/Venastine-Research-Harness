@@ -38,10 +38,30 @@ def _drain(gen):
 # ---- Anthropic ------------------------------------------------------------
 # ---------------------------------------------------------------------------
 
+def _text_event(text):
+    """The SDK's synthetic TextEvent, in the shape call_model_stream reads.
+
+    §38: the Anthropic branch iterates the STREAM, not stream.text_stream,
+    because the two share one underlying iterator and only the former
+    carries thinking. So the double is an iterable of typed events now
+    rather than a list of strings -- see tests/BREAKING_CHANGES.md. The
+    real field names are pinned against the installed SDK in
+    tests/test_sdk_conformance.py; this file only has to agree with them.
+    """
+    return SimpleNamespace(type="text", text=text)
+
+
+def _thinking_event(thinking):
+    return SimpleNamespace(type="thinking", thinking=thinking)
+
+
 class _FakeAnthropicStream:
-    def __init__(self, texts, final_message):
-        self.text_stream = list(texts)
+    def __init__(self, events, final_message):
+        self._events = list(events)
         self._final = final_message
+
+    def __iter__(self):
+        return iter(self._events)
 
     def get_final_message(self):
         return self._final
@@ -54,9 +74,9 @@ class _FakeAnthropicStream:
 
 
 class _FakeAnthropicClient:
-    def __init__(self, texts, final_message):
+    def __init__(self, events, final_message):
         self.messages = SimpleNamespace(
-            stream=lambda **kwargs: _FakeAnthropicStream(texts, final_message)
+            stream=lambda **kwargs: _FakeAnthropicStream(events, final_message)
         )
 
 
@@ -70,7 +90,8 @@ def test_stream_anthropic_text_and_tool_use(monkeypatch):
         ],
         usage=SimpleNamespace(input_tokens=11, output_tokens=7),
     )
-    client = _FakeAnthropicClient(["Searching ", "now."], final_message)
+    client = _FakeAnthropicClient(
+        [_text_event("Searching "), _text_event("now.")], final_message)
 
     tokens = list(call_model_stream(
         client, "ANTHROPIC", "m", [], "sys", [],
@@ -111,7 +132,7 @@ def test_stream_anthropic_d21_raises_on_zero_usage_when_flag_true(monkeypatch):
         content=[SimpleNamespace(type="text", text="hi")],
         usage=SimpleNamespace(),
     )
-    client = _FakeAnthropicClient(["hi"], final_message)
+    client = _FakeAnthropicClient([_text_event("hi")], final_message)
 
     with pytest.raises(RuntimeError, match="without usage"):
         _drain(call_model_stream(client, "ANTHROPIC", "m", [], "sys", []))
@@ -134,7 +155,7 @@ def test_stream_anthropic_honours_the_flag_rather_than_always_raising(monkeypatc
         content=[SimpleNamespace(type="text", text="hi")],
         usage=SimpleNamespace(),
     )
-    client = _FakeAnthropicClient(["hi"], final_message)
+    client = _FakeAnthropicClient([_text_event("hi")], final_message)
 
     resp = _drain(call_model_stream(client, "ANTHROPIC", "m", [], "sys", []))
     assert resp.usage == {"input_tokens": 0, "output_tokens": 0}
@@ -298,3 +319,142 @@ def test_stream_openai_no_raise_when_flag_false_and_zero_usage(monkeypatch):
 
     resp = _drain(call_model_stream(client, "OPENAI", "m", [], "sys", []))
     assert resp.usage == {"input_tokens": 0, "output_tokens": 0}
+
+
+# ---------------------------------------------------------------------------
+# ---- Thinking capture (ROADMAP_v2 §38) ------------------------------------
+# ---------------------------------------------------------------------------
+
+class TestThinkingIsCapturedAndKeptOutOfTheAnswer:
+    """§38 O1/O3. Reasoning reaches the shells as its own StreamToken and
+    NEVER joins the accumulated text.
+
+    The second half is the one worth pinning: folding reasoning into
+    `text` would change every ModelResponse these branches produce, put
+    thinking into the thread D20 persists, and send it back up the wire on
+    the next turn -- which is the whole reason the field is separate
+    rather than a formatting convention on token_delta.
+    """
+
+    def test_anthropic_yields_thinking_deltas_beside_text(self, monkeypatch):
+        monkeypatch.setattr("core.client.load_provider_data", lambda: {})
+        final_message = SimpleNamespace(
+            content=[SimpleNamespace(type="text", text="42.")],
+            usage=SimpleNamespace(input_tokens=3, output_tokens=2),
+        )
+        client = _FakeAnthropicClient(
+            [_thinking_event("Let me "), _thinking_event("count. "),
+             _text_event("42.")],
+            final_message)
+
+        tokens = list(call_model_stream(client, "ANTHROPIC", "m", [], "sys", []))
+
+        assert [t.thinking_delta for t in tokens
+                if t.thinking_delta is not None] == ["Let me ", "count. "]
+        assert [t.text_delta for t in tokens
+                if t.text_delta is not None] == ["42."]
+        # The answer is read off get_final_message(), so thinking cannot
+        # reach it however the deltas interleave.
+        assert tokens[-1].final_response.text == "42."
+
+    def test_anthropic_ignores_event_kinds_it_does_not_render(self, monkeypatch):
+        """The SDK emits signature, content_block_stop and message_stop
+        events on the same iterator. Reading `type` rather than assuming a
+        shape is what keeps an unknown kind inert instead of an
+        AttributeError out of the generator."""
+        monkeypatch.setattr("core.client.load_provider_data", lambda: {})
+        final_message = SimpleNamespace(
+            content=[SimpleNamespace(type="text", text="hi")],
+            usage=SimpleNamespace(input_tokens=1, output_tokens=1),
+        )
+        client = _FakeAnthropicClient(
+            [SimpleNamespace(type="message_start"),
+             _text_event("hi"),
+             SimpleNamespace(type="signature", signature="sig"),
+             SimpleNamespace(type="content_block_stop"),
+             SimpleNamespace(type="message_stop")],
+            final_message)
+
+        tokens = list(call_model_stream(client, "ANTHROPIC", "m", [], "sys", []))
+
+        assert [t.text_delta for t in tokens if t.text_delta is not None] == ["hi"]
+        assert [t.thinking_delta for t in tokens
+                if t.thinking_delta is not None] == []
+
+    @pytest.mark.parametrize("field", ["reasoning_content", "reasoning"])
+    def test_openai_compatible_reads_either_reasoning_field(
+            self, monkeypatch, field):
+        """There is no standard name: DeepSeek/Qwen/Z.AI send
+        `reasoning_content`, OpenRouter and Groq send `reasoning`, and
+        OpenAI's own endpoint sends neither. Both are read because both
+        are live conventions, and ChoiceDelta being extra="allow" is what
+        makes either arrive as a real attribute."""
+        monkeypatch.setattr("core.client.load_provider_data", lambda: {})
+        delta = SimpleNamespace(content="A", tool_calls=None, **{field: "why"})
+        chunks = [
+            _oai_chunk(delta),
+            _oai_chunk(None, usage=SimpleNamespace(
+                prompt_tokens=4, completion_tokens=2)),
+        ]
+        client = _FakeOpenAIClient(chunks)
+
+        tokens = list(call_model_stream(client, "DEEPSEEK", "m", [], "sys", []))
+
+        assert [t.thinking_delta for t in tokens
+                if t.thinking_delta is not None] == ["why"]
+        assert tokens[-1].final_response.text == "A"
+
+    def test_openai_reasoning_never_joins_the_answer_text(self, monkeypatch):
+        """A reasoning-only chunk (no content) must contribute nothing to
+        `text`. This is the mutation that would look green everywhere else:
+        appending to text_parts renders identically in a transcript and is
+        wrong in the thread."""
+        monkeypatch.setattr("core.client.load_provider_data", lambda: {})
+        chunks = [
+            _oai_chunk(SimpleNamespace(
+                content=None, tool_calls=None, reasoning_content="thinking…")),
+            _oai_chunk(_oai_delta(content="answer")),
+            _oai_chunk(None, usage=SimpleNamespace(
+                prompt_tokens=4, completion_tokens=2)),
+        ]
+        client = _FakeOpenAIClient(chunks)
+
+        resp = _drain(call_model_stream(client, "QWEN", "m", [], "sys", []))
+        assert resp.text == "answer"
+
+    def test_openai_ignores_a_non_string_reasoning_field(self, monkeypatch):
+        """`reasoning` is an OBJECT on some providers' non-streaming
+        responses. isinstance rather than truthiness, so a shape this code
+        cannot render is skipped instead of stringified into the
+        transcript."""
+        monkeypatch.setattr("core.client.load_provider_data", lambda: {})
+        chunks = [
+            _oai_chunk(SimpleNamespace(
+                content="x", tool_calls=None,
+                reasoning=SimpleNamespace(summary="nope"))),
+            _oai_chunk(None, usage=SimpleNamespace(
+                prompt_tokens=1, completion_tokens=1)),
+        ]
+        client = _FakeOpenAIClient(chunks)
+
+        tokens = list(call_model_stream(client, "OPENROUTER", "m", [], "sys", []))
+        assert [t.thinking_delta for t in tokens
+                if t.thinking_delta is not None] == []
+
+    def test_google_is_deliberately_untouched(self, monkeypatch):
+        """§38 O2. GOOGLE's request does not ask for thought summaries, so
+        no thought parts arrive and nothing is yielded. Pinned because the
+        obvious "completion" of this feature is to set include_thoughts,
+        which changes a verified provider's wire request and bills the
+        summaries -- an owner decision, not a gap."""
+        monkeypatch.setattr("core.client.load_provider_data", lambda: {})
+        chunks = [
+            _google_chunk([SimpleNamespace(text="hi", function_call=None)]),
+            _google_chunk([], usage=SimpleNamespace(
+                prompt_token_count=2, candidates_token_count=1)),
+        ]
+        client = _FakeGoogleClient(chunks)
+
+        tokens = list(call_model_stream(client, "GOOGLE", "m", [], "sys", []))
+        assert [t.thinking_delta for t in tokens
+                if t.thinking_delta is not None] == []

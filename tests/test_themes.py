@@ -42,8 +42,9 @@ STANDALONE_NAMES = [
 
 EXPECTED_ROLE_KEYS = {
     "user", "user_label", "assistant_label", "assistant", "system",
-    "pass", "pass_done", "tool", "tool_error", "warning", "error",
-    "success", "HIGH", "MEDIUM", "LOW", "UNVERIFIED", "UNVERIFIED_COVERAGE",
+    "thinking", "pass", "pass_done", "tool", "tool_error", "warning",
+    "error", "success", "HIGH", "MEDIUM", "LOW", "UNVERIFIED",
+    "UNVERIFIED_COVERAGE",
 }
 
 

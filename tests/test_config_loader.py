@@ -472,6 +472,33 @@ def test_tui_deep_merges_like_compaction(_redirect_roots):
     assert tui["theme"] == "light-blue"      # project wins on its own key
     assert tui["animations"] is False        # user's sibling key survives
 
+
+def test_show_thinking_is_a_known_bool_and_absent_by_default(_redirect_roots):
+    """§38 (O6). The key exists in the schema so a settings.json carrying
+    it starts the app rather than raising; the DEFAULT lives in
+    tui/app.py, following `animations`, because config.py holds no TUI
+    values and is plain-values-only.
+
+    Absent-means-absent is the half worth pinning: the loader must not
+    invent a False here, or a user who never touched the key would get
+    the collapsed indicator and no way to tell why.
+    """
+    _write_settings(_redirect_roots["user"], {"tui": {"show_thinking": False}})
+    config_loader.initialize(str(_redirect_roots["project"]))
+    assert config_loader.get_settings()["tui"]["show_thinking"] is False
+
+    config_loader.reset()
+    _write_settings(_redirect_roots["user"], {"tui": {"theme": "dark-green"}})
+    config_loader.initialize(str(_redirect_roots["project"]))
+    assert "show_thinking" not in config_loader.get_settings()["tui"]
+
+
+def test_show_thinking_wrong_type_raises(_redirect_roots):
+    _write_settings(_redirect_roots["user"], {"tui": {"show_thinking": "yes"}})
+
+    with pytest.raises(ValueError, match="must be bool"):
+        config_loader.initialize(str(_redirect_roots["project"]))
+
 # ---------------------------------------------------------------------------
 # ---- Frontmatter values are VALIDATED, not coerced (review f1, f2) --------
 # ---------------------------------------------------------------------------

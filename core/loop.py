@@ -782,6 +782,8 @@ class RunAgentLoop:
             ):
                 if token.text_delta:
                     yield LoopEvent(token_delta=token.text_delta)
+                if token.thinking_delta:
+                    yield LoopEvent(thinking_delta=token.thinking_delta)
                 if token.final_response is not None:
                     response = token.final_response
 

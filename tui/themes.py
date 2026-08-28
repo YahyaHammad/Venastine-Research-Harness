@@ -217,6 +217,13 @@ def role_styles(theme: Theme) -> dict[str, str]:
         "assistant": "",
         # The harness talking about itself.
         "system": "dim italic",
+        # §38: the model's reasoning, when tui.show_thinking renders it
+        # inline. `secondary` because thinking is the answer's quieter
+        # sibling rather than a severity or an identity -- it already
+        # clears the identity floor on every theme, so no theme constant
+        # moves for this. Italic separates it from `pass`/`pass_done`,
+        # which share the hue in the research view.
+        "thinking": f"italic {theme.secondary}",
         "pass": f"bold {theme.secondary}",
         "pass_done": theme.secondary,
         "tool": f"dim {theme.accent}",

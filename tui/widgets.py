@@ -19,6 +19,21 @@ from tui import ravens, themes
 # place the mascot can cost responsiveness rather than just effort.
 ANIMATION_INTERVAL = 0.4
 
+# §38. The thinking block's furniture. A bar down the left is how chat
+# interfaces mark quoted reasoning, and it has to be applied per RENDERED
+# row rather than once per block -- which is why Transcript pre-wraps
+# instead of letting RichLog soft-wrap.
+THINKING_OPEN = "╭ thinking…"
+THINKING_BAR = "│ "
+THINKING_CLOSE = "╰ …done thinking"
+THINKING_INDENT = "  "
+
+# Below this many usable columns nothing is pre-wrapped and the newline
+# rule alone decides when a chunk is committable. A transcript that narrow
+# has bigger problems than streaming cadence, and an unmeasurable width
+# (a bare-built test widget, a widget before mount) reads as 0.
+MIN_WRAP_WIDTH = 20
+
 
 class RavenPanel(Static):
     """Corner raven: what the harness is doing right now."""
@@ -62,6 +77,68 @@ class RavenPanel(Static):
     def resume_animation(self) -> None:
         if self._timer is not None:
             self._timer.resume()
+
+
+class ThinkingIndicator(Static):
+    """The collapsed form of a thinking span (§38 O8), for
+    `tui.show_thinking: false`.
+
+    A Static rather than a transcript line, because RichLog cannot rewrite
+    a row it has drawn and an ellipsis that does not move is not an
+    indicator. Docked directly under the transcript, so it reads as the
+    bottom of the conversation rather than as sidebar furniture.
+
+    `tui.animations` is honoured (RavenPanel's rule): with animations off
+    it renders the last frame, static. The timer is created PAUSED and
+    resumed only while a span is live -- a 0.4s tick against a hidden
+    widget is exactly the idle redraw loop RavenPanel.pause_animation
+    exists to avoid.
+    """
+
+    FRAMES = ("thinking.", "thinking..", "thinking...")
+
+    def __init__(self, animations: bool = True, **kwargs):
+        super().__init__(**kwargs)
+        self._animations = animations
+        self._frame = 0
+        self._timer = None
+        self.display = False
+
+    def on_mount(self) -> None:
+        if self._animations:
+            self._timer = self.set_interval(ANIMATION_INTERVAL, self._advance)
+            self._timer.pause()
+
+    def _advance(self) -> None:
+        self._frame = (self._frame + 1) % len(self.FRAMES)
+        self._redraw()
+
+    def _redraw(self) -> None:
+        # Same guard as Transcript._styles: self.app RAISES outside a
+        # running app, and this widget is built bare in the suite.
+        try:
+            style = themes.styles_for(self.app).get("thinking", "")
+        except Exception:  # noqa: BLE001 -- no running app; render unstyled
+            style = ""
+        frame = self.FRAMES[self._frame] if self._animations else self.FRAMES[-1]
+        self.update(Text(f"{THINKING_INDENT}{frame}", style))
+
+    def start(self) -> None:
+        """Idempotent -- called on every thinking delta."""
+        if self.display:
+            return
+        self._frame = 0
+        self.display = True
+        self._redraw()
+        if self._timer is not None:
+            self._timer.resume()
+
+    def stop(self) -> None:
+        """Idempotent -- called by every non-thinking event."""
+        if self._timer is not None:
+            self._timer.pause()
+        self.display = False
+        self.update("")
 
 
 class EffortRaven(Static):
@@ -420,19 +497,41 @@ class ResearchProgress(Static):
 class Transcript(RichLog):
     """The conversation. Code fences render highlighted via Rich's Syntax.
 
-    Token deltas are BUFFERED, not rendered as they arrive: RichLog
-    appends, so writing per delta would produce one row per token. The
-    buffer is committed by flush_stream() at the next boundary -- a tool
-    call, a system line, or the end of the turn -- which is what makes
-    code-fence highlighting possible at all, since a fence cannot be
-    parsed until it closes.
+    Token deltas are buffered and committed AT LINE BOUNDARIES THIS WIDGET
+    COMPUTES (§38 O7), so an answer appears as it is written. RichLog
+    appends and cannot rewrite a row it has already drawn, so a delta
+    cannot simply be painted: a chunk is only committable once it ends
+    where a rendered row ends.
 
-    The visible consequence, stated because the previous docstring
-    implied otherwise: a plain answer with no tool calls shows nothing
-    until the turn ends. No output is lost (every turn-end path flushes),
-    but this is not progressive rendering, and anyone chasing streaming
-    latency should look here first rather than for a render path that
-    does not exist.
+    Two rules decide that, in order:
+
+      - everything up to and including the last newline is committable;
+      - past that, a tail longer than one rendered row is committed up to
+        its last space. That second rule is what makes a single long
+        paragraph stream rather than arriving whole at the end of the
+        turn, and it is why the wrap has to be ours: Rich would soft-wrap
+        the row we are still appending to.
+
+    A chunk is held back while a ``` fence is open, and the check is
+    against `_stream_text + chunk` rather than the whole pending buffer --
+    a block whose closing fence has no newline after it yet puts the last
+    newline INSIDE the fence, so an otherwise-committable prefix would
+    render an unterminated opener as plain text and leave _split_fences
+    counting from the wrong place for the rest of the answer. Holding is
+    what keeps §26's syntax highlighting working: a fence rendered plain
+    now cannot be restyled when it closes.
+
+    This USED to buffer everything until flush_stream(), and the docstring
+    here said so: "a plain answer with no tool calls shows nothing until
+    the turn ends... this is not progressive rendering, and anyone chasing
+    streaming latency should look here first." They should still look
+    here first; the answer is now the two rules above.
+
+    Known edge, stated rather than fixed: a terminal resize mid-answer
+    leaves already-drawn rows wrapped to the old width. `_entries` keeps
+    the unwrapped source, so rerender() puts it right, and a resize
+    handler for the seconds an answer is in flight is machinery with no
+    user.
 
     §26 adds two things and one obligation.
 
@@ -449,13 +548,27 @@ class Transcript(RichLog):
     The obligation: every write path must go through _emit(), or a line
     lands on screen and is absent from both the replay and the copy. That
     is the same "two writers of related data" shape §22 spent a section
-    removing from the trace.
+    removing from the trace. §38 keeps it by a different route for a
+    streamed span: the rows go out in pieces, but `_entries` holds ONE
+    entry per span, updated in place. Appending per chunk would split a
+    copied answer across as_text()'s "\\n\\n" joins and make rerender()
+    draw a "venastine ›" label per fragment.
     """
 
     def __init__(self, **kwargs):
         super().__init__(wrap=True, markup=False, **kwargs)
         self._pending = ""
         self._entries: list[tuple[str, str]] = []
+        # §38. An assistant span with rows already on screen: its label is
+        # drawn and its single entry is open at _entries[-1].
+        self._stream_open = False
+        self._stream_text = ""
+        # The same pair for a thinking span, tracked separately because
+        # the two interleave -- thinking, text, a tool call, thinking
+        # again -- and opening either closes the other.
+        self._thinking_pending = ""
+        self._thinking_open = False
+        self._thinking_text = ""
 
     # -- styling -----------------------------------------------------------
 
@@ -500,17 +613,59 @@ class Transcript(RichLog):
                 (text, self._style("user"))))
         elif role == "assistant":
             self.write(Text("\nvenastine ›", self._style("assistant_label")))
-            for block in _split_fences(text):
-                if isinstance(block, tuple):
-                    language, code = block
-                    self.write(Syntax(code, language or "text",
-                                      theme=self._syntax_theme(),
-                                      word_wrap=True,
-                                      indent_guides=False))
-                else:
-                    self.write(Text(block, self._style("assistant")))
+            # One trailing newline is dropped, exactly as a committed
+            # stream chunk drops it. Rich renders a trailing newline as an
+            # extra empty row, so without this a REPLAYED answer carried a
+            # blank line the live render never had -- and a /theme
+            # mid-session would reflow the transcript it was only meant to
+            # recolour. Stripped HERE and not inside _render_blocks, which
+            # is also called per committed chunk, where a second strip
+            # would eat the blank line between paragraphs.
+            self._render_blocks(text[:-1] if text.endswith("\n") else text)
+        elif role == "thinking":
+            # §38. The furniture is OWNED by the renderer, not stored in
+            # the entry: `_entries` keeps the model's raw reasoning, so
+            # /copy gets prose rather than box-drawing characters, and a
+            # replay under a new theme re-derives the bar rather than
+            # replaying a string that was decorated once.
+            self._write_thinking_open()
+            self._write_thinking_lines(text)
+            self._write_thinking_close()
         else:
             self.write(Text(f"     {text}", self._style(role)))
+
+    def _render_blocks(self, text: str) -> None:
+        """The assistant body: fenced code highlighted, everything else
+        plain. Shared by a replayed entry and a committed stream chunk, so
+        the two cannot render the same text differently.
+
+        The newline trimming around a fence is what makes that sharing
+        exact rather than approximate. A `Syntax` renderable occupies its own
+        rows, so the newline that ends the ``` line is structural, not a
+        blank line -- but Rich renders it as an extra empty row when it
+        lands at the edge of an adjacent plain block. A streamed answer
+        never sees those newlines (they are consumed as the committed
+        chunk's own terminator), so without this a replay of the same
+        answer grew a blank row per code block, and a /theme mid-session
+        reflowed a transcript it was only meant to recolour.
+        """
+        blocks = _split_fences(text)
+        for index, block in enumerate(blocks):
+            if isinstance(block, tuple):
+                language, code = block
+                self.write(Syntax(code, language or "text",
+                                  theme=self._syntax_theme(),
+                                  word_wrap=True,
+                                  indent_guides=False))
+                continue
+            body = block
+            if index and isinstance(blocks[index - 1], tuple) \
+                    and body.startswith("\n"):
+                body = body[1:]
+            if index + 1 < len(blocks) and isinstance(blocks[index + 1], tuple) \
+                    and body.endswith("\n"):
+                body = body[:-1]
+            self.write(Text(body, self._style("assistant")))
 
     def write_user(self, text: str) -> None:
         self.flush_stream()
@@ -542,21 +697,197 @@ class Transcript(RichLog):
         self.flush_stream()
         self._emit("assistant", text)
 
+    # -- streaming ---------------------------------------------------------
+
+    def _wrap_width(self, prefix: str = "") -> int:
+        """Usable text columns for one rendered row, or 0 when there is
+        nothing to measure.
+
+        RichLog.write's OWN computation, reproduced rather than
+        approximated: it shrinks a renderable to
+        `scrollable_content_region.width` and then raises the result to
+        `min_width`, which defaults to 78 and is therefore the number that
+        actually decides where a line breaks in a sidebar-narrowed
+        transcript. Guessing instead (`content_size.width`, minus a column
+        for safety) wrapped a streamed answer ~15 columns narrower than the
+        same text replayed by rerender() -- so a /theme mid-session visibly
+        reflowed the conversation, which is the one thing a pre-wrap must
+        not do.
+
+        A widget has no size before mount and is built bare throughout the
+        suite, so the guard is around the measurement itself, for the same
+        reason _styles' is.
+        """
+        try:
+            width = max(self.scrollable_content_region.width, self.min_width)
+        except Exception:  # noqa: BLE001 -- unmounted; the newline rule alone
+            return 0
+        width -= len(prefix)
+        return width if width >= MIN_WRAP_WIDTH else 0
+
+    @staticmethod
+    def _fence_is_open(text: str) -> bool:
+        """An odd number of ``` means a code fence is still open."""
+        return text.count("```") % 2 == 1
+
+    @staticmethod
+    def _split_committable(pending: str, width: int) -> tuple[str, str]:
+        """Split `pending` into (commit now, keep buffered).
+
+        The two rules from the class docstring. The over-long-token branch
+        is the third case they imply: a run of more than one row with no
+        space in it (a URL) would otherwise be held until a newline
+        arrived, so it is cut at the row boundary -- which is what Rich's
+        own wrapping does with a word too long for the line.
+        """
+        cut = pending.rfind("\n")
+        if cut != -1:
+            return pending[:cut + 1], pending[cut + 1:]
+        if width and len(pending) > width:
+            space = pending.rfind(" ", 0, width + 1)
+            if space > 0:
+                return pending[:space + 1], pending[space + 1:]
+            return pending[:width], pending[width:]
+        return "", pending
+
     def stream_delta(self, delta: str) -> None:
         self._pending += delta
+        self._commit_ready()
+
+    def _commit_ready(self) -> None:
+        """Write whatever of the pending stream can safely be drawn now.
+
+        Loops because one delta can make several rows committable at once
+        -- a paragraph arriving in one chunk, or a buffer that has been
+        held back behind a closing fence.
+        """
+        width = self._wrap_width()
+        while True:
+            chunk, rest = self._split_committable(self._pending, width)
+            if not chunk or self._fence_is_open(self._stream_text + chunk):
+                return
+            self._pending = rest
+            self._write_stream_chunk(chunk)
+
+    def _write_stream_chunk(self, chunk: str) -> None:
+        if not self._stream_open:
+            self.end_thinking()
+            self.write(Text("\nvenastine ›", self._style("assistant_label")))
+            self._entries.append(("assistant", ""))
+            self._stream_open = True
+        self._stream_text += chunk
+        self._entries[-1] = ("assistant", self._stream_text)
+        # Exactly one trailing newline is dropped: the chunk ENDS at a row
+        # boundary, and RichLog already starts a new row per write, so
+        # keeping it would insert a blank row per committed chunk. A chunk
+        # that is only a newline is the blank line between paragraphs and
+        # still has to draw one.
+        body = chunk[:-1] if chunk.endswith("\n") else chunk
+        if body:
+            self._render_blocks(body)
+        else:
+            self.write(Text("", self._style("assistant")))
 
     def flush_stream(self) -> str:
-        """Commit the buffered stream, rendering fenced code blocks with
-        syntax highlighting and everything else as plain text.
+        """Commit whatever is left of the stream and close the span.
 
-        Returns what was flushed (empty when there was nothing), so the app
-        can track the last response for /copy without keeping a second
-        buffer beside this one.
+        Returns everything the span committed (empty when there was
+        nothing), so the app can track the last response for /copy without
+        keeping a second buffer beside this one. Closes an open thinking
+        span first, which is what gives every write_* path below the right
+        ordering for free.
         """
-        if not self._pending:
+        self.end_thinking()
+        return self._close_answer()
+
+    def _close_answer(self) -> str:
+        """flush_stream without the thinking half.
+
+        The split is not cosmetic: _write_thinking_chunk has to close an
+        open ANSWER before it draws, and routing that through flush_stream
+        would re-enter end_thinking at a point where _thinking_pending
+        already holds the remainder of the chunk being committed -- which
+        emits that remainder as a second, standalone thinking entry and
+        then drops it.
+        """
+        if not self._pending and not self._stream_open:
             return ""
-        text, self._pending = self._pending, ""
-        self._emit("assistant", text)
+        residual, self._pending = self._pending, ""
+        if not self._stream_open:
+            # Nothing reached the screen -- an answer short enough that no
+            # commit boundary was ever crossed. Rendered through _emit so
+            # it is byte-identical to write_answer's one-shot path.
+            self._emit("assistant", residual)
+            return residual
+        if residual:
+            self._stream_text += residual
+            self._entries[-1] = ("assistant", self._stream_text)
+            self._render_blocks(residual)
+        text = self._stream_text
+        self._stream_open = False
+        self._stream_text = ""
+        return text
+
+    # -- thinking (§38) ----------------------------------------------------
+
+    def _write_thinking_open(self) -> None:
+        self.write(Text(f"{THINKING_INDENT}{THINKING_OPEN}",
+                        self._style("thinking")))
+
+    def _write_thinking_close(self) -> None:
+        self.write(Text(f"{THINKING_INDENT}{THINKING_CLOSE}",
+                        self._style("thinking")))
+
+    def _write_thinking_lines(self, text: str) -> None:
+        """One bar-prefixed row per source line. The rows are pre-wrapped
+        by the time they arrive here (that is what _wrap_width's prefix
+        argument is for), because RichLog's own soft wrap would put the
+        bar on the first row of a wrapped line and nothing on the rest."""
+        lines = text.split("\n")
+        if lines and lines[-1] == "":
+            lines.pop()
+        for line in lines:
+            self.write(Text(f"{THINKING_INDENT}{THINKING_BAR}{line}",
+                            self._style("thinking")))
+
+    def thinking_delta(self, delta: str) -> None:
+        self._thinking_pending += delta
+        width = self._wrap_width(THINKING_INDENT + THINKING_BAR)
+        while True:
+            chunk, rest = self._split_committable(self._thinking_pending, width)
+            if not chunk:
+                return
+            self._thinking_pending = rest
+            self._write_thinking_chunk(chunk)
+
+    def _write_thinking_chunk(self, chunk: str) -> None:
+        if not self._thinking_open:
+            self._close_answer()
+            self._write_thinking_open()
+            self._entries.append(("thinking", ""))
+            self._thinking_open = True
+        self._thinking_text += chunk
+        self._entries[-1] = ("thinking", self._thinking_text)
+        self._write_thinking_lines(chunk)
+
+    def end_thinking(self) -> str:
+        """Close the thinking span, if one is open. Idempotent: every
+        non-thinking event calls it, and most of them find nothing."""
+        if not self._thinking_open and not self._thinking_pending:
+            return ""
+        residual, self._thinking_pending = self._thinking_pending, ""
+        if not self._thinking_open:
+            self._emit("thinking", residual)
+            self._thinking_text = ""
+            return residual
+        if residual:
+            self._thinking_text += residual
+            self._entries[-1] = ("thinking", self._thinking_text)
+            self._write_thinking_lines(residual)
+        self._write_thinking_close()
+        text = self._thinking_text
+        self._thinking_open = False
+        self._thinking_text = ""
         return text
 
     # -- replay ------------------------------------------------------------
@@ -572,9 +903,16 @@ class Transcript(RichLog):
 
         The pending stream buffer goes too. A resume cannot happen mid-turn
         (`_busy` refuses), so anything buffered here belongs to the thread
-        being left.
+        being left. §38's open-span flags go with it for the same reason:
+        a span left open would put the next thread's first chunk into the
+        previous thread's entry.
         """
         self._pending = ""
+        self._stream_open = False
+        self._stream_text = ""
+        self._thinking_pending = ""
+        self._thinking_open = False
+        self._thinking_text = ""
         self._entries.clear()
         self.clear()
 
@@ -593,7 +931,8 @@ class Transcript(RichLog):
 
     def as_text(self) -> str:
         """The session as plain text, for /copy all."""
-        labels = {"user": "you", "assistant": "venastine"}
+        labels = {"user": "you", "assistant": "venastine",
+                  "thinking": "thinking"}
         out = []
         for role, text in self._entries:
             label = labels.get(role)

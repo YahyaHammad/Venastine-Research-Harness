@@ -207,7 +207,7 @@ class TestTheEventTypeDecision:
         assert PipelineEvent is not LoopEvent
         assert not issubclass(PipelineEvent, LoopEvent)
 
-    def test_loop_event_did_not_grow_an_eighth_field(self):
+    def test_loop_event_did_not_grow_a_ninth_field(self):
         """The mutation-sighted half of AC4. §22 adds ~7 event kinds and
         §23 adds more; P1's rejected option was to put them on LoopEvent,
         whose "exactly one field is populated" convention lives in a
@@ -215,14 +215,23 @@ class TestTheEventTypeDecision:
         lands here, this goes red and the decision gets re-made
         deliberately rather than by accretion.
 
-        Named for the EIGHTH field: LoopEvent already has seven, six payload
-        fields plus stop_reason. This was called "..._a_seventh_field" while
-        asserting a seven-name set (audit #128) -- the assertion was always
-        right and only the name was off by one, but a test name is the first
-        thing a reader trusts.
+        Named for the next field, not the current count: it was
+        "..._a_seventh_field" while asserting a seven-name set (audit
+        #128), which was right in the assertion and off by one in the name,
+        and a test name is the first thing a reader trusts.
+
+        §38 IS the re-made decision, and it went exactly the way this test
+        was built to make it go: the field was added deliberately, with the
+        argument written down, rather than appearing in a diff. P1 rejected
+        the §22/§23 kinds because those describe a ten-pass RUN and live
+        for the run, so a flat bag would have collected ~15 optional fields
+        whose valid combinations lived only in prose. `thinking_delta`
+        describes one model call's progress and lives for a turn -- it is
+        token_delta's family exactly, the case P1's rule was never about.
+        The ninth field still has to argue for itself here.
         """
         assert set(LoopEvent.__dataclass_fields__) == {
-            "token_delta", "tool_call_start", "tool_result",
+            "token_delta", "thinking_delta", "tool_call_start", "tool_result",
             "permission_request", "notice", "final_response", "stop_reason",
         }
 

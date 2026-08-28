@@ -180,6 +180,17 @@ def _translate(pass_id: str, stream):
                                 streaming pass output into a transcript
                                 buries the report under it. Only the volume
                                 escapes, never the content.
+      thinking_delta            §38 (O5). Not translated AND not counted
+                                into pass_activity's running total, so
+                                `chars` keeps meaning one thing -- output
+                                streamed so far -- rather than quietly
+                                becoming two instruments the way batch 27
+                                item 9 describes for the token figures. The
+                                cost is stated rather than hidden: a pass
+                                that thinks for minutes before writing
+                                anything shows no activity, which is the
+                                shape §26 built pass_activity to cure. Flip
+                                it here if that turns up in a real run.
       permission_request        §25's ApprovalProvider already carries this
                                 to the shell and blocks on the answer. A
                                 second rendering of a question already on

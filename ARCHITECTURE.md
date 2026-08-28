@@ -50,7 +50,7 @@ Venastine Research Harness/
 ├── CLAUDE.md / QWEN.md             # pointers to AGENTS.md, so a harness that auto-loads one of those names finds the context instead of a second copy of it
 ├── DEVLOG.md                       # implementation notes for built ROADMAP sections -- see §0
 │
-├── tests/                          # 2686 tests, all offline, ~25-45s depending on the machine (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
+├── tests/                          # 2742 tests, all offline, ~25-45s depending on the machine (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
 │   ├── conftest.py                 # fixtures: make_model_response, make_stream_from_response, make_stream_sequence, FakeStorage, ...
 │   ├── BREAKING_CHANGES.md         # what-breaks-it / symptom / fix per area
 │   ├── test_cli.py                 # 87 tests -- ROADMAP §1 thread_id passthrough + UUID validation + §14 parser defaults/resolution/trust flow + §29 N1-N8 the one stdin reader, N2's channel deadline, every request kind rendered, and the startup block main(argv) made reachable + #102's four declining defaults
@@ -61,11 +61,11 @@ Venastine Research Harness/
 │   ├── test_output_writer.py       # 12 tests -- ROADMAP §12 artifact file layout, contents, chart PNG, None guard, tier counts
 │   ├── test_confidence_scoring.py  # 50 tests (3 ROADMAP verbatim regressions)
 │   ├── test_client_translation.py  # 37 tests -- all three provider translation branches + batching + Google request/response parsing + §33's W7 guard that importing core.client pulls in no provider SDK
-│   ├── test_client_streaming.py    # 10 tests -- ROADMAP §13 direct call_model_stream coverage (3 providers + D21 + fragment accumulation)
+│   ├── test_client_streaming.py    # 17 tests -- ROADMAP §13 direct call_model_stream coverage (3 providers + D21 + fragment accumulation); §38's thinking capture, incl. that reasoning never joins the answer text
 │   ├── test_loop_stop_conditions.py# 4 tests -- ROADMAP verbatim stop conditions + #45's belt (a non-positive max_steps raises a named ValueError)
-│   ├── test_streaming_loop.py      # 16 tests -- ROADMAP §13 generator event ordering, exception propagation, D20 persistence, permission_channel, and #158's actionable headless denial (name-gated vs argument-gated)
+│   ├── test_streaming_loop.py      # 18 tests -- ROADMAP §13 generator event ordering, exception propagation, D20 persistence, permission_channel, and #158's actionable headless denial (name-gated vs argument-gated)
 │   ├── test_workspace_trust.py     # 22 tests -- ROADMAP_v2 §14 AC1/AC2 + hash-control properties (path-in-hash, determinism)
-│   ├── test_config_loader.py       # 69 tests -- ROADMAP_v2 §14 frontmatter AC4, tier precedence D8/D18, settings merge, CONTEXT opt-in AC5, catalog, #45's repair-not-reject max_steps
+│   ├── test_config_loader.py       # 71 tests -- ROADMAP_v2 §14 frontmatter AC4, tier precedence D8/D18, settings merge, CONTEXT opt-in AC5, catalog, #45's repair-not-reject max_steps
 │   ├── test_load_skill.py          # 8 tests -- load_skill view-only retrieval, D24 permission declaration, catalog prompt injection
 │   ├── test_orchestrator.py        # 37 tests -- full pipeline mocked + JSON-retry + §5 failure/success/acceptance
 │   ├── test_registry_permissions.py# 11 tests -- allow/deny/approval
@@ -101,7 +101,7 @@ Venastine Research Harness/
 │   ├── test_review.py              # 96 tests -- ROADMAP_v2 §20 V1-V9: the reviewer agent, consent as data, the accept/reject/refine walk, both shells, 07_review.json, plus the 2026-08-04 hardening class (containment, deferred commit, sanitisation, shell lifecycle)
 │   ├── test_skills.py              # 37 tests -- ROADMAP_v2 §19 K1-K6: stateless manager, body pinning (incl. one-shot turns), precondition check (incl. registration), /skill, the pass-prompt boundary
 │   ├── test_docs_consistency.py    # 21 tests -- the documented counts, ROADMAP_v2's status markers, README's approval table, the decision record's index against its citations, and the npm allowlist (version parity, no secret can ship)
-│   ├── test_sdk_conformance.py     # 9 tests -- audit #143: the REAL pinned SDKs asked offline (google-genai fields, the thinking_budget pin note, httpx's redirect default). #35's capability chain is asserted here, and driven against real SDK objects -- the test the dict-shaped doubles could not be. Also the three context-window facts §21 assumed away: anthropic's ModelInfo.max_input_tokens, google's Model.input_token_limit, and openai.types.Model being extra="allow" (the property that makes the v1-compatible sniff one function rather than thirteen adapters)
+│   ├── test_sdk_conformance.py     # 11 tests -- audit #143: the REAL pinned SDKs asked offline (google-genai fields, the thinking_budget pin note, httpx's redirect default). #35's capability chain is asserted here, and driven against real SDK objects -- the test the dict-shaped doubles could not be. Also the three context-window facts §21 assumed away: anthropic's ModelInfo.max_input_tokens, google's Model.input_token_limit, and openai.types.Model being extra="allow" (the property that makes the v1-compatible sniff one function rather than thirteen adapters)
 │   ├── test_prompt_tier_boundary.py # 11 tests -- audit #146: K6 as a RULE. A pass prompt is invariant under every session tier, parametrised over a canary table so a tier added later is covered
 │   ├── test_fake_storage_mirror.py # 16 tests -- audit #123: FakeStorage._reconstruct / _split_at compared against storage._to_neutral / _split_at, which two docstrings and AGENTS.md claimed and nothing checked
 │   ├── test_schema_migration.py   # 21 tests -- ROADMAP_v2 §21a M7: database.ensure_columns() adds a declared column to a table already on disk, driven against stdlib sqlite3 rather than the fake sqlmodel; §26's nullability carry and its WARNING arm
@@ -123,6 +123,7 @@ Venastine Research Harness/
 │   ├── test_thread_refs.py       # 38 tests -- ROADMAP_v2 §21c: what summarize_thread reads and when it spends a call, the ref tier and the pass-prompt boundary it must not cross, the cap that refuses, both shells' commands, and #90's truncation-with-a-stated-cut
 │   ├── test_thread_legibility.py  # 35 tests -- ROADMAP_v2 §27: what each creation path labels its thread, what the picker is offered, the legacy classification (raw sqlite3), what a replay shows, and the per-thread state a resume must reset
 │   ├── test_research_legibility.py # 42 tests -- ROADMAP_v2 §26: a pass's tool calls escaping (P2 amended), the redacted param digest, one stage event per code stage (D2 per ROUND), the role palette, /copy, and ctrl+l vs the Input's ctrl+k
+│   ├── test_live_output.py         # 43 tests -- ROADMAP_v2 §38: the commit rules (a completed line drawn without a flush, a long paragraph broken at row boundaries, an open fence held), the ONE entry per streamed span that keeps /copy and /theme honest, the inline thinking block and its collapsed indicator, and the app wiring for both forms
 │   ├── test_interaction.py        # 92 tests -- ROADMAP_v2 §23 J2-J7: core/interaction.py's decode, the declining default per kind, CHOICE and SUBAGENT_SIGNOFF validated against the request, and the strict review decoder
 │   ├── test_question_tool.py      # 45 tests -- ROADMAP_v2 §23 slice 2: ask_user through the injected response_channel, QUESTION's three-way answer, and both shells' renderers
 │   ├── test_todo.py               # 57 tests -- ROADMAP_v2 §23 slice 2: todo_write's whole-list write (J13), the notice forwarded and stripped (J10), and the panel reading its content from thread state
@@ -342,7 +343,9 @@ This section exists specifically because earlier drafts of this project put pers
 
 **Google Gemini (ROADMAP §9):** fully implemented. `_tools_for_provider` wraps schemas in `Tool(function_declarations=[FunctionDeclaration(...)])` (raw `input_schema` dict auto-converts to `types.Schema`). `_messages_for_provider` builds a `{tool_call_id: name}` lookup from assistant messages for `FunctionResponse.name`. `call_model` calls `client.models.generate_content(...)` with `GenerateContentConfig(system_instruction=..., tools=...)` and parses parts manually.
 
-**Streaming (ROADMAP §13):** `call_model_stream()` is a generator yielding `StreamToken(text_delta=...)` for incremental text and a terminal `StreamToken(final_response=ModelResponse)`. Three implementations which must agree with each other about the `ModelResponse` they produce for the same inputs: Anthropic iterates `client.messages.stream(...).text_stream` then `get_final_message()`; Google iterates `generate_content_stream(...)` chunks (accumulating text + function_call parts, usage from the last chunk's `usage_metadata`); OpenAI-compatible iterates `chat.completions.create(..., stream=True)` chunks, accumulating tool-call `arguments` AND `name` fragments by `index` (both are split across deltas on some providers — a last-write-wins `name` corrupts the tool name). **D21 usage-or-raise:** `supports_stream_usage` is read once from `providers.json` at the top; the Google and OpenAI branches raise if the flag is true but the stream completes with zero usage (a silently-zero budget would disable `max_total_tokens` and §21's compaction trigger). Anthropic always reports usage on its final message, so the flag doesn't gate it. A stream that completes without yielding a terminal token is an error, raised by `_run()` — that contract used to belong to `collect_response()`, and moved with the code when §33 deleted it.
+**Streaming (ROADMAP §13, extended by §38):** `call_model_stream()` is a generator yielding `StreamToken(text_delta=...)` for incremental text, `StreamToken(thinking_delta=...)` for incremental reasoning, and a terminal `StreamToken(final_response=ModelResponse)`. Three implementations which must agree with each other about the `ModelResponse` they produce for the same inputs: Anthropic iterates `client.messages.stream(...).text_stream` then `get_final_message()`; Google iterates `generate_content_stream(...)` chunks (accumulating text + function_call parts, usage from the last chunk's `usage_metadata`); OpenAI-compatible iterates `chat.completions.create(..., stream=True)` chunks, accumulating tool-call `arguments` AND `name` fragments by `index` (both are split across deltas on some providers — a last-write-wins `name` corrupts the tool name). **D21 usage-or-raise:** `supports_stream_usage` is read once from `providers.json` at the top; ALL THREE branches raise if the flag is true but the stream completes with zero usage (a silently-zero budget would disable `max_total_tokens` and §21's compaction trigger). This paragraph used to exempt Anthropic on the reasoning that `get_final_message()` always carries usage -- audit #40 closed that, since it is exactly the assumption D21 exists because nobody can verify it from inside, and it left the one provider whose example config ships the flag `true` as the one provider where setting it did nothing. **The flag does not gate whether TEXT streams**: every branch yields deltas regardless of it, which §38 records because it is the first place someone chasing streaming latency looks.
+
+**§38's thinking capture.** Anthropic iterates the `MessageStream` instead of `stream.text_stream` (one shared underlying iterator, so a caller gets text or both kinds, never text plus thinking) and matches the SDK's synthetic `TextEvent`/`ThinkingEvent`; the OpenAI-compatible branch reads `reasoning_content` or `reasoning` off the delta, which arrive only because `ChoiceDelta` is `extra="allow"`. Google is deliberately unchanged and yields none. Thinking NEVER joins the accumulated text, so every branch's `ModelResponse` is byte-identical to the pre-§38 one -- it is display data, not thread data. Both SDK shapes are asserted against the real pinned packages in `tests/test_sdk_conformance.py`, per D22. A stream that completes without yielding a terminal token is an error, raised by `_run()` — that contract used to belong to `collect_response()`, and moved with the code when §33 deleted it.
 
 **Sampling and reasoning effort (ROADMAP_v2 §16):** two more translate-at-the-boundary helpers, for the same reason the other two exist — the providers disagree.
 
@@ -849,6 +852,26 @@ three and identity uses the per-variant hues.
 stores rendered segments, so a `/theme` switch cannot restyle what is on screen —
 `rerender()` replays from the entry log. Every write path must go through `_emit()`, or
 a line appears on screen and is absent from both the replay and the copy.
+
+**The transcript renders as the answer arrives (§38).** Deltas used to be buffered whole
+and drawn only by `flush_stream()`, so an answer with no tool calls appeared in one lump at
+`TurnFinished`. `RichLog` appends and cannot rewrite a drawn row, so a chunk is now committed
+when it ends where a rendered row ends: through the last newline, and past that a tail longer
+than one row up to its last space — which is what streams a single long paragraph, and why
+the wrap is computed here rather than left to Rich. An open ``` fence is held until it closes
+(checked against `_stream_text + chunk`, not the whole buffer, so a prefix cannot end inside a
+block), which is what preserves the syntax highlighting above. A streamed span still produces
+exactly ONE `_entries` row, updated in place — the `_emit()` obligation kept by a different
+route, since appending per chunk splits a copied answer and draws a label per fragment.
+
+**Thinking has an inline form and a collapsed one, and one closing path.** `tui.show_thinking`
+(default `True`) renders reasoning as a bar-prefixed block in the `thinking` palette role;
+off, `ThinkingIndicator` — a `Static` under the transcript — shows an animated ellipsis,
+because a `RichLog` row cannot animate. Both are ended by `VenastineApp._end_thinking()`,
+which every non-thinking event calls. `_write_thinking_chunk` must close an open answer through
+`_close_answer()` rather than `flush_stream()`: the latter re-enters `end_thinking()` while
+`_thinking_pending` still holds the remainder of the chunk being committed, emitting it as a
+stray entry and then dropping it.
 
 **`/copy` exists because the pinned textual has no text selection at all** —
 `App.ALLOW_SELECT` and `RichLog.allow_select` arrived in 3.x. `App.copy_to_clipboard`

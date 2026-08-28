@@ -119,6 +119,11 @@ _KNOWN_TUI = {
     "animations": bool,  # master switch for the raven + transitions
     "effort": str,       # persisted reasoning-effort level (§16)
     "todo_position": str,  # §23 slice 2: one of TODO_POSITIONS below
+    # §38 (O6): render a turn's reasoning inline, or collapse it to an
+    # animated one-line indicator. Defaults to True in tui/app.py rather
+    # than to a config.py constant, following `animations` above -- config.py
+    # holds no TUI values and is plain-values-only.
+    "show_thinking": bool,
 }
 
 # §23 slice 2. Validated AT LOAD and raising, following

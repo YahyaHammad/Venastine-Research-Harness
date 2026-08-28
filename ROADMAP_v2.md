@@ -165,6 +165,7 @@ the namespace list in `AGENTS.md`.
 - **§35. The record's index — the decisions, and whether they can be found** — BUILT (#16, #17, #147, #91; closes unit X5)
 - **§36. Compaction's boundaries — trigger, notice, pin, summarizer input** — BUILT (#43, #44, #45, #89, #90, #92, #172; closes units 4 and 11)
 - **§37. MCP's edges — disclosure, SSE, teardown, catalogue** — BUILT (#60, #61, #62, #63, #64, #65; closes unit 7)
+- **§38. Live output — progressive rendering and visible thinking** — BUILT (the transcript buffered a whole turn; thinking was never captured at all)
 - **Open Questions — None Remaining** (Rev. 3 — all decisions locked; verification items only)
 - **Why these calls, not just what they are** (Rev. 3 — the reasoning patterns behind several decisions above)
 
@@ -3016,6 +3017,75 @@ Audit unit 7's six remaining findings: **#60, #61, #62, #63, #64, #65**, on
 orphan-path test) was already pinned by batch 1; this batch pins the other six. **M19's
 headers property is now asserted on BOTH HTTP transports**, since SSE is a second place to
 discard an Authorization header.
+
+## §38. Live output — progressive rendering and visible thinking
+
+**Status: BUILT.** Two complaints from using the TUI, one shared cause and one deeper one.
+
+**The transcript showed nothing until the turn ended.** Every layer below it already streamed:
+`call_model_stream` yields `StreamToken(text_delta=…)` on all three provider branches, `_run()`
+forwards them as `LoopEvent(token_delta=…)`, and `tui/app.py` handed each one to
+`Transcript.stream_delta`. That method did `self._pending += delta` and nothing else, so text
+reached the screen only when `flush_stream()` ran — at a tool call, a system line, or
+`TurnFinished`. Its own docstring said so and had said so since §26: "a plain answer with no
+tool calls shows nothing until the turn ends… this is not progressive rendering." A plain
+answer is the common case, and a harness that looks frozen for the length of a reply is
+indistinguishable from one that has hung.
+
+`supports_stream_usage` is not implicated and is worth naming, because it is where the next
+person looks: it gates D21's usage-or-raise check only, and deltas stream regardless of it.
+
+**Thinking was never CAPTURED, let alone displayed.** Not a renderer gap. Anthropic iterated
+`stream.text_stream`, which carries text deltas only, and then filtered `final_msg.content` to
+`type == "text"`; the OpenAI-compatible branch read `delta.content` alone; Google read `p.text`
+and never asked for thought summaries. Neither `StreamToken` nor `LoopEvent` had a field for
+it. `config.DEFAULT_EFFORT` has been `"high"` since batch 25, so on the default provider every
+turn was thinking and the only evidence of it anywhere in the product was the corner raven.
+
+### Design Decisions Record — §38 (O1–O8)
+
+| id | decision |
+|---|---|
+| **O1** | **Thinking is DISPLAY-ONLY.** It never joins `ModelResponse.text`, is never persisted, and is never sent back on the wire. Every branch's `ModelResponse` is byte-identical to what it produced before, so D20's persisted turn, M4's fold boundary and `_messages_for_provider`'s translation are all untouched, and the feature cannot regress a thread. It also sidesteps the question of whether a provider requires its own thinking blocks returned on the next turn — the harness does today exactly what it did yesterday |
+| **O2** | **Which providers show thinking is a fact about the providers, and is documented rather than smoothed over.** It works on Anthropic and on OpenAI-compatible providers that stream reasoning (DeepSeek, Qwen, Z.AI, OpenRouter). It is silently absent on `OPENAI`, whose Chat Completions endpoint returns no reasoning text at all, and on `GOOGLE`. **Google's request is deliberately unchanged** (owner decision): thought summaries need `ThinkingConfig(include_thoughts=True)`, which the pinned `google-genai==1.0.0` can express, but setting it alters a verified provider's wire request and bills summaries the model produces either way. Effort — whether the model thinks — is not what this switch controls; it controls whether the API hands the thoughts back |
+| **O3** | **Capture is three lines in `core/client.py` and no new abstraction.** Anthropic iterates the `MessageStream` instead of `stream.text_stream` (the two share one underlying iterator, so a caller gets one or the other, and only iteration carries thinking), matching on the SDK's synthetic `TextEvent`/`ThinkingEvent`. The OpenAI-compatible branch reads `reasoning_content` **or** `reasoning` off the delta — there is no standard name, and `ChoiceDelta` being `extra="allow"` is what makes either arrive. Both shapes are asserted against the REAL pinned SDKs in `tests/test_sdk_conformance.py`, per D22, because a rename here fails silently: `getattr` returns `None` and every stream looks like it carried nothing |
+| **O4** | **`LoopEvent` gets an eighth field, and P1 is re-made rather than widened.** `thinking_delta` sits beside `token_delta`. P1 rejected putting §22's and §23's kinds here because those describe a ten-pass RUN and live for the run, so a flat bag would have accumulated ~15 optional fields whose valid combinations lived only in prose. A thinking delta describes one model call's progress and lives for a turn — `token_delta`'s family exactly, the case P1's rule was never about. `test_loop_event_did_not_grow_a_ninth_field` is the same guard, moved on by one, and it worked: it is what forced this decision to be argued instead of appearing in a diff. The rejected alternative was carrying thinking on `notice`, which is §21's compaction channel and is mirrored onto `ModelResponse` — it would have leaked reasoning into every drainer that reads notices |
+| **O5** | **Thinking is excluded from `pass_activity`'s character total.** `_translate` needs no code change (a thinking delta has `token_delta = None`), and the exclusion keeps `chars` meaning one thing — output streamed so far — rather than quietly becoming two instruments, which is item 9's misreading in a new place. The cost is stated in `_translate`'s own "What is NOT translated" block: a pass that thinks for minutes before writing looks idle, which is the shape §26 built `pass_activity` to cure. Flippable there if a real run shows it |
+| **O6** | **`tui.show_thinking` follows `tui.animations` exactly**: a `bool` in `_KNOWN_TUI`, defaulted to `True` inline in `VenastineApp.__init__`, with **no** `config.py` constant. `config.py` holds no TUI values and is plain-values-only, and inventing a default in the loader would make a user who never touched the key indistinguishable from one who set it False. `/thinking [on|off]` flips it for the session and persists nothing, matching `/effort` and `/model` and batch 36's rule that nothing writes to `settings.json` |
+| **O7** | **The transcript computes its own line boundaries.** `RichLog` appends and cannot rewrite a drawn row, so a delta cannot simply be painted. A chunk is committed when it ends where a rendered row ends: everything through the last newline, and past that a tail longer than one row up to its last space. The second rule is what makes a single long paragraph stream rather than arrive whole, and it is why the wrap has to be ours — Rich would soft-wrap the row still being appended to. A ``` fence is held until it closes, checked against `_stream_text + chunk` rather than the whole buffer, because a block whose closing fence has no newline after it yet puts the last newline INSIDE the fence. Holding is what keeps §26's syntax highlighting: a fence rendered plain cannot be restyled when it closes. The rejected alternative was a live-region `Static` repainting per token, which is genuinely token-by-token and needs height capping, scroll coordination, and a second place answer text lives. **`_entries` still holds ONE entry per span, updated in place** — appending per chunk would split a copied answer across `as_text()`'s joins and draw a `venastine ›` label per fragment |
+| **O8** | **Hidden thinking is a widget, not a transcript line.** An ellipsis that does not move is not an indicator, and `RichLog` cannot animate one, so `ThinkingIndicator` is a `Static` docked under the transcript — hidden until a span starts, `height: auto`, so it costs nothing when thinking is shown inline. It honours `tui.animations` (RavenPanel's rule) and its timer is created **paused**, resumed only while a span is live: a 0.4s tick against a hidden widget is the idle redraw loop `pause_animation` exists to avoid. Both forms end at the same moment, through one `_end_thinking()` that every non-thinking event calls, so a flipped setting cannot leave one of them running |
+
+### Verified by rendering, not by assertion
+
+Two layout divergences survived a green suite and were found by rendering the
+same text through both paths and diffing the rows: a wrap width guessed from
+`content_size` rather than reproducing RichLog's own
+`max(scrollable_content_region.width, min_width)`, and Rich's rendering of a
+trailing newline as an extra empty row (at the end of an answer, and on both
+sides of every fence, where the newline terminating the ``` line is structural
+rather than spacing). Both are fixed at the producer, in the `_render_blocks`
+both paths already shared, and the diff itself is now
+`test_live_output.py::TestAStreamedAnswerRendersLikeAWrittenOne`.
+
+The invariant it pins is worth stating on its own: **a streamed answer and the
+same answer written whole must produce identical rows.** `rerender()` replays
+`_entries` through the whole-text path, so a divergence means a `/theme`
+reflows a transcript it was only meant to recolour -- and it is invisible to
+every assertion that reads `_entries` instead of the screen, which is §27's
+own recorded lesson.
+
+### Deliberately not in §38
+
+- **The CLI.** `main.py`'s `run_chat` drains `run_agent_conversation` and prints the finished
+  answer, and still does. D12 keeps the CLI a permanent fallback rather than a second front
+  end, and the capture in `core/client.py` is where a later CLI change would start from.
+- **Persisting thinking**, for O1's reason.
+- **`include_thoughts` on Google**, for O2's.
+
+### Closed with this section
+
+The two complaints above. `Transcript`'s docstring is the artifact worth noting: it described
+this defect accurately for two sections before anyone read it as a bug report.
 
 ## Open Questions — None Remaining
 

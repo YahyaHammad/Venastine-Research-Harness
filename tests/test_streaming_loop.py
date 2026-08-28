@@ -673,3 +673,58 @@ def test_a_stream_with_no_final_response_raises(mocker):
     with pytest.raises(RuntimeError,
                        match="without yielding a final response"):
         list(RunAgentLoop._run(**_run_kwargs(memory)))
+
+
+# ---------------------------------------------------------------------------
+# ---- ROADMAP_v2 §38: thinking deltas -------------------------------------
+# ---------------------------------------------------------------------------
+
+def test_thinking_deltas_are_forwarded_as_their_own_event(mocker):
+    """§38 O4. A thinking delta becomes its OWN LoopEvent, not a
+    token_delta and not a notice.
+
+    The separation is the point: a consumer that renders token_delta as
+    the answer must not receive reasoning through that field, and
+    core/reasoning/orchestrator.py's pass_activity counts token_delta
+    characters -- so a merged field would silently start counting
+    reasoning as pass output.
+    """
+    memory = _FakeMemory()
+    final = make_model_response(text="42.", tool_calls=None,
+                                usage={"input_tokens": 3, "output_tokens": 2})
+
+    def stream(*args, **kwargs):
+        from core.client import StreamToken
+        yield StreamToken(thinking_delta="Let me count. ")
+        yield StreamToken(text_delta="42.")
+        yield StreamToken(final_response=final)
+
+    mocker.patch("core.loop.call_model_stream", side_effect=stream)
+
+    events = list(RunAgentLoop._run(**_run_kwargs(memory)))
+
+    thinking = [e for e in events if e.thinking_delta is not None]
+    assert [e.thinking_delta for e in thinking] == ["Let me count. "]
+    # Exactly one field populated per event, the convention core/events.py
+    # documents and nothing but a test can enforce.
+    assert thinking[0].token_delta is None
+    assert thinking[0].notice is None
+    assert [e.token_delta for e in events if e.token_delta is not None] == ["42."]
+
+
+def test_a_thinking_delta_does_not_reach_the_pipeline_as_activity(mocker):
+    """§38 O5, asserted where the decision lives rather than in prose.
+
+    _translate reads token_delta to build pass_activity's running total.
+    Thinking is excluded so `chars` keeps meaning one thing -- output
+    streamed so far -- and this pins that a thinking-only pass produces no
+    activity events rather than producing misleading ones.
+    """
+    from core.reasoning.orchestrator import _translate
+
+    def loop_stream():
+        yield LoopEvent(thinking_delta="x" * 5000)
+        return make_model_response(text="", tool_calls=None)
+
+    events = list(_translate("pass_1", loop_stream()))
+    assert [e for e in events if e.kind == "pass_activity"] == []

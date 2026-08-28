@@ -394,3 +394,77 @@ def test_httpx_get_does_not_follow_redirects_by_default():
         "httpx.get now follows redirects by default. Re-read #53 "
         "(fetch_url checks the blocklist pre-flight only) and arxiv's "
         "explicit follow_redirects against the new default.")
+
+
+# ===========================================================================
+# ---- ROADMAP_v2 §38: the shapes the thinking capture reads ----------------
+# ===========================================================================
+
+def test_the_anthropic_stream_is_iterable_and_names_its_delta_events():
+    """§38 O3. The Anthropic branch reads reasoning by iterating the
+    MessageStream, so three facts about the pinned SDK have to hold.
+
+    The first is why the branch changed at all: `text_stream` is an
+    instance attribute built in MessageStream.__init__ from the SAME
+    underlying iterator `__iter__` walks, so a caller gets one or the
+    other and only `__iter__` carries thinking. If a bump ever makes them
+    independent, the simpler `text_stream` loop becomes available again.
+
+    The other two are the field names. This is exactly #35's shape: the
+    branch reads `.text` and `.thinking` off events matched by `.type`,
+    and a rename would produce no error at all -- getattr returns None,
+    every stream looks like it carried no text, and the answer would come
+    back whole from get_final_message() with the transcript silently
+    dead.
+    """
+    with real_package("anthropic", "httpx"):
+        from anthropic.lib.streaming import MessageStream
+        from anthropic.lib.streaming._types import TextEvent, ThinkingEvent
+
+        assert hasattr(MessageStream, "__iter__"), (
+            "anthropic's MessageStream is no longer iterable; "
+            "core/client.py's ANTHROPIC branch walks it for text AND "
+            "thinking deltas")
+
+        src = inspect.getsource(MessageStream.__init__)
+        assert "self.text_stream" in src, (
+            "MessageStream no longer builds text_stream in __init__ -- "
+            "re-check whether it and __iter__ still share one iterator "
+            "before assuming the branch must iterate the stream")
+
+        assert "text" in TextEvent.model_fields, (
+            "anthropic's TextEvent no longer carries .text; the ANTHROPIC "
+            "branch would stream nothing and fail silently")
+        assert "thinking" in ThinkingEvent.model_fields, (
+            "anthropic's ThinkingEvent no longer carries .thinking; §38's "
+            "thinking display would go silently empty on the default "
+            "provider")
+
+
+def test_the_openai_delta_keeps_unmodelled_reasoning_fields():
+    """§38 O3, the OpenAI-compatible half, and the same property
+    test_openai_models_keep_unknown_provider_fields turns on one layer up.
+
+    `reasoning_content` (DeepSeek, Qwen, Z.AI) and `reasoning` (OpenRouter,
+    Groq) are not declared on ChoiceDelta and never will be -- OpenAI's own
+    endpoint sends neither. They arrive only because the SDK's base model
+    is extra="allow". If a bump sets extra="ignore", thinking goes silently
+    empty on every OpenAI-compatible provider that has it, which is the
+    #35 failure mode again.
+    """
+    with real_package("openai", "httpx"):
+        from openai.types.chat.chat_completion_chunk import ChoiceDelta
+
+        assert ChoiceDelta.model_config.get("extra") == "allow", (
+            "openai's ChoiceDelta no longer keeps unknown fields; "
+            "core/client.py reads reasoning_content/reasoning off it")
+
+        declared = set(ChoiceDelta.model_fields)
+        assert not declared & {"reasoning_content", "reasoning"}, (
+            "openai now DECLARES a reasoning field on ChoiceDelta -- read "
+            "its shape before leaving core/client.py's getattr pair as the "
+            "only reader")
+
+        parsed = ChoiceDelta.model_validate(
+            {"content": None, "reasoning_content": "why"})
+        assert getattr(parsed, "reasoning_content", None) == "why"

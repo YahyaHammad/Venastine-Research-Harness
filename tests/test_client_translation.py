@@ -590,7 +590,11 @@ def _stream_anthropic(captured):
     )
 
     class _S:
-        text_stream = ["ok"]
+        # §38: the branch iterates the STREAM, not stream.text_stream --
+        # the two share one iterator in the real SDK and only this one
+        # carries thinking. See tests/BREAKING_CHANGES.md.
+        def __iter__(self):
+            return iter([SimpleNamespace(type="text", text="ok")])
 
         def get_final_message(self):
             return final

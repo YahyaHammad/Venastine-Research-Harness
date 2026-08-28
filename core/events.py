@@ -28,6 +28,20 @@ from typing import Optional, Any
 class LoopEvent:
     """One event yielded by RunAgentLoop._run()."""
     token_delta: Optional[str] = None
+    # ROADMAP_v2 §38 (O4) -- the EIGHTH field, and P1 re-made rather than
+    # widened by accretion. P1 rejected putting §22's and §23's kinds here
+    # because those describe a ten-pass RUN and live for the run; a
+    # thinking delta describes one model call's progress and lives for a
+    # turn, which is token_delta's family exactly. So this is the case P1's
+    # rule was never about, and the ninth field still has to argue for
+    # itself in tests/test_pipeline_events.py.
+    #
+    # Reasoning text, streamed as it arrives, for the shells that want to
+    # show it. Display-only: it is not persisted, not part of
+    # ModelResponse.text, and never sent back on the wire. Empty on
+    # providers that return no reasoning (OPENAI, GOOGLE) -- see
+    # StreamToken's note.
+    thinking_delta: Optional[str] = None
     tool_call_start: Optional[dict] = None       # {"id", "name", "input"}
     tool_result: Optional[dict] = None            # {"id", "result"}
     permission_request: Optional[dict] = None     # {"tool_name", "params"}

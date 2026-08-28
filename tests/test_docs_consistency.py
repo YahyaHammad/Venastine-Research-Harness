@@ -865,12 +865,26 @@ def test_the_citation_scan_reads_docstrings_and_not_runtime_strings():
         "the scan changed, it is reading less than it claims and every check "
         "above is passing on a domain nobody looked at.")
 
-    orch = dict(_prose_lines(
-        os.path.join(ROOT, "core", "reasoning", "orchestrator.py")))
-    assert 979 not in orch, (
-        "orchestrator.py:979 is `yield from _stage(\"D0\")` -- a runtime "
-        "VALUE, not a citation. Reading it would demand `gate D0` inside a "
-        "string the trace test matches on.")
+    orch_path = os.path.join(ROOT, "core", "reasoning", "orchestrator.py")
+    orch = dict(_prose_lines(orch_path))
+    # Anchored by CONTENT, not by a literal line number (§38). It was
+    # `assert 979 not in orch`, and by the time anything moved that line
+    # the real `yield from _stage("D0")` had drifted to 1059 -- so the
+    # assertion was passing because 979 happened to be blank, testing
+    # nothing. A hardcoded line number in a test about drift is the one
+    # place it cannot be excused.
+    with open(orch_path, encoding="utf-8") as handle:
+        stage_lines = [n for n, line in enumerate(handle, 1)
+                       if 'yield from _stage("D0")' in line]
+    assert stage_lines, (
+        "orchestrator.py no longer contains `yield from _stage(\"D0\")`; "
+        "re-anchor this test on whatever runtime id string replaced it, or "
+        "the runtime-strings half of the domain stops being checked")
+    for number in stage_lines:
+        assert number not in orch, (
+            f"orchestrator.py:{number} is `yield from _stage(\"D0\")` -- a "
+            f"runtime VALUE, not a citation. Reading it would demand "
+            f"`gate D0` inside a string the trace test matches on.")
 
 
 def test_a_range_citation_does_not_report_its_own_endpoint():

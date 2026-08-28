@@ -7282,3 +7282,177 @@ as a subsequent system, 9.0.
 Unchanged from batch 36: `npm login` + the `NPM_TOKEN` secret; whether the
 channel opens at `0.1.0` or `1.0.0`; and batch 33's carried three (Private
 Vulnerability Reporting, the OpenRouter key rotation, `git commit -s`).
+
+## Batch 38 — the harness looked frozen, and the thinking was never there (2026-08-29)
+
+Two complaints from using the TUI. They looked like one problem and were two,
+and only the first was where anyone would have looked.
+
+### The transcript buffered a whole turn
+
+Every layer below the widget already streamed. `call_model_stream` yields a
+`StreamToken(text_delta=…)` per delta on all three provider branches, `_run()`
+forwards each as a `LoopEvent`, `tui/app.py`'s `on_loop_event_message` handed
+it to `Transcript.stream_delta`, and that method was `self._pending += delta`
+and nothing else.
+
+Text reached the screen only when `flush_stream()` ran, at a tool call, a
+system line, or `TurnFinished`. So a tool-using turn dribbled out at step
+boundaries and a plain answer — the common case — appeared in one lump when
+the turn ended.
+
+**The widget's docstring had said so since §26.** Verbatim: "a plain answer
+with no tool calls shows nothing until the turn ends. No output is lost, but
+this is not progressive rendering, and anyone chasing streaming latency should
+look here first rather than for a render path that does not exist." That is an
+accurate bug report, written by whoever introduced the behaviour, sitting in
+the file for two sections. It was read as a design note because it was phrased
+as one.
+
+The first guess was the provider flag — `supports_stream_usage` is false for
+most entries in `providers.json.example`, and "streaming doesn't work on
+providers without the streaming flag" is a coherent story. It is also wrong:
+that flag gates D21's usage-or-raise check and nothing else, and deltas are
+yielded regardless of it. Recorded in O2 and in AGENTS.md because it is a
+plausible enough wrong answer to be worth pre-empting.
+
+### Thinking was never captured
+
+Not a rendering gap — the data never entered the harness. The Anthropic branch
+iterated `stream.text_stream`, which carries text deltas only, then read the
+answer off `final_msg.content` filtered to `type == "text"`. The
+OpenAI-compatible branch read `delta.content` alone. Google read `p.text` and
+never asked for thought summaries. Neither `StreamToken` nor `LoopEvent` had a
+field for reasoning.
+
+`config.DEFAULT_EFFORT` has been "high" since batch 25, so on the default
+provider every turn had been thinking, and the only evidence of it anywhere in
+the product was the corner raven.
+
+### What was decided rather than derived
+
+Four things went to the owner, because the code could not answer them.
+
+**The rendering mechanism.** `RichLog` appends and cannot rewrite a drawn row,
+so token-by-token repainting needs a second widget — a live region that
+repaints per delta and commits into the log at turn end. Chosen instead:
+commit into the log at line boundaries the widget computes itself. One widget,
+one place answer text lives, and no height-capping or scroll coordination. The
+cost is that the unit is a rendered row rather than a token, which at 80–120
+columns is a distinction nobody watching can see.
+
+**`LoopEvent`'s eighth field.** `test_loop_event_did_not_grow_an_eighth_field`
+pinned the dataclass at seven names, and its docstring said what it was for:
+"If a §22 or §23 event ever lands here, this goes red and the decision gets
+re-made deliberately rather than by accretion." It went red, and the decision
+was re-made. P1 rejected putting §22's and §23's kinds on `LoopEvent` because
+those describe a ten-pass run and live for the run, so a flat bag would have
+accreted ~15 optional fields whose valid combinations lived only in prose. A
+thinking delta describes one model call's progress and lives for a turn. It is
+`token_delta`'s family, which is the case P1's rule was never about. The test
+is renamed for the ninth field and carries the argument.
+
+This is the second guard in this project that worked the way D24 and J4 did:
+not by preventing the change, but by making it impossible to make silently.
+
+**Google.** `ThinkingConfig(include_thoughts=True)` exists on the pinned
+`google-genai==1.0.0` — it is the only field that class has — so surfacing
+Google's reasoning was one line. Declined: it changes a verified provider's
+wire request and bills thought summaries the model produces either way. The
+owner's framing was the clarifying one — effort controls whether the model
+thinks, this would control whether the API hands the thoughts back — and the
+answer was to leave the request alone and say so in the docs rather than have
+a user find the gap.
+
+**Scope.** TUI only. `main.py`'s `run_chat` still drains and prints the
+finished answer; D12 keeps the CLI a fallback rather than a second front end,
+and the capture in `core/client.py` is where a later CLI change starts.
+
+### The three edges that took the time
+
+**A fence prefix that ends inside the block.** Chunks are held while a code
+fence is open, and the obvious check is on the whole pending buffer. That is
+wrong for a block whose closing fence has no newline after it yet: the
+buffer's backtick count is even, so the fence reads as closed, but the last
+newline is *inside* the block, so the committable prefix ends with an
+unterminated opener. It renders plain and every later `_split_fences` counts
+from the wrong place. The check is against `_stream_text + chunk`.
+
+**`flush_stream` re-entering itself.** `_write_thinking_chunk` has to close an
+open answer before it draws. Routing that through `flush_stream()` re-enters
+`end_thinking()` at a point where `_thinking_pending` already holds the
+remainder of the chunk being committed — which emits that remainder as a
+second, standalone thinking entry and then drops it. Split into
+`_close_answer()`, with a test that arranges exactly that interleaving.
+
+**One entry per span.** The rows go out in pieces but `_entries` must hold one
+row per answer, updated in place. Appending per chunk splits a copied answer
+across `as_text()`'s blank-line joins and makes `rerender()` draw a
+"venastine ›" label per fragment. §26's "every write path goes through
+`_emit()`" obligation, kept by a different route.
+
+### Two divergences only a visual diff could find
+
+The tests were green and the layout was wrong, twice, and neither is the
+kind of thing an assertion about `_entries` can see. Both were found by
+rendering the same text through the streamed path and the whole-text path
+and diffing the rows -- which is `test_live_output.py`'s
+`TestAStreamedAnswerRendersLikeAWrittenOne`, promoted from a scratch script
+into the strongest pin the batch has. It matters because BOTH paths are
+live at once: `rerender()` replays `_entries` through the whole-text path,
+so any divergence means a `/theme` reflows a transcript it was only meant
+to recolour.
+
+**The wrap width was guessed.** `content_size.width - 1` looked like the
+usable columns and is not what RichLog uses: `write()` shrinks a renderable
+to `scrollable_content_region.width` and then raises the result to
+`min_width`, which defaults to 78 -- so in a sidebar-narrowed transcript it
+is `min_width` that decides the break. Streamed answers came out about
+fifteen columns narrower than replayed ones. Fixed by reproducing RichLog's
+computation rather than approximating it.
+
+**Rich renders a trailing newline as an empty row.** A committed chunk drops
+exactly one trailing newline (otherwise every chunk adds a blank row), so
+the live render never showed those; the whole-text path did, at the end of
+any answer ending in a newline and on both sides of every code fence, where
+the newline terminating the ``` line is structural rather than spacing.
+Fixed at the producer, in `_render_blocks`, which both paths already shared
+-- so the trimming rule has one copy and the two cannot drift.
+
+This is §27's lesson arriving again: "no test in a 1028-test suite could
+fail on it, because every one of them asserted on state rather than on what
+reached the screen."
+
+### One pre-existing test that was testing nothing
+
+`test_the_citation_scan_reads_docstrings_and_not_runtime_strings` asserted
+`979 not in orch` — that `orchestrator.py:979` is a runtime value the citation
+scan must not read. By this batch the real line was 1059, so the assertion had
+been passing against a blank line for some time. An eleven-line docstring
+addition moved a comment onto 979 and it went red, which is the only reason
+anyone looked. Re-anchored by content, and it now fails loudly if that string
+disappears. A hardcoded line number in a test about drift is the one place it
+cannot be excused.
+
+### Files
+
+- `core/client.py` — `StreamToken.thinking_delta`; the Anthropic branch
+  iterates the stream; the OpenAI branch reads `reasoning_content`/`reasoning`.
+- `core/events.py`, `core/loop.py` — `LoopEvent.thinking_delta` and its forward.
+- `core/reasoning/orchestrator.py` — `_translate`'s docstring (O5: thinking is
+  excluded from `pass_activity`, with the cost stated).
+- `core/config_loader.py` — `tui.show_thinking`.
+- `tui/widgets.py` — the commit rules, the thinking block, `ThinkingIndicator`.
+- `tui/app.py`, `tui/app.tcss`, `tui/themes.py` — wiring, `/thinking`, the role.
+- `tests/test_live_output.py` (NEW, 43 tests), plus `test_client_streaming.py`,
+  `test_client_translation.py`, `test_sdk_conformance.py`,
+  `test_streaming_loop.py`, `test_pipeline_events.py`, `test_themes.py`,
+  `test_config_loader.py`, `test_docs_consistency.py`.
+- `ROADMAP_v2.md` (§38, O1–O8), `AGENTS.md`, `ARCHITECTURE.md`,
+  `tests/BREAKING_CHANGES.md`, `README.md`.
+
+### Still open
+
+Unchanged from batch 37. Two carried by this batch: the CLI does not stream,
+and `pass_activity` does not count thinking — both stated in place rather than
+left to be rediscovered.

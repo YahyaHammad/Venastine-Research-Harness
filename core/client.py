@@ -203,10 +203,25 @@ def _tool_arguments(raw_args: str, tool_name: str,
 @dataclass
 class StreamToken:
     """One token-level event yielded by call_model_stream(). Exactly one
-    field is populated per yield: text_delta for incremental text, or
-    final_response for the terminal ModelResponse (with accumulated tool
-    calls and usage)."""
+    field is populated per yield: text_delta for incremental text,
+    thinking_delta for incremental REASONING text, or final_response for
+    the terminal ModelResponse (with accumulated tool calls and usage).
+
+    §38 O1: thinking is DISPLAY-ONLY. It never joins the accumulated
+    `text`, is never persisted, and is never sent back on the wire -- so
+    the ModelResponse each branch produces is byte-identical to what it
+    produced before thinking was captured, and D20's persisted turn and
+    M4's fold boundary keep exactly the bytes they have today.
+
+    Which providers actually populate it (§38 O2): Anthropic, and every
+    OpenAI-compatible provider that streams `reasoning_content` or
+    `reasoning` (DeepSeek, Qwen, Z.AI, OpenRouter). It stays empty on
+    OPENAI -- its Chat Completions endpoint returns no reasoning text at
+    all -- and on GOOGLE, whose request deliberately does not ask for
+    thought summaries. Absence is not a bug there; see O2.
+    """
     text_delta: Optional[str] = None
+    thinking_delta: Optional[str] = None
     final_response: Optional[ModelResponse] = None
 
 
@@ -864,8 +879,10 @@ def call_model_stream(
     effort: Optional[str] = None,
 ):
     """The one model call, for every provider. Yields StreamToken
-    events: text_delta for incremental text, final_response for the
-    terminal ModelResponse with accumulated tool calls and usage.
+    events: text_delta for incremental text, thinking_delta for
+    incremental reasoning text where the provider sends any (§38 O2),
+    final_response for the terminal ModelResponse with accumulated tool
+    calls and usage.
 
     Three provider implementations — Anthropic typed events, Google
     chunked candidates, OpenAI-compatible index-accumulated tool-call
@@ -911,8 +928,30 @@ def call_model_stream(
         stream_kwargs.update(thinking)
 
         with client.messages.stream(**stream_kwargs) as stream:
-            for text in stream.text_stream:
-                yield StreamToken(text_delta=text)
+            # §38 O3. Iterating the STREAM rather than stream.text_stream,
+            # because text_stream yields text deltas only and there is no
+            # way to have both: `text_stream` is an instance attribute
+            # built from the same underlying iterator in MessageStream's
+            # __init__, so consuming one consumes the other.
+            #
+            # The SDK emits its own synthetic events beside the raw ones --
+            # TextEvent(type="text", text=<delta>) and
+            # ThinkingEvent(type="thinking", thinking=<delta>) -- which is
+            # why this reads two attribute names rather than unpacking
+            # content_block_delta by hand. Verified against the pinned
+            # anthropic==0.116.0 rather than assumed (D22), and pinned in
+            # tests/test_sdk_conformance.py.
+            #
+            # Every other event kind is ignored on purpose: `text` is the
+            # accumulated answer read off get_final_message() below, not
+            # off these deltas, so nothing here can change what this
+            # branch returns.
+            for ev in stream:
+                kind = getattr(ev, "type", None)
+                if kind == "text":
+                    yield StreamToken(text_delta=ev.text)
+                elif kind == "thinking":
+                    yield StreamToken(thinking_delta=ev.thinking)
             final_msg = stream.get_final_message()
             text = "\n".join(
                 b.text for b in final_msg.content if b.type == "text"
@@ -1038,6 +1077,21 @@ def call_model_stream(
             if delta.content:
                 text_parts.append(delta.content)
                 yield StreamToken(text_delta=delta.content)
+            # §38 O3. Reasoning text, where the provider sends any. There
+            # is no standard field: DeepSeek, Qwen and Z.AI use
+            # `reasoning_content`, OpenRouter and Groq use `reasoning`,
+            # and OpenAI's own endpoint sends neither. openai's ChoiceDelta
+            # is extra="allow" (pinned in test_sdk_conformance.py), so an
+            # unknown-to-the-SDK field arrives as a real attribute.
+            #
+            # NEVER appended to text_parts: reasoning is not the answer,
+            # and folding it in would change every ModelResponse this
+            # branch returns, put thinking into the persisted thread, and
+            # send it back on the next turn's wire.
+            reasoning = (getattr(delta, "reasoning_content", None)
+                         or getattr(delta, "reasoning", None))
+            if isinstance(reasoning, str) and reasoning:
+                yield StreamToken(thinking_delta=reasoning)
             if delta.tool_calls:
                 for tc_delta in delta.tool_calls:
                     idx = tc_delta.index
