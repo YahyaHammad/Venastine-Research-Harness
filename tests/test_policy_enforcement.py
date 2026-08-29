@@ -11,6 +11,7 @@ import sys
 import pytest
 
 import config
+from tests.conftest import rebind_posture, set_posture
 
 from safety.policy_enforcement import (
     BLOCKED_DOMAINS,
@@ -904,6 +905,7 @@ class TestRedactionKillSwitch:
 
     def test_env_var_disables_both_kinds_of_substitution(self, monkeypatch):
         monkeypatch.setenv("VENASTINE_REDACT_OFF", "1")
+        rebind_posture(monkeypatch)
         out = check_output_policy(
             "t", {"content": f'{SECRET} and {GRADLE_BLOCK}'})
         assert SECRET in out["content"]
@@ -912,12 +914,14 @@ class TestRedactionKillSwitch:
     @pytest.mark.parametrize("value", ["0", "false", "no", "off", ""])
     def test_falsy_spellings_keep_it_on(self, monkeypatch, value):
         monkeypatch.setenv("VENASTINE_REDACT_OFF", value)
+        rebind_posture(monkeypatch)
         out = check_output_policy("t", {"content": GRADLE_BLOCK})
         assert "hunter2" not in out["content"]
 
     def test_the_constant_disables_it_permanently(self, monkeypatch):
         monkeypatch.setattr(config, "REDACT_TOOL_OUTPUTS", False)
         monkeypatch.delenv("VENASTINE_REDACT_OFF", raising=False)
+        rebind_posture(monkeypatch)
         out = check_output_policy("t", {"content": GRADLE_BLOCK})
         assert "hunter2" in out["content"]
 
@@ -926,6 +930,7 @@ class TestRedactionKillSwitch:
         back on would be a coin flip, not a switch."""
         monkeypatch.setattr(config, "REDACT_TOOL_OUTPUTS", False)
         monkeypatch.setenv("VENASTINE_REDACT_OFF", "")
+        rebind_posture(monkeypatch)
         out = check_output_policy("t", {"content": GRADLE_BLOCK})
         assert "hunter2" in out["content"]
 
@@ -934,6 +939,7 @@ class TestRedactionKillSwitch:
         """Structure, not content judgment: making the cap optional would
         recreate the deterministic bypass its own comment forbids."""
         monkeypatch.setenv("VENASTINE_REDACT_OFF", "1")
+        rebind_posture(monkeypatch)
         nested = {"leaf": "x"}
         for _ in range(14):
             nested = {"next": nested}
@@ -955,5 +961,6 @@ class TestRedactionKillSwitch:
 
     def test_param_digest_shows_raw_when_disabled(self, monkeypatch):
         monkeypatch.setenv("VENASTINE_REDACT_OFF", "1")
+        rebind_posture(monkeypatch)
         digest = param_digest({"url": GEM_SOURCE})
         assert "tok3n" in digest

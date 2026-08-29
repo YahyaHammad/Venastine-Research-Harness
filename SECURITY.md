@@ -54,6 +54,20 @@ Out of scope: social engineering, physical access, compromise of a provider's ow
 
 The same applies to `ALLOW_INSECURE_SANDBOX_FALLBACK = True` **together with** `AUTO_APPROVE_SANDBOX_FALLBACK = True`. That pair is unprompted arbitrary code on the host, with your own file access, including writes into the harness's own source tree — and the harness ships as a folder of Python, so a run can edit the code the next run executes. It is not defended against, and the reason is that it cannot be: an uncontained host shell cannot be bounded from inside the same process. A path check stops `echo x > ../config.py` and a `python -c` payload walks straight past it, which is a control that reads as safety without being it. Docker is the boundary. `README.md` § *"`shell` is classified, not just approved"* states the same thing at the point of use.
 
+**Since batch 40 these settings are read ONCE, at startup, into a frozen posture
+(`security/posture.py`).** Before that they were read live at every decision, so
+`config.SHELL_APPROVAL_MODE = "never"` -- a single attribute assignment -- turned the shell gate off
+for the rest of the process from anywhere in it, and `os.environ["VENASTINE_REDACT_OFF"] = "1"` did
+the same for credential redaction. The posture now cannot be changed by a tool call, a settings
+file, an environment variable, model output, or a TUI command; each of those is pinned by a test in
+`tests/test_posture.py`.
+
+It **can** be changed by arbitrary in-process Python, which can also rebind the accessor itself. A
+frozen dataclass raises where a bare assignment succeeded, which raises the bar without closing the
+class. In scope: any route from model output or repository content to a changed posture. Out of
+scope: "I achieved arbitrary code execution and then changed it", which is a report about the
+execution.
+
 Note that all of these settings live in `config.py` (`SHELL_APPROVAL_MODE` at `config.py:245`, `ToolPermissions` at `config.py:640`, the two fallback flags at `config.py:221-222`) — none has a `settings.json` key or an environment override, by design. What IS in scope, and was fixed rather than documented: a sandboxed command reaching the harness's install tree or `~/.config/venastine/` through the workspace mount (`security/protected_paths.py`), and any argument spelling that makes the classifier and the executor disagree about where a token ends.
 
 ## No bounty

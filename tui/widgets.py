@@ -150,6 +150,49 @@ class EffortRaven(Static):
         self.update(ravens.effort_raven(self.effort))
 
 
+class PostureBadge(Static):
+    """Which shipped protections are OFF, shown for the whole session.
+
+    §40 (UN3). The startup banner scrolls away; a posture does not. The
+    case this exists for is not the researcher who just typed a flag --
+    it is the user who set `ALLOW_INSECURE_SANDBOX_FALLBACK` months ago
+    and forgot, or who inherited a config.py from somewhere. Neither of
+    them reads app.log.
+
+    Hidden when the posture is the shipped one, GoalBanner-style, so it
+    costs no sidebar rows in the case that needs nothing said. It takes
+    the lines rather than reading the posture itself, because
+    `Posture.unsafe_reasons()` is the single source all three surfaces
+    share and a widget that re-derived the question would be the second.
+    """
+
+    def __init__(self, reasons: list[tuple[str, str]], **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._reasons = list(reasons)
+
+    def on_mount(self) -> None:
+        if not self._reasons:
+            self.display = False
+            return
+        # The full sentences live in the banner and the log; the sidebar
+        # is twenty columns, so this shows the LABEL half of each pair.
+        # `unsafe_reasons()` carries both for exactly this reason -- a
+        # second method deriving short names would put the conditions in
+        # two places, and the raw constant name (31 characters for
+        # ALLOW_INSECURE_SANDBOX_FALLBACK) wraps mid-identifier here.
+        # No `style=` here, and that is §26's rule (#116) rather than an
+        # oversight: a widget must not paint a literal, because half the
+        # shipped themes disagree with any ANSI slot it could pick. The
+        # colour and the weight come from `#posture-badge` in app.tcss,
+        # which resolves `$error` against the ACTIVE theme -- so this
+        # badge recolours with `/theme` like everything else.
+        body = Text("!! REDUCED SECURITY\n")
+        for label, _detail in self._reasons:
+            body.append("- " + label + "\n")
+        self.update(body)
+        self.display = True
+
+
 class UsageLine(Static):
     """Session usage, batch 27 (#4): billed-since-resume and the thread's
     current context size, one sidebar line.

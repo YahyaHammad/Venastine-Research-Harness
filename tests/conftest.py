@@ -1103,3 +1103,45 @@ def http(monkeypatch):
     finally:
         httpx._queued.clear()
         httpx._requests.clear()
+
+
+# ---------------------------------------------------------------------------
+# ---- Security posture (ROADMAP_v2 §40) ------------------------------------
+# ---------------------------------------------------------------------------
+
+def set_posture(monkeypatch, **fields):
+    """Override security posture fields for one test.
+
+    Replaces `monkeypatch.setattr(config, "SHELL_APPROVAL_MODE", ...)` and
+    friends, which stopped working when §40 bound the posture once at
+    import -- and that is the POINT rather than an inconvenience. Those
+    call sites worked only because the flags were read live at every
+    decision, which is the property UN1 removed: a bare
+    `config.SHELL_APPROVAL_MODE = "never"` used to turn the shell gate off
+    for the rest of the process, from anywhere.
+
+    Patches the module singleton through `monkeypatch`, so teardown is
+    pytest's and not ours, and composes -- two calls in a row build on
+    each other, matching the two-line `setattr` pairs this replaced.
+    """
+    import dataclasses
+    from security import posture
+    monkeypatch.setattr(
+        posture, "_posture",
+        dataclasses.replace(posture.current(), **fields))
+
+
+def rebind_posture(monkeypatch):
+    """Re-read the posture from `config` and the environment.
+
+    For tests whose SUBJECT is the reading itself -- the redaction kill
+    switch, whose contract is "the constant is permanent, the environment
+    weakens it for one run". Those must keep setting `config` and
+    `os.environ` and then bind, because that is what a real process does
+    at startup; asserting on `set_posture` instead would test the
+    dataclass rather than the rule.
+
+    Call AFTER the setenv/setattr lines it is meant to pick up.
+    """
+    from security import posture
+    monkeypatch.setattr(posture, "_posture", posture._from_config())

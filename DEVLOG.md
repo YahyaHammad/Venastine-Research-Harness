@@ -7697,3 +7697,171 @@ One caveat for whoever runs it next: this WSL image has Python 3.14 with
 matplotlib 3.10.3, which recurses to death rendering a figure, so
 `test_output_writer.py`'s two chart tests fail there and only there. CI pins 3.11
 and passes them. Not a finding.
+
+---
+
+## Batch 40 — the security posture, bound once (2026-08-29)
+
+The question was whether the harness has a single switch that turns every
+protection off, for security researchers who want an unbounded run and
+accept the consequences.
+
+**It does not, and it is most of the way there anyway.** Four knobs in
+`config.py` get you close: `ToolPermissions`, `SHELL_APPROVAL_MODE =
+"never"`, the two fallback flags, `REDACT_TOOL_OUTPUTS = False`. Two gaps
+survive all four. `file_ops._file_approval_check` hard-returns True for any
+path outside the workspace *before* consulting `ToolApprovals`, so `read
+/etc/shadow` prompts in the most permissive configuration that exists. And
+the insecure fallback is only reached when Docker is *down*, so a
+researcher with Docker installed cannot get host execution at all.
+
+Which means the researcher who wants it edits `security/sandbox.py`. That
+is an unversioned local divergence the harness cannot detect, report, or
+refuse to combine with anything else — strictly worse than a named switch.
+So the switch is worth building. It is **not in this batch**: it ships on
+the `unsafe-mode` branch (§90), because a deliberate reduction in security
+should not be one `npm install` away from someone who did not ask for it.
+
+This batch is the half every user should have, and it exists because
+answering the question turned up something already true on `main`.
+
+### Every security flag was read live, and one of them said so
+
+`tools/builtin/shell.py`, before this batch:
+
+> Re-checked per call as well, because a test or a runtime edit can change
+> it after this line has run.
+
+That sentence describes a test seam and an attack in the same breath.
+`config.SHELL_APPROVAL_MODE = "never"` was a single attribute assignment,
+from anywhere in the process, and the gate followed it for every command
+afterwards. So did both fallback flags and `REDACT_TOOL_OUTPUTS`. Whether
+that is reachable is not hypothetical in this codebase:
+`tools/builtin/_math_common.py` exists because "an expression string is
+code", and its docstring lists the escapes found before the AST allowlist
+went in.
+
+**And one flag had an environment input, read at call time.**
+`redaction_enabled()` consulted `os.environ["VENASTINE_REDACT_OFF"]` on
+every call — so `os.environ[...] = "1"` was a live in-process switch for
+credential redaction. Batch 37 pinned the mirror of this from the other
+side: mutating the environment cannot move `AGENT_WORKSPACE`, because
+`config` binds at import. This is the case where the same asymmetry ran the
+other way, and nobody had looked.
+
+So `security/posture.py`: read `config` and the environment once, freeze
+it, and have every consumer read that. The precedent is deliberate —
+`AGENT_WORKSPACE`'s, not `SHELL_APPROVAL_MODE`'s. Batch 37 recorded that
+the fix someone reaches for, "resolve it at call time so tests can redirect
+it", is exactly the one that must not be made for a value that is a
+permission boundary. Twenty-three test call sites relied on the live read.
+That they existed is the defect, not the cost.
+
+### The ordering guard was wrong twice before it was right
+
+`apply_cli()` folds the command line in and must run before anything reads
+the posture. The obvious guard — raise if the posture has already been read
+— was wrong in two ways, and both showed up immediately.
+
+`tools/builtin/shell.py` validates the approval mode at **import**, so
+importing the tool registry marked the posture bound and every single
+launch died in the guard. That one is a real rule and it stayed: **no
+module may read the posture at import time**, because `apply_cli()` runs
+inside `main()`, after every import. shell.py's import-time check now reads
+`config` directly — it is validating the constant a human wrote, a typo
+check rather than a decision — and a source scan in `test_posture.py` holds
+the rule.
+
+The second was subtler. Raising on the *read* made `main()` un-callable
+twice in one interpreter, which the suite does constantly; sixteen
+`test_cli.py` tests failed for a reason that had nothing to do with what
+they test. The fix is to raise on a **change** after a read, which is also
+the more honest predicate: the guard exists to catch "something acted on
+the config-only value", and if folding in the command line produces the
+posture that was already read, nobody anywhere saw a wrong value. A guard
+the tests have to work around stops being read as a guard.
+
+### The badge is for this branch, not for the one that needs it
+
+`ALLOW_INSECURE_SANDBOX_FALLBACK` is a posture a user can be in today with
+**no indicator anywhere**. The case that matters is not the researcher who
+just typed a flag — it is the user who set it months ago and forgot, or who
+inherited a `config.py` from somewhere. Neither of them reads `app.log`.
+
+So the banner, the launch WARNING and the sidebar badge ship here, driven
+by a live flag and exercised by this branch's own suite, and the
+`unsafe-mode` branch only extends the list they report. All three read one
+method, `Posture.unsafe_reasons()`, because three surfaces describing one
+state in three slightly different ways is how a user ends up trusting
+whichever is wrong — §37 F4's argument for the per-server warning, and
+§28's "one classification, two consumers" one level up.
+
+`AUTO_APPROVE_SANDBOX_FALLBACK` on its own reports nothing, deliberately.
+Without the fallback enabled it cannot do anything, and a warning a user
+cannot act on is noise that teaches them to ignore the ones that matter.
+
+### The publish guard goes on the branch that does not need it
+
+`scripts/prepublish-check.mjs` refuses to publish a tree carrying an
+`UNSAFE_BRANCH` marker or a `config.py` declaring `UNSAFE_NO_*`. It lives
+on `main`, and that placement is the whole point: it travels into the
+branch by merge, so the branch cannot lose it by forgetting or through a
+bad conflict resolution — and it catches the reverse accident, unsafe code
+merged INTO main and published from there. That direction is the
+unrecoverable one, because a published npm version can never be replaced,
+only deprecated.
+
+### One test that survived its own mutation
+
+`test_the_publish_guard_is_wired_into_the_prepublish_check` asserted that
+`problems.push(...unsafeBranchProblems());` appears in the source. The
+mutation that disables the guard **comments that line out** — and the
+substring is still there, so the test passed. It scans live lines only now.
+
+Third time this record has caught the same shape in three batches: a check
+that passes because it was measuring something adjacent to its subject. It
+was caught by running the mutation, not by reading the assertion, which is
+the only thing that ever catches it.
+
+### What the guarantee is, and is not
+
+Written into SECURITY.md in these terms rather than in stronger ones. The
+posture cannot be changed by a tool call, a settings file, an environment
+variable, model output, or a TUI command — each pinned by its own test. It
+**can** be changed by arbitrary in-process Python, which can also rebind
+`current` itself. A frozen dataclass raises `FrozenInstanceError` where a
+bare assignment succeeded; that raises the bar without closing the class.
+Claiming more would be the "reads as safety without being it" failure
+SECURITY.md already names for the insecure fallback.
+
+### Verification
+
+Tests 2786 -> 2815, full suite green on Windows and Linux. Eight mutations,
+each killed by the test whose subject it is: unfreezing the dataclass (4),
+restoring the live config read (2), dropping the ordering guard (1),
+silently ignoring an unknown field (1), the shell gate reading config again
+(6), containment reading config again (13), `unsafe_reasons` going silent
+(5), and the publish guard going uncalled (1, after the assertion was fixed
+to notice).
+
+### Files
+
+- `security/posture.py` (NEW) — the frozen posture, `current()` /
+  `apply_cli()` / `override_for_tests()`, and `unsafe_reasons()`.
+- `security/sandbox.py`, `tools/builtin/shell.py`,
+  `safety/policy_enforcement.py` — read the posture, not `config`.
+- `main.py` — `apply_cli()` above `check_workspace`, `_announce_posture()`.
+- `tui/widgets.py`, `tui/app.py`, `tui/app.tcss` — `PostureBadge`.
+- `scripts/prepublish-check.mjs` — the unsafe-mode publish refusal.
+- `tests/test_posture.py` (NEW, 28 tests), `tests/conftest.py`
+  (`set_posture` / `rebind_posture`), plus the 23 migrated call sites.
+- `ROADMAP_v2.md` (§40, UN1–UN6), `AGENTS.md`, `ARCHITECTURE.md`,
+  `README.md`, `SECURITY.md`, `tests/BREAKING_CHANGES.md`.
+
+### Still open
+
+`config.ToolPermissions()` and `ToolApprovals()` are still constructed per
+call. They are the D14 ratchet and can only tighten, so the same mutation
+against them causes prompts rather than skipping them — a different risk,
+and one that wants its own batch rather than a rider on this one. Stated
+here rather than left to be rediscovered as an inconsistency.

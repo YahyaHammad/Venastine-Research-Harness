@@ -28,6 +28,16 @@
     content-align: center middle;
 }
 
+/* §40. Hidden unless a shipped protection is off; auto height so it
+   costs nothing in the shipped posture. $error because the one thing it
+   must not read as is decoration. */
+#posture-badge {
+    height: auto;
+    color: $error;
+    text-style: bold;
+    padding: 1 0 0 0;
+}
+
 #effort-raven {
     height: 2;
     color: $secondary;

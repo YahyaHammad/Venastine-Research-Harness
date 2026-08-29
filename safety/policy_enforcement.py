@@ -37,6 +37,11 @@ import socket
 from urllib.parse import urlparse
 
 import config
+# safety -> security, and never the reverse. `security.posture` imports
+# `config` and the stdlib only, so this adds no cycle -- which is exactly
+# why batch 37 kept `logging_setup` OUT of `security/`: that one pulls in
+# this module, and the edge only stays acyclic while it runs one way.
+from security import posture
 
 logger = logging.getLogger(__name__)
 
@@ -327,15 +332,23 @@ def redaction_enabled() -> bool:
     protection an environment variable could silently re-enable would not
     be a switch but a coin flip.
 
+    §40 (UN1): BOTH switches are now read from the frozen posture rather
+    than live, and the environment half is the reason that mattered here.
+    `config` binds at import so mutating the environment could never move
+    the constant -- but `os.environ.get(...)` at call time followed a
+    mutation, so this one function was a live in-process switch for
+    redaction. The distinction above survives as two posture fields; only
+    the moment of reading moved.
+
     What this does NOT govern, whichever way it reads: input refusals
     (_input_leaf -- a denial is legible, not destructive), the depth-cap
     substitution (fail-closed structural bound), and logging_setup's
     formatter redaction (the second sink guards app.log regardless).
     """
-    if not config.REDACT_TOOL_OUTPUTS:
+    active = posture.current()
+    if not active.redact_tool_outputs:
         return False
-    raw = os.environ.get("VENASTINE_REDACT_OFF", "")
-    return raw.strip().lower() in ("", "0", "false", "no", "off")
+    return not active.redact_off_env
 
 
 def _redact_output_text(text: str) -> str:

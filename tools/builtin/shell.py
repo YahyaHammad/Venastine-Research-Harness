@@ -47,7 +47,7 @@ import logging
 from pydantic import BaseModel, Field
 
 import config
-from security import capability
+from security import capability, posture
 from security.capability import UNAVAILABLE, UNCONTAINED, auto_approved
 from security.sandbox import (
     HOST_READ,
@@ -66,8 +66,22 @@ logger = logging.getLogger(__name__)
 # Validated at IMPORT, so a typo in a security setting is a startup
 # failure rather than a policy that quietly means something else. Same
 # posture as D24's assert_permissions_declared, applied to a value.
-# Re-checked per call as well, because a test or a runtime edit can
-# change it after this line has run.
+#
+# It used to say "re-checked per call as well, because a test or a runtime
+# edit can change it after this line has run", and that sentence described
+# a test seam and an attack in the same breath: `config.SHELL_APPROVAL_MODE
+# = "never"` was one attribute assignment, from anywhere in the process,
+# and the gate followed it. §40 (UN1) binds the value once into
+# `security.posture`, and `_shell_approval_check` reads it from there.
+#
+# THIS line still reads `config` directly, and deliberately (UN2). It
+# validates the CONSTANT A HUMAN WROTE -- a typo check, not a decision --
+# and it runs at import, which is before `main()` has folded in the
+# command line. Reading the posture here would mark it bound and make
+# `apply_cli()` raise on every launch, because importing this module is
+# how the registry is built. The rule the guard enforces: **no module may
+# read the posture at import time**, pinned by
+# test_posture.py::test_no_module_reads_the_posture_at_import.
 capability.validate_mode(config.SHELL_APPROVAL_MODE,
                          "config.SHELL_APPROVAL_MODE")
 
@@ -162,7 +176,8 @@ def _shell_approval_check(tool_name: str, params: dict) -> bool:
     if getattr(approvals, tool_name, False):
         return True
 
-    mode = capability.validate_mode(config.SHELL_APPROVAL_MODE,
+    active = posture.current()
+    mode = capability.validate_mode(active.shell_approval_mode,
                                     "config.SHELL_APPROVAL_MODE")
     if mode == capability.ALWAYS:
         return True
@@ -179,7 +194,7 @@ def _shell_approval_check(tool_name: str, params: dict) -> bool:
     # more config reads and a second Docker probe.
     if (profile.tier not in (INERT, HOST_READ)
             and containment == UNCONTAINED
-            and config.AUTO_APPROVE_SANDBOX_FALLBACK):
+            and active.auto_approve_fallback):
         return False
 
     # No backend can run this, so there is nothing to approve. NOT the
@@ -233,10 +248,15 @@ def run(params: dict) -> dict:
     if not docker_up and not _is_inert(parsed.command):
         approvals = config.ToolApprovals()
         base_needs_approval = getattr(approvals, "shell", False)
+        # Read here rather than passed in from the approval check: §40
+        # makes the two reads the SAME object for the life of the process,
+        # so re-reading cannot reintroduce the TOCTOU gap this block
+        # exists to close. Before §40 it could have.
+        active = posture.current()
         if (
             not base_needs_approval
-            and config.ALLOW_INSECURE_SANDBOX_FALLBACK
-            and not config.AUTO_APPROVE_SANDBOX_FALLBACK
+            and active.allow_insecure_fallback
+            and not active.auto_approve_fallback
         ):
             return {
                 "error": (

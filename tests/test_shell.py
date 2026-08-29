@@ -50,6 +50,7 @@ from security.sandbox import (
     run_sandboxed,
 )
 from security import protected_paths
+from tests.conftest import rebind_posture, set_posture
 from tools.builtin.shell import _shell_approval_check, _shell_approval_notice
 
 # Batch 39 builds command strings containing backslashes. Written as
@@ -407,7 +408,7 @@ class TestRunSandboxedRouting:
 
     def test_non_inert_no_docker_fallback_enabled(self, monkeypatch, ws):
         monkeypatch.setattr(config, "INERT_COMMANDS", ["ls"])
-        monkeypatch.setattr(config, "ALLOW_INSECURE_SANDBOX_FALLBACK", True)
+        set_posture(monkeypatch, allow_insecure_fallback=True)
         with patch("security.sandbox.is_docker_available", return_value=False), \
              patch("security.sandbox._run_subprocess_fallback") as mock_fb:
             mock_fb.return_value = {"stdout": "fb", "stderr": "", "return_code": 0}
@@ -417,7 +418,7 @@ class TestRunSandboxedRouting:
 
     def test_non_inert_no_docker_fallback_disabled_raises(self, monkeypatch, ws):
         monkeypatch.setattr(config, "INERT_COMMANDS", ["ls"])
-        monkeypatch.setattr(config, "ALLOW_INSECURE_SANDBOX_FALLBACK", False)
+        set_posture(monkeypatch, allow_insecure_fallback=False)
         with patch("security.sandbox.is_docker_available", return_value=False):
             with pytest.raises(SandboxUnavailable, match="Docker is not available"):
                 run_sandboxed("python script.py", ws)
@@ -475,16 +476,16 @@ class TestShellApprovalCheck:
     def test_fallback_no_auto_approve_requires_approval(self, monkeypatch):
         monkeypatch.setattr(config, "ToolApprovals", lambda: type("A", (), {"shell": False})())
         monkeypatch.setattr(config, "INERT_COMMANDS", ["ls"])
-        monkeypatch.setattr(config, "ALLOW_INSECURE_SANDBOX_FALLBACK", True)
-        monkeypatch.setattr(config, "AUTO_APPROVE_SANDBOX_FALLBACK", False)
+        set_posture(monkeypatch, allow_insecure_fallback=True)
+        set_posture(monkeypatch, auto_approve_fallback=False)
         with patch("tools.builtin.shell.is_docker_available", return_value=False):
             assert _shell_approval_check("shell", {"command": "python x.py"}) is True
 
     def test_fallback_auto_approve_no_approval(self, monkeypatch):
         monkeypatch.setattr(config, "ToolApprovals", lambda: type("A", (), {"shell": False})())
         monkeypatch.setattr(config, "INERT_COMMANDS", ["ls"])
-        monkeypatch.setattr(config, "ALLOW_INSECURE_SANDBOX_FALLBACK", True)
-        monkeypatch.setattr(config, "AUTO_APPROVE_SANDBOX_FALLBACK", True)
+        set_posture(monkeypatch, allow_insecure_fallback=True)
+        set_posture(monkeypatch, auto_approve_fallback=True)
         with patch("tools.builtin.shell.is_docker_available", return_value=False):
             assert _shell_approval_check("shell", {"command": "python x.py"}) is False
 
@@ -522,7 +523,7 @@ def _tiered(monkeypatch, tmp_path):
     ToolApprovals.shell False is the SHIPPED value since §28 -- the mode is
     the gate. Tests that want the ratchet set it back to True explicitly.
     """
-    monkeypatch.setattr(config, "SHELL_APPROVAL_MODE", "tiered")
+    set_posture(monkeypatch, shell_approval_mode="tiered")
     monkeypatch.setattr(config, "ToolApprovals",
                         lambda: type("A", (), {"shell": False})())
     monkeypatch.setattr(config, "WORKSPACE_DIR", str(tmp_path))
@@ -659,7 +660,7 @@ class TestTheModeIsTheGateAndTheFieldIsTheRatchet:
 
     @pytest.mark.parametrize("command", EVERY_SHAPE)
     def test_always_asks_about_everything(self, _tiered, monkeypatch, command):
-        monkeypatch.setattr(config, "SHELL_APPROVAL_MODE", "always")
+        set_posture(monkeypatch, shell_approval_mode="always")
         assert _asks(command) is True
 
     @pytest.mark.parametrize("command", EVERY_SHAPE)
@@ -667,7 +668,7 @@ class TestTheModeIsTheGateAndTheFieldIsTheRatchet:
         """"never" is the pre-§28 loose config, preserved deliberately.
         The fix for #157 is not that this became unreachable -- it is that
         reaching it now means writing the word "never"."""
-        monkeypatch.setattr(config, "SHELL_APPROVAL_MODE", "never")
+        set_posture(monkeypatch, shell_approval_mode="never")
         assert _asks(command) is False
 
     def test_tiered_sits_between_them(self, _tiered):
@@ -678,7 +679,7 @@ class TestTheModeIsTheGateAndTheFieldIsTheRatchet:
         """D14's one-way ratchet. SHELL_APPROVAL_MODE is the gate, but
         ToolApprovals.shell can only ever tighten it -- and `never` is the
         mode where that has to hold or the field is decorative."""
-        monkeypatch.setattr(config, "SHELL_APPROVAL_MODE", "never")
+        set_posture(monkeypatch, shell_approval_mode="never")
         monkeypatch.setattr(config, "ToolApprovals",
                             lambda: type("A", (), {"shell": True})())
         assert _asks("cat /etc/shadow") is True
@@ -688,7 +689,7 @@ class TestTheModeIsTheGateAndTheFieldIsTheRatchet:
                                                         monkeypatch):
         """Neither direction of a silent default is safe: one asks about
         everything, the other about nothing, and a typo cannot pick."""
-        monkeypatch.setattr(config, "SHELL_APPROVAL_MODE", "teired")
+        set_posture(monkeypatch, shell_approval_mode="teired")
         with pytest.raises(ValueError, match="must be one of"):
             _asks("ls -la")
 
@@ -722,20 +723,20 @@ class TestTheFallbackFlagsStillMeanWhatTheyMeant:
 
     def test_fallback_without_auto_approve_still_asks(self, _tiered,
                                                       monkeypatch):
-        monkeypatch.setattr(config, "ALLOW_INSECURE_SANDBOX_FALLBACK", True)
-        monkeypatch.setattr(config, "AUTO_APPROVE_SANDBOX_FALLBACK", False)
+        set_posture(monkeypatch, allow_insecure_fallback=True)
+        set_posture(monkeypatch, auto_approve_fallback=False)
         assert _asks("python x.py", docker=False) is True
 
     def test_fallback_with_auto_approve_does_not(self, _tiered, monkeypatch):
-        monkeypatch.setattr(config, "ALLOW_INSECURE_SANDBOX_FALLBACK", True)
-        monkeypatch.setattr(config, "AUTO_APPROVE_SANDBOX_FALLBACK", True)
+        set_posture(monkeypatch, allow_insecure_fallback=True)
+        set_posture(monkeypatch, auto_approve_fallback=True)
         assert _asks("python x.py", docker=False) is False
 
     def test_no_backend_at_all_does_not_ask(self, _tiered, monkeypatch):
         """Not "approved" -- run_sandboxed still raises SandboxUnavailable.
         Asking first spends a human decision on an outcome already fixed,
         which is the burn-a-turn class."""
-        monkeypatch.setattr(config, "ALLOW_INSECURE_SANDBOX_FALLBACK", False)
+        set_posture(monkeypatch, allow_insecure_fallback=False)
         assert _asks("python x.py", docker=False) is False
         assert containment_for(classify_command("python x.py", _tiered),
                                docker_available=False) == UNAVAILABLE
@@ -996,8 +997,8 @@ class TestQuotingCannotHideAnEscape:
         because with the fallback OFF the same call returns False for the
         opposite reason: nothing can run it, so there is nothing to
         approve."""
-        monkeypatch.setattr(config, "ALLOW_INSECURE_SANDBOX_FALLBACK", True)
-        monkeypatch.setattr(config, "AUTO_APPROVE_SANDBOX_FALLBACK", False)
+        set_posture(monkeypatch, allow_insecure_fallback=True)
+        set_posture(monkeypatch, auto_approve_fallback=False)
         profile = classify_command(command, _tiered)
         assert containment_for(profile, docker_available=False) == UNCONTAINED
         assert _asks(command, docker=False) is True
@@ -1219,7 +1220,7 @@ class TestEveryBackendRefusesARefusedWorkspace:
             run_sandboxed(command, protected_paths.harness_root())
 
     def test_the_fallback_refuses_it_too(self, monkeypatch):
-        monkeypatch.setattr(config, "ALLOW_INSECURE_SANDBOX_FALLBACK", True)
+        set_posture(monkeypatch, allow_insecure_fallback=True)
         with pytest.raises(SandboxUnavailable, match="AGENT_WORKSPACE"):
             run_sandboxed("python evil.py",
                           protected_paths.harness_root(),
@@ -1353,8 +1354,8 @@ class TestBackslashCannotHideAnEscape:
         because with the fallback OFF the same call returns False for the
         opposite reason: nothing can run it, so there is nothing to
         approve."""
-        monkeypatch.setattr(config, "ALLOW_INSECURE_SANDBOX_FALLBACK", True)
-        monkeypatch.setattr(config, "AUTO_APPROVE_SANDBOX_FALLBACK", False)
+        set_posture(monkeypatch, allow_insecure_fallback=True)
+        set_posture(monkeypatch, auto_approve_fallback=False)
         profile = classify_command(command, _tiered)
         assert containment_for(profile, docker_available=False) == UNCONTAINED
         assert _asks(command, docker=False) is True

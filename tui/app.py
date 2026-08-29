@@ -72,9 +72,10 @@ from tui.screens import (
     ProjectKindScreen, QuestionScreen, ReviewScreen, SubagentSignoffScreen,
     ThreadPickerScreen,
 )
+from security import posture
 from tui.widgets import (
-    EffortRaven, GoalBanner, RavenPanel, ResearchProgress, ThinkingIndicator,
-    TodoPanel, Transcript, UsageLine,
+    EffortRaven, GoalBanner, PostureBadge, RavenPanel, ResearchProgress,
+    ThinkingIndicator, TodoPanel, Transcript, UsageLine,
 )
 
 logger = logging.getLogger(__name__)
@@ -377,6 +378,11 @@ class VenastineApp(App):
             with Vertical(id="sidebar"):
                 yield RavenPanel(animations=self._animations, id="raven")
                 yield EffortRaven(id="effort-raven")
+                # §40. Above the ravens' siblings and always in view: a
+                # posture is not a transient, so it does not belong in the
+                # transcript where it would scroll away.
+                yield PostureBadge(posture.current().unsafe_reasons(),
+                                   id="posture-badge")
                 # #4: billed-since-resume and current context size, one
                 # line. Hidden until a turn produces figures.
                 yield UsageLine(id="usage-line")

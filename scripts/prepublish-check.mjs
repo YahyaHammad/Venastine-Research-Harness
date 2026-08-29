@@ -59,7 +59,49 @@ const FORBIDDEN = [
   { label: 'compiled python', test: (f) => f.endsWith('.pyc') || f.includes('__pycache__') },
   { label: 'notebook checkpoints', test: (f) => f.includes('.ipynb_checkpoints') },
   { label: 'security scan artifacts', test: (f) => f.startsWith('CLAUDE-SECURITY') },
+  { label: 'the unsafe-mode branch marker', test: (f) => f === 'UNSAFE_BRANCH' },
 ];
+
+/**
+ * The unsafe-mode branch must never reach npm (ROADMAP_v2 UN5).
+ *
+ * That branch carries UNSAFE_NO_APPROVAL / UNSAFE_NO_SANDBOX -- a
+ * deliberate, documented reduction in security for researchers who accept
+ * it. Regular users install from npm, so npm must only ever serve `main`.
+ *
+ * This check lives on MAIN, not on the branch, and that placement is the
+ * point. It travels into the branch by merge, so the branch cannot lose it
+ * by forgetting to add it or by a bad conflict resolution -- and it also
+ * catches the reverse accident, unsafe code merged INTO main and published
+ * from there. A published npm version can never be replaced, only
+ * deprecated, so the reverse accident is the unrecoverable one.
+ *
+ * Two independent detectors, because either alone is one rename away from
+ * silence: a marker file the branch carries, and the config constants
+ * themselves. The FORBIDDEN entry above catches the marker if it is ever
+ * packed; this catches it in the working tree whether packed or not.
+ */
+function unsafeBranchProblems() {
+  const found = [];
+  if (fs.existsSync(path.join(ROOT, 'UNSAFE_BRANCH'))) {
+    found.push('an UNSAFE_BRANCH marker file is present at the repo root');
+  }
+  try {
+    const cfg = fs.readFileSync(path.join(ROOT, 'config.py'), 'utf8');
+    if (/^\s*UNSAFE_NO_(APPROVAL|SANDBOX)\s*=/m.test(cfg)) {
+      found.push('config.py declares UNSAFE_NO_APPROVAL / UNSAFE_NO_SANDBOX');
+    }
+  } catch {
+    found.push('config.py could not be read to check for unsafe-mode flags');
+  }
+  return found.map(
+    (why) =>
+      `Refusing to publish the unsafe-mode build: ${why}. ` +
+      'npm serves regular users and must only ever be published from `main`. ' +
+      'If you are on `main` and see this, unsafe-mode code has been merged in ' +
+      'by mistake -- that is the accident this check exists for.'
+  );
+}
 
 function versionFromPyproject() {
   const text = fs.readFileSync(path.join(ROOT, 'pyproject.toml'), 'utf8');
@@ -118,6 +160,8 @@ if (files) {
     }
   }
 }
+
+problems.push(...unsafeBranchProblems());
 
 if (problems.length) {
   process.stderr.write(

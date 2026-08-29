@@ -33,7 +33,7 @@ from core.reasoning.authorization import GRANT_PICKER
 from core.replay import replay_entries
 from database import create_db_and_tables, engine
 from logging_setup import configure_logging
-from security import protected_paths
+from security import posture, protected_paths
 
 # Importing these for their SIDE EFFECT, and the side effect is load-bearing:
 # a SQLModel table class registers on SQLModel.metadata when its module is
@@ -92,6 +92,34 @@ def _print_replay(thread_id: UUID) -> None:
             print(f"     {text}")
     noun = "entry" if len(entries) == 1 else "entries"
     print(f"--- end of {len(entries)} replayed {noun} ---")
+
+
+
+def _announce_posture() -> None:
+    """Say, at every launch, which shipped protections are off (§40 UN3).
+
+    Two sinks because they reach different people. The WARNING goes to
+    app.log and, on the CLI, to stderr through the root handler -- it is
+    the record a bug report is triaged against. The stderr banner is for
+    the human at the terminal, who may have set one of these months ago
+    and forgotten, or may have inherited a config.py from somewhere.
+
+    Silent when the posture is shipped, so this costs nothing in the case
+    that needs nothing said. That is also why it reads `unsafe_reasons()`
+    rather than testing the flags here: three surfaces describing one
+    state in three slightly different ways is how a user ends up
+    trusting whichever is wrong, and §37 F4 already made this argument
+    for the per-server auto-approve warning.
+    """
+    reasons = posture.current().unsafe_reasons()
+    if not reasons:
+        return
+    print("", file=sys.stderr)
+    print("  !! REDUCED SECURITY POSTURE -- set in config.py", file=sys.stderr)
+    for _label, detail in reasons:
+        logger.warning("Reduced security posture: %s", detail)
+        print(f"   - {detail}", file=sys.stderr)
+    print("", file=sys.stderr)
 
 
 def run_chat(
@@ -1655,6 +1683,17 @@ def main(argv=None) -> int:
     # Below configure_logging so the reason can be logged, and above
     # create_db_and_tables so a refused launch does not leave a database
     # behind -- the same argument audit #101 makes one line down.
+    # §40 (UN2). ABOVE check_workspace, and that ordering is not
+    # cosmetic: the posture is what a later batch lets decide whether the
+    # workspace guard runs at all, and `apply_cli` RAISES if anything has
+    # already read the posture -- so a reader creeping above this line is
+    # a loud startup failure rather than a run that quietly used the
+    # config-only value. Below parse_args because the command line feeds
+    # it; below configure_logging so the warnings below have somewhere to
+    # go.
+    posture.apply_cli()
+    _announce_posture()
+
     workspace_refusal = protected_paths.check_workspace(config.WORKSPACE_DIR)
     if workspace_refusal:
         logger.error("%s", workspace_refusal)

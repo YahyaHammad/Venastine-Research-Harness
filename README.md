@@ -267,7 +267,7 @@ Under `tiered`, each command is classified **once** into what it can do, and the
 | `INERT` | read-only command, every argument inside the workspace | host | no |
 | `HOST_READ` | read-only, but an argument reaches outside the workspace | host | **yes** |
 | `SANDBOXED` | anything else, no network | container | no, if Docker is confirmed up |
-| `SANDBOXED_NET` | its first word is on the network allowlist (`curl`, `pip`, `git`, …) | container, with network | **yes** |
+| `SANDBOXED_NET` | **any** word is on the network allowlist (`curl`, `pip`, `git`, …) — first word only for an INERT command, which cannot chain | container, with network | **yes** |
 | `UNKNOWN` | could not be characterised at all | — | **yes** |
 
 The auto-approved set is narrower than the `read` tool's, which is already unprompted inside the workspace. A `SANDBOXED` command can do what `write` and `edit` can already do without asking — corrupt the workspace — bounded to 1 CPU, 1 GB, 200 processes, 60 seconds, no network and no host filesystem.
@@ -275,6 +275,20 @@ The auto-approved set is narrower than the `read` tool's, which is already unpro
 **The argument rule does not parse, deliberately.** Every token after the first is read as a path and required to stay inside the workspace; a flag like `-la` passes only because it is *relative*, not because anything recognised it as a flag. Refusing to interpret shell syntax is what makes the check trustworthy — a classifier that parses is a shell parser, and a parser that is wrong auto-approves something dangerous. The cost is occasional false positives: `grep /etc/passwd notes.txt` searches for a string that looks like a path, and costs one prompt.
 
 **Quoted arguments are never inert.** The corollary of not parsing: the raw tokens have to be the real tokens. A quoted command is classified `SANDBOXED` and goes to a container, because the classifier splits on whitespace while the executor splits with `shlex` — and `shlex` strips quotes, so `cat "/etc/passwd"` read as one token *inside* the workspace and then ran as two tokens naming the host's file. Under Docker this costs nothing: `cat "my notes.txt"` is still auto-approved, it simply runs in the container. Fixed in batch 37; `'single quotes'` and `--file="/etc/x"` did it too.
+
+**Escaped arguments are never inert either.** The same corollary, one character further, and it
+took a second batch to find: `shlex` consumes `\` exactly as it consumes quotes, so
+`cat \/etc\/passwd` read as one relative token inside the workspace and then ran as `/etc/passwd` on
+the host — measured on a POSIX host at the shipped default. With `\` rejected the character class is
+now **closed** under `shlex`, which consumes exactly whitespace, `'`, `"` and `\`: the classifier's
+tokens and the executor's are provably the same list. On Windows this costs a backslash path such
+as `cat sub\dir\notes.txt`, which moves to the container and fails there — use forward slashes.
+
+**These settings are read once, at startup.** Since batch 40 `SHELL_APPROVAL_MODE`, both fallback
+flags and `REDACT_TOOL_OUTPUTS` are bound into a frozen posture (`security/posture.py`) rather than
+consulted at each decision, so nothing running in-process can move them mid-session. If any of them
+is set to something weaker than the shipped default, the harness says so at launch — on stderr, in
+`app.log`, and as a badge in the TUI sidebar for as long as the session lasts.
 
 **An approved host read still reads the host.** `cat /etc/shadow` is asked about; if you say yes, it runs on the host, because that is what you approved. Routing it into a container would answer a different question than the one you were asked.
 
@@ -729,7 +743,7 @@ classifier is described under *Security model* above. If you have a fork or a lo
 note that `ToolApprovals.shell` now ships `False` and `SHELL_APPROVAL_MODE` is the gate — see
 `tests/BREAKING_CHANGES.md` §24.
 
-Run the test suite with `pytest` — 2786 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
+Run the test suite with `pytest` — 2815 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
 
 ## Documentation
 

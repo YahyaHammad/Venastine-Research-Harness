@@ -3293,3 +3293,72 @@ The `&&` question, answered as verified-false with the measurement rather than w
 transformations, which is a stronger statement than the previous two fixes could make.
 
 ---
+
+## §40. The security posture — bound once, and said out loud
+
+**Status: BUILT.** Asked whether the harness has a single switch that turns every protection off,
+for security researchers who want an unbounded run and accept the consequences. It does not, and
+answering it properly turned up something that was already true on `main`.
+
+**Every security flag was read LIVE, at the moment each decision was made.**
+`tools/builtin/shell.py` said so in as many words:
+
+> Re-checked per call as well, because a test or a runtime edit can change it after this line has
+> run.
+
+That sentence describes a test seam and an attack in the same breath. `config.SHELL_APPROVAL_MODE =
+"never"` was one attribute assignment, from anywhere in the process, and the gate followed it for
+every command afterwards. So did `ALLOW_INSECURE_SANDBOX_FALLBACK`, `AUTO_APPROVE_SANDBOX_FALLBACK`
+and `REDACT_TOOL_OUTPUTS`. The project's own history says this is not hypothetical: `_math_common.py`
+exists because "an expression string is code", and its docstring lists the escapes found before the
+AST allowlist went in.
+
+**And one flag had an environment input, read at call time.** `redaction_enabled()` consulted
+`os.environ["VENASTINE_REDACT_OFF"]` on every call, so `os.environ[...] = "1"` was a live in-process
+switch for credential redaction. Batch 37 pinned the mirror of this from the other side — mutating
+the environment cannot move `AGENT_WORKSPACE`, because `config` binds at import — and this is the
+case where the same asymmetry ran the other way.
+
+The unsafe switch itself is **not** in this section. It ships on the `unsafe-mode` branch (§90), and
+this batch is the part every user should have: the posture is bound once, frozen, and reported.
+
+### Design Decisions Record — §40 (UN1–UN6)
+
+| id | decision |
+|---|---|
+| **UN1** | **The posture is bound once at import and frozen.** `security/posture.py` holds a `@dataclass(frozen=True)` read from `config` and the environment exactly once; `config.py` is still where a human writes the value and stops being what is read at decision time. This follows `AGENT_WORKSPACE`'s precedent rather than `SHELL_APPROVAL_MODE`'s — batch 37 recorded that the fix someone reaches for ("resolve it at call time so tests can redirect it") is precisely the one that must not be made for a value that is a permission boundary. The blast radius was 23 `monkeypatch.setattr(config, …)` call sites, all of which worked *only* because of the property being removed |
+| **UN2** | **Ordering is self-enforcing, and it fires on a CHANGE rather than on a read.** `current()` marks the posture bound; `apply_cli()` raises if folding in the command line would now produce something different. Raising on the read alone was the first draft and it was wrong twice over: `tools/builtin/shell.py` validates the approval mode at *import*, so every launch died in the guard, and `main()` became un-callable twice in one interpreter, which the suite does constantly. A guard the tests have to work around stops being read as a guard. The rule it depends on — **no module may read the posture at import time** — is pinned by a source scan, and shell.py's import-time check reads `config` directly for exactly that reason |
+| **UN3** | **`unsafe_reasons()` is the single description.** The startup banner, the launch WARNING and the TUI badge all read one method, so three surfaces cannot describe one state in three slightly different ways — which is how a user ends up trusting whichever is wrong. Same argument §37 F4 made for the per-server auto-approve warning, and §28's "one classification, two consumers" one level up. `AUTO_APPROVE_SANDBOX_FALLBACK` alone reports nothing, deliberately: without the fallback enabled it cannot do anything, and a warning a user cannot act on is noise. It returns `(label, detail)` PAIRS rather than sentences, because the surfaces differ in width: the sidebar is twenty columns and shows the label, stderr and app.log show the detail. A second method deriving short names would put the conditions in two places, which is the drift this method exists to prevent -- and the raw constant name is 31 characters, so it wrapped mid-identifier |
+| **UN4** | **The guarantee is stated with its limit.** The posture cannot be changed by a tool call, a settings file, an environment variable, model output, or a TUI command — each pinned by its own test. It **can** be changed by arbitrary in-process Python, which can also rebind `current` itself. A frozen dataclass raises `FrozenInstanceError` where a bare `config.X = …` succeeded, which raises the bar without closing the class. Saying more than that would be the "reads as safety without being it" failure SECURITY.md already names for the insecure fallback |
+| **UN5** | **The publish guard lives on `main`, not on the branch that needs it.** `scripts/prepublish-check.mjs` refuses to publish a tree carrying an `UNSAFE_BRANCH` marker or a `config.py` declaring `UNSAFE_NO_*`. On `main` it travels into the branch by merge, so the branch cannot lose it by forgetting or by a bad conflict resolution — and it catches the reverse accident, unsafe code merged INTO main and published from there, which is the unrecoverable direction: a published npm version can never be replaced, only deprecated. Two independent detectors because either alone is one rename from silence |
+| **UN6** | **`VENASTINE_REDACT_OFF` is bound too, and stays a separate field.** Folding it into an effective boolean would erase `redaction_enabled()`'s real distinction: the constant is the permanent answer, the environment weakens it for one run, and the environment may only ever turn redaction OFF. Two fields keep that expressible; only the moment of reading moved |
+
+### The banner is for `main`, not for the branch
+
+The badge and the startup warning are not scaffolding for a feature this branch lacks.
+`ALLOW_INSECURE_SANDBOX_FALLBACK` is a real posture a user can be in today with **no indicator
+anywhere**, and the case that matters is not the researcher who just typed a flag — it is the user
+who set it months ago and forgot, or who inherited a `config.py` from somewhere. Neither of them
+reads `app.log`. So the mechanism is driven by a live flag on `main` and exercised by `main`'s own
+suite; the branch only extends the list it reports.
+
+### One test that survived its own mutation
+
+`test_the_publish_guard_is_wired_into_the_prepublish_check` asserted that
+`problems.push(...unsafeBranchProblems());` appears in the source. The mutation that disables the
+guard comments the line out — and the substring is still there, so the test passed. It now scans
+live lines only. The vacuity class, caught by running the mutation rather than by reading the
+assertion.
+
+### Deliberately not in §40
+
+**No CLI flag.** Nothing on `main` needs one; `apply_cli()` exists and takes no overrides here, which
+is what makes the ordering guard verifiable before the branch depends on it.
+
+**No `settings.json` key, and no environment variable, for any posture field.** G7's argument
+generalises: a project's settings beat the user's and arrive with a directory you cloned.
+
+**The other live-config reads are out of scope.** `config.ToolPermissions()` and `ToolApprovals()`
+are still constructed per call. They are the D14 ratchet and can only tighten, so the same mutation
+against them causes prompts rather than skipping them — a different risk, and one that wants its own
+batch rather than a rider on this one.

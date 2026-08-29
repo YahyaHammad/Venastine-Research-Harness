@@ -36,7 +36,7 @@ import uuid
 from typing import Callable, Optional
 
 import config
-from security import protected_paths
+from security import posture, protected_paths
 from security.capability import (
     CONTAINED,
     UNAVAILABLE,
@@ -440,7 +440,7 @@ def containment_for(
         return UNCONTAINED
     if docker_available:
         return CONTAINED
-    if config.ALLOW_INSECURE_SANDBOX_FALLBACK:
+    if posture.current().allow_insecure_fallback:
         return UNCONTAINED
     return UNAVAILABLE
 
@@ -801,7 +801,7 @@ def run_sandboxed(
         )
         return _run_docker(command, workspace_dir, shell_binary, network)
 
-    if config.ALLOW_INSECURE_SANDBOX_FALLBACK:
+    if posture.current().allow_insecure_fallback:
         logger.warning(
             "Using INSECURE subprocess fallback: %s", command[:80],
         )
