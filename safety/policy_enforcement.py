@@ -383,7 +383,7 @@ _DIGEST_VALUE_CHARS = 60
 _DIGEST_CHARS = 140
 
 
-def param_digest(params) -> str:
+def param_digest(params, omit=()) -> str:
     """A short, REDACTED description of what a tool was called with.
 
     REDACTED BEFORE TRUNCATION, not after. Truncating first can cut a
@@ -409,11 +409,26 @@ def param_digest(params) -> str:
     url, one query, one command -- the key is noise, and per-value
     truncation is what keeps a `write` call from pasting a file into the
     transcript.
+
+    `omit` NAMES KEYS TO SKIP (§42, RA3), and it is a parameter rather
+    than a rule because this module must not learn about the registry:
+    it imports `config` and `security.posture` and nothing else, and
+    which tool declares which param is the registry's knowledge.
+    `registry.call_digest()` is the one caller that does the lookup.
+
+    It exists for `shell`'s `rationale`, which is prose written for a
+    person to read and would otherwise take sixty of the digest's one
+    hundred and forty characters. Key ORDER is the model's, so it
+    lands first about half the time: measured, `ls -la dist/` became
+    `I need to check whether the build artifacts directory still…  ls
+    -la dist/` -- the command no longer the first thing a reader sees.
     """
     if not isinstance(params, dict) or not params:
         return ""
     parts = []
-    for value in params.values():
+    for key, value in params.items():
+        if key in omit:
+            continue
         text = value if isinstance(value, str) else json.dumps(value, default=str)
         # The same redaction tool output takes -- shapes included (#167),
         # so a fetch_url whose url carries userinfo does not print its

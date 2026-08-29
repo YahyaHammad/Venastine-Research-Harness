@@ -329,8 +329,18 @@ def test_permission_channel_yields_request_and_dispatches_on_approval(mocker):
     # `notice` is the §18 sign-off's channel for "what does approving
     # this actually authorise" (ToolSpec.approval_notice); web_search
     # supplies none, so it is None here rather than absent.
+    #
+    # `rationale` is §42's, and it is None for the same KIND of reason
+    # and a different one: web_search declares no `rationale_param`, so
+    # there is no field to read. Present-and-None rather than absent,
+    # so a shell that renders it does not have to distinguish "this
+    # tool has no rationale" from "this build predates the field".
+    #
+    # ASSERTED AS A WHOLE DICT on purpose: that is what made this test
+    # notice §42 adding a key, and a key added to the approval question
+    # without anybody looking is precisely the thing worth catching.
     assert perm[0] == {"tool_name": "web_search", "params": {"query": "x"},
-                       "notice": None}
+                       "notice": None, "rationale": None}
 
     # Approved → dispatch called once with a callback that returns True.
     assert len(dispatched) == 1

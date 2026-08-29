@@ -158,6 +158,29 @@ class ToolSpec:
     #
     # assert_budget_declared() below makes omission fatal at import.
     budget: Optional[str] = None
+    # ROADMAP_v2 §42 (RA2). Which parameter, if any, carries the
+    # AGENT'S OWN STATED REASON for making this call. `shell` sets
+    # "rationale"; every other tool leaves it None.
+    #
+    # DISPLAY ONLY, and that is the whole contract. The named param is
+    # rendered on the approval prompt and skipped by the transcript
+    # digest, and it reaches NOTHING else: not
+    # `_shell_approval_check`, not `classify_command`, not
+    # `run_sandboxed`. A self-reported reason is unverifiable by
+    # construction -- a hijacked agent writes a reassuring one -- so
+    # letting it touch a decision would be strictly worse than not
+    # having it. Its value is longitudinal: a thread's worth of stated
+    # reasons, archived beside the calls, is a drift signal no single
+    # prompt can give. test_rationale.py pins the invariance by
+    # asserting on the arguments the classifier RECEIVES, not on the
+    # decision it returns -- an outcome check would pass for a tool
+    # that read the field and happened to agree.
+    #
+    # NO IMPORT-TIME GUARD, unlike grant_policy and budget. For those,
+    # None is an unanswered question and silence is the failure; here
+    # None is the correct answer for every tool but one, so a
+    # declaration requirement would be noise on twenty-two of them.
+    rationale_param: Optional[str] = None
 
 
 def assert_grant_policy_declared(tools: Iterable[str], specs=None) -> None:

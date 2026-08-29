@@ -110,6 +110,17 @@ class ShellParams(BaseModel):
             "fallback)."
         ),
     )
+    rationale: str = Field(
+        default="",
+        description=(
+            "Why you are running this command, right now, in a sentence "
+            "or two. Say what you are trying to learn or change and "
+            "what it is for -- not what the command does, which the "
+            "reader can see. This is shown to the user on the approval "
+            "prompt and recorded with the call; it never affects whether "
+            "the command is allowed or how it runs."
+        ),
+    )
 
 
 TOOL_SCHEMA = {
@@ -126,6 +137,23 @@ TOOL_SCHEMA = {
     ),
     "input_schema": ShellParams.model_json_schema(),
 }
+
+# §42 (RA4). ADVERTISED as required, TOLERATED when absent -- and the
+# asymmetry is deliberate rather than an oversight to tidy up.
+#
+# The schema is what the model reads, so `required` is where the ask
+# belongs: a rationale nobody asks for is supplied inconsistently, and
+# a drift signal with unknown coverage is not a signal. But
+# `ShellParams` keeps its default, because approval is obtained BEFORE
+# dispatch: a hard requirement would show the user a modal, take their
+# yes, and only then fail validation. That is the burn-a-turn class --
+# a human decision spent on an outcome already fixed -- and §32 A7
+# rejected it for a condition the tool could see, which this is.
+#
+# So an omission costs nothing and is VISIBLE: the prompt says
+# "(none given)", which is itself the observation. A silent gap would
+# not be.
+TOOL_SCHEMA["input_schema"]["required"] = ["command", "rationale"]
 
 
 # ---------------------------------------------------------------------------
@@ -234,6 +262,9 @@ def _shell_approval_notice(params: dict, _context=None) -> str:
 
 
 def run(params: dict) -> dict:
+    # `parsed.rationale` is deliberately never read below. It is shown
+    # to a person and archived with the call; it has no part in what
+    # runs or in whether it is allowed to (§42, RA2).
     parsed = ShellParams(**params)
 
     # Probe Docker once for this execution — the result is threaded

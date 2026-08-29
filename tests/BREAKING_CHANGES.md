@@ -2888,6 +2888,16 @@ Count 2742 -> 2786.
 
 Count 2786 -> 2815.
 
+## Batch 42 — the consent surface (2026-08-29)
+
+| Change | What breaks | Symptom / fix |
+|---|---|---|
+| Every non-literal renderable in `tui/screens.py` is wrapped in `Text(...)` | Any test reading a modal's content back off the constructor argument, and any new screen added without the wrap | `test_every_renderable_built_from_a_non_literal_is_wrapped` fails with the offending `(widget, lineno)` pairs. **Do not "simplify" it to `markup=False`** — on textual 1.0.0 that flag is stored by `__init__` and never read by the `visual` property, so it silently does nothing and the modal still raises. Measured |
+| The `permission_request` LoopEvent and the APPROVAL `Request` payload carry a `rationale` key | Any test asserting the whole dict — `test_streaming_loop.py` had one | `assert perm[0] == {...}` fails with an extra key. That test asserts the WHOLE dict on purpose and that is why it caught this; add `"rationale": None` rather than loosening it to a subset check. Present-and-None for a tool with no `rationale_param`, so a shell need not tell "this tool has no rationale" from "this build predates the field" |
+| `param_digest(params)` is now `param_digest(params, omit=())` | Nothing — the parameter is optional | But **call `registry.call_digest(tool_name, params)` instead** unless you are writing a test about `param_digest` itself. The three production consumers moved; a fourth going direct would silently print a tool's rationale into a line sized for a command |
+| `PermissionScreen.__init__` and `ask_permission_blocking` take a trailing `rationale` | Positional callers passing four arguments | Both default to `None`, so existing three-argument calls are unchanged. A test constructing the screen directly gets no rationale and shows `(none given)` |
+| A `PermissionScreen` built directly cannot detect a break in `core/loop.py`'s wiring | Nothing today — it is why `test_the_loop_carries_the_reason_to_whoever_is_asked` exists | Measured, not assumed: replacing `registry.rationale_for(...)` with `None` in the loop left every modal test green. If you add a display assertion, add it beside a test that drives `_run()`, or it is a claim about a constructor rather than about the app |
+
 ## Batch 41 — the transcript's vocabulary (2026-08-29)
 
 | Change | What breaks | Symptom / fix |

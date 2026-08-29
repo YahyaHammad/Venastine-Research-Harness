@@ -72,7 +72,8 @@ from core.reasoning.json_retry import parse_json_response as _parse_json_respons
 from core.reasoning.json_retry import retry_until_json
 from core.reasoning.payload_validation import validate as _validate_payload
 from core.reasoning.pipeline_storage import create_pipeline_run, update_pipeline_run
-from safety.policy_enforcement import param_digest, redact_secrets
+from safety.policy_enforcement import redact_secrets
+from tools.registry import registry
 
 logger = logging.getLogger(__name__)
 
@@ -238,7 +239,11 @@ def _translate(pass_id: str, stream):
             names[event.tool_call_start.get("id")] = name
             yield PipelineEvent(
                 kind="tool_call", pass_id=pass_id, tool=name,
-                text=param_digest(event.tool_call_start.get("input")))
+                # §42 (RA3): through the registry, so a tool's
+                # declared rationale param is dropped here too -- a
+                # pass row is as narrow as a transcript line.
+                text=registry.call_digest(
+                    name, event.tool_call_start.get("input")))
         if event.tool_result:
             result = event.tool_result.get("result")
             failed = isinstance(result, dict) and "error" in result

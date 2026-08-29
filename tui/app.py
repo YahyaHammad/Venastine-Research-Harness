@@ -65,9 +65,10 @@ from core.replay import last_assistant_text, replay_entries
 from core.reasoning.authorization import GRANT_PICKER, NOTHING_TO_GRANT
 from prompts import system_prompts
 from safety.policy_enforcement import (
-    param_digest, redact_output_text, redact_secrets)
+    redact_output_text, redact_secrets)
 
 from tools.builtin import file_ops
+from tools.registry import registry as tool_registry
 from tui import diffs, preferences, ravens, themes
 from tui.commands import SlashCommand, registry as commands
 from tui.screens import (
@@ -1053,7 +1054,12 @@ class VenastineApp(App):
                     name, params or {}, self._snapshot(params))
                 transcript.write_role("tool", f"▸ {name}")
             else:
-                digest = param_digest(params)
+                # §42 (RA3): the registry's digest, not param_digest
+                # direct -- a tool's declared rationale is prose for
+                # the approval prompt and would take sixty of this
+                # line's hundred and forty characters, leading it
+                # whenever the model emits that key first.
+                digest = tool_registry.call_digest(name, params)
                 detail = f"  {digest}" if digest else ""
                 transcript.write_role("tool", f"▸ {name}{detail}")
 
@@ -1284,7 +1290,8 @@ class VenastineApp(App):
             return self.ask_permission_blocking(
                 request.payload.get("tool_name"),
                 request.payload.get("params") or {},
-                request.notice)
+                request.notice,
+                request.payload.get("rationale"))
         if request.kind == interaction.REVIEW:
             return self.ask_review_blocking(
                 request.payload.get("finding") or {},
@@ -1308,7 +1315,7 @@ class VenastineApp(App):
         return None
 
     def ask_permission_blocking(self, tool_name: str, params: dict,
-                                notice) -> bool:
+                                notice, rationale=None) -> bool:
         """Show the permission modal and BLOCK until answered.
 
         Called from a worker thread, never the UI thread -- both the chat
@@ -1329,7 +1336,7 @@ class VenastineApp(App):
         # screen would also leave the user answering a question whose
         # answer no longer goes anywhere.
         return self._blocking_modal(
-            PermissionScreen(tool_name, params, notice),
+            PermissionScreen(tool_name, params, notice, rationale),
             on_timeout=lambda screen: self._timed_out_ask(
                 screen,
                 dismiss_with=False,

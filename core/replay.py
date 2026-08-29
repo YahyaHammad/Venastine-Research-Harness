@@ -50,7 +50,7 @@ from __future__ import annotations
 from typing import List, Optional, Tuple
 from uuid import UUID
 
-from safety.policy_enforcement import param_digest
+from tools.registry import registry
 from storage import archive_history
 
 #: One replayed entry: (role, text). The roles are transcript palette roles
@@ -104,14 +104,21 @@ def last_assistant_text(entries: List[ReplayEntry]) -> str:
 def _tool_marker(call: dict) -> str:
     """One line for one tool call: name, then a redacted param digest.
 
-    The digest comes from safety/policy_enforcement.py rather than from a
-    local copy -- it redacts BEFORE truncating, and a second implementation
-    is how that ordering regresses in one place and not the other (§27's
-    note on _param_digest, and the project's canonical producer/consumer
-    bug).
+    The digest comes from `registry.call_digest` rather than from a
+    local copy -- it redacts BEFORE truncating, and a second
+    implementation is how that ordering regresses in one place and
+    not the other (§27's note on _param_digest, and the project's
+    canonical producer/consumer bug).
+
+    Through the REGISTRY since §42 (RA3), not `param_digest` direct,
+    because dropping a tool's declared rationale param is part of the
+    same rule and belongs at the same producer. Importing the registry
+    here costs nothing measurable: `main.py` is this module's only
+    caller and has already imported it, so it is in `sys.modules`
+    (1.9s cold at process start, 0.0s here).
     """
     name = call.get("name") or "tool"
-    digest = param_digest(call.get("input"))
+    digest = registry.call_digest(name, call.get("input"))
     # Standardised to ▸ like the live transcript (tui/app.py both modes).
     # Replay stays redacted via param_digest, same producer as live.
     return f"▸ {name}  {digest}".rstrip() if digest else f"▸ {name}"

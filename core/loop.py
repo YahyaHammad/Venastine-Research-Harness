@@ -346,7 +346,7 @@ def _denial_reason(tool_name: str, response_channel, context) -> str:
 
 
 def _obtain_approval(response_channel, tool_name: str, params: dict,
-                     notice, request_payload=None) -> tuple:
+                     notice, request_payload=None, rationale=None) -> tuple:
     """Ask the human about one gated call. Returns (approved, grant).
 
     ONE route since §23. There were two -- a queue.Queue the TUI's worker
@@ -370,9 +370,16 @@ def _obtain_approval(response_channel, tool_name: str, params: dict,
     computed, because the caller needs it before this point to look up the
     sign-off memo -- and building a subagent's candidate list twice per
     call would be wasteful and could disagree with itself.
+
+    `rationale` is the agent's own account of why it wants this call
+    (§42, RA5), and it is passed in already resolved for the same
+    reason: the caller needs it for the LoopEvent too, and looking it
+    up twice invites the two from disagreeing. DISPLAY ONLY -- it
+    reaches the prompt and nothing that decides anything.
     """
     kind = registry.request_kind(tool_name)
-    payload = {"tool_name": tool_name, "params": params}
+    payload = {"tool_name": tool_name, "params": params,
+               "rationale": rationale}
     payload.update(request_payload or {})
     answer = interaction.ask(response_channel, interaction.Request(
         kind=kind, payload=payload, notice=notice))
@@ -959,13 +966,24 @@ class RunAgentLoop:
                 if needs_approval:
                     notice = registry.approval_notice(
                         call.name, call.input, context)
+                    # §42 (RA5). The agent's own stated reason, asked
+                    # of the registry so the loop names no key -- the
+                    # same way it asks what KIND of question a tool
+                    # needs and whether it needs one at all. The VALUE
+                    # travels rather than the key, because the two
+                    # shells that render it are a Textual screen that
+                    # imports nothing from this package and a `print`
+                    # in main.py.
+                    rationale = registry.rationale_for(
+                        call.name, call.input)
                     yield LoopEvent(permission_request={
                         "tool_name": call.name, "params": call.input,
                         "notice": notice,
+                        "rationale": rationale,
                     })
                     approved, signoff = _obtain_approval(
                         response_channel, call.name, call.input, notice,
-                        request_payload)
+                        request_payload, rationale=rationale)
                     if not approved:
                         result = {"error": _denial_reason(
                             call.name, response_channel, context)}

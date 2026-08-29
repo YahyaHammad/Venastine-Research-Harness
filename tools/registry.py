@@ -40,7 +40,9 @@ from tools.builtin import (
 from security.permissions import (
     assert_permissions_declared, is_tool_allowed, requires_approval,
 )
-from safety.policy_enforcement import check_input_policy, check_output_policy
+from safety.policy_enforcement import (check_input_policy,
+                                        check_output_policy,
+                                        param_digest)
 from agents import subagent_tool
 
 logger = logging.getLogger(__name__)
@@ -389,6 +391,60 @@ class ToolRegistry:
         spec = self._tools.get(tool_name)
         return spec.grant_scope if spec is not None else None
 
+    def rationale_param(self, tool_name: str) -> Optional[str]:
+        """Which param carries the agent's own stated reason,
+        or None (§42, RA2).
+
+        Mechanism, not policy, exactly like grant_scope above: the
+        consumer asks rather than testing for the literal name
+        `shell`. Two of them need this -- the approval prompt, which
+        shows the reason, and the transcript digest, which skips it --
+        and neither is a place for a tool name to live.
+        """
+        spec = self._tools.get(tool_name)
+        return spec.rationale_param if spec is not None else None
+
+    def rationale_for(self, tool_name: str, params: dict):
+        """The agent's stated reason for THIS call, or None.
+
+        The VALUE, so no caller has to know the key. core/loop.py puts
+        the result on the approval request and the shells render it;
+        `tui/screens.py` imports nothing from this package and that
+        stays true because what travels is a string.
+
+        Empty and whitespace-only collapse to None, so a model that
+        supplies the key with nothing in it is treated as the omission
+        it is -- the prompt says so rather than showing a blank space
+        where a reason should be.
+        """
+        key = self.rationale_param(tool_name)
+        if not key or not isinstance(params, dict):
+            return None
+        value = params.get(key)
+        if not isinstance(value, str) or not value.strip():
+            return None
+        return value.strip()
+
+    def call_digest(self, tool_name: str, params) -> str:
+        """The transcript's one-line summary of a tool call.
+
+        THE ONE PRODUCER (§42, RA3). `param_digest` is pure and knows
+        nothing about tools; this knows which param a tool declared as
+        its rationale and drops it, because that field is prose for a
+        person and would take sixty of the digest's hundred and forty
+        characters -- leading the line about half the time, since the
+        key order is the model's.
+
+        Three consumers went through `param_digest` directly before
+        this: the TUI's `▸ name` line, the research pipeline's tool
+        rows, and §27's replay of the archive. Teaching each of them
+        the lookup would be three copies of one rule, which is the
+        producer/consumer shape `param_digest`'s own docstring calls
+        this project's canonical bug.
+        """
+        key = self.rationale_param(tool_name)
+        return param_digest(params, omit=(key,) if key else ())
+
     def request_kind(self, tool_name: str) -> str:
         """Which kind of question approving this tool asks (§23).
 
@@ -661,7 +717,7 @@ registry.register(ToolSpec("edit", file_ops.EDIT_TOOL_SCHEMA, file_ops.edit_run,
 # §28: approval_notice carries the capability profile into the prompt.
 # The command text is already in the params; what it does not show is
 # WHERE it runs, and "cat /etc/shadow" does not look like a host read.
-registry.register(ToolSpec("shell", shell.TOOL_SCHEMA, shell.run, approval_check=shell._shell_approval_check, approval_notice=shell._shell_approval_notice, grant_policy=GRANT_NEVER, budget=BUDGET_IO))
+registry.register(ToolSpec("shell", shell.TOOL_SCHEMA, shell.run, approval_check=shell._shell_approval_check, approval_notice=shell._shell_approval_notice, grant_policy=GRANT_NEVER, budget=BUDGET_IO, rationale_param="rationale"))
 registry.register(ToolSpec("load_skill", load_skill.TOOL_SCHEMA, load_skill.run, available_check=load_skill.has_skills, grant_policy=GRANT_ANYWHERE, budget=BUDGET_IO))
 registry.register(ToolSpec("pin", pin.TOOL_SCHEMA, pin.run, available_check=pin.available, grant_policy=GRANT_ANYWHERE, budget=BUDGET_IO))
 # §21/D26 restored (#89): the mirror of pin. Same gating posture (ungated,

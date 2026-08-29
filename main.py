@@ -525,6 +525,14 @@ def build_attended_provider(honour_run_scope: bool = False,
         print(f"\n[approval] {request.payload.get('tool_name')}")
         if request.notice:
             print(f"  {request.notice}")
+        # §42 (RA6). Same order as the modal -- the computed notice,
+        # then the agent's own claim, then the payload. Shown here as
+        # well as in the TUI because a kind one shell renders and the
+        # other silently drops is D12's wired-up-but-invisible gap,
+        # and the CLI is where an unattended-looking run is watched
+        # from.
+        reason = request.payload.get("rationale")
+        print(f"  reason (the agent's own words, unverified): {reason or '(none given)'}")
         _render_params(request.payload.get("params") or {})
         answer = reader.ask(f"  Allow? [y/N]{clock}: ", timeout)
         if answer is None:

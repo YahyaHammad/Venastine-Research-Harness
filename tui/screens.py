@@ -70,14 +70,31 @@ class PermissionScreen(ModalScreen[bool]):
     Showing the exact value is this screen's whole purpose, and
     markup parsing is a way of showing something else -- see the
     module docstring.
+
+    THE RATIONALE IS NOT EVIDENCE (§42, RA6). It is the agent's own
+    sentence about its own call, so it is unverifiable by
+    construction: an agent that has been steered writes a reassuring
+    one, and that is the case this screen exists for. It is labelled
+    as a claim and placed BELOW the notice, which the harness
+    computed, so nobody reads the harness as vouching for it. What it
+    is actually for is longitudinal -- a thread's worth of stated
+    reasons, archived beside the calls, is a drift signal no single
+    prompt can be.
     """
 
     BINDINGS = [("escape", "deny", "Deny")]
 
-    def __init__(self, tool_name: str, params: dict, notice: str = None):
+    def __init__(self, tool_name: str, params: dict, notice: str = None,
+                 rationale: str = None):
         super().__init__()
         self._tool_name = tool_name
         self._params = params
+        # §42 (RA6). The agent's OWN account of why it wants this call,
+        # resolved by the registry from whichever param the tool
+        # declared. Passed in rather than looked up: this module
+        # imports nothing from the rest of the project and that is
+        # worth more than saving a parameter.
+        self._rationale = rationale
         # Supplied by the tool via ToolSpec.approval_notice, not composed
         # here: what approving authorises is the TOOL's knowledge.
         # spawn_subagent uses it to list the tools the subagent could then
@@ -91,6 +108,16 @@ class PermissionScreen(ModalScreen[bool]):
             rendered = json.dumps(self._params, indent=2, default=str)
         except (TypeError, ValueError):
             rendered = repr(self._params)
+        # HARNESS FACT, THEN AGENT CLAIM, THEN EVIDENCE (§42, RA6).
+        # The notice is computed -- `classify_command` decided it --
+        # so it is read before any reassurance the model wrote. The
+        # payload stays last and stays whole; the rationale appears in
+        # it as well, and that duplication is the honest cost of
+        # surfacing the field without breaking the rule above that
+        # this screen shows the payload entire.
+        reason = self._rationale or "(none given)"
+        rendered = (f"Agent's stated reason (its own words, unverified):\n"
+                    f"  {reason}\n\n{rendered}")
         if self._notice:
             rendered = f"{self._notice}\n\n{rendered}"
         yield Grid(
