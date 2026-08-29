@@ -7930,3 +7930,59 @@ in `test_tui.py`).
   `tests/BREAKING_CHANGES.md`.
 
 Count 2815 -> 2858.
+
+### Commit 2 — the checklist vocabulary
+
+**Two panels, two spellings, and they disagreed.** `TodoPanel` used
+`x` / `>` / `·` for completed / in-progress / pending; `ResearchProgress` used
+`·` / `✗` / `x` / `>` for stage / failed / done / running. So `·` meant *not
+started* in one widget and *already finished* in the other, a screen apart,
+and a reader had to hold two tables in their head.
+
+**One vocabulary, in `tui/widgets.py`.** `MARK_PENDING` ☐, `MARK_DONE` ☑,
+`MARK_FAILED` ☒ — one Unicode family, so a reader learns one shape and reads
+its contents. Two of the five are deliberately NOT boxes and say so beside the
+constants:
+
+- **Running is `▸`**, the transcript's own tool marker. An empty box says
+  "nothing has happened here", which is exactly what a pass burning tokens is
+  not — and telling the live pass from the queued ones is the entire job of
+  the research panel. The user's own spec put pending and in-progress under
+  one glyph; this was raised and the distinction kept.
+- **A zero-LLM stage stays `·`**. §26 marked it apart from a pass because it
+  made no model call, so it has no pending form and no running form to check
+  off. `test_the_panel_marks_code_stages_apart_from_passes` carries that
+  reasoning and still passes.
+
+E14's constraint is unchanged: a row that ended badly does not share a glyph
+with one that finished. It used to borrow the transcript's `✗`; it is now the
+ballot box's failed form, which keeps the constraint and puts the three pass
+outcomes in one family. The transcript's own `✗` for a failed tool call and
+its `→`/`←` pass boundaries are untouched — those are a chronological log, and
+a row already drawn cannot be re-ticked, so a checkbox there is a checkbox
+that never changes.
+
+**Every marker assertion in the suite now reads the constants**, which makes
+the obvious pin vacuous: changing them back to `x`/`>`/`·` would take the
+whole suite with it, green. So two more:
+
+- the codepoints pinned **by value** (batch 29's named-secondaries precedent);
+- each mark measured **one cell wide** against Rich's own table. U+2610–2612
+  are East-Asian AMBIGUOUS width, so a terminal may give them one cell or two
+  and Rich commits to one; a two-cell glyph shears every row of the 22-column
+  sidebar — a layout bug that presents as a font bug. Rendered both panels at
+  width 22 to confirm: every row lands where it should.
+
+### Files (commit 2)
+
+- `tui/widgets.py` — the five constants; `TodoPanel.MARKERS`;
+  `ResearchProgress._redraw`.
+- `tests/test_todo.py` — `TestTheMarkerVocabulary` (+3 tests) and the two
+  panel assertions repointed at the constants.
+- `tests/test_pipeline_events.py`, `tests/test_research_legibility.py` — five
+  more assertions repointed.
+- `ROADMAP_v2.md` (§41, X3), `AGENTS.md`, `ARCHITECTURE.md`, `README.md`,
+  `tests/BREAKING_CHANGES.md`.
+
+Count 2858 -> 2861.
+

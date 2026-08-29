@@ -304,15 +304,19 @@ class TestTheProgressPanel:
         panel.pass_completed("Pass 0", ok=True)
         panel.pass_started("Pass 1")
 
+        from tui.widgets import MARK_DONE, MARK_RUNNING
+
         text = str(panel.renderable)
-        assert "x Pass 0" in text, "a finished pass must read as finished"
-        assert "> Pass 1" in text, "the running pass must read as running"
+        assert f"{MARK_DONE} Pass 0" in text, \
+            "a finished pass must read as finished"
+        assert f"{MARK_RUNNING} Pass 1" in text, \
+            "the running pass must read as running"
 
     def test_a_failed_pass_reads_failed_not_done(self):
         """#115/E14. The ensemble path can leave a Pass 1 row that never
         resolves -- the run carries on around it, so nothing else marks
-        it. ok=False is that third state: ✗, not the done x, and not
-        still-running >."""
+        it. ok=False is that third state: the ballot box's failed
+        form, not the checked one and not the running marker."""
         panel = self._panel()
         panel.pass_started("Pass 1")
         panel.pass_completed("Pass 1", ok=False)
@@ -320,10 +324,14 @@ class TestTheProgressPanel:
         panel.pass_completed("Pass 1", ok=True)
         panel.pass_started("Pass 2")
 
+        from tui.widgets import MARK_DONE, MARK_FAILED, MARK_RUNNING
+
         text = str(panel.renderable)
-        assert "✗ Pass 1" in text, "the failed candidate must read as failed"
-        assert "x Pass 1" in text, "the surviving candidate reads as done"
-        assert "> Pass 2" in text
+        assert f"{MARK_FAILED} Pass 1" in text, \
+            "the failed candidate must read as failed"
+        assert f"{MARK_DONE} Pass 1" in text, \
+            "the surviving candidate reads as done"
+        assert f"{MARK_RUNNING} Pass 2" in text
 
     def test_pass_completed_demands_an_answer_about_the_outcome(self):
         """The required keyword-only ok is the lock on the false-tick
@@ -398,9 +406,11 @@ async def test_ac2_the_tui_renders_pass_boundaries_and_tiers_as_they_happen(mock
         assert await settle(
             pilot, lambda: "medium 1" in str(panel.renderable)), \
             "the claim tier never reached the panel"
-        # x, not >: the pass_complete event has to land too, or the panel
-        # shows every pass as still running for the rest of the run.
-        assert "x Pass 3a" in str(panel.renderable)
+        # DONE, not running: the pass_complete event has to land too,
+        # or the panel shows every pass as still going for the rest of
+        # the run.
+        from tui.widgets import MARK_DONE
+        assert f"{MARK_DONE} Pass 3a" in str(panel.renderable)
 
 
 @pytest.mark.asyncio

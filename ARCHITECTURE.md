@@ -50,7 +50,7 @@ Venastine Research Harness/
 ├── CLAUDE.md / QWEN.md             # pointers to AGENTS.md, so a harness that auto-loads one of those names finds the context instead of a second copy of it
 ├── DEVLOG.md                       # implementation notes for built ROADMAP sections -- see §0
 │
-├── tests/                          # 2858 tests, all offline, ~25-45s depending on the machine (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
+├── tests/                          # 2861 tests, all offline, ~25-45s depending on the machine (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
 │   ├── conftest.py                 # fixtures: make_model_response, make_stream_from_response, make_stream_sequence, FakeStorage, ...
 │   ├── BREAKING_CHANGES.md         # what-breaks-it / symptom / fix per area
 │   ├── test_cli.py                 # 87 tests -- ROADMAP §1 thread_id passthrough + UUID validation + §14 parser defaults/resolution/trust flow + §29 N1-N8 the one stdin reader, N2's channel deadline, every request kind rendered, and the startup block main(argv) made reachable + #102's four declining defaults
@@ -127,7 +127,7 @@ Venastine Research Harness/
 │   ├── test_live_output.py         # 43 tests -- ROADMAP_v2 §38: the commit rules (a completed line drawn without a flush, a long paragraph broken at row boundaries, an open fence held), the ONE entry per streamed span that keeps /copy and /theme honest, the inline thinking block and its collapsed indicator, and the app wiring for both forms
 │   ├── test_interaction.py        # 92 tests -- ROADMAP_v2 §23 J2-J7: core/interaction.py's decode, the declining default per kind, CHOICE and SUBAGENT_SIGNOFF validated against the request, and the strict review decoder
 │   ├── test_question_tool.py      # 45 tests -- ROADMAP_v2 §23 slice 2: ask_user through the injected response_channel, QUESTION's three-way answer, and both shells' renderers
-│   ├── test_todo.py               # 57 tests -- ROADMAP_v2 §23 slice 2: todo_write's whole-list write (J13), the notice forwarded and stripped (J10), and the panel reading its content from thread state
+│   ├── test_todo.py               # 60 tests -- ROADMAP_v2 §23 slice 2: todo_write's whole-list write (J13), the notice forwarded and stripped (J10), and the panel reading its content from thread state; batch 41 adds TestTheMarkerVocabulary (X3) -- the shared ☐/▸/☑/☒/· constants, pinned by codepoint and measured one cell wide under Rich
 │   ├── test_project_init.py       # 129 tests -- ROADMAP_v2 §24 I1-I13: the two narrow tools, the generated index, stubs vs invented content, one consent covering a named list, and the I6 trust re-grant + §29 N5 the CLI's --init down the response channel
 │   ├── test_truncated_pass.py     # 11 tests -- _check_not_truncated at the pass: truncated-with-text traces and continues, truncated-with-nothing raises naming the pass, and it runs BEFORE the JSON retry
 │   ├── test_tool_failure_containment.py # 12 tests -- dispatch() turning a raising handler into an {"error": ...} result, the two exceptions deliberately raised above it, and the error result still going through check_output_policy
@@ -223,6 +223,7 @@ Venastine Research Harness/
 ├── tui/                           # ROADMAP_v2 §16: the Textual shell. Hosts capabilities; owns none (D12 keeps the CLI first-class)
 │   ├── app.py                     # the App -- worker, LoopEvent routing, slash dispatch, permission bridge, both ravens; §18 active-agent state + goal banner
 │   ├── widgets.py                 # transcript (Rich Syntax highlighting), raven panels, research progress, GoalBanner
+│   │                              # batch 41 (X3): MARK_PENDING / MARK_RUNNING / MARK_DONE / MARK_FAILED / MARK_STAGE -- one checklist vocabulary for TodoPanel and ResearchProgress, which had been spelling it two different ways
 │   ├── commands.py                # slash-command registry -- MECHANISM only; §18/§19/§21 register into it
 │   ├── screens.py                 # ModalScreens: permission prompt (AC2), thread picker
 │   ├── themes.py                  # 14 themes -- the 8-theme neutral grid (dark/light x plain/red/green/blue) + 6 standalone tinted themes (matrix, nightmare, ember, midnight, glassy-lapis, paper) whose panels carry the identity; role_styles resolves per theme; #14's contrast floors and batch 41's role-separation floor are pinned in tests/test_themes.py

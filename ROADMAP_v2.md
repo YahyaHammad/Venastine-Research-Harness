@@ -3387,6 +3387,8 @@ used it; the one widget that did (`GoalBanner`) composed its own weight on top.
 | **X1** | **`tool` renders in plain `accent`, and dark-plain's accent was lifted to meet it.** Two halves, because the collision had two causes. `dim` is a Rich *attribute*, not a colour, so this file's contrast floors measure the undimmed hue and cannot see what the terminal paints — which made the style on every tool call the one style whose real contrast nothing measured. And underneath that, dark-plain's accent `#a9b2c3` sat **98.5 redmean units** from its secondary `#8792a2`: the tightest secondary/accent pair of all fourteen themes (the next is paper at 143.8), on the shipped default. A monochrome theme cannot separate two roles by hue, so only lightness is left, and dark-plain's did not have enough of it. `#b8c1d1` measures 142.7 while staying 111 units off the foreground — go lighter and the assistant label melts into the body text it introduces, which is the same defect facing the other way. Batch 29's #14 nudge, on a different axis: that one measured contrast against the BACKGROUND, this one measures separation between two roles that sit on adjacent lines |
 | **X2** | **A routed log record carries a PALETTE ROLE, not an `is_error` bool.** `LogRecordMessage(text, role)` and one `write_role()` call replace the two-branch `write_error`/`write_system` split. The bool was not merely underspecified — it had no warning case at all, so the handler delivered warnings in the role that means "the harness narrating itself". `warning` becomes `bold {theme.warning}` where `tool_error` stays plain: both are non-fatal and keep the hue family, and the weight separates the harness raising its voice from a tool that failed. `GoalBanner` stops composing its own `bold` — with the weight in the role, composing it a second time yields `bold bold #d9a441`, and a style decided in two places is the drift §26's palette exists to prevent |
 
+| **X3** | **One checklist vocabulary, in `tui/widgets.py`, and two of the five marks are deliberately not boxes.** `TodoPanel` and `ResearchProgress` each had their own spelling, and they disagreed: `·` meant *pending* in the todo panel and *a code stage that has already finished* in the research panel — one mark with opposite meanings, two panels a screen apart. The three states a checklist item can be in are now one Unicode family (U+2610 ☐ / U+2611 ☑ / U+2612 ☒), so a reader learns one shape and reads its contents rather than memorising which punctuation the author picked. **Running is not a fourth box** (`▸`, the transcript's own tool marker): an empty box says *nothing has happened here*, which is exactly what a pass burning tokens is not, and telling the live pass from the queued ones is the whole job of the research panel. **A zero-LLM stage is not a box either** (`·`) — §26 marked it apart from a pass because it made no model call, so it has no pending form and no running form to check off. E14's constraint survives unchanged: a row that ended badly does not share a glyph with one that finished |
+
 ### Three pins, because one instrument could not see the defect
 
 `tests/test_themes.py` gains `MESSAGE_ROLES` — every role a transcript line can be painted with —
@@ -3409,3 +3411,11 @@ reverted bug, which is how the other two got written.
   nothing about `UNVERIFIED_COVERAGE` — `dim {error}` there sits beside an undimmed `UNVERIFIED`
   in the claims modal, where the attribute carries meaning against a sibling rather than hiding a
   colour. This is what catches X1's first half.
+
+The marks get two of their own in `tests/test_todo.py`, and the second exists because the
+first is not enough: every other assertion about a panel now compares it against these
+constants, so changing them back to `x`/`>`/`·` would take the suite with it, green. So the
+codepoints are pinned by value (batch 29's named-secondaries precedent), and each mark is
+measured **one cell wide** against Rich's own table — U+2610–2612 are East-Asian AMBIGUOUS
+width, and a two-cell glyph shears every row of the 22-column sidebar, which is a layout bug
+that presents as a font bug.

@@ -361,10 +361,12 @@ class TestThePanelWidget:
         panel = self._panel()
         panel.todos = _items(("done", "completed"), ("now", "in_progress"),
                              ("later", "pending"))
+        from tui.widgets import MARK_DONE, MARK_PENDING, MARK_RUNNING
+
         text = str(panel.renderable)
-        assert "x done" in text
-        assert "> now" in text
-        assert "· later" in text
+        assert f"{MARK_DONE} done" in text
+        assert f"{MARK_RUNNING} now" in text
+        assert f"{MARK_PENDING} later" in text
 
     def test_it_shows_the_completed_count(self):
         panel = self._panel()
@@ -372,9 +374,11 @@ class TestThePanelWidget:
         assert "1/2" in str(panel.renderable)
 
     def test_an_unknown_status_renders_as_pending(self):
+        from tui.widgets import MARK_PENDING
+
         panel = self._panel()
         panel.todos = [{"content": "x", "status": "???"}]
-        assert "· x" in str(panel.renderable)
+        assert f"{MARK_PENDING} x" in str(panel.renderable)
 
     def test_a_long_list_is_windowed_and_says_so(self):
         """A Static does not scroll itself to the bottom, so an unbounded
@@ -397,6 +401,71 @@ class TestThePanelWidget:
         panel = self._panel()
         panel.todos = _items(("x", "pending"))
         assert "x" in str(panel.renderable)
+
+
+class TestTheMarkerVocabulary:
+    """Batch 41 (X3). The five marks live in tui/widgets.py because two
+    panels render them; these are the two properties that make sharing
+    them safe."""
+
+    def _marks(self):
+        from tui import widgets
+        return {
+            "pending": widgets.MARK_PENDING,
+            "running": widgets.MARK_RUNNING,
+            "done": widgets.MARK_DONE,
+            "failed": widgets.MARK_FAILED,
+            "stage": widgets.MARK_STAGE,
+        }
+
+    def test_every_mark_is_one_cell_wide(self):
+        """The real risk in moving to U+2610/2611/2612. They are
+        East-Asian AMBIGUOUS width, so a terminal may render them in one
+        cell or in two; Rich commits to one, and every row of the
+        22-column sidebar is laid out on that answer. A two-cell glyph
+        shears the panel on every row it appears in -- a layout bug that
+        presents as a font bug.
+
+        Measured against Rich's own table rather than asserted as a
+        constant, so a Rich upgrade that reclassified one fails HERE,
+        naming the glyph, rather than in a screenshot nobody takes.
+        """
+        from rich.cells import cell_len
+
+        wide = {name: mark for name, mark in self._marks().items()
+                if cell_len(mark) != 1}
+        assert not wide, (
+            f"these marks are not one cell wide under this Rich: {wide}. "
+            f"The sidebar's rows are laid out assuming they are."
+        )
+
+    def test_the_checkbox_marks_are_the_ballot_box_family(self):
+        """Pinned BY CODEPOINT, following batch 29's named-secondaries
+        precedent, because every other assertion in this file compares the
+        panels against these constants -- so changing the constants back
+        to `x`/`>`/`·` would take the whole suite with it, green.
+
+        The three states a checklist item can be in are one family in
+        Unicode (U+2610/2611/2612) on purpose: the reader learns one
+        shape and reads its contents, instead of memorising which piece
+        of punctuation the author picked for which state.
+        """
+        marks = self._marks()
+        assert (marks["pending"], marks["done"], marks["failed"]) ==             ("☐", "☑", "☒")
+        # The two that are deliberately NOT boxes, and why, live in
+        # tui/widgets.py beside the constants.
+        assert marks["running"] == "▸"
+        assert marks["stage"] == "·"
+
+    def test_the_marks_are_all_different(self):
+        """Five states, five glyphs. The vocabulary they replaced failed
+        this ACROSS widgets rather than within one: the todo panel used a
+        middle dot for 'pending' while the research panel used it for a
+        code stage that had already FINISHED, so one mark meant opposite
+        things in two panels a screen apart."""
+        marks = self._marks()
+        assert len(set(marks.values())) == len(marks), \
+            f"two states share a glyph: {marks}"
 
 
 class TestThePanelIsEventDriven:

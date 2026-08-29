@@ -34,6 +34,35 @@ THINKING_INDENT = "  "
 # (a bare-built test widget, a widget before mount) reads as 0.
 MIN_WRAP_WIDTH = 20
 
+# Batch 41 (X3). The checklist vocabulary, in ONE place because two
+# panels render it and they were already spelling it differently: the
+# todo list used `x` for done where the research panel used `x` for a
+# finished pass and · for a code stage, so `·` meant
+# "not started" in one widget and "already finished" in the other.
+#
+# Checkboxes rather than punctuation: a reader should not have to
+# remember which mark means what, and ☐/☑/☒ carry it in the
+# glyph. All three measure ONE CELL under the pinned Rich
+# (tests/test_todo.py pins that) -- a two-cell glyph would shear the
+# 22-column sidebar on every row it appears in.
+MARK_PENDING = "☐"   # U+2610 BALLOT BOX
+MARK_DONE = "☑"      # U+2611 BALLOT BOX WITH CHECK
+MARK_FAILED = "☒"    # U+2612 BALLOT BOX WITH X
+
+# NOT a fourth checkbox. An item being worked on right now is the one
+# state a box cannot express -- an empty box says "nothing has
+# happened here", which is exactly what a running pass is not, and
+# telling the live pass from the queued ones is the whole job of the
+# research panel. It borrows the transcript's own tool marker, so the
+# same glyph means "in flight" in both places.
+MARK_RUNNING = "▸"
+
+# Also not a checklist state. A zero-LLM stage (Pass 5, gate D1) is
+# done the moment it is announced because it made no model call, so it
+# has no pending form and no running form to check off -- §26 marked
+# it apart from a pass for that reason and this keeps the distinction.
+MARK_STAGE = "·"
+
 
 class RavenPanel(Static):
     """Corner raven: what the harness is doing right now."""
@@ -316,7 +345,9 @@ class TodoPanel(Static):
     -- and the reason this file still imports nothing from core/ or config.
     """
 
-    MARKERS = {"completed": "x", "in_progress": ">", "pending": "·"}
+    MARKERS = {"completed": MARK_DONE,
+               "in_progress": MARK_RUNNING,
+               "pending": MARK_PENDING}
 
     # A window, for ResearchProgress's reason: a Static does not scroll
     # itself to the bottom, so an unbounded list would push the newest item
@@ -508,14 +539,17 @@ class ResearchProgress(Static):
         body.append("research\n\n")
         for pass_id, done, failed, is_stage, tools, chars in self._passes[-self.ROWS:]:
             if is_stage:
-                marker, role = "·", "pass_done"
+                marker, role = MARK_STAGE, "pass_done"
             elif failed:
-                # #115/E14. The transcript's own failed-tool marker: a
-                # row that ended badly must not share a glyph with one
-                # that finished.
-                marker, role = "✗", "error"
+                # #115/E14. A row that ended badly must not share a
+                # glyph with one that finished. This used to be the
+                # transcript's own ✗; since batch 41 it is the ballot
+                # box's failed form, which keeps E14's constraint and
+                # puts the three pass outcomes in one visual family.
+                marker, role = MARK_FAILED, "error"
             else:
-                marker, role = ("x", "pass_done") if done else (">", "pass")
+                marker, role = (MARK_DONE, "pass_done") if done \
+                    else (MARK_RUNNING, "pass")
             body.append(f"{marker} {pass_label(pass_id)}\n", styles.get(role, ""))
             if not done:
                 detail = []

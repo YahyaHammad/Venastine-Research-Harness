@@ -643,15 +643,15 @@ def test_a_widget_renders_without_a_running_app():
 def test_the_panel_marks_code_stages_apart_from_passes():
     """A stage that made no model call is done the moment it appears, so
     showing it as running would show a state that never exists."""
-    from tui.widgets import ResearchProgress
+    from tui.widgets import MARK_RUNNING, MARK_STAGE, ResearchProgress
 
     panel = ResearchProgress()
     panel.pass_started("Pass 6a")
     panel.stage_completed("Pass 5")
     body = panel.renderable.plain
 
-    assert "> Pass 6a" in body, "a running pass"
-    assert "· Pass 5" in body, "a code stage"
+    assert f"{MARK_RUNNING} Pass 6a" in body, "a running pass"
+    assert f"{MARK_STAGE} Pass 5" in body, "a code stage"
 
 
 def test_the_panel_counts_tool_calls_on_the_running_pass():
@@ -882,7 +882,8 @@ def test_tool_counts_land_on_the_current_run_of_a_repeated_pass():
     that never run and hide rows that run three times -- and a count that
     lands on the FIRST run's row would report activity on a pass nobody
     is waiting on while the retry reads silent."""
-    from tui.widgets import ResearchProgress
+    from tui.widgets import (
+        MARK_DONE, MARK_RUNNING, ResearchProgress)
 
     panel = ResearchProgress()
     panel.pass_started("Pass 6a")
@@ -894,8 +895,10 @@ def test_tool_counts_land_on_the_current_run_of_a_repeated_pass():
     panel.tool_called("Pass 6a")
     body = panel.renderable.plain
 
-    assert "> Pass 6a" in body, "the retry round never showed as running"
-    assert "x Pass 6a" in body, "the finished first run lost its tick"
+    assert f"{MARK_RUNNING} Pass 6a" in body, \
+        "the retry round never showed as running"
+    assert f"{MARK_DONE} Pass 6a" in body, \
+        "the finished first run lost its tick"
     assert "1 tool" in body, \
         f"the retry's own call did not land on its row:\n{body}"
     assert "2 tools" not in body, \
@@ -909,7 +912,7 @@ def test_tool_counts_land_on_the_current_run_of_a_repeated_pass():
     panel.pass_started("Pass 1")
     panel.tool_called("Pass 1")
     body = panel.renderable.plain
-    assert body.rindex("1 tool") > body.rindex("> Pass 1"), \
+    assert body.rindex("1 tool") > body.rindex(f"{MARK_RUNNING} Pass 1"), \
         f"the call landed on the first-started candidate:\n{body}"
 
 
@@ -919,7 +922,8 @@ def test_a_completion_tick_lands_on_the_run_that_just_finished():
     the most recent UNRESOLVED row -- scanning forward instead would tick
     the first candidate and leave the one that actually returned showing
     as still running."""
-    from tui.widgets import ResearchProgress
+    from tui.widgets import (
+        MARK_DONE, MARK_RUNNING, ResearchProgress)
 
     panel = ResearchProgress()
     panel.pass_started("Pass 1")
@@ -927,7 +931,8 @@ def test_a_completion_tick_lands_on_the_run_that_just_finished():
     panel.pass_completed("Pass 1", ok=True)
     body = panel.renderable.plain
 
-    assert body.index("> Pass 1") < body.index("x Pass 1"), \
+    assert body.index(f"{MARK_RUNNING} Pass 1") \
+        < body.index(f"{MARK_DONE} Pass 1"), \
         f"the tick went to the first-started candidate:\n{body}"
 
 
@@ -935,13 +940,13 @@ def test_a_zero_llm_stage_is_recorded_already_done():
     """'It made no model call, so it has no observable running state.' A
     stage rendered as RUNNING would show a state that never exists -- and
     stay stuck there, because nothing will ever complete it."""
-    from tui.widgets import ResearchProgress
+    from tui.widgets import MARK_STAGE, ResearchProgress
 
     panel = ResearchProgress()
     panel.stage_completed("Pass 5")
     panel.stage_completed("D2")
     body = panel.renderable.plain
 
-    assert "· Pass 5" in body and "· D2" in body
+    assert f"{MARK_STAGE} Pass 5" in body and f"{MARK_STAGE} D2" in body
     assert "> Pass 5" not in body and "> D2" not in body, \
         "a zero-LLM stage rendered as running work"
