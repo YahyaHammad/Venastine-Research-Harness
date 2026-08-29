@@ -50,7 +50,7 @@ Venastine Research Harness/
 ├── CLAUDE.md / QWEN.md             # pointers to AGENTS.md, so a harness that auto-loads one of those names finds the context instead of a second copy of it
 ├── DEVLOG.md                       # implementation notes for built ROADMAP sections -- see §0
 │
-├── tests/                          # 2782 tests, all offline, ~25-45s depending on the machine (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
+├── tests/                          # 2786 tests, all offline, ~25-45s depending on the machine (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
 │   ├── conftest.py                 # fixtures: make_model_response, make_stream_from_response, make_stream_sequence, FakeStorage, ...
 │   ├── BREAKING_CHANGES.md         # what-breaks-it / symptom / fix per area
 │   ├── test_cli.py                 # 87 tests -- ROADMAP §1 thread_id passthrough + UUID validation + §14 parser defaults/resolution/trust flow + §29 N1-N8 the one stdin reader, N2's channel deadline, every request kind rendered, and the startup block main(argv) made reachable + #102's four declining defaults
@@ -77,7 +77,7 @@ Venastine Research Harness/
 │   ├── test_payload_validation.py  # 59 tests -- ROADMAP_v2 §30 the pass payload boundary: the spec table, the three properties, the id cross-check and its partial-match control
 │   ├── test_pipeline_storage.py    # 12 tests -- ROADMAP §5 create/update/load_pipeline_run + inner-failure caplog
 │   ├── test_file_ops.py            # 40 tests -- ROADMAP §6 path resolution, approval, read/write/edit, registry
-│   ├── test_shell.py               # 180 tests -- ROADMAP §7 sandbox routing, inert/network classification, approval, backend internals; §28 the capability classifier, the three modes, the .venastine mount; batch 37 the quoting bypass and the protected-path workspace guard; batch 39 the escaping bypass, the generative tokeniser-agreement corpus and the compound-command network flag
+│   ├── test_shell.py               # 184 tests -- ROADMAP §7 sandbox routing, inert/network classification, approval, backend internals; §28 the capability classifier, the three modes, the .venastine mount; batch 37 the quoting bypass and the protected-path workspace guard; batch 39 the escaping bypass, the generative tokeniser-agreement corpus and the compound-command network flag
 │   ├── test_policy_enforcement.py  # 101 tests -- ROADMAP §8 secret redaction, domain blocking (#48 normalisation + suffix match), is_url_permitted's address guard (#54), output policy, registry integration
 │   ├── test_critic_routing.py      # 2 tests -- ROADMAP §11 critic-model routing (3a/3b/6c to critic, rest to main)
 │   ├── test_permission_context.py  # 21 tests -- ROADMAP_v2 §15 AC1-AC7 (stricter wins, mcp default, redaction survives, D24, unregister) + schemas filtering

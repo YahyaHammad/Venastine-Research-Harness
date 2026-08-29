@@ -7621,3 +7621,79 @@ reporting inaccuracy in `profile.reason` and not a gate — under CONTAINED
 `auto_approved` never consults `escapes_workspace`, and under UNCONTAINED `writes=True`
 already forces the ask — but it is stated in §39 rather than left to be rediscovered as a
 hole.
+
+### Postscript, one day later — CI was red, and the reason was a test
+
+Batch 39 went green on Windows and red on Linux (`33228544997`, 2 failed / 2779
+passed). The production code was correct and did not change. Two of its test
+cases did.
+
+`test_an_unresolvable_token_reads_as_outside` asserted that `\\;` reads as
+outside *because `realpath` raises on it*. That is a **Windows** fact: `\\;` is a
+malformed UNC path and `ntpath.realpath` raises `WinError 668`, so Q3's
+fail-closed `except` returns False. On Linux a backslash is not a path separator
+at all — `\\;` is an ordinary relative filename that resolves happily inside the
+workspace, nothing raises, and `True` is the **correct** answer.
+
+Which is batch 37's mistake in mirror image, twice over. That batch assumed
+Windows was exempt from a POSIX finding and measured its way out of it. This one
+assumed Linux shared a Windows one. And the correction was already written down
+**forty lines above the new class**, in
+`test_a_windows_drive_and_a_unc_path_escape_on_windows`:
+
+> Platform-split rather than asserted everywhere, because the Linux container
+> proved the combined version wrong.
+
+A lesson recorded in the same file, in a test about the same predicate, and it
+did not transfer. Reading the neighbours is not the same as reading the file.
+
+### The worse half: one of those cases was passing for the wrong reason
+
+Measured on both platforms after the failure:
+
+| token | Windows | Linux |
+|---|---|---|
+| `\\;` malformed UNC | **OSError** — the guard fires | resolves fine, ordinary relative name |
+| `a\0b` embedded NUL | resolves fine | **ValueError** — the guard fires |
+| `\\?` | **no raise**; escapes as UNC-absolute | resolves *inside* the workspace |
+
+`\\?` never raises anywhere. It returned False on Windows because `\\?` is
+UNC-absolute and therefore outside the workspace — an **ordinary escape, not the
+guard firing**. So that parametrised case passed on Windows for a reason
+unrelated to its own name and docstring, and would have kept passing forever if
+Linux had not disagreed with its sibling. The vacuity class again: a check that
+passes because it was measuring something else.
+
+### And Q3 is load-bearing on POSIX after all
+
+`except (OSError, ValueError)` was written with a trigger for the OSError half
+and none for the other. The NUL token is that trigger, it raises `ValueError` on
+POSIX, and a JSON tool-call argument can carry it as `\u0000` — so the clause
+that looked speculative is the one doing the work on the platform most of this
+project's users run. Verified with the guard in place: `_within` answers False
+and `classify_command` returns `HOST_READ` instead of raising out of the approval
+gate.
+
+No single token exercises this guard on both platforms. So the test pins the
+**contract** — patch `realpath` to raise, assert the answer is "outside" — and
+asserts each real trigger under a `skipif` naming why it is one-sided. The
+"answers instead of raising" pair keeps both tokens, which is what would have
+caught this.
+
+`test_and_so_does_the_approval_gate` also stopped pretending. It asserted
+`_asks(...) in (True, False)`, which reads like an assertion and is vacuously
+true; the real claim is "does not raise", and it now says `isinstance(..., bool)`.
+Which bool is platform-dependent, and pinning it either way would re-make the
+mistake this class exists to record.
+
+### What actually let it through
+
+The batch-39 verification ran the classifier probe under WSL and the *suite* only
+on Windows, because WSL had no pytest. A single-platform green is not evidence
+for a change whose whole subject is path syntax. `pytest` is installed there now,
+and the two-platform run is the standing rule for anything touching `os.path`.
+
+One caveat for whoever runs it next: this WSL image has Python 3.14 with
+matplotlib 3.10.3, which recurses to death rendering a figure, so
+`test_output_writer.py`'s two chart tests fail there and only there. CI pins 3.11
+and passes them. Not a finding.

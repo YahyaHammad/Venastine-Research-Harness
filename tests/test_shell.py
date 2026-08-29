@@ -1555,23 +1555,87 @@ class TestTheGateAnswersForEveryString:
     `classify_command`, and out of `registry.approval_needed()` -- which
     has no handler, and neither does anything above it.
 
-    Found by the generative corpus rather than by review. `\\\\;` is not a
-    spelling anyone writes down.
+    Found by the generative corpus rather than by review, and then
+    MIS-TESTED, which is the more useful half of the story. The first
+    version asserted the fail-closed answer using two tokens observed on
+    Windows, and CI on Linux disagreed with both:
+
+        token         Windows                      Linux
+        ------------  ---------------------------  ------------------------
+        `\\\\;`         OSError -- the guard fires   an ordinary relative
+                                                   filename, resolves
+                                                   INSIDE the workspace
+        `a\\0b`         resolves fine                ValueError -- the guard
+                                                   fires
+        `\\\\?`         no raise; escapes as         resolves inside
+                      UNC-absolute
+
+    Two lessons, both pinned below. `\\\\?` never raises anywhere -- it
+    returned False on Windows because it is UNC-absolute and therefore
+    outside the workspace, an ORDINARY ESCAPE rather than the guard
+    firing, so that case passed for a reason unrelated to its own name.
+    And a backslash is a path separator on exactly one of the two
+    platforms, so no single token exercises this guard on both.
+
+    So the CONTRACT is pinned platform-neutrally by making `realpath`
+    raise, and the real triggers are asserted where each actually fires.
     """
 
+    # Every one of these must be ANSWERED rather than raised on, on both
+    # platforms. The NUL token is the Linux trigger and is reachable: a
+    # JSON tool-call argument can carry a \\u0000 escape.
     MALFORMED = [
         BS * 2 + ";",
-        BS * 2 + "?",
         BS * 2 + "|x",
         "cat " + BS * 2 + ";",
         "ls " + BS * 2 + ";" + BS + "share",
+        "cat a" + chr(0) + "b",
+        "grep -r x --file=a" + chr(0) + "b",
     ]
 
-    @pytest.mark.parametrize("token", [BS * 2 + ";", BS * 2 + "?"])
-    def test_an_unresolvable_token_reads_as_outside(self, token, _tiered):
-        """Fail CLOSED. False here means the argument escapes, which means
-        the command is asked about -- never that it is denied silently."""
-        assert _within(_tiered, token) is False
+    def test_a_token_that_cannot_be_resolved_reads_as_outside(
+            self, _tiered, monkeypatch):
+        """THE contract, stated without reference to any platform: if
+        resolution fails, the answer is 'outside'.
+
+        Fail CLOSED. False here means the argument escapes, which means
+        the command is asked about -- never that it is denied silently.
+        Asserted by making `realpath` raise rather than by finding a token
+        that makes it raise, because which tokens do that is a property of
+        the OS and not of this guard.
+        """
+        def boom(_path):
+            raise OSError(668, "An assertion failure has occurred")
+
+        monkeypatch.setattr(os.path, "realpath", boom)
+        assert _within(_tiered, "notes.txt") is False
+
+    def test_and_a_ValueError_is_caught_too(self, _tiered, monkeypatch):
+        """The other half of `except (OSError, ValueError)`. It was
+        written on instinct with no trigger behind it; the NUL token below
+        is the trigger, and this pins the clause independently of whether
+        the platform running the suite has one."""
+        def boom(_path):
+            raise ValueError("embedded null byte")
+
+        monkeypatch.setattr(os.path, "realpath", boom)
+        assert _within(_tiered, "notes.txt") is False
+
+    @pytest.mark.skipif(platform.system() != "Windows",
+                        reason="a backslash is only a path separator on "
+                               "Windows; on POSIX this token is an "
+                               "ordinary relative filename that resolves")
+    def test_the_windows_trigger_is_a_malformed_unc_path(self, _tiered):
+        """`\\\\;` -- `ntpath.realpath` raises WinError 668 on it."""
+        assert _within(_tiered, BS * 2 + ";") is False
+
+    @pytest.mark.skipif(platform.system() == "Windows",
+                        reason="Windows resolves a NUL-bearing path "
+                               "without complaint; POSIX raises")
+    def test_the_posix_trigger_is_an_embedded_nul(self, _tiered):
+        """`a\\0b` -- `posixpath.realpath` raises ValueError on it, and a
+        JSON tool argument can carry one."""
+        assert _within(_tiered, "a" + chr(0) + "b") is False
 
     @pytest.mark.parametrize("command", MALFORMED)
     def test_the_classifier_answers_instead_of_raising(
@@ -1582,9 +1646,18 @@ class TestTheGateAnswersForEveryString:
 
     @pytest.mark.parametrize("command", MALFORMED)
     def test_and_so_does_the_approval_gate(self, command, _tiered):
-        """The reachable failure, at the layer it was reachable from.
-        Before Q3 this raised OSError [WinError 668] on Windows."""
-        assert _asks(command, docker=True) in (True, False)
+        """The reachable failure, at the layer it was reachable from:
+        before Q3 this raised out of `registry.approval_needed()`, which
+        has no handler above it.
+
+        The assertion is deliberately only that a bool comes back. WHICH
+        bool is platform-dependent -- `\\\\;` escapes on Windows and is
+        inside the workspace on POSIX -- and pinning it either way would
+        re-make the mistake this class exists to record. `isinstance`
+        rather than `in (True, False)`, which reads like an assertion
+        while being vacuously true.
+        """
+        assert isinstance(_asks(command, docker=True), bool)
 
     def test_a_resolvable_token_is_unaffected(self, _tiered):
         """The except must not swallow the normal answer -- a bare
