@@ -27,7 +27,7 @@ from tools.builtin import file_ops
 @pytest.fixture
 def workspace(tmp_path, monkeypatch):
     """Points config.WORKSPACE_DIR and file_ops.WORKSPACE_ROOT at a
-    real tmp_path directory so _resolve_path / _is_within_workspace /
+    real tmp_path directory so resolve_path / _is_within_workspace /
     _file_approval_check all operate against a real filesystem."""
     ws = str(tmp_path / "ws")
     os.makedirs(ws, exist_ok=True)
@@ -67,7 +67,7 @@ class TestPathResolution:
         assert file_ops._is_within_workspace("/etc/passwd") is False
 
     def test_resolve_path_handles_dotdot(self, workspace):
-        resolved = file_ops._resolve_path("sub/../../etc/passwd")
+        resolved = file_ops.resolve_path("sub/../../etc/passwd")
         assert not resolved.startswith(os.path.realpath(workspace))
 
 

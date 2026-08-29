@@ -42,7 +42,7 @@ python main.py --init --research-project           # §24: skip the type questio
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 2861 tests, offline, ~25-45s by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 2965 tests, offline, ~25-45s by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -253,6 +253,31 @@ the answer. **`_entries` still holds ONE entry per span, updated in place** — 
 write path goes through `_emit()`" obligation kept by a different route, because appending per
 chunk splits a copied answer across `as_text()`'s joins and draws a `venastine ›` label per
 fragment.
+
+**The transcript's own vocabulary is three things now** (§41, X1-X7).
+
+- **Colour separates KINDS of line, and the pins measure that rather than "
+contrast.** `role_styles`
+  fills `MESSAGE_ROLES` with pairwise-distinct style strings on all fourteen themes; the accent and
+  secondary slots are held >= 120 redmean units apart (dark-plain's were 98.5, the tightest pair
+  of any theme, on the shipped default); and `dim` appears in `system` alone, because it is an
+  attribute no floor in `tests/test_themes.py` can see. `TranscriptLogHandler` carries a palette
+  ROLE, not an `is_error` bool -- it had no warning case at all, so every WARNING it routed
+  rendered as `system`.
+- **One checklist vocabulary** (`tui/widgets.py`'s `MARK_*`), shared by `TodoPanel` and
+  `ResearchProgress`, which had been spelling it two different ways -- `.` meant *pending* in one
+  and *an already-finished code stage* in the other. Running (`>`) and stage (`.`) are
+  deliberately not boxes; the reasons are beside the constants.
+- **`write` and `edit` render an inline diff**, chat mode only. That is a property of the data,
+  not a shortcut: research-mode tool lines come from `PipelineEvent`, which carries a pre-digested
+  string and no params, and both tools are `GRANT_NEVER` so a headless pass cannot call them. The
+  pre-image is snapshotted at `tool_call_start` and the block drawn at a SUCCESSFUL `tool_result`
+  -- a call can still be denied, and a diff drawn at the call would show a change that never
+  happened. **Every rendered row is padded and written with an explicit `width=`**: RichLog
+  otherwise raises a short row to `min_width` and `Strip.adjust_cell_length` pads the tail with an
+  UNSTYLED segment, so the background stops at the last character of the source line. The wrap is
+  ours for the same reason -- Rich's soft wrap returns rows of 78, 75, 78 and 66 cells and the
+  tint stops wherever the text broke.
 
 **Thinking has two forms and one closing path** (§38, O6/O8). `tui.show_thinking` (default
 `True`, defaulted in `tui/app.py` beside `animations` rather than in `config.py`) renders

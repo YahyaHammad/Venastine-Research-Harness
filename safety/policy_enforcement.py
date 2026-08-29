@@ -351,14 +351,24 @@ def redaction_enabled() -> bool:
     return not active.redact_off_env
 
 
-def _redact_output_text(text: str) -> str:
+def redact_output_text(text: str) -> str:
     """The one redaction path tool OUTPUT takes, under one switch.
 
     Vendor tokens first, then credential shapes on what survives. Both are
     substitutions of content the user chose to see raw when they flip the
     switch off -- so this is where VENASTINE_REDACT_OFF bites. The depth
     cap is NOT routed through here: it is structure, not content judgment,
-    and stays fail-closed unconditionally."""
+    and stays fail-closed unconditionally.
+
+    PUBLIC since batch 41 (X4). It was private while `param_digest` was
+    its only caller outside this module's own dispatch path, and the §41
+    diff is the second: a `write` renders the content the tool put on
+    disk, which is tool output by any reading, and it replaces the very
+    digest line that goes through here. `redact_secrets` alone would have
+    redacted LESS than the line it replaced -- the vendor tokens but not
+    the credential shapes -- which is a regression dressed as a feature.
+    The docstring above already called this "the one path"; it now is one
+    for both consumers."""
     if not redaction_enabled():
         return text
     return _redact_credential_shapes(redact_secrets(text))
@@ -411,7 +421,7 @@ def param_digest(params) -> str:
         # replayed archive. Under VENASTINE_REDACT_OFF this shows raw,
         # like every other pattern substitution; it stays display-only
         # and never logs, whatever the switch reads.
-        text = _redact_output_text(text)
+        text = redact_output_text(text)
         if len(text) > _DIGEST_VALUE_CHARS:
             text = text[:_DIGEST_VALUE_CHARS - 1] + "…"
         parts.append(text)
@@ -557,7 +567,7 @@ def check_output_policy(tool_name: str, result: dict) -> dict:
 
     def _leaf(text: str) -> str:
         nonlocal redacted_values
-        replacement = _redact_output_text(text)
+        replacement = redact_output_text(text)
         if replacement != text:
             redacted_values += 1
         return replacement

@@ -12,7 +12,7 @@ from textual.widgets import RichLog, Static
 
 from prompts.system_prompts import pass_label
 
-from tui import ravens, themes
+from tui import diffs, ravens, themes
 
 # Animation cadence. Slow enough to read, and paused outright while tokens
 # are streaming -- a redraw loop competing with token deltas is the one
@@ -33,6 +33,41 @@ THINKING_INDENT = "  "
 # has bigger problems than streaming cadence, and an unmeasurable width
 # (a bare-built test widget, a widget before mount) reads as 0.
 MIN_WRAP_WIDTH = 20
+
+# §41. The inline diff's furniture, owned by the renderer for the same
+# reason the thinking bar is: `_entries` keeps the canonical block, so
+# /copy hands back a diff rather than a decorated string and a replay
+# under a new theme re-derives the painting.
+#
+# One column deeper than a plain transcript line (five), so the block
+# reads as belonging to the `▸ edit` line above it.
+DIFF_INDENT = "      "
+
+# A tab is one CELL to Rich and a jump to the next tab stop in the
+# terminal, so a tabbed source line would break the padding that
+# carries the row's background and leave the rectangle ragged.
+# Expanded at render time only -- the stored block keeps the file's
+# own bytes.
+DIFF_TAB = "    "
+
+_DIFF_ROLES = {
+    diffs.CONTEXT: "diff_context",
+    diffs.DELETED: "diff_del",
+    diffs.ADDED: "diff_add",
+    diffs.ELIDED: "diff_context",
+}
+
+# The elided-rows notice takes the gutter column rather than a row of
+# its own: it is a statement about line numbers, so it belongs where
+# the line numbers are.
+_ELIDE_GUTTER = "…"
+
+_DIFF_MARKS = {
+    diffs.CONTEXT: " ",
+    diffs.DELETED: "-",
+    diffs.ADDED: "+",
+    diffs.ELIDED: " ",
+}
 
 # Batch 41 (X3). The checklist vocabulary, in ONE place because two
 # panels render it and they were already spelling it differently: the
@@ -699,6 +734,8 @@ class Transcript(RichLog):
             # is also called per committed chunk, where a second strip
             # would eat the blank line between paragraphs.
             self._render_blocks(text[:-1] if text.endswith("\n") else text)
+        elif role == "diff":
+            self._render_diff(text)
         elif role == "thinking":
             # §38. The furniture is OWNED by the renderer, not stored in
             # the entry: `_entries` keeps the model's raw reasoning, so
@@ -710,6 +747,53 @@ class Transcript(RichLog):
             self._write_thinking_close()
         else:
             self.write(Text(f"     {text}", self._style(role)))
+
+    def _render_diff(self, block: str) -> None:
+        """One `write`/`edit` diff (§41, X5).
+
+        Every rendered row is PADDED to the full width and written with an
+        explicit `width=`, and both halves are load-bearing. RichLog
+        otherwise raises the render width to `min_width` and
+        `Strip.adjust_cell_length` pads the tail with an UNSTYLED segment,
+        so the background would stop at the last character of the source
+        line instead of at the edge of the row -- which is the difference
+        between a marked line and a coloured word.
+
+        Wrapping is ours for §38's reason: Rich would soft-wrap the row and
+        the padding would reach the first rendered line only, leaving a
+        wrapped addition half green.
+        """
+        path, rows = diffs.parse(block)
+        if not path and not rows:
+            return
+        styles = self._styles()
+        total = self._wrap_width()
+        gutter_width = max((len(gutter) for _k, gutter, _t in rows), default=0)
+
+        self._write_padded(f"{DIFF_INDENT} {path}",
+                           styles.get("diff_header", ""), total)
+        for kind, gutter, text in rows:
+            column = (_ELIDE_GUTTER if kind == diffs.ELIDED else gutter)
+            prefix = (f"{DIFF_INDENT}{_DIFF_MARKS[kind]} "
+                      f"{column.rjust(gutter_width)}{diffs.GUTTER_SEP}")
+            blank = " " * len(prefix)
+            style = styles.get(_DIFF_ROLES[kind], "")
+            body = text.replace("\t", DIFF_TAB)
+            for index, chunk in enumerate(
+                    diffs.wrap_source(body, total - len(prefix) if total else 0)):
+                self._write_padded((prefix if index == 0 else blank) + chunk,
+                                   style, total)
+
+    def _write_padded(self, text: str, style: str, total: int) -> None:
+        """One rendered row, filled to `total` columns so its background
+        covers the whole line. `total` of 0 means the widget could not be
+        measured (unmounted, or built bare in the suite), where the row is
+        written as it stands rather than raising -- `_styles`' guard rule
+        applied to geometry."""
+        if not total:
+            self.write(Text(text, style))
+            return
+        self.write(Text(text.ljust(total), style), width=total)
 
     def _render_blocks(self, text: str) -> None:
         """The assistant body: fenced code highlighted, everything else
@@ -1008,6 +1092,9 @@ class Transcript(RichLog):
 
     def as_text(self) -> str:
         """The session as plain text, for /copy all."""
+        # `diff` is deliberately absent: the canonical block already
+        # opens with the path it describes, so a label would announce
+        # the file twice.
         labels = {"user": "you", "assistant": "venastine",
                   "thinking": "thinking"}
         out = []

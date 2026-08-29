@@ -22,6 +22,7 @@ derives the full variable set from these anchors, so each theme only
 declares the colours that actually differ.
 """
 
+from textual.color import Color
 from textual.theme import Theme
 
 # Shared neutrals. The accent variants below change only the three hue
@@ -211,6 +212,26 @@ def register_all(app) -> None:
 # theme-resolved trio and identity uses the hues, rather than the
 # reverse. Floors are pinned in tests/test_themes.py.
 
+#: How far a diff row's background is blended TOWARD the theme's own
+#: background (batch 41, X7). 0.8 leaves a band that stands off the
+#: page by 1.22-1.53 across the fourteen themes while the foreground
+#: still reads on it at 9.3:1 or better -- a highlight rather than a
+#: slab. Both floors are pinned in tests/test_themes.py.
+DIFF_TINT = 0.8
+
+
+def _tint(colour: str, background: str, factor: float = DIFF_TINT) -> str:
+    """`colour` faded toward `background`, as a hex string.
+
+    Derived from the theme's own slots rather than written down, for
+    the reason the whole of this section exists (#116): a literal pair
+    of green and red backgrounds would be designed against one of the
+    fourteen palettes and wrong on the other thirteen -- and on the six
+    standalone themes, whose panels carry the identity, visibly so.
+    """
+    return Color.parse(colour).blend(Color.parse(background), factor).hex
+
+
 def role_styles(theme: Theme) -> dict[str, str]:
     """Rich style strings keyed by transcript role, for one theme.
 
@@ -271,6 +292,21 @@ def role_styles(theme: Theme) -> dict[str, str]:
         "LOW": theme.warning,
         "UNVERIFIED": theme.error,
         "UNVERIFIED_COVERAGE": f"dim {theme.error}",
+        # §41's inline diff for `write` and `edit`. The only roles in
+        # this table that set a BACKGROUND, because the whole point is
+        # that a changed row is marked across its full width rather
+        # than at the one character that carries the sign.
+        "diff_add": f"{theme.foreground} on {_tint(theme.success, theme.background)}",
+        "diff_del": f"{theme.foreground} on {_tint(theme.error, theme.background)}",
+        # Unchanged context recedes: it is there to place the change,
+        # not to be read. `secondary` rather than a dimmed foreground
+        # for X1's reason -- `dim` is an attribute no floor can
+        # measure.
+        "diff_context": theme.secondary,
+        # The file being changed. Bold foreground takes no hue at all,
+        # which is what keeps it out of the identity roles the same
+        # batch just separated -- a path is not a speaker.
+        "diff_header": f"bold {theme.foreground}",
     }
 
 

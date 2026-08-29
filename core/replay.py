@@ -29,6 +29,13 @@ also means a replayed thread shows what was originally said rather than a
 condensation of it, which is what a human resuming a conversation is looking
 for.
 
+THE LIVE VIEW SHOWS MORE THAN THIS ONE, DELIBERATELY (§41). Since batch 41
+the TUI renders a `write` or an `edit` as an inline diff, and a REPLAYED one
+here still shows `param_digest`. That is not a gap to close: a replay reads
+the archive, which records what was called and never what the file held at
+the time, so the digest is genuinely all this function has. The live view is
+better informed because it was there.
+
 TOOL RESULTS ARE SKIPPED, TOOL CALLS ARE ONE LINE (T4). A grounding-heavy
 thread carries hundreds of kilobytes of fetched page text in its
 `tool_result` rows; replaying that would bury the conversation in the

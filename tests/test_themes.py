@@ -45,6 +45,8 @@ EXPECTED_ROLE_KEYS = {
     "thinking", "pass", "pass_done", "tool", "tool_error", "warning",
     "error", "success", "HIGH", "MEDIUM", "LOW", "UNVERIFIED",
     "UNVERIFIED_COVERAGE",
+    # Batch 41 (X7). The only roles that set a BACKGROUND.
+    "diff_add", "diff_del", "diff_context", "diff_header",
 }
 
 
@@ -398,3 +400,52 @@ def test_dim_is_the_system_role_alone(theme):
         f"floors in this file can measure, or say here why this role is "
         f"the second one that recedes."
     )
+
+
+# ---- Batch 41 (X7): the diff tint, derived and measured ---------------------
+
+def _tint_of(theme, slot):
+    """The background a diff row is painted with, read out of the style
+    string rather than recomputed -- so this measures what the transcript
+    actually draws, not a second copy of the formula."""
+    return role_styles(theme)[slot].split(" on ")[1]
+
+
+@pytest.mark.parametrize("theme", ALL_THEMES, ids=lambda t: t.name)
+@pytest.mark.parametrize("slot", ["diff_add", "diff_del"])
+def test_a_diff_row_is_readable_on_its_own_tint(theme, slot):
+    """A diff row is the one place in the transcript where the background
+    is not the theme's own, so the foreground floor has to be re-checked
+    against it -- `test_foreground_is_body_readable` measures against
+    `theme.background` and knows nothing about this."""
+    tint = _tint_of(theme, slot)
+    assert _ratio(theme.foreground, tint) >= 4.5, \
+        f"{theme.name}.{slot}: text on {tint} at {_ratio(theme.foreground, tint):.2f}"
+
+
+@pytest.mark.parametrize("theme", ALL_THEMES, ids=lambda t: t.name)
+@pytest.mark.parametrize("slot", ["diff_add", "diff_del"])
+def test_the_tint_is_visible_against_the_page(theme, slot):
+    """The other half, and the one that actually bounds DIFF_TINT. Blend
+    further toward the background and the foreground reads better and
+    better while the band the whole feature exists to draw fades out --
+    so a floor on readability alone would be satisfied by a tint that is
+    not there. 1.15 is the visible-band floor; 0.8 puts the fourteen
+    themes between 1.22 and 1.53."""
+    tint = _tint_of(theme, slot)
+    assert _ratio(tint, theme.background) >= 1.15, \
+        f"{theme.name}.{slot}: {tint} against {theme.background} at " \
+        f"{_ratio(tint, theme.background):.2f} -- the row is not marked"
+
+
+@pytest.mark.parametrize("theme", ALL_THEMES, ids=lambda t: t.name)
+def test_added_and_removed_are_told_apart_by_more_than_position(theme):
+    """The two tints derive from `success` and `error`, which every theme
+    keeps in different hue families -- but two of the standalone themes
+    override a severity slot against their own panel tint (nightmare's
+    error, matrix's success), and this is what says the overrides did not
+    collapse the pair."""
+    add, delete = _tint_of(theme, "diff_add"), _tint_of(theme, "diff_del")
+    assert _apart(add, delete) >= 25.0, \
+        f"{theme.name}: {add} and {delete} are {_apart(add, delete):.1f} apart"
+

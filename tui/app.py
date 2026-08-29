@@ -30,6 +30,7 @@ Two hard acceptance criteria live in this file:
 
 import json
 import logging
+import os
 import queue
 from pathlib import Path
 from uuid import UUID
@@ -63,9 +64,11 @@ from core.replay import last_assistant_text, replay_entries
 # instances would look identical and behave differently.
 from core.reasoning.authorization import GRANT_PICKER, NOTHING_TO_GRANT
 from prompts import system_prompts
-from safety.policy_enforcement import param_digest, redact_secrets
+from safety.policy_enforcement import (
+    param_digest, redact_output_text, redact_secrets)
 
-from tui import preferences, ravens, themes
+from tools.builtin import file_ops
+from tui import diffs, preferences, ravens, themes
 from tui.commands import SlashCommand, registry as commands
 from tui.screens import (
     ClaimsScreen, ConfirmScreen, GrantPickerScreen, PermissionScreen,
@@ -79,6 +82,20 @@ from tui.widgets import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+#: The two tools whose call the transcript shows as a diff (§41, X4).
+#: `read` is deliberately absent: it changes nothing, so there is no diff
+#: to draw, and its one-line `▸ read  path` already says what happened.
+DIFFED_TOOLS = ("write", "edit")
+
+#: How much of a file the TUI will hold in order to diff it. NOT
+#: `config.MAX_FILE_SIZE_BYTES`, which is 25 MB -- that is the bound on
+#: what a tool may operate on, and this is the bound on what a transcript
+#: block is worth. Past it the diff degrades rather than disappearing:
+#: `write` renders as an all-new block, `edit` as its own old/new text
+#: without line numbers.
+DIFF_SNAPSHOT_MAX_BYTES = 512_000
 
 
 class LoopEventMessage(Message):
@@ -356,6 +373,13 @@ class VenastineApp(App):
         # on_turn_finished; unbounded growth here would be a leak on a
         # long-lived app.
         self._tool_names: dict = {}
+        # §41 (X4). call id -> (name, params, pre-image) for a `write`
+        # or an `edit`, captured at tool_call_start because that is the
+        # last moment the file still holds what the call is about to
+        # replace. Cleared alongside _tool_names in both the places
+        # that clear it; a per-turn map that outlives its turn is a
+        # leak on an app that stays open for hours.
+        self._file_calls: dict = {}
 
     # -- layout --------------------------------------------------------------
 
@@ -1018,20 +1042,40 @@ class VenastineApp(App):
             call_id = event.tool_call_start.get("id")
             if call_id:
                 self._tool_names[call_id] = name
-            digest = param_digest(event.tool_call_start.get("input"))
-            detail = f"  {digest}" if digest else ""
-            transcript.write_role("tool", f"▸ {name}{detail}")
+            params = event.tool_call_start.get("input")
+            if name in DIFFED_TOOLS and call_id:
+                # No digest on these two (§41, X4). It showed the first
+                # 60 characters of `content`, or of `old_text` and
+                # `new_text` -- which is the thing the diff replaces,
+                # and printing both would be the truncated payload back
+                # again, above a block that says it properly.
+                self._file_calls[call_id] = (
+                    name, params or {}, self._snapshot(params))
+                transcript.write_role("tool", f"▸ {name}")
+            else:
+                digest = param_digest(params)
+                detail = f"  {digest}" if digest else ""
+                transcript.write_role("tool", f"▸ {name}{detail}")
 
         if event.tool_result:
             result = event.tool_result["result"]
-            if isinstance(result, dict) and "error" in result:
-                call_id = event.tool_result.get("id")
+            call_id = event.tool_result.get("id")
+            failed = isinstance(result, dict) and "error" in result
+            if failed:
                 tool_name = self._tool_names.get(call_id) if call_id else None
                 error_text = redact_secrets(str(result["error"]))
                 if tool_name:
                     transcript.write_role("tool_error", f"  ✗ {tool_name}  {error_text}")
                 else:
                     transcript.write_error(f"  ✗ {error_text}")
+            # §41 (X4). AT THE RESULT, and only a successful one. A
+            # call can still be denied at the permission gate or
+            # refused by the tool (old_text not unique, path
+            # unwritable), and a diff drawn at tool_call_start would
+            # have shown a change that never happened.
+            stashed = self._file_calls.pop(call_id, None) if call_id else None
+            if stashed and not failed:
+                self._write_file_diff(transcript, *stashed)
 
         if event.notice:
             # ROADMAP_v2 §21's "no silent compaction, ever". Flushed first
@@ -1055,6 +1099,112 @@ class VenastineApp(App):
             transcript.flush_stream()
             if event.stop_reason and event.stop_reason != "complete":
                 transcript.write_system(f"[stopped early: {event.stop_reason}]")
+
+    def _snapshot(self, params) -> "str | None":
+        """What the file holds right now, or None when there is nothing
+        usable to diff against (§41, X4/X6).
+
+        Resolved through `file_ops.resolve_path`, the tool's own rule,
+        rather than re-derived here -- a second path computation would
+        mean a diff of one file beside an edit to another.
+
+        None for every reason a snapshot can fail: no such file (a
+        `write` creating one, which is the common case), a directory, one
+        past DIFF_SNAPSHOT_MAX_BYTES, an unreadable one. Every one of
+        those degrades the block rather than losing it, so none of them is
+        worth an error line -- and this runs on the UI thread, where an
+        exception escaping would take the app's message pump with it.
+        """
+        path = (params or {}).get("path")
+        if not isinstance(path, str) or not path:
+            return None
+        try:
+            resolved = file_ops.resolve_path(path)
+            if not os.path.isfile(resolved):
+                return None
+            if os.path.getsize(resolved) > DIFF_SNAPSHOT_MAX_BYTES:
+                return None
+            with open(resolved, "r", encoding="utf-8", errors="replace") as f:
+                return f.read()
+        except Exception:  # noqa: BLE001 -- see the docstring
+            return None
+
+    def _write_file_diff(self, transcript, name: str, params: dict,
+                         pre: "str | None") -> None:
+        """The diff for one finished `write` or `edit`.
+
+        The post-image is RECONSTRUCTED from the call's own arguments
+        rather than read back off disk: `write_run` writes `content`
+        verbatim and `edit_run` replaces a span the tool has already
+        guaranteed unique, so the reconstruction is exact -- and it cannot
+        pick up a change some other process made between the call
+        returning and this line running.
+
+        Redaction runs through `redact_output_text`, the same path
+        `param_digest` takes: a `write` renders the content the tool put
+        on disk, which is tool output by any reading, and `redact_secrets`
+        alone catches the vendor tokens but not the three credential
+        SHAPES (#167) -- so the narrower function would have made this
+        block redact LESS than the digest line it replaces.
+
+        It runs on the WHOLE texts, because the redactor works on whole
+        strings and a secret that reached the block would be just as
+        readable split across two wrapped rows as on one. And it runs
+        AFTER the reconstruction, because doing it first means matching a
+        redacted `old_text` inside a separately-redacted file:
+        `redact_output_text` sees more context in the file than in the
+        argument, so it can match a longer span there (measured:
+        `ci:pw@host` is untouched alone and redacted inside
+        `https://ci:pw@host`, since the userinfo pattern anchors on `//`),
+        the replace finds nothing, and the block comes back empty.
+
+        WHICH LEAVES ONE HONEST GAP, AND IT IS ANNOUNCED. Redacting both
+        sides with the same substitution is what stops an unchanged secret
+        reading as a spurious edit -- and it also collapses a change that
+        was ENTIRELY inside a secret, which is exactly what rotating a
+        credential is. The block is empty and the file did change, so a
+        line says so. Rendering nothing would be M14's silent cap on the
+        one edit a reader is most likely to be checking.
+        """
+        path = params.get("path") or ""
+        if name == "write":
+            post = params.get("content")
+            if not isinstance(post, str):
+                return
+            block = diffs.build_block(
+                path, redact_output_text(pre) if pre is not None else None,
+                redact_output_text(post))
+            changed = pre != post
+        else:
+            old, new = params.get("old_text"), params.get("new_text")
+            if not isinstance(old, str) or not isinstance(new, str):
+                return
+            if pre is None or old not in pre:
+                # X6. The snapshot is missing, or it does not contain what
+                # the tool replaced -- a file that changed between the
+                # call and the result. Reconstructing from it would be a
+                # guess presented as a diff, and the arguments are true
+                # whatever the file did.
+                block = diffs.build_replacement_block(
+                    path, redact_output_text(old), redact_output_text(new))
+                changed = True
+            else:
+                # `.replace(old, new)` with no count, matching `edit_run`
+                # exactly rather than approximating it. The tool has
+                # already refused the call unless `old` appeared once, so
+                # the two are the same operation -- and writing the same
+                # call is what keeps them the same operation if that
+                # guarantee ever moves.
+                post = pre.replace(old, new)
+                block = diffs.build_block(path, redact_output_text(pre),
+                                          redact_output_text(post))
+                changed = pre != post
+        if block:
+            transcript.write_role("diff", block)
+        elif changed:
+            transcript.write_role(
+                "system",
+                f"  {path}: the change is entirely inside redacted content")
 
     def _release_permission_channel(self) -> None:
         """Unblock a worker parked on permission_channel.get(), denying.
@@ -1408,6 +1558,7 @@ class VenastineApp(App):
         self._busy = False
         self._permission_channel = None
         self._tool_names.clear()
+        self._file_calls.clear()
         # §38: close a thinking span before the answer's, so a turn that
         # ends mid-reasoning (a stop condition, an error) still gets its
         # closing delimiter and drops the indicator.
@@ -1628,6 +1779,7 @@ class VenastineApp(App):
         self._live_claims = {}
         self._last_response = ""
         self._tool_names.clear()
+        self._file_calls.clear()
         # CLEAR, then replay. Swapping memory without clearing left the
         # previous conversation on screen beneath the new thread's id --
         # bug 1's worst half, since a blank panel is merely unhelpful

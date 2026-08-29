@@ -55,18 +55,25 @@ _RICH_EXTENSIONS = frozenset({
 })
 
 
-def _resolve_path(user_path: str) -> str:
+def resolve_path(user_path: str) -> str:
     """Resolve *user_path* relative to WORKSPACE_ROOT via realpath.
 
     Handles ``..`` segments and symlinks. Does NOT reject paths that
     land outside the workspace — that decision belongs to the approval
     layer (``_file_approval_check``), not to path resolution.
+
+    PUBLIC since batch 41 (X4). The TUI has to read the file a `write`
+    or an `edit` is about to change in order to show the diff, and it
+    must land on the same file the tool will — a second
+    ``os.path.join(WORKSPACE_ROOT, ...)`` at the call site is this
+    project's canonical producer/consumer bug, and here it would mean a
+    diff of one file beside an edit to another.
     """
     return os.path.realpath(os.path.join(WORKSPACE_ROOT, user_path))
 
 
 def _is_within_workspace(user_path: str) -> bool:
-    resolved = _resolve_path(user_path)
+    resolved = resolve_path(user_path)
     return resolved == WORKSPACE_ROOT or resolved.startswith(WORKSPACE_ROOT + os.sep)
 
 
@@ -174,7 +181,7 @@ def _truncate_lines(
 
 def read_run(params: dict) -> dict:
     parsed = ReadFileParams(**params)
-    resolved = _resolve_path(parsed.path)
+    resolved = resolve_path(parsed.path)
 
     if not os.path.exists(resolved):
         return {"error": f"No such file or directory: {parsed.path}"}
@@ -250,7 +257,7 @@ def write_run(params: dict) -> dict:
             ),
         }
 
-    resolved = _resolve_path(parsed.path)
+    resolved = resolve_path(parsed.path)
     os.makedirs(os.path.dirname(resolved), exist_ok=True)
 
     try:
@@ -286,7 +293,7 @@ EDIT_TOOL_SCHEMA = {
 
 def edit_run(params: dict) -> dict:
     parsed = EditFileParams(**params)
-    resolved = _resolve_path(parsed.path)
+    resolved = resolve_path(parsed.path)
 
     if not os.path.isfile(resolved):
         return {"error": f"No such file: {parsed.path}"}

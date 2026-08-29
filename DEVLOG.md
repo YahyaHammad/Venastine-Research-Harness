@@ -7986,3 +7986,131 @@ whole suite with it, green. So two more:
 
 Count 2858 -> 2861.
 
+### Commit 3 --- what an edit actually looks like
+
+`write` and `edit` rendered as `> {name}  {param_digest(input)}`, and
+`param_digest` caps every value at 60 characters. So an edit showed the first
+60 characters of `old_text`, the first 60 of `new_text`, and nothing about
+where in the file they landed --- three questions a reader has, and the line
+answered none of them.
+
+**Chat mode only, and that is the data rather than a shortcut.** Research-mode
+tool lines come from `PipelineEvent`, which carries a pre-digested string and
+no params; and both tools are `GRANT_NEVER`, so a headless pass cannot call
+them at all.
+
+**The timing is the design.** The pre-image is read at `tool_call_start` ---
+the last moment the file still holds what is about to be replaced --- and the
+block is drawn at a SUCCESSFUL `tool_result`. A call can still be denied at the
+permission gate or refused by the tool, and a diff drawn at the call would show
+a change that never happened. The post-image is reconstructed from the call's
+own arguments (`params["content"]`, or `pre.replace(old, new, 1)` --- exactly
+what `edit_run` did, on a span the tool has already guaranteed unique) rather
+than read back, so it costs no second read and cannot pick up someone else's
+change in between.
+
+**`tools/builtin/file_ops.resolve_path` became public** so the TUI lands on the
+same file the tool will. A second `os.path.join(WORKSPACE_ROOT, ...)` at the
+call site is this project's canonical producer/consumer bug, and here it would
+mean a diff of one file beside an edit to another.
+
+**RichLog fights the one claim the feature makes.** `write()` raises a short
+renderable to `min_width` and `Strip.adjust_cell_length` pads the tail with an
+UNSTYLED segment --- so a changed row's background would stop at the last
+character of the source line, which is a coloured word rather than a marked
+line. Every row is therefore padded and written with an explicit `width=`. The
+wrap has to be ours for the same reason, and this is where the geometry test
+first passed against its own mutation:
+`test_a_wrapped_row_keeps_its_background_on_every_line` asserted that every
+tinted row carried the same background, and Rich's soft wrap does apply the
+`Text`'s style to each row it produces --- what it does not do is pad them.
+Measured with `wrap_source` stubbed out: rows of 78, 75, 78 and 66 cells, the
+tint stopping wherever the text broke. The test now asserts every tinted row is
+the transcript's full width.
+
+**The tints are derived, and two floors bound them.** `theme.success` and
+`theme.error` blended 0.8 toward `theme.background`. A literal green and red
+would be designed against one of the fourteen palettes and wrong on the other
+thirteen. The foreground has to read on the tint (>= 4.5:1; measured 9.3-12.2)
+AND the tint has to stand off the page (>= 1.15:1; measured 1.22-1.53) ---
+a readability floor alone is satisfied by blending further, which fades out the
+band the feature exists to draw.
+
+**Degradation is part of the contract.** `_snapshot` runs on the UI thread
+inside the message pump, so every way a read can fail comes back as None:
+absent, a directory, undecodable, past the TUI's own 512 KB cap (not
+`config.MAX_FILE_SIZE_BYTES`, which is 25 MB and bounds a different question),
+or a `path` that is not a string. From there `write` renders as all-new and
+`edit` renders its own old/new text without line numbers --- still strictly
+more than the digest showed.
+
+Five mutations, each killed by the claim it breaks: dropping the padding and
+the explicit width, stubbing out the wrap, drawing the block on a failed call,
+dropping the redaction, and putting the digest back on the tool line.
+
+### Files (commit 3)
+
+- `tui/diffs.py` (NEW) --- pure: `build_block`, `build_replacement_block`,
+  `parse`, `wrap_source`, and the canonical text format they share.
+- `tui/themes.py` --- `DIFF_TINT`, `_tint()`, and the four `diff_*` roles.
+- `tui/widgets.py` --- `Transcript._render_diff` / `_write_padded`, and the
+  `"diff"` branch in `_render_entry`.
+- `tui/app.py` --- `DIFFED_TOOLS`, `DIFF_SNAPSHOT_MAX_BYTES`, `_file_calls`,
+  `_snapshot()`, `_write_file_diff()`, and the two event branches.
+- `tools/builtin/file_ops.py` --- `_resolve_path` -> `resolve_path`.
+- `safety/policy_enforcement.py` --- `_redact_output_text` ->
+  `redact_output_text`, its second consumer being the diff.
+- `tests/test_diff_view.py` (NEW, 34 tests), `tests/test_themes.py`
+  (the tint floors), `tests/test_file_ops.py` (the rename).
+- `ROADMAP_v2.md` (§41, X4--X7), `AGENTS.md`, `ARCHITECTURE.md`, `README.md`,
+  `tests/BREAKING_CHANGES.md`.
+
+
+**One more thing the batch found on its way out.** The first draft redacted
+with `redact_secrets`, which catches the seven vendor tokens and none of the
+three credential SHAPES (#167) --- so the diff would have redacted LESS than
+the `param_digest` line it replaces. `_redact_output_text` had described itself
+as "the one redaction path tool OUTPUT takes" since batch 20 while being
+private with one caller; it is `redact_output_text` now, and a `write` renders
+the content the tool put on disk, which is tool output by any reading.
+
+That in turn forced the ORDER. `redact_output_text` sees more context in the
+file than in the argument -- `ci:pw@host/v1` is untouched standing alone and
+redacted inside `https://ci:pw@host/v1`, since the userinfo pattern anchors on
+`//` -- so redacting first leaves the redacted `old_text` no longer a substring
+of the redacted file, the replace finds nothing, and the block is empty for a
+reason unrelated to the edit. Reconstruct first, redact both sides after.
+
+And that leaves one honest gap, which is announced rather than hidden. Both
+sides taking the same substitution is what stops an unchanged secret reading as
+a spurious edit; it also collapses a change that was entirely INSIDE one, which
+is exactly what rotating a credential is. An empty block over a file that did
+change now prints a line saying so --- M14's rule, on the edit a reader is most
+likely to be checking.
+
+Three more mutations: `redact_secrets` for `redact_output_text`, redaction
+before the reconstruction, and dropping the note. The middle one passed on its
+first attempt, because the test edited BESIDE the credential rather than across
+it and `retries = 3` redacts to itself. Rewritten to edit across the redaction
+span, it goes red.
+
+Count 2861 -> 2965.
+
+### Deliberately not in batch 41
+
+**`core/replay.py` still renders a replayed `edit` as `> edit  {digest}`.** A
+replay reads the archive and has no file state from that moment, so the digest
+is genuinely all it has; the live view is better informed, and that asymmetry
+is a fact about the data rather than a gap. Noted in the module docstring so
+the next reader does not "fix" it.
+
+**`/init`'s diff is still an unstyled `difflib.unified_diff` written through
+`write_system`.** It could share this renderer and it would look better for it.
+It is a separate surface with its own consent flow, and folding it in would
+have made this batch's diff about two callers before it had one.
+
+**The transcript's research pass boundaries keep `->` / `<-`, and a failed tool
+call keeps its cross.** Those are a chronological log, not a checklist, and a
+row already drawn cannot be re-ticked --- a checkbox there is a checkbox that
+never changes.
+
