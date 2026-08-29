@@ -10,6 +10,7 @@ All tests run offline — subprocess and Docker are mocked.
 
 import os
 import platform
+import random
 import shlex
 import subprocess
 from unittest.mock import MagicMock, patch
@@ -32,6 +33,7 @@ from security.sandbox import (
     SANDBOXED_NET,
     UNKNOWN,
     SandboxUnavailable,
+    _SHELL_METACHARACTERS,
     _escapes_workspace,
     _is_inert,
     _needs_network,
@@ -49,6 +51,13 @@ from security.sandbox import (
 )
 from security import protected_paths
 from tools.builtin.shell import _shell_approval_check, _shell_approval_notice
+
+# Batch 39 builds command strings containing backslashes. Written as
+# `chr(92)` and concatenated rather than as escapes in a literal, because
+# `"cat \\/etc\\/passwd"` and `r"cat \/etc\/passwd"` are the same string
+# and look like different ones -- and a test whose SUBJECT is a
+# backslash must not be the place a reader has to count them.
+BS = chr(92)
 
 
 # ---------------------------------------------------------------------------
@@ -197,30 +206,63 @@ class TestIsInert:
 # ===========================================================================
 
 class TestNeedsNetwork:
+    """`first_word_only` is `_is_inert`, and `classify_command` is the only
+    caller that supplies it (Q2). These tests pass it explicitly; the
+    behaviour that matters -- which commands actually get the flag -- is
+    pinned at the classify level in TestChainingCannotHideBehindTheFirstWord.
+    """
 
     def test_pip_install(self):
-        assert _needs_network("pip install requests") is True
+        assert _needs_network("pip install requests", False) is True
 
     def test_curl(self):
-        assert _needs_network("curl https://example.com") is True
+        assert _needs_network("curl https://example.com", False) is True
 
     def test_git_clone(self):
-        assert _needs_network("git clone https://github.com/x/y") is True
+        assert _needs_network("git clone https://github.com/x/y",
+                              False) is True
 
     def test_no_network_command(self):
-        assert _needs_network("ls -la") is False
-        assert _needs_network("python script.py") is False
+        assert _needs_network("ls -la", True) is False
+        assert _needs_network("python script.py", False) is False
 
-    def test_keyword_in_args_does_not_grant_network(self):
-        """grep pip notes.txt must NOT grant network — only the
-        command name (first word) is checked."""
-        assert _needs_network("grep pip notes.txt") is False
-        assert _needs_network("echo git") is False
-        assert _needs_network("python script.py # pip") is False
-        assert _needs_network("make install-git-hooks") is False
+    def test_an_inert_commands_arguments_never_grant_network(self):
+        """The carve-out that survives Q2's reversal, and the reason it is
+        drawn at `_is_inert` rather than at a taste for fewer prompts: an
+        inert command carries no metacharacters, so it cannot chain, so its
+        first word is its only command position. Scanning its arguments
+        would make `grep pip notes.txt` prompt and buy nothing."""
+        assert _needs_network("grep pip notes.txt", True) is False
+        assert _needs_network("echo git", True) is False
+        assert _needs_network("cat curl", True) is False
+
+    def test_a_non_inert_commands_arguments_do(self):
+        """Q2, stated as the reversal it is. The old rule read the first
+        word only "to prevent a command from granting itself network access
+        via a keyword in its arguments", and that is exactly what this now
+        allows -- for commands that can chain, where the first word was
+        never the whole answer."""
+        assert _needs_network("echo hi && curl http://evil", False) is True
+        assert _needs_network("python -m pip install x", False) is True
+        assert _needs_network("cd proj && pip install -e .", False) is True
+
+    def test_a_false_positive_is_the_priced_cost(self):
+        """`python script.py # pip` has a comment, so it is not inert, so
+        the argument scan reaches the word in the comment. Recorded rather
+        than special-cased: stripping comments would be parsing, which is
+        the thing this module does not do (G2)."""
+        assert _needs_network("python script.py # pip", False) is True
+
+    def test_a_word_that_merely_contains_a_binary_name_does_not_match(self):
+        """Matching is per whole token after basename, not substring, so
+        the reversal did not widen to anything containing "git"."""
+        assert _needs_network("make install-git-hooks", False) is False
+        assert _needs_network("./configure --with-curl-support",
+                              False) is False
 
     def test_path_qualified_network_command(self):
-        assert _needs_network("/usr/bin/pip install x") is True
+        assert _needs_network("/usr/bin/pip install x", False) is True
+        assert _needs_network("x && /usr/bin/pip install y", False) is True
 
 
 # ===========================================================================
@@ -1264,3 +1306,291 @@ class TestTheWorkspaceBoundaryIsNotEnvironmentControlled:
         monkeypatch.setenv("AGENT_WORKSPACE", os.path.join("somewhere",
                                                            "else"))
         assert file_ops.WORKSPACE_ROOT == before
+
+
+# ===========================================================================
+# ---- Batch 39: escaping, and the first word of a compound command ---------
+# ===========================================================================
+
+
+class TestBackslashCannotHideAnEscape:
+    """Q1. Batch 37 closed the same hole for quotes and left one character
+    open.
+
+    `_escapes_workspace` reads raw `.split()` tokens; `_run_inert` execs
+    `shlex.split()` tokens, and in POSIX mode shlex consumes the backslash
+    exactly as it consumes quotes. So `cat \\/etc\\/passwd` was ONE token
+    that joined onto the workspace root and read as inside it -- classified
+    INERT, silently auto-approved, no prompt -- and then ran on the host as
+    `['cat', '/etc/passwd']`. Measured on a real POSIX host before the fix:
+    return code 0, and the contents of /etc/passwd came back.
+
+    `.\\.\\/etc/passwd` is in the corpus because it is the case the
+    leading-backslash spellings hide: it escapes by TRAVERSAL, so a guard
+    that only caught absolute paths after unescaping would miss it, and it
+    is the spelling that classifies INERT on Windows too.
+    """
+
+    BACKSLASH_ESCAPES = [
+        "cat " + BS + "/etc" + BS + "/passwd",
+        "cat " + BS + "/etc/passwd",
+        "cat ." + BS + "." + BS + "/etc/passwd",
+        "grep -r x --file=" + BS + "/etc/passwd",
+        "stat " + BS + "/root/.ssh/id_rsa",
+    ]
+
+    @pytest.mark.parametrize("command", BACKSLASH_ESCAPES)
+    def test_an_escaped_escape_is_no_longer_inert(self, command, _tiered):
+        assert _is_inert(command) is False
+        assert classify_command(command, _tiered).tier == SANDBOXED
+
+    @pytest.mark.parametrize("command", BACKSLASH_ESCAPES)
+    def test_reaching_the_host_now_costs_a_human(
+            self, command, _tiered, monkeypatch):
+        """With the fallback on -- the only configuration in which a
+        non-inert command reaches the host at all -- the answer is ASK.
+        Asserted against containment rather than against `_asks` alone,
+        because with the fallback OFF the same call returns False for the
+        opposite reason: nothing can run it, so there is nothing to
+        approve."""
+        monkeypatch.setattr(config, "ALLOW_INSECURE_SANDBOX_FALLBACK", True)
+        monkeypatch.setattr(config, "AUTO_APPROVE_SANDBOX_FALLBACK", False)
+        profile = classify_command(command, _tiered)
+        assert containment_for(profile, docker_available=False) == UNCONTAINED
+        assert _asks(command, docker=False) is True
+
+    @pytest.mark.parametrize("command", BACKSLASH_ESCAPES)
+    def test_and_with_docker_up_it_is_simply_contained(self, command, _tiered):
+        """The cost of the fix, measured. In the DEFAULT posture an escaped
+        command is still auto-approved -- it just runs in the container,
+        where /etc/passwd is the container's own."""
+        profile = classify_command(command, _tiered)
+        assert containment_for(profile, docker_available=True) == CONTAINED
+        assert _asks(command, docker=True) is False
+
+    def test_a_legitimate_escaped_workspace_path_still_works(self, _tiered):
+        """The friction this fix actually costs someone on POSIX: none,
+        under Docker. A workspace file whose name has a space in it is
+        SANDBOXED rather than INERT, and still runs without a prompt."""
+        assert _asks("cat notes" + BS + " file.txt", docker=True) is False
+
+    def test_the_windows_spelling_is_the_priced_regression(self, _tiered):
+        """Stated as a test so the cost cannot be forgotten and then
+        rediscovered as a bug. `cat sub\\dir\\notes.txt` runs on the inert
+        path today on Windows and now goes to Docker, where `bash -c`
+        strips the backslashes and it fails. Forward slashes work on
+        Windows for every INERT_COMMANDS binary; the failure is loud."""
+        command = "cat sub" + BS + "dir" + BS + "notes.txt"
+        assert _is_inert(command) is False
+        assert classify_command(command, _tiered).tier == SANDBOXED
+        assert _is_inert("cat sub/dir/notes.txt") is True
+
+
+class TestTheTwoTokenisersCannotDisagree:
+    """The property that makes Q1 a closure rather than the next patch in a
+    series, and the one that would have caught it a batch earlier.
+
+    shlex in POSIX mode consumes exactly four things: whitespace, `'`, `"`
+    and `\\`. Whitespace splits both tokenisers identically. The other
+    three are all rejected by `_SHELL_METACHARACTERS`. So for any command
+    the classifier is willing to look at as raw tokens, the raw tokens ARE
+    the tokens the executor will run -- no enumeration of spellings
+    required, and no character left to find next batch.
+    """
+
+    ALPHABET = (list("abc-./=") + [" ", "\t", "\n", BS, "'", '"']
+                + list(";|&$><(){}!#~") + ["`"])
+
+    def _samples(self, count):
+        """Deterministic, so a failure is reproducible from the seed alone
+        rather than being a flake someone reruns until it passes."""
+        rng = random.Random(20260829)
+        for _ in range(count):
+            length = rng.randint(1, 14)
+            yield "".join(rng.choice(self.ALPHABET) for _ in range(length))
+
+    def _commands(self, count):
+        """Samples with a REAL inert command in front.
+
+        Uniformly random strings are the right corpus for the tokeniser
+        property and the wrong one for the classifier property: their first
+        word is essentially never in INERT_COMMANDS, so every sample
+        classifies SANDBOXED and the test measures nothing. The assertion
+        on `seen_inert` below is what caught that, and it stays for the
+        same reason -- a corpus that stops reaching the tier it is about
+        must fail rather than pass vacuously.
+        """
+        rng = random.Random(20260829)
+        for _ in range(count):
+            args = "".join(rng.choice(self.ALPHABET)
+                           for _ in range(rng.randint(1, 14)))
+            yield "%s %s" % (rng.choice(config.INERT_COMMANDS), args)
+
+    def test_nothing_the_class_accepts_tokenises_two_ways(self):
+        """The closure, stated directly. Before the fix this found 870
+        divergent survivors in 300k samples and every one of them was a
+        backslash."""
+        for sample in self._samples(20000):
+            if not sample.strip():
+                continue
+            if _SHELL_METACHARACTERS.search(sample):
+                continue
+            try:
+                argv = shlex.split(sample, posix=True)
+            except ValueError:  # unbalanced quotes: rejected above anyway
+                pytest.fail("%r survived the class but does not tokenise"
+                            % sample)
+            assert sample.split() == argv, (
+                "the classifier reads %r and the executor runs %r -- one of "
+                "them is wrong about this command" % (sample.split(), argv))
+
+    def test_and_so_nothing_classified_inert_escapes_after_tokenising(
+            self, _tiered):
+        """The same property read through the gate rather than through the
+        tokenisers, which is the form that names the consequence: anything
+        auto-approved as INERT is still inside the workspace AFTER the
+        executor has finished with it.
+
+        `posix=True` deliberately, on every platform -- it is what
+        `_run_inert` uses on Linux and macOS, and it is the stricter of the
+        two, so the property holds everywhere rather than only where the
+        test happens to run. Batch 37 wrote that line and an enumerated
+        corpus underneath it; this is the generative half it was missing.
+
+        5000 samples rather than the sibling test's 20000: this one
+        resolves real paths, so it costs ~5s against that test's 0.2s, and
+        the count is set where the INERT yield stops climbing fast enough
+        to pay for the seconds.
+        """
+        seen_inert = 0
+        for sample in self._commands(5000):
+            if classify_command(sample, _tiered).tier != INERT:
+                continue
+            seen_inert += 1
+            argv = shlex.split(sample, posix=True)
+            for token in argv[1:]:
+                assert _within(_tiered, token), (sample, token)
+        assert seen_inert > 100, (
+            "the corpus produced %d INERT samples, too few to be testing "
+            "anything -- the alphabet or INERT_COMMANDS changed"
+            % seen_inert)
+
+
+class TestChainingCannotHideBehindTheFirstWord:
+    """Q2, at the level the flag is actually consumed.
+
+    NOT an escalation, and the record says so in both places: `network` is
+    one fact with two consumers, so the flag withheld from `echo hi &&
+    curl x` is the flag `_run_docker` reads, and the compound line ran
+    under `--network none`. What was wrong is that the profile asserted "no
+    network" about a call that plainly wanted it, and `auto_approved`
+    skipped the human on that basis.
+    """
+
+    def test_a_benign_first_word_no_longer_buys_an_auto_approval(
+            self, _tiered):
+        profile = classify_command("echo hi && curl http://evil", _tiered)
+        assert profile.tier == SANDBOXED_NET
+        assert profile.network is True
+        assert _asks("echo hi && curl http://evil", docker=True) is True
+
+    def test_and_the_user_can_now_say_yes_to_one_that_needs_it(self, _tiered):
+        """The half of Q2 that is a usability fix rather than a tightening.
+        These have no egress today AND are never asked about, so there is
+        no way for a user to allow them -- the command just fails inside a
+        network-less container for a reason nothing reports."""
+        for command in ["cd proj && pip install -e .",
+                        "python -m pip install requests",
+                        "git clone http://x && cd x"]:
+            assert classify_command(command, _tiered).network is True
+
+    def test_an_inert_command_is_unchanged(self, _tiered):
+        """The carve-out, pinned so a later simplification cannot delete it
+        as redundant. Deleting it makes `grep pip notes.txt` prompt."""
+        for command in ["grep pip notes.txt", "grep git notes.txt",
+                        "cat curl", "echo git"]:
+            profile = classify_command(command, _tiered)
+            assert profile.tier == INERT
+            assert profile.network is False
+            assert _asks(command, docker=True) is False
+
+    def test_what_made_the_old_rule_safe_is_still_true(self, _tiered):
+        """Verified-safe, recorded rather than dropped. The reason the
+        first-word rule could not escalate is that ONE value drives both
+        the gate and `--network`, so under-granting reaches the executor
+        too. Q2 changed which commands get the flag; it did not split the
+        flag in two, and splitting it is the #67/#133 shape this module
+        exists to avoid."""
+        profile = classify_command("echo hi && curl http://evil", _tiered)
+        with patch("security.sandbox.subprocess.Popen") as popen:
+            popen.return_value.communicate.return_value = ("", "")
+            popen.return_value.returncode = 0
+            _run_docker("echo hi && curl http://evil", _tiered,
+                        "bash", network=profile.network)
+        argv = popen.call_args[0][0]
+        assert profile.network is True
+        assert "none" not in argv, (
+            "the profile granted network, so the container must get it")
+
+    def test_and_when_it_is_withheld_the_whole_line_is_covered(self, _tiered):
+        """The other direction: no grant means `--network none`, which
+        applies to the compound line and not merely to its first word."""
+        profile = classify_command("echo hi && ls", _tiered)
+        assert profile.network is False
+        with patch("security.sandbox.subprocess.Popen") as popen:
+            popen.return_value.communicate.return_value = ("", "")
+            popen.return_value.returncode = 0
+            _run_docker("echo hi && ls", _tiered, "bash",
+                        network=profile.network)
+        argv = popen.call_args[0][0]
+        assert argv[argv.index("--network") + 1] == "none"
+
+
+class TestTheGateAnswersForEveryString:
+    """Q3. `classify_command` guards against a non-string command because
+    it is handed the model's tool-call input verbatim, before ShellParams
+    validates anything. The guard was one layer too shallow: a token that
+    IS a string but is not a resolvable PATH made `os.path.realpath` raise
+    out of `_within`, out of `_escapes_workspace`, out of
+    `classify_command`, and out of `registry.approval_needed()` -- which
+    has no handler, and neither does anything above it.
+
+    Found by the generative corpus rather than by review. `\\\\;` is not a
+    spelling anyone writes down.
+    """
+
+    MALFORMED = [
+        BS * 2 + ";",
+        BS * 2 + "?",
+        BS * 2 + "|x",
+        "cat " + BS * 2 + ";",
+        "ls " + BS * 2 + ";" + BS + "share",
+    ]
+
+    @pytest.mark.parametrize("token", [BS * 2 + ";", BS * 2 + "?"])
+    def test_an_unresolvable_token_reads_as_outside(self, token, _tiered):
+        """Fail CLOSED. False here means the argument escapes, which means
+        the command is asked about -- never that it is denied silently."""
+        assert _within(_tiered, token) is False
+
+    @pytest.mark.parametrize("command", MALFORMED)
+    def test_the_classifier_answers_instead_of_raising(
+            self, command, _tiered):
+        profile = classify_command(command, _tiered)
+        assert profile.tier in (INERT, HOST_READ, SANDBOXED,
+                                SANDBOXED_NET, UNKNOWN)
+
+    @pytest.mark.parametrize("command", MALFORMED)
+    def test_and_so_does_the_approval_gate(self, command, _tiered):
+        """The reachable failure, at the layer it was reachable from.
+        Before Q3 this raised OSError [WinError 668] on Windows."""
+        assert _asks(command, docker=True) in (True, False)
+
+    def test_a_resolvable_token_is_unaffected(self, _tiered):
+        """The except must not swallow the normal answer -- a bare
+        `except` here would make every token read as escaping and turn the
+        whole inert tier into a prompt."""
+        assert _within(_tiered, "notes.txt") is True
+        assert _within(_tiered, os.path.join("sub", "notes.txt")) is True
+        assert _within(_tiered, os.path.join("..", "escape.txt")) is False
+        assert classify_command("cat notes.txt", _tiered).tier == INERT

@@ -126,21 +126,38 @@ def is_docker_available() -> bool:
 # ---- Command classification -----------------------------------------------
 # ---------------------------------------------------------------------------
 
-# The two quote characters are here for a reason that is NOT "they are
-# shell syntax": this module tokenises a command twice, in two different
-# ways, and they have to agree. This classifier reads raw `.split()`
-# tokens; `_run_inert` execs `shlex.split()` tokens, and shlex STRIPS
-# quotes. So `cat "/etc/passwd"` was ONE token that joined onto the
-# workspace root and read as inside it -- classified INERT, silently
-# auto-approved -- and was then executed as `['cat', '/etc/passwd']` on
-# the host. Audit #157 again, arriving through the gap between two
-# tokenisers rather than through the gate.
+# The two quotes and the backslash are here for a reason that is NOT
+# "they are shell syntax": this module tokenises a command twice, in two
+# different ways, and they have to agree. This classifier reads raw
+# `.split()` tokens; `_run_inert` execs `shlex.split()` tokens, and shlex
+# CONSUMES all three. So `cat "/etc/passwd"` was ONE token that joined
+# onto the workspace root and read as inside it -- classified INERT,
+# silently auto-approved -- and was then executed as
+# `['cat', '/etc/passwd']` on the host. Audit #157, arriving through the
+# gap between two tokenisers rather than through the gate.
 #
 # Rejecting the character keeps this module's actual soundness argument
 # (reject syntax, never interpret it). Teaching the classifier to unquote
 # would close the same hole by making it the shell parser
 # `_escapes_workspace` explains it must never become.
-_SHELL_METACHARACTERS = re.compile(r"""[;|&$`><(){}!#~'"]""")
+#
+# Q1. The backslash arrived a batch later than the quotes, through the
+# same hole and for want of one character in this class. `cat \/etc\/passwd`
+# passed every check here, joined onto the workspace root as one token
+# that read as inside it, and shlex handed `['cat', '/etc/passwd']` to a
+# HOST subprocess -- measured on a POSIX host returning real content, at
+# the shipped "tiered" default. `.\.\/etc/passwd` did it by traversal
+# rather than by absolute path, which is why the leading-backslash
+# spelling is not the whole family.
+#
+# What makes this the LAST character rather than the next in a series:
+# shlex in POSIX mode consumes exactly whitespace, `'`, `"` and `\`, and
+# nothing else. Whitespace splits both tokenisers identically. The other
+# three are now all rejected. So for any command that reaches the inert
+# path, `command.split()` and `shlex.split(command)` are provably the
+# same list -- a closure, not a patch, and pinned as one by
+# `test_the_two_tokenisers_cannot_disagree`.
+_SHELL_METACHARACTERS = re.compile(r"""[;|&$`><(){}!#~'"\\]""")
 
 # Dangerous flags for commands that remain in INERT_COMMANDS.
 # Even though find/sort were removed, this denylist provides
@@ -154,14 +171,22 @@ _DANGEROUS_FLAGS: dict[str, frozenset[str]] = {
 
 def _is_inert(command: str) -> bool:
     """True if the command is a read-only inspection command with no
-    shell metacharacters, no quoting, no path-qualified binary, and no
-    dangerous flags — safe to run without full sandbox isolation.
+    shell metacharacters, no quoting, no escaping, no path-qualified
+    binary, and no dangerous flags — safe to run without full sandbox
+    isolation.
 
-    "No quoting" is load-bearing rather than tidy, and
-    _SHELL_METACHARACTERS carries the whole reason. A quoted argument
-    means this function and `_run_inert` disagree about where one token
-    ends, and a disagreement between the classifier and the executor is a
-    command approved as one thing and run as another."""
+    "No quoting and no escaping" is load-bearing rather than tidy, and
+    _SHELL_METACHARACTERS carries the whole reason. A quoted OR escaped
+    argument means this function and `_run_inert` disagree about where one
+    token ends, and a disagreement between the classifier and the executor
+    is a command approved as one thing and run as another.
+
+    The escape half is the one that took two batches (Q1, Q4). A backslash
+    survives every check here as an ordinary character, so
+    `cat .\\.\\/etc/passwd` reads as a relative path inside the workspace
+    -- and then shlex removes the backslashes and hands the executor
+    `../etc/passwd`. Escaping does not need to produce an ABSOLUTE path to
+    escape the workspace; it only needs to produce a different one."""
     stripped = command.strip()
     if not stripped:
         return False
@@ -184,18 +209,50 @@ def _is_inert(command: str) -> bool:
     return True
 
 
-def _needs_network(command: str) -> bool:
-    """True if the command's program name (first word) matches a word
-    in NETWORK_ALLOWED_COMMANDS. Only the invoked binary is checked —
-    not arguments, flags, or comments — to prevent a command from
-    granting itself network access via a keyword in its arguments."""
+def _needs_network(command: str, first_word_only: bool) -> bool:
+    """True if *command* names a binary in NETWORK_ALLOWED_COMMANDS.
+
+    Q2 REVERSES this function's original rule, which read the first word
+    only "to prevent a command from granting itself network access via a
+    keyword in its arguments". A compound command has more than one
+    command position, and the first word was never the whole answer:
+    `echo hi && curl http://evil` profiled as network=False on the
+    strength of `echo`.
+
+    That was not an escalation and the reversal is not a fix for one.
+    `network` is ONE fact with two consumers (see CommandProfile), so the
+    flag the classifier withheld is the flag `_run_docker` read, and the
+    whole compound line ran under `--network none` -- the egress was never
+    there to take. What was wrong is the CLASSIFICATION: the profile
+    asserted "no network" about a call that plainly wanted it, and
+    `auto_approved` skipped the human on that basis. It failed the user in
+    the other direction too, and that half is the more common one --
+    `cd proj && pip install -e .` and `python -m pip install x` have no
+    egress today, are never asked about, and so cannot be allowed.
+
+    *first_word_only* is not a caller preference; it is `_is_inert`, and
+    `classify_command` is the only caller. An inert command carries no
+    metacharacters, so it CANNOT chain -- its first word is its only
+    command position, and scanning its arguments would buy nothing while
+    making `grep pip notes.txt` and `grep git notes.txt` prompt. The
+    carve-out is the reversal's price, paid where it buys something and
+    not where it does not.
+
+    Known limit, stated because a half-understood control is worse than
+    none: a quoted spelling (`bash -c "curl x"`) tokenises as `"curl` and
+    does not match. That is the safe direction for the executor -- under-
+    granting means `--network none` -- and it is simply a tightening this
+    classifier does not get, because it still refuses to parse (G2).
+    """
     stripped = command.strip()
     if not stripped:
         return False
-    first_word = stripped.split()[0]
+    tokens = stripped.split()
+    if first_word_only:
+        tokens = tokens[:1]
+    allowed = set(config.NETWORK_ALLOWED_COMMANDS)
     # Strip path components for matching (e.g. /usr/bin/pip → pip)
-    first_word = os.path.basename(first_word)
-    return first_word in set(config.NETWORK_ALLOWED_COMMANDS)
+    return any(os.path.basename(token) in allowed for token in tokens)
 
 
 # ---------------------------------------------------------------------------
@@ -220,9 +277,31 @@ def _within(root: str, token: str) -> bool:
     in that direction and inverts the layering. And file_ops captures
     WORKSPACE_ROOT at IMPORT time, so it cannot follow a workspace that
     the caller passed in, which is the only thing this needs to do.
+
+    Q3. A token this cannot RESOLVE counts as outside, and the try/except
+    is load-bearing rather than defensive. `os.path.realpath` raises on
+    Windows for a malformed UNC path -- `OSError: [WinError 668]` on the
+    token `\\;` -- and this runs inside `classify_command`, which runs
+    inside `registry.approval_needed()`, which is handed the model's
+    tool-call input verbatim. There is no handler anywhere above it, so
+    `ls \\;` was an unhandled OSError out of the approval gate. That is
+    `classify_command`'s own totality requirement ("`command.strip()` on a
+    list is an AttributeError escaping the approval check and then the
+    loop") failing one layer further down, on a value that IS a string and
+    so walks straight past the isinstance guard written for it.
+
+    False is the only defensible answer: a path the harness cannot resolve
+    is not one it can vouch is inside the workspace, and this predicate's
+    False means "ask a human", never "deny silently". Found by the
+    generative corpus in TestTheTwoTokenisersCannotDisagree, which is what
+    a generative corpus is for -- no enumerated list of spellings anyone
+    would write was going to contain `\\;`.
     """
-    root = os.path.realpath(root)
-    resolved = os.path.realpath(os.path.join(root, token))
+    try:
+        root = os.path.realpath(root)
+        resolved = os.path.realpath(os.path.join(root, token))
+    except (OSError, ValueError):
+        return False
     return resolved == root or resolved.startswith(root + os.sep)
 
 
@@ -300,9 +379,14 @@ def classify_command(command: str, workspace_dir: str) -> CommandProfile:
             tier=UNKNOWN, measured=False, escapes_workspace=True,
             writes=True, network=False, reason="empty command")
 
-    network = _needs_network(stripped)
+    # Order matters, and only for Q2: `_needs_network` reads every command
+    # position of a compound command and the FIRST WORD ONLY of an inert
+    # one, and `_is_inert` is what tells those apart. One call, read twice
+    # -- not two calls, which is the shape #157 came from.
+    inert = _is_inert(stripped)
+    network = _needs_network(stripped, first_word_only=inert)
 
-    if _is_inert(stripped):
+    if inert:
         # INERT_COMMANDS is a read-only list and _DANGEROUS_FLAGS guards
         # the entries that have a writing mode, so writes=False here is a
         # claim about the COMMAND. It says nothing about the arguments,

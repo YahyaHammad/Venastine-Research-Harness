@@ -7456,3 +7456,168 @@ cannot be excused.
 Unchanged from batch 37. Two carried by this batch: the CLI does not stream,
 and `pass_activity` does not count thinking — both stated in place rather than
 left to be rediscovered.
+
+---
+
+## Batch 39 — the last tokeniser disagreement (2026-08-29)
+
+The question was whether the shell allowlist matches only the first keyword, so that
+`[inert command] && [dangerous command]` would be auto-approved on the strength of the
+inert half.
+
+**It does not, and the answer is worth writing down as carefully as a fix would be.**
+`_is_inert` does match `INERT_COMMANDS` on the first word — but the first-word match is
+not the gate. `_SHELL_METACHARACTERS` rejects the command outright if it contains any of
+`; | & $ ` > < ( ) { } ! # ~ ' "`, so a chained command leaves the inert host path before
+the allowlist is ever consulted. `ls && cat /etc/passwd`, `ls; cat /etc/passwd` and
+`ls | cat` all classify SANDBOXED. Every chaining construct in bash and PowerShell is
+covered by that one class.
+
+The proposed fix — split on `&&` and classify each segment — would have **opened** the
+hole it was aimed at. Splitting implies accepting a command containing `&&` into the
+inert path, and `_escapes_workspace`'s docstring forbids exactly that: "a classifier that
+starts interpreting shell syntax is a shell parser whose bugs auto-approve things". Today
+`&&` is a hard reject. Splitting turns a reject into a parse, and the parse has to be as
+good as bash's forever.
+
+**But the shape of the question was right.** Batch 37 closed the quoting bypass by adding
+`'` and `"` to that class, because the classifier reads raw `.split()` tokens while
+`_run_inert` execs `shlex.split()` tokens. It did not add `\`, which shlex also consumes.
+Measured on a real POSIX host, before the fix, at the shipped `"tiered"` default:
+
+```
+'cat \/etc\/passwd'   INERT   asks=False
+    -> RAN ON HOST rc=0 stdout='root:x:0:0:root:/root:/bin/bash | daemon:x:1:1:...'
+```
+
+#157 for the third time, through the one remaining gap between the two tokenisers. Same
+CVSS vector as batch 37's, 6.0, needing only `ToolPermissions.shell = True`.
+
+### The character was not the interesting part
+
+Adding `\` to a denylist is one character. What made it worth a batch is that the
+denylist can now be shown to be CLOSED rather than merely longer.
+
+shlex in POSIX mode consumes exactly four things: whitespace, `'`, `"` and `\`.
+Whitespace splits both tokenisers identically. The other three are now all rejected. So
+for any command that reaches the inert path, `command.split()` and `shlex.split(command)`
+are provably the same list — there is no fifth character to find next batch. Measured
+over a generated corpus before and after:
+
+```
+divergent survivors -- today: 870  |  with backslash rejected: 0
+```
+
+Every one of the 870 was a backslash. That is a different kind of statement from "we
+fixed the three spellings in the report", and it is the one the module needed after
+finding the same class of bug twice.
+
+### Windows, and a decision that cost something
+
+The obvious fix was platform-conditional: `_run_inert` uses `shlex.split(posix=False)` on
+Windows, so the classifier and the executor there already agree, and one shared
+`_POSIX_TOKENS` constant would have made that coupling explicit at zero cost to Windows
+users.
+
+It was rejected, and the reason is batch 37's own test. That batch locked the invariant
+at `posix=True` on **every** platform, reasoning it is "the stricter of the two, so the
+property holds everywhere rather than only where the test happens to run". And
+`cat .\.\/etc/passwd` — escape by TRAVERSAL rather than by absolute path — classifies
+INERT on Windows too. So making that test generative turns it red on Windows under the
+platform-conditional fix. Buying back one Windows convenience would have meant weakening
+a decision locked the day before.
+
+The cost is real and is now a test rather than a surprise: `cat sub\dir\notes.txt` works
+on the inert path on Windows today and now fails in a Linux container that strips the
+backslashes. Forward slashes work there for every `INERT_COMMANDS` binary, and the
+failure is loud.
+
+### The network flag, reversed on purpose
+
+`_needs_network` read the first word only, so `echo hi && curl http://evil` profiled as
+`network=False`. The owner's call was to scan every word, and the framing that settled it
+was theirs: *don't auto-block networked commands the user might have wanted to approve,
+and don't let the agent hide one behind a benign first word.*
+
+One correction went into the record with it. **This was never an escalation.** `network`
+is one fact with two consumers, so the flag the classifier withheld is the flag
+`_run_docker` reads — the compound line ran under `--network none` and the egress was
+never there to take. What was wrong is the CLASSIFICATION: the profile asserted "no
+network" about a call that plainly wanted it, and `auto_approved` skipped the human on
+that basis. The half users actually feel runs the other way — `cd proj && pip install -e .`
+and `python -m pip install x` have no egress today AND are never asked about, so there is
+no way to allow them; the command just fails inside a network-less container for a reason
+nothing reports.
+
+The reversal stops at `_is_inert`, which is what keeps it from costing anything it
+shouldn't. An inert command carries no metacharacters, so it cannot chain — its first
+word is its only command position. Scanning its arguments would make `grep pip notes.txt`
+and `grep git notes.txt` prompt and buy nothing. `python script.py # pip` is the false
+positive that remains, and it stays: stripping comments would be parsing.
+
+### What the corpus found that the review did not
+
+The generative test was written to pin Q1. On its first run it failed on `\\;` — with an
+`OSError: [WinError 668]` from `os.path.realpath`, raised out of `_within`, out of
+`classify_command`, out of `registry.approval_needed()`, which is handed the model's tool
+input verbatim and has no handler anywhere above it. `ls \\;` crashed the approval gate.
+
+That is `classify_command`'s own totality requirement failing one layer below where it was
+written. The isinstance guard exists precisely because this function is handed raw model
+output — and `\\;` is a perfectly good string, so it walked straight past. `_within` now
+fails closed, which for this predicate means "ask", never "deny silently".
+
+Nobody was going to find that by reading. `\\;` is not a spelling anyone writes down. It
+is the argument for generating the corpus instead of enumerating it, and batch 37 had
+already made that argument in a docstring — "over a corpus rather than over the three
+spellings that happened to be found" — above eight hand-written spellings, none with a
+backslash. The invariant was named correctly and under-populated, and it passed for a day
+over the one character that broke it.
+
+An enumerated corpus can only contain the cases its author already thought of, which is
+the set that has already been fixed.
+
+### One test that passed while measuring nothing, caught before it could
+
+The first draft of the generative classifier test built samples from a uniformly random
+alphabet. Their first word is essentially never `ls` or `cat`, so every sample classified
+SANDBOXED, the INERT branch was never reached, and the test passed. It only failed
+because it had been written with `assert seen_inert > 100` underneath the loop.
+
+That guard is the whole reason the bug lasted minutes rather than shipping green. It
+stays, and its sibling — the enumerated corpus that had no backslash — is why.
+
+### Verification
+
+Tests 2742 -> 2782, full suite green. Four mutations, each killed by the test whose
+subject it is: the character class (14 tests, including both generative properties), the
+network rule (6), the inert carve-out (exactly 1), the `_within` guard (4). The first
+mutation attempt applied nothing — a heredoc ate the backslashes and the suite went green
+against unmutated code — so the mutation script now exits non-zero when its pattern is
+absent, rather than letting a no-op score kills. Same trap as batch 37's, arriving through
+a different door.
+
+End to end on a real POSIX host via WSL, before and after: the bypass returned the
+contents of `/etc/passwd` unprompted, and now classifies SANDBOXED and never reaches
+`_run_inert`. `cat notes.txt` is still INERT and still auto-approved.
+
+### Files
+
+- `security/sandbox.py` — `\` into `_SHELL_METACHARACTERS` with the closure argument;
+  `_needs_network(command, first_word_only)`; `classify_command` reads `_is_inert` once
+  and passes it; `_within` fails closed.
+- `tests/test_shell.py` — `TestBackslashCannotHideAnEscape`,
+  `TestTheTwoTokenisersCannotDisagree` (the generative pair),
+  `TestChainingCannotHideBehindTheFirstWord`, `TestTheGateAnswersForEveryString`, and
+  `TestNeedsNetwork` rewritten around the reversal.
+- `ROADMAP_v2.md` (§39, Q1–Q6), `AGENTS.md`, `ARCHITECTURE.md`, `README.md`,
+  `tests/BREAKING_CHANGES.md`.
+
+### Still open
+
+Unchanged from batch 38, plus one carried by this batch: `_escapes_workspace` still reads
+raw tokens for the SANDBOXED tier, where quotes and backslashes are legal. It is a
+reporting inaccuracy in `profile.reason` and not a gate — under CONTAINED
+`auto_approved` never consults `escapes_workspace`, and under UNCONTAINED `writes=True`
+already forces the ask — but it is stated in §39 rather than left to be rediscovered as a
+hole.

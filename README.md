@@ -661,7 +661,7 @@ Deliberately not settings.json keys: editing these means editing the file in you
 | `MODELS_REJECTING_SAMPLING_PARAMS` | current Anthropic models | These 400 on temperature/top_p/top_k; such parameters are dropped with a WARNING rather than sent |
 | `MODEL_CONTEXT_WINDOWS` / `DEFAULT_CONTEXT_WINDOW` | 200k fallback | The **fallback** for the window, not the only source: Anthropic and Google report it on their model endpoints, and the OpenAI-compatible providers that carry it (Groq, Mistral, Together, OpenRouter) are read through one alias sniff. This table answers for the ones that report nothing (OpenAI, DeepSeek, Perplexity). Feeds the research-pass compaction backstop **and** the summarizer's one-call input budget; an unknown model warns once and assumes the default. Keys are stored normalized — no date suffix, no `vendor/` prefix |
 | `SHELL_APPROVAL_MODE` | `"tiered"` | The shell gate: `always` / `tiered` / `never`; a bad value raises at import. Rejected in settings.json by name, see above |
-| `NETWORK_ALLOWED_COMMANDS` | pip, curl, git, npm, … | First words granted network access inside the sandbox |
+| `NETWORK_ALLOWED_COMMANDS` | pip, curl, git, npm, … | Binaries granted network access inside the sandbox. Matched against **every** word of a command that needs a sandbox, so `cd x && pip install .` is recognised and asked about — and against the **first word only** of an inert one, which cannot chain, so `grep pip notes.txt` still runs unprompted |
 | `INERT_COMMANDS` | ls, cat, grep, wc, … | Read-only commands that run as plain host subprocesses, skipping Docker entirely |
 | Sandbox bounds | image `python:3.13-slim`; 60 s, 1024 MB, 30 CPU-s, 200 pids | `SANDBOX_DOCKER_IMAGE`, `SANDBOX_TIMEOUT_SECONDS`, `SANDBOX_MEMORY_MB`, `SANDBOX_CPU_SECONDS`, `SANDBOX_MAX_PIDS` |
 | `ALLOW_INSECURE_SANDBOX_FALLBACK` / `AUTO_APPROVE_SANDBOX_FALLBACK` | `False` / `False` | Enable, then de-prompt, the weak host-subprocess fallback |
@@ -729,7 +729,7 @@ classifier is described under *Security model* above. If you have a fork or a lo
 note that `ToolApprovals.shell` now ships `False` and `SHELL_APPROVAL_MODE` is the gate — see
 `tests/BREAKING_CHANGES.md` §24.
 
-Run the test suite with `pytest` — 2742 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
+Run the test suite with `pytest` — 2782 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
 
 ## Documentation
 

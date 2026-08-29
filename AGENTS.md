@@ -42,7 +42,7 @@ python main.py --init --research-project           # §24: skip the type questio
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 2742 tests, offline, ~25-45s by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 2782 tests, offline, ~25-45s by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -115,7 +115,7 @@ published npm version can never be replaced — only deprecated.
 Read these before changing anything non-trivial — they carry design decisions that are locked, not defaults to re-derive.
 
 - **ARCHITECTURE.md** — what's built, file-by-file contracts ("what belongs here / what does NOT"), known gotchas (§11).
-- **ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **ROADMAP_v2.md** (§13–§36, all built) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I13 from §24, J1–J14 from §23, E1–E12 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A11 from §32, W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37 and O1–O8 from §38). Section and D-numbers are stable and cross-referenced everywhere.
+- **ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **ROADMAP_v2.md** (§13–§39, all built) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I13 from §24, J1–J14 from §23, E1–E12 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A11 from §32, W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37, O1–O8 from §38 and Q1–Q6 from §39). Section and D-numbers are stable and cross-referenced everywhere.
 
 **Six namespaces use the same `LETTER+NUMBER` shape, and only the first is the
 record.** An id that resolves to two places is a cross-reference that fails
@@ -632,7 +632,20 @@ Read §28's record before touching `security/sandbox.py`, `security/capability.p
   path; a flag passes only because it is relative. `_is_inert` is sound *because* it
   rejects metacharacters rather than understanding them, and a classifier that learns
   shell syntax is a shell parser whose bugs auto-approve. False positives are the
-  designed error direction.
+  designed error direction. **This is also why `&&` is not a hole** — the chained
+  command is rejected wholesale, so the first-word allowlist match never decides
+  anything. Splitting on separators to classify each segment would *undo* that.
+- **`_SHELL_METACHARACTERS` is closed under shlex, and that is the whole point** (Q1,
+  Q5). The class exists because this module tokenises twice — the classifier reads raw
+  `.split()` tokens, `_run_inert` execs `shlex.split()` tokens — and shlex consumes
+  exactly whitespace, `'`, `"` and `\`. Whitespace splits both the same way; the other
+  three are all rejected, so the raw tokens ARE the executed tokens. #157 arrived
+  through this gap twice: quotes in §37, the backslash in §39, both auto-approving a
+  host read of an arbitrary file. **Removing a character from that class re-opens it**,
+  and `TestTheTwoTokenisersCannotDisagree` is what says so.
+- **`_within` fails closed** (Q3). `realpath` raises on a malformed UNC path, and this
+  runs inside the approval gate on model-supplied input with no handler above it.
+  Unresolvable means "outside", which means "ask".
 - **`profile.measured` gates every containment branch** (G5). A profile that could not be
   characterised answers `False` to every capability question, so without it the
   CONTAINED branch approves an unmeasurable command *for having no network*. It is also
@@ -640,7 +653,9 @@ Read §28's record before touching `security/sandbox.py`, `security/capability.p
 - **`classify_command` must stay total.** `registry.approval_needed` is handed the
   model's tool input verbatim; `ShellParams` does not validate until `run()`, which is
   after approval. A non-string `command` used to be an `AttributeError` escaping the
-  approval check and then the loop.
+  approval check and then the loop. **Totality is deeper than the isinstance guard**
+  (Q3): `ls \\;` is a perfectly good string whose token made `realpath` raise, so it
+  walked past the guard written for exactly this and crashed the gate anyway.
 
 `shell_approval_mode` is rejected in `settings.json` **by name** (G7), the way R12
 rejects `research.granted_tools`: a project's settings beat the user's, and this key
