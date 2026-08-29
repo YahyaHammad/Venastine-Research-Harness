@@ -60,7 +60,19 @@ _LIGHT_BASE = {
 # is pinned in tests/test_themes.py; these are the minimal luminance moves
 # that clear it.
 _ACCENTS_DARK = {
-    "plain": ("#8a93a3", "#8792a2", "#a9b2c3"),
+    # dark-plain's ACCENT was lifted in batch 41 (X1), for batch 29's
+    # reason applied to a different axis. #14 measured contrast against
+    # the BACKGROUND; this is separation between two roles that sit on
+    # adjacent lines. `tool` renders in accent and `thinking` in
+    # secondary, and on a deliberately monochrome theme hue cannot
+    # separate them -- only lightness can. #a9b2c3 was 98.5 redmean
+    # units from #8792a2, the tightest secondary/accent pair of all
+    # fourteen themes (the next is paper at 143.8). #b8c1d1 is 142.7,
+    # which clears that floor while staying 111 units off the
+    # foreground -- go lighter and the assistant label melts into the
+    # body text it introduces, which is the same defect facing the
+    # other way.
+    "plain": ("#8a93a3", "#8792a2", "#b8c1d1"),
     "red": ("#d4674f", "#b0513c", "#e8917b"),
     "green": ("#5fa876", "#4d8f63", "#8ecba1"),
     "blue": ("#5b90cc", "#4a76b3", "#8bb6e6"),
@@ -226,10 +238,29 @@ def role_styles(theme: Theme) -> dict[str, str]:
         "thinking": f"italic {theme.secondary}",
         "pass": f"bold {theme.secondary}",
         "pass_done": theme.secondary,
-        "tool": f"dim {theme.accent}",
+        # PLAIN accent, not `dim` (batch 41, X1). Two reasons, and the
+        # second is the one that generalises. `dim {accent}` sat a
+        # measured 98.5 redmean units from `thinking`'s
+        # `italic {secondary}` on dark-plain -- the shipped default,
+        # and the tightest pair of any theme (every other theme is
+        # >= 143) -- so a tool call and a reasoning line were one
+        # colour on the palette most people actually see. And `dim` is
+        # a Rich ATTRIBUTE, not a colour: tests/test_themes.py's
+        # contrast floors measure the undimmed hue and cannot see what
+        # the terminal paints, so the style on EVERY tool call was the
+        # one style whose real contrast nothing measured. Plain accent
+        # moves it up, away from secondary, into a number the floors
+        # can see.
+        "tool": theme.accent,
         # How bad it is. The three shared colours.
         "tool_error": theme.warning,
-        "warning": theme.warning,
+        # BOLD, where tool_error is plain (X2). Both are non-fatal and
+        # keep the hue family; the weight separates the harness raising
+        # its voice from a tool that failed. They were the same string
+        # outright until batch 41, which was survivable only because
+        # nothing routed a WARNING here at all -- see
+        # TranscriptLogHandler, where that was the actual defect.
+        "warning": f"bold {theme.warning}",
         "error": f"bold {theme.error}",
         "success": theme.success,
         # Confidence tiers, ordered worst-to-best in meaning rather than in

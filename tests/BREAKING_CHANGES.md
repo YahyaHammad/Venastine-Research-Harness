@@ -2887,3 +2887,12 @@ Count 2742 -> 2786.
 | A source-scan assertion must ignore commented-out lines | `test_the_publish_guard_is_wired_into_the_prepublish_check`, and any test written the same way | The first version asserted `"problems.push(...unsafeBranchProblems());" in src` and **survived the mutation that comments that exact line out**, because the substring is still there. Scan live lines only. Found by running the mutation, not by reading the assertion |
 
 Count 2786 -> 2815.
+
+## Batch 41 — the transcript's vocabulary (2026-08-29)
+
+| Change | What breaks | Symptom / fix |
+|---|---|---|
+| `LogRecordMessage(text, is_error)` is now `(text, role)` | Any test patching `Transcript.write_system` or `write_error` to observe a routed log record — `test_tui.py` had three | The test does not error, it goes **vacuous**: `write_system` is simply never called any more, so an assertion that nothing appeared there passes for the wrong reason. That is exactly what `test_info_is_not_routed_to_the_transcript` would have done. Patch `write_role` and assert on the `(role, text)` pair |
+| `role_styles()["warning"]` is `bold {warning}`, not `{warning}` | Any caller composing its own weight on top | `GoalBanner` did, and produced `bold bold #d9a441` — Rich accepts it, and `test_a_theme_switch_restyles_the_goal_banner` compares the style string exactly, so it fails with a readable diff. Use the role verbatim; the weight is the role's decision now |
+| `dark-plain`'s accent is `#b8c1d1`, not `#a9b2c3` | A test pinning that hex, and anything reading `$accent` in `app.tcss` expecting the old value | Intended (X1). It is the accent's turn at batch 29's #14 treatment, on a different axis: #14 measured contrast against the background, this measures separation from `secondary`, which is what `thinking` and `pass_done` render in. `tests/test_themes.py::test_a_tool_call_is_visibly_apart_from_a_reasoning_line` is the pin |
+| A new transcript role must clear three checks, not one | Adding a role to `MESSAGE_ROLES` in `tests/test_themes.py` | Pairwise-distinct style strings, a redmean separation of ≥ 120 from the roles it sits beside, and no `dim` unless it is `system`. If a role legitimately needs `dim`, say why in `test_dim_is_the_system_role_alone` rather than widening the exception silently — the whole point is that neither of the other two checks can see it |

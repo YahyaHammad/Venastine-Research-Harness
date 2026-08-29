@@ -50,7 +50,7 @@ Venastine Research Harness/
 ├── CLAUDE.md / QWEN.md             # pointers to AGENTS.md, so a harness that auto-loads one of those names finds the context instead of a second copy of it
 ├── DEVLOG.md                       # implementation notes for built ROADMAP sections -- see §0
 │
-├── tests/                          # 2815 tests, all offline, ~25-45s depending on the machine (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
+├── tests/                          # 2858 tests, all offline, ~25-45s depending on the machine (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
 │   ├── conftest.py                 # fixtures: make_model_response, make_stream_from_response, make_stream_sequence, FakeStorage, ...
 │   ├── BREAKING_CHANGES.md         # what-breaks-it / symptom / fix per area
 │   ├── test_cli.py                 # 87 tests -- ROADMAP §1 thread_id passthrough + UUID validation + §14 parser defaults/resolution/trust flow + §29 N1-N8 the one stdin reader, N2's channel deadline, every request kind rendered, and the startup block main(argv) made reachable + #102's four declining defaults
@@ -91,7 +91,7 @@ Venastine Research Harness/
 │   ├── test_untrusted_content.py   # 26 tests -- ROADMAP_v2 §32 A8 (#72): the injection defence in one copy reaching both modes, the ten pass prompts pinned byte-identical by digest across the extraction, and the two tails naming different instruction sources for the same rule
 │   ├── test_client_effort.py       # 26 tests -- ROADMAP_v2 §16 effort levels: queried for Anthropic, table fallback, effort_for validation, cache behaviour
 │   ├── test_ensemble_guard.py      # 15 tests -- §10 revisit: refuse an ensemble roster that cannot disagree with itself
-│   ├── test_themes.py             # 120 tests -- batch 29: the roster (grid names unchanged, six standalone tinted themes), role-slot completeness for every theme, and #14's contrast floors (foreground >= 7:1, severity >= 4:1, identity >= 3.5 dark / 3.0 light) computed from the Theme objects; plus #183's restyle wiring and the /theme hint
+│   ├── test_themes.py             # 163 tests -- batch 29: the roster (grid names unchanged, six standalone tinted themes), role-slot completeness for every theme, and #14's contrast floors (foreground >= 7:1, severity >= 4:1, identity >= 3.5 dark / 3.0 light) computed from the Theme objects; plus #183's restyle wiring and the /theme hint; batch 41 adds the transcript-role pins (X1/X2): pairwise distinctness over MESSAGE_ROLES, a redmean separation floor between the tool and thinking slots, and `dim` confined to the system role
 │   ├── test_tui.py                 # 164 tests -- ROADMAP_v2 §16 AC1-AC3 (thread picker, permission round-trip, worker survives a raising tool) + §25 grant picker / attended modal + #106's two axes staying independent + /model's provider/model switch + #172's one-shot notices
 │   ├── test_mcp_config.py          # 42 tests -- ROADMAP_v2 §17 mcp.json discovery, tier precedence D29, unknown-key tolerance, strict flag parsing; §37 F1-F3/F5 describe disclosure + store v2
 │   ├── test_mcp_client.py          # 45 tests -- ROADMAP_v2 §17 bridge, cancel-scope task affinity, v2 field names, normalization; §37 F4-F8 teardown budget, straggler naming, catalogue cache, M17/M18/M25/M13 pins. AC6 is split in two (batch 32): a CRASHED tool asserts only the in-band error convention, because whether its text reaches the client is the server's policy and mcp 2.1.0 changed it; a DELIBERATE ToolError asserts the message survives, which both pinned versions honour
@@ -225,7 +225,7 @@ Venastine Research Harness/
 │   ├── widgets.py                 # transcript (Rich Syntax highlighting), raven panels, research progress, GoalBanner
 │   ├── commands.py                # slash-command registry -- MECHANISM only; §18/§19/§21 register into it
 │   ├── screens.py                 # ModalScreens: permission prompt (AC2), thread picker
-│   ├── themes.py                  # 14 themes -- the 8-theme neutral grid (dark/light x plain/red/green/blue) + 6 standalone tinted themes (matrix, nightmare, ember, midnight, glassy-lapis, paper) whose panels carry the identity; role_styles resolves per theme; #14's contrast floors are pinned in tests/test_themes.py
+│   ├── themes.py                  # 14 themes -- the 8-theme neutral grid (dark/light x plain/red/green/blue) + 6 standalone tinted themes (matrix, nightmare, ember, midnight, glassy-lapis, paper) whose panels carry the identity; role_styles resolves per theme; #14's contrast floors and batch 41's role-separation floor are pinned in tests/test_themes.py
 │   ├── preferences.py             # the remembered theme -- a USER-tier store beside settings.json (~/.config/venastine/ui_preferences.json), never a write into it
 │   ├── ravens.py                  # mascot art + the tool-name -> activity-state table
 │   └── app.tcss                   # styles, driven off theme variables rather than literals

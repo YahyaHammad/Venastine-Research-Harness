@@ -7865,3 +7865,68 @@ call. They are the D14 ratchet and can only tighten, so the same mutation
 against them causes prompts rather than skipping them — a different risk,
 and one that wants its own batch rather than a rider on this one. Stated
 here rather than left to be rediscovered as an inconsistency.
+
+
+## Batch 41 — the transcript's vocabulary (2026-08-29)
+
+Three complaints from using the TUI, one of which had a real defect under it.
+Landed as three commits: colour, then markers, then what an edit looks like.
+
+### Commit 1 — three kinds of line stopped looking alike
+
+**The reported symptom.** Warnings, thinking and tool calls read as one grey
+blur. Measured rather than agreed with: `system` is `dim italic`, `thinking`
+is `italic {secondary}`, `tool` was `dim {accent}`, and on dark-plain --- the
+shipped default --- accent and secondary sit **98.5 redmean units** apart, the
+tightest such pair of all fourteen themes (the next is paper at 143.8).
+
+**The defect underneath it.** `TranscriptLogHandler` exists *because* the TUI
+detaches stderr, and it flagged only `levelno >= logging.ERROR`. The receiving
+branch therefore had two cases and neither was warning: every WARNING it
+routed went to `write_system`, the role that means "the harness narrating
+itself". `themes.role_styles` has carried a `warning` colour since §26 and no
+transcript line had ever used it --- the only consumer was `GoalBanner`, which
+composed its own weight on top. So the component whose whole job is making
+warnings visible had been delivering them invisibly since it was written.
+
+**What changed.** `LogRecordMessage` carries a palette ROLE, not an `is_error`
+bool, and `on_log_record_message` is one `write_role()` call. `warning` became
+`bold {theme.warning}` (`tool_error` stays plain --- both are non-fatal and
+keep the hue, the weight separates them), `tool` lost its `dim`, and
+dark-plain's accent went `#a9b2c3` -> `#b8c1d1`. `GoalBanner` stopped
+composing `bold`, which with the weight now in the role would have rendered
+`bold bold #d9a441`.
+
+**The first test passed against the reverted bug.** The pairwise
+style-STRING check catches `warning == tool_error`, and it does not catch
+`dim {accent}` vs `italic {secondary}` --- those are different strings. Two
+more pins were written after watching it stay green through the revert:
+
+- a **redmean separation floor** (120) between the accent and secondary slots.
+  Not WCAG contrast: contrast cannot see hue, and dark-plain's accent and
+  warning sit at a luminance ratio of 1.05 while being obviously different.
+- **`dim` confined to `system`.** A role whose only mark is an attribute is a
+  role neither of the other checks can see. Scoped to `MESSAGE_ROLES`, so it
+  says nothing about `UNVERIFIED_COVERAGE`, where `dim {error}` sits beside an
+  undimmed `UNVERIFIED` and the attribute carries meaning against a sibling.
+
+Four mutations, each killed by the pin whose subject it is: `tool` back to
+`dim {accent}` (14 themes red on the dim rule), dark-plain's accent back to
+`#a9b2c3` (1 red on the separation floor), `warning` back to plain (14 red on
+pairwise distinctness), and the log routing back to the two-branch form (2 red
+in `test_tui.py`).
+
+### Files (commit 1)
+
+- `tui/themes.py` --- `role_styles`' `tool` and `warning`; dark-plain's accent.
+- `tui/app.py` --- `LogRecordMessage(text, role)`, `TranscriptLogHandler.emit`,
+  `on_log_record_message`.
+- `tui/widgets.py` --- `GoalBanner` stops composing its own weight.
+- `tests/test_themes.py` --- `MESSAGE_ROLES` and the three pins (+43 tests).
+- `tests/test_tui.py` --- the three log-routing tests repointed at
+  `write_role`, including the INFO control, which would otherwise have passed
+  by watching a method logging no longer calls.
+- `ROADMAP_v2.md` (§41, X1--X2), `AGENTS.md`, `ARCHITECTURE.md`, `README.md`,
+  `tests/BREAKING_CHANGES.md`.
+
+Count 2815 -> 2858.

@@ -285,12 +285,12 @@ class GoalBanner(Static):
             self.display = True
             # The palette, not a literal (#116): `warning` is one of the
             # three theme-invariant roles, so the hue means the same thing
-            # on every theme. The WEIGHT stays bold -- composing it
-            # here is what role_styles itself does ("bold {theme.primary}")
-            # -- but guarded, because a bare-built widget has no styles
-            # dict to draw the colour from.
-            colour = self._styles().get("warning", "")
-            style = f"bold {colour}" if colour else "bold"
+            # on every theme. The WEIGHT is carried by the role itself
+            # since batch 41 (X2) -- this used to compose `bold {colour}`
+            # over a plain hue, which now yields "bold bold #d9a441" and
+            # is the second place a weight would be decided. Guarded still,
+            # because a bare-built widget has no styles dict at all.
+            style = self._styles().get("warning", "") or "bold"
             self.update(Text(f"goal  {self.goal}", style=style))
         else:
             self.display = False

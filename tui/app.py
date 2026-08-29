@@ -102,9 +102,16 @@ class LogRecordMessage(Message):
     the same rule LoopEventMessage follows.
     """
 
-    def __init__(self, text: str, is_error: bool) -> None:
+    def __init__(self, text: str, role: str) -> None:
         self.text = text
-        self.is_error = is_error
+        # A PALETTE ROLE, not a severity bool (batch 41, X2). It used to
+        # be `is_error`, and the receiving branch chose between
+        # write_error and write_system -- so every WARNING, the whole
+        # reason this handler exists, rendered as `system`: dim italic,
+        # indistinguishable from the harness announcing its own model
+        # name. `themes.role_styles` has carried a `warning` style since
+        # §26 and no transcript line had ever used it.
+        self.role = role
         super().__init__()
 
 
@@ -136,7 +143,7 @@ class TranscriptLogHandler(logging.Handler):
             # narrow transcript for no gain.
             self._app.post_message(LogRecordMessage(
                 f"[{record.levelname.lower()}] {record.getMessage()}",
-                record.levelno >= logging.ERROR,
+                "error" if record.levelno >= logging.ERROR else "warning",
             ))
         except Exception:  # noqa: BLE001 -- see the docstring
             pass
@@ -493,15 +500,17 @@ class VenastineApp(App):
             self._log_handler = None
 
     def on_log_record_message(self, message: LogRecordMessage) -> None:
-        """Render a routed log record.
+        """Render a routed log record in the role the handler chose.
 
         Never re-enters the logger: Transcript.write* does no logging, so
         a handler feeding a widget that logs cannot loop here.
+
+        `write_role("error", ...)` is byte-identical to `write_error()` --
+        both flush the stream and fall to _render_entry's else branch --
+        so routing both levels through one call costs the error path
+        nothing and gives the warning path the style it never had.
         """
-        if message.is_error:
-            self._transcript.write_error(message.text)
-        else:
-            self._transcript.write_system(message.text)
+        self._transcript.write_role(message.role, message.text)
 
     def refresh_status(self) -> None:
         """Keep the header showing which provider/model turns will use.

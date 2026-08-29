@@ -166,6 +166,7 @@ the namespace list in `AGENTS.md`.
 - **§36. Compaction's boundaries — trigger, notice, pin, summarizer input** — BUILT (#43, #44, #45, #89, #90, #92, #172; closes units 4 and 11)
 - **§37. MCP's edges — disclosure, SSE, teardown, catalogue** — BUILT (#60, #61, #62, #63, #64, #65; closes unit 7)
 - **§38. Live output — progressive rendering and visible thinking** — BUILT (the transcript buffered a whole turn; thinking was never captured at all)
+- **§41. The transcript's vocabulary — colour, markers, and what an edit looks like** — BUILT (three kinds of line shared one grey; the `warning` role was unreachable; `write`/`edit` showed 60 characters of payload instead of a change)
 - **Open Questions — None Remaining** (Rev. 3 — all decisions locked; verification items only)
 - **Why these calls, not just what they are** (Rev. 3 — the reasoning patterns behind several decisions above)
 
@@ -3362,3 +3363,49 @@ generalises: a project's settings beat the user's and arrive with a directory yo
 are still constructed per call. They are the D14 ratchet and can only tighten, so the same mutation
 against them causes prompts rather than skipping them — a different risk, and one that wants its own
 batch rather than a rider on this one.
+
+
+## §41. The transcript's vocabulary — colour, markers, and what an edit looks like
+
+**Status: BUILT.** Three complaints from using the TUI, one of which turned out to have a real
+defect underneath it.
+
+**Three kinds of line were one colour, and one of them was never coloured at all.**
+`role_styles` gave `system` = `dim italic`, `thinking` = `italic {secondary}` and `tool` =
+`dim {accent}`. Across the grid themes accent and secondary are one luminance step apart in the
+same hue, so dimming accent lands it on secondary: a tool call and a reasoning line rendered
+identically, and the dim grey `system` sat close enough to both to complete the blur. Underneath
+that, `TranscriptLogHandler` — the component that exists *because* the TUI takes stderr away —
+flagged only `levelno >= ERROR`, so every WARNING it routed was written with `write_system`.
+`themes.role_styles` has carried a `warning` colour since §26 and no transcript line had ever
+used it; the one widget that did (`GoalBanner`) composed its own weight on top.
+
+### Design Decisions Record — §41 (X1–X2)
+
+| id | decision |
+|---|---|
+| **X1** | **`tool` renders in plain `accent`, and dark-plain's accent was lifted to meet it.** Two halves, because the collision had two causes. `dim` is a Rich *attribute*, not a colour, so this file's contrast floors measure the undimmed hue and cannot see what the terminal paints — which made the style on every tool call the one style whose real contrast nothing measured. And underneath that, dark-plain's accent `#a9b2c3` sat **98.5 redmean units** from its secondary `#8792a2`: the tightest secondary/accent pair of all fourteen themes (the next is paper at 143.8), on the shipped default. A monochrome theme cannot separate two roles by hue, so only lightness is left, and dark-plain's did not have enough of it. `#b8c1d1` measures 142.7 while staying 111 units off the foreground — go lighter and the assistant label melts into the body text it introduces, which is the same defect facing the other way. Batch 29's #14 nudge, on a different axis: that one measured contrast against the BACKGROUND, this one measures separation between two roles that sit on adjacent lines |
+| **X2** | **A routed log record carries a PALETTE ROLE, not an `is_error` bool.** `LogRecordMessage(text, role)` and one `write_role()` call replace the two-branch `write_error`/`write_system` split. The bool was not merely underspecified — it had no warning case at all, so the handler delivered warnings in the role that means "the harness narrating itself". `warning` becomes `bold {theme.warning}` where `tool_error` stays plain: both are non-fatal and keep the hue family, and the weight separates the harness raising its voice from a tool that failed. `GoalBanner` stops composing its own `bold` — with the weight in the role, composing it a second time yields `bold bold #d9a441`, and a style decided in two places is the drift §26's palette exists to prevent |
+
+### Three pins, because one instrument could not see the defect
+
+`tests/test_themes.py` gains `MESSAGE_ROLES` — every role a transcript line can be painted with —
+and three checks over it. The first draft had only the first of them, and it passed against the
+reverted bug, which is how the other two got written.
+
+- **Pairwise distinct style STRINGS**, on all fourteen themes. Strings rather than colours, because
+  `italic #8792a2` and `#8792a2` are two legitimate renderings of one hue (`themes.py` says so
+  for `thinking` vs `pass_done`) while two identical strings cannot be anything but the same line
+  twice. This is what catches `warning` == `tool_error`. `user_label` is excluded by name: it and
+  `user` are the two halves of one rendered line and are *meant* to match.
+- **A REDMEAN separation floor** between the accent and secondary slots, at 120. Not WCAG
+  contrast: contrast answers "can this be read against that background", and it cannot see hue —
+  dark-plain's accent and warning sit at a luminance ratio of 1.05 and are obviously different
+  (grey against amber), while its accent and secondary sat at 1.48 and were the pair the defect
+  was filed about. This is what catches X1's second half.
+- **`dim` confined to `system`.** A role whose only distinguishing mark is an attribute is a role
+  whose appearance neither of the checks above can see. `system` keeps it because receding IS
+  its whole specification and it carries no hue to measure. Scoped to `MESSAGE_ROLES`, so it says
+  nothing about `UNVERIFIED_COVERAGE` — `dim {error}` there sits beside an undimmed `UNVERIFIED`
+  in the claims modal, where the attribute carries meaning against a sibling rather than hiding a
+  colour. This is what catches X1's first half.

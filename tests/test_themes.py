@@ -67,6 +67,32 @@ def _ratio(fg: str, bg: str) -> float:
     return (hi + 0.05) / (lo + 0.05)
 
 
+def _rgb(hex_colour: str):
+    h = hex_colour.lstrip("#")
+    return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
+
+
+def _apart(a: str, b: str) -> float:
+    """Perceptual distance between two colours ("redmean", 0..~765).
+
+    NOT `_ratio`. WCAG contrast answers "can this be read against that
+    background", which is the question the floors below ask. The question
+    batch 41 had to answer is different -- "can a reader tell these two
+    KINDS OF LINE apart" -- and contrast is the wrong instrument for it:
+    dark-plain's accent and its warning sit at a luminance ratio of 1.05
+    and are obviously different (grey against amber), while its accent and
+    its secondary sat at 1.48 and were the pair the defect was filed
+    about. Luminance cannot see hue; this can.
+    """
+    r1, g1, b1 = _rgb(a)
+    r2, g2, b2 = _rgb(b)
+    mean_r = (r1 + r2) / 2
+    dr, dg, db = r1 - r2, g1 - g2, b1 - b2
+    return ((2 + mean_r / 256) * dr * dr
+            + 4 * dg * dg
+            + (2 + (255 - mean_r) / 256) * db * db) ** 0.5
+
+
 # ---- Roster -----------------------------------------------------------------
 
 def test_the_grid_names_are_unchanged_and_come_first():
@@ -103,6 +129,61 @@ def test_every_theme_fills_every_role_slot(theme):
     assert empty == [], \
         f"{theme.name}: empty role styles {empty} -- the assistant body is \
 the one deliberately unstyled slot"
+
+
+# ---- Batch 41 (X1/X2): the roles a transcript puts next to each other ---------
+
+#: Every role a line in the transcript can be painted with. NOT the tier
+#: roles, which live in the claims view and never sit beside these; and not
+#: `assistant`, which is deliberately unstyled (the answer is the longest
+#: text on screen and tinting it costs contrast to say what the label
+#: already said).
+#:
+#: `user_label` is absent on purpose: it and `user` are the two halves of
+#: ONE line (`you ›  the message`) and are meant to match. Colliding there
+#: is the design, not the defect.
+MESSAGE_ROLES = [
+    "system", "thinking", "tool", "tool_error", "warning", "error",
+    "user", "assistant_label", "pass", "pass_done", "success",
+]
+
+
+@pytest.mark.parametrize("theme", ALL_THEMES, ids=lambda t: t.name)
+def test_the_message_roles_are_pairwise_distinct(theme):
+    """The reported defect, pinned so it cannot come back quietly.
+
+    A tool call, a reasoning line and a routed WARNING rendered as one
+    grey blur: `tool` was `dim {accent}`, `thinking` is `italic
+    {secondary}`, and across the grid themes accent and secondary are one
+    luminance step apart in the same hue -- so dimming accent lands it on
+    secondary. `warning` and `tool_error` were the same string outright.
+
+    Distinctness of the STYLE STRING rather than of the colour, because
+    the strings are what Rich is handed: `italic #8792a2` and `#8792a2`
+    are two different renderings of one hue and that is a legitimate
+    separation (themes.py says so for thinking vs pass_done), while two
+    identical strings cannot be anything but the same line twice.
+    """
+    styles = role_styles(theme)
+    seen = {}
+    for role in MESSAGE_ROLES:
+        style = styles[role]
+        clash = seen.get(style)
+        assert clash is None, (
+            f"{theme.name}: {role!r} and {clash!r} both render as "
+            f"{style!r} -- two kinds of line the reader cannot tell apart"
+        )
+        seen[style] = role
+
+
+def test_every_message_role_is_actually_reachable():
+    """MESSAGE_ROLES above is a hand-written list, which is the shape this
+    project keeps catching drift in. This is the cheap half: every role it
+    names must exist in the palette, so a rename fails here rather than
+    silently shrinking what the distinctness check covers."""
+    styles = role_styles(ALL_THEMES[0])
+    missing = [r for r in MESSAGE_ROLES if r not in styles]
+    assert not missing, f"MESSAGE_ROLES names roles the palette lacks: {missing}"
 
 
 # ---- Contrast floors ----------------------------------------------------------
@@ -250,3 +331,70 @@ async def test_bare_theme_command_says_what_a_theme_restyles():
         entries = [txt for _r, txt in app._transcript._entries]
 
     assert any("restyle panels" in txt for txt in entries), entries[-3:]
+
+
+
+# ---- Batch 41 (X1): the two pins that go red if the roles collapse back -----
+
+#: Minimum perceptual separation between the colour behind `tool` and the
+#: colour behind `thinking`/`pass_done`. dark-plain sat at 98.5 before this
+#: batch -- the tightest secondary/accent pair of all fourteen themes, and
+#: the shipped default. Lifting its accent to #b8c1d1 puts it at 142.7; the
+#: next-tightest theme (paper) is 143.8. 120 is the floor with headroom on
+#: both sides of that gap.
+ROLE_SEPARATION_FLOOR = 120.0
+
+
+@pytest.mark.parametrize("theme", ALL_THEMES, ids=lambda t: t.name)
+def test_a_tool_call_is_visibly_apart_from_a_reasoning_line(theme):
+    """The filed defect, measured.
+
+    `tool` renders in accent and `thinking`/`pass_done` in secondary, and
+    those two lines sit next to each other constantly -- a tool call, then
+    the model reasoning about its result. On a deliberately monochrome
+    theme hue cannot separate them, so lightness has to, and dark-plain's
+    did not: 98.5 redmean units, against >= 143 everywhere else.
+
+    Asserted on the THEME's slots rather than by parsing the style strings,
+    because the mapping (tool -> accent, thinking -> secondary) is what the
+    test is about; parsing would let a role move to a different slot and
+    still pass.
+    """
+    assert _apart(theme.accent, theme.secondary) >= ROLE_SEPARATION_FLOOR, (
+        f"{theme.name}: accent {theme.accent} and secondary "
+        f"{theme.secondary} are {_apart(theme.accent, theme.secondary):.1f} "
+        f"apart -- a tool call and a reasoning line read as one colour"
+    )
+
+
+@pytest.mark.parametrize("theme", ALL_THEMES, ids=lambda t: t.name)
+def test_dim_is_the_system_role_alone(theme):
+    """`dim` is a Rich ATTRIBUTE, not a colour, so every check in this file
+    is blind to it: the contrast floors measure the undimmed hue and the
+    separation floor above measures theme slots. A role whose only
+    distinguishing mark is `dim` is therefore a role whose real appearance
+    nothing here can see -- which is exactly what `tool` was
+    (`dim {accent}`), on the one style the transcript draws most often.
+
+    `system` keeps it, and that is the point of the exception rather than
+    a hole in the rule: `system` is the harness narrating itself and is
+    MEANT to recede, it carries no hue to measure, and it is the only role
+    for which "quieter than the body text" is the whole specification.
+
+    Scoped to MESSAGE_ROLES, so it says nothing about the confidence
+    tiers. `UNVERIFIED_COVERAGE` is `dim {error}` on purpose and is the
+    counter-example that proves the rule is about the transcript: it lives
+    in the claims modal directly beside `UNVERIFIED`, which is the same
+    hue undimmed, and the dimming is what says "a gap in what was asked,
+    not a claim that failed". There the attribute carries meaning against
+    a sibling; on a transcript line it carries only a colour nothing can
+    measure.
+    """
+    styles = role_styles(theme)
+    dimmed = [role for role in MESSAGE_ROLES
+              if "dim" in styles[role].split() and role != "system"]
+    assert dimmed == [], (
+        f"{theme.name}: {dimmed} render with `dim`. Pick a colour the "
+        f"floors in this file can measure, or say here why this role is "
+        f"the second one that recedes."
+    )

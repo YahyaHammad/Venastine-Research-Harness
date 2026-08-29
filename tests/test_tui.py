@@ -929,21 +929,34 @@ async def test_effort_lookup_does_not_block_the_ui_thread(mocker):
 # is the other half, or the warnings would simply become invisible.
 
 @pytest.mark.asyncio
-async def test_a_warning_reaches_the_transcript():
+async def test_a_warning_reaches_the_transcript_in_the_warning_role():
+    """Batch 41 (X2). This used to patch write_system and assert only
+    that the line ARRIVED -- which it did, in `system`: dim italic, the
+    same style as the mount banner. `themes.role_styles` had carried a
+    `warning` colour since §26 and no transcript line had ever used it,
+    so the handler that exists to make warnings visible was delivering
+    them in the one role that reads as narration.
+
+    The role is asserted beside the text now, because arriving and
+    arriving legibly are two different claims.
+    """
     import logging
 
     written = []
     app = VenastineApp("ANTHROPIC", "test-model", {})
     async with app.run_test() as pilot:
-        app._transcript.write_system = lambda text: written.append(text)
+        app._transcript.write_role = \
+            lambda role, text: written.append((role, text))
         logging.getLogger("core.compaction").warning(
             "No context window known for model 'x'")
         assert await settle(
-            pilot, lambda: any("context window" in t for t in written)), \
+            pilot,
+            lambda: any("context window" in t for _r, t in written)), \
             "a WARNING never reached the transcript"
 
-    assert any(t.startswith("[warning]") for t in written), \
-        "the level must be visible -- an unlabelled line reads as narration"
+    assert any(role == "warning" and text.startswith("[warning]")
+               for role, text in written), \
+        f"a WARNING arrived as {[r for r, _ in written]} -- the level must be visible in BOTH the label and the colour"
 
 
 @pytest.mark.asyncio
@@ -955,24 +968,37 @@ async def test_info_is_not_routed_to_the_transcript():
     written = []
     app = VenastineApp("ANTHROPIC", "test-model", {})
     async with app.run_test() as pilot:
-        app._transcript.write_system = lambda text: written.append(text)
+        # write_role, not write_system: since batch 41 every routed
+        # record goes through the role path, and patching the old one
+        # would make this control pass by watching a method logging no
+        # longer calls -- vacuously, which is the one failure mode a
+        # control test has.
+        app._transcript.write_role = \
+            lambda role, text: written.append((role, text))
         logging.getLogger("core.compaction").info("cache hit")
         await pump(pilot, 10)
 
-    assert not any("cache hit" in t for t in written)
+    assert not any("cache hit" in t for _r, t in written)
 
 
 @pytest.mark.asyncio
 async def test_an_error_renders_as_an_error():
+    """The other half of X2's branch. Collapsing write_error and
+    write_system into one write_role() call must not quietly demote an
+    ERROR: write_role("error", ...) and write_error() render
+    identically, and this is what says so."""
     import logging
 
     errors = []
     app = VenastineApp("ANTHROPIC", "test-model", {})
     async with app.run_test() as pilot:
-        app._transcript.write_error = lambda text: errors.append(text)
+        app._transcript.write_role = \
+            lambda role, text: errors.append((role, text))
         logging.getLogger("tools.registry").error("tool exploded")
         assert await settle(
-            pilot, lambda: any("tool exploded" in t for t in errors))
+            pilot,
+            lambda: any(role == "error" and "tool exploded" in text
+                        for role, text in errors))
 
 
 @pytest.mark.asyncio
