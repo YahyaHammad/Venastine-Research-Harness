@@ -9,10 +9,42 @@ as a plain stdlib queue.Queue precisely so this hand-off works: the worker
 thread running _run() blocks on channel.get() while the UI thread shows the
 modal, and the user's answer unblocks it. Nothing here is async-aware --
 the blocking side is a thread, not a coroutine.
+
+EVERY RENDERABLE BUILT FROM A NON-LITERAL IS WRAPPED IN `Text(...)`
+(batch 42, RA1). Textual renders a `str` through `Text.from_markup`, so
+a square bracket in a tool argument, a claim, a thread preview or an
+`ask_user` option is CONSOLE MARKUP here -- and these screens exist to
+show a person exactly what a model asked for. Two live failures:
+
+  * `sed -i "s/[/]//" f.txt` in a permission payload
+    raised MarkupError inside compose(). The screen was pushed and
+    never rendered, so its dismissal callback never fired and the
+    worker parked on Queue.get() for ATTENDED_APPROVAL_TIMEOUT_S --
+    600s, presenting as a hang. ARCHITECTURE.md records that every
+    DISMISSAL path must produce a boolean; this is the case that rule
+    misses, because a screen that cannot render never reaches one.
+
+  * `ReviewScreen`'s title read `[{severity}]`, and `[high]` is a tag.
+    The severity was silently absent from every review modal since
+    §20 -- an unconditional defect, needing no adversary at all.
+
+`markup=False` IS NOT THE FIX, and looks like it is. On the pinned
+textual 1.0.0 `Static.__init__` stores the flag and assigns
+`self._content` directly; the `visual` property then calls
+`render_str()` -> `Text.from_markup` unconditionally and never reads
+it. Only the `renderable` SETTER honours it, and no constructor goes
+through the setter -- so `Static(x, markup=False)` still raises,
+measured. `render_str` returns a `Text` unaltered, which is why
+wrapping works and is the only thing here that does.
+
+A literal written in THIS file is left alone: it is ours and it is
+reviewed. The rule is mechanical, so it holds for the next screen
+somebody adds -- test_tui.py walks this file's AST and asserts it.
 """
 
 import json
 
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import Grid, Vertical
 from textual.screen import ModalScreen
@@ -32,6 +64,12 @@ class PermissionScreen(ModalScreen[bool]):
     logging_setup._RedactingFormatter and safety/policy_enforcement's
     check_output_policy, so the full value never reaches disk unguarded —
     do not add redaction here to "match" the transcript.
+
+    Full and unredacted, and NOT INTERPRETED: the payload goes
+    through `Text(...)` so a bracket in a command stays a bracket.
+    Showing the exact value is this screen's whole purpose, and
+    markup parsing is a way of showing something else -- see the
+    module docstring.
     """
 
     BINDINGS = [("escape", "deny", "Deny")]
@@ -56,8 +94,9 @@ class PermissionScreen(ModalScreen[bool]):
         if self._notice:
             rendered = f"{self._notice}\n\n{rendered}"
         yield Grid(
-            Label(f"Allow {self._tool_name}?", id="permission-title"),
-            Static(rendered, id="permission-params"),
+            Label(Text(f"Allow {self._tool_name}?"),
+                  id="permission-title"),
+            Static(Text(rendered), id="permission-params"),
             Button("Allow", variant="success", id="allow"),
             Button("Deny", variant="error", id="deny"),
             id="permission-dialog",
@@ -101,7 +140,8 @@ class GrantPickerScreen(ModalScreen[object]):
         # convenient action the permissive one, and this prompt exists
         # precisely because nobody will be watching afterwards.
         options = [
-            Selection(f"{name}  —  {description}" if description else name,
+            Selection(Text(f"{name}  —  {description}" if description
+                           else name),
                       name, False)
             for name, description in self._offered
         ]
@@ -151,17 +191,20 @@ class SubagentSignoffScreen(ModalScreen[object]):
     def compose(self) -> ComposeResult:
         if not self._candidates:
             yield Grid(
-                Label(f"Run {self._agent}?", id="permission-title"),
-                Static(f"{self._agent} needs no approval-gated tools.",
+                Label(Text(f"Run {self._agent}?"),
+                      id="permission-title"),
+                Static(Text(f"{self._agent} needs no approval-gated "
+                            f"tools."),
                        id="permission-params"),
                 Button("Run", variant="success", id="signoff-none"),
                 Button("Refuse", variant="error", id="signoff-refuse"),
                 id="permission-dialog",
             )
             return
-        options = [Selection(name, name, False) for name in self._candidates]
+        options = [Selection(Text(name), name, False)
+                   for name in self._candidates]
         yield Vertical(
-            Label(f"What may {self._agent} use without asking again?",
+            Label(Text(f"What may {self._agent} use without asking again?"),
                   id="grant-title"),
             Static(
                 "Space toggles, then choose. Anything left unticked still "
@@ -232,13 +275,13 @@ class QuestionScreen(ModalScreen[object]):
 
     def compose(self) -> ComposeResult:
         widgets = [Label("The assistant has a question", id="question-title"),
-                   Static(self._question, id="question-body")]
+                   Static(Text(self._question), id="question-body")]
 
         if self._options and self._multi:
             widgets.append(Static(
                 "Space toggles; several may be chosen.", id="question-help"))
             widgets.append(SelectionList(
-                *[Selection(o, o, False) for o in self._options],
+                *[Selection(Text(o), o, False) for o in self._options],
                 id="question-list"))
             widgets.append(
                 Button("Answer", variant="success", id="question-ok"))
@@ -342,9 +385,14 @@ class ReviewScreen(ModalScreen[object]):
             body = (f"(refinement {self._round} of {self._max_rounds})\n\n"
                     f"{body}")
         yield Vertical(
-            Label(f"{kind} correction to {target}  [{severity}]",
+            # `[{severity}]` is a MARKUP TAG to Rich, so this title
+            # rendered WITHOUT its severity on every review modal from
+            # §20 until batch 42 -- `[high]` parsed as an unknown
+            # style over a zero-width span. The brackets are wanted
+            # here; the parsing never was.
+            Label(Text(f"{kind} correction to {target}  [{severity}]"),
                   id="review-title"),
-            Static(body, id="review-body"),
+            Static(Text(body), id="review-body"),
             Input(placeholder="Note for the reviewer (used by Refine)",
                   id="review-note"),
             Button("Accept", variant="success", id="review-accept"),
@@ -413,8 +461,9 @@ class ClaimsScreen(ModalScreen[None]):
             # text and tier have been broadcast as events.
             header += "  — run in progress, metadata incomplete"
         yield Vertical(
-            Label(header, id="claims-title"),
-            Static(_render_claims(self._claims), id="claims-body"),
+            Label(Text(header), id="claims-title"),
+            Static(Text(_render_claims(self._claims)),
+                   id="claims-body"),
             id="claims-dialog",
         )
 
@@ -509,8 +558,8 @@ class ConfirmScreen(ModalScreen[bool]):
 
     def compose(self) -> ComposeResult:
         yield Grid(
-            Label(self._title, id="permission-title"),
-            Static(self._body, id="permission-params"),
+            Label(Text(self._title), id="permission-title"),
+            Static(Text(self._body), id="permission-params"),
             Button(self._confirm_label, variant="success", id="allow"),
             Button("No", variant="error", id="deny"),
             id="permission-dialog",
@@ -557,12 +606,14 @@ class ProjectKindScreen(ModalScreen[object]):
             Label("Set up documentation for which kind of project?",
                   id="permission-title"),
             Static(
-                f"{explanation}\n\n"
-                "software — ARCHITECTURE, ROADMAP, DEVLOG, TECHNICAL_DEBT, "
-                "DOCUMENTATION_STANDARDS, TEST_WRITING, BREAKING_CHANGES\n"
-                "research — RESEARCH_QUESTIONS, METHODOLOGY, SOURCES, "
-                "FINDINGS, LIMITATIONS, EXPERIMENT_LOG, OPEN_QUESTIONS, "
-                "DOCUMENTATION_STANDARDS",
+                Text(
+                    f"{explanation}\n\n"
+                    "software — ARCHITECTURE, ROADMAP, DEVLOG, "
+                    "TECHNICAL_DEBT, DOCUMENTATION_STANDARDS, "
+                    "TEST_WRITING, BREAKING_CHANGES\n"
+                    "research — RESEARCH_QUESTIONS, METHODOLOGY, "
+                    "SOURCES, FINDINGS, LIMITATIONS, EXPERIMENT_LOG, "
+                    "OPEN_QUESTIONS, DOCUMENTATION_STANDARDS"),
                 id="permission-params"),
             Button("Software", variant="success", id="kind-software"),
             Button("Research", variant="primary", id="kind-research"),
@@ -604,10 +655,12 @@ class ThreadPickerScreen(ModalScreen[object]):
         self._note = note
 
     def compose(self) -> ComposeResult:
-        items = [ListItem(Label(_thread_row(t))) for t in self._threads]
+        items = [ListItem(Label(Text(_thread_row(t))))
+                 for t in self._threads]
         children = [Label("Resume which thread?", id="thread-title")]
         if self._note:
-            children.append(Static(self._note, id="thread-note"))
+            children.append(Static(Text(self._note),
+                                   id="thread-note"))
         if items:
             children.append(ListView(*items, id="thread-list"))
         else:

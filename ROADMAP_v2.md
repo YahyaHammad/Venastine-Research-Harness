@@ -167,6 +167,7 @@ the namespace list in `AGENTS.md`.
 - **§37. MCP's edges — disclosure, SSE, teardown, catalogue** — BUILT (#60, #61, #62, #63, #64, #65; closes unit 7)
 - **§38. Live output — progressive rendering and visible thinking** — BUILT (the transcript buffered a whole turn; thinking was never captured at all)
 - **§41. The transcript's vocabulary — colour, markers, and what an edit looks like** — BUILT (three kinds of line shared one grey; the `warning` role was unreachable; `write`/`edit` showed 60 characters of payload instead of a change)
+- **§42. The consent surface — what a modal shows, and what the agent says it is doing** — BUILT (the permission modal parsed console markup out of the payload it exists to show; `shell` gained a display-only `rationale`)
 - **Open Questions — None Remaining** (Rev. 3 — all decisions locked; verification items only)
 - **Why these calls, not just what they are** (Rev. 3 — the reasoning patterns behind several decisions above)
 
@@ -3380,7 +3381,7 @@ flagged only `levelno >= ERROR`, so every WARNING it routed was written with `wr
 `themes.role_styles` has carried a `warning` colour since §26 and no transcript line had ever
 used it; the one widget that did (`GoalBanner`) composed its own weight on top.
 
-### Design Decisions Record — §41 (X1–X2)
+### Design Decisions Record — §41 (X1–X7)
 
 | id | decision |
 |---|---|
@@ -3440,3 +3441,44 @@ The redaction-ordering test made the same mistake once more and was caught the s
 version put the edit BESIDE the credential (`retries = 3`, which redacts to itself), so the ordering could
 not matter and it passed against the mutation. It now edits ACROSS the credential's redaction span,
 which is the only shape that distinguishes the two orderings.
+
+
+## §42. The consent surface — what a modal shows, and what the agent says it is doing
+
+**Status: BUILT.** One request — let the agent say *why* it wants to run a command, and show that
+on the permission prompt — and one defect found on the way in, in the screen the request was
+about.
+
+**The modal parsed markup out of the payload it exists to show.** `PermissionScreen` renders the
+call's arguments with `Static(str)`, and Textual sends a `str` through `Text.from_markup`. So a
+square bracket in a shell command was console markup on the one screen whose entire purpose is
+showing a person the exact value they are being asked to authorise. Measured, with a command
+nobody would look at twice:
+
+```
+command: sed -i "s/[/]//" f.txt
+→ rich.errors.MarkupError: closing tag '[/]' at position 46 has nothing to close
+→ screen stack depth: 2, callback fired: []
+```
+
+The screen was pushed and never drew. Its dismissal callback never fired, so the worker parked on
+`Queue.get(timeout=ATTENDED_APPROVAL_TIMEOUT_S)` — 600 seconds — and then denied a call the user
+was never shown. ARCHITECTURE.md already carried the rule that **every dismissal path must produce
+a boolean**, and that rule held throughout: the failure is upstream of every dismissal path, which
+is what made it invisible to the invariant written for exactly this hazard.
+
+**The quieter half is the one that matters on a consent screen.** An unbalanced tag raises and is
+impossible to miss. A *balanced* one renders — `[bold green]VERIFIED SAFE[/bold green]` in an
+argument becomes styled text with the tags gone, so the modal shows a person a phrase the harness
+never wrote, formatted as though it had. The screen that asks "do you want to allow this" was
+willing to typeset the answer.
+
+**And one instance needed no adversary at all.** `ReviewScreen`'s title is
+`f"{kind} correction to {target}  [{severity}]"`. `[high]` is a tag. Every review modal since §20
+rendered its title with the severity silently absent.
+
+### Design Decisions Record — §42 (RA1)
+
+| id | decision |
+|---|---|
+| **RA1** | **Every renderable in `tui/screens.py` built from a non-literal is wrapped in `Text(...)`, and the rule is checked by an AST walk rather than by a list of sites.** The wrap is the fix because it is the only thing that works: `markup=False` looks like the answer and is not. On the pinned textual 1.0.0 `Static.__init__` stores the flag and assigns `self._content` directly, and the `visual` property then calls `render_str()` → `Text.from_markup` unconditionally without ever reading it — only the `renderable` SETTER honours the flag, and no constructor goes through the setter. `Static(x, markup=False)` still raises, measured. `render_str` returns a `Text` unaltered, so passing one is the whole mechanism. The rule covers `Static`, `Label` (its subclass) and `Selection`, whose prompt goes through `Text.from_markup` in its own constructor — which is how `ask_user`'s options, the model's own words, reach a parser. **A string literal written in that file is exempt**: it is ours, it is reviewed, and two of the help texts are better for markup. The check is an AST walk because the sites this batch fixed are not the point — the next screen somebody adds is, and a blessed-line-numbers version would keep passing while the file grew past it, which is the vacuity shape this project keeps finding in its own guards |

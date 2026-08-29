@@ -3421,3 +3421,185 @@ async def test_summary_refuses_to_start_mid_turn(mocker):
                    for _role, txt in app._transcript._entries), \
             "mid-turn /summary gave no refusal"
         assert started == [], "mid-turn /summary started a worker anyway"
+
+
+# ===========================================================================
+# ---- Batch 42 (RA1): the modals show text, not markup ---------------------
+# ===========================================================================
+#
+# Textual renders a `str` through `Text.from_markup`, so a square bracket in
+# anything a MODEL wrote -- a shell command, a claim, an `ask_user` option, a
+# thread preview -- was console markup on the screens whose entire job is
+# showing a person the exact value. Two live failures, both measured before
+# the fix:
+#
+#   * `sed -i "s/[/]//" f.txt` raised MarkupError inside compose(), so the
+#     pushed screen never rendered, its dismissal callback never fired, and
+#     the worker parked on Queue.get() for ATTENDED_APPROVAL_TIMEOUT_S.
+#   * ReviewScreen's `[{severity}]` parsed as a tag, so the severity was
+#     silently missing from every review modal since §20.
+#
+# The first is why these assert on the DISMISSAL VALUE and not on the screen
+# appearing: the screen did appear. It just never drew, and the difference
+# between those two is a ten-minute hang.
+
+
+def _plain(widget) -> str:
+    """The text a Static/Label actually drew, markup already resolved.
+
+    Reached through the visual rather than the constructor argument on
+    purpose -- the bug was that the argument and the drawing disagreed,
+    so a test reading the argument back could not have seen it.
+    """
+    visual = widget.visual
+    renderable = getattr(visual, "_renderable", visual)
+    return renderable.plain
+
+
+@pytest.mark.asyncio
+async def test_a_bracket_in_a_command_does_not_stop_the_modal_rendering():
+    """The hang, from the direction it actually arrives.
+
+    ARCHITECTURE.md's rule is that every DISMISSAL path produces a
+    boolean. This is the case that rule misses: a screen that raises in
+    compose() never reaches a dismissal path at all, so the invariant
+    held and the worker still waited out ATTENDED_APPROVAL_TIMEOUT_S.
+    `isinstance(app.screen, PermissionScreen)` was TRUE throughout --
+    the screen was pushed, it simply never drew -- which is why a test
+    that watches for the modal appearing could not have seen this.
+
+    WHAT THIS TEST ACTUALLY OBSERVES IS THE EXCEPTION, and that is worth
+    being exact about. Under `run_test` Textual re-raises a compose()
+    error into the test, so reverting the fix fails here on MarkupError
+    before any assertion below runs. The 600s hang is the LIVE
+    behaviour, where the same error reaches Textual's own handler and
+    nothing unblocks the worker. So this test pins the raising half; the
+    silent half -- balanced markup, which never raises anywhere -- is
+    pinned by test_balanced_markup_in_a_payload_stays_literal, and that
+    is the one a regression would slip past first.
+    """
+    import threading
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        answer = {}
+
+        def worker():
+            answer["value"] = app.ask_permission_blocking(
+                "shell", {"command": 'sed -i "s/[/]//" f.txt'}, None)
+
+        threading.Thread(target=worker, daemon=True).start()
+        assert await settle(
+            pilot, lambda: isinstance(app.screen, PermissionScreen))
+        body = _plain(app.screen.query_one("#permission-params"))
+        app.screen.dismiss(True)
+
+        assert await settle(pilot, lambda: "value" in answer), (
+            "the worker never unblocked -- the modal was pushed but never "
+            "drew, which is the 600s hang this fix is for")
+    assert answer["value"] is True
+    assert 's/[/]//' in body, (
+        f"the command was not shown as written: {body!r}")
+
+
+@pytest.mark.asyncio
+async def test_balanced_markup_in_a_payload_stays_literal():
+    """The quiet half, and the one a regression would restore first.
+
+    An unbalanced tag raises and is impossible to miss. A BALANCED one
+    renders -- as styled text with the tags eaten -- so a payload reading
+    `[bold green]VERIFIED SAFE[/bold green]` would show a person a phrase
+    the harness never wrote, formatted as though it had. On a consent
+    screen that is the whole attack.
+    """
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        app.push_screen(
+            PermissionScreen("shell",
+                             {"command": "ls",
+                              "note": "[bold green]VERIFIED SAFE[/bold green]"},
+                             None),
+            lambda _a: None)
+        assert await settle(
+            pilot, lambda: isinstance(app.screen, PermissionScreen))
+        body = _plain(app.screen.query_one("#permission-params"))
+        app.screen.dismiss(False)
+        await pilot.pause()
+
+    assert "[bold green]" in body and "[/bold green]" in body, (
+        f"the markup was interpreted instead of shown: {body!r}")
+
+
+@pytest.mark.asyncio
+async def test_the_review_title_still_has_its_severity():
+    """`[high]` is a tag. This title carried brackets deliberately and
+    lost its severity to them on every review modal from §20 until batch
+    42 -- no adversary, no unusual input, just a literal in the format
+    string meeting a parser nobody knew was there."""
+    from tui.screens import ReviewScreen
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        app.push_screen(
+            ReviewScreen({"kind": "factual", "target": "claim-3",
+                          "severity": "high",
+                          "reason": "r", "proposed": "p"}, 0),
+            lambda _a: None)
+        assert await settle(
+            pilot, lambda: isinstance(app.screen, ReviewScreen))
+        title = _plain(app.screen.query_one("#review-title"))
+        app.screen.dismiss(None)
+        await pilot.pause()
+
+    assert "[high]" in title, (
+        f"the severity was parsed away as a markup tag: {title!r}")
+
+
+def test_every_renderable_built_from_a_non_literal_is_wrapped():
+    """The rule, mechanically, over the whole file.
+
+    Written as an AST walk rather than a list of the sites this batch
+    fixed, because the sites are not the point -- the next screen
+    somebody adds is. A blessed-line-numbers version would pass forever
+    while the file grew past it, which is the vacuity shape this project
+    keeps finding in its own guards.
+
+    A STRING LITERAL IS ALLOWED. It is ours, it is reviewed, and a couple
+    of the help texts would be worse without markup. Anything else --
+    an f-string, a name, a call, a conditional -- is content from a
+    model, a file or the archive, and gets `Text(...)`.
+    """
+    import ast
+
+    with open("tui/screens.py", encoding="utf-8") as f:
+        tree = ast.parse(f.read())
+
+    # Every Textual renderable-accepting constructor used in this file.
+    # Label subclasses Static, and SelectionList prompts go through
+    # Text.from_markup in Selection's own constructor -- measured, and
+    # `ask_user`'s options are the model's own words.
+    WIDGETS = {"Static", "Label", "Selection"}
+    offenders = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if getattr(node.func, "id", None) not in WIDGETS or not node.args:
+            continue
+        first = node.args[0]
+        if isinstance(first, ast.Constant) and isinstance(first.value, str):
+            continue
+        if isinstance(first, ast.JoinedStr) or isinstance(first, ast.BinOp):
+            # An f-string or a concatenation is not a literal we reviewed.
+            offenders.append((node.func.id, node.lineno))
+            continue
+        if (isinstance(first, ast.Call)
+                and getattr(first.func, "id", None) == "Text"):
+            continue
+        offenders.append((node.func.id, node.lineno))
+
+    assert not offenders, (
+        f"these renderables are built from non-literals and are not wrapped "
+        f"in Text(...), so Rich will parse markup out of them: {offenders}. "
+        f"Textual sends a `str` through Text.from_markup; `markup=False` "
+        f"does NOT prevent it on textual 1.0.0 (the flag is stored and "
+        f"never read by the `visual` property). Wrap the value.")

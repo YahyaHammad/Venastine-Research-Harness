@@ -7867,6 +7867,71 @@ and one that wants its own batch rather than a rider on this one. Stated
 here rather than left to be rediscovered as an inconsistency.
 
 
+## Batch 42 — the consent surface (2026-08-29)
+
+The ask: let the agent state a reason for a shell command, and show it on the
+permission prompt. Verifying that against the code turned up a defect in the
+screen the feature was about, so it landed first, on its own.
+
+### Commit 1 — the modals show text, not markup
+
+**Found while checking where a rationale would be displayed.**
+`PermissionScreen` renders the payload with `Static(str)`, and Textual sends a
+`str` through `Text.from_markup`. The screen whose entire purpose is showing a
+person the exact value they are authorising was parsing that value as console
+markup. Measured with an ordinary command:
+
+```
+command: sed -i "s/[/]//" f.txt
+→ rich.errors.MarkupError: closing tag '[/]' at position 46 has nothing to close
+→ screen stack depth: 2, callback fired: []
+```
+
+Pushed, never drawn. The dismissal callback never fires, so the worker parks on
+`Queue.get(timeout=600)` and then denies a call nobody saw. ARCHITECTURE.md's
+"every dismissal path must produce a boolean" held the whole time — the failure
+is upstream of every dismissal path. That invariant was written for this exact
+hazard and could not see this instance of it, which is the interesting part.
+
+**The balanced case is worse than the raising one.** `[bold green]VERIFIED
+SAFE[/bold green]` in an argument renders as styled text with the tags eaten:
+the modal shows a phrase the harness never wrote, formatted as though it had.
+On a consent screen that is the whole attack, and it makes no noise.
+
+**One instance was unconditional.** `ReviewScreen`'s title is
+`f"{kind} correction to {target}  [{severity}]"`, and `[high]` is a tag — so
+the severity has been missing from every review modal since §20. No adversary,
+no unusual input; a literal in a format string meeting a parser nobody knew was
+there.
+
+**`markup=False` is not the fix, and looks exactly like it.** On textual 1.0.0
+`Static.__init__` stores the flag and assigns `self._content` directly; the
+`visual` property then calls `render_str()` -> `Text.from_markup`
+unconditionally and never reads it. Only the `renderable` setter honours it,
+and no constructor goes through the setter. `Static(x, markup=False)` still
+raises — measured, before writing anything. Passing a `Text` works, because
+`render_str` returns one unaltered.
+
+Sixteen sites across seven screens, plus three `Selection` prompts: a
+SelectionList option goes through `Text.from_markup` in `Selection.__init__`,
+and `QuestionScreen`'s options are the model's own words.
+
+**The pin is an AST walk, not a list of the sites.** The sites this commit
+fixed are not the point; the next screen somebody adds is. A blessed-line-
+numbers test would pass forever while the file grew past it -- the vacuity
+shape this project keeps finding in its own guards.
+
+**One test's docstring was wrong and got corrected rather than kept.** The
+bracket test claimed its dismissal assertion is what catches the regression.
+It is not: under `run_test` Textual re-raises a `compose()` error into the
+test, so reverting the fix fails on `MarkupError` before any assertion runs.
+The 600s hang is the LIVE behaviour, where the same error reaches Textual's
+own handler. The silent half -- balanced markup, which never raises anywhere
+-- is pinned by its own test, and that is the one a regression slips past
+first.
+
+Count 2965 -> 2969.
+
 ## Batch 41 — the transcript's vocabulary (2026-08-29)
 
 Three complaints from using the TUI, one of which had a real defect under it.
