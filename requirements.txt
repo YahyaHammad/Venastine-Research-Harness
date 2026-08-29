@@ -20,7 +20,7 @@ google-genai==1.0.0
 pydantic==2.13.4
 sympy==1.13.3
 sqlmodel==0.0.39
-python-dotenv==1.0.1
+python-dotenv==1.2.2
 matplotlib==3.10.3
 pyyaml==6.0.3
 # ROADMAP_v2 §16 TUI. Upper-bounded per D22 -- the mcp lesson was that an
