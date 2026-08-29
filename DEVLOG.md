@@ -7865,3 +7865,164 @@ call. They are the D14 ratchet and can only tighten, so the same mutation
 against them causes prompts rather than skipping them — a different risk,
 and one that wants its own batch rather than a rider on this one. Stated
 here rather than left to be rediscovered as an inconsistency.
+
+---
+
+## Batch 41 — unsafe mode, on a branch (2026-08-29)
+
+**This entry describes work that exists only on `unsafe-mode`.** `main` has
+none of it, and four independent brakes keep it that way.
+
+§40 bound the security posture once and froze it. This adds the two
+switches that posture exists to make un-flippable:
+
+    UNSAFE_NO_APPROVAL   no tool call is ever asked about
+    UNSAFE_NO_SANDBOX    shell runs on the HOST, Docker or not
+
+Both ship False. Checking the branch out changes nothing until you set one.
+
+### Why a branch at all
+
+The switches are a deliberate security reduction that may still be
+exploitable despite the guards around them. Regular users install from npm,
+so npm must only ever serve `main`. Keeping the code off `main` entirely is
+the only version of that guarantee which does not depend on a config
+default staying correct — a default is one bad merge from being wrong,
+whereas absent code cannot be enabled.
+
+And a switch is worth having, because without one the researcher who wants
+this edits `security/sandbox.py`. That is an unversioned local divergence
+the harness cannot detect, report, or refuse to combine with anything —
+strictly worse than a named switch that announces itself at every launch.
+
+### One choke point, above the ratchet
+
+`UNSAFE_NO_APPROVAL` is read in exactly **one** place,
+`ToolRegistry.approval_needed`, and a source scan keeps it that way. That
+method is the documented single source of truth and `dispatch()`'s internal
+re-check calls it too, so one edit covers the loop, dispatch,
+`_file_approval_check`, `_shell_approval_check` and MCP's dynamic defaults.
+A second reader would be the #67/#133 shape — two sites answering one
+question and drifting — inside the very method built to remove it.
+
+It sits **above** the D14 OR rather than inside it, because a term inside a
+ratchet that can only tighten could not loosen anything. Which means it
+beats the ratchet: `ToolApprovals.shell = True` normally forces `always`,
+and under this flag it does not. That is not a weakening of D14 so much as
+a statement that there is nobody to ask — a ratchet routes a decision TO a
+human, and with none present it produces a **denial** rather than safety,
+which is exactly what a headless run already does with a gated tool. No
+security is lost either: `approval_overrides` can only tighten, so an
+attacker abusing them causes prompts, never escalation.
+
+### The asymmetry in the workspace guard
+
+`protected_paths.check_workspace` is skipped under `UNSAFE_NO_SANDBOX` and
+**not** under `UNSAFE_NO_APPROVAL`, and getting that backwards would have
+been the batch's real bug.
+
+The guard protects a MOUNT. Batch 37 added it because `_run_docker` binds
+the workspace read-write at `/workspace`, so a workspace pointed at the
+harness tree was unattended write access to the code about to run next.
+Under `no_sandbox` there is no container and no mount, so the guard
+protects nothing and refusing a launch for it would be theatre. Under
+`no_approval` **alone**, Docker is still in use and every command is
+auto-approved — skipping it there would rebind the harness's own source
+read-write into an auto-approved container, which is batch 37's exact
+escalation returning through the half of unsafe mode that does not need it.
+
+`containment_for` has the matching obligation: under `no_sandbox` it
+returns UNCONTAINED even with Docker up. That is what keeps `no_sandbox`
+*without* `no_approval` coherent — host execution, still supervised. Saying
+CONTAINED while running on the host would auto-approve a writing command
+against the real filesystem, #157's shape with the tiers relabelled.
+
+The INERT branch stays above the unsafe one, and that ordering is pinned:
+the inert path was never contained, it is a host subprocess by
+construction, so the flag changes nothing for it. The first version of that
+test used `ls` and failed for exactly this reason — a correct behaviour,
+the wrong input.
+
+### The hazard the researcher did not sign up for
+
+Not their own commands — those they typed. It is that `fetch_url`,
+`web_search`, MCP servers and a project's `.venastine/` already reach the
+model, and with no approval gate a poisoned page is arbitrary host code.
+They flipped the switch to test a target, not to let a fetched page own the
+laptop.
+
+Named at launch rather than disabled (owner decision). Refusing to launch
+would block a real use case — testing a malicious page, or a hostile MCP
+server is precisely what this branch is for. Disabling them silently would
+be D24's failure, where `fetch_url` was denied on every call for its entire
+life and nothing anywhere said so. So the banner lists each enabled one by
+name, and only under `no_approval`: under `no_sandbox` alone the human is
+still asked about every call, and a warning nobody can act on teaches them
+to ignore the ones that matter.
+
+### Four brakes, and one of them proved the other unnecessary
+
+`scripts/prepublish-check.mjs` (on `main`, so it arrives here by merge)
+refuses a tree with an `UNSAFE_BRANCH` marker OR a `config.py` declaring
+`UNSAFE_NO_*`. The publish workflow has no push or tag trigger, and its one
+job is now `if: github.ref == 'refs/heads/main'`.
+
+The two detectors are not redundancy for its own sake. **Measured**:
+deleting the marker file entirely still exits 1, because the config
+detector catches it. Either alone is one rename from silence; together they
+are not.
+
+### Nine mutations
+
+All killed. Dropping the approval short-circuit (6 tests), moving it below
+the ratchet (6), containment lying about the host (2), routing to Docker
+anyway (2), skipping the workspace guard under both flags (5, including
+batch 37's own tests), settings.json no longer rejecting the keys (2),
+`unsafe_reasons` going silent (2), the workflow guard removed (1), and the
+marker deleted (1 — plus the prepublish check refusing independently).
+
+The marker mutation is worth a note: the first version edited the file's
+*contents*, which changes nothing, since both the test and the check ask
+whether it EXISTS. A mutation that does not mutate the thing under test
+scores a false survival, which is the same family as batch 39's heredoc
+no-op and batch 40's commented-out line. Mutate the property, not the file.
+
+### §90, not §41
+
+Sections from 90 up and the `UM` family are reserved for branch-only work.
+A branch taking the next free number would collide with `main`'s next batch
+and conflict on every merge forever. Recorded in AGENTS.md so the reason
+survives on the branch that does not use it.
+
+### Verification
+
+Tests 2815 -> 2846, full suite green on Windows and Linux. Banner and CLI
+exercised end to end: all four flag combinations fold correctly, and an
+absent flag never turns OFF a `config.py` that turned a setting on
+(`store_true` with `default=None`, because a plain `store_true` defaults to
+False and would).
+
+### Files
+
+- `config.py` — the two constants, with the risk stated where they are set.
+- `security/posture.py` — two fields, `unsafe_reasons()` extended, and
+  `getattr` on the config read so this file stays importable on a `main`
+  that does not declare them.
+- `tools/registry.py` — the one choke point.
+- `security/sandbox.py` — host routing and the workspace-guard asymmetry.
+- `main.py` — `--unsafe`, `--unsafe-no-approval`, `--unsafe-no-sandbox`,
+  and the untrusted-content warning.
+- `core/config_loader.py` — both keys rejected by name.
+- `.github/workflows/publish.yml`, `UNSAFE_BRANCH` — the fourth brake.
+- `tests/test_posture.py` — 31 new tests (60 total on this branch).
+- `ROADMAP_v2.md` (§90, UM1–UM8), `AGENTS.md`, `ARCHITECTURE.md`,
+  `README.md`, `SECURITY.md`, `tests/BREAKING_CHANGES.md`.
+
+### Still open
+
+`UNSAFE_NO_APPROVAL` removes the prompt but not the workspace boundary
+itself — `file_ops` still resolves paths the same way, so what counts as
+"outside the workspace" is unchanged and only the asking stopped. That is
+the intended shape, stated here because someone will eventually wonder
+whether the classification should change too. It should not: the record of
+what a call reached is the thing UM2 exists to keep.

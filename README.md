@@ -284,6 +284,14 @@ now **closed** under `shlex`, which consumes exactly whitespace, `'`, `"` and `\
 tokens and the executor's are provably the same list. On Windows this costs a backslash path such
 as `cat sub\dir\notes.txt`, which moves to the container and fails there — use forward slashes.
 
+**This branch has an unsafe mode; releases do not.** `unsafe-mode` carries
+`UNSAFE_NO_APPROVAL` (never ask about any tool call) and `UNSAFE_NO_SANDBOX` (run shell on the host,
+Docker or not), settable in `config.py` or with `--unsafe` / `--unsafe-no-approval` /
+`--unsafe-no-sandbox`. Both ship off. They are for security researchers who want an unbounded
+harness and accept that anything reachable through them is a documented risk rather than a bug — see
+`SECURITY.md`. The classifier still runs and still records what it decided; unsafe means *do not
+ask* and *do not contain*, never *do not measure*. Four independent brakes keep this branch off npm.
+
 **These settings are read once, at startup.** Since batch 40 `SHELL_APPROVAL_MODE`, both fallback
 flags and `REDACT_TOOL_OUTPUTS` are bound into a frozen posture (`security/posture.py`) rather than
 consulted at each decision, so nothing running in-process can move them mid-session. If any of them
@@ -743,7 +751,7 @@ classifier is described under *Security model* above. If you have a fork or a lo
 note that `ToolApprovals.shell` now ships `False` and `SHELL_APPROVAL_MODE` is the gate — see
 `tests/BREAKING_CHANGES.md` §24.
 
-Run the test suite with `pytest` — 2815 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
+Run the test suite with `pytest` — 2846 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
 
 ## Documentation
 

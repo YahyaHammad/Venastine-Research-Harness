@@ -19,12 +19,43 @@ import ast
 import dataclasses
 import io
 import os
+import re
+from unittest.mock import patch
 
 import pytest
 
 import config
-from security import posture
+from security import posture, protected_paths
+from security.capability import CONTAINED, UNCONTAINED
 from security.posture import Posture
+from security.sandbox import (
+    SANDBOXED_NET,
+    SandboxUnavailable,
+    classify_command,
+    containment_for,
+    run_sandboxed,
+)
+from tests.conftest import set_posture  # noqa: F401 -- parity with test_shell
+
+
+@pytest.fixture
+def _tiered(monkeypatch, tmp_path):
+    """The shipped §28 posture with a real empty workspace, mirroring
+    test_shell.py's fixture of the same name. Duplicated rather than
+    shared because the two files disagree about nothing and a fixture in
+    conftest that only two files use is indirection without a payer."""
+    monkeypatch.setattr(config, "SHELL_APPROVAL_MODE", "tiered")
+    monkeypatch.setattr(config, "ToolApprovals",
+                        lambda: type("A", (), {"shell": False})())
+    monkeypatch.setattr(config, "WORKSPACE_DIR", str(tmp_path))
+    posture._posture = posture._from_config()
+    return str(tmp_path)
+
+
+def _asks(command, docker=True):
+    from tools.builtin.shell import _shell_approval_check
+    with patch("tools.builtin.shell.is_docker_available", return_value=docker):
+        return _shell_approval_check("shell", {"command": command})
 
 
 @pytest.fixture(autouse=True)
@@ -183,7 +214,7 @@ class TestApplyCliOrdering:
     def test_an_unknown_field_raises_rather_than_being_ignored(self):
         posture._read = False
         with pytest.raises(TypeError, match="unknown posture field"):
-            posture.apply_cli(no_approval=True)
+            posture.apply_cli(definitely_not_a_posture_field=True)
 
     def test_no_module_reads_the_posture_at_import(self):
         """The rule the ordering guard depends on, checked at the source.
@@ -422,3 +453,278 @@ class TestTheConsumersRead:
                                         redact_off_env=False):
             from safety.policy_enforcement import redaction_enabled
             assert redaction_enabled() is False
+
+
+# ===========================================================================
+# ---- §90 (UM1-UM8): unsafe mode, `unsafe-mode` branch only ---------------
+# ===========================================================================
+
+
+class TestUnsafeNoApproval:
+    """UM3. One choke point: `ToolRegistry.approval_needed`.
+
+    It is the documented SINGLE SOURCE OF TRUTH and `dispatch()`'s internal
+    re-check calls it too, so one edit covers the loop, dispatch,
+    `_file_approval_check`, `_shell_approval_check` and MCP's dynamic
+    defaults. A second unsafe check anywhere else would be the #67/#133
+    shape -- two sites answering one question and drifting.
+    """
+
+    @pytest.fixture
+    def _ratchet_on(self, monkeypatch):
+        """The hardest case: every D14 ratchet set, which normally forces
+        a prompt for all four path-dependent tools."""
+        class _Approvals:
+            shell = True
+            write = True
+            edit = True
+            read = True
+        monkeypatch.setattr(config, "ToolApprovals", lambda: _Approvals())
+
+    CALLS = [
+        ("shell", {"command": "cat /etc/shadow"}),
+        ("write", {"path": "/etc/passwd"}),
+        ("edit", {"path": "/etc/hosts"}),
+        ("read", {"path": "/root/.ssh/id_rsa"}),
+    ]
+
+    @pytest.mark.parametrize("tool,params", CALLS)
+    def test_without_the_flag_every_one_of_these_asks(
+            self, tool, params, _ratchet_on):
+        """The positive half. Without it the assertions below could pass on
+        a registry that approves everything anyway."""
+        from tools.registry import registry
+        assert registry.approval_needed(tool, params) is True
+
+    @pytest.mark.parametrize("tool,params", CALLS)
+    def test_with_the_flag_none_of_them_do(self, tool, params, _ratchet_on):
+        from tools.registry import registry
+        with posture.override_for_tests(no_approval=True):
+            assert registry.approval_needed(tool, params) is False
+
+    def test_it_beats_the_d14_ratchet_deliberately(self, _ratchet_on):
+        """`ToolApprovals.shell = True` forces "always" whatever the mode
+        says, and under this flag it no longer does.
+
+        Not a weakening of D14 so much as a statement that there is nobody
+        to ask: a ratchet routes a decision TO a human, and with none
+        present it produces a DENIAL rather than safety -- which is what a
+        headless run already does with a gated tool. Nothing is lost
+        either, because `approval_overrides` can only tighten, so abusing
+        them causes prompts and never escalation."""
+        from tools.registry import registry
+        monkey = {"command": "rm -rf /"}
+        assert registry.approval_needed("shell", monkey) is True
+        with posture.override_for_tests(no_approval=True):
+            assert registry.approval_needed("shell", monkey) is False
+
+    def test_there_is_exactly_one_unsafe_check_in_production_code(self):
+        """UM3's real content. The flag is only sound while it is read in
+        ONE place; a second reader is how the two sites drift."""
+        readers = []
+        for rel, src in _production_sources():
+            if rel in ("security/posture.py", "main.py", "config.py"):
+                continue     # the definition, the CLI fold-in, the constant
+            for lineno, line in enumerate(src.splitlines(), 1):
+                # `.no_approval`, i.e. reading it off the posture -- not the
+                # bare word, which also appears in config_loader's BY-NAME
+                # rejection of the settings.json key `unsafe_no_approval`.
+                # That line is a refusal, not a reader, and counting it
+                # would make this test fail for doing the right thing.
+                if ".no_approval" in line and not line.lstrip().startswith("#"):
+                    readers.append(f"{rel}:{lineno}")
+        assert len(readers) == 1, (
+            "UNSAFE_NO_APPROVAL must be read in exactly ONE place "
+            "(ToolRegistry.approval_needed); found: " + ", ".join(readers))
+        assert readers[0].startswith("tools/registry.py"), readers
+
+
+class TestUnsafeNoSandbox:
+    """UM5/UM6. Host execution, and the guard that must NOT come with it."""
+
+    def test_containment_says_uncontained_even_with_docker_up(self):
+        """The half that keeps `auto_approved` honest. `no_sandbox` without
+        `no_approval` is a coherent posture -- host execution, still
+        supervised -- and it only works if the gate is told the truth.
+        Reporting CONTAINED while running on the host would auto-approve a
+        writing command against the real filesystem, which is #157's shape
+        with the tiers relabelled."""
+        profile = classify_command("rm -rf /tmp/x", os.getcwd())
+        assert containment_for(profile, docker_available=True) == CONTAINED
+        with posture.override_for_tests(no_sandbox=True):
+            assert containment_for(profile, docker_available=True) == UNCONTAINED
+            assert containment_for(profile, docker_available=False) == UNCONTAINED
+
+    def test_it_still_asks_when_only_the_sandbox_is_off(self, _tiered):
+        """Which is the whole reason the two flags are separable."""
+        with posture.override_for_tests(no_sandbox=True):
+            assert _asks("rm -rf /tmp/x", docker=True) is True
+
+    def test_the_command_runs_on_the_host_with_docker_up(self, _tiered):
+        with posture.override_for_tests(no_sandbox=True):
+            with patch("security.sandbox._run_subprocess_fallback") as host, \
+                    patch("security.sandbox._run_docker") as docker:
+                host.return_value = {"stdout": "", "stderr": "", "return_code": 0}
+                run_sandboxed("python x.py", _tiered, "bash",
+                              docker_available=True)
+        assert host.called and not docker.called
+
+    def test_the_classifier_still_runs_and_is_recorded(self, _tiered):
+        """UM2. Unsafe means do not ask and do not contain -- never do not
+        MEASURE. The profile is what makes a report against this branch
+        triageable, and it costs microseconds."""
+        with posture.override_for_tests(no_sandbox=True, no_approval=True):
+            profile = classify_command("curl http://x", _tiered)
+        assert profile.measured is True
+        assert profile.tier == SANDBOXED_NET
+        assert profile.network is True
+
+    def test_the_workspace_guard_is_skipped_only_here(self, _tiered,
+                                                      monkeypatch):
+        """UM6, and the asymmetry is the point.
+
+        `check_workspace` protects a MOUNT: batch 37 added it because
+        `_run_docker` binds the workspace read-write, so pointing it at the
+        harness tree was unattended write access to the code about to run.
+        Under `no_sandbox` there is no container and no mount, so the guard
+        protects nothing.
+
+        Under `no_approval` ALONE, Docker is still in use and every command
+        is auto-approved -- so skipping it there would rebind the harness's
+        own source read-write into an auto-approved container, which is
+        batch 37's exact escalation returning through the half of unsafe
+        mode that does not need it.
+        """
+        harness = protected_paths.harness_root()
+
+        # A NON-inert command deliberately. An inert one already runs as a
+        # host subprocess, so `no_sandbox` changes nothing for it and the
+        # inert branch stays above the unsafe one in run_sandboxed().
+        command = "python x.py"
+
+        with posture.override_for_tests(no_approval=True):
+            with pytest.raises(SandboxUnavailable):
+                run_sandboxed(command, harness, "bash", docker_available=True)
+
+        with posture.override_for_tests(no_sandbox=True):
+            with patch("security.sandbox._run_subprocess_fallback") as host:
+                host.return_value = {"stdout": "", "stderr": "",
+                                     "return_code": 0}
+                run_sandboxed(command, harness, "bash", docker_available=True)
+            assert host.called
+
+    def test_an_inert_command_is_unaffected(self, _tiered):
+        """`no_sandbox` says "do not contain", and the inert path was never
+        contained -- it is a host subprocess by construction. So the inert
+        branch stays ABOVE the unsafe one in run_sandboxed(), and this pins
+        that ordering rather than leaving it to read as an oversight."""
+        with posture.override_for_tests(no_sandbox=True):
+            with patch("security.sandbox._run_inert") as inert, \
+                    patch("security.sandbox._run_subprocess_fallback") as host:
+                inert.return_value = {"stdout": "", "stderr": "",
+                                      "return_code": 0}
+                run_sandboxed("ls", _tiered, "bash", docker_available=True)
+        assert inert.called and not host.called
+
+
+class TestUnsafeModeIsUnreachableFromASession:
+    """UM4. The same claim §40 makes, extended to the two flags that
+    matter most -- and these are the ones a rogue agent would want."""
+
+    @pytest.mark.parametrize("key", ["unsafe_no_approval", "unsafe_no_sandbox"])
+    def test_settings_json_rejects_them_by_name(self, key):
+        """BY NAME rather than by absence from _KNOWN_SETTINGS, because
+        "unknown key" reads as a typo and invites someone to add it."""
+        from core.config_loader import _validate_settings
+        with pytest.raises(ValueError, match="deliberately not supported"):
+            _validate_settings({key: True}, "probe")
+
+    @pytest.mark.parametrize("name", ["UNSAFE_NO_APPROVAL",
+                                      "UNSAFE_NO_SANDBOX"])
+    def test_mutating_config_after_binding_does_nothing(self, name,
+                                                        monkeypatch):
+        before = posture.current()
+        monkeypatch.setattr(config, name, True)
+        assert posture.current() == before
+        assert posture.current().no_approval is False
+        assert posture.current().no_sandbox is False
+
+    @pytest.mark.parametrize("var", ["UNSAFE_NO_APPROVAL", "VENASTINE_UNSAFE",
+                                     "UNSAFE_NO_SANDBOX"])
+    def test_no_environment_variable_reaches_them(self, var, monkeypatch):
+        monkeypatch.setenv(var, "1")
+        rebuilt = posture._from_config()
+        assert rebuilt.no_approval is False
+        assert rebuilt.no_sandbox is False
+
+    def test_no_slash_command_reaches_them(self):
+        from tui.app import register_builtin_commands
+        from tui.commands import registry as command_registry
+        register_builtin_commands()
+        names = set(command_registry.names())
+        assert "help" in names          # the registry is real
+        assert not (names & {"unsafe", "posture", "sandbox", "approval"})
+
+    def test_an_absent_cli_flag_never_turns_it_off(self):
+        """argparse `store_true` with `default=None` means absent is None,
+        so a launch without `--unsafe` cannot override a config.py that
+        turned it on. A plain `store_true` defaults to False and would."""
+        posture._read = False
+        posture.apply_cli(no_approval=True)
+        posture._read = False
+        assert posture.apply_cli(no_approval=None).no_approval is True
+
+
+class TestTheBrakesOnPublishing:
+    """UM8. Four independent brakes, because a published npm version can
+    never be replaced -- only deprecated."""
+
+    def test_the_branch_carries_its_marker(self):
+        assert os.path.isfile(os.path.join(ROOT, "UNSAFE_BRANCH")), \
+            "the marker is what prepublish-check refuses on; do not delete it"
+
+    def test_the_publish_workflow_is_pinned_to_main(self):
+        path = os.path.join(ROOT, ".github", "workflows", "publish.yml")
+        src = io.open(path, encoding="utf-8").read()
+        live = [ln for ln in src.splitlines()
+                if not ln.lstrip().startswith("#")]
+        assert any("if: github.ref == 'refs/heads/main'" in ln
+                   for ln in live), \
+            "a workflow_dispatch against this branch would be allowed to run"
+        # And still no automatic trigger, which is the brake this joins.
+        assert "workflow_dispatch:" in src
+        assert "\non:\n  push:" not in src
+
+    def test_config_declares_the_flags_so_prepublish_refuses(self):
+        """The second detector in `prepublish-check.mjs`, independent of
+        the marker file -- either alone is one rename from silence."""
+        src = io.open(os.path.join(ROOT, "config.py"), encoding="utf-8").read()
+        assert re.search(r"^\s*UNSAFE_NO_APPROVAL\s*=", src, re.M)
+        assert re.search(r"^\s*UNSAFE_NO_SANDBOX\s*=", src, re.M)
+
+
+class TestUnsafeReasonsCoverTheNewFlags:
+    """UM7. The banner, the WARNING and the badge all read one method."""
+
+    def test_each_flag_is_reported(self):
+        base = Posture("tiered", False, False, True, False)
+        assert base.unsafe_reasons() == []
+        assert dataclasses.replace(base, no_approval=True).unsafe_reasons()
+        assert dataclasses.replace(base, no_sandbox=True).unsafe_reasons()
+
+    def test_unsafe_is_named_first(self):
+        """It subsumes the settings below it, so a reader scanning a
+        twenty-column badge should meet the widest fact first."""
+        loud = Posture("never", True, True, False, False,
+                       no_approval=True, no_sandbox=True)
+        labels = [label for label, _ in loud.unsafe_reasons()]
+        assert labels[0].startswith("UNSAFE")
+        assert labels[1].startswith("UNSAFE")
+        assert len(labels) == 5, labels
+
+    def test_the_labels_still_fit_the_sidebar(self):
+        loud = Posture("never", True, True, False, True,
+                       no_approval=True, no_sandbox=True)
+        for label, detail in loud.unsafe_reasons():
+            assert len(label) + 2 <= 20, (label, len(label))
+            assert len(detail) > len(label)

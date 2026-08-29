@@ -60,6 +60,21 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
+    # ROADMAP_v2 §90 (UM8) -- the FOURTH brake, and the one that closes the
+    # only door the other three leave open.
+    #
+    # This workflow has no push and no tag trigger, so nothing automatic can
+    # start it. What CAN start it is a human choosing `workflow_dispatch`
+    # against a ref of their choice -- including `unsafe-mode`, which
+    # carries UNSAFE_NO_APPROVAL and must never reach npm. This refuses that
+    # run before checkout.
+    #
+    # `scripts/prepublish-check.mjs` refuses the same tree from inside the
+    # job, and that check lives on `main` so it also catches unsafe code
+    # merged INTO main. Two independent brakes, because a published npm
+    # version can never be replaced, only deprecated.
+    if: github.ref == 'refs/heads/main'
+
     steps:
       - uses: actions/checkout@v4
 

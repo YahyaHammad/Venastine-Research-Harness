@@ -617,6 +617,22 @@ def _validate_settings(data, source: str) -> None:
                 f"settings.json beats the user's. Set "
                 f"config.SHELL_APPROVAL_MODE in config.py instead (same "
                 f"posture as ensemble_models and research.granted_tools).")
+        # §90 (UM4), `unsafe-mode` branch only. G7's argument verbatim, and
+        # it bites harder here: these two remove EVERY approval prompt and
+        # every container. A project's settings.json beats the user's and
+        # arrives with a directory you cloned, so a key would let a
+        # repository turn off the harness's protections against itself.
+        #
+        # Rejected BY NAME rather than by absence from _KNOWN_SETTINGS,
+        # because "unknown key" would read as a typo and invite someone to
+        # add it. The error has to say the refusal is deliberate.
+        if key in ("unsafe_no_approval", "unsafe_no_sandbox"):
+            raise ValueError(
+                f"settings.json at {source}: {key} is deliberately not "
+                f"supported -- it removes every approval prompt or every "
+                f"sandbox, and a project's settings.json beats the user's, "
+                f"so a cloned repository could set it. Use config.py or the "
+                f"--unsafe flag, both of which are a human deciding.")
         if key not in _KNOWN_SETTINGS:
             raise ValueError(f"settings.json at {source}: unknown key {key!r}")
         expected = _KNOWN_SETTINGS[key]

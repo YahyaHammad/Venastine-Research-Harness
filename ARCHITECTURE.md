@@ -50,7 +50,7 @@ Venastine Research Harness/
 ├── CLAUDE.md / QWEN.md             # pointers to AGENTS.md, so a harness that auto-loads one of those names finds the context instead of a second copy of it
 ├── DEVLOG.md                       # implementation notes for built ROADMAP sections -- see §0
 │
-├── tests/                          # 2815 tests, all offline, ~25-45s depending on the machine (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
+├── tests/                          # 2846 tests, all offline, ~25-45s depending on the machine (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
 │   ├── conftest.py                 # fixtures: make_model_response, make_stream_from_response, make_stream_sequence, FakeStorage, ...
 │   ├── BREAKING_CHANGES.md         # what-breaks-it / symptom / fix per area
 │   ├── test_cli.py                 # 87 tests -- ROADMAP §1 thread_id passthrough + UUID validation + §14 parser defaults/resolution/trust flow + §29 N1-N8 the one stdin reader, N2's channel deadline, every request kind rendered, and the startup block main(argv) made reachable + #102's four declining defaults
@@ -78,7 +78,7 @@ Venastine Research Harness/
 │   ├── test_pipeline_storage.py    # 12 tests -- ROADMAP §5 create/update/load_pipeline_run + inner-failure caplog
 │   ├── test_file_ops.py            # 40 tests -- ROADMAP §6 path resolution, approval, read/write/edit, registry
 │   ├── test_shell.py               # 184 tests -- ROADMAP §7 sandbox routing, inert/network classification, approval, backend internals; §28 the capability classifier, the three modes, the .venastine mount; batch 37 the quoting bypass and the protected-path workspace guard; batch 39 the escaping bypass, the generative tokeniser-agreement corpus and the compound-command network flag
-│   ├── test_posture.py             # 29 tests -- batch 40 (UN1-UN6): the posture is frozen, config/env mutation cannot move it, apply_cli's ordering guard, and every route a session has (settings.json, env, slash command, writing config.py) proved not to reach it
+│   ├── test_posture.py             # 60 tests -- batch 40 (UN1-UN6): the posture is frozen, config/env mutation cannot move it, apply_cli's ordering guard, and every route a session has (settings.json, env, slash command, writing config.py) proved not to reach it
 │   ├── test_policy_enforcement.py  # 101 tests -- ROADMAP §8 secret redaction, domain blocking (#48 normalisation + suffix match), is_url_permitted's address guard (#54), output policy, registry integration
 │   ├── test_critic_routing.py      # 2 tests -- ROADMAP §11 critic-model routing (3a/3b/6c to critic, rest to main)
 │   ├── test_permission_context.py  # 21 tests -- ROADMAP_v2 §15 AC1-AC7 (stricter wins, mcp default, redaction survives, D24, unregister) + schemas filtering
@@ -178,7 +178,7 @@ Venastine Research Harness/
 ├── security/
 │   ├── capability.py              # ROADMAP_v2 §28: CommandProfile + containment + the one auto-approval rule -- generic, reads no config, knows no tool
 │   ├── permissions.py             # is_tool_allowed() / requires_approval() -- reads config's dataclasses
-│   ├── posture.py                 # batch 40 (UN1): the process's security settings, read from config+env ONCE at import and FROZEN -- before this every flag was read live, so one attribute assignment moved the shell gate
+│   ├── posture.py                 # batch 40 (UN1) + §90 on `unsafe-mode` (UM1: no_approval / no_sandbox): the process's security settings, read from config+env ONCE at import and FROZEN -- before this every flag was read live, so one attribute assignment moved the shell gate
 │   ├── protected_paths.py         # batch 37: the trees a sandboxed command may never write -- the install tree and ~/.config/venastine refuse a workspace; providers.json / app.db / logs are ro-bound when nested
 │   └── sandbox.py                 # ROADMAP §7 + §28: hybrid Docker/subprocess sandbox, classify_command(), inert fast-path, network allowlist
 │

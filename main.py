@@ -119,7 +119,46 @@ def _announce_posture() -> None:
     for _label, detail in reasons:
         logger.warning("Reduced security posture: %s", detail)
         print(f"   - {detail}", file=sys.stderr)
+    _announce_untrusted_content_tools()
     print("", file=sys.stderr)
+
+
+def _announce_untrusted_content_tools() -> None:
+    """Name the tools that pull third-party content in, when nothing will
+    be asked about (ROADMAP_v2 §90, UM7).
+
+    The hazard unsafe mode actually carries is NOT the researcher's own
+    commands -- those they typed. It is that untrusted content already
+    reaches the model through `fetch_url`, `web_search`, MCP servers and a
+    project's `.venastine/`, and with no approval gate a poisoned page is
+    arbitrary host code. They flipped the switch to test a target, not to
+    let a fetched page own the laptop.
+
+    Named rather than disabled (owner decision): researchers know the risk,
+    and a researcher testing a malicious page or a hostile MCP server is a
+    real use case that refusing to launch would block outright. Silently
+    disabling them would be worse still -- D24 exists because `fetch_url`
+    was denied on every call for its entire life and nothing said so.
+
+    Only under `no_approval`. Under `no_sandbox` alone the human is still
+    asked about every call, which is the whole point of that posture being
+    separable, and a warning a user cannot act on teaches them to ignore
+    the ones that matter.
+    """
+    if not posture.current().no_approval:
+        return
+    permissions = config.ToolPermissions()
+    ingesting = [name for name in ("fetch_url", "web_search", "load_skill")
+                 if getattr(permissions, name, False)]
+    if ingesting:
+        detail = ("these tools pull in third-party content and nothing will "
+                  "be asked about: " + ", ".join(ingesting))
+        logger.warning("UNSAFE_NO_APPROVAL: %s", detail)
+        print(f"   - {detail}", file=sys.stderr)
+    detail = ("an MCP server or a project .venastine/ can also reach the "
+              "model; under this flag their tool calls run unprompted")
+    logger.warning("UNSAFE_NO_APPROVAL: %s", detail)
+    print(f"   - {detail}", file=sys.stderr)
 
 
 def run_chat(
@@ -1248,6 +1287,42 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="ID",
         help="Delete one durable memory by id (see --memories) and exit.",
     )
+    # ROADMAP_v2 §90 (UM4), `unsafe-mode` branch only. A CLI flag AND a
+    # config.py constant, and deliberately nothing else -- no settings.json
+    # key, because a project's settings beat the user's and would let a
+    # cloned repository set its own approval posture (G7's argument), and
+    # no environment variable, because a CI file or a wrapper script is not
+    # a human deciding. There is no TUI command either: that is the one
+    # surface reachable AFTER untrusted content is already in the context
+    # window.
+    #
+    # The flag is arguably the safer of the two entry points, because it is
+    # typed by a human at each launch and cannot be left on by accident the
+    # way an edited file can.
+    unsafe = parser.add_argument_group(
+        "unsafe mode (unsafe-mode branch only)",
+        "Removes protections deliberately, for security research. Any "
+        "vulnerability requiring one of these is a DOCUMENTED RISK -- see "
+        "SECURITY.md.")
+    unsafe.add_argument(
+        "--unsafe-no-approval",
+        action="store_true",
+        default=None,
+        help="Never ask about any tool call, including shell on the host "
+             "and writes outside the workspace. Overrides ToolApprovals.",
+    )
+    unsafe.add_argument(
+        "--unsafe-no-sandbox",
+        action="store_true",
+        default=None,
+        help="Run shell commands on the HOST, whether or not Docker is "
+             "available. No container, no filesystem or network isolation.",
+    )
+    unsafe.add_argument(
+        "--unsafe",
+        action="store_true",
+        help="Both of the above.",
+    )
     # ROADMAP_v2 §21c (M21). Flags rather than /summary and /ref for the same
     # reason --memories is a flag: the CLI has no slash-command layer, and
     # adding one is §23's business rather than this section's. The accepted
@@ -1691,7 +1766,14 @@ def main(argv=None) -> int:
     # config-only value. Below parse_args because the command line feeds
     # it; below configure_logging so the warnings below have somewhere to
     # go.
-    posture.apply_cli()
+    # `store_true` with default=None means absent is None, not False --
+    # so an omitted flag never overrides a config.py that turned the
+    # setting ON. `--unsafe` ORs into both, and `or None` keeps an absent
+    # combined flag absent rather than making it a False that overrides.
+    posture.apply_cli(
+        no_approval=(args.unsafe_no_approval or args.unsafe) or None,
+        no_sandbox=(args.unsafe_no_sandbox or args.unsafe) or None,
+    )
     _announce_posture()
 
     workspace_refusal = protected_paths.check_workspace(config.WORKSPACE_DIR)

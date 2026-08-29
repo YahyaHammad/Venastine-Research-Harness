@@ -37,6 +37,7 @@ from tools.builtin import (
     file_ops, shell, load_skill, pin, remember, project_docs,
     ask_user, todo,
 )
+from security import posture
 from security.permissions import (
     assert_permissions_declared, is_tool_allowed, requires_approval,
 )
@@ -304,7 +305,32 @@ class ToolRegistry:
         approval for symbolic_math) but can never suppress a check the
         tool itself imposes (an agent declaring `shell: false` does NOT
         skip shell's non-inert-command gate).
+
+        §90 (UM3), `unsafe-mode` branch only: `UNSAFE_NO_APPROVAL` returns
+        False from HERE and nowhere else. Being the single source of truth
+        is what makes that one edit sufficient -- `dispatch()`'s internal
+        re-check calls this same method, so the loop, dispatch,
+        `_file_approval_check`, `_shell_approval_check` and MCP's dynamic
+        defaults are all covered at once. **A second unsafe check anywhere
+        else is a bug**, and would be the #67/#133 shape this method was
+        built to remove: two sites answering one question and drifting.
         """
+        # ABOVE the OR, which is the whole point. D14 makes every layer
+        # below able only to TIGHTEN, so folding this in as another term
+        # could not loosen anything -- it has to sit above the ratchet, not
+        # inside it (UM3).
+        #
+        # And it deliberately beats the ratchet. `ToolApprovals.shell =
+        # True` forces "always"; under this flag it no longer does. The
+        # flag means "there is no human here to ask", and a ratchet whose
+        # purpose is to route a decision TO a human produces a DENIAL
+        # rather than safety when none is present -- which is what headless
+        # runs already do with a gated tool. No security is lost either:
+        # `approval_overrides` can only tighten, so an attacker abusing
+        # them causes prompts, never escalation.
+        if posture.current().no_approval:
+            return False
+
         spec = self._tools.get(tool_name)
         tool_level = (
             spec.approval_check(tool_name, params)

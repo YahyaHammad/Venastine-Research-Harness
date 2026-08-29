@@ -436,11 +436,24 @@ def containment_for(
     from under the callers that pre-compute it for the TOCTOU thread --
     the same reason run_sandboxed takes it instead of asking.
     """
+    active = posture.current()
+    # §90 (UM5), `unsafe-mode` branch only. BEFORE the docker branch,
+    # because this must mirror run_sandboxed()'s routing exactly and that
+    # is where the flag takes effect there too.
+    #
+    # This half is what keeps `auto_approved` honest. UNSAFE_NO_SANDBOX
+    # WITHOUT UNSAFE_NO_APPROVAL is a coherent posture -- host execution,
+    # still supervised -- and it only works if the gate is told the truth
+    # about containment. Returning CONTAINED here while running on the
+    # host would auto-approve a writing command against the real
+    # filesystem, which is #157's shape with the tiers relabelled.
+    if active.no_sandbox:
+        return UNCONTAINED
     if profile.tier in (INERT, HOST_READ):
         return UNCONTAINED
     if docker_available:
         return CONTAINED
-    if posture.current().allow_insecure_fallback:
+    if active.allow_insecure_fallback:
         return UNCONTAINED
     return UNAVAILABLE
 
@@ -766,9 +779,24 @@ def run_sandboxed(
     # rather than one inside _run_docker, so the inert path and the
     # subprocess fallback -- which mount nothing and would otherwise be
     # exempt by accident -- refuse it too.
-    refusal = protected_paths.check_workspace(workspace_dir)
-    if refusal:
-        raise SandboxUnavailable(refusal)
+    unsafe = posture.current()
+    # §90 (UM6). The workspace refusal protects a MOUNT: batch 37 added it
+    # because `_run_docker` binds the workspace read-write at /workspace,
+    # so pointing it at the harness's own tree was unattended write access
+    # to the code about to run next. Under UNSAFE_NO_SANDBOX there is no
+    # container and no mount, so the guard is protecting nothing and
+    # refusing a launch for it would be theatre.
+    #
+    # It stays enforced under UNSAFE_NO_APPROVAL ALONE, and that asymmetry
+    # is the point rather than an oversight: Docker is still in use there,
+    # every command is auto-approved, and skipping the check would rebind
+    # the harness's own source read-write into an auto-approved container.
+    # That is batch 37's exact escalation, and it must not return through
+    # the half of unsafe mode that does not need it.
+    if not unsafe.no_sandbox:
+        refusal = protected_paths.check_workspace(workspace_dir)
+        if refusal:
+            raise SandboxUnavailable(refusal)
 
     if shell_binary is None:
         shell_binary = detect_shell()
@@ -793,6 +821,18 @@ def run_sandboxed(
     # otherwise probe now.
     if docker_available is None:
         docker_available = is_docker_available()
+
+    # §90 (UM5). Above the Docker branch, so the flag means what it says:
+    # the host, whether or not a container was available. The classifier
+    # has already run and `profile` is already recorded (UM2) -- unsafe
+    # mode does not ask and does not contain, but it still measures, and
+    # that record is what makes a report against this branch triageable.
+    if unsafe.no_sandbox:
+        logger.warning(
+            "UNSAFE_NO_SANDBOX: running on the HOST, tier=%s: %s",
+            profile.tier, command[:80],
+        )
+        return _run_subprocess_fallback(command, workspace_dir, shell_binary)
 
     if docker_available:
         network = profile.network

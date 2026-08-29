@@ -1,0 +1,37 @@
+This is the `unsafe-mode` branch of the Venastine Research Harness.
+
+It carries two settings that `main` does not have, and that no npm release
+ever will:
+
+    config.UNSAFE_NO_APPROVAL   no tool call is ever asked about
+    config.UNSAFE_NO_SANDBOX    shell commands run on the HOST, Docker or not
+
+Both ship False. The branch is a capability, not a posture -- checking it
+out changes nothing until you set one.
+
+WHY THIS FILE EXISTS
+--------------------
+`scripts/prepublish-check.mjs` refuses to publish any tree containing it.
+That check lives on `main`, so it arrives here by merge and cannot be lost
+by a bad conflict resolution -- and it also catches the reverse accident,
+this branch's code merged INTO main and published from there. A published
+npm version can never be replaced, only deprecated, so that direction is
+the unrecoverable one.
+
+DO NOT DELETE THIS FILE, and do not merge this branch into `main`.
+
+WHO THIS IS FOR
+---------------
+Security researchers who want an unbounded harness for testing and who
+accept the consequences. Any vulnerability that requires one of these
+settings is a DOCUMENTED RISK, not a finding -- see SECURITY.md.
+
+The relevant reading is ROADMAP_v2.md section 90 (UM1-UM8) for what the
+switches do and why they are shaped this way, and section 40 (UN1-UN6) on
+`main` for why the posture cannot be changed mid-session.
+
+KEEPING UP TO DATE
+------------------
+    git fetch origin && git merge origin/main
+
+The delta is deliberately small so that stays cheap.

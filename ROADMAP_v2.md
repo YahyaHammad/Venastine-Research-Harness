@@ -3362,3 +3362,80 @@ generalises: a project's settings beat the user's and arrive with a directory yo
 are still constructed per call. They are the D14 ratchet and can only tighten, so the same mutation
 against them causes prompts rather than skipping them — a different risk, and one that wants its own
 batch rather than a rider on this one.
+
+## §90. Unsafe mode — `unsafe-mode` BRANCH ONLY
+
+**Status: BUILT, on the `unsafe-mode` branch. This section does not exist on `main`.**
+
+> **Why §90 and not §41.** Sections from 90 up are reserved for branch-only work. If this took the
+> next free number, `main`'s next batch would claim the same one and every `git fetch && git merge
+> origin/main` would conflict on it forever. The namespace `UM` is reserved the same way.
+
+§40 on `main` established that the security posture is read once and frozen. This section adds the
+two switches that posture exists to make un-flippable, for security researchers who want an
+unbounded harness and accept the consequences.
+
+**Why a branch rather than a flag on `main`.** The switches introduce a deliberate security
+reduction that may still be exploitable despite the guards around it. Regular users install from
+npm, so npm must only ever serve `main` — and four independent brakes enforce that (UM8). Keeping
+the code off `main` entirely is the only version of that guarantee which does not depend on a
+config default staying correct.
+
+**Why a switch at all.** Without one, a researcher who wants this edits `security/sandbox.py`. That
+is an unversioned local divergence the harness cannot detect, report, or refuse to combine with
+anything — strictly worse than a named switch that announces itself at every launch. `SECURITY.md`
+already sets the policy: `never` mode is "the old unbounded behaviour, kept on purpose", and reports
+against it close as documented risk. This extends that, it does not invent it.
+
+### Design Decisions Record — §90 (UM1–UM8)
+
+| id | decision |
+|---|---|
+| **UM1** | **Two independent switches, not one blanket** (owner decision). `UNSAFE_NO_APPROVAL` never asks; `UNSAFE_NO_SANDBOX` runs shell on the host whether or not Docker is up. The needs genuinely differ — a vulnerable web app in a container wants no prompts and keeps Docker, host-level work wants the opposite — and `no_sandbox` alone is a coherent, much narrower posture: *host execution, still supervised*. Both ship `False`; the branch is a capability, not a posture. They live on `Posture` because it is the only thing in the process a session cannot reach, and a switch that removes every approval prompt must be un-flippable by the thing it stops asking about |
+| **UM2** | **The classifier still runs and its verdict is still recorded.** Unsafe means do not ask and do not contain — never *do not measure*. `classify_command` is unchanged and `profile` is logged on the host path, because that record is what makes a bug report against this branch triageable, and it costs microseconds. Removing it would buy nothing and destroy the only account of what the harness thought it was doing |
+| **UM3** | **`UNSAFE_NO_APPROVAL` is read in exactly ONE place**, `ToolRegistry.approval_needed`, and a test scans production code to keep it that way. That method is the documented single source of truth and `dispatch()`'s internal re-check calls it too, so one edit covers the loop, dispatch, `_file_approval_check`, `_shell_approval_check` and MCP's dynamic defaults. A second reader would be the #67/#133 shape — two sites answering one question and drifting — inside the method built to remove it. It sits **above** the D14 OR, because a term inside a ratchet that can only tighten could not loosen anything |
+| **UM4** | **It beats the D14 ratchet, deliberately.** `ToolApprovals.shell = True` normally forces `always`; under this flag it does not. The flag means *there is no human here to ask*, and a ratchet whose purpose is to route a decision TO a human produces a **denial** rather than safety when none is present — which is what a headless run already does with a gated tool. No security is lost: `approval_overrides` can only tighten, so an attacker abusing them causes prompts, never escalation. The launch banner names the contradiction so a user who set both can see it |
+| **UM5** | **`containment_for` must tell the truth about the host.** Under `no_sandbox` it returns `UNCONTAINED` even with Docker up, mirroring `run_sandboxed`'s routing exactly. This is what keeps `no_sandbox` *without* `no_approval` coherent: reporting `CONTAINED` while running on the host would auto-approve a writing command against the real filesystem, which is #157's shape with the tiers relabelled. The INERT branch stays **above** the unsafe one, because the inert path was never contained — it is a host subprocess by construction, so the flag changes nothing for it |
+| **UM6** | **`protected_paths.check_workspace` is skipped under `no_sandbox` ONLY**, and the asymmetry is the point. That guard protects a MOUNT: batch 37 added it because `_run_docker` binds the workspace read-write, so pointing it at the harness tree was unattended write access to the code about to run next. Under `no_sandbox` there is no container and no mount, so refusing a launch for it would be theatre. Under `no_approval` **alone**, Docker is still in use and every command is auto-approved, so skipping it would rebind the harness's own source read-write into an auto-approved container — batch 37's exact escalation returning through the half of unsafe mode that does not need it |
+| **UM7** | **Untrusted-content tools stay enabled, and are NAMED at launch** (owner decision). The hazard unsafe mode actually carries is not the researcher's own commands — it is that `fetch_url`, `web_search`, MCP servers and a project's `.venastine/` already reach the model, and with no approval gate a poisoned page is arbitrary host code. They flipped the switch to test a target, not to let a fetched page own the laptop. Refusing to launch would block a real use case (testing a malicious page, or a hostile MCP server); disabling them silently would be D24's failure, where `fetch_url` was denied on every call for its whole life and nothing said so. So: warn, name each one, and let the researcher decide. Only under `no_approval` — under `no_sandbox` alone the human is still asked about every call |
+| **UM8** | **Four independent brakes on publishing.** (1) `scripts/prepublish-check.mjs` refuses a tree with an `UNSAFE_BRANCH` marker, and (2) refuses one whose `config.py` declares `UNSAFE_NO_*` — two detectors because either alone is one rename from silence; **measured**: deleting the marker still exits 1 via the second. That check lives on `main`, so it arrives here by merge and also catches the reverse accident, unsafe code merged INTO main. (3) The publish workflow has no push or tag trigger, so nothing automatic starts it. (4) Its one job is now `if: github.ref == 'refs/heads/main'`, refusing a manual `workflow_dispatch` against this branch before checkout. A published npm version can never be replaced, only deprecated, so the reverse direction is the unrecoverable one |
+
+### Reachability, measured rather than argued
+
+The owner's requirement was to confirm no rogue agent or malicious actor can enable this
+mid-session. §40's guarantee carries, and each route has its own test:
+
+| route | result |
+|---|---|
+| mutate `config.UNSAFE_NO_*` in-process | no effect — the posture bound at import |
+| `settings.json`, user **or project** tier | rejected **by name**, not merely unknown |
+| any environment variable | none exists; `_from_config` reads only `config` |
+| a TUI slash command | none exists, and a test fails if one is added |
+| a tool call writing `config.py` | still prompts — it is outside the workspace |
+| arbitrary in-process Python | **yes**, and that is stated rather than hidden |
+
+The last row is the honest limit. Anything with in-process Python can also rebind `posture.current`
+itself, so no in-process flag defends against it. A frozen dataclass raises where a bare assignment
+succeeded; that raises the bar without closing the class, and claiming more would be the "reads as
+safety without being it" failure `SECURITY.md` already names for the insecure fallback.
+
+### Deliberately not in §90
+
+**No `settings.json` key and no environment variable** (UM4's sibling reasoning): a project's
+settings beat the user's and arrive with a directory you cloned; a CI file or wrapper script is not
+a human deciding.
+
+**No TUI command.** It is the one surface reachable *after* untrusted content is already in the
+context window, which is precisely when an injection would want to change the posture.
+
+**No change to the `file_ops` workspace boundary itself.** `UNSAFE_NO_APPROVAL` removes the
+*prompt*, which is what made `read /etc/shadow` unreachable-without-asking; the path resolution is
+untouched, so the classification of what is inside the workspace still means what it did.
+
+### Keeping this branch current
+
+    git fetch origin && git merge origin/main
+
+The delta is deliberately small — `main` carries the posture module, the banner, the badge and the
+publish guard, all exercised by `main`'s own suite. The known conflict point is AGENTS.md's
+decision-family map, which both branches extend; resolve by keeping both families.

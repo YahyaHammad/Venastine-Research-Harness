@@ -2887,3 +2887,20 @@ Count 2742 -> 2786.
 | A source-scan assertion must ignore commented-out lines | `test_the_publish_guard_is_wired_into_the_prepublish_check`, and any test written the same way | The first version asserted `"problems.push(...unsafeBranchProblems());" in src` and **survived the mutation that comments that exact line out**, because the substring is still there. Scan live lines only. Found by running the mutation, not by reading the assertion |
 
 Count 2786 -> 2815.
+
+## Batch 41 — unsafe mode (`unsafe-mode` BRANCH ONLY, 2026-08-29)
+
+**None of this exists on `main`.** If you are reading it there, a merge went wrong — and
+`scripts/prepublish-check.mjs` will refuse to publish until it is undone.
+
+| Change | What breaks | Symptom / fix |
+|---|---|---|
+| `Posture` gained `no_approval` / `no_sandbox` | Positional `Posture(...)` construction with exactly five arguments still works; six or seven is branch-only | Both have defaults, so `main`'s five-arg constructions are unaffected. `_from_config` reads the constants with `getattr`, so this module still imports on a `config.py` that does not declare them — which is what makes a `main` → branch merge safe in both directions |
+| `ToolRegistry.approval_needed` can return False for everything | Any test asserting a call is gated, run with `no_approval` set | Intended (UM3), and it is the ONLY place the flag is read. A source-scan test fails if a second reader appears — do not add one "for clarity" in `dispatch()` or the loop |
+| `containment_for` returns UNCONTAINED with Docker up | Code assuming `docker_available=True` implies CONTAINED | Intended (UM5). It must mirror `run_sandboxed`'s routing exactly, and under `no_sandbox` that routing is the host. Reporting CONTAINED while running on the host would auto-approve a writing command against the real filesystem |
+| `check_workspace` is skipped under `no_sandbox` | A test asserting the refusal fires in every posture | Skipped under `no_sandbox` ONLY, and the asymmetry is load-bearing (UM6): under `no_approval` alone Docker is still in use, so skipping it would rebind the harness's own source read-write into an auto-approved container — batch 37's escalation, returning through the half that does not need it |
+| The INERT branch stays ABOVE the unsafe one in `run_sandboxed` | A test using an inert command to prove host routing | `ls` never reaches `_run_subprocess_fallback` and never should — the inert path is already a host subprocess, so `no_sandbox` changes nothing for it. Use a non-inert command. The first draft of that test used `ls` and failed for exactly this reason |
+| `settings.json` rejects `unsafe_no_approval` / `unsafe_no_sandbox` by name | A config carrying either key | Intended (UM4). By NAME rather than by absence from `_KNOWN_SETTINGS`, because "unknown key" reads as a typo and invites someone to add it |
+| A mutation must mutate the PROPERTY, not the file | A mutation test that edits `UNSAFE_BRANCH`'s contents | Both the test and `prepublish-check.mjs` ask whether the marker EXISTS, so a content edit scores a false survival. Delete the file to test it. Same family as batch 39's heredoc no-op and batch 40's commented-out line |
+
+Count 2815 -> 2846 (on this branch).

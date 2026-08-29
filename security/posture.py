@@ -67,6 +67,17 @@ to work around stops being read as a guard.
 Never calling `apply_cli()` at all -- a library import, a bare test --
 leaves the config-derived default, which is the safe posture.
 
+UNSAFE MODE (`unsafe-mode` BRANCH ONLY, §90)
+-------------------------------------------
+This branch adds `no_approval` and `no_sandbox`. They ride here rather
+than anywhere else for one reason: the posture is the only thing in the
+process that a session cannot reach, so a switch that removes every
+approval prompt has to be un-flippable by the thing it stops asking about.
+
+Both are False on `main`, which does not declare the constants at all --
+`_from_config` reads them with `getattr` so this file stays importable in
+either direction, and a missing constant means the safe value.
+
 This module imports `config` and the stdlib and nothing else, per
 ARCHITECTURE's rule for `security/`.
 """
@@ -122,6 +133,15 @@ class Posture:
     # real distinction: the constant is the permanent answer and this is
     # one run's, and the environment may only ever turn redaction OFF.
     redact_off_env: bool
+    # §90 (UM1), `unsafe-mode` BRANCH ONLY. Both ship False and neither
+    # exists on `main`.
+    #
+    # Independent because the needs are: a vulnerable web app in a
+    # container wants no prompts and keeps Docker, host-level work wants
+    # the opposite. `no_sandbox` alone is "host execution, still
+    # supervised", which is coherent and much narrower.
+    no_approval: bool = False
+    no_sandbox: bool = False
 
     def unsafe_reasons(self) -> list[tuple[str, str]]:
         """Every active posture that weakens the shipped defaults, as
@@ -146,6 +166,22 @@ class Posture:
         caller write `if reasons:` instead of re-deriving the question.
         """
         reasons: list[tuple[str, str]] = []
+        # UNSAFE first, and deliberately: it subsumes the settings below
+        # it, so a reader scanning the badge should meet the widest fact
+        # before the narrower ones.
+        if self.no_approval:
+            reasons.append((
+                "UNSAFE: no prompts",
+                "UNSAFE_NO_APPROVAL is on -- NO tool call is asked about, "
+                "including shell on the host, writes outside the workspace "
+                "and MCP servers. Any untrusted content reaching the model "
+                "is acting with your authority"))
+        if self.no_sandbox:
+            reasons.append((
+                "UNSAFE: no sandbox",
+                "UNSAFE_NO_SANDBOX is on -- shell commands run on the HOST "
+                "with no container, no filesystem isolation and no network "
+                "restriction, whether or not Docker is available"))
         if self.shell_approval_mode == "never":
             reasons.append((
                 "shell: never ask",
@@ -199,6 +235,12 @@ def _from_config() -> Posture:
         auto_approve_fallback=bool(config.AUTO_APPROVE_SANDBOX_FALLBACK),
         redact_tool_outputs=bool(config.REDACT_TOOL_OUTPUTS),
         redact_off_env=_redact_off_from_env(),
+        # §90. `getattr` because these exist only on the `unsafe-mode`
+        # branch: this module must keep importing cleanly if it is ever
+        # merged onto a config.py without them, and the safe default is
+        # the one a missing constant should mean.
+        no_approval=bool(getattr(config, "UNSAFE_NO_APPROVAL", False)),
+        no_sandbox=bool(getattr(config, "UNSAFE_NO_SANDBOX", False)),
     )
 
 

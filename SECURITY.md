@@ -54,6 +54,23 @@ Out of scope: social engineering, physical access, compromise of a provider's ow
 
 The same applies to `ALLOW_INSECURE_SANDBOX_FALLBACK = True` **together with** `AUTO_APPROVE_SANDBOX_FALLBACK = True`. That pair is unprompted arbitrary code on the host, with your own file access, including writes into the harness's own source tree — and the harness ships as a folder of Python, so a run can edit the code the next run executes. It is not defended against, and the reason is that it cannot be: an uncontained host shell cannot be bounded from inside the same process. A path check stops `echo x > ../config.py` and a `python -c` payload walks straight past it, which is a control that reads as safety without being it. Docker is the boundary. `README.md` § *"`shell` is classified, not just approved"* states the same thing at the point of use.
 
+**This is the `unsafe-mode` branch, and it carries two settings no release has.**
+`UNSAFE_NO_APPROVAL` removes every approval prompt, for every tool. `UNSAFE_NO_SANDBOX` runs shell
+commands on the host whether or not Docker is available. Both ship `False`; checking the branch out
+changes nothing until you set one. **Any vulnerability that requires either is a documented risk and
+will be closed as one** — the same treatment `SHELL_APPROVAL_MODE = "never"` already gets below, and
+for the same reason: the setting *is* the vulnerability, deliberately, and you chose it.
+
+What we do still want reported from this branch: anything that reaches those settings without a
+human at the machine setting them. They are read once at startup from `config.py` or the `--unsafe`
+flag, and are unreachable from `settings.json` at either tier, from any environment variable, from a
+tool call, and from a TUI command. A route past that is a real finding, on this branch as much as on
+`main`.
+
+And the thing worth saying plainly: under `UNSAFE_NO_APPROVAL` a prompt injection from a fetched
+page, an MCP server or a project's `.venastine/` is arbitrary code on your host. The harness names
+those tools at launch and shows a badge for the whole session. It cannot do more than tell you.
+
 **Since batch 40 these settings are read ONCE, at startup, into a frozen posture
 (`security/posture.py`).** Before that they were read live at every decision, so
 `config.SHELL_APPROVAL_MODE = "never"` -- a single attribute assignment -- turned the shell gate off

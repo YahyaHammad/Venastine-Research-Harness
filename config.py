@@ -221,6 +221,54 @@ SHELL_BINARY = os.environ.get("AGENT_SHELL", "")  # auto-detect if empty
 ALLOW_INSECURE_SANDBOX_FALLBACK = False  # explicitly enable subprocess fallback
 AUTO_APPROVE_SANDBOX_FALLBACK = False    # auto-approve fallback runs (no per-run prompt)
 
+# ---------------------------------------------------------------------------
+# --- UNSAFE MODE (ROADMAP_v2 §90, UM1) -- `unsafe-mode` BRANCH ONLY ---------
+# ---------------------------------------------------------------------------
+#
+# THESE TWO SETTINGS EXIST ON NO RELEASED VERSION OF THIS HARNESS. They are
+# carried by the `unsafe-mode` branch, for security researchers who want an
+# unbounded harness and accept the consequences, and
+# `scripts/prepublish-check.mjs` refuses to publish any tree that declares
+# them. If you are reading this on `main`, something has been merged wrong.
+#
+# Both ship False. The branch is a CAPABILITY, not a posture.
+#
+#   UNSAFE_NO_APPROVAL   No tool call is ever asked about -- not shell, not
+#                        `write` or `edit` outside the workspace, not an MCP
+#                        server, not a subagent spawn. It overrides the D14
+#                        ratchet as well: `ToolApprovals.shell = True` no
+#                        longer forces a prompt. The flag means "there is no
+#                        human here to ask", and a ratchet whose purpose is
+#                        to route a decision TO a human produces a denial
+#                        rather than safety when none is present.
+#
+#   UNSAFE_NO_SANDBOX    Shell commands run on the HOST through the
+#                        subprocess fallback, whether or not Docker is
+#                        available -- no container, no filesystem isolation,
+#                        no network restriction, and no `protected_paths`
+#                        refusal, since there is no mount to protect.
+#
+# They are INDEPENDENT because the needs are. Testing a vulnerable web app
+# in a container wants no prompts and keeps Docker; host-level work wants
+# the opposite. `UNSAFE_NO_SANDBOX` alone is "host execution, still
+# supervised", which is a coherent and much narrower posture.
+#
+# WHAT STILL HAPPENS: the command classifier still runs and its verdict is
+# still recorded (UM2). Unsafe means do not ask and do not contain -- never
+# do not measure. That record is what makes a bug report against this branch
+# triageable, and it costs microseconds.
+#
+# WHAT DOES NOT PROTECT YOU: everything. A prompt injection from a fetched
+# page, an MCP server or a project's `.venastine/` is arbitrary host code
+# under these settings. The harness warns at launch and shows a badge for
+# the whole session; it cannot do more, and SECURITY.md says so.
+#
+# There is deliberately NO settings.json key and NO environment variable for
+# either (UM4), and no TUI command. The values are read ONCE at startup into
+# `security/posture.py` -- see §40 on `main` for why.
+UNSAFE_NO_APPROVAL = False
+UNSAFE_NO_SANDBOX = False
+
 # ROADMAP_v2 §28 (G3). WHICH shell commands need a human to say yes.
 #
 #   "always"  every command is asked about, whatever it does.
