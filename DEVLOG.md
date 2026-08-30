@@ -8258,3 +8258,147 @@ call keeps its cross.** Those are a chronological log, not a checklist, and a
 row already drawn cannot be re-ticked --- a checkbox there is a checkbox that
 never changes.
 
+## Batch 43 — who is speaking, and what the session remembers (2026-08-30)
+
+Three defects reported from using the TUI after §38 and §41, plus one report that
+turned out to be the code working as designed. Landed as four commits: the label,
+`/new`, the remembered model, then the documentation.
+
+### Commit 1 — the turn's label opens the turn
+
+**The reported symptom.** Since thinking became visible, `venastine ›` appears
+*after* the reasoning block, so the block sits under `you ›` and reads as the
+user having done the thinking and the model having answered with none.
+
+**Why it was there.** §38 added a thinking span and left the label exactly where
+it had always been: in `_write_stream_chunk`, drawn when the first committable
+chunk of ANSWER text arrives. That was correct while an answer was the only
+thing a model produced. It stopped being correct the moment something else could
+come first, and nothing in the §38 review looked at ordering because the label
+had not moved.
+
+**What changed.** `_open_label()` draws it once and sets `_label_in_force`;
+`_write_thinking_chunk` calls it above the opening delimiter, `_write_stream_chunk`
+calls it instead of writing the label itself, and `_render_entry` clears the flag
+on the `user` role and calls it for both `assistant` and `thinking`. One label per
+turn; a tool line, a diff or a notice inside the turn does not re-open one.
+
+**The property that made it safe.** Placement is a pure function of the role
+sequence in `_entries`. `rerender()` replays those entries after a `/theme` and
+must not reflow a transcript it was asked only to recolour — so it re-derives the
+labels by running the same code over the same list rather than remembering where
+they went. That is why the flag is cleared in `reset()` and at the top of
+`rerender()` and set nowhere else.
+
+**Owner decision.** One label per TURN, not one per contiguous model block. The
+block rule re-labels after every tool call; asked with both renderings drawn out,
+the answer was the quieter one, and it makes the label mean "the model is
+answering you" rather than "a span started".
+
+**Mutation.** Removing the `_open_label()` call from `_write_thinking_chunk` —
+i.e. the shipped §38 behaviour — turns two of the six new tests red.
+
+### Commit 2 — /new redraws the window
+
+**The reported symptom.** `/new` says it started a thread and leaves the previous
+conversation on screen, so the session reads as two conversations concatenated
+under one sentence, only the second of which is in context.
+
+**It was a known bug, fixed once, on one of the two paths.** §27 found exactly
+this on resume — "the PREVIOUS thread's transcript stayed on screen under the new
+thread's id, so the screen actively lied about which conversation was loaded" —
+and fixed it in `switch_to_thread`. `_cmd_new` was never brought along. It also
+never cleared `_last_run`, `_live_claims`, `_last_response`, `_tool_names` or
+`_file_calls`, so `/claims` and `/copy last` kept answering for the abandoned
+thread: the same §27 AC4 defect, on the same missing path.
+
+**What changed.** `_cmd_new` now performs `switch_to_thread`'s reset — state
+first, then `Transcript.reset()`, then anything written — and reprints the banner
+through a new shared `_write_session_banner()`. The `_busy` refusal stays first,
+so a refused `/new` clears nothing.
+
+**Owner decision.** Redraw *with* the banner, like a fresh launch, rather than
+leaving one line on an empty screen. The banner is REPRINTED rather than replayed:
+a `/model` switch is session state and survives `/new`, so a banner echoing the
+launch pair would name a model the next turn will not call. That is what its test
+asserts, and asserting on the string `switched-model` alone was vacuous — the
+`/model` confirmation contains it — which the revert check caught.
+
+### Commit 3 — the model you picked is the model you get back
+
+**The reported symptom.** The TUI comes up on `config.MODEL_NAME` every launch;
+`/model` is forgotten at exit, and the only durable answer is hand-editing
+`settings.json`.
+
+**This is batch 36, one preference along.** That batch established the argument:
+the rule that nothing writes to `settings.json` is about the FILE — a trusted
+project's copy beats the user's (D29), and it is hand-authored — not about whether
+a choice may be remembered. So the pair is remembered beside it, in the same
+user-tier store, with the same staleness key.
+
+Here the file has a second reason to be left alone that the theme did not have:
+the project copy of `settings.json` lives inside D17's trust content hash, so a
+session writing `default_model` into it would re-trigger the trust prompt at the
+next launch. The user-tier copy has the other problem — a project `default_model`
+outranks it, so the write would silently fail to stick in exactly the projects
+that set one.
+
+**What is load-bearing.**
+
+- **The record is a PAIR, restored whole or not at all.** A model name is
+  meaningless against the wrong provider.
+- **Three fallbacks besides "nothing remembered", each a real failure.** A
+  `--provider`/`--model` flag pins the launch; the staleness key differs (edit,
+  add or remove either settings key and the file re-asserts — which is why the
+  recorded values are RAW and `None` stays distinguishable from a string); or the
+  remembered provider is gone from `providers.json`, which is `/model`'s own
+  unknown-provider refusal applied at mount instead of as a first-turn
+  `api_initialization` failure a long way from the edit that caused it.
+- **`cli_pinned` is passed, not inferred.** `resolve_runtime_defaults` has already
+  collapsed the flags into the resolved pair, so the app cannot tell one from a
+  default by looking. Comparing against `settings.json` instead would read a flag
+  that happens to match the configured value as absent — the same
+  default-indistinguishable-from-decision defect `_theme_persisting` exists to
+  prevent, through the other door.
+- **Two records in one file, so both writers read-modify-write.** A writer
+  serialising only its own fields would drop the other's, and each half would look
+  correct in its own test. `STORE_VERSION` deliberately stays 1: the model keys are
+  optional, so an existing store keeps its theme and gains the pair on the first
+  `/model`, where a bump would have discarded every user's theme once.
+- **The restore is announced.** The mount banner says `(remembered)`. A session
+  silently starting on a model no config file names is the confusion this would
+  otherwise trade for the one it fixes (#138), and it is the counterpart of
+  `/theme`'s "Remembered for the next launch." `/model` clears the marker, since it
+  describes the launch rather than the store.
+- **The confirmation is printed only on a write that landed**, matching `/theme`:
+  a failure WARNS inside `remember_model` and reaches the transcript through
+  `TranscriptLogHandler`.
+
+`preferences.load`/`remember` became `load_theme`/`remember_theme`; the rename is
+in `tests/BREAKING_CHANGES.md`.
+
+### Commit 4 — what workspace trust is actually keyed to
+
+**The report.** `AGENT_WORKSPACE` was changed, the TUI relaunched, and no trust
+prompt appeared.
+
+**Measured, and it is correct.** `main()` passes `os.getcwd()` as the project
+path, so trust is keyed to the PROJECT; `AGENT_WORKSPACE` (`config.WORKSPACE_DIR`)
+is `file_ops`' permission boundary and deliberately not a project path — the
+distribution section already warns that pointing it at a shared directory silently
+auto-approves writes there. And `is_trusted()` returns `True` outright for a
+project with no `.venastine/`: nothing to trust, nothing to list, no question to
+ask. An empty directory is that case, and so is this repository.
+
+**Owner decision.** Leave the behaviour alone; add the sentence. A mount line
+stating the trust state was offered and declined — the behaviour is right, and a
+further surface describing it is UN3's "one description of the posture" argument
+applied to a second control.
+
+### Still open
+
+1. `ROADMAP_v2.md`'s index does not list §39 or §40 (both built, both with their
+   own sections and decision records). Not touched here: the status-marker check
+   quantifies over the numbered list, so the omission is invisible to it, and
+   backfilling two entries is somebody's decision about that document rather than
+   this batch's.

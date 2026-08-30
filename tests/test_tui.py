@@ -685,10 +685,10 @@ async def test_mounting_without_choosing_a_theme_writes_nothing(
 async def test_a_failed_save_still_switches_the_theme_and_claims_nothing(
         mocker):
     """A write that cannot land must not cost the user the switch, and
-    must not be reported as remembered -- the WARNING preferences.remember
-    logs reaches the transcript through TranscriptLogHandler, so saying
+    must not be reported as remembered -- the WARNING
+    preferences.remember_theme logs reaches the transcript through TranscriptLogHandler, so saying
     nothing here is neither silent nor a duplicate."""
-    mocker.patch("tui.app.preferences.remember", return_value=False)
+    mocker.patch("tui.app.preferences.remember_theme", return_value=False)
 
     app = VenastineApp("ANTHROPIC", "test-model", {})
     async with app.run_test() as pilot:
@@ -712,8 +712,184 @@ def test_remember_reports_a_write_it_could_not_make(tmp_path, mocker):
     mocker.patch.object(preferences, "store_path",
                         lambda: str(blocker / "ui_preferences.json"))
 
-    assert preferences.remember("ember", None) is False
-    assert preferences.load() is None
+    assert preferences.remember_theme("ember", None) is False
+    assert preferences.load_theme() is None
+    assert preferences.remember_model("ANTHROPIC", "m", None, None) is False
+    assert preferences.load_model() is None
+
+
+# ---------------------------------------------------------------------------
+#
+# §43 (RM3/RM4). The same feature, one preference along: the pair chosen
+# with /model is the pair the next launch mounts on. Same store, same
+# staleness rule, same refusal to write settings.json -- and here that
+# refusal has a second reason, since the project copy of that file lives
+# inside D17's trust content hash.
+
+
+@pytest.mark.asyncio
+async def test_model_command_is_remembered_for_the_next_launch(
+        isolate_ui_preferences):
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        app.query_one("#prompt").value = "/model ANTHROPIC chosen-model"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.model == "chosen-model"
+        assert [t for _role, t in app._transcript._entries
+                if "Remembered" in t], "the save was never confirmed"
+
+    stored = json.loads(isolate_ui_preferences.read_text(encoding="utf-8"))
+    assert stored["provider"] == "ANTHROPIC"
+    assert stored["model"] == "chosen-model"
+    assert stored["settings_provider"] is None
+    assert stored["settings_model"] is None, \
+        "settings.json named no default_model, and that has to be recorded " \
+        "as a fact rather than as the resolved default"
+
+    nextrun = VenastineApp("ANTHROPIC", "test-model", {})
+    async with nextrun.run_test() as pilot:
+        assert nextrun.model == "chosen-model"
+        assert nextrun.provider_name == "ANTHROPIC"
+        assert any("(remembered)" in t
+                   for _role, t in nextrun._transcript._entries), \
+            "a restored pair has to say where it came from (#138)"
+
+
+@pytest.mark.asyncio
+async def test_a_remembered_pair_is_restored_whole(isolate_ui_preferences):
+    """A model name is meaningless against the wrong provider, so the
+    record is a pair and it is restored whole or not at all."""
+    isolate_ui_preferences.write_text(json.dumps(
+        {"version": 1, "provider": "OPENAI", "model": "gpt-5.1",
+         "settings_provider": None, "settings_model": None}),
+        encoding="utf-8")
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test():
+        assert (app.provider_name, app.model) == ("OPENAI", "gpt-5.1")
+
+
+@pytest.mark.asyncio
+async def test_editing_default_model_re_asserts_it(isolate_ui_preferences):
+    """The staleness rule. A remembered pair outranks settings.json only
+    while settings.json still says what it said when the pair was
+    chosen."""
+    isolate_ui_preferences.write_text(json.dumps(
+        {"version": 1, "provider": "ANTHROPIC", "model": "old-choice",
+         "settings_provider": None, "settings_model": "was-this"}),
+        encoding="utf-8")
+
+    app = VenastineApp("ANTHROPIC", "is-now-this",
+                       {"default_model": "is-now-this"})
+    async with app.run_test():
+        assert app.model == "is-now-this"
+
+
+@pytest.mark.asyncio
+async def test_adding_default_model_to_settings_re_asserts_it(
+        isolate_ui_preferences):
+    """The half that catches a collapsed None. `settings_model: null` --
+    "settings.json named no default_model when this was chosen" -- has to
+    stay distinguishable from an explicit value, or ADDING the key
+    becomes a silent no-op while CHANGING one still works."""
+    isolate_ui_preferences.write_text(json.dumps(
+        {"version": 1, "provider": "ANTHROPIC", "model": "old-choice",
+         "settings_provider": None, "settings_model": None}),
+        encoding="utf-8")
+
+    app = VenastineApp("ANTHROPIC", "named-in-settings",
+                       {"default_model": "named-in-settings"})
+    async with app.run_test():
+        assert app.model == "named-in-settings"
+
+
+@pytest.mark.asyncio
+async def test_a_remembered_provider_that_is_gone_falls_back(
+        isolate_ui_preferences, mocker):
+    """/model's own unknown-provider refusal, applied at mount.
+    api_initialization would otherwise raise on the first turn, a long
+    way from the providers.json edit that caused it."""
+    mocker.patch("credentials.load_provider_data",
+                 return_value={"ANTHROPIC": {"API_KEY": "x"}})
+    isolate_ui_preferences.write_text(json.dumps(
+        {"version": 1, "provider": "RETIRED", "model": "gone",
+         "settings_provider": None, "settings_model": None}),
+        encoding="utf-8")
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test():
+        assert (app.provider_name, app.model) == ("ANTHROPIC", "test-model")
+
+
+@pytest.mark.asyncio
+async def test_a_launch_flag_outranks_a_remembered_pair(
+        isolate_ui_preferences):
+    """--provider/--model is an instruction about this launch. main has
+    already collapsed the flags into the resolved pair by the time the
+    app is built, which is why cli_pinned has to be passed separately."""
+    isolate_ui_preferences.write_text(json.dumps(
+        {"version": 1, "provider": "OPENAI", "model": "gpt-5.1",
+         "settings_provider": None, "settings_model": None}),
+        encoding="utf-8")
+
+    app = VenastineApp("ANTHROPIC", "named-on-the-command-line", {},
+                       cli_pinned=True)
+    async with app.run_test():
+        assert app.model == "named-on-the-command-line"
+        assert app.provider_name == "ANTHROPIC"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_save_still_switches_the_model_and_claims_nothing(
+        mocker):
+    mocker.patch("tui.app.preferences.remember_model", return_value=False)
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        app.query_one("#prompt").value = "/model ANTHROPIC chosen-model"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.model == "chosen-model"
+        assert not [t for _role, t in app._transcript._entries
+                    if "Remembered" in t], \
+            "a save that failed was reported as a save that worked"
+
+
+def test_the_two_records_share_a_file_without_clobbering_each_other(
+        isolate_ui_preferences):
+    """The read-modify-write obligation. Two records, one file, written
+    at different moments by different commands -- a writer that
+    serialised only its own fields would drop the other's, and each half
+    would look correct in its own test."""
+    from tui import preferences
+
+    assert preferences.remember_theme("ember", None) is True
+    assert preferences.remember_model("OPENAI", "gpt-5.1", None, None) is True
+
+    assert preferences.load_theme()["theme"] == "ember"
+    assert preferences.load_model()["model"] == "gpt-5.1"
+
+    assert preferences.remember_theme("matrix", "dark-plain") is True
+    assert preferences.load_model()["provider"] == "OPENAI", \
+        "remembering a theme forgot the model"
+
+
+def test_a_store_written_before_the_model_record_still_loads_its_theme(
+        isolate_ui_preferences):
+    """Why STORE_VERSION was not bumped: the model keys are optional, so
+    an existing v1 store keeps its theme and gains the pair on the first
+    /model. Bumping would have thrown every user's theme away once."""
+    from tui import preferences
+
+    isolate_ui_preferences.write_text(json.dumps(
+        {"version": 1, "theme": "ember", "settings_theme": None}),
+        encoding="utf-8")
+
+    assert preferences.load_theme()["theme"] == "ember"
+    assert preferences.load_model() is None
+    assert preferences.remember_model("OPENAI", "gpt-5.1", None, None) is True
+    assert preferences.load_theme()["theme"] == "ember"
 
 
 @pytest.mark.asyncio
@@ -1589,6 +1765,80 @@ async def test_new_thread_clears_a_stale_goal_banner(_mocked_loop):
         _cmd_new(app, "")
         await pilot.pause()
         assert app.query_one("#goal-banner", GoalBanner).goal is None
+
+
+@pytest.mark.asyncio
+async def test_new_thread_redraws_the_window(_mocked_loop):
+    """§43 (RM2). /new swapped the memory and wrote one line, so the
+    previous conversation stayed on screen underneath it -- two threads
+    concatenated, with only the second of them in context. The resume
+    path had cleared the transcript since §27; this one had not."""
+    from tui.app import _cmd_new
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        app.query_one("#prompt").value = "the previous conversation"
+        await pilot.press("enter")
+        await settle(pilot, lambda: not app._busy)
+        assert any("the previous conversation" in text
+                   for _role, text in app._transcript._entries)
+
+        _cmd_new(app, "")
+        await pilot.pause()
+
+        assert not any("the previous conversation" in text
+                       for _role, text in app._transcript._entries), \
+            "the previous thread was still on screen after /new"
+        assert app._transcript.as_text().strip().endswith(
+            "Started a new thread.")
+
+
+@pytest.mark.asyncio
+async def test_new_thread_clears_the_state_that_answers_for_a_thread(
+        _mocked_loop):
+    """switch_to_thread's list, and switch_to_thread's reason: /copy last
+    and /claims read these, so leaving them set makes the new thread
+    answer with the old one's content."""
+    from tui.app import _cmd_new
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        app._last_response = "the previous thread's answer"
+        app._last_run = object()
+        app._live_claims = {"c1": {"tier": "HIGH"}}
+        app._tool_names["call-1"] = "read"
+        app._file_calls["call-1"] = ("write", {}, "")
+
+        _cmd_new(app, "")
+        await pilot.pause()
+
+        assert app._last_response == ""
+        assert app._last_run is None
+        assert app._live_claims == {}
+        assert app._tool_names == {}
+        assert app._file_calls == {}
+
+
+@pytest.mark.asyncio
+async def test_the_redrawn_banner_reports_the_switched_model(_mocked_loop):
+    """The banner is REPRINTED, not remembered from mount: a /model
+    switch survives /new (it is session state), so a banner replaying
+    the launch pair would name a model the next turn will not call."""
+    from tui.app import _cmd_new, _cmd_model
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        _cmd_model(app, "ANTHROPIC switched-model")
+        await pilot.pause()
+
+        _cmd_new(app, "")
+        await pilot.pause()
+
+        assert app.model == "switched-model", "the switch did not survive /new"
+        banner = (f"{app.provider_name} | {app.model} "
+                  f"| theme {app._theme_name}")
+        assert any(text == banner for _role, text in app._transcript._entries), \
+            "the redrawn window never stated the pair the next turn will use"
 
 
 @pytest.mark.asyncio

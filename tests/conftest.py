@@ -409,20 +409,27 @@ _ui_prefs_counter = itertools.count()
 
 @pytest.fixture(autouse=True)
 def isolate_ui_preferences(tmp_path_factory, monkeypatch):
-    """Point the TUI's remembered-theme store somewhere disposable.
+    """Point the TUI's preference store somewhere disposable.
 
     AUTOUSE and unconditional, for two reasons of different kinds. The
-    first is hygiene: /theme writes to ~/.config/venastine, so without
-    this the suite edits the developer's own preferences -- which is also
-    what the trust store and the MCP acknowledgement store already avoid
-    by resolving through expanduser at call time, except that those are
-    only reached by tests that opt into real_harness_tier.
+    first is hygiene: /theme and /model write to ~/.config/venastine, so
+    without this the suite edits the developer's own preferences -- which
+    is also what the trust store and the MCP acknowledgement store already
+    avoid by resolving through expanduser at call time, except that those
+    are only reached by tests that opt into real_harness_tier.
 
     The second is correctness, and it is the one that would actually go
-    red: the mount path READS this store, and a remembered theme outranks
+    red: the mount path READS this store, and both records outrank
     settings.json. test_theme_preference_from_settings_is_applied_at_mount
     would then pass or fail depending on whether the person running it
     had ever typed /theme -- a suite result that depends on the machine.
+    Since §43 the same is true of the model: VenastineApp.__init__ reads
+    the pair, so an app built in a test would mount on whatever the
+    developer last chose.
+
+    A FILE PER TEST, not one per session: /model now writes on every
+    switch, so a shared file would let one test's choice decide which
+    model the next test's app came up on.
 
     tmp_path_factory.getbasetemp() rather than tmp_path: the base already
     exists, so nothing is created for the thousands of tests that never

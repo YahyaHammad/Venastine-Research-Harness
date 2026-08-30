@@ -1199,10 +1199,16 @@ class TestTheLaunchProviderCheck:
         import tui.app
 
         seen = {}
+        # `cli_pinned` is accepted and recorded rather than swallowed by a
+        # **kwargs: §43 (RM5) makes it main()'s answer to "did a flag name
+        # the pair", and a double that hid the argument would let the
+        # wiring break with this test still green.
         monkeypatch.setattr(
             tui.app, "run",
-            lambda provider, model, settings, startup_warnings=None:
-                seen.update(warnings=list(startup_warnings or ())))
+            lambda provider, model, settings, startup_warnings=None,
+            cli_pinned=False:
+                seen.update(warnings=list(startup_warnings or ()),
+                            cli_pinned=cli_pinned))
 
         with open("providers.json", "w", encoding="utf-8") as f:
             json.dump({"OPENAI": {"API_KEY": "k", "API_URL": "",
@@ -1214,6 +1220,13 @@ class TestTheLaunchProviderCheck:
         assert len(seen.get("warnings", [])) == 1, seen
         assert "Unknown provider: ANTHROPIC" in seen["warnings"][0]
         assert "[warning]" not in capsys.readouterr().out
+        assert seen["cli_pinned"] is False, (
+            "no --provider/--model was given, so nothing pinned this launch")
+
+        main.main(["--tui", "--model", "named-on-the-command-line"])
+        assert seen["cli_pinned"] is True, (
+            "a --model flag has to reach the app: it is what stops a "
+            "remembered pair from outranking the command line")
 
 
 # ===========================================================================
