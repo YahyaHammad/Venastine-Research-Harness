@@ -168,6 +168,7 @@ the namespace list in `AGENTS.md`.
 - **§38. Live output — progressive rendering and visible thinking** — BUILT (the transcript buffered a whole turn; thinking was never captured at all)
 - **§41. The transcript's vocabulary — colour, markers, and what an edit looks like** — BUILT (three kinds of line shared one grey; the `warning` role was unreachable; `write`/`edit` showed 60 characters of payload instead of a change)
 - **§42. The consent surface — what a modal shows, and what the agent says it is doing** — BUILT (the permission modal parsed console markup out of the payload it exists to show; `shell` gained a display-only `rationale`)
+- **§43. Who is speaking, and what the session remembers** — BUILT (the `venastine ›` label rendered after a turn's reasoning; `/new` left the previous conversation on screen; a `/model` switch was forgotten at exit; workspace trust was reported broken and is not)
 - **Open Questions — None Remaining** (Rev. 3 — all decisions locked; verification items only)
 - **Why these calls, not just what they are** (Rev. 3 — the reasoning patterns behind several decisions above)
 
@@ -3506,3 +3507,64 @@ later turn of the thread, and the agent therefore reads its own past reasons.
 | **RA4** | **ADVERTISED as required, TOLERATED when absent.** The schema is what the model reads, so `required` is where the ask belongs — a field nobody asks for is supplied inconsistently, and a drift signal with unknown coverage is not a signal. But `ShellParams` keeps its default, because **approval is obtained BEFORE dispatch**: a hard requirement would show the user a modal, take their yes, and only then fail validation. That is the burn-a-turn class — a human decision spent on an outcome already fixed — and §32 A7 rejected it for a condition the tool can see, which this is. So an omission costs nothing and is VISIBLE: the prompt says `(none given)`, which is itself the observation a silent gap would not be. Whitespace-only collapses to the same thing, so a model supplying the key with nothing in it has omitted it |
 | **RA5** | **The loop asks the registry for the VALUE, and the value travels.** `registry.rationale_for(name, params)` resolves it once, and the result goes onto both the `permission_request` LoopEvent and the `interaction.Request` payload — once, because the caller needs it in both places and looking it up twice invites the two from disagreeing. The value rather than the key, because the two shells that render it are a Textual screen that imports nothing from the rest of the project and a `print` in `main.py`. **Both shells show it**, the CLI included: a kind one shell renders and the other silently drops is D12's wired-up-but-invisible gap, and the CLI is where a long session is watched from |
 | **RA6** | **HARNESS FACT, then AGENT CLAIM, then evidence.** The computed notice first (`classify_command` decided it), then the rationale labelled as the agent's own unverified words, then the payload — so a reader meets "Runs on the HOST, with your own file access" before any reassurance, and never reads the harness as vouching for the claim. Rendered into the EXISTING `#permission-params` block rather than a new widget: it already scrolls (`max-height: 10; overflow-y: auto`), so a long rationale needs no cap, and no CSS changes. **The payload keeps the rationale too**, so it appears twice — the honest cost of surfacing the field without breaking this screen's older and stronger rule that the payload is shown FULL and UNREDACTED. Removing a key to tidy the duplication would be a quieter version of exactly what that rule forbids |
+---
+
+## §43. Who is speaking, and what the session remembers
+
+**Status: BUILT.** Three defects reported from use after §38 made reasoning visible, and one
+report that turned out to be the code working as designed — which is recorded here because the
+question it answers ("why did nothing prompt me?") will be asked again.
+
+**The label said the wrong thing about who had been thinking.** §38 rendered a turn's reasoning
+inline and left the `venastine ›` label where it had always been: on the ANSWER span, drawn by
+`Transcript._write_stream_chunk` when the first committable chunk of text arrived. On the shape
+§38 itself made normal — think, then answer — that put the whole reasoning block above the label
+and therefore under `you ›`:
+
+```
+you ›  refactor the loader
+  ╭ thinking…
+  │ I should read the file first
+  ╰ …done thinking
+venastine ›
+Let me look at config_loader.py.
+```
+
+Read straight down, that is the user thinking and the model answering with none. The feature
+whose entire purpose is showing that the model reasoned was attributing the reasoning to the
+person who asked.
+
+**`/new` started a thread and left the old one on screen.** `_cmd_new` swapped `app.memory` for
+`None` and wrote one line. §27 had already met this exact defect on the resume path — "the
+PREVIOUS thread's transcript stayed on screen under the new thread's id, so the screen actively
+lied about which conversation was loaded" — and fixed it in `switch_to_thread`, which clears the
+transcript *and* the per-thread state beside it. `/new` had none of that, so a session became two
+conversations concatenated under one sentence, with only the second of them in the model's
+context, and `/copy all` and `/claims` went on answering for the thread the session had left.
+
+**A model chosen with `/model` did not survive the exit.** This is batch 36's defect, one
+preference along, and it has batch 36's answer: the rule that nothing writes to `settings.json`
+is about that FILE — a trusted project's copy beats the user's (D29), and it is hand-authored —
+not about whether a choice may be remembered. Here the file has a second reason to be left alone
+that the theme did not have: the project copy lives inside D17's trust content hash, so a session
+writing `default_model` into it would re-trigger the trust prompt at the next launch.
+
+**Workspace trust was reported as broken and is not.** Changing `AGENT_WORKSPACE` and relaunching
+produced no trust prompt. It should not: `main()` passes `os.getcwd()` as the project path, so
+trust is keyed to the PROJECT, while `AGENT_WORKSPACE` (`config.WORKSPACE_DIR`) is `file_ops`'
+permission boundary and is deliberately not a project path — AGENTS.md's distribution section
+already warns that pointing it at a shared directory silently auto-approves writes there. And
+`is_trusted()` returns `True` outright for a project with no `.venastine/` directory: there is
+nothing to trust, no content to list, and no question to ask. An empty directory is that case.
+No code changed; the answer is written down instead, in AGENTS.md and ARCHITECTURE.md.
+
+### Design Decisions Record — §43 (RM1–RM6)
+
+| id | decision |
+|---|---|
+| **RM1** | **The label belongs to the TURN, and its placement is derived from the entry-role sequence rather than tracked as a side effect.** One `venastine ›` above the model's first output of the turn, whether that output is reasoning or text; a tool line, a diff or a system notice inside the turn does not re-open one; the next `you ›` retires it. The rejected alternative was one label per contiguous model block, which re-labels after every tool call — quieter to implement, noisier to read, and it makes the label mean "a span started" rather than "the model is answering you". The derivation matters as much as the rule: `_label_in_force` is set by `_open_label` and cleared only by the `user` branch of `_render_entry`, so `rerender()` — which replays `_entries` after a `/theme` and must not reflow what it was asked only to recolour — reproduces the same placement by running the same code over the same sequence, rather than by remembering where the labels went. The accepted cost, stated rather than fixed: an answer resuming after a tool line starts directly under it, where the suppressed label used to supply a blank row. A separator drawn instead would be a second thing the live path and the replay must agree about, which is the shape this file keeps removing |
+| **RM2** | **`/new` REDRAWS, and it redraws through the same reset `switch_to_thread` uses.** Clearing the transcript alone would have fixed the report and left the half nobody sees: `_last_run`, `_live_claims`, `_last_response`, `_tool_names` and `_file_calls` are per-thread state that `/claims` and `/copy last` read, and §27 AC4 already says a thread switch must reset them. The `_busy` refusal stays FIRST, before anything is cleared, so a refused `/new` leaves the session exactly as it was. What survives is the SESSION — the active agent, the active skills (K5), the effort level, the theme, and the provider/model pair — and that is why the banner is REPRINTED from a shared `_write_session_banner()` rather than replayed from mount: after a `/model` switch the launch pair is no longer the pair the next turn will use, and a redrawn window that states the wrong one is the same class of lie as a stale transcript |
+| **RM3** | **The `/model` pair is remembered BESIDE `settings.json`, never in it, and the record is a PAIR.** Batch 36's mechanism exactly: `tui/preferences.py`'s user-tier `~/.config/venastine/ui_preferences.json`, versioned, atomic on write, failing soft on read, with the choice stored against the `default_provider`/`default_model` it was chosen against so an edited — or added, or removed — settings value re-asserts itself instead of being silently outranked forever. Restored whole or not at all: a model name is meaningless against the wrong provider, so half a record is no record. Three further fallbacks to the resolved pair, and each is a real failure this closes: a `--provider`/`--model` flag pins the launch (an instruction about now outranks a memory of then); the staleness key differs; or the remembered provider is no longer in `providers.json`, which is `/model`'s own unknown-provider refusal applied at mount rather than as an `api_initialization` failure on the first turn, a long way from the edit that caused it. **The restore is announced** — the mount banner says `(remembered)` — because a session silently starting on a model no config file names is the confusion this would otherwise trade for the one it fixes (#138's rule), and it is the counterpart of `/theme`'s "Remembered for the next launch." |
+| **RM4** | **Two records in one file, so both writers read-modify-write, and `STORE_VERSION` does NOT move.** The theme and the model are chosen at different moments by different commands. A writer serialising only its own fields would silently drop the other's — `/theme` forgetting the model, then `/model` forgetting the theme, each correct in its own test — so `_remember` merges into `_read_raw()` and each loader validates only its own keys. The version stays 1 because the model keys are OPTIONAL and their absence already reads as "nothing remembered": a store written before this batch keeps its theme and gains the pair on the first `/model`. Bumping would have thrown away every existing user's theme once, to express something the loaders already handle |
+| **RM5** | **`cli_pinned` is passed, not inferred.** `main.resolve_runtime_defaults` has already collapsed `--provider`/`--model` into the resolved pair by the time the app is built, so the TUI cannot tell a flag from a default by looking at what it was handed. The rejected alternative — comparing the resolved pair against `settings.json` — reads a flag that happens to match the configured value as absent, which is the same "a default is indistinguishable from a decision" defect `_theme_persisting` exists to prevent, arriving through the other door. It is one boolean on `VenastineApp.__init__` and `tui.app.run`, computed in `main()` where the parsed arguments actually are |
+| **RM6** | **Workspace trust is left exactly as it is, and the reason is documented at both surfaces.** Trust keys off the project path and the presence of `.venastine/`; `AGENT_WORKSPACE` is a permission boundary for `file_ops` and not a project path; a project with no `.venastine/` has nothing to trust, so silence at launch is the correct outcome rather than a missing prompt. The considered addition — a mount line stating the project's trust state — was declined by the owner: the behaviour is right, and a fifth surface describing it is UN3's "one description of the posture" argument applied to a second security control. What was missing was the sentence, so the sentence is what was added |

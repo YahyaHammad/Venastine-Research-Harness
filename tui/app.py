@@ -288,11 +288,26 @@ class VenastineApp(App):
 
     def __init__(self, provider_name: str = DEFAULT_PROVIDER,
                  model: str = None, settings: dict | None = None,
-                 startup_warnings: list[str] | None = None):
+                 startup_warnings: list[str] | None = None,
+                 cli_pinned: bool = False):
         super().__init__()
         self.provider_name = provider_name
         self.model = model or config.MODEL_NAME
         self._settings = settings or {}
+        # §43 (RM3). Whether --provider/--model named this launch's pair.
+        # main.resolve_runtime_defaults has already collapsed the flags
+        # into the resolved values above, so the app cannot tell by
+        # looking; a flag is an instruction for THIS launch and outranks
+        # anything remembered.
+        self._cli_pinned = cli_pinned
+        # Resolved here rather than in on_mount, unlike the theme: this
+        # one depends on nothing the mount does, and doing it now means
+        # the banner, refresh_status and the first turn cannot disagree
+        # about which pair the session is on. Sets _model_restored, which
+        # the banner reads so a restored pair is stated rather than
+        # guessed at (#138's rule).
+        self._model_restored = False
+        self.provider_name, self.model = self._startup_model()
         # #138. Launch-time provider findings, printed by main() on the
         # CLI path and carried here on the TUI path -- a pre-mount print
         # would vanish under Textual's screen and TranscriptLogHandler
@@ -443,9 +458,7 @@ class VenastineApp(App):
         self.refresh_goal_banner()
         self.refresh_todo_panel()
         self.refresh_status()
-        self._transcript.write_system(
-            f"{self.provider_name} | {self.model} | theme {self._theme_name}"
-        )
+        self._write_session_banner()
         # #138. Beside the status line it qualifies, before anything the
         # user might type. write_error, matching /model: an unknown
         # provider or a missing key is the same fact at both moments.
@@ -486,7 +499,7 @@ class VenastineApp(App):
         is re-read rather than silently outranked forever, which is the
         alternative that would make editing tui.theme a silent no-op.
         """
-        remembered = preferences.load()
+        remembered = preferences.load_theme()
         if remembered is None:
             return themes.resolve(self._settings_theme)
         if remembered["settings_theme"] != self._settings_theme:
@@ -494,6 +507,63 @@ class VenastineApp(App):
         if remembered["theme"] not in self.available_themes:
             return themes.resolve(self._settings_theme)
         return remembered["theme"]
+
+    def _startup_model(self) -> tuple[str, str]:
+        """The pair to mount on: the last one chosen with /model, unless
+        something better-informed has spoken since (§43, RM3).
+
+        _startup_theme's shape, one preference along, and for the same
+        reason batch 36 gave: the rule that nothing writes to
+        settings.json is about that FILE -- a project's copy beats the
+        user's (D29) and it is hand-authored -- not about whether a
+        choice may be remembered. Writing default_model into it would be
+        worse than merely rude here: the project copy lives inside D17's
+        trust content hash, so a session rewriting it would re-trigger
+        the trust prompt at the next launch.
+
+        Four fallbacks to the resolved pair, and the first is this
+        preference's own:
+
+          - a --provider/--model flag named the pair for this launch. It
+            is an instruction about now, and it outranks a memory of
+            then;
+          - nothing is remembered;
+          - the staleness key differs, i.e. default_provider or
+            default_model in settings.json no longer says what it said
+            when the choice was made. Edit either, add either, or remove
+            either and the file re-asserts itself -- which is why the
+            recorded values are the RAW ones and None stays
+            distinguishable from a string;
+          - the remembered provider is no longer configured. That is
+            /model's own unknown-provider refusal applied at mount:
+            api_initialization would raise on the first turn instead, a
+            long way from the providers.json edit that caused it.
+            load_provider_data() returns {} for a missing file, so a
+            fresh clone takes this branch rather than failing.
+
+        The pair is restored WHOLE or not at all. A model name is
+        meaningless against the wrong provider, so mixing a remembered
+        model with a configured provider would be a configuration nobody
+        chose.
+        """
+        if self._cli_pinned:
+            return self.provider_name, self.model
+        remembered = preferences.load_model()
+        if remembered is None:
+            return self.provider_name, self.model
+        if (remembered["settings_provider"] != self._settings.get("default_provider")
+                or remembered["settings_model"] != self._settings.get("default_model")):
+            return self.provider_name, self.model
+        from credentials import load_provider_data
+
+        if remembered["provider"] not in load_provider_data():
+            logger.warning(
+                "Remembered provider %r is not in providers.json; starting on "
+                "%s | %s instead.", remembered["provider"],
+                self.provider_name, self.model)
+            return self.provider_name, self.model
+        self._model_restored = True
+        return remembered["provider"], remembered["model"]
 
     def watch_theme(self, theme: str) -> None:
         """Remember every theme change, whatever route made it.
@@ -515,7 +585,7 @@ class VenastineApp(App):
         """
         if not self._theme_persisting:
             return
-        self._theme_remembered = preferences.remember(
+        self._theme_remembered = preferences.remember_theme(
             theme, self._settings_theme)
 
     def on_unmount(self) -> None:
@@ -536,6 +606,30 @@ class VenastineApp(App):
         nothing and gives the warning path the style it never had.
         """
         self._transcript.write_role(message.role, message.text)
+
+    def _write_session_banner(self) -> None:
+        """What this session is configured as, as one line (§43, RM2).
+
+        Written at mount and again by /new, which redraws the window --
+        so a thread started after a /model switch says which pair it is
+        actually on rather than the one the app launched with. One
+        helper because two copies of a status line are two copies that
+        can disagree, which is the shape §26 spent a decision removing
+        from the trace.
+
+        "(remembered)" marks a pair restored from the preference store
+        rather than resolved from settings.json or config.py (§43, RM3).
+        #138's rule: a launch should not have to be guessed at, and a
+        session silently coming up on a model no config file names is
+        exactly the confusion this feature would otherwise trade for the
+        one it fixes. It is the counterpart of /theme's "Remembered for
+        the next launch."
+        """
+        remembered = " (remembered)" if self._model_restored else ""
+        self._transcript.write_system(
+            f"{self.provider_name} | {self.model}{remembered} "
+            f"| theme {self._theme_name}"
+        )
 
     def refresh_status(self) -> None:
         """Keep the header showing which provider/model turns will use.
@@ -1950,12 +2044,14 @@ def _cmd_model(app: VenastineApp, args: str) -> None:
     `/model <name>` keeps the current provider; `/model <PROVIDER> <name>`
     switches both. Bare `/model` reports where things stand.
 
-    SESSION-SCOPED, and deliberately not written back to settings.json.
-    /theme and /effort read that file at startup and never write to it,
-    and settings.json is the one config file where a trusted project tier
-    beats the user tier (D29) -- a session quietly rewriting it is a
-    decision, not a convenience. The message says how to make a choice
-    stick instead.
+    REMEMBERED for the next launch, and still not written back to
+    settings.json (§43, RM3). That file is the one config file where a
+    trusted project tier beats the user tier (D29) -- a session quietly
+    rewriting it is a decision, not a convenience -- and the project copy
+    is inside D17's trust content hash, so writing default_model there
+    would re-trigger the trust prompt at the next launch. The pair goes
+    into the user-tier store /theme already uses, BESIDE that file. See
+    _startup_model for what brings it back and what outranks it.
 
     The switch takes effect on the NEXT turn: run_agent_turn and
     _cmd_research both read app.model / app.provider_name when they
@@ -2005,6 +2101,11 @@ def _cmd_model(app: VenastineApp, args: str) -> None:
 
     app.provider_name = provider
     app.model = model
+    # §43 (RM3). The banner's marker describes the LAUNCH -- "this pair
+    # came back from the store rather than from a config file". A pair
+    # chosen a moment ago in this session is not that, whatever the
+    # store now holds, so /new after a switch says the pair plainly.
+    app._model_restored = False
     app.refresh_status()
     app._transcript.write_system(f"Now using {provider} | {model}.")
 
@@ -2044,9 +2145,23 @@ def _cmd_model(app: VenastineApp, args: str) -> None:
             f"{agent.model or app.model} for chat turns, so this applies to "
             f"/research and to turns after /agent clear.")
 
-    app._transcript.write_system(
-        "This session only. Use --provider/--model at launch, or "
-        "default_provider/default_model in settings.json, to make it stick.")
+    # §43 (RM3). Remembered for the next launch, in the user-tier store
+    # BESIDE settings.json -- never in it. Written here rather than in a
+    # watcher (the theme's route, which exists because ctrl+p's command
+    # palette sets App.theme directly): this command is the only thing
+    # that changes the session's pair, so there is no second route to
+    # miss.
+    #
+    # The confirmation is printed only on a write that landed, matching
+    # /theme: a failure WARNED inside remember_model and reaches the
+    # transcript through TranscriptLogHandler, and claiming a save that
+    # did not happen is the one thing this must not do. The switch
+    # itself applies either way.
+    if preferences.remember_model(
+            provider, model,
+            app._settings.get("default_provider"),
+            app._settings.get("default_model")):
+        app._transcript.write_system("Remembered for the next launch.")
 
     # Effort is per-model: a level the old model accepted may be rejected
     # outright by the new one, and every turn would then fail with a
@@ -2371,6 +2486,28 @@ def _cmd_resume(app: VenastineApp, args: str) -> None:
 
 
 def _cmd_new(app: VenastineApp, args: str) -> None:
+    """Start a fresh thread and REDRAW the window (§43, RM2).
+
+    This used to swap the memory and write one line, leaving the
+    previous conversation on screen under it -- two conversations
+    concatenated, separated by a sentence, with only the second of them
+    in the model's context. `switch_to_thread` had already solved
+    exactly this for a resume ("CLEAR, then replay", §27 bug 1) and
+    /new had none of it: not the transcript, and not the per-thread
+    state beside it, so /copy all and /claims went on answering for the
+    thread the session had left.
+
+    The refusal stays FIRST. Nothing is cleared on a turn that is still
+    running, so a refused /new leaves the session exactly as it was.
+
+    What deliberately survives is the session: the active agent, the
+    active skills (K5 -- a skill is a working mode, not a property of
+    the thread), the effort level, the theme, and the provider/model a
+    /model switch chose. That is why the banner is reprinted rather
+    than remembered from mount: it states the pair the NEXT turn will
+    use, which after a switch is not the pair the app launched with.
+    The /ref attachments are thread state and leave with the thread.
+    """
     if app._busy:
         app._transcript.write_error(
             "Still working — wait for this turn to finish.")
@@ -2380,6 +2517,19 @@ def _cmd_new(app: VenastineApp, args: str) -> None:
     app.memory = None
     app.refresh_goal_banner()
     app.refresh_todo_panel()
+    # switch_to_thread's list, for switch_to_thread's reasons: `/claims`
+    # and `/copy last` read these, and a stale panel pointing at the
+    # wrong thread is wrong where a blank one is merely unhelpful.
+    app._last_run = None
+    app._live_claims = {}
+    app._last_response = ""
+    app._tool_names.clear()
+    app._file_calls.clear()
+    # State first, then the screen, then anything written -- so a
+    # failure cannot leave the transcript cleared while the panels still
+    # describe the previous thread.
+    app._transcript.reset()
+    app._write_session_banner()
     app._transcript.write_system("Started a new thread.")
 
 
@@ -2908,8 +3058,16 @@ register_init_commands()  # §24: /init
 
 
 def run(provider_name: str, model: str, settings: dict | None = None,
-        startup_warnings: list[str] | None = None) -> None:
-    """Entry point used by main.py --tui."""
+        startup_warnings: list[str] | None = None,
+        cli_pinned: bool = False) -> None:
+    """Entry point used by main.py --tui.
+
+    `cli_pinned` says whether --provider/--model named this launch's
+    pair (§43, RM3). main.resolve_runtime_defaults has already collapsed
+    the flags into `provider_name`/`model` by here, so the app cannot
+    tell by looking -- and a flag has to outrank a remembered choice.
+    """
     config_loader_settings = settings if settings is not None else config_loader.get_settings()
     VenastineApp(provider_name, model, config_loader_settings,
-                 startup_warnings=startup_warnings).run()
+                 startup_warnings=startup_warnings,
+                 cli_pinned=cli_pinned).run()

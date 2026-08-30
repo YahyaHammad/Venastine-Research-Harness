@@ -1,7 +1,8 @@
 """
 tui/preferences.py
 
-The TUI's remembered UI choices. Currently one: the last theme selected.
+The TUI's remembered UI choices. Two: the last theme selected, and the
+last provider/model pair chosen with /model.
 
 A user-tier JSON store at ~/.config/venastine/ui_preferences.json,
 written by the harness, sitting BESIDE settings.json rather than in it.
@@ -12,23 +13,32 @@ the one config file where a trusted project tier beats the user tier
 also a file a person hand-authors, and rewriting one of those reorders
 and reformats what they wrote.
 
-Remembering which colours you last chose is a convenience, so it gets
-its own file, at the user tier only, that no project can reach. Same
-shape as the two stores that already live there:
-core/workspace_trust.py's trusted_projects.json and mcp_client/config.py's
-known_mcp_servers.json -- expanduser at CALL time (so a moved HOME is
-picked up, and tests redirect without a restart), versioned, and failing
-soft on anything it cannot read.
+Remembering what you last chose is a convenience, so it gets its own
+file, at the user tier only, that no project can reach. Same shape as
+the two stores that already live there: core/workspace_trust.py's
+trusted_projects.json and mcp_client/config.py's known_mcp_servers.json
+-- expanduser at CALL time (so a moved HOME is picked up, and tests
+redirect without a restart), versioned, and failing soft on anything it
+cannot read.
 
-The store records the theme AND the tui.theme value it was chosen
+Each record stores the choice AND the settings.json value it was chosen
 against, which is what makes an edited settings.json re-assert itself
 instead of being silently outranked forever. Same staleness rule as the
 trust store's content hash and the MCP store's entry digest, applied to
 a preference rather than to a consent.
 
-Nothing in core/ is imported, and nothing here knows a theme name: this
-module stores a string, and tui/app.py decides whether that string still
-means anything.
+TWO RECORDS, ONE FILE, AND THEREFORE READ-MODIFY-WRITE (§43, RM4). The
+theme and the model are chosen at different moments by different
+commands. A writer that serialised only its own fields would silently
+drop the other's -- /theme forgetting the model, then /model forgetting
+the theme, each looking correct in its own test. `_remember` reads the
+store first and updates its own keys, and `load_theme` / `load_model`
+each validate only their own, so a store written before the model
+existed still yields a theme.
+
+Nothing in core/ is imported, and nothing here knows a theme name or a
+provider name: this module stores strings, and tui/app.py decides
+whether they still mean anything.
 """
 
 import json
@@ -38,8 +48,15 @@ import os
 logger = logging.getLogger(__name__)
 
 # Bumped when the SHAPE changes. An unknown version reads as no memory --
-# which costs one launch on the default theme, so there is no need for
-# the MCP store's careful legacy handling: nothing here was consented to.
+# which costs one launch on the defaults, so there is no need for the MCP
+# store's careful legacy handling: nothing here was consented to.
+#
+# NOT bumped when the model record was added (§43): the model keys are
+# optional and their absence already reads as "nothing remembered", so a
+# v1 store holding only a theme keeps working and gains the new keys the
+# first time /model is used. Bumping would have thrown away every
+# existing user's theme once, to express something the load functions
+# already handle.
 STORE_VERSION = 1
 
 
@@ -51,33 +68,45 @@ def store_path() -> str:
     return os.path.expanduser("~/.config/venastine/ui_preferences.json")
 
 
-def load() -> dict | None:
-    """The remembered choice, or None for "nothing remembered".
+def _read_raw() -> dict:
+    """The store as it stands, or {} for anything unusable.
 
-    None covers every unhappy case -- missing file, unreadable file, not
-    an object, a version this build does not know, a missing or
-    non-string theme -- because the worst consequence of forgetting a
-    colour scheme is starting on the default. Contrast with the trust
-    store, which fails closed for a security reason; there is no security
-    property here to preserve.
+    {} covers every unhappy case -- missing file, unreadable file, not
+    an object, a version this build does not know -- because the worst
+    consequence of forgetting a preference is starting on the configured
+    one. Contrast with the trust store, which fails closed for a security
+    reason; there is no security property here to preserve.
+
+    Shared by the loaders and by `_remember`, so a write can only ever
+    preserve records this build would also have read.
+    """
+    path = store_path()
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8-sig") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        logger.debug("Could not read %s; starting on the configured "
+                     "preferences.", path)
+        return {}
+    if not isinstance(data, dict) or data.get("version") != STORE_VERSION:
+        return {}
+    return data
+
+
+def load_theme() -> dict | None:
+    """The remembered theme, or None for "nothing remembered".
+
+    None also covers a missing or non-string theme, for _read_raw's
+    reason.
 
     `settings_theme` is deliberately allowed to be None: that is the
     recorded fact "settings.json named no theme when this was chosen",
     and it has to stay distinguishable from "settings.json said
     dark-plain".
     """
-    path = store_path()
-    if not os.path.exists(path):
-        return None
-    try:
-        with open(path, "r", encoding="utf-8-sig") as f:
-            data = json.load(f)
-    except (OSError, ValueError):
-        logger.debug("Could not read %s; starting on the configured theme.",
-                     path)
-        return None
-    if not isinstance(data, dict) or data.get("version") != STORE_VERSION:
-        return None
+    data = _read_raw()
     theme = data.get("theme")
     settings_theme = data.get("settings_theme")
     if not isinstance(theme, str):
@@ -87,8 +116,39 @@ def load() -> dict | None:
     return {"theme": theme, "settings_theme": settings_theme}
 
 
-def remember(theme: str, settings_theme: str | None) -> bool:
-    """Record the selection. True if it reached disk.
+def load_model() -> dict | None:
+    """The remembered provider/model pair, or None (§43, RM3).
+
+    A PAIR, always. A model name means nothing against the wrong
+    provider, so half a record is no record: if either side is missing
+    or is not a string, this returns None rather than mixing a
+    remembered model with a configured provider.
+
+    The two `settings_*` fields are the staleness key and follow
+    `settings_theme` exactly -- None is the recorded fact "settings.json
+    named no default_provider/default_model when this was chosen", which
+    has to stay distinguishable from an explicit value, or ADDING one of
+    those keys would become a silent no-op.
+    """
+    data = _read_raw()
+    provider = data.get("provider")
+    model = data.get("model")
+    if not isinstance(provider, str) or not isinstance(model, str):
+        return None
+    out = {"provider": provider, "model": model}
+    for key in ("settings_provider", "settings_model"):
+        value = data.get(key)
+        if value is not None and not isinstance(value, str):
+            return None
+        out[key] = value
+    return out
+
+
+def _remember(fields: dict, noun: str) -> bool:
+    """Merge `fields` into the store. True if it reached disk.
+
+    READ-MODIFY-WRITE, per the module docstring: the theme record and
+    the model record share a file and are written at different moments.
 
     Written via a temp file and os.replace, which is atomic on POSIX and
     on Windows -- _save_trust_store's reasoning, and it costs three
@@ -106,8 +166,9 @@ def remember(theme: str, settings_theme: str | None) -> bool:
     hear that it failed again.
     """
     path = store_path()
-    payload = {"version": STORE_VERSION, "theme": theme,
-               "settings_theme": settings_theme}
+    payload = dict(_read_raw())
+    payload.update(fields)
+    payload["version"] = STORE_VERSION
     tmp = f"{path}.tmp"
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -115,7 +176,20 @@ def remember(theme: str, settings_theme: str | None) -> bool:
             json.dump(payload, f, indent=2)
         os.replace(tmp, path)
     except OSError as exc:
-        logger.warning("Could not save the theme preference to %s (%s). The "
-                       "theme applies to this session only.", path, exc)
+        logger.warning("Could not save the %s preference to %s (%s). The "
+                       "%s applies to this session only.", noun, path, exc,
+                       noun)
         return False
     return True
+
+
+def remember_theme(theme: str, settings_theme: str | None) -> bool:
+    return _remember({"theme": theme, "settings_theme": settings_theme},
+                     "theme")
+
+
+def remember_model(provider: str, model: str, settings_provider: str | None,
+                   settings_model: str | None) -> bool:
+    return _remember({"provider": provider, "model": model,
+                      "settings_provider": settings_provider,
+                      "settings_model": settings_model}, "model")

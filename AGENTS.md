@@ -42,7 +42,7 @@ python main.py --init --research-project           # §24: skip the type questio
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 2995 tests, offline, ~25-45s by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 3013 tests, offline, ~25-45s by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -115,7 +115,7 @@ published npm version can never be replaced — only deprecated.
 Read these before changing anything non-trivial — they carry design decisions that are locked, not defaults to re-derive.
 
 - **ARCHITECTURE.md** — what's built, file-by-file contracts ("what belongs here / what does NOT"), known gotchas (§11).
-- **ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **ROADMAP_v2.md** (§13–§42, all built) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I13 from §24, J1–J14 from §23, E1–E12 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A11 from §32, W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37, O1–O8 from §38 Q1–Q6 from §39, UN1–UN6 from §40, X1–X7 from §41 and RA1–RA6 from §42). Section and D-numbers are stable and cross-referenced everywhere.
+- **ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **ROADMAP_v2.md** (§13–§43, all built) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I13 from §24, J1–J14 from §23, E1–E12 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A11 from §32, W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37, O1–O8 from §38 Q1–Q6 from §39, UN1–UN6 from §40, X1–X7 from §41, RA1–RA6 from §42 and RM1–RM6 from §43). Section and D-numbers are stable and cross-referenced everywhere.
 
 **Six namespaces use the same `LETTER+NUMBER` shape, and only the first is the
 record.** An id that resolves to two places is a cross-reference that fails
@@ -199,18 +199,31 @@ A **shell**, not a feature home. D12 makes the CLI a permanent fallback, so anyt
 - **Active bodies are appended outside `with_catalogs()`** (K6) — see the progressive-disclosure note in ARCHITECTURE §4. This is the one cross-shell leak the design can have.
 - **Schemas need no mid-loop refresh** (K7, settling ROADMAP_v2's Rev. 3 verification item). Activation happens between turns, and `_run()` recomputes `registry.schemas()` at the top of every call.
 
-`/model [[PROVIDER] name]` switches provider/model for the session and persists nothing (matching `/effort`, which reads `settings.json` and never writes to it). It refuses while `_busy`, re-runs the mount-time effort validation because effort is per-model, and warns rather than refuses on an empty `API_KEY` so a local OpenAI-compatible endpoint stays usable.
+`/model [[PROVIDER] name]` switches provider/model for the session and is **remembered for the next launch** beside `settings.json`, never in it (§43, RM3 — see the paragraph below). It refuses while `_busy`, re-runs the mount-time effort validation because effort is per-model, and warns rather than refuses on an empty `API_KEY` so a local OpenAI-compatible endpoint stays usable. `/effort` and `/thinking` still persist nothing.
 
-**Nothing writes to `settings.json`; the theme is remembered BESIDE it** (batch 36).
-`/theme` used to persist nothing either, and a colour scheme chosen in one session was gone
-in the next. The rule that stopped it is about the FILE, not about the preference: a project's
-`settings.json` beats the user's (D29), and it is hand-authored, so a session rewriting it is a
-decision rather than a convenience. So the theme is remembered in `tui/preferences.py`'s
-`~/.config/venastine/ui_preferences.json` — user tier only, which no project can reach —
-following `trusted_projects.json` and `known_mcp_servers.json`: `expanduser` at call time,
-versioned, failing soft on anything unreadable. `/effort` and `/model` are unchanged.
+**Nothing writes to `settings.json`; the theme AND the model are remembered BESIDE it**
+(batch 36, extended by §43). `/theme` used to persist nothing either, and a colour scheme
+chosen in one session was gone in the next. The rule that stopped it is about the FILE, not
+about the preference: a project's `settings.json` beats the user's (D29), and it is
+hand-authored, so a session rewriting it is a decision rather than a convenience. So both are
+remembered in `tui/preferences.py`'s `~/.config/venastine/ui_preferences.json` — user tier
+only, which no project can reach — following `trusted_projects.json` and
+`known_mcp_servers.json`: `expanduser` at call time, versioned, failing soft on anything
+unreadable. `/effort` and `/thinking` are unchanged.
 
-Three things there are load-bearing:
+**The model has a second reason not to be written into that file** (RM3): a project's
+`.venastine/settings.json` is inside D17's trust content hash, so a session writing
+`default_model` there would re-trigger the trust prompt at the next launch — and the
+user-tier copy would be outranked by any project that sets the key, so the switch would
+silently fail to stick in exactly those projects. The pair is restored WHOLE or not at all (a
+model name is meaningless against the wrong provider), a `--provider`/`--model` flag pins the
+launch (`cli_pinned`, passed from `main()` because the resolved pair can no longer say whether
+a flag spoke), a remembered provider absent from `providers.json` falls back, and the mount
+banner says `(remembered)` when the restore fired. Both records share one file, so both
+writers read-modify-write and `STORE_VERSION` stays 1 — the model keys are optional, and
+bumping would have discarded every user's theme once (RM4).
+
+Three things about the THEME half are load-bearing:
 - **The store records the theme AND the `tui.theme` value it was chosen against.** A remembered
   choice outranks `settings.json` only while that value still says what it said; edit it, add it
   or remove it and the file re-asserts itself. Same staleness rule as `workspace_trust`'s content
@@ -289,6 +302,17 @@ through `_close_answer()` and **not** `flush_stream()`: the latter re-enters `en
 at a point where `_thinking_pending` already holds the rest of the chunk being committed, which
 emits that remainder as a second entry and then drops it. `/thinking [on|off]` is the session
 toggle and persists nothing, matching `/effort`.
+
+**The `venastine ›` label belongs to the TURN, not to an answer span** (§43, RM1). §38 made
+reasoning visible and left the label where it had always been — drawn by
+`_write_stream_chunk` when the first committable chunk of ANSWER text arrived — so on the
+shape §38 itself made normal the whole thinking block rendered above it, under `you ›`, and
+read as the user having done the thinking. `_open_label()` now draws it once above the
+turn's first model output, reasoning included; a tool line, a diff or a notice inside the
+turn does not re-open one, and the next `you ›` retires it. Placement is a pure function of
+the role sequence in `_entries`, which is what lets `rerender()` re-derive it after a
+`/theme` instead of remembering where the labels went — a replay that moves a label is the
+same defect as one that reflows a paragraph.
 
 Two things in `tui/app.py` are load-bearing and easy to break silently:
 - **`run_worker(..., exit_on_error=False)` + `on_worker_state_changed`.** Textual's default tears the whole app down on a transient worker exception.
@@ -877,6 +901,13 @@ independent bugs, both found by using the app.
 - **`param_digest` lives in `safety/policy_enforcement.py`**, beside `redact_secrets`,
   since §27's replay renderer is its second caller. It redacts BEFORE truncating, and
   a second copy is how that ordering regresses in one place and not the other.
+- **`/new` redraws, through the same reset** (§43, RM2). `switch_to_thread` cleared the
+  transcript and the per-thread state; `_cmd_new` did neither, so a new thread inherited
+  the previous conversation's screen, its `/copy all` and its `/claims` — §27's bug 1 and
+  AC4, surviving on the path §27 did not touch. The `_busy` refusal stays first, so a
+  refused `/new` clears nothing, and the banner is REPRINTED (`_write_session_banner`)
+  rather than replayed: a `/model` switch survives `/new`, so the launch pair would name a
+  model the next turn will not call.
 - **Resuming resets per-thread state.** `_last_run`, `_live_claims` and
   `_last_response` survived a thread switch, so `/claims` after a resume showed the
   previous thread's run — the same class of bug the goal banner already fixed in that
@@ -1067,7 +1098,9 @@ the CLI has no command layer).
 
 `core/config_loader.py` discovers `.md` agents/skills across three tiers — harness (`<root>/{agents,skills}/builtin/`) → project (`.venastine/`, trust-gated) → user (`~/.config/venastine/`) — parses line-anchored YAML frontmatter, and merges `settings.json` (unknown keys **raise**). `core/workspace_trust.py` owns only the D17 trust store (resolved path + sorted-walk content hash); `main.py` owns the prompting UX.
 
-Load-bearing: untrusted project content is **absent**, not loaded-and-disabled. Trust-store and user-config paths resolve at call time, not import time (tests redirect them). Provider/model precedence is CLI > `settings.json` > `config.py`, which only works because argparse defaults are `None` (`main.resolve_runtime_defaults`).
+**Trust is keyed to the PROJECT PATH (`os.getcwd()`) and the presence of `.venastine/`** — not to `AGENT_WORKSPACE` (§43, RM6). `config.WORKSPACE_DIR` is `file_ops`' permission boundary and deliberately not a project path (see the distribution section above), so changing it never asks about trust; and `is_trusted()` returns `True` outright for a project with no `.venastine/` directory, because there is nothing to trust, nothing to list and no question to ask. An empty directory is that case, and so is this repository — silence at launch is the correct outcome there rather than a missing prompt.
+
+Load-bearing: untrusted project content is **absent**, not loaded-and-disabled. Trust-store and user-config paths resolve at call time, not import time (tests redirect them). Provider/model precedence is CLI > `settings.json` > `config.py`, which only works because argparse defaults are `None` (`main.resolve_runtime_defaults`). Since §43 the TUI adds one tier of its own between the first two — a remembered `/model` pair, applied only when no flag spoke and only while `default_provider`/`default_model` still say what they said when it was chosen. The CLI is unchanged and does not read that store.
 
 **A symlinked PROJECT tier root is treated as absent (#18).** `os.walk` follows the path handed to it as `top` but not symlinked subdirectories, and the two sides of the trust boundary start from different places: `workspace_trust` walks from `.venastine`, so `skills/` is a subdirectory it will not descend, while `_md_files` walks from `.venastine/skills`, so it *is* the top and gets followed. Directory names never enter the hash either, so the link contributed nothing — not even its own name. Behind it, definitions loaded as project tier while being absent from the trust prompt's listing **and** from the hash, so their bodies could be rewritten freely after one grant with `is_trusted()` still returning `True`. The payload is instructions, not data: a project-tier body becomes system-prompt content. Git stores symlinks natively, so this arrives on clone — D17's own stated threat. The guard is scoped to the **project** tier deliberately; nothing hashes the harness or user directories, and symlinking `~/.config/venastine/` into a dotfiles repo is legitimate. The invariant to keep however this is later refined: **the loader must read no file the trust listing omits** (`test_workspace_trust.py`). The deeper fix — making `content_files()` and `_content_hash()` one traversal rather than two that must agree — is still open.
 

@@ -32,6 +32,11 @@ from tui.widgets import (THINKING_BAR, THINKING_CLOSE, THINKING_OPEN,
                          ThinkingIndicator, Transcript)
 
 
+#: The label §43 moved. Written with a leading newline, so rows are
+#: matched on the text rather than compared whole.
+LABEL = "venastine ›"
+
+
 def _recording_transcript():
     """A Transcript whose renders are captured as plain strings.
 
@@ -327,6 +332,111 @@ class TestThinkingRendersInline:
         assert transcript._thinking_open is False
         assert transcript._pending == ""
         assert transcript._thinking_pending == ""
+
+
+# ===========================================================================
+# ---- The label opens the turn (§43, RM1) ----------------------------------
+# ===========================================================================
+
+def _labels(written):
+    """Indices of the rows carrying a `venastine ›` label."""
+    return [i for i, row in enumerate(written) if LABEL in row]
+
+
+class TestTheLabelOpensTheTurn:
+    """§38 made reasoning visible and left the label where it was: on the
+    ANSWER span. So a turn that thinks first drew the thinking block
+    under `you ›` and `venastine ›` after it, which reads as the user
+    having done the thinking and the model having answered without
+    any."""
+
+    def test_the_label_precedes_a_thinking_block(self):
+        transcript, written = _recording_transcript()
+
+        transcript.thinking_delta("weighing it up\n")
+        transcript.end_thinking()
+        transcript.stream_delta("the answer\n")
+
+        label = next(i for i, row in enumerate(written) if LABEL in row)
+        opened = next(i for i, row in enumerate(written)
+                      if THINKING_OPEN in row)
+        assert label < opened, "the reasoning was drawn above the label"
+
+    def test_one_label_per_turn_across_reasoning_and_text(self):
+        transcript, written = _recording_transcript()
+
+        transcript.thinking_delta("weighing it up\n")
+        transcript.end_thinking()
+        transcript.stream_delta("the answer\n")
+        transcript.flush_stream()
+
+        assert len(_labels(written)) == 1
+
+    def test_a_tool_line_does_not_re_open_a_label(self):
+        """A tool call, a diff and a notice are all part of the turn the
+        label already announced. Once per TURN is the rule; once per
+        model span was the shape that put it after the reasoning."""
+        transcript, written = _recording_transcript()
+
+        transcript.thinking_delta("read the file first\n")
+        transcript.stream_delta("Looking at config_loader.py.\n")
+        transcript.write_role("tool", "▸ read  core/config_loader.py")
+        transcript.thinking_delta("the tiers are harness > user > project\n")
+        transcript.stream_delta("Here is what I found.\n")
+        transcript.flush_stream()
+
+        assert len(_labels(written)) == 1
+
+    def test_the_next_user_message_retires_it(self):
+        transcript, written = _recording_transcript()
+
+        transcript.stream_delta("first answer\n")
+        transcript.write_user("and now something else")
+        transcript.thinking_delta("hmm\n")
+        transcript.end_thinking()
+
+        assert len(_labels(written)) == 2, \
+            "the second turn inherited the first turn's label"
+
+    def test_rerender_places_the_labels_where_the_live_render_did(self):
+        """The property the rule is built on: placement is a pure
+        function of the role sequence in `_entries`. RichLog cannot
+        restyle a drawn row, so /theme replays the session -- and a
+        replay that moves a label is the same defect as one that reflows
+        a paragraph."""
+        transcript, written = _recording_transcript()
+        transcript.clear = lambda: None
+
+        transcript.write_user("refactor the loader")
+        transcript.thinking_delta("read the file first\n")
+        transcript.stream_delta("Looking at it.\n")
+        transcript.write_role("tool", "▸ read  core/config_loader.py")
+        transcript.stream_delta("Here is what I found.\n")
+        transcript.flush_stream()
+        live_roles = [role for role, _ in transcript._entries]
+
+        written.clear()
+        transcript.rerender()
+
+        assert [role for role, _ in transcript._entries] == live_roles
+        assert len(_labels(written)) == 1
+        label = _labels(written)[0]
+        opened = next(i for i, row in enumerate(written)
+                      if THINKING_OPEN in row)
+        user = next(i for i, row in enumerate(written) if "you ›" in row)
+        assert user < label < opened
+
+    def test_reset_retires_the_label(self):
+        """§27's rule again: a label left in force would make the first
+        turn of the next thread the only one in the session without
+        one."""
+        transcript, _ = _recording_transcript()
+        transcript.clear = lambda: None
+        transcript.stream_delta("old thread\n")
+
+        transcript.reset()
+
+        assert transcript._label_in_force is False
 
 
 # ===========================================================================

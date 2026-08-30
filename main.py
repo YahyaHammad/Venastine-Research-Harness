@@ -1831,8 +1831,16 @@ def main(argv=None) -> int:
             # vanishes the moment it renders, and TranscriptLogHandler is
             # attached only at mount -- so this pre-mount print would be
             # seen by nobody. on_mount writes each into the transcript.
+            # §43 (RM3). Whether a FLAG named the pair, which the
+            # resolved values above can no longer say -- and the TUI
+            # needs it to know whether a remembered /model choice may
+            # apply. Computed from args rather than by comparing the
+            # resolved pair against settings.json, which would read a
+            # flag that happens to match the configured value as absent.
             run_tui(provider, model, settings,
-                    startup_warnings=startup_warnings)
+                    startup_warnings=startup_warnings,
+                    cli_pinned=args.provider is not None
+                    or args.model is not None)
         elif args.mode == "research":
             # AFTER setup_mcp: the tools a grant can cover are named at
             # connection time, so asking any earlier would offer a list

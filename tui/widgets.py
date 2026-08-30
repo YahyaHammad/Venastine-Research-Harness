@@ -665,6 +665,15 @@ class Transcript(RichLog):
     entry per span, updated in place. Appending per chunk would split a
     copied answer across as_text()'s "\\n\\n" joins and make rerender()
     draw a "venastine ›" label per fragment.
+
+    §43 moves that label. It belongs to the TURN, not to an answer span:
+    one "venastine ›" above the model's first output of the turn,
+    whether that output is reasoning or text, retired by the next
+    "you ›". See _open_label for why, and note the property that makes
+    it safe -- placement is a pure function of the role sequence in
+    `_entries`, so rerender() reproduces it rather than approximating
+    it. A re-render that moves a label is the same defect as one that
+    reflows a paragraph.
     """
 
     def __init__(self, **kwargs):
@@ -681,6 +690,10 @@ class Transcript(RichLog):
         self._thinking_pending = ""
         self._thinking_open = False
         self._thinking_text = ""
+        # §43 (RM1). Whether this turn's `venastine ›` has been drawn.
+        # ONE label per turn, above the model's first output of it
+        # whether that output is reasoning or text -- see _open_label.
+        self._label_in_force = False
 
     # -- styling -----------------------------------------------------------
 
@@ -720,11 +733,16 @@ class Transcript(RichLog):
 
     def _render_entry(self, role: str, text: str) -> None:
         if role == "user":
+            # §43 (RM1). The turn's label is retired HERE and nowhere
+            # else, so where the labels land is a pure function of the
+            # role sequence in `_entries` -- which is what lets
+            # rerender() put them exactly where the live render did.
+            self._label_in_force = False
             self.write(Text.assemble(
                 ("\nyou ›  ", self._style("user_label")),
                 (text, self._style("user"))))
         elif role == "assistant":
-            self.write(Text("\nvenastine ›", self._style("assistant_label")))
+            self._open_label()
             # One trailing newline is dropped, exactly as a committed
             # stream chunk drops it. Rich renders a trailing newline as an
             # extra empty row, so without this a REPLAYED answer carried a
@@ -742,11 +760,36 @@ class Transcript(RichLog):
             # /copy gets prose rather than box-drawing characters, and a
             # replay under a new theme re-derives the bar rather than
             # replaying a string that was decorated once.
+            self._open_label()
             self._write_thinking_open()
             self._write_thinking_lines(text)
             self._write_thinking_close()
         else:
             self.write(Text(f"     {text}", self._style(role)))
+
+    def _open_label(self) -> None:
+        """Draw this turn's `venastine ›`, once (§43, RM1).
+
+        The label used to belong to an ANSWER span, drawn by
+        _write_stream_chunk when the first committable chunk arrived. On
+        a turn that thinks first -- the normal shape since §38 -- that
+        put the reasoning ABOVE the label and therefore under `you ›`,
+        so the transcript read as if the user had done the thinking and
+        the model had answered without any.
+
+        It is now the TURN's, opened by whichever of reasoning or text
+        comes first and retired only by the next `you ›`. A tool line, a
+        diff or a system notice inside the turn does NOT re-open one:
+        they are part of the turn the label already announced. The cost,
+        accepted rather than fixed: an answer resuming after a tool line
+        starts directly under it, where the suppressed label used to
+        supply a blank row. A separator drawn instead would be a second
+        thing the live path and rerender() must agree about.
+        """
+        if self._label_in_force:
+            return
+        self.write(Text("\nvenastine ›", self._style("assistant_label")))
+        self._label_in_force = True
 
     def _render_diff(self, block: str) -> None:
         """One `write`/`edit` diff (§41, X5).
@@ -933,7 +976,7 @@ class Transcript(RichLog):
     def _write_stream_chunk(self, chunk: str) -> None:
         if not self._stream_open:
             self.end_thinking()
-            self.write(Text("\nvenastine ›", self._style("assistant_label")))
+            self._open_label()
             self._entries.append(("assistant", ""))
             self._stream_open = True
         self._stream_text += chunk
@@ -1024,6 +1067,10 @@ class Transcript(RichLog):
     def _write_thinking_chunk(self, chunk: str) -> None:
         if not self._thinking_open:
             self._close_answer()
+            # §43 (RM1). ABOVE the opening delimiter: on a turn that
+            # thinks before it answers this is where the label is drawn,
+            # and it is the whole point of the change.
+            self._open_label()
             self._write_thinking_open()
             self._entries.append(("thinking", ""))
             self._thinking_open = True
@@ -1074,6 +1121,10 @@ class Transcript(RichLog):
         self._thinking_pending = ""
         self._thinking_open = False
         self._thinking_text = ""
+        # §43 (RM1). Same reasoning as the open-span flags: a label left
+        # in force would make the next thread's first turn the only one
+        # in the session with no `venastine ›`.
+        self._label_in_force = False
         self._entries.clear()
         self.clear()
 
@@ -1087,6 +1138,10 @@ class Transcript(RichLog):
         """
         self.flush_stream()
         self.clear()
+        # §43 (RM1). The screen is empty, so no label is in force; the
+        # loop below re-derives every one of them from the role sequence
+        # exactly as the live path did.
+        self._label_in_force = False
         for role, text in self._entries:
             self._render_entry(role, text)
 

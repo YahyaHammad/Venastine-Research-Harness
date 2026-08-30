@@ -469,7 +469,7 @@ The first connection to a **user-level** server asks once, showing the resolved 
 | `/theme [name]` | Restyle panels, transcript roles and code blocks — not just borders. Bare shows the current theme and all fourteen names. **Remembered for the next launch**, unless `tui.theme` in settings.json has changed since |
 | `/effort [level\|auto]` | Switch reasoning effort, offering only levels this model accepts (Anthropic's are queried live). Session-only (`tui.effort` persists) |
 | `/thinking [on\|off]` | Show or hide reasoning inline for this session. Session-only (`tui.show_thinking` persists) |
-| `/model [[PROVIDER] name]` | Switch provider and/or model for the session. Refuses mid-turn, warns on a missing key, revalidates effort against the new model, and notes if an active agent pins its own. Persist via launch flags or `default_provider`/`default_model` |
+| `/model [[PROVIDER] name]` | Switch provider and/or model, and it is remembered for the next launch. Refuses mid-turn, warns on a missing key, revalidates effort against the new model, and notes if an active agent pins its own |
 | `/research [--attended] [--review\|--no-review] [--grant[=a,b]] <query>` | Run the pipeline live from the TUI. Leading flags compose in any order before the query; bare `--grant` opens the picker, `--grant=a,b` names them (`--grant-tools=` works as an alias); without flags, `research.*` settings apply |
 | `/compact [--strength 1-5]` | Fold older turns now instead of waiting for the trigger. Recent turns keep exactly the protection an automatic compaction gives them |
 | `/trigger [tokens\|off]` | Override **when this chat compacts**, for this session only. An absolute prompt size (`80k`), not a margin below the window. A value below the warning margin or the keep-recent floor is refused naming it; a value below the thread's current size is accepted and says a fold is coming |
@@ -491,7 +491,7 @@ The first connection to a **user-level** server asks once, showing the resolved 
 
 Keys: **ctrl+c** quit · **ctrl+t** thread picker · **ctrl+l** claims view.
 
-Three behaviours worth knowing: an unknown slash command is an error, never a chat turn — a mistyped command cannot silently burn a request. `/effort` and `/model` persist nothing, so make those stick through settings.json or launch flags; `/theme` is the exception — it is remembered for the next launch, in a file of its own beside settings.json rather than by rewriting it. And the commands that spend money or swap models mid-session (`/compact`, `/summary`, `/research`, `/init`, `/model`, `/grill-me`) refuse while a turn is still running rather than acting underneath it.
+Three behaviours worth knowing: an unknown slash command is an error, never a chat turn — a mistyped command cannot silently burn a request. `/effort` and `/thinking` persist nothing, so make those stick through settings.json or launch flags; `/theme` and `/model` are the exceptions — they are remembered for the next launch, in a file of their own beside settings.json rather than by rewriting it. And the commands that spend money or swap models mid-session (`/compact`, `/summary`, `/research`, `/init`, `/model`, `/grill-me`) refuse while a turn is still running rather than acting underneath it.
 
 When a subagent is spawned, you are asked which of its approval-gated tools it may use without asking again — per tool, all unticked by default. Running it with none selected is fine, and refusing the spawn entirely is a separate answer from granting it nothing. Before this, approving a spawn authorised the child's whole set.
 
@@ -501,9 +501,9 @@ Only `CONTEXT.md` is written for you in full; the rest arrive as skeletons with 
 
 `/summary` distils this conversation and shows it — it does **not** shorten what the model sees; that is `/compact`. `/ref` picks another conversation, summarises it, and attaches that summary to this one as standing context: you choose what crosses between threads, so nothing read or argued in one conversation can steer another without your say-so. `/ref --list` and `/ref --clear` are the way back out, and the summaries are labelled so the model knows they are not part of this conversation. From the CLI the same two are launch flags: `--summary <thread>` and a repeatable `--ref <thread>`.
 
-`/threads` lists your **conversations** — not the ~15 internal threads each research run creates, nor the one every automatic compaction makes — ordered by last activity, so the conversation you were just in stays on top. Each row leads with its first message so you can tell them apart. The list shows the 200 most recently active and says so when it truncates; `/resume <thread-id>` opens any thread by id, however old, and `/new` starts fresh. A run's own pass threads are recorded with the run (`output/<run_id>/pass_threads.json`) and can still be opened by id with `--thread`, if you want to see how a particular pass argued.
+`/threads` lists your **conversations** — not the ~15 internal threads each research run creates, nor the one every automatic compaction makes — ordered by last activity, so the conversation you were just in stays on top. Each row leads with its first message so you can tell them apart. The list shows the 200 most recently active and says so when it truncates; `/resume <thread-id>` opens any thread by id, however old, and `/new` starts fresh, redrawing the window rather than leaving the previous conversation on screen beneath it. A run's own pass threads are recorded with the run (`output/<run_id>/pass_threads.json`) and can still be opened by id with `--thread`, if you want to see how a particular pass argued.
 
-`/model` switches provider and model for the session and saves nothing — use the launch flags or `default_provider` / `default_model` in `settings.json` to make it stick.
+`/model` switches provider and model, and the pair comes back at the next launch: it is saved in `~/.config/venastine/ui_preferences.json`, beside `settings.json` and never into it. Editing `default_provider` / `default_model` there still wins — the store records what the file said when you chose, so changing it (or adding it, or removing it) re-asserts the file — and `--provider` / `--model` pin one launch without disturbing what is remembered.
 
 `/copy` exists because Textual 1.0 cannot select text at all. Clipboard delivery uses an escape sequence that some multiplexers drop silently and **cannot be confirmed**, so `--file <path>` is the route that provably worked. Shift+drag usually bypasses the mouse capture and lets your terminal select natively.
 
@@ -743,7 +743,7 @@ classifier is described under *Security model* above. If you have a fork or a lo
 note that `ToolApprovals.shell` now ships `False` and `SHELL_APPROVAL_MODE` is the gate — see
 `tests/BREAKING_CHANGES.md` §24.
 
-Run the test suite with `pytest` — 2995 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
+Run the test suite with `pytest` — 3013 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
 
 ## Documentation
 
