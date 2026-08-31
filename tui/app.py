@@ -1927,6 +1927,20 @@ class VenastineApp(App):
                 self._transcript.write_user(text)
             elif role == "assistant":
                 self._transcript.write_answer(text)
+            elif role == "thinking":
+                # §44. Skipped rather than dimmed when the setting is off:
+                # /thinking is about whether reasoning is shown at all, and
+                # a replay that showed what a live turn had hidden would be
+                # the same conversation rendered two ways -- which is the
+                # defect this whole commit exists to remove, arriving
+                # through the other door.
+                #
+                # write_role, not a new method: Transcript._render_entry
+                # has known the "thinking" role since §38 and already draws
+                # the bar block and opens §43's turn label above it, so a
+                # replayed span and a streamed one go through one renderer.
+                if self._show_thinking:
+                    self._transcript.write_role(role, text)
             else:
                 self._transcript.write_role(role, text)
         if entries:

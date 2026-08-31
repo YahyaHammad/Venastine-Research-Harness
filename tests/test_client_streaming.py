@@ -357,6 +357,98 @@ class TestThinkingIsCapturedAndKeptOutOfTheAnswer:
         # reach it however the deltas interleave.
         assert tokens[-1].final_response.text == "42."
 
+    def test_anthropic_keeps_the_blocks_not_the_streamed_prose(
+            self, monkeypatch):
+        """§44. The deltas are for the screen; the BLOCKS are what goes
+        back to the model, and only the blocks carry the signature it
+        verifies. A record rebuilt from the deltas would be unsigned and
+        rejected, which is why this reads get_final_message() rather than
+        joining what the transcript already has.
+
+        model_dump() rather than a hand-built dict, and the double
+        provides one, so the field set that reaches the wire is the field
+        set that came off it. test_sdk_conformance.py asks the real SDK
+        whether that method and that signature field exist."""
+        monkeypatch.setattr("core.client.load_provider_data", lambda: {})
+        block = {"type": "thinking", "thinking": "Let me count.",
+                 "signature": "abc123"}
+        final_message = SimpleNamespace(
+            content=[SimpleNamespace(type="thinking",
+                                     model_dump=lambda: dict(block)),
+                     SimpleNamespace(type="text", text="42.")],
+            usage=SimpleNamespace(input_tokens=3, output_tokens=2),
+        )
+        client = _FakeAnthropicClient(
+            [_thinking_event("Let me count."), _text_event("42.")],
+            final_message)
+
+        response = list(call_model_stream(
+            client, "ANTHROPIC", "claude-opus-5", [], "sys", []))[-1].final_response
+
+        assert response.thinking == {
+            "provider": "ANTHROPIC", "model": "claude-opus-5",
+            "blocks": [block]}
+        assert response.text == "42.", "the answer is unchanged"
+
+    def test_anthropic_keeps_redacted_thinking_too(self, monkeypatch):
+        """Opaque to us and meaningful to the model. Dropping it would
+        break a turn that had one, silently, on the next send."""
+        monkeypatch.setattr("core.client.load_provider_data", lambda: {})
+        redacted = {"type": "redacted_thinking", "data": "EncryptedBlob=="}
+        final_message = SimpleNamespace(
+            content=[SimpleNamespace(type="redacted_thinking",
+                                     model_dump=lambda: dict(redacted)),
+                     SimpleNamespace(type="text", text="ok")],
+            usage=SimpleNamespace(input_tokens=1, output_tokens=1),
+        )
+        client = _FakeAnthropicClient([_text_event("ok")], final_message)
+
+        response = list(call_model_stream(
+            client, "ANTHROPIC", "m", [], "sys", []))[-1].final_response
+
+        assert response.thinking["blocks"] == [redacted]
+
+    def test_a_turn_that_did_not_think_records_nothing(self, monkeypatch):
+        """None, not an empty envelope: "no reasoning" and "a provider
+        that reports none" are one thing, and neither should write a row
+        or reach _messages_for_provider with something to skip."""
+        monkeypatch.setattr("core.client.load_provider_data", lambda: {})
+        final_message = SimpleNamespace(
+            content=[SimpleNamespace(type="text", text="hi")],
+            usage=SimpleNamespace(input_tokens=1, output_tokens=1),
+        )
+        client = _FakeAnthropicClient([_text_event("hi")], final_message)
+
+        response = list(call_model_stream(
+            client, "ANTHROPIC", "m", [], "sys", []))[-1].final_response
+
+        assert response.thinking is None
+
+    def test_the_v1_branch_records_one_block_under_its_own_field_name(
+            self, monkeypatch):
+        """There is no block structure on this wire -- reasoning arrives as
+        a flat run of deltas -- so the record is the concatenation, spelled
+        after the field the request would use to send it back."""
+        monkeypatch.setattr("core.client.load_provider_data", lambda: {})
+        chunks = [
+            _oai_chunk(SimpleNamespace(content=None, tool_calls=None,
+                                       reasoning_content="Let me ")),
+            _oai_chunk(SimpleNamespace(content="A", tool_calls=None,
+                                       reasoning_content="count.")),
+            _oai_chunk(None, usage=SimpleNamespace(
+                prompt_tokens=4, completion_tokens=2)),
+        ]
+
+        response = list(call_model_stream(
+            _FakeOpenAIClient(chunks), "OPENROUTER", "minimax/minimax-m3",
+            [], "sys", []))[-1].final_response
+
+        assert response.thinking == {
+            "provider": "OPENROUTER", "model": "minimax/minimax-m3",
+            "blocks": [{"type": "reasoning_content",
+                        "text": "Let me count."}]}
+        assert response.text == "A"
+
     def test_anthropic_ignores_event_kinds_it_does_not_render(self, monkeypatch):
         """The SDK emits signature, content_block_stop and message_stop
         events on the same iterator. Reading `type` rather than assuming a

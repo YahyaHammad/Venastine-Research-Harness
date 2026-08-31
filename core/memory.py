@@ -331,15 +331,29 @@ class ConversationMemory:
             for tc in response.tool_calls
         ]
         entry = {"role": "assistant", "text": response.text, "tool_calls": tool_calls}
+        # §44: the turn's reasoning, in the provider's own blocks. Read
+        # off the response rather than accumulated from the display
+        # deltas, because an Anthropic block carries a signature the
+        # prose does not -- see ModelResponse.thinking. Attached to the
+        # in-memory entry as well as persisted, so a live turn and a
+        # resumed one hand _messages_for_provider the same shape; that is
+        # the whole point, and it is why this is one field and not two
+        # code paths.
+        thinking = getattr(response, "thinking", None)
+        if thinking:
+            entry["thinking"] = thinking
         self._messages.append(entry)
         # Persist only the assistant-specific payload, not the whole
         # entry -- "role" is already carried by save_message's own
         # `role=` argument, and duplicating it inside `content` is
-        # exactly the redundancy that caused the resume-shape bug.
+        # exactly the redundancy that caused the resume-shape bug. The
+        # reasoning has its own column for the same reason: it is not
+        # part of what the model said.
         save_message(
             self.thread_id,
             role="assistant",
             content={"text": response.text, "tool_calls": tool_calls},
+            thinking=thinking,
         )
 
     def add_tool_result(self, tool_call_id: str, result: dict) -> None:

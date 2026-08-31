@@ -821,7 +821,8 @@ class FakeStorage:
         this method and is the fake's documented simplification."""
         return self._first_user_message(thread_id)
 
-    def save_message(self, thread_id, role, content, name=None, tool_call_id=None):
+    def save_message(self, thread_id, role, content, name=None,
+                     tool_call_id=None, thinking=None):
         # Stores content exactly as given -- production's save_message
         # json.dumps'es it and get_session_history json.loads'es it back,
         # and round-trip is identity for any JSON-encodable value, so the
@@ -838,6 +839,12 @@ class FakeStorage:
             "name": name,
             "tool_call_id": tool_call_id,
             "pinned": False,
+            # §44. Held as the DICT, where production holds the JSON text
+            # its column stores -- the same simplification this fake
+            # already makes for `content`, and for the same reason: the
+            # round trip is identity, and what has to mirror production
+            # for real is the RECONSTRUCTION below.
+            "thinking": thinking,
         })
         # (#32) Mirrors production: any archived row stamps the thread,
         # in the same write.
@@ -1026,6 +1033,15 @@ class FakeStorage:
                     "text": content.get("text", ""),
                     "tool_calls": content.get("tool_calls", []),
                 }
+                # §44, mirroring storage._to_neutral exactly: present only
+                # when the row carried reasoning, so every message written
+                # before this batch reconstructs to the shape it always
+                # did. The real one decodes JSON and drops anything
+                # unusable; this fake stores the dict, so the guard is the
+                # same predicate against an already-decoded value.
+                thinking = row.get("thinking")
+                if isinstance(thinking, dict) and thinking.get("blocks"):
+                    payload["thinking"] = thinking
             elif role == "tool":
                 payload = {"role": "tool", "tool_call_id": row["tool_call_id"], "content": content}
             else:

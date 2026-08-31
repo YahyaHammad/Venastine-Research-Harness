@@ -71,6 +71,12 @@ def _print_replay(thread_id: UUID) -> None:
     replayed turn and a fresh one are not two different-looking things in
     the same scrollback. What may be shown is core/replay.py's decision,
     not this function's; the shells must not disagree about that.
+
+    §44's reasoning entries get a label of their own. Unlabelled they
+    would arrive under the same anonymous indent as a tool line, and a
+    paragraph of prose reading as a tool call is worse than not showing
+    it. D12 keeps this shell a real fallback, so it renders what the TUI
+    renders -- it simply has no tui.show_thinking to consult.
     """
     try:
         entries = replay_entries(thread_id)
@@ -88,6 +94,8 @@ def _print_replay(thread_id: UUID) -> None:
             print(f"You: {text}")
         elif role == "assistant":
             print(f"\nAgent: {text}\n")
+        elif role == "thinking":
+            print(f"\nThinking: {text}")
         else:
             print(f"     {text}")
     noun = "entry" if len(entries) == 1 else "entries"

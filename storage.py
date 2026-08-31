@@ -64,6 +64,19 @@ class MessageLog(SQLModel, table=True):
     # ensure_columns() -- create_all() would have left every existing
     # app.db without it and failed at the next SELECT (M7).
     pinned: bool = Field(default=False)
+    # §44. The turn's reasoning, JSON-encoded, or None -- assistant rows
+    # only, and only where the provider returned any.
+    #
+    # A SEPARATE COLUMN rather than a key inside `content`, because these
+    # are different KINDS of thing with different rules. `content` is what
+    # the model said; this is the provider's own signed blocks, which go
+    # back on the wire unchanged or not at all, and which every reader
+    # that measures the conversation (the compactor's input, /summary's
+    # distillation) has to be able to leave out without parsing around
+    # them. Nullable and additive, so database.ensure_columns() adds it to
+    # an existing database exactly as it added `pinned` -- see the note on
+    # that field's migration in _ordered_rows.
+    thinking: Optional[str] = None
 
 
 class CompactionCheckpoint(SQLModel, table=True):
@@ -261,6 +274,7 @@ def save_message(
     content: Any,
     name: Optional[str] = None,
     tool_call_id: Optional[str] = None,
+    thinking: Optional[dict] = None,
 ) -> None:
     """Append one archived row and stamp the thread's activity (#32).
 
@@ -279,6 +293,10 @@ def save_message(
             content=json.dumps(content),
             name=name,
             tool_call_id=tool_call_id,
+            # Encoded separately from `content` and stored as NULL when
+            # absent, so "this turn did no reasoning" costs no bytes and
+            # reads back as None rather than as an empty structure.
+            thinking=json.dumps(thinking) if thinking else None,
         )
         session.add(new_message)
         thread = session.get(ConversationThread, thread_id)
@@ -429,6 +447,23 @@ def _first_user_messages(session, thread_ids: List[UUID]) -> Dict[UUID, str]:
     return out
 
 
+def _decode_thinking(raw):
+    """A stored thinking record, or None for anything unusable.
+
+    Degrades rather than raising, like every other read on this path: the
+    column is a convenience for replay and for echoing blocks back to the
+    model that wrote them, and a row whose JSON cannot be parsed must cost
+    that convenience rather than the ability to resume the thread at all.
+    """
+    if not raw:
+        return None
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if isinstance(value, dict) and value.get("blocks") else None
+
+
 def _to_neutral(msg: dict) -> dict:
     """Reconstructs the exact neutral shape core/memory.py's add_* methods
     write, per msg.role -- this is the counterpart to memory.py only ever
@@ -453,6 +488,14 @@ def _to_neutral(msg: dict) -> dict:
             "text": decoded.get("text", ""),
             "tool_calls": decoded.get("tool_calls", []),
         }
+        # §44, from its own column rather than from `content`. Present
+        # ONLY when the row carried reasoning, so every message this
+        # project has ever written reconstructs to exactly the shape it
+        # did before -- which is what keeps _messages_for_provider,
+        # compactable_span and the fake's mirror unchanged for them.
+        thinking = _decode_thinking(msg.get("thinking"))
+        if thinking is not None:
+            payload["thinking"] = thinking
     elif role == "tool":
         # decoded is the plain result string add_tool_result persisted.
         payload = {"role": "tool", "tool_call_id": msg["tool_call_id"], "content": decoded}
@@ -500,6 +543,9 @@ def _ordered_rows(thread_id: UUID) -> List[dict]:
                 "id": m.id, "role": m.role, "content": m.content,
                 "name": m.name, "tool_call_id": m.tool_call_id,
                 "pinned": bool(m.pinned),
+                # Not coerced, unlike `pinned`: NULL is the ordinary state
+                # of this column and _decode_thinking answers None for it.
+                "thinking": m.thinking,
             }
             for m in session.exec(statement).all()
         ]

@@ -370,6 +370,75 @@ class TestWhatIsReplayed:
         assert key not in text
         assert "[REDACTED]" in text
 
+    def test_reasoning_is_replayed_above_the_answer_it_preceded(self, mocker):
+        """§44. §38 captured thinking for display and persisted none of
+        it, so closing and reopening a thread showed the answers with the
+        reasoning silently gone -- one conversation rendered two ways
+        depending on whether the session had been closed.
+
+        ABOVE the answer, because that is the order it happened in and the
+        order the live transcript drew it in (§43 RM1 opens one
+        `venastine ›` above whichever of reasoning and text came first). A
+        replay that reordered a turn is the same defect as one that
+        reflowed it."""
+        mocker.patch("core.replay.archive_history", return_value=[
+            {"role": "user", "content": "why?"},
+            {"role": "assistant", "text": "Because.", "tool_calls": [],
+             "thinking": {"provider": "ANTHROPIC", "model": "claude-opus-5",
+                          "blocks": [{"type": "thinking",
+                                      "thinking": "Let me think.",
+                                      "signature": "sig"}]}},
+        ])
+
+        assert replay_entries(uuid4()) == [
+            ("user", "why?"),
+            ("thinking", "Let me think."),
+            ("assistant", "Because."),
+        ]
+
+    def test_several_blocks_replay_as_paragraphs(self, mocker):
+        mocker.patch("core.replay.archive_history", return_value=[
+            {"role": "assistant", "text": "a", "tool_calls": [],
+             "thinking": {"blocks": [{"type": "thinking", "thinking": "One."},
+                                     {"type": "thinking", "thinking": "Two."}]}},
+        ])
+
+        assert replay_entries(uuid4())[0] == ("thinking", "One.\n\nTwo.")
+
+    def test_the_v1_shape_replays_by_field_name_not_by_provider(self, mocker):
+        """Two spellings reach _reasoning_text -- Anthropic's `thinking`
+        and the v1-compatible `text` -- and neither is branched on by
+        provider, so a third costs a field name rather than a case."""
+        mocker.patch("core.replay.archive_history", return_value=[
+            {"role": "assistant", "text": "a", "tool_calls": [],
+             "thinking": {"provider": "OPENROUTER", "model": "minimax/m3",
+                          "blocks": [{"type": "reasoning_content",
+                                      "text": "Hmm."}]}},
+        ])
+
+        assert ("thinking", "Hmm.") in replay_entries(uuid4())
+
+    def test_redacted_blocks_travel_but_are_not_drawn(self, mocker):
+        """Opaque ciphertext meaningful only to the model. It is stored --
+        dropping it breaks the next send -- but rendering it would put a
+        wall of base64 under a `venastine ›` label."""
+        mocker.patch("core.replay.archive_history", return_value=[
+            {"role": "assistant", "text": "a", "tool_calls": [],
+             "thinking": {"blocks": [{"type": "redacted_thinking",
+                                      "data": "Blob=="}]}},
+        ])
+
+        assert replay_entries(uuid4()) == [("assistant", "a")]
+
+    def test_a_turn_without_reasoning_replays_exactly_as_before(self, mocker):
+        """The property that makes §44 safe on an existing database: a row
+        that carried no reasoning produces the entry list it always did."""
+        mocker.patch("core.replay.archive_history", return_value=[
+            {"role": "assistant", "text": "a", "tool_calls": []},
+        ])
+
+        assert replay_entries(uuid4()) == [("assistant", "a")]
+
     def test_last_assistant_text_finds_the_most_recent_answer(self):
         entries = [("assistant", "first"), ("user", "again?"),
                    ("assistant", "second"), ("tool", "⟩ read")]
@@ -444,6 +513,62 @@ async def test_resuming_clears_the_screen_and_replays(mocker):
     assert app._last_response == "we decided on 3 of 5"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shown", [True, False])
+async def test_a_reopened_thread_draws_its_reasoning_when_thinking_is_on(
+        mocker, shown):
+    """§44's point, asserted at the surface it was reported at: a reopened
+    thread has to look like one that was never closed.
+
+    BOTH DIRECTIONS, because only the pair says the rule. Asserting the
+    block appears would pass against a build that ignored tui.show_thinking
+    entirely, and asserting it is absent when the setting is off would pass
+    against one that never replayed reasoning at all -- which is the bug.
+
+    No render change was needed to make this work: Transcript._render_entry
+    has known the "thinking" role since §38, so a replayed span goes
+    through the same code as a streamed one, right down to §43's single
+    turn label above it. What this pins is that the entry REACHES it.
+    """
+    from tui.app import VenastineApp
+    from tui.screens import ThreadPickerScreen
+
+    resumed = uuid4()
+    mocker.patch("tui.app.storage.list_threads", return_value=[
+        {"id": resumed, "created_at": "2026-08-30", "kind": "chat",
+         "preview": "a thread that reasoned"}])
+    mocker.patch("tui.app.ConversationMemory",
+                 lambda thread_id=None, kind="chat": type(
+                     "M", (), {"thread_id": thread_id or uuid4(),
+                               "extra": {}, "messages": []})())
+    mocker.patch("tui.app.replay_entries", return_value=[
+        ("user", "why 3 of 5"),
+        ("thinking", "A quorum has to survive one failure."),
+        ("assistant", "we decided on 3 of 5"),
+    ])
+
+    app = VenastineApp("ANTHROPIC", "test-model",
+                       {"tui": {"show_thinking": shown}})
+    async with app.run_test() as pilot:
+        transcript = app._transcript
+        app.action_pick_thread()
+        assert await settle(
+            pilot, lambda: isinstance(app.screen, ThreadPickerScreen))
+        app.screen.dismiss(resumed)
+        assert await settle(
+            pilot, lambda: any("3 of 5" in text
+                               for _, text in transcript._entries))
+
+    roles = [role for role, _ in transcript._entries]
+    assert ("thinking" in roles) is shown, (
+        f"tui.show_thinking={shown} but the replayed reasoning "
+        f"{'did not reach' if shown else 'reached'} the transcript")
+    # The answer is there either way -- the setting hides reasoning, not
+    # the conversation.
+    assert any("we decided on 3 of 5" in text
+               for _, text in transcript._entries)
+
+
 # ===========================================================================
 # ---- AC4: resuming in the CLI (T5) -----------------------------------------
 # ===========================================================================
@@ -455,6 +580,7 @@ def test_the_cli_replays_a_resumed_thread(mocker, capsys):
 
     mocker.patch.object(main, "replay_entries", return_value=[
         ("user", "what did we decide"), ("assistant", "3 of 5"),
+        ("thinking", "A quorum has to survive one failure."),
         ("tool", "⟩ read  notes.md")])
 
     main._print_replay(uuid4())
@@ -463,6 +589,10 @@ def test_the_cli_replays_a_resumed_thread(mocker, capsys):
     assert "You: what did we decide" in out
     assert "Agent: 3 of 5" in out
     assert "notes.md" in out
+    # §44. Labelled rather than left under the anonymous indent a tool
+    # line uses: a paragraph of prose reading as a tool call is worse
+    # than not showing it at all.
+    assert "Thinking: A quorum has to survive one failure." in out
 
 
 def test_a_replay_failure_does_not_stop_the_session(mocker, capsys):

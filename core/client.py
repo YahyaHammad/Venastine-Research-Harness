@@ -142,6 +142,30 @@ class ModelResponse:
     # read that way again (TECHNICAL_DEBT item 9, closed batch 27).
     turn_billed_tokens: Optional[int] = None
     turn_new_tokens: Optional[int] = None
+    # Batch 44 (§44). The turn's reasoning, as the PROVIDER'S OWN BLOCKS
+    # rather than as the text §38 streams for display:
+    #
+    #   {"provider": ..., "model": ..., "blocks": [ ...native... ]}
+    #
+    # §38's O1 made thinking display-only -- never persisted, never back
+    # on the wire -- and sidestepped "does a provider need its own
+    # thinking returned next turn?" by never returning it. That answer
+    # stopped being free once it was clear the model had never seen its
+    # own reasoning at ALL: not across a restart, and not between two
+    # turns of one live session, so a turn re-derives what it already
+    # worked out. O1 is amended here.
+    #
+    # BLOCKS, NOT THE STREAMED TEXT, and that is the whole reason this is
+    # a field rather than an accumulation in core/loop.py. An Anthropic
+    # thinking block carries a `signature`; the model reuses its own state
+    # through the block, not through the prose, so a re-serialised copy of
+    # the deltas would be unsigned and rejected. The blocks are read off
+    # get_final_message(), which already has them in hand.
+    #
+    # `provider` and `model` ride along because the replay rule is
+    # per-model: blocks go back UNCHANGED to the model that produced them
+    # and are dropped for anything else.
+    thinking: Optional[dict] = None
 
 
 def _tool_arguments(raw_args: str, tool_name: str,
@@ -909,6 +933,18 @@ def _google_supports_thinking_budget() -> bool:
     return _google_budget_support
 
 
+def _thinking_record(provider_name: str, model: str,
+                     blocks: list) -> Optional[dict]:
+    """The turn's reasoning in the shape ModelResponse.thinking carries.
+
+    None when the turn produced none, so "no reasoning" and "a provider
+    that reports none" stay one thing and no row is written for either.
+    """
+    if not blocks:
+        return None
+    return {"provider": provider_name, "model": model, "blocks": blocks}
+
+
 def _thinking_for_provider(provider_name: str, effort: Optional[str]) -> dict:
     """Reasoning-effort kwargs for this provider, or {} when no effort is set.
 
@@ -928,9 +964,20 @@ def _thinking_for_provider(provider_name: str, effort: Optional[str]) -> dict:
         return {}
     if provider_name == "ANTHROPIC":
         # Adaptive thinking + an effort level is the current-model pairing;
+        # `display` is EXPLICIT because its default changed under us. On
+        # Fable 5, Opus 5, Opus 4.8/4.7 and Sonnet 5 it defaults to
+        # "omitted", which still streams thinking blocks but with EMPTY
+        # text -- so §38's whole feature rendered nothing at all on
+        # Anthropic: ev.thinking was "", core/loop.py's `if
+        # token.thinking_delta` never fired, and neither the inline block
+        # nor ThinkingIndicator ever appeared. It looked like it worked
+        # because the OpenAI-compatible branch reads reasoning_content and
+        # is unaffected. The raw chain of thought is never exposed on any
+        # model; "summarized" is the readable form, and it is what the
+        # blocks captured below carry back to the model that wrote them.
         # budget_tokens was removed and returns a 400.
         return {
-            "thinking": {"type": "adaptive"},
+            "thinking": {"type": "adaptive", "display": "summarized"},
             "output_config": {"effort": effort},
         }
     if provider_name == "GOOGLE":
@@ -1038,6 +1085,16 @@ def call_model_stream(
                 ToolCallRequest(id=b.id, name=b.name, input=b.input)
                 for b in final_msg.content if b.type == "tool_use"
             ]
+            # model_dump() rather than a hand-built dict: what goes back on
+            # the wire has to be what came off it, field for field, or the
+            # signature does not verify. redacted_thinking is included for
+            # the same reason -- it is opaque to us and meaningful to the
+            # model, so dropping it would silently break a turn that had
+            # one.
+            thinking_blocks = [
+                b.model_dump() for b in final_msg.content
+                if b.type in ("thinking", "redacted_thinking")
+            ]
             usage_obj = getattr(final_msg, "usage", None)
             usage = {
                 "input_tokens": getattr(usage_obj, "input_tokens", 0) if usage_obj else 0,
@@ -1068,6 +1125,7 @@ def call_model_stream(
 
         yield StreamToken(final_response=ModelResponse(
             text=text, tool_calls=calls, usage=usage,
+            thinking=_thinking_record(provider_name, model, thinking_blocks),
         ))
         return
 
@@ -1138,6 +1196,7 @@ def call_model_stream(
         openai_kwargs["stream_options"] = {"include_usage": True}
 
     text_parts = []
+    reasoning_parts = []
     tool_fragments: dict[int, dict] = {}
     usage = {"input_tokens": 0, "output_tokens": 0}
 
@@ -1164,11 +1223,16 @@ def call_model_stream(
             #
             # NEVER appended to text_parts: reasoning is not the answer,
             # and folding it in would change every ModelResponse this
-            # branch returns, put thinking into the persisted thread, and
-            # send it back on the next turn's wire.
+            # branch returns and put reasoning into the thread as though
+            # the model had said it. It is accumulated SEPARATELY instead
+            # (batch 44), into ModelResponse.thinking, where it is kept as
+            # this provider's own field name rather than as prose -- an
+            # echo back on the wire has to spell it the way the provider
+            # spelled it.
             reasoning = (getattr(delta, "reasoning_content", None)
                          or getattr(delta, "reasoning", None))
             if isinstance(reasoning, str) and reasoning:
+                reasoning_parts.append(reasoning)
                 yield StreamToken(thinking_delta=reasoning)
             if delta.tool_calls:
                 for tc_delta in delta.tool_calls:
@@ -1218,6 +1282,17 @@ def call_model_stream(
             id=frag["id"], name=name, input=parsed, parse_error=parse_error,
         ))
 
+    # ONE block, not one per delta. There is no block structure on this
+    # wire -- reasoning arrives as a flat string of deltas -- so the record
+    # is the concatenation under the field name the request would use to
+    # send it back. `type` names the shape for _messages_for_provider;
+    # nothing about it is the provider's, which is why it is spelled after
+    # the field rather than after Anthropic's "thinking".
+    reasoning_blocks = ([{"type": "reasoning_content",
+                          "text": "".join(reasoning_parts)}]
+                        if reasoning_parts else [])
+
     yield StreamToken(final_response=ModelResponse(
         text="".join(text_parts), tool_calls=calls, usage=usage,
+        thinking=_thinking_record(provider_name, model, reasoning_blocks),
     ))

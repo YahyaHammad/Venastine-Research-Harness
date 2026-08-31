@@ -36,6 +36,15 @@ the archive, which records what was called and never what the file held at
 the time, so the digest is genuinely all this function has. The live view is
 better informed because it was there.
 
+REASONING IS REPLAYED, SINCE §44. §38 captured thinking for display and
+persisted none of it, so reopening a thread showed the answers with the
+reasoning silently missing -- the same conversation rendered two different
+ways depending on whether the session had been closed. The blocks are
+stored now (storage.MessageLog.thinking) and _reasoning_text pulls the
+prose back out of them. What a shell does with the entry is still the
+shell's: the TUI honours tui.show_thinking, because that is a display
+setting rather than a fact about the thread.
+
 TOOL RESULTS ARE SKIPPED, TOOL CALLS ARE ONE LINE (T4). A grounding-heavy
 thread carries hundreds of kilobytes of fetched page text in its
 `tool_result` rows; replaying that would bury the conversation in the
@@ -77,6 +86,14 @@ def replay_entries(thread_id: UUID) -> List[ReplayEntry]:
             if text:
                 entries.append(("user", text))
         elif role == "assistant":
+            # BEFORE the answer, because that is the order it happened in
+            # and the order the live transcript drew it in (§43 RM1 puts
+            # one `venastine ›` above whichever came first). A replay that
+            # reordered the turn would be the same defect as one that
+            # reflowed it.
+            reasoning = _reasoning_text(message.get("thinking"))
+            if reasoning:
+                entries.append(("thinking", reasoning))
             text = _as_text(message.get("text"))
             if text:
                 entries.append(("assistant", text))
@@ -85,6 +102,33 @@ def replay_entries(thread_id: UUID) -> List[ReplayEntry]:
         # role == "tool": skipped by T4. Not a gap -- see the module
         # docstring. The CALL above is the record that it happened.
     return entries
+
+
+def _reasoning_text(record) -> str:
+    """The displayable prose out of a stored thinking record (§44).
+
+    The record holds the PROVIDER'S blocks, because that is what goes back
+    on the wire; this is the other half of the same data, for a human. Two
+    shapes reach here -- Anthropic's `thinking` blocks and the
+    v1-compatible `reasoning_content` one -- and both are read by field
+    name rather than by provider, so a third costs a name and not a
+    branch.
+
+    `redacted_thinking` contributes NOTHING and that is correct: it is
+    opaque ciphertext meaningful only to the model, so rendering it would
+    put a wall of base64 under a `venastine ›` label. It still travels on
+    the wire; this function is about what a person sees.
+    """
+    if not isinstance(record, dict):
+        return ""
+    parts = []
+    for block in record.get("blocks") or []:
+        if not isinstance(block, dict):
+            continue
+        value = block.get("thinking") or block.get("text")
+        if isinstance(value, str) and value.strip():
+            parts.append(value.strip())
+    return "\n\n".join(parts)
 
 
 def last_assistant_text(entries: List[ReplayEntry]) -> str:
