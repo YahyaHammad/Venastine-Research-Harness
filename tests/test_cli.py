@@ -11,6 +11,7 @@ parser defaults) is exercised.
 
 import argparse
 import contextlib
+import os
 import sys
 from types import SimpleNamespace
 from uuid import UUID, uuid4
@@ -825,6 +826,89 @@ def startup(monkeypatch, tmp_path):
     monkeypatch.setattr(main, "run_summary_command", _record("summary", 0))
     monkeypatch.setattr(main, "run_init_command", _record("init", 0))
     return order
+
+
+class TestWhichDirectoryIsTheProject:
+    """Batch 44, reversing RM6.
+
+    RM6 recorded that trust keys off cwd and that AGENT_WORKSPACE is a
+    permission boundary "deliberately not a project path". The report that
+    reopened it is what that split looks like in use: with AGENT_WORKSPACE
+    set, read/write/edit/shell were correctly confined to the project while
+    /init scaffolded documentation into the HARNESS -- one session with two
+    ideas of where the work was.
+
+    ASSERTED AT main(), because that is where the decision now lives and
+    because everything else follows from it: config_loader.get_project_path()
+    is the single resolver for /init's destination (both in
+    project_init.generator and, decisively, in write_project_doc's own
+    _project_root), for D17 trust, for the `.venastine/` tier and for
+    UserMemory's project scope. Nothing in test_project_init.py could see
+    this -- its `project` fixture calls config_loader.initialize() itself
+    and never touches the environment.
+    """
+
+    def _resolved(self, monkeypatch):
+        """The project path main() actually computed."""
+        import main
+
+        seen = {}
+
+        def _record(path, *a, **k):
+            seen["path"] = path
+            return {}
+
+        monkeypatch.setattr(main, "load_project_config", _record)
+        main.main([])
+        return seen["path"]
+
+    def test_a_named_workspace_is_the_project(self, startup, monkeypatch,
+                                              tmp_path):
+        import config
+
+        workspace = tmp_path / "some-project"
+        workspace.mkdir()
+        monkeypatch.setattr(config, "WORKSPACE_DIR", str(workspace))
+        monkeypatch.setattr(config, "WORKSPACE_DIR_EXPLICIT", True)
+
+        assert self._resolved(monkeypatch) == os.path.realpath(str(workspace))
+
+    def test_without_one_the_project_is_still_the_working_directory(
+            self, startup, monkeypatch, tmp_path):
+        """The population this must not disturb. AGENT_WORKSPACE defaults
+        to ./workspace, a SUBDIRECTORY of wherever you launched -- so the
+        rule is the presence of the variable, never its value, or everyone
+        who set nothing would find their project moved one level down."""
+        import config
+
+        monkeypatch.setattr(config, "WORKSPACE_DIR", "./workspace")
+        monkeypatch.setattr(config, "WORKSPACE_DIR_EXPLICIT", False)
+
+        assert self._resolved(monkeypatch) == os.getcwd()
+
+    def test_the_workspace_guard_still_runs_first(self, startup, monkeypatch,
+                                                  tmp_path):
+        """What makes the reversal safe, and it is an ordering that already
+        existed: check_workspace() refuses a workspace that is or sits
+        inside the harness install tree, several lines above this. So the
+        project can never become the harness by this route -- which is a
+        second reason the npm launcher must never set the variable."""
+        import config
+        import main
+
+        monkeypatch.setattr(config, "WORKSPACE_DIR", str(tmp_path))
+        monkeypatch.setattr(config, "WORKSPACE_DIR_EXPLICIT", True)
+        monkeypatch.setattr(main.protected_paths, "check_workspace",
+                            lambda _path: "refused for the test")
+
+        seen = {}
+        monkeypatch.setattr(main, "load_project_config",
+                            lambda path, *a, **k: seen.setdefault("path", path))
+
+        assert main.main([]) == 2
+        assert "path" not in seen, (
+            "the project path was resolved from a workspace the guard had "
+            "already refused")
 
 
 class TestStartupDoesNoWorkBeforeArgparse:

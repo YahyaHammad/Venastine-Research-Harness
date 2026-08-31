@@ -1733,7 +1733,27 @@ def main(argv=None) -> int:
     # path can forget to call.
     create_db_and_tables()
 
-    project_path = os.getcwd()
+    # THE PROJECT IS THE WORKSPACE WHEN ONE WAS NAMED (batch 44, reversing
+    # RM6). Everything downstream follows from this one line, because
+    # config_loader.get_project_path() is the single resolver: /init's
+    # destination (project_init.generator and, decisively,
+    # write_project_doc's own _project_root), D17 workspace trust, the
+    # `.venastine/` config tier, and UserMemory's project scope (D25/M12).
+    #
+    # RM6 said the opposite -- trust keys off cwd, AGENT_WORKSPACE is a
+    # permission boundary and "deliberately not a project path" -- and the
+    # report that reopened it is what that split actually looks like in
+    # use: with AGENT_WORKSPACE set, read/write/edit/shell were correctly
+    # confined to the project while /init scaffolded documentation into
+    # the HARNESS. One session, two different ideas of where the work was.
+    #
+    # SAFE BY AN ORDERING THAT ALREADY EXISTED: check_workspace() ran a
+    # few lines above and refuses a workspace that is, or sits inside, the
+    # harness install tree. So the project can never become the harness by
+    # this route -- and that guard is now load-bearing for a second
+    # reason, which is why the launcher must still never set the variable.
+    project_path = (os.path.realpath(config.WORKSPACE_DIR)
+                    if config.WORKSPACE_DIR_EXPLICIT else os.getcwd())
     settings = load_project_config(project_path, args.trust_project)
     provider, model = resolve_runtime_defaults(args, settings)
     effort = resolve_effort(args, settings)

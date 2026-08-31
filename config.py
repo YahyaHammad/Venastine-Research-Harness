@@ -179,10 +179,31 @@ GOOGLE_THINKING_BUDGETS = {
 DB_PATH = os.environ.get("APP_DB_PATH", "app.db")
 
 # --- Output artifacts ---
-OUTPUT_DIR = os.environ.get("AGENT_OUTPUT_DIR", "./output")
+#
+# BESIDE THE WORK, which since batch 44 means beside the WORKSPACE when one
+# was named. "State is global, artifacts are local" is the distribution
+# split, and the local half is only true if "local" tracks where the work
+# is: with AGENT_WORKSPACE pointing at a project, a run launched from the
+# harness checkout wrote its reports into the harness. Reading the env var
+# rather than WORKSPACE_DIR below, and defaulting it to ".", so this stays
+# one expression with no branch in it -- an unset AGENT_WORKSPACE gives
+# ./output exactly as before, not ./workspace/output.
+OUTPUT_DIR = os.environ.get(
+    "AGENT_OUTPUT_DIR",
+    os.path.join(os.environ.get("AGENT_WORKSPACE", "."), "output"))
 
 # --- File-ops workspace (ROADMAP §6) ---
 WORKSPACE_DIR = os.environ.get("AGENT_WORKSPACE", "./workspace")
+
+# Whether AGENT_WORKSPACE was NAMED, as opposed to defaulted (batch 44).
+#
+# The presence of the variable, never its value: the default "./workspace"
+# is a subdirectory of wherever you launched, so a value test would make
+# `./workspace` the project for everyone who never set anything -- which
+# is the whole population this must not disturb. main() reads this to
+# decide the project path; the decision is there, because config.py holds
+# plain values and this is one.
+WORKSPACE_DIR_EXPLICIT = "AGENT_WORKSPACE" in os.environ
 MAX_FILE_SIZE_BYTES = 25_000_000   # 25 MB — hard reject before opening
 MAX_READ_LINES = 500               # max lines per read call
 MAX_READ_CHARS = 50_000            # max chars per read call

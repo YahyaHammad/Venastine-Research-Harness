@@ -351,6 +351,35 @@ class TestTheScopedTools:
 # ---- The document sets -----------------------------------------------------
 # ---------------------------------------------------------------------------
 
+class TestWhereItWrites:
+    """Batch 44. The reported symptom, stated as a property.
+
+    With AGENT_WORKSPACE set, the file tools were correctly confined to the
+    project and /init scaffolded into the HARNESS instead -- and no test
+    could see it, because every test in this file establishes its root by
+    calling config_loader.initialize() and none of them has ever cared
+    what the working directory was.
+
+    THE DESTINATION IS RESOLVED TWICE and both resolutions matter.
+    project_init.generator reads config_loader.get_project_path() for the
+    manifest, the diff and the trust state; write_project_doc re-reads it
+    through its own _project_root(), because I1 gave that tool no path
+    parameter on purpose so it cannot be aimed. Fixing one and not the
+    other would have moved the report and left the write.
+    """
+
+    def test_the_destination_follows_the_project_and_not_the_cwd(
+            self, project):
+        from tools.builtin.project_docs import _project_root, doc_path
+
+        assert os.path.realpath(str(project)) != os.path.realpath(os.getcwd()), (
+            "this test says nothing unless the project and the working "
+            "directory actually differ")
+        assert os.path.realpath(_project_root()) == os.path.realpath(str(project))
+        assert doc_path(_project_root(), "AGENTS.md").startswith(
+            os.path.realpath(str(project)))
+
+
 class TestTheDocumentSets:
 
     def test_the_two_sets_share_only_the_standards_document(self):
