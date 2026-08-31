@@ -35,7 +35,7 @@ import re
 from typing import Optional
 
 import config
-from core import config_loader, session
+from core import config_loader, model_windows, session
 from storage import THREAD_KIND_SUBAGENT
 
 logger = logging.getLogger(__name__)
@@ -140,12 +140,15 @@ def context_limit(model: str, provider_name: Optional[str] = None) -> int:
 
     FOUR SOURCES, most local first:
 
-      0. A session override, bound to this exact (provider, model) --
-         core/session.py. Ephemeral, unpersisted, cleared by /model. It
-         wins because it is the one source a human set on purpose, and
-         because the query it overrides can be wrong in the direction
-         that matters: a beta-gated 1M window reports as 200k until the
-         account is asked with the right header.
+      0. A REMEMBERED override for this exact (provider, model) --
+         core/model_windows.py, written by /window and kept across
+         launches (batch 44). It wins because it is the one source a
+         human set on purpose, and because the query it overrides can be
+         confidently wrong: a gateway may report its own default rather
+         than the deployment's, and a self-hosted endpoint's window is
+         a fact only its operator has. Everywhere else in this project a
+         measured value beats a configured one; here the direction is
+         deliberately inverted.
       1. What the provider SAID, via core.client.known_context_window --
          a cache-only read, primed by core/loop.py before every send. §21
          rejected querying on the belief that no provider in the roster
@@ -179,8 +182,14 @@ def context_limit(model: str, provider_name: Optional[str] = None) -> int:
     `provider_name` is optional so that every existing caller keeps
     working; without it only sources 2 and 3 are available, which is
     exactly the behaviour that predated the query.
+
+    THIS IS NOW ON EVERY THREAD'S PATH, not just a research pass's. Batch
+    44 made the working-set trigger a fraction of what this returns, so a
+    wrong answer here no longer costs a mistimed backstop -- it decides
+    when every chat compacts. That is why source 0 exists at the user tier
+    and why the fallback below still warns.
     """
-    override = session.window_for(provider_name, model)
+    override = model_windows.window_for(provider_name, model)
     if override:
         return override
 
@@ -204,10 +213,11 @@ def context_limit(model: str, provider_name: Optional[str] = None) -> int:
         if model not in _context_window_warned:
             _context_window_warned.add(model)
             logger.warning(
-                "No context window known for model %r%s; assuming %s. Add it "
-                "to config.MODEL_CONTEXT_WINDOWS -- the compaction backstop "
-                "and the summarizer's input budget both fire against this "
-                "number.", model,
+                "No context window known for model %r%s; assuming %s. Set it "
+                "with /window (remembered for this model) or add it to "
+                "config.MODEL_CONTEXT_WINDOWS -- the compaction trigger, the "
+                "research backstop and the summarizer's input budget all "
+                "fire against this number.", model,
                 f" on {provider_name}" if provider_name else "",
                 config.DEFAULT_CONTEXT_WINDOW)
         return config.DEFAULT_CONTEXT_WINDOW

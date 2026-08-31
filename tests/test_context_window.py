@@ -194,6 +194,177 @@ def test_a_provider_that_reports_nothing_answers_None_authoritatively():
 
 
 # ---------------------------------------------------------------------------
+# ---- The listing fallback (batch 44) ---------------------------------------
+# ---------------------------------------------------------------------------
+#
+# The reader was never the problem. `context_length` has been in
+# _WINDOW_FIELD_ALIASES since batch 30 and its comment names OpenRouter --
+# but the ROUTE was `models.retrieve(model)`, i.e. GET {base}/models/{id},
+# and OpenRouter implements the listing plus /models/:author/:slug/endpoints
+# and no plain per-id retrieve. An id with a slash in it therefore addressed
+# a route that does not exist, so the one provider the comment named as
+# answering was the one that always 404'd. NVIDIA has the same shape.
+
+
+def _listing_client(entries, retrieve_error=None):
+    """A v1-compatible client whose per-id route fails, recording both."""
+    calls = {"retrieve": 0, "list": 0}
+
+    def retrieve(model):
+        calls["retrieve"] += 1
+        raise (retrieve_error or RuntimeError("404 page not found"))
+
+    def listing():
+        calls["list"] += 1
+        return entries
+
+    return SimpleNamespace(
+        models=SimpleNamespace(retrieve=retrieve, list=listing)), calls
+
+
+def test_a_slashed_id_falls_back_to_the_listing():
+    """The reported bug, in the shape it was reported in: OpenRouter and
+    NVIDIA both 404 on retrieve and both carry the window in the listing."""
+    client, calls = _listing_client([
+        SimpleNamespace(id="anthropic/claude-opus-5", model_extra={}),
+        SimpleNamespace(id="minimax/minimax-m3",
+                        model_extra={"context_length": 1_000_000}),
+    ])
+
+    window, authoritative = client_module.context_window_for(
+        client, "OPENROUTER", "minimax/minimax-m3")
+
+    assert window == 1_000_000
+    assert authoritative
+    assert calls == {"retrieve": 1, "list": 1}
+
+
+def test_the_listing_is_asked_once_because_the_answer_is_cached():
+    """A listing can be hundreds of entries, and this runs on the path
+    core/loop.py crosses before every send."""
+    client, calls = _listing_client([
+        SimpleNamespace(id="m", model_extra={"context_length": 64_000})])
+
+    for _ in range(4):
+        client_module.context_window_for(client, "NVIDIA", "m")
+
+    assert calls == {"retrieve": 1, "list": 1}
+
+
+def test_the_nested_top_provider_spelling_is_read_too():
+    """OpenRouter's routed window. Second, so a flat context_length still
+    wins where both are present -- this is a fallback for entries carrying
+    only the nested form, not a preference for the narrower number."""
+    client, _ = _listing_client([
+        SimpleNamespace(id="m", model_extra={
+            "top_provider": {"context_length": 262_144}})])
+
+    assert client_module.context_window_for(client, "OPENROUTER", "m")[0] \
+        == 262_144
+
+
+def test_a_flat_context_length_outranks_the_nested_one():
+    client, _ = _listing_client([
+        SimpleNamespace(id="m", model_extra={
+            "context_length": 1_000_000,
+            "top_provider": {"context_length": 262_144}})])
+
+    assert client_module.context_window_for(client, "OPENROUTER", "m")[0] \
+        == 1_000_000
+
+
+def test_a_model_absent_from_a_real_listing_is_an_ANSWER_not_a_failure():
+    """The distinction the sentinel exists for. A complete listing that
+    does not name the model has told us this provider has nothing to say
+    about it -- retrying that three times learns the same thing three
+    times, which is exactly what #35's cap exists to stop."""
+    client, calls = _listing_client([
+        SimpleNamespace(id="some/other-model", model_extra={})])
+
+    window, authoritative = client_module.context_window_for(
+        client, "OPENROUTER", "not/listed")
+
+    assert window is None
+    assert authoritative
+    assert ("OPENROUTER", "not/listed") in client_module._context_window_cache
+
+    client_module.context_window_for(client, "OPENROUTER", "not/listed")
+    assert calls == {"retrieve": 1, "list": 1}
+
+
+def test_an_empty_listing_reports_the_retrieve_failure(caplog):
+    """An empty list answered nothing at all, so this is the failure path
+    -- and the message must name the endpoint the caller asked for, not
+    the fallback it tried afterwards."""
+    client, _ = _listing_client([], retrieve_error=RuntimeError("404 nope"))
+
+    with caplog.at_level("WARNING", logger="core.client"):
+        window, authoritative = client_module.context_window_for(
+            client, "OPENROUTER", "m")
+
+    assert window is None
+    assert not authoritative
+    assert "404 nope" in caplog.text
+    assert ("OPENROUTER", "m") not in client_module._context_window_cache
+
+
+def test_a_failing_listing_reports_the_retrieve_failure_not_its_own(caplog):
+    """The listing is not a second opinion; it is the same question by
+    another route. Reporting ITS error would name an endpoint the user
+    never configured and hide the one they did."""
+    def retrieve(model):
+        raise RuntimeError("retrieve said 404")
+
+    def listing():
+        raise RuntimeError("list said 500")
+
+    client = SimpleNamespace(
+        models=SimpleNamespace(retrieve=retrieve, list=listing))
+
+    with caplog.at_level("WARNING", logger="core.client"):
+        client_module.context_window_for(client, "OPENROUTER", "m")
+
+    assert "retrieve said 404" in caplog.text
+    assert "list said 500" not in caplog.text
+
+
+def test_a_client_with_no_listing_at_all_still_fails_the_old_way():
+    """Groq, Fireworks and Z.AI publish no model-metadata endpoint. The
+    fallback must not turn their loud failure into a silent None -- that
+    is #35 exactly."""
+    def boom(model):
+        raise RuntimeError("no such endpoint")
+
+    client = SimpleNamespace(models=SimpleNamespace(retrieve=boom))
+
+    window, authoritative = client_module.context_window_for(
+        client, "GROK", "grok-4")
+
+    assert window is None
+    assert not authoritative
+    assert ("GROK", "grok-4") not in client_module._context_window_cache
+
+
+def test_retrieve_still_wins_when_it_works():
+    """One call, not two: retrieve is right for Groq, Together and Mistral,
+    and a listing can be hundreds of entries."""
+    listed = []
+
+    def retrieve(model):
+        return SimpleNamespace(model_extra={"context_window": 131_072})
+
+    def listing():
+        listed.append(True)
+        return []
+
+    client = SimpleNamespace(
+        models=SimpleNamespace(retrieve=retrieve, list=listing))
+
+    assert client_module.context_window_for(client, "GROQ", "m")[0] == 131_072
+    assert not listed
+
+
+# ---------------------------------------------------------------------------
 # ---- The failure/silence split (#35's rule) --------------------------------
 # ---------------------------------------------------------------------------
 

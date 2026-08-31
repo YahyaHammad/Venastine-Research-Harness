@@ -579,24 +579,35 @@ COMPACTION_PIPELINE_BACKSTOP_TOKENS = 20_000
 # also the bug this fixed: matching was exact, so `claude-sonnet-5-20260724`
 # missed a million-token entry and silently took the default.
 #
-# Under M1 an incomplete entry costs less than §21 feared -- the working-set
-# trigger never consults this -- but it is not free: it also sets the
-# summarizer's one-call input budget, which gates the lossy truncation in
-# summarize_thread().
+# AN INCOMPLETE ENTRY IS EXPENSIVE NOW. Under M1 it cost a mistimed
+# research backstop and a mistimed summarizer input budget, because the
+# working-set trigger was a flat number that never consulted this. Batch 44
+# made that trigger a FRACTION of what context_limit() returns, so a wrong
+# number here mistimes compaction on every thread -- too high and the
+# thread never folds and the provider raises a hard context-limit error
+# instead. core/model_windows.py is the user's answer to that, and /window
+# is how they give it; this table is what answers before they do.
 MODEL_CONTEXT_WINDOWS: dict[str, int] = {
-    # UNVERIFIED AGAINST A LIVE ENDPOINT, and erring in the dangerous
-    # direction. 1M on these models is beta-gated behind the
-    # context-1m-2025-08-07 header, which this harness does not send, so
-    # the baseline an ordinary account actually gets is 200_000. By the
-    # qwen entry's own rule below -- record the SMALLER number, because
-    # erring high means a hard context-limit error mid-run -- these want
-    # to be 200_000 here, with the query supplying 1M to the accounts that
-    # really have it. Left as set pending an owner decision; see DEVLOG.
+    # 1M IS THE ORDINARY WINDOW ON THESE, not a beta.
+    #
+    # This block used to carry the opposite claim -- that 1M was gated
+    # behind a `context-1m-2025-08-07` header this harness does not send,
+    # so an ordinary account got 200_000 and these entries "want to be
+    # 200_000". That was true of the Sonnet 4 era and was never true of
+    # the models listed here; checked against the current model reference
+    # in batch 44, the whole 4.6-and-later family is 1M and Haiku 4.5 is
+    # 200K. The values were right and the comment was stale, which is the
+    # dangerous combination now that the trigger reads them: a reader
+    # following the old note would have "corrected" five entries by a
+    # factor of five and compacted every Claude thread at a fifth of the
+    # window.
     "claude-opus-5": 1_000_000,
     "claude-sonnet-5": 1_000_000,
     "claude-fable-5": 1_000_000,
     "claude-opus-4-8": 1_000_000,
     "claude-opus-4-7": 1_000_000,
+    "claude-opus-4-6": 1_000_000,
+    "claude-sonnet-4-6": 1_000_000,
     # Dateless, per the normalization note above: this was keyed
     # "claude-haiku-4-5-20251001" while its five siblings were dateless,
     # which is the inconsistency that exposed the exact-match bug.
@@ -612,14 +623,22 @@ MODEL_CONTEXT_WINDOWS: dict[str, int] = {
     "qwen3.8-max-preview": 983_616,
 }
 # Logged at WARNING ONCE PER MODEL, per §21 -- a wrong-by-default window
-# means the backstop fires at the wrong time in whichever direction the
-# guess is wrong, and silent guessing turns a tuning problem into a
-# mystery. Once per model rather than once per use, because context_limit()
-# is on should_compact()'s path and that runs at the top of every step of
-# every turn; the dedup set lives in core/compaction.py. A long session
-# therefore says this once and is then silent, which is the trade -- the
-# line is actionable exactly once.
-DEFAULT_CONTEXT_WINDOW = 200_000
+# means compaction and the backstop both fire at the wrong time in
+# whichever direction the guess is wrong, and silent guessing turns a
+# tuning problem into a mystery. Once per model rather than once per use,
+# because context_limit() is on should_compact()'s path and that runs at
+# the top of every step of every turn; the dedup set lives in
+# core/compaction.py. A long session therefore says this once and is then
+# silent, which is the trade -- the line is actionable exactly once, and
+# since batch 44 it names the action (/window, which remembers).
+#
+# 256_000 rather than 200_000 (batch 44): the floor a hosted agentic model
+# ships with today. Below that is essentially always a self-hosted
+# deployment, whose operator knows the number and can say it once with
+# /window -- which is the case this default cannot serve and does not try
+# to. Erring low here would compact every unknown model early forever to
+# protect the rarer case that has an owner who can answer.
+DEFAULT_CONTEXT_WINDOW = 256_000
 
 
 # APICredentials was here and is deleted (audit #23). It was dead -- nothing

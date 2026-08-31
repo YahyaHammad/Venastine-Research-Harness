@@ -698,6 +698,86 @@ _WINDOW_FIELD_ALIASES = (
     "max_input_tokens",
 )
 
+#: Returned by _model_info when a COMPLETE listing did not contain the model.
+#: Distinct from a raise: the provider answered, so there is nothing to retry.
+_NOT_LISTED = object()
+
+
+def _window_from_model_object(info) -> Optional[int]:
+    """The context window off one provider model object, or None.
+
+    Declared fields first, then model_extra -- the same object may carry
+    either depending on whether the installed SDK models the field.
+    ATTRIBUTES not subscripts, for #35's reason: these are pydantic objects
+    on every pinned SDK here.
+
+    `top_provider.context_length` is the one NESTED spelling, and it is
+    OpenRouter's: the flat `context_length` is the model's maximum across
+    every backend, while top_provider carries the routed one. Read second,
+    so the flat value still wins where both exist -- this is a fallback for
+    entries that carry only the nested form, not a preference for the
+    narrower number.
+    """
+    extra = getattr(info, "model_extra", None) or {}
+    for name in _WINDOW_FIELD_ALIASES:
+        value = getattr(info, name, None)
+        if value is None:
+            value = extra.get(name)
+        if value is not None:
+            return value
+    top = extra.get("top_provider")
+    if isinstance(top, dict):
+        return top.get("context_length")
+    return None
+
+
+def _model_info(client, model):
+    """The provider's object for one model, via retrieve or via the listing.
+
+    THE ROUTE WAS THE BUG, NOT THE READER (batch 44). This asked
+    `client.models.retrieve(model)` alone, which is `GET {base}/models/{id}`
+    -- and OpenRouter implements `GET /api/v1/models` plus
+    `/models/:author/:slug/endpoints` and no plain per-id retrieve, so an id
+    containing a slash (`minimax/minimax-m3`) turns the path into a route
+    that does not exist. 404, every time, on a provider whose listing has
+    carried `context_length` all along and which _WINDOW_FIELD_ALIASES'
+    own comment names. NVIDIA's endpoint has the same shape, and so does
+    every other provider whose ids are `vendor/model`.
+
+    Retrieve stays FIRST: it is one call and it is the right one for Groq,
+    Together and Mistral, and a listing can be hundreds of entries. The
+    fallback costs one extra call per provider per process, on the path
+    that was previously three failures and a permanent give-up.
+
+    Three outcomes, deliberately distinct:
+      an object     something answered
+      _NOT_LISTED   a complete listing came back without this model, which
+                    is an ANSWER ("this provider has nothing to say about
+                    it") and must not be retried like a network blip
+      raises        neither route could answer; the caller counts it
+    """
+    try:
+        return client.models.retrieve(model)
+    except Exception as retrieve_error:
+        listing = getattr(getattr(client, "models", None), "list", None)
+        if listing is None:
+            raise
+        try:
+            entries = list(listing())
+        except Exception:
+            # The listing is not a second opinion about the retrieve; it is
+            # the same question by another route. Report the FIRST failure,
+            # which is the one that names the endpoint the caller asked for.
+            raise retrieve_error from None
+        for entry in entries:
+            if getattr(entry, "id", None) == model:
+                return entry
+        if not entries:
+            # An empty listing answered nothing at all; report the failure
+            # that names the endpoint the caller actually asked for.
+            raise retrieve_error from None
+        return _NOT_LISTED
+
 
 def _record_window(provider_name: str, model: str, value) -> Optional[int]:
     """Cache a queried window, coercing anything unusable to None.
@@ -743,7 +823,10 @@ def context_window_for(client, provider_name: str, model: str) -> tuple:
       GOOGLE      models.get(...).input_token_limit, one field on the
                   pinned google-genai type.
       v1-compat   ONE alias sniff over model_extra, not thirteen adapters,
-                  because openai.types.Model allows extra fields.
+                  because openai.types.Model allows extra fields -- over
+                  whichever of models.retrieve() and models.list() answers
+                  (see _model_info: providers whose ids carry a slash have
+                  no per-id route, so retrieve 404s on them).
 
     §21's CONCLUSION survives intact and is why the table remains: OpenAI,
     DeepSeek and Perplexity report nothing, so a fallback constant is
@@ -768,18 +851,13 @@ def context_window_for(client, provider_name: str, model: str) -> tuple:
             return _record_window(
                 provider_name, model,
                 getattr(info, "input_token_limit", None)), True
-        info = client.models.retrieve(model)
-        # Declared fields first, then model_extra -- the same object may
-        # carry either depending on whether the installed SDK models the
-        # field. ATTRIBUTES not subscripts, for #35's reason: these are
-        # pydantic objects on every pinned SDK here.
-        extra = getattr(info, "model_extra", None) or {}
-        for name in _WINDOW_FIELD_ALIASES:
-            value = getattr(info, name, None)
-            if value is None:
-                value = extra.get(name)
-            if value is not None:
-                return _record_window(provider_name, model, value), True
+        info = _model_info(client, model)
+        if info is _NOT_LISTED:
+            # Asked and answered by a listing that did not name it.
+            return _record_window(provider_name, model, None), True
+        window = _window_from_model_object(info)
+        if window is not None:
+            return _record_window(provider_name, model, window), True
         # Asked and answered: this provider reports no window.
         return _record_window(provider_name, model, None), True
     except Exception as e:

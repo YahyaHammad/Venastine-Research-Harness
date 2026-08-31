@@ -447,6 +447,29 @@ def isolate_ui_preferences(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def isolate_model_windows(tmp_path_factory, monkeypatch):
+    """Point the remembered-context-window store somewhere disposable.
+
+    isolate_ui_preferences' argument, third instance. Since batch 44
+    compaction.context_limit() reads this store BEFORE the provider query
+    and the static table, so without the redirect every threshold in the
+    suite would depend on whether the person running it had ever typed
+    /window -- and the writes would land in their real
+    ~/.config/venastine/model_windows.json.
+
+    A FILE PER TEST for the same reason as the preference store: /window
+    writes on every use, and a shared file would let one test's window
+    decide another test's compaction threshold.
+    """
+    from core import model_windows
+
+    path = tmp_path_factory.getbasetemp() / "model-windows-{}.json".format(
+        next(_ui_prefs_counter))
+    monkeypatch.setattr(model_windows, "store_path", lambda: str(path))
+    return path
+
+
+@pytest.fixture(autouse=True)
 def isolate_provider_check(tmp_path_factory, monkeypatch):
     """Give the launch provider check a keyed copy of providers.json.
 
