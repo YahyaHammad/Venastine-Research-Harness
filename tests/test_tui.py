@@ -3134,17 +3134,36 @@ def test_live_claims_fall_back_when_the_run_has_none():
 # ---- #138: launch-time provider warnings reach the transcript --------------
 # ===========================================================================
 
+def _providers_file(tmp_path, monkeypatch, entries):
+    """Point credentials at a providers.json of this test's own making."""
+    import json
+
+    import credentials
+
+    path = tmp_path / "providers.json"
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(entries, f)
+    monkeypatch.setattr(credentials, "LLM_PROVIDERS_FILE", str(path))
+    return path
+
+
 @pytest.mark.asyncio
-async def test_launch_warnings_are_written_to_the_transcript_at_mount():
+async def test_launch_warnings_are_written_to_the_transcript_at_mount(
+        tmp_path, monkeypatch):
     """#138's TUI half. main() cannot print these -- anything on stdout
-    before Textual takes the screen vanishes when it renders -- so they
-    travel into the app and on_mount writes each one where the user
+    before Textual takes the screen vanishes when it renders -- so the
+    app computes them itself and on_mount writes each one where the user
     actually reads. Beside the status line it qualifies, before the
     /help hint: a warning that arrives after the user typed is a dead
-    end one step later than #138 complained about."""
-    app = VenastineApp("ANTHROPIC", "test-model", {},
-                       startup_warnings=[
-                           "ANTHROPIC has no API_KEY in providers.json"])
+    end one step later than #138 complained about.
+
+    Arranged through providers.json rather than by handing the app a
+    string (batch 44). The old version constructed the finding by hand,
+    which is why it could not see the defect it was named for: the app
+    was never asked to work out WHICH provider the finding was about."""
+    _providers_file(tmp_path, monkeypatch,
+                    {"ANTHROPIC": {"API_KEY": "", "API_URL": ""}})
+    app = VenastineApp("ANTHROPIC", "test-model", {})
     async with app.run_test() as pilot:
         assert await settle(pilot, lambda: bool(app._transcript._entries)), \
             "the transcript never rendered"
@@ -3153,18 +3172,60 @@ async def test_launch_warnings_are_written_to_the_transcript_at_mount():
                     if "has no API_KEY" in txt]
         assert rendered, (
             "the launch warning never reached the transcript")
+        assert "ANTHROPIC" in rendered[0]
 
 
 @pytest.mark.asyncio
-async def test_a_healthy_mount_adds_no_warning_lines():
+async def test_a_healthy_mount_adds_no_warning_lines(tmp_path, monkeypatch):
     """Silence is the healthy case's whole UX (#138): an install with a
     configured provider and key gets no extra lines at all."""
-    app = VenastineApp("ANTHROPIC", "test-model", {}, startup_warnings=[])
+    _providers_file(tmp_path, monkeypatch,
+                    {"ANTHROPIC": {"API_KEY": "k", "API_URL": ""}})
+    app = VenastineApp("ANTHROPIC", "test-model", {})
     async with app.run_test() as pilot:
         assert await settle(pilot, lambda: bool(app._transcript._entries))
 
         assert not [txt for _role, txt in app._transcript._entries
                     if "API_KEY" in txt or "warning" in txt.lower()]
+
+
+@pytest.mark.asyncio
+async def test_the_launch_finding_is_about_the_remembered_pair(
+        tmp_path, monkeypatch, isolate_ui_preferences):
+    """Batch 44's defect, and the seam nothing was standing on.
+
+    §43 restores a remembered /model pair inside __init__; #138 computed
+    its finding in main(), before the app existed. Both features were
+    tested and neither test built the other's state, so a session came up
+    on OpenRouter under a banner saying so and reported that ANTHROPIC --
+    a provider it would never call -- has no key.
+
+    The two halves are asserted separately on purpose: an assertion that
+    only the OPENROUTER line is absent would also pass if the app stopped
+    warning at all."""
+    from tui import preferences
+
+    _providers_file(tmp_path, monkeypatch, {
+        "ANTHROPIC": {"API_KEY": "", "API_URL": ""},
+        "OPENROUTER": {"API_KEY": "k", "API_URL": "",
+                       "is_v1_compatible": True},
+    })
+    assert preferences.remember_model("OPENROUTER", "minimax-m3", None, None)
+
+    app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
+    assert (app.provider_name, app.model) == ("OPENROUTER", "minimax-m3"), \
+        "the pair was not restored, so this test proves nothing"
+
+    async with app.run_test() as pilot:
+        assert await settle(pilot, lambda: bool(app._transcript._entries))
+
+        assert not [txt for _role, txt in app._transcript._entries
+                    if "ANTHROPIC" in txt], (
+            "the launch finding named the provider main() resolved, not "
+            "the one the session restored and will actually call")
+        assert [txt for _role, txt in app._transcript._entries
+                if "OPENROUTER" in txt], (
+            "the banner names the restored pair, so something should")
 
 
 # ===========================================================================

@@ -288,7 +288,6 @@ class VenastineApp(App):
 
     def __init__(self, provider_name: str = DEFAULT_PROVIDER,
                  model: str = None, settings: dict | None = None,
-                 startup_warnings: list[str] | None = None,
                  cli_pinned: bool = False):
         super().__init__()
         self.provider_name = provider_name
@@ -308,12 +307,27 @@ class VenastineApp(App):
         # guessed at (#138's rule).
         self._model_restored = False
         self.provider_name, self.model = self._startup_model()
-        # #138. Launch-time provider findings, printed by main() on the
-        # CLI path and carried here on the TUI path -- a pre-mount print
-        # would vanish under Textual's screen and TranscriptLogHandler
-        # attaches only at mount, so this is the one route that reaches a
-        # user. Empty list is the healthy case and stays silent.
-        self._startup_warnings = list(startup_warnings or ())
+        # #138, corrected in batch 44. Launch-time provider findings for
+        # the pair this session will ACTUALLY use.
+        #
+        # COMPUTED HERE, AFTER _startup_model(), and not handed down from
+        # main(). main() resolves its pair before the app exists and froze
+        # the list at that moment, so a session that restored a remembered
+        # /model pair (§43, RM3) reported the CONFIG provider's missing key
+        # directly under a banner naming the restored one -- and with only
+        # the restored provider in providers.json it announced "Unknown
+        # provider: ANTHROPIC" and then ran perfectly well on OpenRouter.
+        # The order is what makes this the only correct site: the restore
+        # is early enough to fix the banner and far too late to fix a list
+        # main() has already built.
+        #
+        # A pre-mount print would vanish under Textual's screen and
+        # TranscriptLogHandler attaches only at mount, so on_mount is still
+        # the one route that reaches a user. Empty list is the healthy case
+        # and stays silent.
+        from credentials import provider_startup_issues
+
+        self._startup_warnings = provider_startup_issues(self.provider_name)
         tui_settings = self._settings.get("tui", {})
         # RAW, not themes.resolve()'d, because this is half the staleness
         # key the remembered theme is recorded against (see
@@ -2129,9 +2143,9 @@ def _cmd_model(app: VenastineApp, args: str) -> None:
     # real configuration -- but every call to a hosted provider will fail
     # auth, and finding that out one turn later is the worse trade.
     if not providers[provider].get("API_KEY"):
-        app._transcript.write_error(
-            f"{provider} has no API_KEY in providers.json — calls will fail "
-            f"unless it is a local endpoint that needs none.")
+        from credentials import missing_key_message
+
+        app._transcript.write_error(missing_key_message(provider))
 
     # An active agent may name its own model/provider (§18), and those win
     # in run_agent_turn. Without this the switch is a silent no-op for as
@@ -3058,7 +3072,6 @@ register_init_commands()  # §24: /init
 
 
 def run(provider_name: str, model: str, settings: dict | None = None,
-        startup_warnings: list[str] | None = None,
         cli_pinned: bool = False) -> None:
     """Entry point used by main.py --tui.
 
@@ -3069,5 +3082,4 @@ def run(provider_name: str, model: str, settings: dict | None = None,
     """
     config_loader_settings = settings if settings is not None else config_loader.get_settings()
     VenastineApp(provider_name, model, config_loader_settings,
-                 startup_warnings=startup_warnings,
                  cli_pinned=cli_pinned).run()

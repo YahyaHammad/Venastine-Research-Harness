@@ -803,6 +803,14 @@ def startup(monkeypatch, tmp_path):
         return _fn
 
     monkeypatch.chdir(tmp_path)
+    # Batch 44: conftest's autouse isolate_provider_check points
+    # credentials.LLM_PROVIDERS_FILE at a keyed copy, which is the right
+    # default everywhere an app is built. Here it is exactly wrong -- these
+    # tests chdir into an EMPTY directory precisely to be a fresh clone,
+    # and the cwd-relative default is the behaviour under test.
+    import credentials
+
+    monkeypatch.setattr(credentials, "LLM_PROVIDERS_FILE", "providers.json")
     monkeypatch.setattr(main, "configure_logging", _record("configure_logging"))
     monkeypatch.setattr(main, "create_db_and_tables", _record("create_db"))
     monkeypatch.setattr(main, "_classify_legacy_threads", _record("sweep"))
@@ -1189,12 +1197,19 @@ class TestTheLaunchProviderCheck:
         out = capsys.readouterr().out
         assert "has no API_KEY" in out and "local endpoint" in out, out
 
-    def test_the_tui_carries_the_warnings_instead_of_printing(
+    def test_the_tui_path_leaves_the_provider_check_to_the_app(
             self, startup, monkeypatch, capsys):
-        """A pre-mount print vanishes under Textual's screen, and
-        TranscriptLogHandler attaches only at mount -- so printing on the
-        TUI path would be seen by nobody. The warnings travel into the
-        app and reach the transcript at mount instead."""
+        """Batch 44. main() computes NOTHING here on the TUI path.
+
+        It used to compute the findings and hand them over, which was the
+        defect: `provider` is resolve_runtime_defaults' answer and §43's
+        remembered /model pair is restored later, inside the app -- so the
+        list named the config provider while the banner named the restored
+        one. The app computes its own; main() must not carry a stale one,
+        and must still print nothing (a pre-mount print vanishes under
+        Textual's screen, and TranscriptLogHandler attaches only at mount).
+        """
+        import inspect
         import json
         import tui.app
 
@@ -1205,10 +1220,8 @@ class TestTheLaunchProviderCheck:
         # wiring break with this test still green.
         monkeypatch.setattr(
             tui.app, "run",
-            lambda provider, model, settings, startup_warnings=None,
-            cli_pinned=False:
-                seen.update(warnings=list(startup_warnings or ()),
-                            cli_pinned=cli_pinned))
+            lambda provider, model, settings, cli_pinned=False:
+                seen.update(provider=provider, cli_pinned=cli_pinned))
 
         with open("providers.json", "w", encoding="utf-8") as f:
             json.dump({"OPENAI": {"API_KEY": "k", "API_URL": "",
@@ -1217,9 +1230,14 @@ class TestTheLaunchProviderCheck:
         import main
         main.main(["--tui"])
 
-        assert len(seen.get("warnings", [])) == 1, seen
-        assert "Unknown provider: ANTHROPIC" in seen["warnings"][0]
+        # ANTHROPIC is not in that file, so the OLD code path had a finding
+        # to hand over. Nothing is printed and nothing is passed.
         assert "[warning]" not in capsys.readouterr().out
+        assert seen["provider"] == "ANTHROPIC"
+        assert "startup_warnings" not in inspect.signature(
+            tui.app.run).parameters, (
+            "the parameter is what let a stale finding travel; removing it "
+            "is the fix, so its absence is the assertion")
         assert seen["cli_pinned"] is False, (
             "no --provider/--model was given, so nothing pinned this launch")
 

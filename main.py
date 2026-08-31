@@ -1738,13 +1738,18 @@ def main(argv=None) -> int:
     # no key, so refusing would block a real configuration. Skipped for
     # the two pure-data commands that run no model call; kept for
     # --summary and --init, which do.
-    startup_warnings: list[str] = []
-    if not (args.memories or args.forget):
+    #
+    # Batch 44: the TUI path no longer computes these here. `provider` is
+    # resolve_runtime_defaults' answer, and §43's remembered /model pair is
+    # restored later, inside VenastineApp.__init__ -- so a list frozen at
+    # this line named the CONFIG provider while the banner one row above it
+    # named the restored one. The app computes its own against the pair it
+    # will actually call. Fixed at the producer: the check was right and
+    # its input was wrong.
+    if not (args.memories or args.forget or args.tui):
         from credentials import provider_startup_issues
-        startup_warnings = provider_startup_issues(provider)
-        if not args.tui:
-            for warning in startup_warnings:
-                print(f"[warning] {warning}")
+        for warning in provider_startup_issues(provider):
+            print(f"[warning] {warning}")
 
     # §21b M15. AFTER load_project_config, because scoping needs the
     # resolved project path -- and before any MCP setup, since neither
@@ -1838,7 +1843,6 @@ def main(argv=None) -> int:
             # resolved pair against settings.json, which would read a
             # flag that happens to match the configured value as absent.
             run_tui(provider, model, settings,
-                    startup_warnings=startup_warnings,
                     cli_pinned=args.provider is not None
                     or args.model is not None)
         elif args.mode == "research":

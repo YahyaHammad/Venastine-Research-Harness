@@ -138,6 +138,22 @@ def load_credentials(provider_name: str) -> tuple[str, str]:
     return entry["API_KEY"], entry.get("API_URL", "")
 
 
+def missing_key_message(provider_name: str) -> str:
+    """The one wording for "configured, but with an empty API_KEY".
+
+    Extracted in batch 44 for the reason no_providers_message() was: /model
+    carried its own copy, naming providers.json literally where this file
+    names LLM_PROVIDERS_FILE, so the same fact read differently at launch
+    and at a switch -- while tui/app.py's comment beside the launch render
+    already claimed they were "the same fact at both moments". WARN-only at
+    both call sites: a local OpenAI-compatible endpoint legitimately takes
+    no key, and refusing would block a real configuration.
+    """
+    return (f"{provider_name} has no API_KEY in {LLM_PROVIDERS_FILE} "
+            f"— calls will fail unless it is a local endpoint that "
+            f"needs none.")
+
+
 def provider_startup_issues(provider_name: str) -> list:
     """What launch should say about the provider setup, before either
     shell starts (#138).
@@ -160,9 +176,5 @@ def provider_startup_issues(provider_name: str) -> list:
     if provider_name not in providers:
         return [unknown_provider_message(provider_name, providers)]
     if not providers[provider_name].get("API_KEY"):
-        return [
-            f"{provider_name} has no API_KEY in {LLM_PROVIDERS_FILE} "
-            f"— calls will fail unless it is a local endpoint that "
-            f"needs none."
-        ]
+        return [missing_key_message(provider_name)]
     return []

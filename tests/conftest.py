@@ -11,6 +11,7 @@ behavior.
 
 import importlib
 import itertools
+import os
 import sys
 import time
 import types
@@ -442,6 +443,49 @@ def isolate_ui_preferences(tmp_path_factory, monkeypatch):
     name = "ui-prefs-{}.json".format(next(_ui_prefs_counter))
     path = tmp_path_factory.getbasetemp() / name
     monkeypatch.setattr(preferences, "store_path", lambda: str(path))
+    return path
+
+
+@pytest.fixture(autouse=True)
+def isolate_provider_check(tmp_path_factory, monkeypatch):
+    """Give the launch provider check a keyed copy of providers.json.
+
+    isolate_ui_preferences' second reason, arriving through a second door.
+    Since batch 44 VenastineApp.__init__ calls provider_startup_issues()
+    against the pair it resolved, so EVERY app built in a test reads the
+    developer's own providers.json -- and the shipped one carries empty
+    keys, so `test_a_healthy_mount_adds_no_warning_lines` would pass on a
+    machine with a real ANTHROPIC key and fail on one without. A suite
+    result that depends on whose checkout it runs in.
+
+    The copy is the REAL file's entries with every empty key filled, so
+    what a test sees is the shipped roster in its healthy state; a test
+    that wants a finding writes its own file and repoints the attribute.
+
+    LEFT ALONE WHEN THE FILE IS ABSENT, deliberately. A fresh clone with
+    no providers.json fails twelve tests with "No providers configured"
+    (AGENTS.md says so, and says which), and that is a real contract about
+    a real setup step -- synthesising a roster here would quietly repair
+    it and the note would go stale without anything failing.
+    """
+    import json
+
+    import credentials
+
+    source = credentials.LLM_PROVIDERS_FILE
+    if not os.path.exists(source):
+        return None
+    with open(source, encoding="utf-8") as f:
+        data = json.load(f)
+    for entry in data.values():
+        if isinstance(entry, dict) and not entry.get("API_KEY"):
+            entry["API_KEY"] = "test-key-not-a-real-credential"
+
+    path = tmp_path_factory.getbasetemp() / "providers-{}.json".format(
+        next(_ui_prefs_counter))
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f)
+    monkeypatch.setattr(credentials, "LLM_PROVIDERS_FILE", str(path))
     return path
 
 
