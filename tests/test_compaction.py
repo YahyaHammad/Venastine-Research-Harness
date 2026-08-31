@@ -83,16 +83,53 @@ OVERRIDES = {"keep_recent_turns": 2, "keep_recent_tokens": 1,
 # ---- The trigger (M1, M6) --------------------------------------------------
 # ---------------------------------------------------------------------------
 
-def test_the_trigger_is_a_working_set_target_not_the_window():
-    """M1. §21 put this at `context_limit - buffer`, which can never fire:
-    a window-derived threshold sits at a size the thread cannot reach in
-    working order. (The old MAX_TOKEN_BUDGET collision that also argued
-    for this died with batch 27's uncapped default; the size-based reason
-    stands on its own.)"""
-    _, compact_at = compaction.thresholds("claude-sonnet-5")
+def test_the_trigger_is_a_share_of_the_window():
+    """Batch 44 reversed M1, because M1's argument had expired.
 
-    assert compact_at == config.COMPACTION_TRIGGER_TOKENS
-    assert compact_at < compaction.context_limit("claude-sonnet-5") / 2
+    M1 rejected `context_limit - buffer` on the grounds that a
+    window-derived threshold "sits at a size the thread cannot reach in
+    working order" -- and the arithmetic behind that was MAX_TOKEN_BUDGET,
+    a default spend ceiling of 250k that ended a tool-using turn long
+    before any modern window. Batch 27 deleted that default. Nothing
+    competes with a large trigger any more, so the flat 40k was compacting
+    a 1M-window thread at 4% of its window: a model call spent and
+    fidelity lost against a problem the model did not have.
+
+    Asserted as a RATIO rather than against a literal, so the test says
+    what the rule is instead of restating one model's arithmetic."""
+    for model in ("claude-sonnet-5", "claude-haiku-4-5"):
+        _, compact_at = compaction.thresholds(model)
+        window = compaction.context_limit(model)
+
+        assert compact_at == int(config.COMPACTION_TRIGGER_FRACTION * window)
+        assert window / 2 < compact_at < window, (
+            "a share, not a rounding error and not the whole window")
+
+
+def test_the_trigger_follows_the_model_rather_than_a_constant():
+    """The property the flat number could not have: a 1M model and a 200k
+    model get different triggers from the same configuration."""
+    big = compaction.thresholds("claude-sonnet-5")[1]
+    small = compaction.thresholds("claude-haiku-4-5")[1]
+
+    assert big > small
+    assert big / small == pytest.approx(
+        compaction.context_limit("claude-sonnet-5")
+        / compaction.context_limit("claude-haiku-4-5"))
+
+
+def test_a_configured_trigger_still_outranks_the_derivation(monkeypatch):
+    """Batch 44 changed a DEFAULT, not a control. settings.json naming an
+    absolute must still win, or a user who tuned this in a config file
+    would silently lose it to a release."""
+    from core import config_loader
+
+    monkeypatch.setattr(
+        config_loader, "get_settings",
+        lambda: {"compaction": {"trigger_tokens": 30_000}})
+
+    _, compact_at = compaction.thresholds("claude-sonnet-5")
+    assert compact_at == 30_000
 
 
 def test_the_warning_fires_strictly_before_the_compaction():
@@ -111,8 +148,12 @@ def test_a_research_pass_only_compacts_near_the_window(caplog):
     """M6. A pass is headless and unattended and already returns a
     distillation, so routine compaction there would spend on a judgment
     call nobody is watching. The backstop is a safety net against a hard
-    provider error, not a working-set policy."""
-    used = config.COMPACTION_TRIGGER_TOKENS + 1
+    provider error, not a working-set policy.
+
+    The two are both window-derived since batch 44, so the separation is
+    now about how much room each leaves rather than about their shape:
+    chat folds at a share of the window, a pass only just under it."""
+    used = compaction.thresholds("claude-sonnet-5")[1] + 1
 
     assert compaction.should_compact(used, "claude-sonnet-5") == "compact"
     assert compaction.should_compact(used, "claude-sonnet-5", mode="backstop") == ""
@@ -122,10 +163,13 @@ def test_a_research_pass_only_compacts_near_the_window(caplog):
 
 
 def test_an_unknown_model_warns_about_its_assumed_window(caplog):
-    """§21: silent guessing turns a tuning problem into a mystery. Much
-    less dangerous than §21 assumed, though -- M1 moved the ordinary
-    trigger off this table, so a missing entry costs a mistimed backstop
-    rather than mistimed compaction."""
+    """§21: silent guessing turns a tuning problem into a mystery.
+
+    Fully dangerous again since batch 44, which is why the warning names
+    /window now. M1 had moved the ordinary trigger off this table so that
+    a missing entry cost only a mistimed backstop; the trigger is a share
+    of this number once more, so a missing entry mistimes compaction on
+    every thread."""
     with caplog.at_level("WARNING", logger="core.compaction"):
         assert compaction.context_limit("some-new-model") == config.DEFAULT_CONTEXT_WINDOW
 

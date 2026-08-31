@@ -224,6 +224,43 @@ def context_limit(model: str, provider_name: Optional[str] = None) -> int:
     return window
 
 
+def derived_trigger(model: str, provider_name: Optional[str] = None) -> int:
+    """The working-set trigger for this model: a share of its window.
+
+    config.COMPACTION_TRIGGER_FRACTION x context_limit(), which is 850k on
+    a 1M model and 170k on a 200k one. Batch 44's reversal of M1; the
+    argument is on the constant.
+
+    A FRACTION AND NOT `window - margin`, which was the shape considered
+    first and is what the research backstop below actually uses. A fixed
+    margin cannot be right at both ends of the roster: 40k below a 1M
+    window is a rounding error, and 40k below a 64k window leaves 24k,
+    which is not a working thread. A share scales by construction.
+
+    Floored at 1 rather than validated: context_limit() can only return a
+    positive number, and effective_compaction() raises on a trigger below
+    1, so this exists to keep an absurd window from turning into a
+    confusing error two layers away from the value that caused it.
+    """
+    return max(1, int(config.COMPACTION_TRIGGER_FRACTION
+                      * context_limit(model, provider_name)))
+
+
+def _trigger_is_configured() -> bool:
+    """Whether settings.json names compaction.trigger_tokens.
+
+    The derived trigger is a DEFAULT, so it must not outrank a number a
+    human wrote in a config file -- and effective_compaction() cannot tell
+    a configured value from the config.py fallback, because it merges them
+    into one dict by design (TECHNICAL_DEBT item 12: the merge records no
+    provenance). Asking the settings directly is the narrow question this
+    one decision needs, rather than a provenance mechanism the rest of
+    that dict has done without.
+    """
+    return "trigger_tokens" in (config_loader.get_settings().get(
+        "compaction") or {})
+
+
 def thresholds(model: str, mode: str = "working_set",
                overrides: Optional[dict] = None,
                provider_name: Optional[str] = None) -> tuple:
@@ -231,21 +268,31 @@ def thresholds(model: str, mode: str = "working_set",
 
     TWO MODES, because a research pass and a chat turn want different
     answers (M6). "working_set" is the ordinary one: compaction keeps the
-    thread small enough that turns stay cheap and keep their tool steps,
-    at a threshold largely independent of the model's window.
-    "backstop" is what a pipeline pass gets -- it fires only near the
-    actual context window, because a pass is headless and unattended and
-    each one already returns a distillation, so routine compaction there
-    would spend on a judgment call nobody is watching.
+    thread inside a share of the model's window, so turns stay affordable
+    and keep their tool steps. "backstop" is what a pipeline pass gets --
+    it fires only just under the window, because a pass is headless and
+    unattended and each one already returns a distillation, so routine
+    compaction there would spend on a judgment call nobody is watching.
+    Since batch 44 both are derived from context_limit(); what still
+    separates them is how much room each leaves.
+
+    FOUR SOURCES FOR THE WORKING-SET TRIGGER, nearest first: an explicit
+    `overrides` (a `/compact --strength N`), a session `/trigger` bound to
+    this pair, settings.json's compaction.trigger_tokens, and the derived
+    share. The first three are absolute numbers a human named and all
+    outrank the derivation, which is what makes batch 44 a change of
+    DEFAULT rather than a removal of the control.
     """
-    # The session tier, resolved HERE because this is the only place the
-    # working-set trigger is read and the only place that knows the pair
-    # to match it against. effective_compaction stays model-agnostic, and
-    # D27's four-tier chain is unchanged -- the session value arrives
-    # through the existing per-invocation slot rather than adding a fifth
-    # tier. An explicit `overrides` (a `/compact --strength N`) still
-    # wins, since nearest is meant to win and the caller is nearer.
+    # Resolved HERE because this is the only place the working-set trigger
+    # is read and the only place that knows the model. effective_compaction
+    # stays model-agnostic, and D27's four-tier chain is unchanged -- both
+    # the session value and the derived default arrive through the existing
+    # per-invocation slot rather than adding a fifth tier. An explicit
+    # `overrides` still wins, since nearest is meant to win and the caller
+    # is nearer.
     trigger = session.trigger_for(provider_name, model)
+    if trigger is None and mode != "backstop" and not _trigger_is_configured():
+        trigger = derived_trigger(model, provider_name)
     if trigger is not None:
         overrides = {"trigger_tokens": trigger, **(overrides or {})}
     settings = config_loader.effective_compaction(overrides)

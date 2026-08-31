@@ -370,30 +370,67 @@ MAX_REVIEW_REFINEMENTS = 3
 # The architecture is what's locked; the numbers are expected to move once
 # there are real long threads to look at.
 
-# The working-set size compaction maintains. Compaction fires when the last
-# measured input_tokens reaches this.
+# How much of the model's context window a thread may fill before
+# compaction folds it. thresholds() multiplies this by context_limit(),
+# so it is 850k on a 1M model and 170k on a 200k one.
 #
-# M1: NOT `context_limit - buffer`. §21 parameterized the trigger against
-# the model's context window on the assumption that the window is what a
-# long thread hits first. On this codebase it is not -- a window-derived
-# trigger sits at a size the thread can never reach in working order, and
-# (since batch 27) there is no default spend ceiling for it to collide with
-# either: the trigger is a CONTEXT-SIZE target, keyed off the provider's
-# own last_input_tokens measurement, and it has never read the billing
-# meter. The model's real window remains a backstop below.
+# BATCH 44 REVERSED M1, AND THE REASON M1 GAVE HAS EXPIRED. M1 rejected a
+# window-derived trigger because "a window-derived trigger sits at a size
+# the thread can never reach in working order" -- and the arithmetic
+# behind that was about MAX_TOKEN_BUDGET, then a default spend ceiling of
+# 250k: the prompt is re-sent on every step of a tool-using turn, so a
+# thread at 160k got one response and no tool calls before the cap ended
+# the turn. Batch 27 DELETED that default ceiling. There is no cap for a
+# large trigger to collide with any more, so the premise is gone and the
+# flat 40k outlived it -- compacting a 1M-window thread at 4% of its
+# window, spending a model call and losing fidelity to solve a problem
+# the model did not have.
 #
-# This also makes MODEL_CONTEXT_WINDOWS much less dangerous to get wrong,
-# which was a risk §21 flagged about its own design.
+# THE COST OF THE REVERSAL, STATED. MODEL_CONTEXT_WINDOWS and the provider
+# query decide when every thread folds now, where under M1 a wrong entry
+# only mistimed a research backstop. That is why core/model_windows.py
+# exists (the user's own answer, outranking both) and why the fallback
+# still WARNS. A fraction rather than `window - margin`: a fixed margin
+# that is right for a 1M model leaves a 64k model no working room at all,
+# and one that is right for 64k never fires on 1M.
+COMPACTION_TRIGGER_FRACTION = 0.85
+
+# The trigger used when NO MODEL IS IN SCOPE -- and the default
+# settings.json's `compaction.trigger_tokens` overrides.
+#
+# One caller has no (provider, model) to derive a window from:
+# compaction.pin_measurements, which computes #89's cap as
+# PIN_MAX_TRIGGER_FRACTION x the trigger from a thread id alone. Left at
+# 40_000 deliberately, so the pin cap is exactly what it was before batch
+# 44 -- this batch changes when a thread compacts, not how much of one a
+# single pin may freeze, and a cap that grew with the window would let one
+# `pin` call freeze 425k tokens of a 1M-window thread.
 COMPACTION_TRIGGER_TOKENS = 40_000
 
 # Fires this many tokens BEFORE the trigger, so there is room to do
 # something about it -- pin a message, wrap up a thought, run /compact at a
-# natural break. §21 singles this out as the one value whose wrong setting
+# natural break.
+#
+# STILL ABSOLUTE after batch 44, and that is a decision rather than an
+# oversight. What this buys is a HUMAN'S REACTION TIME, measured in turns,
+# and a turn does not get bigger because the window did: 8k is roughly a
+# turn or two of notice on a 64k model and on a 1M one alike. As a
+# fraction of the new trigger it would be 128k on a 1M model -- a warning
+# that fires while the thread is at 72% and has nothing to worry about
+# yet. §21 singles this out as the one value whose wrong setting
 # is not self-correcting: too small and it is an alert with no time
 # attached to it. Validated to be strictly less than the trigger.
 COMPACTION_WARNING_MARGIN_TOKENS = 8_000
 
 # The most recent tokens that always stay verbatim, never compacted.
+#
+# ABSOLUTE, like the warning margin above and for the same kind of reason:
+# this is an amount of CONVERSATION to keep intact, not a share of a
+# window. It is also the weaker of the two floors in practice -- M5 keeps
+# whichever protects more, and the three-turn floor below almost always
+# protects more than 4k on the long threads that reach the trigger at all.
+# Left where it was so batch 44 changes when a thread folds and not what
+# survives the fold.
 COMPACTION_KEEP_RECENT_TOKENS = 4_000
 
 # M5: a FLOOR in turns, on top of the token floor above, and the two

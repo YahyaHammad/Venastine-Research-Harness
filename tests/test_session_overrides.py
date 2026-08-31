@@ -216,7 +216,7 @@ def test_the_remembered_window_beats_the_provider_query():
 
 def test_the_trigger_override_moves_the_working_set_threshold():
     _, default_at = compaction.thresholds(PAIR[1], provider_name=PAIR[0])
-    assert default_at == config.COMPACTION_TRIGGER_TOKENS
+    assert default_at == compaction.derived_trigger(PAIR[1], PAIR[0])
 
     session.set_trigger(*PAIR, 80_000)
     warn_at, compact_at = compaction.thresholds(PAIR[1], provider_name=PAIR[0])
