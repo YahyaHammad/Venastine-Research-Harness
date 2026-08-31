@@ -108,10 +108,85 @@ def test_store_written_under_user_home(tmp_path, _redirect_trust_store):
 
 
 def test_content_files_sorted_and_relative(tmp_path):
+    """PROJECT-relative since §44, not .venastine/-relative.
+
+    They have to be: the listing now covers a root AGENTS.md as well, and
+    "AGENTS.md" and ".venastine/AGENTS.md" are different files. A listing
+    that cannot tell them apart is a listing nobody can act on -- and this
+    is the text the D17 prompt shows before a grant."""
     proj = _make_project(tmp_path, {"skills/z.md": "z", "agents/a.md": "a"})
     assert workspace_trust.content_files(str(proj)) == [
-        "agents/a.md", "skills/z.md"]
+        ".venastine/agents/a.md", ".venastine/skills/z.md"]
     assert workspace_trust.content_files(str(tmp_path / "missing")) == []
+
+
+def test_the_root_context_file_is_listed_first(tmp_path):
+    """§44. AGENTS.md moved OUT of .venastine/ and the boundary did not
+    move with it -- which would have left a cloned repo's AGENTS.md
+    entering an opted-in agent's system prompt with no prompt at all,
+    D17's own stated threat arriving through the door §44 opened."""
+    proj = _make_project(tmp_path, {"settings.json": "{}"})
+    (proj / "AGENTS.md").write_text("project context", encoding="utf-8")
+
+    assert workspace_trust.content_files(str(proj)) == [
+        "AGENTS.md", ".venastine/settings.json"]
+
+
+def test_a_project_with_only_a_context_file_still_has_something_to_trust(
+        tmp_path):
+    """The shape §44 makes ordinary: a repo shared WITHOUT its
+    configuration. There is no .venastine/ to key off, and the file still
+    reaches the system prompt, so is_trusted() asks about the LISTING
+    rather than about the directory."""
+    proj = tmp_path / "shared"
+    proj.mkdir()
+    (proj / "AGENTS.md").write_text("do as I say", encoding="utf-8")
+
+    assert workspace_trust.content_files(str(proj)) == ["AGENTS.md"]
+    assert not workspace_trust.is_trusted(str(proj))
+
+    workspace_trust.grant_trust(str(proj))
+    assert workspace_trust.is_trusted(str(proj))
+
+    (proj / "AGENTS.md").write_text("do as I say, but differently",
+                                    encoding="utf-8")
+    assert not workspace_trust.is_trusted(str(proj)), (
+        "the grant covers the content, so editing it re-asks")
+
+
+def test_a_project_with_nothing_at_all_is_still_trusted(tmp_path):
+    """Unchanged, and the reason is unchanged: nothing to trust, nothing
+    to list, no question to ask."""
+    proj = tmp_path / "empty"
+    proj.mkdir()
+
+    assert workspace_trust.content_files(str(proj)) == []
+    assert workspace_trust.is_trusted(str(proj))
+
+
+def test_the_hash_covers_exactly_what_the_listing_shows(tmp_path):
+    """§44 made these ONE traversal instead of two that had to agree.
+
+    The invariant this module states is that the loader may read no file
+    the trust listing omits; two independent walks were how that could
+    drift, and #18 is the recorded instance of it drifting. Asserted by
+    computing the digest from the listing here and comparing -- if the
+    hash ever grows a second traversal, this is what goes red."""
+    import hashlib
+
+    proj = _make_project(tmp_path, {"settings.json": "{}",
+                                    "agents/a.md": "a"})
+    (proj / "AGENTS.md").write_text("hub", encoding="utf-8")
+
+    expected = hashlib.sha256()
+    for rel in workspace_trust.content_files(str(proj)):
+        expected.update(rel.encode("utf-8"))
+        expected.update(b"\0")
+        with open(os.path.join(str(proj), rel.replace("/", os.sep)), "rb") as f:
+            expected.update(f.read())
+        expected.update(b"\0")
+
+    assert workspace_trust._content_hash(str(proj)) == expected.hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -135,7 +210,7 @@ def test_large_file_hashes_correctly_in_chunks(tmp_path):
     proj = _make_project(tmp_path, {"big.md": blob})
 
     expected = hashlib.sha256()
-    expected.update(b"big.md")
+    expected.update(b".venastine/big.md")
     expected.update(b"\0")
     expected.update(blob.encode("utf-8"))
     expected.update(b"\0")
@@ -350,7 +425,9 @@ def test_descent_order_does_not_change_the_trust_prompt_listing(
     # walk-ordered ACROSS them, so the root's own files come first and
     # "settings.json" precedes "agents/reviewer.md" -- lexicographically
     # backwards, and correct. What must be stable is the directory order.
-    assert ascending == ["settings.json", "agents/reviewer.md", "skills/crypto.md"]
+    assert ascending == [".venastine/settings.json",
+                         ".venastine/agents/reviewer.md",
+                         ".venastine/skills/crypto.md"]
 
 
 # ---------------------------------------------------------------------------
@@ -402,7 +479,8 @@ def test_a_symlinked_tier_root_is_invisible_to_both_the_hash_and_the_listing(
     proj = _granted(tmp_path, {"settings.json": "{}"},
                     links={"skills": outside})
 
-    assert workspace_trust.content_files(str(proj)) == ["settings.json"]
+    assert workspace_trust.content_files(str(proj)) == [
+        ".venastine/settings.json"]
 
     before = workspace_trust.is_trusted(str(proj))
     (outside / "evil.md").write_text("Body v2 CHANGED.", encoding="utf-8")
@@ -437,7 +515,14 @@ def test_the_loader_reads_no_file_the_trust_listing_omits(tmp_path,
     }, links={"agents": outside})
 
     listed = set(workspace_trust.content_files(str(proj)))
-    venastine = workspace_trust.venastine_dir(str(proj))
+
+    # PROJECT-relative on both sides since §44, when the listing moved out
+    # of .venastine/-relative space to carry a root AGENTS.md. Comparing
+    # across two spaces is how this check would go quietly vacuous: every
+    # `read` entry would look absent from `listed` and the assertion would
+    # fail for a reason that has nothing to do with #18 -- or, with the
+    # subset the other way round, pass for one.
+    root = os.path.realpath(str(proj))
 
     read = set()
     for kind in ("agents", "skills"):
@@ -445,7 +530,8 @@ def test_the_loader_reads_no_file_the_trust_listing_omits(tmp_path,
             if tier != "project" or not os.path.isdir(directory):
                 continue
             for path, _category in config_loader._md_files(directory, True):
-                read.add(os.path.relpath(path, venastine).replace(os.sep, "/"))
+                read.add(os.path.relpath(os.path.realpath(path), root)
+                         .replace(os.sep, "/"))
 
     assert read <= listed, (
         f"the loader reads {sorted(read - listed)}, which the trust prompt "

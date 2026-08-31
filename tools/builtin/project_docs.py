@@ -97,7 +97,10 @@ _DENIED_SEGMENTS = frozenset({
 })
 _DENIED_FILENAMES = frozenset({"providers.json"})
 
-CONTEXT_FILENAME = "CONTEXT.md"
+#: Re-exported so callers name one constant. The name lives in
+#: core/workspace_trust because the load-bearing fact about it is that a
+#: grant covers it (§44).
+HUB_FILENAME = workspace_trust.PROJECT_CONTEXT_FILENAME
 
 
 def _project_root() -> Optional[str]:
@@ -111,13 +114,20 @@ def doc_path(project_path: str, name: str) -> str:
     """Where a document in the set lives. DERIVED FROM ITS NAME, never taken
     from a path parameter (I1).
 
-    CONTEXT.md is the one file §14's loader reads, and it reads it from
-    `.venastine/` only -- so the hub sits inside the trust boundary while the
-    documents it links are ordinary committed root files (I9). That split is
-    the reason this function exists instead of a single join.
+    ONE JOIN SINCE §44, where this used to branch. I9 put the hub inside
+    `.venastine/` so that the one file every agent reads sat inside the
+    trust boundary. §44 keeps the boundary and moves the file: AGENTS.md is
+    an ordinary committed root document, and workspace_trust.content_files()
+    covers it explicitly. What that buys is a project you can share without
+    your configuration and still have it make sense to whoever cloned it --
+    where a hub in `.venastine/` meant sharing the repo without that
+    directory shipped a set of documents pointing at a file that was not
+    there.
+
+    The function survives the simplification because the confinement is
+    what it is FOR: a name from a fixed allowlist, resolved under the
+    project, with no path parameter anywhere in the tool that calls it.
     """
-    if name == CONTEXT_FILENAME:
-        return os.path.join(workspace_trust.venastine_dir(project_path), name)
     return os.path.join(project_path, name)
 
 
@@ -345,7 +355,7 @@ def approval_notice(params: dict, context) -> str:
     the one line that says which file is about to change.
     """
     root = _project_root()
-    name = params.get("name") or CONTEXT_FILENAME
+    name = params.get("name") or HUB_FILENAME
     where = doc_path(root, name) if root else name
     size = len(params.get("content") or "")
     verb = "Overwrite" if root and os.path.exists(where) else "Create"

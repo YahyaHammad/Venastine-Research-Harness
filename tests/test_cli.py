@@ -11,6 +11,7 @@ parser defaults) is exercised.
 
 import argparse
 import contextlib
+import os
 import sys
 from types import SimpleNamespace
 from uuid import UUID, uuid4
@@ -803,6 +804,14 @@ def startup(monkeypatch, tmp_path):
         return _fn
 
     monkeypatch.chdir(tmp_path)
+    # Batch 44: conftest's autouse isolate_provider_check points
+    # credentials.LLM_PROVIDERS_FILE at a keyed copy, which is the right
+    # default everywhere an app is built. Here it is exactly wrong -- these
+    # tests chdir into an EMPTY directory precisely to be a fresh clone,
+    # and the cwd-relative default is the behaviour under test.
+    import credentials
+
+    monkeypatch.setattr(credentials, "LLM_PROVIDERS_FILE", "providers.json")
     monkeypatch.setattr(main, "configure_logging", _record("configure_logging"))
     monkeypatch.setattr(main, "create_db_and_tables", _record("create_db"))
     monkeypatch.setattr(main, "_classify_legacy_threads", _record("sweep"))
@@ -817,6 +826,89 @@ def startup(monkeypatch, tmp_path):
     monkeypatch.setattr(main, "run_summary_command", _record("summary", 0))
     monkeypatch.setattr(main, "run_init_command", _record("init", 0))
     return order
+
+
+class TestWhichDirectoryIsTheProject:
+    """Batch 44, reversing RM6.
+
+    RM6 recorded that trust keys off cwd and that AGENT_WORKSPACE is a
+    permission boundary "deliberately not a project path". The report that
+    reopened it is what that split looks like in use: with AGENT_WORKSPACE
+    set, read/write/edit/shell were correctly confined to the project while
+    /init scaffolded documentation into the HARNESS -- one session with two
+    ideas of where the work was.
+
+    ASSERTED AT main(), because that is where the decision now lives and
+    because everything else follows from it: config_loader.get_project_path()
+    is the single resolver for /init's destination (both in
+    project_init.generator and, decisively, in write_project_doc's own
+    _project_root), for D17 trust, for the `.venastine/` tier and for
+    UserMemory's project scope. Nothing in test_project_init.py could see
+    this -- its `project` fixture calls config_loader.initialize() itself
+    and never touches the environment.
+    """
+
+    def _resolved(self, monkeypatch):
+        """The project path main() actually computed."""
+        import main
+
+        seen = {}
+
+        def _record(path, *a, **k):
+            seen["path"] = path
+            return {}
+
+        monkeypatch.setattr(main, "load_project_config", _record)
+        main.main([])
+        return seen["path"]
+
+    def test_a_named_workspace_is_the_project(self, startup, monkeypatch,
+                                              tmp_path):
+        import config
+
+        workspace = tmp_path / "some-project"
+        workspace.mkdir()
+        monkeypatch.setattr(config, "WORKSPACE_DIR", str(workspace))
+        monkeypatch.setattr(config, "WORKSPACE_DIR_EXPLICIT", True)
+
+        assert self._resolved(monkeypatch) == os.path.realpath(str(workspace))
+
+    def test_without_one_the_project_is_still_the_working_directory(
+            self, startup, monkeypatch, tmp_path):
+        """The population this must not disturb. AGENT_WORKSPACE defaults
+        to ./workspace, a SUBDIRECTORY of wherever you launched -- so the
+        rule is the presence of the variable, never its value, or everyone
+        who set nothing would find their project moved one level down."""
+        import config
+
+        monkeypatch.setattr(config, "WORKSPACE_DIR", "./workspace")
+        monkeypatch.setattr(config, "WORKSPACE_DIR_EXPLICIT", False)
+
+        assert self._resolved(monkeypatch) == os.getcwd()
+
+    def test_the_workspace_guard_still_runs_first(self, startup, monkeypatch,
+                                                  tmp_path):
+        """What makes the reversal safe, and it is an ordering that already
+        existed: check_workspace() refuses a workspace that is or sits
+        inside the harness install tree, several lines above this. So the
+        project can never become the harness by this route -- which is a
+        second reason the npm launcher must never set the variable."""
+        import config
+        import main
+
+        monkeypatch.setattr(config, "WORKSPACE_DIR", str(tmp_path))
+        monkeypatch.setattr(config, "WORKSPACE_DIR_EXPLICIT", True)
+        monkeypatch.setattr(main.protected_paths, "check_workspace",
+                            lambda _path: "refused for the test")
+
+        seen = {}
+        monkeypatch.setattr(main, "load_project_config",
+                            lambda path, *a, **k: seen.setdefault("path", path))
+
+        assert main.main([]) == 2
+        assert "path" not in seen, (
+            "the project path was resolved from a workspace the guard had "
+            "already refused")
 
 
 class TestStartupDoesNoWorkBeforeArgparse:
@@ -1189,12 +1281,19 @@ class TestTheLaunchProviderCheck:
         out = capsys.readouterr().out
         assert "has no API_KEY" in out and "local endpoint" in out, out
 
-    def test_the_tui_carries_the_warnings_instead_of_printing(
+    def test_the_tui_path_leaves_the_provider_check_to_the_app(
             self, startup, monkeypatch, capsys):
-        """A pre-mount print vanishes under Textual's screen, and
-        TranscriptLogHandler attaches only at mount -- so printing on the
-        TUI path would be seen by nobody. The warnings travel into the
-        app and reach the transcript at mount instead."""
+        """Batch 44. main() computes NOTHING here on the TUI path.
+
+        It used to compute the findings and hand them over, which was the
+        defect: `provider` is resolve_runtime_defaults' answer and §43's
+        remembered /model pair is restored later, inside the app -- so the
+        list named the config provider while the banner named the restored
+        one. The app computes its own; main() must not carry a stale one,
+        and must still print nothing (a pre-mount print vanishes under
+        Textual's screen, and TranscriptLogHandler attaches only at mount).
+        """
+        import inspect
         import json
         import tui.app
 
@@ -1205,10 +1304,8 @@ class TestTheLaunchProviderCheck:
         # wiring break with this test still green.
         monkeypatch.setattr(
             tui.app, "run",
-            lambda provider, model, settings, startup_warnings=None,
-            cli_pinned=False:
-                seen.update(warnings=list(startup_warnings or ()),
-                            cli_pinned=cli_pinned))
+            lambda provider, model, settings, cli_pinned=False:
+                seen.update(provider=provider, cli_pinned=cli_pinned))
 
         with open("providers.json", "w", encoding="utf-8") as f:
             json.dump({"OPENAI": {"API_KEY": "k", "API_URL": "",
@@ -1217,9 +1314,14 @@ class TestTheLaunchProviderCheck:
         import main
         main.main(["--tui"])
 
-        assert len(seen.get("warnings", [])) == 1, seen
-        assert "Unknown provider: ANTHROPIC" in seen["warnings"][0]
+        # ANTHROPIC is not in that file, so the OLD code path had a finding
+        # to hand over. Nothing is printed and nothing is passed.
         assert "[warning]" not in capsys.readouterr().out
+        assert seen["provider"] == "ANTHROPIC"
+        assert "startup_warnings" not in inspect.signature(
+            tui.app.run).parameters, (
+            "the parameter is what let a stale finding travel; removing it "
+            "is the fix, so its absence is the assertion")
         assert seen["cli_pinned"] is False, (
             "no --provider/--model was given, so nothing pinned this launch")
 

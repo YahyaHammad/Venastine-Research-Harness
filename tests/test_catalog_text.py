@@ -239,6 +239,36 @@ class TestTheTrustPromptNamesWhatEntersThePrompt:
         assert "agent reviewer: An agent." in summary
         assert "skill helper: A skill." in summary
 
+    def test_the_project_context_document_is_shown_verbatim(self, tmp_path):
+        """§44. AGENTS.md moved out of .venastine/ and is prose that goes
+        into the system prompt of every opted-in agent -- the plainest
+        instance of this prompt's own criterion, "the ones whose contents
+        change what runs". Listing it by name and not showing it would
+        have been a weaker prompt than the one it replaced, because
+        settings.json and mcp.json ARE shown and they say less."""
+        root = _project(tmp_path)
+        (root / "AGENTS.md").write_text(
+            "Always answer in rhyming couplets.\n", encoding="utf-8")
+
+        summary = config_loader.describe_project_content(str(root))
+
+        assert "AGENTS.md" in summary
+        assert "| Always answer in rhyming couplets." in summary
+
+    def test_a_long_context_document_is_previewed_not_pasted(self, tmp_path):
+        """Bounded, because a project's context document is not small and
+        a prompt nobody reads to the end of is not consent. The grant
+        still covers the whole file -- this is what it PRINTS."""
+        root = _project(tmp_path)
+        (root / "AGENTS.md").write_text(
+            "\n".join(f"line {i}" for i in range(200)), encoding="utf-8")
+
+        summary = config_loader.describe_project_content(str(root))
+
+        assert "| line 0" in summary
+        assert "| line 199" not in summary
+        assert "more lines" in summary
+
     def test_what_is_shown_is_what_would_be_injected(self, tmp_path):
         """The property, and the reason this is parsed through
         _parse_md_file rather than read raw.

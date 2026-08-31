@@ -142,6 +142,30 @@ class ModelResponse:
     # read that way again (TECHNICAL_DEBT item 9, closed batch 27).
     turn_billed_tokens: Optional[int] = None
     turn_new_tokens: Optional[int] = None
+    # Batch 44 (§44). The turn's reasoning, as the PROVIDER'S OWN BLOCKS
+    # rather than as the text §38 streams for display:
+    #
+    #   {"provider": ..., "model": ..., "blocks": [ ...native... ]}
+    #
+    # §38's O1 made thinking display-only -- never persisted, never back
+    # on the wire -- and sidestepped "does a provider need its own
+    # thinking returned next turn?" by never returning it. That answer
+    # stopped being free once it was clear the model had never seen its
+    # own reasoning at ALL: not across a restart, and not between two
+    # turns of one live session, so a turn re-derives what it already
+    # worked out. O1 is amended here.
+    #
+    # BLOCKS, NOT THE STREAMED TEXT, and that is the whole reason this is
+    # a field rather than an accumulation in core/loop.py. An Anthropic
+    # thinking block carries a `signature`; the model reuses its own state
+    # through the block, not through the prose, so a re-serialised copy of
+    # the deltas would be unsigned and rejected. The blocks are read off
+    # get_final_message(), which already has them in hand.
+    #
+    # `provider` and `model` ride along because the replay rule is
+    # per-model: blocks go back UNCHANGED to the model that produced them
+    # and are dropped for anything else.
+    thinking: Optional[dict] = None
 
 
 def _tool_arguments(raw_args: str, tool_name: str,
@@ -312,7 +336,41 @@ def _is_empty_assistant_turn(msg: dict) -> bool:
             and not msg.get("tool_calls"))
 
 
-def _messages_for_provider(provider_name: str, neutral_messages: list[dict]) -> list:
+def _echoed_blocks(provider_name: str, model: Optional[str],
+                   msg: dict) -> list:
+    """This turn's stored thinking blocks, if they may go back (§44).
+
+    THE GATE IS THE PAIR, and it is the whole safety argument. A stored
+    record names the provider and model that produced it; blocks go back
+    UNCHANGED to that model and to nothing else. An Anthropic block carries
+    a signature the model verifies against its own state, so handing it to
+    a different model is at best ignored and at worst a 400 -- and after a
+    /model switch the thread is full of blocks the new model never wrote.
+    Dropping them is always safe: the harness then does exactly what it did
+    before this batch.
+
+    Empty for every message written before §44, which is what keeps the
+    translation byte-identical for every existing thread.
+    """
+    record = msg.get("thinking")
+    if not isinstance(record, dict) or not model:
+        return []
+    if record.get("provider") != provider_name or record.get("model") != model:
+        return []
+    return [b for b in record.get("blocks") or [] if isinstance(b, dict)]
+
+
+def _messages_for_provider(provider_name: str, neutral_messages: list[dict],
+                           model: Optional[str] = None,
+                           echo_reasoning: bool = False) -> list:
+    """The wire shape for one provider.
+
+    `model` and `echo_reasoning` are §44's: they decide whether a stored
+    thinking record may travel. Both DEFAULT to the pre-§44 behaviour --
+    no model means no echo, and the OpenAI-compatible side is opt-in per
+    provider -- so a caller that does not pass them gets exactly the
+    translation this function produced before.
+    """
     # One rule, above the split (#13, #36). Note this can leave two
     # consecutive user turns -- which is the shape Google's branch has
     # always produced here, and which
@@ -393,7 +451,11 @@ def _messages_for_provider(provider_name: str, neutral_messages: list[dict]) -> 
                 translated.append({"role": "user", "content": msg["content"]})
 
             elif role == "assistant":
-                content = []
+                # §44. FIRST in the content array, because that is the
+                # order the model emitted them in and the order the API
+                # documents for the replay -- a signed block after the
+                # text it preceded is not the same message.
+                content = list(_echoed_blocks(provider_name, model, msg))
                 if msg.get("text"):
                     content.append({"type": "text", "text": msg["text"]})
                 for tc in msg.get("tool_calls", []):
@@ -430,6 +492,20 @@ def _messages_for_provider(provider_name: str, neutral_messages: list[dict]) -> 
 
         elif role == "assistant":
             entry: dict = {"role": "assistant", "content": msg.get("text") or None}
+            # §44, and OPT-IN PER PROVIDER rather than on by default.
+            # There is no standard for sending reasoning back on this wire
+            # the way there is for receiving it: DeepSeek documents that
+            # reasoning_content must not be supplied on input and 400s,
+            # while OpenRouter accepts it for some models and ignores it
+            # for others. Off means today's behaviour exactly, so a
+            # provider that has never been tried cannot be broken by this.
+            if echo_reasoning:
+                echoed = "\n\n".join(
+                    b.get("text", "") for b in _echoed_blocks(
+                        provider_name, model, msg)
+                    if b.get("text"))
+                if echoed:
+                    entry["reasoning_content"] = echoed
             if msg.get("tool_calls"):
                 entry["tool_calls"] = [
                     {
@@ -698,6 +774,86 @@ _WINDOW_FIELD_ALIASES = (
     "max_input_tokens",
 )
 
+#: Returned by _model_info when a COMPLETE listing did not contain the model.
+#: Distinct from a raise: the provider answered, so there is nothing to retry.
+_NOT_LISTED = object()
+
+
+def _window_from_model_object(info) -> Optional[int]:
+    """The context window off one provider model object, or None.
+
+    Declared fields first, then model_extra -- the same object may carry
+    either depending on whether the installed SDK models the field.
+    ATTRIBUTES not subscripts, for #35's reason: these are pydantic objects
+    on every pinned SDK here.
+
+    `top_provider.context_length` is the one NESTED spelling, and it is
+    OpenRouter's: the flat `context_length` is the model's maximum across
+    every backend, while top_provider carries the routed one. Read second,
+    so the flat value still wins where both exist -- this is a fallback for
+    entries that carry only the nested form, not a preference for the
+    narrower number.
+    """
+    extra = getattr(info, "model_extra", None) or {}
+    for name in _WINDOW_FIELD_ALIASES:
+        value = getattr(info, name, None)
+        if value is None:
+            value = extra.get(name)
+        if value is not None:
+            return value
+    top = extra.get("top_provider")
+    if isinstance(top, dict):
+        return top.get("context_length")
+    return None
+
+
+def _model_info(client, model):
+    """The provider's object for one model, via retrieve or via the listing.
+
+    THE ROUTE WAS THE BUG, NOT THE READER (batch 44). This asked
+    `client.models.retrieve(model)` alone, which is `GET {base}/models/{id}`
+    -- and OpenRouter implements `GET /api/v1/models` plus
+    `/models/:author/:slug/endpoints` and no plain per-id retrieve, so an id
+    containing a slash (`minimax/minimax-m3`) turns the path into a route
+    that does not exist. 404, every time, on a provider whose listing has
+    carried `context_length` all along and which _WINDOW_FIELD_ALIASES'
+    own comment names. NVIDIA's endpoint has the same shape, and so does
+    every other provider whose ids are `vendor/model`.
+
+    Retrieve stays FIRST: it is one call and it is the right one for Groq,
+    Together and Mistral, and a listing can be hundreds of entries. The
+    fallback costs one extra call per provider per process, on the path
+    that was previously three failures and a permanent give-up.
+
+    Three outcomes, deliberately distinct:
+      an object     something answered
+      _NOT_LISTED   a complete listing came back without this model, which
+                    is an ANSWER ("this provider has nothing to say about
+                    it") and must not be retried like a network blip
+      raises        neither route could answer; the caller counts it
+    """
+    try:
+        return client.models.retrieve(model)
+    except Exception as retrieve_error:
+        listing = getattr(getattr(client, "models", None), "list", None)
+        if listing is None:
+            raise
+        try:
+            entries = list(listing())
+        except Exception:
+            # The listing is not a second opinion about the retrieve; it is
+            # the same question by another route. Report the FIRST failure,
+            # which is the one that names the endpoint the caller asked for.
+            raise retrieve_error from None
+        for entry in entries:
+            if getattr(entry, "id", None) == model:
+                return entry
+        if not entries:
+            # An empty listing answered nothing at all; report the failure
+            # that names the endpoint the caller actually asked for.
+            raise retrieve_error from None
+        return _NOT_LISTED
+
 
 def _record_window(provider_name: str, model: str, value) -> Optional[int]:
     """Cache a queried window, coercing anything unusable to None.
@@ -743,7 +899,10 @@ def context_window_for(client, provider_name: str, model: str) -> tuple:
       GOOGLE      models.get(...).input_token_limit, one field on the
                   pinned google-genai type.
       v1-compat   ONE alias sniff over model_extra, not thirteen adapters,
-                  because openai.types.Model allows extra fields.
+                  because openai.types.Model allows extra fields -- over
+                  whichever of models.retrieve() and models.list() answers
+                  (see _model_info: providers whose ids carry a slash have
+                  no per-id route, so retrieve 404s on them).
 
     §21's CONCLUSION survives intact and is why the table remains: OpenAI,
     DeepSeek and Perplexity report nothing, so a fallback constant is
@@ -768,18 +927,13 @@ def context_window_for(client, provider_name: str, model: str) -> tuple:
             return _record_window(
                 provider_name, model,
                 getattr(info, "input_token_limit", None)), True
-        info = client.models.retrieve(model)
-        # Declared fields first, then model_extra -- the same object may
-        # carry either depending on whether the installed SDK models the
-        # field. ATTRIBUTES not subscripts, for #35's reason: these are
-        # pydantic objects on every pinned SDK here.
-        extra = getattr(info, "model_extra", None) or {}
-        for name in _WINDOW_FIELD_ALIASES:
-            value = getattr(info, name, None)
-            if value is None:
-                value = extra.get(name)
-            if value is not None:
-                return _record_window(provider_name, model, value), True
+        info = _model_info(client, model)
+        if info is _NOT_LISTED:
+            # Asked and answered by a listing that did not name it.
+            return _record_window(provider_name, model, None), True
+        window = _window_from_model_object(info)
+        if window is not None:
+            return _record_window(provider_name, model, window), True
         # Asked and answered: this provider reports no window.
         return _record_window(provider_name, model, None), True
     except Exception as e:
@@ -831,6 +985,18 @@ def _google_supports_thinking_budget() -> bool:
     return _google_budget_support
 
 
+def _thinking_record(provider_name: str, model: str,
+                     blocks: list) -> Optional[dict]:
+    """The turn's reasoning in the shape ModelResponse.thinking carries.
+
+    None when the turn produced none, so "no reasoning" and "a provider
+    that reports none" stay one thing and no row is written for either.
+    """
+    if not blocks:
+        return None
+    return {"provider": provider_name, "model": model, "blocks": blocks}
+
+
 def _thinking_for_provider(provider_name: str, effort: Optional[str]) -> dict:
     """Reasoning-effort kwargs for this provider, or {} when no effort is set.
 
@@ -850,9 +1016,20 @@ def _thinking_for_provider(provider_name: str, effort: Optional[str]) -> dict:
         return {}
     if provider_name == "ANTHROPIC":
         # Adaptive thinking + an effort level is the current-model pairing;
+        # `display` is EXPLICIT because its default changed under us. On
+        # Fable 5, Opus 5, Opus 4.8/4.7 and Sonnet 5 it defaults to
+        # "omitted", which still streams thinking blocks but with EMPTY
+        # text -- so §38's whole feature rendered nothing at all on
+        # Anthropic: ev.thinking was "", core/loop.py's `if
+        # token.thinking_delta` never fired, and neither the inline block
+        # nor ThinkingIndicator ever appeared. It looked like it worked
+        # because the OpenAI-compatible branch reads reasoning_content and
+        # is unaffected. The raw chain of thought is never exposed on any
+        # model; "summarized" is the readable form, and it is what the
+        # blocks captured below carry back to the model that wrote them.
         # budget_tokens was removed and returns a 400.
         return {
-            "thinking": {"type": "adaptive"},
+            "thinking": {"type": "adaptive", "display": "summarized"},
             "output_config": {"effort": effort},
         }
     if provider_name == "GOOGLE":
@@ -901,10 +1078,6 @@ def call_model_stream(
     silently reporting zero (which disables budget enforcement and §21's
     compaction trigger).
     """
-    translated_messages = _messages_for_provider(provider_name, messages)
-    sampling = _sampling_kwargs(provider_name, model, temperature)
-    thinking = _thinking_for_provider(provider_name, effort)
-
     # Read once so every branch applies the same D21 usage-or-raise rule --
     # all three of them, since audit #40. This comment used to claim that in
     # its first sentence and take it back in the second ("the flag only gates
@@ -915,6 +1088,19 @@ def call_model_stream(
     supports_stream_usage = provider_data.get(provider_name, {}).get(
         "supports_stream_usage", False
     )
+    # §44. Whether this OpenAI-compatible provider accepts its own
+    # reasoning back on the next request. supports_stream_usage's
+    # precedent: a per-provider fact that cannot be discovered and must not
+    # be guessed, so it lives beside the endpoint it describes and defaults
+    # to the conservative answer.
+    echoes_reasoning = provider_data.get(provider_name, {}).get(
+        "echoes_reasoning", False
+    )
+
+    translated_messages = _messages_for_provider(
+        provider_name, messages, model, echoes_reasoning)
+    sampling = _sampling_kwargs(provider_name, model, temperature)
+    thinking = _thinking_for_provider(provider_name, effort)
 
     if provider_name == "ANTHROPIC":
         stream_kwargs = dict(
@@ -960,6 +1146,16 @@ def call_model_stream(
                 ToolCallRequest(id=b.id, name=b.name, input=b.input)
                 for b in final_msg.content if b.type == "tool_use"
             ]
+            # model_dump() rather than a hand-built dict: what goes back on
+            # the wire has to be what came off it, field for field, or the
+            # signature does not verify. redacted_thinking is included for
+            # the same reason -- it is opaque to us and meaningful to the
+            # model, so dropping it would silently break a turn that had
+            # one.
+            thinking_blocks = [
+                b.model_dump() for b in final_msg.content
+                if b.type in ("thinking", "redacted_thinking")
+            ]
             usage_obj = getattr(final_msg, "usage", None)
             usage = {
                 "input_tokens": getattr(usage_obj, "input_tokens", 0) if usage_obj else 0,
@@ -990,6 +1186,7 @@ def call_model_stream(
 
         yield StreamToken(final_response=ModelResponse(
             text=text, tool_calls=calls, usage=usage,
+            thinking=_thinking_record(provider_name, model, thinking_blocks),
         ))
         return
 
@@ -1060,6 +1257,7 @@ def call_model_stream(
         openai_kwargs["stream_options"] = {"include_usage": True}
 
     text_parts = []
+    reasoning_parts = []
     tool_fragments: dict[int, dict] = {}
     usage = {"input_tokens": 0, "output_tokens": 0}
 
@@ -1086,11 +1284,16 @@ def call_model_stream(
             #
             # NEVER appended to text_parts: reasoning is not the answer,
             # and folding it in would change every ModelResponse this
-            # branch returns, put thinking into the persisted thread, and
-            # send it back on the next turn's wire.
+            # branch returns and put reasoning into the thread as though
+            # the model had said it. It is accumulated SEPARATELY instead
+            # (batch 44), into ModelResponse.thinking, where it is kept as
+            # this provider's own field name rather than as prose -- an
+            # echo back on the wire has to spell it the way the provider
+            # spelled it.
             reasoning = (getattr(delta, "reasoning_content", None)
                          or getattr(delta, "reasoning", None))
             if isinstance(reasoning, str) and reasoning:
+                reasoning_parts.append(reasoning)
                 yield StreamToken(thinking_delta=reasoning)
             if delta.tool_calls:
                 for tc_delta in delta.tool_calls:
@@ -1140,6 +1343,17 @@ def call_model_stream(
             id=frag["id"], name=name, input=parsed, parse_error=parse_error,
         ))
 
+    # ONE block, not one per delta. There is no block structure on this
+    # wire -- reasoning arrives as a flat string of deltas -- so the record
+    # is the concatenation under the field name the request would use to
+    # send it back. `type` names the shape for _messages_for_provider;
+    # nothing about it is the provider's, which is why it is spelled after
+    # the field rather than after Anthropic's "thinking".
+    reasoning_blocks = ([{"type": "reasoning_content",
+                          "text": "".join(reasoning_parts)}]
+                        if reasoning_parts else [])
+
     yield StreamToken(final_response=ModelResponse(
         text="".join(text_parts), tool_calls=calls, usage=usage,
+        thinking=_thinking_record(provider_name, model, reasoning_blocks),
     ))

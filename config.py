@@ -179,10 +179,31 @@ GOOGLE_THINKING_BUDGETS = {
 DB_PATH = os.environ.get("APP_DB_PATH", "app.db")
 
 # --- Output artifacts ---
-OUTPUT_DIR = os.environ.get("AGENT_OUTPUT_DIR", "./output")
+#
+# BESIDE THE WORK, which since batch 44 means beside the WORKSPACE when one
+# was named. "State is global, artifacts are local" is the distribution
+# split, and the local half is only true if "local" tracks where the work
+# is: with AGENT_WORKSPACE pointing at a project, a run launched from the
+# harness checkout wrote its reports into the harness. Reading the env var
+# rather than WORKSPACE_DIR below, and defaulting it to ".", so this stays
+# one expression with no branch in it -- an unset AGENT_WORKSPACE gives
+# ./output exactly as before, not ./workspace/output.
+OUTPUT_DIR = os.environ.get(
+    "AGENT_OUTPUT_DIR",
+    os.path.join(os.environ.get("AGENT_WORKSPACE", "."), "output"))
 
 # --- File-ops workspace (ROADMAP §6) ---
 WORKSPACE_DIR = os.environ.get("AGENT_WORKSPACE", "./workspace")
+
+# Whether AGENT_WORKSPACE was NAMED, as opposed to defaulted (batch 44).
+#
+# The presence of the variable, never its value: the default "./workspace"
+# is a subdirectory of wherever you launched, so a value test would make
+# `./workspace` the project for everyone who never set anything -- which
+# is the whole population this must not disturb. main() reads this to
+# decide the project path; the decision is there, because config.py holds
+# plain values and this is one.
+WORKSPACE_DIR_EXPLICIT = "AGENT_WORKSPACE" in os.environ
 MAX_FILE_SIZE_BYTES = 25_000_000   # 25 MB — hard reject before opening
 MAX_READ_LINES = 500               # max lines per read call
 MAX_READ_CHARS = 50_000            # max chars per read call
@@ -370,30 +391,67 @@ MAX_REVIEW_REFINEMENTS = 3
 # The architecture is what's locked; the numbers are expected to move once
 # there are real long threads to look at.
 
-# The working-set size compaction maintains. Compaction fires when the last
-# measured input_tokens reaches this.
+# How much of the model's context window a thread may fill before
+# compaction folds it. thresholds() multiplies this by context_limit(),
+# so it is 850k on a 1M model and 170k on a 200k one.
 #
-# M1: NOT `context_limit - buffer`. §21 parameterized the trigger against
-# the model's context window on the assumption that the window is what a
-# long thread hits first. On this codebase it is not -- a window-derived
-# trigger sits at a size the thread can never reach in working order, and
-# (since batch 27) there is no default spend ceiling for it to collide with
-# either: the trigger is a CONTEXT-SIZE target, keyed off the provider's
-# own last_input_tokens measurement, and it has never read the billing
-# meter. The model's real window remains a backstop below.
+# BATCH 44 REVERSED M1, AND THE REASON M1 GAVE HAS EXPIRED. M1 rejected a
+# window-derived trigger because "a window-derived trigger sits at a size
+# the thread can never reach in working order" -- and the arithmetic
+# behind that was about MAX_TOKEN_BUDGET, then a default spend ceiling of
+# 250k: the prompt is re-sent on every step of a tool-using turn, so a
+# thread at 160k got one response and no tool calls before the cap ended
+# the turn. Batch 27 DELETED that default ceiling. There is no cap for a
+# large trigger to collide with any more, so the premise is gone and the
+# flat 40k outlived it -- compacting a 1M-window thread at 4% of its
+# window, spending a model call and losing fidelity to solve a problem
+# the model did not have.
 #
-# This also makes MODEL_CONTEXT_WINDOWS much less dangerous to get wrong,
-# which was a risk §21 flagged about its own design.
+# THE COST OF THE REVERSAL, STATED. MODEL_CONTEXT_WINDOWS and the provider
+# query decide when every thread folds now, where under M1 a wrong entry
+# only mistimed a research backstop. That is why core/model_windows.py
+# exists (the user's own answer, outranking both) and why the fallback
+# still WARNS. A fraction rather than `window - margin`: a fixed margin
+# that is right for a 1M model leaves a 64k model no working room at all,
+# and one that is right for 64k never fires on 1M.
+COMPACTION_TRIGGER_FRACTION = 0.85
+
+# The trigger used when NO MODEL IS IN SCOPE -- and the default
+# settings.json's `compaction.trigger_tokens` overrides.
+#
+# One caller has no (provider, model) to derive a window from:
+# compaction.pin_measurements, which computes #89's cap as
+# PIN_MAX_TRIGGER_FRACTION x the trigger from a thread id alone. Left at
+# 40_000 deliberately, so the pin cap is exactly what it was before batch
+# 44 -- this batch changes when a thread compacts, not how much of one a
+# single pin may freeze, and a cap that grew with the window would let one
+# `pin` call freeze 425k tokens of a 1M-window thread.
 COMPACTION_TRIGGER_TOKENS = 40_000
 
 # Fires this many tokens BEFORE the trigger, so there is room to do
 # something about it -- pin a message, wrap up a thought, run /compact at a
-# natural break. §21 singles this out as the one value whose wrong setting
+# natural break.
+#
+# STILL ABSOLUTE after batch 44, and that is a decision rather than an
+# oversight. What this buys is a HUMAN'S REACTION TIME, measured in turns,
+# and a turn does not get bigger because the window did: 8k is roughly a
+# turn or two of notice on a 64k model and on a 1M one alike. As a
+# fraction of the new trigger it would be 128k on a 1M model -- a warning
+# that fires while the thread is at 72% and has nothing to worry about
+# yet. §21 singles this out as the one value whose wrong setting
 # is not self-correcting: too small and it is an alert with no time
 # attached to it. Validated to be strictly less than the trigger.
 COMPACTION_WARNING_MARGIN_TOKENS = 8_000
 
 # The most recent tokens that always stay verbatim, never compacted.
+#
+# ABSOLUTE, like the warning margin above and for the same kind of reason:
+# this is an amount of CONVERSATION to keep intact, not a share of a
+# window. It is also the weaker of the two floors in practice -- M5 keeps
+# whichever protects more, and the three-turn floor below almost always
+# protects more than 4k on the long threads that reach the trigger at all.
+# Left where it was so batch 44 changes when a thread folds and not what
+# survives the fold.
 COMPACTION_KEEP_RECENT_TOKENS = 4_000
 
 # M5: a FLOOR in turns, on top of the token floor above, and the two
@@ -579,24 +637,35 @@ COMPACTION_PIPELINE_BACKSTOP_TOKENS = 20_000
 # also the bug this fixed: matching was exact, so `claude-sonnet-5-20260724`
 # missed a million-token entry and silently took the default.
 #
-# Under M1 an incomplete entry costs less than §21 feared -- the working-set
-# trigger never consults this -- but it is not free: it also sets the
-# summarizer's one-call input budget, which gates the lossy truncation in
-# summarize_thread().
+# AN INCOMPLETE ENTRY IS EXPENSIVE NOW. Under M1 it cost a mistimed
+# research backstop and a mistimed summarizer input budget, because the
+# working-set trigger was a flat number that never consulted this. Batch 44
+# made that trigger a FRACTION of what context_limit() returns, so a wrong
+# number here mistimes compaction on every thread -- too high and the
+# thread never folds and the provider raises a hard context-limit error
+# instead. core/model_windows.py is the user's answer to that, and /window
+# is how they give it; this table is what answers before they do.
 MODEL_CONTEXT_WINDOWS: dict[str, int] = {
-    # UNVERIFIED AGAINST A LIVE ENDPOINT, and erring in the dangerous
-    # direction. 1M on these models is beta-gated behind the
-    # context-1m-2025-08-07 header, which this harness does not send, so
-    # the baseline an ordinary account actually gets is 200_000. By the
-    # qwen entry's own rule below -- record the SMALLER number, because
-    # erring high means a hard context-limit error mid-run -- these want
-    # to be 200_000 here, with the query supplying 1M to the accounts that
-    # really have it. Left as set pending an owner decision; see DEVLOG.
+    # 1M IS THE ORDINARY WINDOW ON THESE, not a beta.
+    #
+    # This block used to carry the opposite claim -- that 1M was gated
+    # behind a `context-1m-2025-08-07` header this harness does not send,
+    # so an ordinary account got 200_000 and these entries "want to be
+    # 200_000". That was true of the Sonnet 4 era and was never true of
+    # the models listed here; checked against the current model reference
+    # in batch 44, the whole 4.6-and-later family is 1M and Haiku 4.5 is
+    # 200K. The values were right and the comment was stale, which is the
+    # dangerous combination now that the trigger reads them: a reader
+    # following the old note would have "corrected" five entries by a
+    # factor of five and compacted every Claude thread at a fifth of the
+    # window.
     "claude-opus-5": 1_000_000,
     "claude-sonnet-5": 1_000_000,
     "claude-fable-5": 1_000_000,
     "claude-opus-4-8": 1_000_000,
     "claude-opus-4-7": 1_000_000,
+    "claude-opus-4-6": 1_000_000,
+    "claude-sonnet-4-6": 1_000_000,
     # Dateless, per the normalization note above: this was keyed
     # "claude-haiku-4-5-20251001" while its five siblings were dateless,
     # which is the inconsistency that exposed the exact-match bug.
@@ -612,14 +681,22 @@ MODEL_CONTEXT_WINDOWS: dict[str, int] = {
     "qwen3.8-max-preview": 983_616,
 }
 # Logged at WARNING ONCE PER MODEL, per §21 -- a wrong-by-default window
-# means the backstop fires at the wrong time in whichever direction the
-# guess is wrong, and silent guessing turns a tuning problem into a
-# mystery. Once per model rather than once per use, because context_limit()
-# is on should_compact()'s path and that runs at the top of every step of
-# every turn; the dedup set lives in core/compaction.py. A long session
-# therefore says this once and is then silent, which is the trade -- the
-# line is actionable exactly once.
-DEFAULT_CONTEXT_WINDOW = 200_000
+# means compaction and the backstop both fire at the wrong time in
+# whichever direction the guess is wrong, and silent guessing turns a
+# tuning problem into a mystery. Once per model rather than once per use,
+# because context_limit() is on should_compact()'s path and that runs at
+# the top of every step of every turn; the dedup set lives in
+# core/compaction.py. A long session therefore says this once and is then
+# silent, which is the trade -- the line is actionable exactly once, and
+# since batch 44 it names the action (/window, which remembers).
+#
+# 256_000 rather than 200_000 (batch 44): the floor a hosted agentic model
+# ships with today. Below that is essentially always a self-hosted
+# deployment, whose operator knows the number and can say it once with
+# /window -- which is the case this default cannot serve and does not try
+# to. Erring low here would compact every unknown model early forever to
+# protect the rarer case that has an owner who can answer.
+DEFAULT_CONTEXT_WINDOW = 256_000
 
 
 # APICredentials was here and is deleted (audit #23). It was dead -- nothing

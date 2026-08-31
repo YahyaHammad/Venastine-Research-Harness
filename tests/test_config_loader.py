@@ -253,7 +253,7 @@ def test_get_settings_before_initialize_is_empty():
 
 
 # ---------------------------------------------------------------------------
-# ---- CONTEXT.md opt-in (AC5) ------------------------------------------------
+# ---- AGENTS.md opt-in (AC5) -------------------------------------------------
 # ---------------------------------------------------------------------------
 
 def _write_agent(base, name, fm_extra=()):
@@ -262,8 +262,12 @@ def _write_agent(base, name, fm_extra=()):
 
 
 def test_ac5_context_never_read_without_opt_in(_redirect_roots):
+    # §44: the hub is the project's ROOT AGENTS.md, not .venastine/CONTEXT.md.
+    # The .venastine/ directory is still made, because a project with
+    # nothing in it has nothing to trust and grant_trust below would be
+    # recording a grant over an empty set.
     (_redirect_roots["project"] / ".venastine").mkdir(parents=True)
-    (_redirect_roots["project"] / ".venastine" / "CONTEXT.md").write_text(
+    (_redirect_roots["project"] / "AGENTS.md").write_text(
         "PROJECT CONTEXT", encoding="utf-8")
     _write_agent(_redirect_roots["user"], "opt-in", ("use_project_context: true",))
     _write_agent(_redirect_roots["user"], "opt-out")
@@ -280,7 +284,7 @@ def test_ac5_context_never_read_without_opt_in(_redirect_roots):
 
 def test_context_absent_when_untrusted_even_with_opt_in(_redirect_roots):
     (_redirect_roots["project"] / ".venastine").mkdir(parents=True)
-    (_redirect_roots["project"] / ".venastine" / "CONTEXT.md").write_text(
+    (_redirect_roots["project"] / "AGENTS.md").write_text(
         "PROJECT CONTEXT", encoding="utf-8")
     _write_agent(_redirect_roots["user"], "opt-in", ("use_project_context: true",))
 
@@ -602,14 +606,15 @@ def test_undecodable_settings_in_untrusted_project_does_not_break_the_prompt(
 
 def test_undecodable_context_md_in_trusted_project_degrades(
         _redirect_roots, caplog):
-    """A trusted project's CONTEXT.md is content the USER wrote, and this
+    """A trusted project's AGENTS.md is content the USER wrote, and this
     module's policy for malformed content everywhere else is warn-and-
     skip. Raising instead reached main.load_project_config's
     (ValueError, OSError) handler and SystemExit(1)'d every invocation in
     that directory -- including plain chat, which never reads the file."""
     venastine = _redirect_roots["project"] / ".venastine"
     venastine.mkdir(parents=True, exist_ok=True)
-    (venastine / "CONTEXT.md").write_bytes("Project notes".encode("utf-16"))
+    (_redirect_roots["project"] / "AGENTS.md").write_bytes(
+        "Project notes".encode("utf-16"))
     _write_agent(_redirect_roots["user"], "reader",
                  ("use_project_context: true",))
     workspace_trust.grant_trust(str(_redirect_roots["project"]))
@@ -619,14 +624,15 @@ def test_undecodable_context_md_in_trusted_project_degrades(
 
     assert config_loader.context_for_agent(
         config_loader.get_agent("reader")) is None
-    assert any("CONTEXT.md" in r.getMessage() for r in caplog.records)
+    assert any("AGENTS.md" in r.getMessage() for r in caplog.records)
 
 
 def test_readable_context_md_still_loads(_redirect_roots):
     """Control: the degradation must not swallow the working case."""
     venastine = _redirect_roots["project"] / ".venastine"
     venastine.mkdir(parents=True, exist_ok=True)
-    (venastine / "CONTEXT.md").write_text("Real notes.", encoding="utf-8")
+    (_redirect_roots["project"] / "AGENTS.md").write_text(
+        "Real notes.", encoding="utf-8")
     _write_agent(_redirect_roots["user"], "reader",
                  ("use_project_context: true",))
     workspace_trust.grant_trust(str(_redirect_roots["project"]))

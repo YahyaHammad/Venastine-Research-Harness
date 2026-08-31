@@ -1,32 +1,37 @@
 """
 core/session.py
 
-Ephemeral, per-session overrides of two compaction numbers, and nothing
-else. ROADMAP_v2 §21's revisit, batch 31.
+Ephemeral, per-session override of ONE compaction number, and nothing
+else. ROADMAP_v2 §21's revisit, batch 31; halved in batch 44.
 
 WHAT THIS MODULE OWNS
-  set_window / set_trigger    record an override against a (provider, model)
-  window_for / trigger_for    read one back, but only for that same pair
+  set_trigger                 record an override against a (provider, model)
+  trigger_for                 read it back, but only for that same pair
   trigger_any                 the binding-free read, for #89's pin cap
-  clear                       drop everything, on a /model switch
+  clear                       drop it, on a /model switch
 
 WHAT IT DOES NOT OWN
-  Resolving the numbers -- core/compaction.py:context_limit and
-  thresholds() do that, and they treat what is here as the most local
-  source rather than as the answer. Persisting anything: NOTHING here
-  reaches disk, which is the whole point (see NEVER PERSISTED below).
+  Resolving the number -- core/compaction.py:thresholds() does that, and
+  treats what is here as the most local source rather than as the answer.
+  Persisting anything: NOTHING here reaches disk, which is the whole point
+  (see NEVER PERSISTED below).
 
-TWO NUMBERS, NOT ONE, because they are not the same number and treating
-them as one is what made this feature ambiguous to specify:
+ONE NUMBER NOW, AND THE OTHER ONE LEFT FOR A GOOD REASON. Batch 31 held
+two, `window` and `trigger`, and was careful to say they were not the same
+number. They still are not -- but they no longer have the same LIFETIME,
+which is what this module is really about:
 
-  window   what context_limit() returns. Feeds the RESEARCH-PASS backstop
-           (context_limit - COMPACTION_PIPELINE_BACKSTOP_TOKENS) and the
-           summarizer's one-call input budget. It does NOT affect when an
-           ordinary chat compacts.
-  trigger  the working-set ceiling, config.COMPACTION_TRIGGER_TOKENS. An
-           ABSOLUTE size, not a margin below the window (M1) -- a 200k
-           model and a 1M model both compact at 40k in chat. THIS is the
-           number that decides when a chat thread folds.
+  trigger  the working-set ceiling. Ephemeral, because it is a knob you
+           reach for while a particular thread is behaving badly, and
+           restarting should give the derived number back. Still here.
+  window   what context_limit() returns. It is not a preference at all --
+           it is a FACT about a deployment, and a fact does not want to be
+           re-entered every launch. Batch 44 moved it to
+           core/model_windows.py, a user-tier store keyed on every
+           (provider, model) the user has answered for. Keeping an
+           ephemeral tier ABOVE that store was the rejected alternative:
+           /model would clear a value the store immediately re-supplied,
+           so "override cleared" would be true and change nothing.
 
 BOUND TO A (provider, model) PAIR, AND THAT IS THE INTERESTING RULE.
 An override applies only when the model that was named is the model
@@ -50,7 +55,7 @@ needed and they do different jobs.
 NEVER PERSISTED. Not settings.json (project tier beats user tier there,
 D29 -- and a value that survives a restart is not what was asked for),
 not extra_data, not anywhere. Restarting the harness is the guaranteed
-way back to the derived numbers.
+way back to the derived number.
 
 MODULE STATE, written from the UI thread and read from worker threads.
 Same posture as core/compaction.py's `_compacting` flag and for the same
@@ -67,7 +72,6 @@ logger = logging.getLogger(__name__)
 # key -> (provider_name, model, value). One slot each; setting replaces.
 _overrides: dict = {}
 
-WINDOW = "window"
 TRIGGER = "trigger"
 
 
@@ -95,19 +99,9 @@ def _get(key: str, provider_name: Optional[str],
     return None
 
 
-def set_window(provider_name: str, model: str, tokens: int) -> None:
-    """Override what context_limit() reports for this (provider, model)."""
-    _set(WINDOW, provider_name, model, tokens)
-
-
 def set_trigger(provider_name: str, model: str, tokens: int) -> None:
     """Override the working-set compaction ceiling for this pair."""
     _set(TRIGGER, provider_name, model, tokens)
-
-
-def window_for(provider_name: Optional[str],
-               model: Optional[str]) -> Optional[int]:
-    return _get(WINDOW, provider_name, model)
 
 
 def trigger_for(provider_name: Optional[str],
@@ -137,13 +131,17 @@ def trigger_any() -> Optional[int]:
 def clear(key: Optional[str] = None) -> list:
     """Drop overrides and report which were actually dropped.
 
-    Called with no key by /model, which is the ONLY thing that clears
-    both. `/window off` and `/trigger off` clear one. The return value is
-    what the shell says out loud -- a switch that silently discarded a
-    number the user set would be exactly the invisible state this feature
-    is careful not to introduce.
+    Called with no key by /model. `/trigger off` clears the same one by
+    name; the list form survives a second key being added rather than
+    being collapsed to the one that exists today. The return value is what
+    the shell says out loud -- a switch that silently discarded a number
+    the user set would be exactly the invisible state this feature is
+    careful not to introduce.
+
+    /window is NOT here since batch 44: a remembered window survives the
+    switch, and clearing it is `/window off`.
     """
-    keys = [key] if key else [WINDOW, TRIGGER]
+    keys = [key] if key else [TRIGGER]
     dropped = [name for name in keys if _overrides.pop(name, None) is not None]
     if dropped:
         logger.info("Session overrides cleared: %s.", ", ".join(dropped))

@@ -11,6 +11,7 @@ behavior.
 
 import importlib
 import itertools
+import os
 import sys
 import time
 import types
@@ -445,6 +446,72 @@ def isolate_ui_preferences(tmp_path_factory, monkeypatch):
     return path
 
 
+@pytest.fixture(autouse=True)
+def isolate_model_windows(tmp_path_factory, monkeypatch):
+    """Point the remembered-context-window store somewhere disposable.
+
+    isolate_ui_preferences' argument, third instance. Since batch 44
+    compaction.context_limit() reads this store BEFORE the provider query
+    and the static table, so without the redirect every threshold in the
+    suite would depend on whether the person running it had ever typed
+    /window -- and the writes would land in their real
+    ~/.config/venastine/model_windows.json.
+
+    A FILE PER TEST for the same reason as the preference store: /window
+    writes on every use, and a shared file would let one test's window
+    decide another test's compaction threshold.
+    """
+    from core import model_windows
+
+    path = tmp_path_factory.getbasetemp() / "model-windows-{}.json".format(
+        next(_ui_prefs_counter))
+    monkeypatch.setattr(model_windows, "store_path", lambda: str(path))
+    return path
+
+
+@pytest.fixture(autouse=True)
+def isolate_provider_check(tmp_path_factory, monkeypatch):
+    """Give the launch provider check a keyed copy of providers.json.
+
+    isolate_ui_preferences' second reason, arriving through a second door.
+    Since batch 44 VenastineApp.__init__ calls provider_startup_issues()
+    against the pair it resolved, so EVERY app built in a test reads the
+    developer's own providers.json -- and the shipped one carries empty
+    keys, so `test_a_healthy_mount_adds_no_warning_lines` would pass on a
+    machine with a real ANTHROPIC key and fail on one without. A suite
+    result that depends on whose checkout it runs in.
+
+    The copy is the REAL file's entries with every empty key filled, so
+    what a test sees is the shipped roster in its healthy state; a test
+    that wants a finding writes its own file and repoints the attribute.
+
+    LEFT ALONE WHEN THE FILE IS ABSENT, deliberately. A fresh clone with
+    no providers.json fails twelve tests with "No providers configured"
+    (AGENTS.md says so, and says which), and that is a real contract about
+    a real setup step -- synthesising a roster here would quietly repair
+    it and the note would go stale without anything failing.
+    """
+    import json
+
+    import credentials
+
+    source = credentials.LLM_PROVIDERS_FILE
+    if not os.path.exists(source):
+        return None
+    with open(source, encoding="utf-8") as f:
+        data = json.load(f)
+    for entry in data.values():
+        if isinstance(entry, dict) and not entry.get("API_KEY"):
+            entry["API_KEY"] = "test-key-not-a-real-credential"
+
+    path = tmp_path_factory.getbasetemp() / "providers-{}.json".format(
+        next(_ui_prefs_counter))
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f)
+    monkeypatch.setattr(credentials, "LLM_PROVIDERS_FILE", str(path))
+    return path
+
+
 @pytest.fixture
 def real_harness_tier(tmp_path, monkeypatch):
     """A project tier in tmp with the HARNESS TIER LEFT REAL (#5).
@@ -754,7 +821,8 @@ class FakeStorage:
         this method and is the fake's documented simplification."""
         return self._first_user_message(thread_id)
 
-    def save_message(self, thread_id, role, content, name=None, tool_call_id=None):
+    def save_message(self, thread_id, role, content, name=None,
+                     tool_call_id=None, thinking=None):
         # Stores content exactly as given -- production's save_message
         # json.dumps'es it and get_session_history json.loads'es it back,
         # and round-trip is identity for any JSON-encodable value, so the
@@ -771,6 +839,12 @@ class FakeStorage:
             "name": name,
             "tool_call_id": tool_call_id,
             "pinned": False,
+            # §44. Held as the DICT, where production holds the JSON text
+            # its column stores -- the same simplification this fake
+            # already makes for `content`, and for the same reason: the
+            # round trip is identity, and what has to mirror production
+            # for real is the RECONSTRUCTION below.
+            "thinking": thinking,
         })
         # (#32) Mirrors production: any archived row stamps the thread,
         # in the same write.
@@ -959,6 +1033,15 @@ class FakeStorage:
                     "text": content.get("text", ""),
                     "tool_calls": content.get("tool_calls", []),
                 }
+                # §44, mirroring storage._to_neutral exactly: present only
+                # when the row carried reasoning, so every message written
+                # before this batch reconstructs to the shape it always
+                # did. The real one decodes JSON and drops anything
+                # unusable; this fake stores the dict, so the guard is the
+                # same predicate against an already-decoded value.
+                thinking = row.get("thinking")
+                if isinstance(thinking, dict) and thinking.get("blocks"):
+                    payload["thinking"] = thinking
             elif role == "tool":
                 payload = {"role": "tool", "tool_call_id": row["tool_call_id"], "content": content}
             else:

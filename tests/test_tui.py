@@ -1436,11 +1436,12 @@ async def test_a_trigger_above_the_thread_says_nothing_about_folding():
 
 @pytest.mark.asyncio
 async def test_window_warns_but_does_not_refuse_above_the_reported_window():
-    """Raising it is the best reason to have the command -- a beta-gated
-    1M window reads as 200k until the account is asked with the right
-    header -- so refusing would block exactly the case it exists for."""
+    """Raising it is the best reason to have the command -- a gateway or a
+    self-hosted endpoint can report its own default rather than the
+    deployment's real window -- so refusing would block exactly the case
+    it exists for."""
     from core import client as client_module
-    from core import session
+    from core import model_windows
     from tui.app import _cmd_window
 
     client_module._context_window_cache[("ANTHROPIC", "claude-sonnet-5")] = 200_000
@@ -1451,9 +1452,9 @@ async def test_window_warns_but_does_not_refuse_above_the_reported_window():
         _cmd_window(app, "1m")
         await pilot.pause()
 
-    assert session.window_for("ANTHROPIC", "claude-sonnet-5") == 1_000_000
+    assert model_windows.window_for("ANTHROPIC", "claude-sonnet-5") \
+        == 1_000_000
     assert errors and "200,000" in errors[0]
-    session.clear()
     client_module._context_window_cache.clear()
 
 
@@ -1461,7 +1462,7 @@ async def test_window_warns_but_does_not_refuse_above_the_reported_window():
 async def test_a_window_at_or_below_the_backstop_margin_is_REFUSED():
     """compact_at would clamp to its floor of 1 and every evaluation of a
     research pass would compact."""
-    from core import session
+    from core import model_windows
     from tui.app import _cmd_window
 
     app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
@@ -1470,25 +1471,50 @@ async def test_a_window_at_or_below_the_backstop_margin_is_REFUSED():
         _cmd_window(app, str(config.COMPACTION_PIPELINE_BACKSTOP_TOKENS))
         await pilot.pause()
 
-    assert session.window_for("ANTHROPIC", "claude-sonnet-5") is None
+    assert model_windows.window_for("ANTHROPIC", "claude-sonnet-5") is None
     assert errors and "backstop" in errors[0]
-    session.clear()
 
 
 @pytest.mark.asyncio
-async def test_off_clears_one_override_and_says_so():
-    from core import session
+async def test_a_remembered_window_is_confirmed_only_when_it_reached_disk(
+        mocker):
+    """/theme and /model's rule, applied to the third preference: a
+    failure WARNS inside the store and reaches the transcript through
+    TranscriptLogHandler, so the command must not also claim a save it did
+    not make. The value is still reported; only the claim goes."""
     from tui.app import _cmd_window
 
     app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
     async with app.run_test() as pilot:
-        session.set_window("ANTHROPIC", "claude-sonnet-5", 400_000)
+        system, _ = _capture(app)
+        _cmd_window(app, "400k")
+        await pilot.pause()
+        assert any("Remembered for this model" in line for line in system)
+
+        mocker.patch("core.model_windows.remember_window", return_value=False)
+        system2, _ = _capture(app)
+        _cmd_window(app, "500k")
+        await pilot.pause()
+
+    assert any("Context window 500k" in line for line in system2), (
+        "the number is still reported; only the claim that it was saved goes")
+    assert not any("Remembered for this model" in line for line in system2)
+
+
+@pytest.mark.asyncio
+async def test_off_clears_the_remembered_window_and_leaves_the_trigger():
+    from core import model_windows, session
+    from tui.app import _cmd_window
+
+    app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
+    async with app.run_test() as pilot:
+        model_windows.remember_window("ANTHROPIC", "claude-sonnet-5", 400_000)
         session.set_trigger("ANTHROPIC", "claude-sonnet-5", 80_000)
         system, errors = _capture(app)
         _cmd_window(app, "off")
         await pilot.pause()
 
-    assert session.window_for("ANTHROPIC", "claude-sonnet-5") is None
+    assert model_windows.window_for("ANTHROPIC", "claude-sonnet-5") is None
     assert session.trigger_for("ANTHROPIC", "claude-sonnet-5") == 80_000
     assert any("cleared" in line for line in system)
     session.clear()
@@ -1499,7 +1525,7 @@ async def test_the_bare_form_reports_the_value_and_its_provenance():
     """Provenance is the point: four sources can answer for the window, and
     a number with no source attached is what makes someone edit the wrong
     one."""
-    from core import session
+    from core import model_windows
     from tui.app import _cmd_window
 
     app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
@@ -1509,29 +1535,30 @@ async def test_the_bare_form_reports_the_value_and_its_provenance():
         await pilot.pause()
         assert any("MODEL_CONTEXT_WINDOWS" in line for line in system)
 
-        session.set_window("ANTHROPIC", "claude-sonnet-5", 400_000)
+        model_windows.remember_window("ANTHROPIC", "claude-sonnet-5", 400_000)
         system2, _ = _capture(app)
         _cmd_window(app, "")
         await pilot.pause()
 
-    assert any("session override" in line and "400,000" in line
+    assert any("remembered for" in line and "400,000" in line
                for line in system2)
-    session.clear()
 
 
 @pytest.mark.asyncio
-async def test_switching_model_clears_both_overrides_and_says_so(mocker):
-    """A window tuned for one model feeds the summarizer's truncation gate
-    on the next. Cleared rather than carried, and SAID rather than dropped
-    quietly -- the same call the effort revalidation makes two lines
-    below."""
+async def test_switching_model_clears_the_trigger_but_keeps_the_window(mocker):
+    """Batch 44 split what §31 had joined.
+
+    The trigger is cleared and SAID rather than dropped quietly -- a
+    number tuned for one model must not govern the next. The remembered
+    window is NOT cleared: it is a fact about a deployment, kept per pair,
+    and a /model switch simply resolves a different key."""
     mocker.patch("credentials.load_provider_data", return_value=_TWO_PROVIDERS)
-    from core import session
+    from core import model_windows, session
     from tui.app import _cmd_model
 
     app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
     async with app.run_test() as pilot:
-        session.set_window("ANTHROPIC", "claude-sonnet-5", 400_000)
+        model_windows.remember_window("ANTHROPIC", "claude-sonnet-5", 400_000)
         session.set_trigger("ANTHROPIC", "claude-sonnet-5", 80_000)
         system, _ = _capture(app)
         _cmd_model(app, "OPENAI gpt-4o")
@@ -1540,8 +1567,9 @@ async def test_switching_model_clears_both_overrides_and_says_so(mocker):
     assert session.state() == {}
     assert any("cleared by the switch" in line for line in system)
 
-    # ...and coming back does NOT restore them (the owner's rule).
-    assert session.window_for("ANTHROPIC", "claude-sonnet-5") is None
+    # The window survives the round trip; the trigger does not.
+    assert session.trigger_for("ANTHROPIC", "claude-sonnet-5") is None
+    assert model_windows.window_for("ANTHROPIC", "claude-sonnet-5") == 400_000
     session.clear()
 
 
@@ -3134,17 +3162,36 @@ def test_live_claims_fall_back_when_the_run_has_none():
 # ---- #138: launch-time provider warnings reach the transcript --------------
 # ===========================================================================
 
+def _providers_file(tmp_path, monkeypatch, entries):
+    """Point credentials at a providers.json of this test's own making."""
+    import json
+
+    import credentials
+
+    path = tmp_path / "providers.json"
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(entries, f)
+    monkeypatch.setattr(credentials, "LLM_PROVIDERS_FILE", str(path))
+    return path
+
+
 @pytest.mark.asyncio
-async def test_launch_warnings_are_written_to_the_transcript_at_mount():
+async def test_launch_warnings_are_written_to_the_transcript_at_mount(
+        tmp_path, monkeypatch):
     """#138's TUI half. main() cannot print these -- anything on stdout
-    before Textual takes the screen vanishes when it renders -- so they
-    travel into the app and on_mount writes each one where the user
+    before Textual takes the screen vanishes when it renders -- so the
+    app computes them itself and on_mount writes each one where the user
     actually reads. Beside the status line it qualifies, before the
     /help hint: a warning that arrives after the user typed is a dead
-    end one step later than #138 complained about."""
-    app = VenastineApp("ANTHROPIC", "test-model", {},
-                       startup_warnings=[
-                           "ANTHROPIC has no API_KEY in providers.json"])
+    end one step later than #138 complained about.
+
+    Arranged through providers.json rather than by handing the app a
+    string (batch 44). The old version constructed the finding by hand,
+    which is why it could not see the defect it was named for: the app
+    was never asked to work out WHICH provider the finding was about."""
+    _providers_file(tmp_path, monkeypatch,
+                    {"ANTHROPIC": {"API_KEY": "", "API_URL": ""}})
+    app = VenastineApp("ANTHROPIC", "test-model", {})
     async with app.run_test() as pilot:
         assert await settle(pilot, lambda: bool(app._transcript._entries)), \
             "the transcript never rendered"
@@ -3153,18 +3200,60 @@ async def test_launch_warnings_are_written_to_the_transcript_at_mount():
                     if "has no API_KEY" in txt]
         assert rendered, (
             "the launch warning never reached the transcript")
+        assert "ANTHROPIC" in rendered[0]
 
 
 @pytest.mark.asyncio
-async def test_a_healthy_mount_adds_no_warning_lines():
+async def test_a_healthy_mount_adds_no_warning_lines(tmp_path, monkeypatch):
     """Silence is the healthy case's whole UX (#138): an install with a
     configured provider and key gets no extra lines at all."""
-    app = VenastineApp("ANTHROPIC", "test-model", {}, startup_warnings=[])
+    _providers_file(tmp_path, monkeypatch,
+                    {"ANTHROPIC": {"API_KEY": "k", "API_URL": ""}})
+    app = VenastineApp("ANTHROPIC", "test-model", {})
     async with app.run_test() as pilot:
         assert await settle(pilot, lambda: bool(app._transcript._entries))
 
         assert not [txt for _role, txt in app._transcript._entries
                     if "API_KEY" in txt or "warning" in txt.lower()]
+
+
+@pytest.mark.asyncio
+async def test_the_launch_finding_is_about_the_remembered_pair(
+        tmp_path, monkeypatch, isolate_ui_preferences):
+    """Batch 44's defect, and the seam nothing was standing on.
+
+    §43 restores a remembered /model pair inside __init__; #138 computed
+    its finding in main(), before the app existed. Both features were
+    tested and neither test built the other's state, so a session came up
+    on OpenRouter under a banner saying so and reported that ANTHROPIC --
+    a provider it would never call -- has no key.
+
+    The two halves are asserted separately on purpose: an assertion that
+    only the OPENROUTER line is absent would also pass if the app stopped
+    warning at all."""
+    from tui import preferences
+
+    _providers_file(tmp_path, monkeypatch, {
+        "ANTHROPIC": {"API_KEY": "", "API_URL": ""},
+        "OPENROUTER": {"API_KEY": "k", "API_URL": "",
+                       "is_v1_compatible": True},
+    })
+    assert preferences.remember_model("OPENROUTER", "minimax-m3", None, None)
+
+    app = VenastineApp("ANTHROPIC", "claude-sonnet-5", {})
+    assert (app.provider_name, app.model) == ("OPENROUTER", "minimax-m3"), \
+        "the pair was not restored, so this test proves nothing"
+
+    async with app.run_test() as pilot:
+        assert await settle(pilot, lambda: bool(app._transcript._entries))
+
+        assert not [txt for _role, txt in app._transcript._entries
+                    if "ANTHROPIC" in txt], (
+            "the launch finding named the provider main() resolved, not "
+            "the one the session restored and will actually call")
+        assert [txt for _role, txt in app._transcript._entries
+                if "OPENROUTER" in txt], (
+            "the banner names the restored pair, so something should")
 
 
 # ===========================================================================

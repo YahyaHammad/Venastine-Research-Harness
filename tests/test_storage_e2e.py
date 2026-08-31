@@ -443,6 +443,75 @@ def test_a_migrated_column_matches_the_fresh_schema_exactly(real_storage,
 # defence-in-depth nobody exercises: a guard with no test that makes it fire
 # is indistinguishable from a guard that does not work.
 
+def test_reasoning_survives_a_write_and_a_read(real_storage):
+    """§44, end to end on real SQLite: what core/loop.py hands
+    add_assistant_message comes back out of archive_history unchanged.
+
+    Against the REAL storage rather than the fake, because the claim is
+    about a COLUMN -- one this project added to a table that already
+    exists on disk, which is the case database.ensure_columns() exists
+    for. A test against FakeStorage would prove the fake and the code
+    agree about a dict key.
+    """
+    from core.client import ModelResponse
+    from core.memory import ConversationMemory
+
+    record = {"provider": "ANTHROPIC", "model": "claude-opus-5",
+              "blocks": [{"type": "thinking", "thinking": "Let me think.",
+                          "signature": "abc123"}]}
+
+    memory = ConversationMemory()
+    memory.add_user_message("why?")
+    memory.add_assistant_message(
+        ModelResponse(text="Because.", thinking=record))
+
+    # The live view and the archive carry the same shape, which is what
+    # makes a resumed turn indistinguishable from one that never stopped.
+    assert memory.messages[-1]["thinking"] == record
+    stored = real_storage.archive_history(memory.thread_id)[-1]
+    assert stored["thinking"] == record
+    assert stored["text"] == "Because."
+
+    # And a fresh read of the same thread -- the resume path -- agrees.
+    assert ConversationMemory(
+        thread_id=memory.thread_id).messages[-1]["thinking"] == record
+
+
+def test_a_turn_with_no_reasoning_writes_no_record(real_storage):
+    """NULL, not an empty envelope. Every message this project has ever
+    written must reconstruct to exactly the shape it did before §44, or
+    something that reads the archive meets a key it was not built for."""
+    from core.client import ModelResponse
+    from core.memory import ConversationMemory
+
+    memory = ConversationMemory()
+    memory.add_user_message("q")
+    memory.add_assistant_message(ModelResponse(text="a"))
+
+    assert "thinking" not in memory.messages[-1]
+    stored = real_storage.archive_history(memory.thread_id)[-1]
+    assert stored == {"role": "assistant", "text": "a", "tool_calls": []}
+
+
+def test_an_unreadable_record_costs_the_reasoning_not_the_thread(real_storage):
+    """The column is a convenience for replay and for the echo. A row
+    whose JSON cannot be parsed must cost that convenience, never the
+    ability to resume the conversation at all."""
+    from core.client import ModelResponse
+    from core.memory import ConversationMemory
+
+    memory = ConversationMemory()
+    memory.add_user_message("q")
+    memory.add_assistant_message(ModelResponse(text="a"))
+
+    row = dict(real_storage._ordered_rows(memory.thread_id)[-1])
+    row["thinking"] = "{not json"
+    neutral = real_storage._to_neutral(row)
+
+    assert neutral["text"] == "a"
+    assert "thinking" not in neutral
+
+
 def test_a_backwards_watermark_is_refused(real_storage, compactor):
     """save_checkpoint enforces the invariant regardless of caller.
     latest_checkpoint resolves by timestamp, so a backwards watermark does

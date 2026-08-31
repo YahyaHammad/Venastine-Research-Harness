@@ -12,7 +12,7 @@ registry. The tests are about the properties that assembly can silently lose:
   I2   reads are confined to the project and to documentation
   I5   no way to confirm ⇒ nothing is written (§25's V6, applied again)
   I6   an untrusted project is not laundered into a trusted one, and
-       CONTEXT.md is never special-cased out of the D17 hash
+       AGENTS.md is never special-cased out of the D17 hash
   I10  stubs are templates; nothing invents project content
   I11  the index is generated, and is a pure function of the kind
   I12  an existing document is left exactly as it was
@@ -195,8 +195,13 @@ class TestTheScopedTools:
         """I9. The hub is the only file §14's loader reads, and it reads it
         from .venastine/ only."""
         root = str(project)
-        assert project_docs.doc_path(root, "CONTEXT.md") == os.path.join(
-            workspace_trust.venastine_dir(root), "CONTEXT.md")
+        # §44: one join, no special case. The hub moved to the project
+        # root, so every document in the set is a sibling -- which is what
+        # makes a project shared WITHOUT .venastine/ still coherent to
+        # whoever cloned it. The boundary did not move with it:
+        # workspace_trust.content_files() covers the root AGENTS.md.
+        assert project_docs.doc_path(root, "AGENTS.md") == os.path.join(
+            root, "AGENTS.md")
         assert project_docs.doc_path(root, "ARCHITECTURE.md") == os.path.join(
             root, "ARCHITECTURE.md")
 
@@ -351,6 +356,35 @@ class TestTheScopedTools:
 # ---- The document sets -----------------------------------------------------
 # ---------------------------------------------------------------------------
 
+class TestWhereItWrites:
+    """Batch 44. The reported symptom, stated as a property.
+
+    With AGENT_WORKSPACE set, the file tools were correctly confined to the
+    project and /init scaffolded into the HARNESS instead -- and no test
+    could see it, because every test in this file establishes its root by
+    calling config_loader.initialize() and none of them has ever cared
+    what the working directory was.
+
+    THE DESTINATION IS RESOLVED TWICE and both resolutions matter.
+    project_init.generator reads config_loader.get_project_path() for the
+    manifest, the diff and the trust state; write_project_doc re-reads it
+    through its own _project_root(), because I1 gave that tool no path
+    parameter on purpose so it cannot be aimed. Fixing one and not the
+    other would have moved the report and left the write.
+    """
+
+    def test_the_destination_follows_the_project_and_not_the_cwd(
+            self, project):
+        from tools.builtin.project_docs import _project_root, doc_path
+
+        assert os.path.realpath(str(project)) != os.path.realpath(os.getcwd()), (
+            "this test says nothing unless the project and the working "
+            "directory actually differ")
+        assert os.path.realpath(_project_root()) == os.path.realpath(str(project))
+        assert doc_path(_project_root(), "AGENTS.md").startswith(
+            os.path.realpath(str(project)))
+
+
 class TestTheDocumentSets:
 
     def test_the_two_sets_share_only_the_standards_document(self):
@@ -362,7 +396,7 @@ class TestTheDocumentSets:
         """A project that started as research and grew a codebase must be
         able to gain an ARCHITECTURE.md without being re-classified first."""
         names = doc_sets.all_document_names()
-        assert "CONTEXT.md" in names
+        assert "AGENTS.md" in names
         assert set(doc_sets.document_set("software")) <= names
         assert set(doc_sets.document_set("research")) <= names
 
@@ -392,7 +426,7 @@ class TestTheDocumentSets:
     @pytest.mark.parametrize("kind", ["software", "research"])
     def test_the_index_is_a_pure_function_of_the_kind(self, kind, tmp_path):
         """I11, and the defect that found it: an index that varied with what
-        already existed rewrote CONTEXT.md on every subsequent /init and
+        already existed rewrote AGENTS.md on every subsequent /init and
         labelled files /init had just authored as pre-existing.
 
         REWRITTEN in batch 14 (#98). The old version asserted
@@ -412,14 +446,14 @@ class TestTheDocumentSets:
         index = doc_sets.render_index(kind)
         links = [ln for ln in index.splitlines() if ln.startswith("- [")]
 
-        expected = [f"- [{n}](../{n}) — {doc_sets._STUBS[n][0]}"
+        expected = [f"- [{n}]({n}) — {doc_sets._STUBS[n][0]}"
                     for n in doc_sets.document_set(kind)]
         assert links == expected
 
         other = "research" if kind == "software" else "software"
         for name in doc_sets.document_set(other):
             if name not in doc_sets.document_set(kind):
-                assert f"[{name}](../{name})" not in index
+                assert f"[{name}]({name})" not in index
 
         # Purity against a filesystem that changed, not against itself.
         for name in doc_sets.document_set(kind):
@@ -427,9 +461,9 @@ class TestTheDocumentSets:
         assert doc_sets.render_index(kind) == index
 
     def test_the_index_links_out_of_venastine(self):
-        """CONTEXT.md lives one level down, so a bare ./NAME.md would be a
+        """§44: sibling links. The hub used to live one level down and
         broken link in the one file every agent reads."""
-        assert "](../ARCHITECTURE.md)" in doc_sets.render_index("software")
+        assert "](ARCHITECTURE.md)" in doc_sets.render_index("software")
 
 
 # ---------------------------------------------------------------------------
@@ -809,17 +843,17 @@ class TestGenerating:
 
     def test_it_writes_the_hub_and_the_set(self, project, fake_agent):
         notice = _generate()
-        assert (project / ".venastine" / "CONTEXT.md").exists()
+        assert (project / "AGENTS.md").exists()
         for name in doc_sets.document_set("software"):
             assert (project / name).exists(), name
-        assert "CONTEXT.md" in notice["text"]
+        assert "AGENTS.md" in notice["text"]
 
     def test_the_hub_carries_the_generated_index(self, project, fake_agent):
         _generate()
-        body = (project / ".venastine" / "CONTEXT.md").read_text(
+        body = (project / "AGENTS.md").read_text(
             encoding="utf-8")
         assert "## Project documentation" in body
-        assert "](../ARCHITECTURE.md)" in body
+        assert "](ARCHITECTURE.md)" in body
 
     def test_the_manifest_reaches_the_agent_as_the_task(self, project,
                                                         fake_agent):
@@ -835,7 +869,7 @@ class TestGenerating:
         diff and re-applying them."""
         venastine = project / ".venastine"
         venastine.mkdir()
-        (venastine / "CONTEXT.md").write_text(
+        (project / "AGENTS.md").write_text(
             "# Widget\n\nHAND WRITTEN NOTE.\n", encoding="utf-8")
         _generate()
         assert "HAND WRITTEN NOTE." in fake_agent[0]["user_goal"]
@@ -874,11 +908,11 @@ class TestGenerating:
     def test_a_second_run_changes_nothing(self, project, fake_agent):
         """I11's property, end to end: /init is idempotent."""
         _generate()
-        before = (project / ".venastine" / "CONTEXT.md").read_text(
+        before = (project / "AGENTS.md").read_text(
             encoding="utf-8")
         notice = _generate()
         assert "Nothing to do" in notice["text"]
-        assert (project / ".venastine" / "CONTEXT.md").read_text(
+        assert (project / "AGENTS.md").read_text(
             encoding="utf-8") == before
 
     def test_the_research_set_is_scaffolded_when_chosen(self, project,
@@ -893,7 +927,7 @@ class TestGenerating:
                             staticmethod(lambda **_kw: _Resp("")))
         with pytest.raises(generator.InitError):
             _generate()
-        assert not (project / ".venastine" / "CONTEXT.md").exists()
+        assert not (project / "AGENTS.md").exists()
 
     def test_a_missing_initializer_agent_is_reported_not_crashed(
             self, project, monkeypatch):
@@ -913,13 +947,13 @@ class TestConsent:
         """I5 / §25's V6: the inability to ask is not permission to
         proceed. This is the sixth place that rule applies."""
         notice = _generate(confirm=None)
-        assert not (project / ".venastine" / "CONTEXT.md").exists()
+        assert not (project / "AGENTS.md").exists()
         assert not (project / "ARCHITECTURE.md").exists()
         assert "no way to confirm" in notice["text"]
 
     def test_declining_writes_nothing(self, project, fake_agent):
         notice = _generate(confirm=lambda _s: False)
-        assert not (project / ".venastine" / "CONTEXT.md").exists()
+        assert not (project / "AGENTS.md").exists()
         assert "Declined" in notice["text"]
 
     def test_the_diff_is_shown_before_the_question(self, project, fake_agent):
@@ -937,7 +971,7 @@ class TestConsent:
         summaries = []
         _generate(confirm=lambda summary: (summaries.append(summary), True)[1])
         assert "ARCHITECTURE.md" in summaries[0]
-        assert "CONTEXT.md" in summaries[0]
+        assert "AGENTS.md" in summaries[0]
 
     def test_one_consent_covers_the_whole_command(self, project, fake_agent):
         """write_project_doc is approval-gated, so a naive implementation
@@ -995,7 +1029,7 @@ class TestConsent:
 
         message = str(exc.value)
         assert "TECHNICAL_DEBT.md" in message
-        assert "CONTEXT.md" in message
+        assert "AGENTS.md" in message
         assert "ARCHITECTURE.md" in message
         # and the count is the count, not the whole document set
         created = [n for n in doc_sets.document_set("software")
@@ -1007,7 +1041,7 @@ class TestConsent:
         """The control on the line above: a message listing files must not
         appear when there are none, and "Nothing was written" is a
         different sentence from a list of length zero."""
-        _fail_write_of(monkeypatch, "CONTEXT.md")
+        _fail_write_of(monkeypatch, "AGENTS.md")
 
         with pytest.raises(generator.InitError) as exc:
             _generate()
@@ -1061,7 +1095,7 @@ class TestConsent:
         """U7, recorded as a test because the alternative is tempting.
         Rolling back would delete documents out of someone's project on an
         error path, and it would be a lie about the one file that matters:
-        CONTEXT.md's previous content was overwritten at the first step and
+        AGENTS.md's previous content was overwritten at the first step and
         cannot be restored."""
         _fail_write_of(monkeypatch, "TECHNICAL_DEBT.md")
         with pytest.raises(generator.InitError):
@@ -1103,7 +1137,7 @@ class TestChoosingTheKind:
                                                          fake_agent):
         notice = _generate(choose_kind=lambda *_a: None)
         assert "Cancelled" in notice["text"]
-        assert not (project / ".venastine" / "CONTEXT.md").exists()
+        assert not (project / "AGENTS.md").exists()
 
     def test_no_way_to_ask_and_no_flag_refuses(self, project, fake_agent):
         with pytest.raises(generator.InitError):
@@ -1129,7 +1163,7 @@ class TestWorkspaceTrust:
     def test_a_trusted_project_stays_trusted(self, project, fake_agent):
         venastine = project / ".venastine"
         venastine.mkdir()
-        (venastine / "CONTEXT.md").write_text("old\n", encoding="utf-8")
+        (project / "AGENTS.md").write_text("old\n", encoding="utf-8")
         workspace_trust.grant_trust(str(project))
         assert workspace_trust.is_trusted(str(project))
 
@@ -1156,12 +1190,12 @@ class TestWorkspaceTrust:
 
     def test_context_md_still_counts_towards_the_hash(self, project,
                                                       fake_agent):
-        """The other half of I6: no special-casing. If CONTEXT.md were
+        """The other half of I6: no special-casing. If AGENTS.md were
         excluded from the hash, /init would need no re-grant at all — and
         D17 would have a hole shaped exactly like this command."""
         venastine = project / ".venastine"
         venastine.mkdir()
-        (venastine / "CONTEXT.md").write_text("old\n", encoding="utf-8")
+        (project / "AGENTS.md").write_text("old\n", encoding="utf-8")
         before = workspace_trust._content_hash(str(project))
 
         _generate()
@@ -1203,8 +1237,8 @@ async def test_the_tui_asks_the_kind_then_confirms_then_writes(
 
         assert await settle(
             pilot,
-            lambda: (project / ".venastine" / "CONTEXT.md").exists()), \
-            "the worker never wrote CONTEXT.md"
+            lambda: (project / "AGENTS.md").exists()), \
+            "the worker never wrote AGENTS.md"
         assert await settle(pilot, lambda: app._busy is False)
 
 
@@ -1227,7 +1261,7 @@ async def test_dismissing_the_tui_confirmation_writes_nothing(
 
         assert await settle(pilot, lambda: app._busy is False), \
             "the worker never came back — the dismissal carried no value"
-        assert not (project / ".venastine" / "CONTEXT.md").exists()
+        assert not (project / "AGENTS.md").exists()
         assert not (project / "ARCHITECTURE.md").exists()
         assert not isinstance(app.screen, ProjectKindScreen)
 
@@ -1249,7 +1283,7 @@ async def test_cancelling_the_kind_modal_never_reaches_the_confirmation(
 
         assert await settle(pilot, lambda: app._busy is False)
         assert not isinstance(app.screen, ConfirmScreen)
-        assert not (project / ".venastine" / "CONTEXT.md").exists()
+        assert not (project / "AGENTS.md").exists()
 
 
 @pytest.mark.asyncio
@@ -1299,7 +1333,7 @@ async def test_the_confirmation_is_told_what_it_is_confirming(project,
         app.screen.dismiss(False)
         assert await settle(pilot, lambda: app._busy is False)
 
-        assert "CONTEXT.md" in body
+        assert "AGENTS.md" in body
         assert label == "Write"
 
 
@@ -1371,7 +1405,7 @@ async def test_an_unrecognised_kind_answer_cancels(project, fake_agent):
 
         assert await settle(pilot, lambda: app._busy is False)
         assert not isinstance(app.screen, ConfirmScreen)
-        assert not (project / ".venastine" / "CONTEXT.md").exists()
+        assert not (project / "AGENTS.md").exists()
 
         # Nothing is written either way: generate() refuses an unrecognised
         # kind downstream, so asserting on files passes with or without the
@@ -1416,7 +1450,7 @@ class TestTheCliInitGoesDownTheChannel:
     def test_confirm_is_asked_through_the_channel(self, monkeypatch, tmp_path):
         code, seen, reader = self._run(monkeypatch, tmp_path, ["y"])
         assert code == 0
-        assert seen["confirm"]("ARCHITECTURE.md, CONTEXT.md") is True
+        assert seen["confirm"]("ARCHITECTURE.md, AGENTS.md") is True
         assert reader.prompts, "nothing was ever put to the user"
 
     def test_choose_kind_is_asked_through_the_channel(self, monkeypatch,

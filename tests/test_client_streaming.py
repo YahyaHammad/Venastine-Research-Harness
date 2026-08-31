@@ -75,9 +75,18 @@ class _FakeAnthropicStream:
 
 class _FakeAnthropicClient:
     def __init__(self, events, final_message):
-        self.messages = SimpleNamespace(
-            stream=lambda **kwargs: _FakeAnthropicStream(events, final_message)
-        )
+        # The kwargs are RECORDED, not swallowed by a **kwargs the test
+        # cannot see. Batch 42's lesson, in the other file: a translation
+        # asserted through its own function cannot detect a break in the
+        # wiring that calls it, and replacing the arguments with None left
+        # every modal test green.
+        self.sent = []
+
+        def _stream(**kwargs):
+            self.sent.append(kwargs)
+            return _FakeAnthropicStream(events, final_message)
+
+        self.messages = SimpleNamespace(stream=_stream)
 
 
 def test_stream_anthropic_text_and_tool_use(monkeypatch):
@@ -356,6 +365,152 @@ class TestThinkingIsCapturedAndKeptOutOfTheAnswer:
         # The answer is read off get_final_message(), so thinking cannot
         # reach it however the deltas interleave.
         assert tokens[-1].final_response.text == "42."
+
+    def test_anthropic_keeps_the_blocks_not_the_streamed_prose(
+            self, monkeypatch):
+        """§44. The deltas are for the screen; the BLOCKS are what goes
+        back to the model, and only the blocks carry the signature it
+        verifies. A record rebuilt from the deltas would be unsigned and
+        rejected, which is why this reads get_final_message() rather than
+        joining what the transcript already has.
+
+        model_dump() rather than a hand-built dict, and the double
+        provides one, so the field set that reaches the wire is the field
+        set that came off it. test_sdk_conformance.py asks the real SDK
+        whether that method and that signature field exist."""
+        monkeypatch.setattr("core.client.load_provider_data", lambda: {})
+        block = {"type": "thinking", "thinking": "Let me count.",
+                 "signature": "abc123"}
+        final_message = SimpleNamespace(
+            content=[SimpleNamespace(type="thinking",
+                                     model_dump=lambda: dict(block)),
+                     SimpleNamespace(type="text", text="42.")],
+            usage=SimpleNamespace(input_tokens=3, output_tokens=2),
+        )
+        client = _FakeAnthropicClient(
+            [_thinking_event("Let me count."), _text_event("42.")],
+            final_message)
+
+        response = list(call_model_stream(
+            client, "ANTHROPIC", "claude-opus-5", [], "sys", []))[-1].final_response
+
+        assert response.thinking == {
+            "provider": "ANTHROPIC", "model": "claude-opus-5",
+            "blocks": [block]}
+        assert response.text == "42.", "the answer is unchanged"
+
+    def test_anthropic_keeps_redacted_thinking_too(self, monkeypatch):
+        """Opaque to us and meaningful to the model. Dropping it would
+        break a turn that had one, silently, on the next send."""
+        monkeypatch.setattr("core.client.load_provider_data", lambda: {})
+        redacted = {"type": "redacted_thinking", "data": "EncryptedBlob=="}
+        final_message = SimpleNamespace(
+            content=[SimpleNamespace(type="redacted_thinking",
+                                     model_dump=lambda: dict(redacted)),
+                     SimpleNamespace(type="text", text="ok")],
+            usage=SimpleNamespace(input_tokens=1, output_tokens=1),
+        )
+        client = _FakeAnthropicClient([_text_event("ok")], final_message)
+
+        response = list(call_model_stream(
+            client, "ANTHROPIC", "m", [], "sys", []))[-1].final_response
+
+        assert response.thinking["blocks"] == [redacted]
+
+    def test_a_turn_that_did_not_think_records_nothing(self, monkeypatch):
+        """None, not an empty envelope: "no reasoning" and "a provider
+        that reports none" are one thing, and neither should write a row
+        or reach _messages_for_provider with something to skip."""
+        monkeypatch.setattr("core.client.load_provider_data", lambda: {})
+        final_message = SimpleNamespace(
+            content=[SimpleNamespace(type="text", text="hi")],
+            usage=SimpleNamespace(input_tokens=1, output_tokens=1),
+        )
+        client = _FakeAnthropicClient([_text_event("hi")], final_message)
+
+        response = list(call_model_stream(
+            client, "ANTHROPIC", "m", [], "sys", []))[-1].final_response
+
+        assert response.thinking is None
+
+    def test_the_v1_branch_records_one_block_under_its_own_field_name(
+            self, monkeypatch):
+        """There is no block structure on this wire -- reasoning arrives as
+        a flat run of deltas -- so the record is the concatenation, spelled
+        after the field the request would use to send it back."""
+        monkeypatch.setattr("core.client.load_provider_data", lambda: {})
+        chunks = [
+            _oai_chunk(SimpleNamespace(content=None, tool_calls=None,
+                                       reasoning_content="Let me ")),
+            _oai_chunk(SimpleNamespace(content="A", tool_calls=None,
+                                       reasoning_content="count.")),
+            _oai_chunk(None, usage=SimpleNamespace(
+                prompt_tokens=4, completion_tokens=2)),
+        ]
+
+        response = list(call_model_stream(
+            _FakeOpenAIClient(chunks), "OPENROUTER", "minimax/minimax-m3",
+            [], "sys", []))[-1].final_response
+
+        assert response.thinking == {
+            "provider": "OPENROUTER", "model": "minimax/minimax-m3",
+            "blocks": [{"type": "reasoning_content",
+                        "text": "Let me count."}]}
+        assert response.text == "A"
+
+    def test_the_stored_blocks_reach_the_request(self, monkeypatch):
+        """The WIRING, not the translation. _messages_for_provider is
+        tested directly in test_client_translation.py, and a test there
+        cannot see whether call_model_stream actually hands it the model
+        and the flag -- passing None for both would leave every one of
+        those green while the feature did nothing."""
+        monkeypatch.setattr("core.client.load_provider_data", lambda: {})
+        final_message = SimpleNamespace(
+            content=[SimpleNamespace(type="text", text="ok")],
+            usage=SimpleNamespace(input_tokens=1, output_tokens=1),
+        )
+        client = _FakeAnthropicClient([_text_event("ok")], final_message)
+        history = [
+            {"role": "user", "content": "why?"},
+            {"role": "assistant", "text": "Because.", "tool_calls": [],
+             "thinking": {"provider": "ANTHROPIC", "model": "claude-opus-5",
+                          "blocks": [{"type": "thinking", "thinking": "Hmm.",
+                                      "signature": "sig"}]}},
+            {"role": "user", "content": "and now?"},
+        ]
+
+        list(call_model_stream(
+            client, "ANTHROPIC", "claude-opus-5", history, "sys", []))
+
+        sent = client.sent[0]["messages"]
+        assert sent[1]["content"][0] == {
+            "type": "thinking", "thinking": "Hmm.", "signature": "sig"}
+
+    def test_the_v1_flag_is_read_from_providers_json(self, monkeypatch):
+        """echoes_reasoning is supports_stream_usage's precedent: a
+        per-provider fact that cannot be discovered, so it sits beside the
+        endpoint it describes and defaults to the conservative answer."""
+        monkeypatch.setattr("core.client.load_provider_data", lambda: {
+            "OPENROUTER": {"echoes_reasoning": True}})
+        chunks = [
+            _oai_chunk(SimpleNamespace(content="ok", tool_calls=None)),
+        ]
+        client = _FakeOpenAIClient(chunks)
+        history = [
+            {"role": "user", "content": "why?"},
+            {"role": "assistant", "text": "Because.", "tool_calls": [],
+             "thinking": {"provider": "OPENROUTER", "model": "m",
+                          "blocks": [{"type": "reasoning_content",
+                                      "text": "Hmm."}]}},
+            {"role": "user", "content": "and now?"},
+        ]
+
+        list(call_model_stream(client, "OPENROUTER", "m", history, "sys", []))
+
+        # The system prompt is messages[0] on this branch, so the assistant
+        # turn is index 2.
+        sent = client.chat.completions.last_kwargs["messages"]
+        assert sent[2]["reasoning_content"] == "Hmm."
 
     def test_anthropic_ignores_event_kinds_it_does_not_render(self, monkeypatch):
         """The SDK emits signature, content_block_stop and message_stop

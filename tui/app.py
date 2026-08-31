@@ -288,7 +288,6 @@ class VenastineApp(App):
 
     def __init__(self, provider_name: str = DEFAULT_PROVIDER,
                  model: str = None, settings: dict | None = None,
-                 startup_warnings: list[str] | None = None,
                  cli_pinned: bool = False):
         super().__init__()
         self.provider_name = provider_name
@@ -308,12 +307,27 @@ class VenastineApp(App):
         # guessed at (#138's rule).
         self._model_restored = False
         self.provider_name, self.model = self._startup_model()
-        # #138. Launch-time provider findings, printed by main() on the
-        # CLI path and carried here on the TUI path -- a pre-mount print
-        # would vanish under Textual's screen and TranscriptLogHandler
-        # attaches only at mount, so this is the one route that reaches a
-        # user. Empty list is the healthy case and stays silent.
-        self._startup_warnings = list(startup_warnings or ())
+        # #138, corrected in batch 44. Launch-time provider findings for
+        # the pair this session will ACTUALLY use.
+        #
+        # COMPUTED HERE, AFTER _startup_model(), and not handed down from
+        # main(). main() resolves its pair before the app exists and froze
+        # the list at that moment, so a session that restored a remembered
+        # /model pair (§43, RM3) reported the CONFIG provider's missing key
+        # directly under a banner naming the restored one -- and with only
+        # the restored provider in providers.json it announced "Unknown
+        # provider: ANTHROPIC" and then ran perfectly well on OpenRouter.
+        # The order is what makes this the only correct site: the restore
+        # is early enough to fix the banner and far too late to fix a list
+        # main() has already built.
+        #
+        # A pre-mount print would vanish under Textual's screen and
+        # TranscriptLogHandler attaches only at mount, so on_mount is still
+        # the one route that reaches a user. Empty list is the healthy case
+        # and stays silent.
+        from credentials import provider_startup_issues
+
+        self._startup_warnings = provider_startup_issues(self.provider_name)
         tui_settings = self._settings.get("tui", {})
         # RAW, not themes.resolve()'d, because this is half the staleness
         # key the remembered theme is recorded against (see
@@ -1913,6 +1927,20 @@ class VenastineApp(App):
                 self._transcript.write_user(text)
             elif role == "assistant":
                 self._transcript.write_answer(text)
+            elif role == "thinking":
+                # §44. Skipped rather than dimmed when the setting is off:
+                # /thinking is about whether reasoning is shown at all, and
+                # a replay that showed what a live turn had hidden would be
+                # the same conversation rendered two ways -- which is the
+                # defect this whole commit exists to remove, arriving
+                # through the other door.
+                #
+                # write_role, not a new method: Transcript._render_entry
+                # has known the "thinking" role since §38 and already draws
+                # the bar block and opens §43's turn label above it, so a
+                # replayed span and a streamed one go through one renderer.
+                if self._show_thinking:
+                    self._transcript.write_role(role, text)
             else:
                 self._transcript.write_role(role, text)
         if entries:
@@ -2129,9 +2157,9 @@ def _cmd_model(app: VenastineApp, args: str) -> None:
     # real configuration -- but every call to a hosted provider will fail
     # auth, and finding that out one turn later is the worse trade.
     if not providers[provider].get("API_KEY"):
-        app._transcript.write_error(
-            f"{provider} has no API_KEY in providers.json — calls will fail "
-            f"unless it is a local endpoint that needs none.")
+        from credentials import missing_key_message
+
+        app._transcript.write_error(missing_key_message(provider))
 
     # An active agent may name its own model/provider (§18), and those win
     # in run_agent_turn. Without this the switch is a silent no-op for as
@@ -2570,31 +2598,43 @@ def _k(n: int) -> str:
 
 
 def _cmd_window(app: VenastineApp, args: str) -> None:
-    """Override the model's context window for this session.
+    """Say what this model's context window really is, and remember it.
 
-    EPHEMERAL AND BOUND TO THIS (provider, model). Nothing is written to
-    disk; /model clears it; switching away and back gives the derived
-    value again, not this one. A run on any other model -- an agent that
-    pins its own (§18), a critic-routed pass (§11) -- uses that model's
-    own window rather than this number.
+    REMEMBERED AND BOUND TO THIS (provider, model), since batch 44. It is
+    written to core/model_windows.py's user-tier store and survives a
+    /model switch and a restart, because a context window is a FACT about
+    a deployment rather than a preference about a session -- and a fact
+    re-entered every launch is one nobody enters. Every pair is kept, so
+    switching between two models does not ask again about either. A run on
+    any other model -- an agent that pins its own (§18), a critic-routed
+    pass (§11) -- uses that model's own window rather than this number.
 
-    WHAT IT ACTUALLY MOVES, stated because it is easy to expect more: the
-    research-pass backstop (context_limit - COMPACTION_PIPELINE_BACKSTOP_
-    TOKENS) and the summarizer's one-call input budget. It does NOT change
-    when an ordinary chat compacts -- that is the working-set trigger,
-    which is a flat number with no window in it at all (M1). /trigger is
-    the command for that.
+    WHAT IT MOVES, and this is more than it used to be: the chat
+    compaction trigger, which batch 44 made a fraction of this number
+    rather than a flat 40k; the research-pass backstop (context_limit -
+    COMPACTION_PIPELINE_BACKSTOP_TOKENS); and the summarizer's one-call
+    input budget. /trigger still overrides the first of those directly.
     """
-    from core import session
+    from core import model_windows
 
     if not args:
-        _report_override(app, session.WINDOW)
+        _report_override(app, "window")
         return
     if args.strip().lower() in ("off", "clear", "auto"):
-        dropped = session.clear(session.WINDOW)
-        app._transcript.write_system(
-            "Context-window override cleared." if dropped
-            else "No context-window override was set.")
+        outcome = model_windows.forget_window(app.provider_name, app.model)
+        if outcome == "removed":
+            app._transcript.write_system(
+                f"Remembered context window cleared for "
+                f"{app.provider_name} | {app.model}.")
+        elif outcome == "absent":
+            app._transcript.write_system(
+                "No remembered context window was set for this model.")
+        else:
+            # The WARNING inside forget_window has already reached the
+            # transcript through TranscriptLogHandler; saying "cleared"
+            # here would contradict a file the user can go and read.
+            app._transcript.write_error(
+                "The remembered context window could not be cleared.")
         return
 
     tokens, error = _parse_token_count(args)
@@ -2612,16 +2652,18 @@ def _cmd_window(app: VenastineApp, args: str) -> None:
             f"pass would compact on every step. Got {tokens:,}.")
         return
 
-    session.set_window(app.provider_name, app.model, tokens)
+    saved = model_windows.remember_window(
+        app.provider_name, app.model, tokens)
     app._transcript.write_system(
-        f"Context window {_k(tokens)} for {app.provider_name} | {app.model}, "
-        f"this session only.")
+        f"Context window {_k(tokens)} for {app.provider_name} | "
+        f"{app.model}.")
 
     # WARN, never refuse, above what the provider reports. Raising it is
-    # the best reason to have this command -- a beta-gated 1M window reads
-    # as 200k until the account is asked with the right header -- so
-    # refusing would block precisely the case it exists for. The risk is
-    # named in the same terms config.py uses for the qwen entry.
+    # the best reason to have this command -- a gateway or a self-hosted
+    # endpoint can report its own default rather than the deployment's
+    # real window -- so refusing would block precisely the case it exists
+    # for. The risk is named in the same terms config.py uses for the qwen
+    # entry: erring high means a hard context-limit error mid-run.
     reported = _reported_window(app)
     if reported and tokens > reported:
         app._transcript.write_error(
@@ -2629,20 +2671,30 @@ def _cmd_window(app: VenastineApp, args: str) -> None:
             f"the real window a run can fail with a hard context-limit error "
             f"mid-pass rather than compacting.")
 
-    app._transcript.write_system(
-        "Cleared by /model, or by /window off. Never saved.")
+    # Claimed only on a write that landed, matching /theme and /model: a
+    # failure has already WARNED inside remember_window and reached the
+    # transcript through TranscriptLogHandler, so the command must not
+    # also announce something it did not do.
+    if saved:
+        app._transcript.write_system(
+            "Remembered for this model. /window off restores the derived "
+            "value.")
 
 
 def _cmd_trigger(app: VenastineApp, args: str) -> None:
     """Override the working-set compaction ceiling for this session.
 
-    THE NUMBER THAT DECIDES WHEN THIS CHAT COMPACTS, and an ABSOLUTE size
-    rather than a margin below the window (M1): the default 40k is the
-    same on a 200k model and a 1M one. It is measured against the whole
-    prompt the provider was sent -- system prompt, tool schemas, catalogs,
-    memories, then the conversation -- not against the conversation alone.
+    THE NUMBER THAT DECIDES WHEN THIS CHAT COMPACTS, as an ABSOLUTE size.
+    Since batch 44 the DEFAULT it overrides is a fraction of the model's
+    context window rather than a flat 40k, so setting an absolute here is
+    now the exception rather than the shape of the thing. It is measured
+    against the whole prompt the provider was sent -- system prompt, tool
+    schemas, catalogs, memories, then the conversation -- not against the
+    conversation alone.
 
-    Same lifetime rules as /window: ephemeral, bound to this
+    EPHEMERAL, unlike /window, and that is the difference between them: a
+    window is a fact about a deployment and is remembered, while this is a
+    knob for a thread that is behaving badly. Bound to this
     (provider, model), cleared by /model, never written to disk.
     """
     from core import session
@@ -2723,11 +2775,12 @@ def _report_override(app: VenastineApp, key: str) -> None:
     """
     from core import compaction, session
 
-    entry = session.state().get(key)
-    if key == session.WINDOW:
+    if key == "window":
+        from core import model_windows
+
         effective = compaction.context_limit(app.model, app.provider_name)
-        if entry:
-            source = f"session override for {entry[0]} | {entry[1]}"
+        if model_windows.window_for(app.provider_name, app.model):
+            source = f"remembered for {app.provider_name} | {app.model}"
         elif _reported_window(app) is not None:
             source = f"reported by {app.provider_name}"
         elif compaction._normalized(app.model) in config.MODEL_CONTEXT_WINDOWS:
@@ -2737,9 +2790,12 @@ def _report_override(app: VenastineApp, key: str) -> None:
         app._transcript.write_system(
             f"Context window: {effective:,} — {source}.")
         app._transcript.write_system(
-            "Usage: /window <tokens|off>. Moves the research-pass backstop "
-            "and the summarizer's input budget, not the chat trigger.")
+            "Usage: /window <tokens|off>. Moves the chat compaction "
+            "trigger, the research-pass backstop and the summarizer's "
+            "input budget.")
         return
+
+    entry = session.state().get(key)
 
     _, compact_at = compaction.thresholds(
         app.model, provider_name=app.provider_name)
@@ -3058,7 +3114,6 @@ register_init_commands()  # §24: /init
 
 
 def run(provider_name: str, model: str, settings: dict | None = None,
-        startup_warnings: list[str] | None = None,
         cli_pinned: bool = False) -> None:
     """Entry point used by main.py --tui.
 
@@ -3069,5 +3124,4 @@ def run(provider_name: str, model: str, settings: dict | None = None,
     """
     config_loader_settings = settings if settings is not None else config_loader.get_settings()
     VenastineApp(provider_name, model, config_loader_settings,
-                 startup_warnings=startup_warnings,
                  cli_pinned=cli_pinned).run()

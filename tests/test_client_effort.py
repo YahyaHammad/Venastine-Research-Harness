@@ -101,8 +101,23 @@ def test_anthropic_effort_pairs_adaptive_thinking_with_a_level():
     assert out["output_config"] == {"effort": "high"}
     # budget_tokens was removed on current models and returns a 400; the
     # adaptive pairing is what replaced it.
-    assert out["thinking"] == {"type": "adaptive"}
+    assert out["thinking"] == {"type": "adaptive", "display": "summarized"}
     assert "budget_tokens" not in str(out)
+
+
+def test_the_thinking_display_is_asked_for_explicitly():
+    """Batch 44. §38 sent {"type": "adaptive"} and took the default, which
+    on Fable 5, Opus 5, Opus 4.8/4.7 and Sonnet 5 is display "omitted" --
+    thinking blocks stream with EMPTY text. So ev.thinking was "", the
+    truthiness guard in core/loop.py never fired, and §38's entire feature
+    rendered nothing at all on Anthropic while appearing to work on
+    OpenRouter, whose branch reads reasoning_content instead.
+
+    Asserted on its own rather than only inside the pairing above, because
+    the failure it guards is invisible: no error, no warning, just a turn
+    that silently thinks in the dark."""
+    assert _thinking_for_provider("ANTHROPIC", "high")["thinking"][
+        "display"] == "summarized"
 
 
 def test_openai_effort_is_a_flat_enum():

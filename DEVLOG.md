@@ -8258,6 +8258,234 @@ call keeps its cross.** Those are a chronological log, not a checklist, and a
 row already drawn cannot be re-ticked --- a checkbox there is a checkbox that
 never changes.
 
+## Batch 44 — the provider it is on, the reasoning it kept, and the project it is in (2026-08-31)
+
+Four defects reported from using the TUI after §41 and §43, plus two found while verifying
+them. Every one is a seam between two features that were each correct alone. Landed as eight
+commits: the warning, the window, the trigger, thinking kept, thinking echoed, the project,
+the hub, then the documentation.
+
+### Commit 1 — the launch warning names the provider the session will use
+
+**The reported symptom.** `/model OPENROUTER minimax-m3`, quit, relaunch. The banner says
+`OPENROUTER | minimax-m3 (remembered)` and the line under it says ANTHROPIC has no API key.
+
+**Why it was there.** #138 computes the check in `main()` from `resolve_runtime_defaults`'
+pair and freezes the findings into a list the TUI renders at mount; §43 restores the
+remembered pair inside `VenastineApp.__init__`, long after. The restore is early enough to
+fix the banner and far too late to fix a list `main()` has already built. With only
+OPENROUTER in `providers.json` the same staleness announced `Unknown provider: ANTHROPIC`
+and then ran perfectly well — asserted as CORRECT in `test_cli.py` before this batch.
+
+**What changed.** Fixed at the producer: `provider_startup_issues()` was always right and its
+input was wrong, so the call moves to the one place that knows the resolved pair. The
+`startup_warnings` parameter is REMOVED from both `VenastineApp.__init__` and `tui.app.run`
+rather than left defaulting — a parameter whose only capability is carrying a stale finding
+is what the defect was. `/model`'s own empty-key line was a second copy of the wording; both
+call `credentials.missing_key_message()` now.
+
+**Why no test saw it.** The TUI half hand-wrote the warning string, so the app was never
+asked which provider it was about; the CLI half patched `tui.app.run` away, so no restore
+ran. Neither could build the other's state. The new test builds both and fails on the
+reverted line.
+
+**Fallout.** `tests/conftest.py` gains `isolate_provider_check`: the mount path reads
+`providers.json` now, so without it `test_a_healthy_mount_adds_no_warning_lines` passes or
+fails depending on whether the developer has a real ANTHROPIC key. It leaves the path alone
+when the file is absent, so the twelve fresh-clone failures AGENTS.md documents stay real.
+
+### Commit 2 — the context window: a query that works, and a window you enter once
+
+**Reported mid-discussion:** the window query 404s on OpenRouter and NVIDIA.
+
+**Measured, and the reader was never wrong.** `context_window_for` called
+`client.models.retrieve(model)` alone — `GET {base}/models/{id}`. OpenRouter implements the
+listing plus `/models/:author/:slug/endpoints` and no plain per-id route, so
+`minimax/minimax-m3` addressed a route that does not exist. `context_length` has been in
+`_WINDOW_FIELD_ALIASES` since batch 30 and its comment names OpenRouter as reporting it: the
+one provider that comment named as answering was the one that always failed. `_model_info`
+falls back to `models.list()`, once per provider, matched by id; a complete listing that does
+not name the model is an ANSWER and is cached rather than retried three times.
+
+**And the window became something worth entering by hand.** §31's `/window` was one
+ephemeral slot cleared by `/model`. That is the right lifetime for `/trigger` and the wrong
+one for this: a context window is a fact about a deployment, and a fact you must retype after
+every model switch is one nobody sets. `core/model_windows.py` keeps every `(provider,
+model)` answered for, across launches, and OUTRANKS both the query and the table.
+
+**The inversion is deliberate and is written down.** Everywhere else here a measured value
+beats a configured one because tables go stale. Here a query can be confidently wrong — a
+gateway reporting its own default rather than the deployment's — while a typed number is a
+statement about what is actually running.
+
+**Its own module, and the reason is layering.** `core/compaction.py` reads it and D12 forbids
+core importing the shell, so not `tui/preferences.py`; and `core/session.py`'s stated
+contract is that nothing there reaches disk, so not a clause carved out of that.
+
+**Owner correction, and it is the one that mattered.** The draft plan proposed dropping
+`MODEL_CONTEXT_WINDOWS`' five Claude entries from 1M to 200k, following that block's own
+comment about a `context-1m-2025-08-07` beta gate. Checked against the current model
+reference at the owner's insistence: the whole 4.6-and-later family is 1M and Haiku 4.5 is
+200K. The VALUES were right and the COMMENT was stale — a Sonnet 4-era fact that never
+applied to the models listed under it. Left alone, it would have talked the next reader into
+dividing five entries by five exactly as the next commit made them decide when threads fold.
+
+### Commit 3 — compaction defends a share of the window
+
+**The reported question.** "Where did `ctx N/40k` come from, and why 40k when models have
+256k–1M?"
+
+**The answer did not survive contact.** The denominator is the compaction trigger and it is
+ABSOLUTE: 40k on a 200k model and on a 1M one alike, so a 1M-window thread folded at 4% of
+its window.
+
+**M1's argument had expired.** It rejected a window-derived trigger because one "sits at a
+size the thread can never reach in working order" — arithmetic about `MAX_TOKEN_BUDGET`, then
+a default spend ceiling of 250k that made a 160k thread get one response and no tool calls.
+**Batch 27 deleted that ceiling.** Nothing competes with a large trigger any more; the
+premise went and the constant stayed.
+
+**Owner decision on the shape.** A FRACTION (0.85), not `window − margin`. The margin shape
+was offered first and declined for a reason worth recording: it cannot be right at both ends
+of the roster — 40k below 1M is a rounding error, 40k below 64k leaves 24k — while a share
+scales by construction. The owner also raised the default from the proposed 0.75.
+
+**What deliberately did not change.** The derived value is a DEFAULT and sits last, so
+`/compact`, `/trigger` and `settings.json` all still outrank it and D27's four-tier merge is
+untouched. `COMPACTION_TRIGGER_TOKENS` survives as the trigger for the one caller with no
+model in scope, `pin_measurements`, so #89's pin cap is byte-for-byte what it was — this
+batch changes when a thread folds, not how much of one a single `pin` may freeze. The warning
+margin and keep-recent floor stay absolute, with the reason written down rather than left as
+an oversight: both buy an amount of CONVERSATION, and a turn does not get bigger because the
+window did.
+
+### Commit 4 — thinking is kept, so a reopened thread looks like one that stayed open
+
+**The reported symptom.** Close a session with thinking blocks, reopen it, and only the
+answers come back.
+
+**Measured: they were never stored.** §38's O1 made thinking display-only — captured,
+streamed to the widget, dropped at `core/loop.py`. No column, and `core/replay.py` could not
+emit a thinking entry. Not a rendering gap; an absence.
+
+**Found while verifying, and worse.** `_thinking_for_provider` sent `{"type": "adaptive"}`
+and took the default `display`, which on Fable 5, Opus 5, Opus 4.8/4.7 and Sonnet 5 is
+`"omitted"`: thinking blocks stream with EMPTY text. So `ev.thinking` was `""`, the
+truthiness guard never fired, and §38 rendered nothing at all on Anthropic for its whole
+life. Invisible because the OpenAI-compatible branch reads `reasoning_content` and is
+unaffected — which is the branch it was being used on.
+
+**Owner decision: O1 is amended, and the blocks are what is kept.** Not the streamed prose.
+An Anthropic thinking block carries a `signature` the model verifies against its own state,
+so a record rebuilt from the deltas would be unsigned and useless for commit 5. They come off
+`get_final_message()`, which already had them.
+
+**A separate column, not a key in `content`.** Different kinds of thing with different rules:
+`content` is what the model said, this is signed provider state, and everything that MEASURES
+the conversation has to be able to leave it out without parsing around it. `_to_neutral` adds
+the key only when a row carried reasoning, so every message written before this batch
+reconstructs to exactly the shape it always did.
+
+**Neither shell needed a renderer.** `Transcript._render_entry` has known the `thinking` role
+since §38, so a replayed span and a streamed one go through one path, §43's label included.
+The TUI only decides whether to hand it over, honouring `tui.show_thinking` so a replay
+cannot show what a live turn hid.
+
+### Commit 5 — thinking goes back to the model that produced it
+
+**Not a resume problem at all, and that is the correction worth recording.** The plan's first
+question to the owner was "display-only, or on the wire?", and the honest answer to "will the
+agent see it?" was: it does not see it TODAY either, in a live session, so display-only
+persistence makes a reopened thread exactly as good as one that stayed open. The owner asked
+for both anyway, and the reason survives the correction: the model re-derives conclusions the
+turn before it already reached, from the user's words rather than its own recent working, in
+every session — open or reopened.
+
+**The gate is the `(provider, model)` pair.** Blocks return unchanged to the model that wrote
+them and to nothing else; after a `/model` switch the thread is full of blocks the new model
+never wrote. Dropping is always safe, because dropping is what the harness did before.
+
+**The OpenAI-compatible side is opt-in per provider.** Receiving reasoning there is a
+convention; sending it back is not one. DeepSeek documents that `reasoning_content` must not
+be supplied on input and 400s; OpenRouter accepts it for some models and ignores it for
+others. `echoes_reasoning` sits in `providers.json` beside the endpoint it describes —
+`supports_stream_usage`'s precedent.
+
+**Two test surfaces, deliberately.** `test_client_translation.py` drives
+`_messages_for_provider` for the gate; `test_client_streaming.py` asserts the blocks reach
+the REQUEST. Batch 42's lesson: a translation tested through its own function cannot detect a
+break in the wiring that calls it. `test_sdk_conformance.py` asks the real `anthropic`
+package whether `ThinkingBlock` still has `signature` and `model_dump`, because both failures
+are silent — a rename still round-trips and simply stops verifying.
+
+### Commit 6 — the project is the workspace
+
+**The reported symptom.** With `AGENT_WORKSPACE` set, `read`/`write`/`edit`/`shell` are
+correctly confined to the project, and `/init --software` scaffolds documentation into the
+harness's own repository.
+
+**RM6 recorded the split deliberately** — trust keys off cwd, `AGENT_WORKSPACE` is a
+permission boundary "deliberately not a project path" — and this report is what that split
+looks like in use: one session with two ideas of where the work is.
+
+**Owner decision: reverse it.** The point of pointing the harness at a directory is that it
+operates on that directory.
+
+**One line moves, and that is the interesting part.** `config_loader.get_project_path()` is
+the single resolver, so `/init`'s destination follows in BOTH places it is resolved — and the
+second one is decisive: redirecting `generator.generate()` alone would not have worked,
+because `write_project_doc` re-resolves through its own `_project_root()`, which I1 gave no
+path parameter precisely so it could not be aimed.
+
+**PRESENCE, never value.** `AGENT_WORKSPACE` defaults to `./workspace`, a subdirectory of the
+launch directory, so a value test would quietly move the project one level down for everyone
+who set nothing.
+
+**Safe by an ordering that already existed.** `protected_paths.check_workspace()` refuses a
+workspace inside the harness tree several lines earlier, so the project can never become the
+harness by this route — a second reason the npm launcher must never set the variable.
+
+**Owner ruling on memories.** Project-scoped rows written under the old root keep their path
+and stop matching, which is what happens whenever anyone switches projects. Global rows
+(`project_path=None`) are unaffected and live in `app.db`, whose location was never the
+project's. No migration.
+
+### Commit 7 — AGENTS.md is the hub; .venastine/ is configuration only
+
+**Owner decision, arrived at during the discussion rather than in the report.** The ask began
+as "add AGENTS.md to the files `/init` writes" and became "make it the hub and remove
+CONTEXT.md", for a reason the pointer-stub alternative could not meet: a project shared
+WITHOUT `.venastine/` — the ordinary thing to do when you do not want to ship your
+configuration — arrived as a set of root documents pointing at a hub that was not in the
+archive. A pointer would have pointed at the same missing file; a duplicate would have been
+the two-context-files failure this repository records about itself in its own first
+paragraph.
+
+**The trust boundary had to move with the file, and this is the half that would have been a
+security regression if it had been forgotten.** `.venastine/` is gated because its content
+becomes system-prompt text; a root `AGENTS.md` reaching the same place with no grant is
+D17's own stated threat. `content_files()` lists it, its paths become PROJECT-relative
+because `AGENTS.md` and `.venastine/AGENTS.md` are different files, and `is_trusted()` asks
+the listing rather than the directory — so a cloned repo shipping an `AGENTS.md` and no
+`.venastine/` now prompts. Every existing grant re-prompts exactly once, correctly, because
+the set being consented to changed.
+
+**And the deeper fix came free.** `_content_hash()` now iterates `content_files()` instead of
+walking a second time. AGENTS.md listed that as still open — two traversals that must agree
+by construction is exactly how #18 drifted — and the listing growing a root file is what made
+keeping them separate untenable rather than merely untidy.
+
+**`CONTEXT.md` is removed outright.** A fallback is a second path that must keep agreeing with
+the first; re-running `/init` is one command.
+
+### Still open
+
+1. `ROADMAP_v2.md`'s index still does not list §39 or §40 (carried from batch 43). §44 is
+   listed.
+2. The keep-recent floor is 4k against a trigger that is now ~850k on a 1M model, so a fold
+   condenses more at once than it used to. Left absolute with the argument stated (WS5); if a
+   real long thread shows it losing too much, that is the number to revisit.
+
 ## Batch 43 — who is speaking, and what the session remembers (2026-08-30)
 
 Three defects reported from using the TUI after §38 and §41, plus one report that

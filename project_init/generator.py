@@ -89,8 +89,8 @@ def _existing_documents(project_path: str, kind: str) -> set:
 
 
 def _read_existing_context(project_path: str) -> Optional[str]:
-    from tools.builtin.project_docs import CONTEXT_FILENAME, doc_path
-    path = doc_path(project_path, CONTEXT_FILENAME)
+    from tools.builtin.project_docs import HUB_FILENAME, doc_path
+    path = doc_path(project_path, HUB_FILENAME)
     if not os.path.exists(path):
         return None
     try:
@@ -202,7 +202,7 @@ def generate(
 
     Returns a notice dict in the {"kind", "text"} shape both shells render.
     """
-    from tools.builtin.project_docs import CONTEXT_FILENAME, doc_path
+    from tools.builtin.project_docs import HUB_FILENAME, doc_path
     from tools.registry import registry, ToolCallDenied
 
     root = project_path or config_loader.get_project_path()
@@ -231,7 +231,7 @@ def generate(
 
     # ---- 2. Generate ---------------------------------------------------
     existing_context = _read_existing_context(root)
-    say(f"Reading the project and drafting {CONTEXT_FILENAME}…")
+    say(f"Reading the project and drafting {HUB_FILENAME}…")
     body = _run_initializer(root, kind, existing_context, model, provider_name)
 
     already_there = _existing_documents(root, kind)
@@ -241,17 +241,17 @@ def generate(
                  if name not in already_there]
 
     # ---- 3. Show, then ask once ----------------------------------------
-    context_path = doc_path(root, CONTEXT_FILENAME)
+    context_path = doc_path(root, HUB_FILENAME)
     diff = build_diff(existing_context, body, context_path)
     if not diff and not to_create:
         return {"kind": "init",
-                "text": f"{CONTEXT_FILENAME} is already up to date and every "
+                "text": f"{HUB_FILENAME} is already up to date and every "
                         f"document in the {kind} set exists. Nothing to do."}
 
     if diff:
         say(diff)
     else:
-        say(f"{CONTEXT_FILENAME} is unchanged.")
+        say(f"{HUB_FILENAME} is unchanged.")
     if to_create:
         say("Will also create, as stubs: " + ", ".join(to_create))
     if already_there:
@@ -281,8 +281,8 @@ def generate(
     failure = None
     try:
         if diff:
-            _write(registry, granted, CONTEXT_FILENAME, body)
-            written.append(CONTEXT_FILENAME)
+            _write(registry, granted, HUB_FILENAME, body)
+            written.append(HUB_FILENAME)
         for name in to_create:
             _write(registry, granted, name, doc_sets.render_stub(name, facts))
             written.append(name)

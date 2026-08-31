@@ -1,8 +1,8 @@
 """
 test_session_overrides.py
 
-ROADMAP_v2 §21's revisit, batch 31: `/window` and `/trigger`, ephemeral and
-bound to the (provider, model) they were set for.
+ROADMAP_v2 §21's revisit, batch 31: `/window` and `/trigger`, bound to the
+(provider, model) they were set for.
 
 WHAT THIS FILE IS ABOUT. Not the arithmetic -- test_compaction.py owns the
 thresholds and test_pin_tool.py owns #89's cap. This is about the two rules
@@ -13,21 +13,27 @@ NOT apply:
                   window feeds _input_budget(), which gates the lossy
                   truncation in summarize_thread(), so a 1M number leaking
                   onto a 200k critic model discards thread content. Reading
-                  a mismatched pair returns None and does NOT clear, so a
-                  routine critic pass cannot destroy an override either.
-  THE CLEAR       /model drops both outright, so switching away and back
-                  gives the DERIVED value. The binding alone would restore
-                  it, which is why both rules exist and neither is
-                  redundant.
+                  a mismatched pair returns None, so an agent that pins its
+                  own model and a critic-routed pass both get their own.
+  THE LIFETIME    which differs between the two since batch 44, and that is
+                  now the most interesting thing here. /trigger is
+                  EPHEMERAL and /model clears it, so switching away and
+                  back gives the derived value. /window is REMEMBERED, in
+                  core/model_windows.py's user-tier store, because a
+                  context window is a fact about a deployment rather than a
+                  preference about a session -- it survives the switch and
+                  the restart, and `/window off` is the only thing that
+                  drops it.
 
-Everything here is offline: the overrides are module state and the reads are
-pure functions of it plus config.
+Everything here is offline: the trigger is module state, the window is a
+JSON file conftest redirects per test, and the reads are pure functions of
+those plus config.
 """
 
 import pytest
 
 import config
-from core import compaction, session
+from core import compaction, model_windows, session
 
 
 @pytest.fixture(autouse=True)
@@ -50,8 +56,8 @@ OTHER_PROVIDER = ("OPENAI", "claude-sonnet-5")
 # ---------------------------------------------------------------------------
 
 def test_an_override_applies_to_the_pair_it_was_set_for():
-    session.set_window(*PAIR, 400_000)
-    assert session.window_for(*PAIR) == 400_000
+    assert model_windows.remember_window(*PAIR, 400_000)
+    assert model_windows.window_for(*PAIR) == 400_000
     assert compaction.context_limit(PAIR[1], PAIR[0]) == 400_000
 
 
@@ -64,25 +70,37 @@ def test_another_model_or_provider_does_not_see_it(other):
     # apply" is distinguishable from "applied and happened to agree" --
     # OTHER_PROVIDER deliberately reuses the same MODEL name, which the
     # table answers for identically.
-    session.set_window(*PAIR, 777_777)
+    model_windows.remember_window(*PAIR, 777_777)
 
-    assert session.window_for(*other) is None
+    assert model_windows.window_for(*other) is None
     # ...and the resolved answer falls through to the ordinary sources.
     assert compaction.context_limit(other[1], other[0]) != 777_777
 
 
-def test_a_mismatched_read_does_not_clear_the_override():
-    """THE HALF THAT IS EASY TO GET WRONG. If a mismatch cleared, one
-    routine critic pass mid-research would silently destroy an override
-    set for the chat, and the user would have no idea which command did
-    it."""
-    session.set_window(*PAIR, 400_000)
+def test_every_pair_is_kept_not_just_the_latest():
+    """Batch 44's reason for a store rather than a slot. §31 held ONE
+    window bound to ONE pair, so answering for a second model discarded
+    the first -- and the whole point of remembering is that a window is
+    entered once per model and never again."""
+    model_windows.remember_window(*PAIR, 400_000)
+    model_windows.remember_window(*OTHER_MODEL, 128_000)
 
-    session.window_for(*OTHER_MODEL)
-    session.window_for(*OTHER_PROVIDER)
+    assert model_windows.window_for(*PAIR) == 400_000
+    assert model_windows.window_for(*OTHER_MODEL) == 128_000
+    assert model_windows.all_windows() == {PAIR: 400_000,
+                                           OTHER_MODEL: 128_000}
+
+
+def test_a_mismatched_read_leaves_the_entry_alone():
+    """A routine critic pass mid-research reads a pair the user never
+    typed; it must not disturb what they did type."""
+    model_windows.remember_window(*PAIR, 400_000)
+
+    model_windows.window_for(*OTHER_MODEL)
+    model_windows.window_for(*OTHER_PROVIDER)
     compaction.context_limit(OTHER_MODEL[1], OTHER_MODEL[0])
 
-    assert session.window_for(*PAIR) == 400_000
+    assert model_windows.window_for(*PAIR) == 400_000
 
 
 def test_no_provider_means_no_override():
@@ -90,73 +108,115 @@ def test_no_provider_means_no_override():
     provider. Without one no pair can match, which is the same answer as
     having no override -- and is what keeps every pre-batch-31 call site
     behaving exactly as it did."""
-    session.set_window(*PAIR, 400_000)
-    assert session.window_for(None, PAIR[1]) is None
+    model_windows.remember_window(*PAIR, 400_000)
+    assert model_windows.window_for(None, PAIR[1]) is None
     assert compaction.context_limit(PAIR[1]) == 1_000_000
 
 
+def test_a_hand_edited_nonsense_value_costs_the_derived_window(tmp_path):
+    """The store is a plain JSON file a person can open. A bad entry must
+    cost the derived window rather than the session -- and a bool is not a
+    window, for _record_window's reason one layer down."""
+    import json
+
+    with open(model_windows.store_path(), "w", encoding="utf-8") as f:
+        json.dump({"version": model_windows.STORE_VERSION,
+                   "windows": {"ANTHROPIC|claude-sonnet-5": True,
+                               "ANTHROPIC|claude-haiku-4-5": -5}}, f)
+
+    assert model_windows.window_for(*PAIR) is None
+    assert compaction.context_limit(PAIR[1], PAIR[0]) == 1_000_000
+
+
 # ---------------------------------------------------------------------------
-# ---- The clear ------------------------------------------------------------
+# ---- The lifetimes, which are not the same one ----------------------------
 # ---------------------------------------------------------------------------
 
-def test_clear_drops_everything_and_reports_what_it_dropped():
-    session.set_window(*PAIR, 400_000)
+def test_clear_drops_the_trigger_and_reports_it():
     session.set_trigger(*PAIR, 80_000)
 
-    assert sorted(session.clear()) == ["trigger", "window"]
-    assert session.window_for(*PAIR) is None
+    assert session.clear() == ["trigger"]
     assert session.trigger_for(*PAIR) is None
     # Nothing to say the second time -- the shell prints only real drops.
     assert session.clear() == []
 
 
-def test_switching_away_and_back_gives_the_default_not_the_old_value():
-    """The owner's rule, stated exactly: 'go back to the default value even
-    if switched to the model before that for which the value was changed'.
+def test_a_model_switch_does_not_forget_a_remembered_window():
+    """Batch 44 reversed §31 here, deliberately.
 
-    This is why /model clears rather than relying on the binding. Under the
-    binding alone the value would still be stored against the original pair
-    and would reappear the moment that pair came back."""
-    session.set_window(*PAIR, 400_000)
-    derived = compaction.context_limit(OTHER_MODEL[1], OTHER_MODEL[0])
-
-    session.clear()                       # what /model does on the way out
-    assert compaction.context_limit(OTHER_MODEL[1], OTHER_MODEL[0]) == derived
-    # ...and coming back to the original model does NOT restore it.
-    assert session.window_for(*PAIR) is None
-    assert compaction.context_limit(PAIR[1], PAIR[0]) == 1_000_000
-
-
-def test_one_key_can_be_cleared_without_the_other():
-    """`/window off` must not take the trigger with it."""
-    session.set_window(*PAIR, 400_000)
+    §31's rule was that /model clears both, so switching away and back
+    gives the derived value. That is still right for the trigger, which is
+    a knob for a thread that is behaving badly. It was wrong for the
+    window: re-entering the same fact about the same endpoint on every
+    switch is exactly what nobody does, so the value would never be set at
+    all."""
+    model_windows.remember_window(*PAIR, 400_000)
     session.set_trigger(*PAIR, 80_000)
 
-    assert session.clear(session.WINDOW) == ["window"]
-    assert session.window_for(*PAIR) is None
-    assert session.trigger_for(*PAIR) == 80_000
+    session.clear()                       # what /model does on the way out
+
+    assert session.trigger_for(*PAIR) is None
+    assert model_windows.window_for(*PAIR) == 400_000
+    assert compaction.context_limit(PAIR[1], PAIR[0]) == 400_000
+
+
+def test_window_off_drops_one_entry_and_says_which_outcome():
+    """Three outcomes, because the shell says a different sentence for
+    each -- and a failed write reported as "nothing was set" would be a
+    lie about a file the user can go and read."""
+    model_windows.remember_window(*PAIR, 400_000)
+    model_windows.remember_window(*OTHER_MODEL, 128_000)
+
+    assert model_windows.forget_window(*PAIR) == "removed"
+    assert model_windows.window_for(*PAIR) is None
+    assert model_windows.window_for(*OTHER_MODEL) == 128_000
+
+    assert model_windows.forget_window(*PAIR) == "absent"
+
+
+def test_a_write_that_cannot_land_is_reported_not_swallowed(
+        tmp_path, monkeypatch):
+    """/window claims "Remembered" only on a write that landed, matching
+    /theme and /model. The WARNING reaches the transcript through
+    TranscriptLogHandler.
+
+    Blocked by a FILE where the directory would go, rather than by an
+    unwritable absolute path: `os.makedirs("/nope")` succeeds on Windows,
+    where the drive root is writable, so that version of this test passed
+    for the wrong reason on POSIX and failed outright here."""
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory", encoding="utf-8")
+    monkeypatch.setattr(model_windows, "store_path",
+                        lambda: str(blocker / "model_windows.json"))
+
+    assert model_windows.remember_window(*PAIR, 400_000) is False
+    assert model_windows.window_for(*PAIR) is None
 
 
 # ---------------------------------------------------------------------------
 # ---- Source order ---------------------------------------------------------
 # ---------------------------------------------------------------------------
 
-def test_the_window_override_beats_the_provider_query():
-    """Source 0 above source 1. The query can be wrong in the direction
-    that matters -- a beta-gated 1M window reports as 200k -- so a number
-    a human set on purpose has to win."""
+def test_the_remembered_window_beats_the_provider_query():
+    """Source 0 above source 1, and the inversion is deliberate.
+
+    Everywhere else in this project a measured value beats a configured
+    one, because a static table goes stale. Here the direction flips: a
+    query can be confidently wrong -- a gateway reporting its own default
+    rather than the deployment's -- while a number someone typed is a
+    statement about the deployment they are actually running."""
     from core import client as client_module
 
     client_module._context_window_cache[PAIR] = 200_000
     assert compaction.context_limit(PAIR[1], PAIR[0]) == 200_000
 
-    session.set_window(*PAIR, 1_000_000)
+    model_windows.remember_window(*PAIR, 1_000_000)
     assert compaction.context_limit(PAIR[1], PAIR[0]) == 1_000_000
 
 
 def test_the_trigger_override_moves_the_working_set_threshold():
     _, default_at = compaction.thresholds(PAIR[1], provider_name=PAIR[0])
-    assert default_at == config.COMPACTION_TRIGGER_TOKENS
+    assert default_at == compaction.derived_trigger(PAIR[1], PAIR[0])
 
     session.set_trigger(*PAIR, 80_000)
     warn_at, compact_at = compaction.thresholds(PAIR[1], provider_name=PAIR[0])
@@ -188,7 +248,7 @@ def test_the_trigger_override_does_not_touch_the_backstop():
 
 
 def test_the_window_override_moves_the_backstop_and_the_input_budget():
-    session.set_window(*PAIR, 300_000)
+    model_windows.remember_window(*PAIR, 300_000)
 
     _, compact_at = compaction.thresholds(
         PAIR[1], mode="backstop", provider_name=PAIR[0])

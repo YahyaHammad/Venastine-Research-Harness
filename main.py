@@ -71,6 +71,12 @@ def _print_replay(thread_id: UUID) -> None:
     replayed turn and a fresh one are not two different-looking things in
     the same scrollback. What may be shown is core/replay.py's decision,
     not this function's; the shells must not disagree about that.
+
+    §44's reasoning entries get a label of their own. Unlabelled they
+    would arrive under the same anonymous indent as a tool line, and a
+    paragraph of prose reading as a tool call is worse than not showing
+    it. D12 keeps this shell a real fallback, so it renders what the TUI
+    renders -- it simply has no tui.show_thinking to consult.
     """
     try:
         entries = replay_entries(thread_id)
@@ -88,6 +94,8 @@ def _print_replay(thread_id: UUID) -> None:
             print(f"You: {text}")
         elif role == "assistant":
             print(f"\nAgent: {text}\n")
+        elif role == "thinking":
+            print(f"\nThinking: {text}")
         else:
             print(f"     {text}")
     noun = "entry" if len(entries) == 1 else "entries"
@@ -1725,7 +1733,27 @@ def main(argv=None) -> int:
     # path can forget to call.
     create_db_and_tables()
 
-    project_path = os.getcwd()
+    # THE PROJECT IS THE WORKSPACE WHEN ONE WAS NAMED (batch 44, reversing
+    # RM6). Everything downstream follows from this one line, because
+    # config_loader.get_project_path() is the single resolver: /init's
+    # destination (project_init.generator and, decisively,
+    # write_project_doc's own _project_root), D17 workspace trust, the
+    # `.venastine/` config tier, and UserMemory's project scope (D25/M12).
+    #
+    # RM6 said the opposite -- trust keys off cwd, AGENT_WORKSPACE is a
+    # permission boundary and "deliberately not a project path" -- and the
+    # report that reopened it is what that split actually looks like in
+    # use: with AGENT_WORKSPACE set, read/write/edit/shell were correctly
+    # confined to the project while /init scaffolded documentation into
+    # the HARNESS. One session, two different ideas of where the work was.
+    #
+    # SAFE BY AN ORDERING THAT ALREADY EXISTED: check_workspace() ran a
+    # few lines above and refuses a workspace that is, or sits inside, the
+    # harness install tree. So the project can never become the harness by
+    # this route -- and that guard is now load-bearing for a second
+    # reason, which is why the launcher must still never set the variable.
+    project_path = (os.path.realpath(config.WORKSPACE_DIR)
+                    if config.WORKSPACE_DIR_EXPLICIT else os.getcwd())
     settings = load_project_config(project_path, args.trust_project)
     provider, model = resolve_runtime_defaults(args, settings)
     effort = resolve_effort(args, settings)
@@ -1738,13 +1766,18 @@ def main(argv=None) -> int:
     # no key, so refusing would block a real configuration. Skipped for
     # the two pure-data commands that run no model call; kept for
     # --summary and --init, which do.
-    startup_warnings: list[str] = []
-    if not (args.memories or args.forget):
+    #
+    # Batch 44: the TUI path no longer computes these here. `provider` is
+    # resolve_runtime_defaults' answer, and §43's remembered /model pair is
+    # restored later, inside VenastineApp.__init__ -- so a list frozen at
+    # this line named the CONFIG provider while the banner one row above it
+    # named the restored one. The app computes its own against the pair it
+    # will actually call. Fixed at the producer: the check was right and
+    # its input was wrong.
+    if not (args.memories or args.forget or args.tui):
         from credentials import provider_startup_issues
-        startup_warnings = provider_startup_issues(provider)
-        if not args.tui:
-            for warning in startup_warnings:
-                print(f"[warning] {warning}")
+        for warning in provider_startup_issues(provider):
+            print(f"[warning] {warning}")
 
     # §21b M15. AFTER load_project_config, because scoping needs the
     # resolved project path -- and before any MCP setup, since neither
@@ -1838,7 +1871,6 @@ def main(argv=None) -> int:
             # resolved pair against settings.json, which would read a
             # flag that happens to match the configured value as absent.
             run_tui(provider, model, settings,
-                    startup_warnings=startup_warnings,
                     cli_pinned=args.provider is not None
                     or args.model is not None)
         elif args.mode == "research":
