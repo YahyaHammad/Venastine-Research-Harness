@@ -479,7 +479,8 @@ def test_a_symlinked_tier_root_is_invisible_to_both_the_hash_and_the_listing(
     proj = _granted(tmp_path, {"settings.json": "{}"},
                     links={"skills": outside})
 
-    assert workspace_trust.content_files(str(proj)) == ["settings.json"]
+    assert workspace_trust.content_files(str(proj)) == [
+        ".venastine/settings.json"]
 
     before = workspace_trust.is_trusted(str(proj))
     (outside / "evil.md").write_text("Body v2 CHANGED.", encoding="utf-8")
@@ -514,7 +515,14 @@ def test_the_loader_reads_no_file_the_trust_listing_omits(tmp_path,
     }, links={"agents": outside})
 
     listed = set(workspace_trust.content_files(str(proj)))
-    venastine = workspace_trust.venastine_dir(str(proj))
+
+    # PROJECT-relative on both sides since §44, when the listing moved out
+    # of .venastine/-relative space to carry a root AGENTS.md. Comparing
+    # across two spaces is how this check would go quietly vacuous: every
+    # `read` entry would look absent from `listed` and the assertion would
+    # fail for a reason that has nothing to do with #18 -- or, with the
+    # subset the other way round, pass for one.
+    root = os.path.realpath(str(proj))
 
     read = set()
     for kind in ("agents", "skills"):
@@ -522,7 +530,8 @@ def test_the_loader_reads_no_file_the_trust_listing_omits(tmp_path,
             if tier != "project" or not os.path.isdir(directory):
                 continue
             for path, _category in config_loader._md_files(directory, True):
-                read.add(os.path.relpath(path, venastine).replace(os.sep, "/"))
+                read.add(os.path.relpath(os.path.realpath(path), root)
+                         .replace(os.sep, "/"))
 
     assert read <= listed, (
         f"the loader reads {sorted(read - listed)}, which the trust prompt "
