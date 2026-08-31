@@ -328,7 +328,7 @@ Symmetric, and applied centrally to every tool in every mode rather than by tool
 
 ### Project directories are untrusted until you say otherwise
 
-A repo you clone can carry `.venastine/` — agents, skills, `settings.json`, `mcp.json`, `CONTEXT.md`. On first run in a directory you are shown what it contains and asked once — the file list, `settings.json` and `mcp.json` verbatim, and **every agent's and skill's description**, because those go into the system prompt of every run in the project the moment you say yes. Until then that content is **absent, not loaded-and-disabled**. Trust is keyed to the resolved path *and* a content hash, so it does not silently carry over when the files change.
+A repo you clone can carry project content the harness will load: `.venastine/` — agents, skills, `settings.json`, `mcp.json` — and a root `AGENTS.md`, which is the project context document. On first run in a directory you are shown what it contains and asked once — the file list, `settings.json` and `mcp.json` verbatim, the opening of `AGENTS.md`, and **every agent's and skill's description**, because all of those go into the system prompt of every run in the project the moment you say yes. A repo with an `AGENTS.md` and no `.venastine/` is asked about too; a repo with neither has nothing to trust and is silent. Until then that content is **absent, not loaded-and-disabled**. Trust is keyed to the resolved path *and* a content hash, so it does not silently carry over when the files change.
 
 ```bash
 python main.py --trust-project        # for CI and scripts
@@ -376,7 +376,7 @@ Two summarisation strategies exist:
 
 Whichever you configure (`compaction.strategy` in settings.json), a span too large for one call falls back to chain with a warning, and one too large even for chain has its oldest material truncated — stated in both the instruction and the stored summary, never silently.
 
-`pin` keeps recent turns out of any summary (capped at half the compaction trigger per call — a pin is a permanent floor, so refusing beats trimming); `unpin` releases it again when pinned detail goes stale. `/compact` in the TUI triggers a compaction by hand. **When compaction runs depends on what the thread is**: chat threads use an ordinary working-set trigger (40k tokens by default); research passes and subagents compact only at a hard backstop near the real context window, wherever they are resumed — spending a model call on a judgement nobody is watching is not worth it mid-run.
+`pin` keeps recent turns out of any summary (capped at half the compaction trigger per call — a pin is a permanent floor, so refusing beats trimming); `unpin` releases it again when pinned detail goes stale. `/compact` in the TUI triggers a compaction by hand. **When compaction runs depends on what the thread is**: a chat thread folds at a share of the model's context window (85% by default, so 850k on a 1M model and 170k on a 200k one); research passes and subagents compact only at a hard backstop just under that window, wherever they are resumed — spending a model call on a judgement nobody is watching is not worth it mid-run. The chat trigger used to be a flat 40k regardless of model, which meant a 1M-window thread was condensed at 4% of its window.
 
 The knobs, all under `compaction` in `settings.json`, each overriding a default in `config.py`:
 
@@ -390,7 +390,7 @@ The knobs, all under `compaction` in `settings.json`, each overriding a default 
 | `max_retries` | `2` | Corrective re-asks when a summary misses its target ratio |
 | `strategy` | `"chain"` | Or `"rederive"`, as above |
 
-`/trigger` and `/window` override the two numbers above for the session and nothing longer: they are never written to disk, they are bound to the `(provider, model)` they were set for — so an agent pinning its own model or a critic-routed pass uses that model's own value rather than a number tuned for a different one — and `/model` clears them outright, so switching away and back gives you the derived value rather than the old override. `/compact --strength N` overrides strength for that one invocation and persists nothing; an unknown flag there is an error rather than an ignored typo, because compacting at the default while you believe you asked otherwise looks exactly like a compaction that obeyed you. The relationships between these values are validated rather than trusted — the warning margin must sit strictly below the trigger, and the keep-recent floor strictly below it too — so an incoherent set is refused at startup instead of firing compaction at nonsense times.
+`/trigger` and `/window` override those numbers, and they have different lifetimes on purpose. `/trigger` is for this session only: never written to disk, and `/model` clears it, so switching away and back gives you the derived value. `/window` is REMEMBERED — a context window is a fact about a deployment rather than a preference about a session, and one you must retype after every model switch is one nobody sets. It is kept per `(provider, model)`, for every pair you have answered for, and it outranks both what the provider reports and the built-in table. `/window off` restores the derived value. Both are bound to the `(provider, model)` they were set for, so an agent pinning its own model or a critic-routed pass uses that model's own value rather than a number tuned for a different one. `/compact --strength N` overrides strength for that one invocation and persists nothing; an unknown flag there is an error rather than an ignored typo, because compacting at the default while you believe you asked otherwise looks exactly like a compaction that obeyed you. The relationships between these values are validated rather than trusted — the warning margin must sit strictly below the trigger, and the keep-recent floor strictly below it too — so an incoherent set is refused at startup instead of firing compaction at nonsense times.
 
 A replayed thread always shows what you originally said, never the summary — the archive is what is replayed, so a compacted conversation reads back the way you had it.
 
@@ -426,7 +426,7 @@ Agent frontmatter fields:
 | `model`, `provider` | string | inherit session | Pin this agent's own model/provider; `/model` tells you when one is active |
 | `allowed_tools` | list | everything allowed | A whitelist that only ever narrows — nothing can widen it |
 | `approval_overrides` | mapping | `{}` | Can only ever *add* prompts, never remove one |
-| `use_project_context` | bool | `false` | Inject `.venastine/CONTEXT.md` into the system prompt |
+| `use_project_context` | bool | `false` | Inject the project's root `AGENTS.md` into the system prompt |
 | `use_memory` | bool | `true` | Inject durable memories (plain chat counts as opted in) |
 | `max_steps` | int ≥ 1 | caller's ceiling | May narrow a run's step budget, never widen it; an invalid value is repaired to the default with a warning naming what it read |
 | `spawnable` | bool | `false` for your files | Whether `spawn_subagent` may feed this agent |
@@ -473,7 +473,7 @@ The first connection to a **user-level** server asks once, showing the resolved 
 | `/research [--attended] [--review\|--no-review] [--grant[=a,b]] <query>` | Run the pipeline live from the TUI. Leading flags compose in any order before the query; bare `--grant` opens the picker, `--grant=a,b` names them (`--grant-tools=` works as an alias); without flags, `research.*` settings apply |
 | `/compact [--strength 1-5]` | Fold older turns now instead of waiting for the trigger. Recent turns keep exactly the protection an automatic compaction gives them |
 | `/trigger [tokens\|off]` | Override **when this chat compacts**, for this session only. An absolute prompt size (`80k`), not a margin below the window. A value below the warning margin or the keep-recent floor is refused naming it; a value below the thread's current size is accepted and says a fold is coming |
-| `/window [tokens\|off]` | Override this model's **context window**, for this session only. Moves the research-pass backstop and the summarizer's input budget — not the chat trigger. Above what the provider reports it warns rather than refusing, because raising it is the point (a 1M window reads as 200k until the account is asked for it) |
+| `/window [tokens\|off]` | Set this model's **context window** and remember it, per `(provider, model)` and across launches. It outranks both the provider's own answer and the built-in table, and it moves everything derived from the window: the chat compaction trigger, the research-pass backstop and the summarizer's input budget. Above what the provider reports it warns rather than refusing, because raising it is the point — a gateway or a self-hosted endpoint can report its own default rather than your deployment's |
 | `/claims [run id]` | Open the claims view — tier, grounding status, assumption flags, score breakdown per claim — during a run or afterwards (**ctrl+l**) |
 | `/copy [last\|report\|claims\|all] [--file <path>]` | Copy out of the session. Defaults to the last response; `all` is transcript plus report plus claims. Clipboard delivery cannot be confirmed, so `--file <path>` is the route that provably worked |
 | `/threads` | Conversations-only picker — research runs' internal threads excluded — most recently active first, capped at 200 with a notice (**ctrl+t**) |
@@ -495,9 +495,9 @@ Three behaviours worth knowing: an unknown slash command is an error, never a ch
 
 When a subagent is spawned, you are asked which of its approval-gated tools it may use without asking again — per tool, all unticked by default. Running it with none selected is fine, and refusing the spawn entirely is a separate answer from granting it nothing. Before this, approving a spawn authorised the child's whole set.
 
-`/init` reads the project and writes its documentation set. `.venastine/CONTEXT.md` is the hub — the short, factual description this harness injects into every agent that opts into project context — and it links out to the documents that hold the detail: `ARCHITECTURE`, `ROADMAP`, `DEVLOG`, `TECHNICAL_DEBT`, `DOCUMENTATION_STANDARDS`, `TEST_WRITING` and `BREAKING_CHANGES` for a codebase, or `RESEARCH_QUESTIONS`, `METHODOLOGY`, `SOURCES`, `FINDINGS`, `LIMITATIONS`, `EXPERIMENT_LOG` and `OPEN_QUESTIONS` for written work. It asks which kind you have — proposing an answer when there is something to go on, and asking outright when the folder is empty.
+`/init` reads the project and writes its documentation set. A root `AGENTS.md` is the hub — the short, factual description this harness injects into every agent that opts into project context, and the filename other agent harnesses look for too — and it links out to the documents that hold the detail: `ARCHITECTURE`, `ROADMAP`, `DEVLOG`, `TECHNICAL_DEBT`, `DOCUMENTATION_STANDARDS`, `TEST_WRITING` and `BREAKING_CHANGES` for a codebase, or `RESEARCH_QUESTIONS`, `METHODOLOGY`, `SOURCES`, `FINDINGS`, `LIMITATIONS`, `EXPERIMENT_LOG` and `OPEN_QUESTIONS` for written work. It asks which kind you have — proposing an answer when there is something to go on, and asking outright when the folder is empty.
 
-Only `CONTEXT.md` is written for you in full; the rest arrive as skeletons with real headings and a note in each saying what belongs in it and what does not. That is deliberate: a DEVLOG invented for a project with no history is fiction in a file that then gets committed and read as fact. Documents you already have are never touched, and regeneration revises your `CONTEXT.md` rather than replacing it — you see a diff and approve it before anything is written. From the CLI it is `--init`, with `--software-project` / `--research-project` to skip the question.
+Only `AGENTS.md` is written for you in full; the rest arrive as skeletons with real headings and a note in each saying what belongs in it and what does not. That is deliberate: a DEVLOG invented for a project with no history is fiction in a file that then gets committed and read as fact. Documents you already have are never touched, and regeneration revises your `AGENTS.md` rather than replacing it — you see a diff and approve it before anything is written. Everything `/init` writes is an ordinary committed file at the project root, so a repository shared without its `.venastine/` configuration is still a repository whose documentation makes sense. From the CLI it is `--init`, with `--software-project` / `--research-project` to skip the question.
 
 `/summary` distils this conversation and shows it — it does **not** shorten what the model sees; that is `/compact`. `/ref` picks another conversation, summarises it, and attaches that summary to this one as standing context: you choose what crosses between threads, so nothing read or argued in one conversation can steer another without your say-so. `/ref --list` and `/ref --clear` are the way back out, and the summaries are labelled so the model knows they are not part of this conversation. From the CLI the same two are launch flags: `--summary <thread>` and a repeatable `--ref <thread>`.
 
@@ -597,7 +597,7 @@ A verification that *fails* — a network blip during the query — passes your 
 
 ### Budgets and stop conditions
 
-There is **no default spend ceiling**. The cumulative input+output counter is a billing meter — the prompt is re-sent and re-billed on every step of a tool-using turn, so it grows quadratically in steps: correct as billing, meaningless as a size limit. A hard cap exists only if settings.json sets `max_token_budget` (billed tokens per run — one user turn, one research pass, one `/init`). Limits at the provider remain the stronger instrument: they see the same bill and cannot be forgotten by a code path.
+There is **no default spend ceiling**. (That absence is also why compaction stopped being a flat number: the trigger was sized against a spend cap that no longer exists.) The cumulative input+output counter is a billing meter — the prompt is re-sent and re-billed on every step of a tool-using turn, so it grows quadratically in steps: correct as billing, meaningless as a size limit. A hard cap exists only if settings.json sets `max_token_budget` (billed tokens per run — one user turn, one research pass, one `/init`). Limits at the provider remain the stronger instrument: they see the same bill and cannot be forgotten by a code path.
 
 Three things can end a turn or pass early:
 
@@ -626,7 +626,7 @@ In the TUI stderr is detached before the screen is taken (anything written there
 | `settings.json` | defaults and modes | unknown keys **raise**; user copy at `~/.config/venastine/settings.json`, project copy at `.venastine/settings.json` (loaded only when trusted) |
 | `mcp.json` | MCP servers | unknown keys ignored; same two locations |
 | `trusted_projects.json` | workspace-trust store | user-level (`~/.config/venastine/`); written by the trust prompt or `--trust-project`, keyed to resolved path + content hash |
-| `CONTEXT.md` | project context for the model | lives in `.venastine/` |
+| `AGENTS.md` | project context for the model | project root; covered by workspace trust |
 
 Precedence for provider and model is CLI flag > `settings.json` > `config.py`. Two different merge orders, deliberately:
 
@@ -703,7 +703,7 @@ Deliberately not settings.json keys: editing these means editing the file in you
 | `AGENT_PROVIDERS_FILE` | `providers.json` | Credential-file location |
 | `APP_DB_PATH` | `app.db` | SQLite database path |
 | `AGENT_OUTPUT_DIR` | `./output` | Research artifacts root |
-| `AGENT_WORKSPACE` | `./workspace` | File-tools and sandbox workspace root |
+| `AGENT_WORKSPACE` | `./workspace` | File-tools and sandbox workspace root. **When you set it, it is also the project**: workspace trust, `.venastine/`, `/init`'s destination, `output/` and project-scoped memories all follow it rather than the directory you launched from |
 | `AGENT_SHELL` | auto-detect | Host shell binary for the `shell` tool |
 | `AGENT_SANDBOX_IMAGE` | `python:3.13-slim` | Sandbox container image |
 | `AGENT_LOG_LEVEL` | `INFO` | Log verbosity — name or numeric level |

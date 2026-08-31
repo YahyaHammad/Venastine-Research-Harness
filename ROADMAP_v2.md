@@ -169,6 +169,7 @@ the namespace list in `AGENTS.md`.
 - **§41. The transcript's vocabulary — colour, markers, and what an edit looks like** — BUILT (three kinds of line shared one grey; the `warning` role was unreachable; `write`/`edit` showed 60 characters of payload instead of a change)
 - **§42. The consent surface — what a modal shows, and what the agent says it is doing** — BUILT (the permission modal parsed console markup out of the payload it exists to show; `shell` gained a display-only `rationale`)
 - **§43. Who is speaking, and what the session remembers** — BUILT (the `venastine ›` label rendered after a turn's reasoning; `/new` left the previous conversation on screen; a `/model` switch was forgotten at exit; workspace trust was reported broken and is not)
+- **§44. The provider it is on, the reasoning it kept, and the project it is in** — BUILT (a remembered `/model` pair left the launch key warning naming the wrong provider; reasoning was never persisted, never echoed, and — measured here — never rendered at all on Anthropic; `/init` scaffolded the harness instead of the workspace; the compaction trigger was a flat 40k on every window)
 - **Open Questions — None Remaining** (Rev. 3 — all decisions locked; verification items only)
 - **Why these calls, not just what they are** (Rev. 3 — the reasoning patterns behind several decisions above)
 
@@ -3089,6 +3090,99 @@ own recorded lesson.
 
 The two complaints above. `Transcript`'s docstring is the artifact worth noting: it described
 this defect accurately for two sections before anyone read it as a bug report.
+
+---
+
+## §44. The provider it is on, the reasoning it kept, and the project it is in
+
+**Status: BUILT.** Four defects reported from use after §41 and §43, and two more found while
+verifying them. Every one is a seam between two features that were each correct on their own.
+
+**The launch warning named a provider the session would never call.** #138 computes the provider
+check in `main()`, from `resolve_runtime_defaults`' pair, and freezes the findings into a list the
+TUI renders at mount. §43 then taught the app to restore a remembered `/model` pair — inside
+`VenastineApp.__init__`, long after `main()` built that list. So a session came up with a banner
+reading `OPENROUTER | minimax-m3 (remembered)` and, one row beneath it, a warning that ANTHROPIC
+has no API key. With only OPENROUTER configured it announced `Unknown provider: ANTHROPIC` and
+then ran perfectly well. Both features were tested; neither test built the other's state.
+
+**Reasoning did not survive a restart — and had never reached the model at all.** §38's O1 made
+thinking display-only: captured, streamed to the widget, dropped. Reopening a thread therefore
+showed the answers with the reasoning silently gone, which is what was reported. The larger half
+was not reported because it is invisible: the harness has never echoed reasoning back, not across
+a restart and not between two turns of one live session, so every turn re-derives what the turn
+before it already worked out, from the user's words rather than from its own recent working.
+
+**And §38 rendered nothing at all on Anthropic.** Found while verifying the above.
+`_thinking_for_provider` sent `{"type": "adaptive"}` and took the default `display`, which on
+Fable 5, Opus 5, Opus 4.8/4.7 and Sonnet 5 is `"omitted"` — thinking blocks still stream, with
+EMPTY text. `ev.thinking` was `""`, `core/loop.py`'s truthiness guard never fired, and neither the
+inline block nor `ThinkingIndicator` ever appeared. The feature looked healthy because the
+OpenAI-compatible branch reads `reasoning_content` and is unaffected, and that is the branch it was
+being used on.
+
+**`/init` scaffolded the harness's own repository.** With `AGENT_WORKSPACE` set, `read`/`write`/
+`edit`/`shell` were correctly confined to the project while `/init` wrote its documentation set
+into the harness — one session with two ideas of where the work was. RM6 recorded that split
+deliberately (trust keys off cwd; `AGENT_WORKSPACE` is a permission boundary "deliberately not a
+project path"), and this is what it looks like in use.
+
+**`ctx N/40k` was asked about, and the answer did not survive contact.** The denominator is the
+compaction trigger, and it is ABSOLUTE: 40k on a 200k model and on a 1M one alike, so a 1M-window
+thread folded at 4% of its window — a model call spent and fidelity lost against a problem the
+model did not have. M1 chose that, and M1's argument was arithmetic about `MAX_TOKEN_BUDGET`, then
+a default spend ceiling of 250k. **Batch 27 deleted that ceiling.** The premise went and the
+constant stayed.
+
+**The window query 404s on exactly the providers that publish a window.** Reported mid-discussion
+and verified: `context_window_for` called `client.models.retrieve(model)` alone — `GET
+{base}/models/{id}` — and OpenRouter implements the listing plus
+`/models/:author/:slug/endpoints` and no plain per-id route, so an id containing a slash addressed
+something that does not exist. NVIDIA has the same shape. The READER was never wrong:
+`context_length` has been in `_WINDOW_FIELD_ALIASES` since batch 30 and its own comment names
+OpenRouter as reporting it. The one provider the comment named as answering was the one that
+always failed.
+
+### What this section amends
+
+Six locked decisions are reversed or narrowed here. Each is argued in the record below rather than
+quietly overwritten, because this project's convention on finding no record is to re-derive — so a
+decision that changed without its reasoning changing with it is one that gets changed back.
+
+| id | was | becomes |
+|---|---|---|
+| **O1** | thinking is never persisted and never on the wire | persisted as the provider's own blocks, and echoed back to the model that produced them (WS3, WS4) |
+| **M1** | the trigger is an absolute working-set target | a share of `context_limit()`; M1's premise no longer exists (WS5) |
+| **RM6** | trust keys off cwd; `AGENT_WORKSPACE` is a permission boundary only | an explicit `AGENT_WORKSPACE` **is** the project path (WS7) |
+| **I9** | `CONTEXT.md` is the hub, and the only document in `.venastine/` | root `AGENTS.md` is the hub; `.venastine/` is configuration only (WS8) |
+| **D17** | the trust hash covers `.venastine/` | plus the root `AGENTS.md`, because that is what now reaches the system prompt (WS9) |
+| §31 `/window` | ephemeral, cleared by `/model` | remembered per `(provider, model)`, outranking the query and the table (WS6) |
+
+### Design Decisions Record — §44 (WS1–WS10)
+
+| id | decision |
+|---|---|
+| **WS1** | **The launch provider check is computed where the resolved pair is known, and nowhere else.** `credentials.provider_startup_issues()` was always right; its INPUT was wrong, so the fix is at the producer: the call moves into `VenastineApp.__init__`, immediately after `_startup_model()` has restored any remembered pair. `main()` keeps it for the CLI, where nothing restores anything, and the `startup_warnings` parameter is REMOVED from `VenastineApp.__init__` and `tui.app.run` rather than left defaulting — a parameter whose whole capability is carrying a stale finding is what this defect was. The rejected alternative was recomputing at mount from the app's pair while still accepting the list, which leaves both paths alive and the next reader unsure which one speaks |
+| **WS2** | **`credentials.missing_key_message()` is one wording, used at launch and at `/model`.** The two sites had drifted — one naming `LLM_PROVIDERS_FILE`, the other the literal `providers.json` — while `tui/app.py`'s comment beside the launch render already claimed they were "the same fact at both moments". No new mechanism; the sentence has one home now, like `no_providers_message()` beside it |
+| **WS3** | **Thinking is persisted as the PROVIDER'S BLOCKS, not as the streamed prose, and in its own column.** An Anthropic thinking block carries a `signature` the model verifies against its own state, so a record rebuilt from the display deltas would be unsigned and useless for WS4; the blocks come off `get_final_message()`, which already had them. A nullable `MessageLog.thinking` rather than a key inside `content`, because these are different kinds of thing with different rules — `content` is what the model said, this is signed provider state — and because everything that MEASURES the conversation (the compactor's input, `/summary`) must be able to leave it out without parsing around it. `_to_neutral` adds the key only when a row carried reasoning, so every message written before this batch reconstructs to exactly the shape it always did. `redacted_thinking` is stored and never rendered: opaque to us, meaningful to the model |
+| **WS4** | **Reasoning goes back on the wire, gated on the `(provider, model)` PAIR.** The record names what produced it and the blocks return unchanged to that model and to nothing else — after a `/model` switch the thread is full of blocks the new model never wrote and cannot verify. Dropping is always safe, because dropping is exactly what the harness did before this batch, which is also what a pre-§44 message gets. Anthropic's blocks lead the assistant content array, because that is the order they were emitted in and a signed block placed after the text it preceded is a different message. The OpenAI-compatible side is OPT-IN per provider (`echoes_reasoning` in `providers.json`, `supports_stream_usage`'s precedent): receiving reasoning there is a convention, sending it back is not one — DeepSeek documents that `reasoning_content` must not be supplied on input and returns a 400, while OpenRouter accepts it for some models and ignores it for others. Google is unchanged; O2 never asks it for thought summaries, so it has none of its own to return |
+| **WS5** | **The working-set trigger is `COMPACTION_TRIGGER_FRACTION × context_limit()`, and a FRACTION rather than `window − margin`.** M1's reasoning has expired: it rejected a window-derived trigger because one "sits at a size the thread can never reach in working order", and the arithmetic behind that was a default `MAX_TOKEN_BUDGET` of 250k that batch 27 deleted. The margin shape — which is what the research backstop uses — cannot be right at both ends of the roster: 40k below 1M is a rounding error and 40k below 64k leaves 24k, which is not a working thread. A share scales by construction. The derived value is a DEFAULT and sits LAST: an explicit `/compact` override, a session `/trigger`, and `settings.json`'s `compaction.trigger_tokens` all outrank it, so this changes a default rather than removing a control, and it arrives through D27's existing per-invocation slot rather than as a fifth tier. `COMPACTION_TRIGGER_TOKENS` survives as the trigger for the one caller with no model in scope — `pin_measurements` — so #89's pin cap is byte-for-byte what it was and one `pin` cannot freeze 425k of a 1M thread. The warning margin and keep-recent floor stay ABSOLUTE, because both buy an amount of CONVERSATION and a turn does not get bigger because the window did |
+| **WS6** | **A context window is a FACT ABOUT A DEPLOYMENT, so it is remembered rather than re-entered.** §31 made `/window` a one-slot ephemeral override cleared by `/model`; that is the right lifetime for `/trigger`, which is a knob for a thread behaving badly, and the wrong one for this. `core/model_windows.py` is a user-tier store keyed on EVERY `(provider, model)` answered for, and it OUTRANKS both the live query and `MODEL_CONTEXT_WINDOWS`. That precedence is an inversion worth stating: everywhere else here a measured value beats a configured one because tables go stale, but a query can be confidently wrong — a gateway reporting its own default rather than the deployment's — while a number someone typed is a statement about what they are actually running. Its own module and file rather than `tui/preferences.py`, because `core/compaction.py` reads it and D12 forbids core importing the shell; and not `core/session.py`, whose contract is that nothing there reaches disk. Keeping an ephemeral tier ABOVE the store was the rejected alternative: `/model` would clear a value the store immediately re-supplied, so "override cleared" would be true and change nothing |
+| **WS7** | **An explicit `AGENT_WORKSPACE` is the project path.** RM6 is reversed: the point of pointing the harness at a directory is that it operates on that directory, and a permission boundary the rest of the harness disagrees with is not a boundary but a disagreement. One line in `main()` moves, and everything follows because `config_loader.get_project_path()` is the single resolver — `/init`'s destination in BOTH places it is resolved (`generator.generate` and, decisively, `write_project_doc`'s own `_project_root`, which I1 gave no path parameter precisely so it could not be aimed), D17 trust, the `.venastine/` tier, and `UserMemory`'s project scope. PRESENCE, never value: `AGENT_WORKSPACE` defaults to `./workspace`, a subdirectory of the launch directory, so a value test would quietly move the project one level down for everyone who has never set anything. Safe by an ordering that already existed — `protected_paths.check_workspace()` refuses a workspace inside the harness tree several lines earlier, which is now load-bearing for a second reason. `AGENT_OUTPUT_DIR` follows, because "artifacts are local" is only true if local tracks where the work is; `app.db` and the log stay global, since one database per workspace would re-introduce the accidental scoping axis `UserMemory.project_path` exists to avoid. Project-scoped memories re-scope silently, which is what happens whenever anyone switches projects |
+| **WS8** | **The hub is a root `AGENTS.md`, and `.venastine/` holds configuration only.** I9's location is reversed for two reasons that pull the same way. A project shared WITHOUT `.venastine/` — the ordinary thing to do when you do not want to ship your configuration — arrived as a set of root documents pointing at a hub that was not in the archive. And `AGENTS.md` is the filename other harnesses already look for, so an initialized project is legible to them without a second copy of the same content under a second name — which is the failure this repository records about itself in the first paragraph of its own `AGENTS.md`. `CONTEXT.md` is removed outright rather than kept as a fallback: a fallback is a second path that must keep agreeing with the first, and re-running `/init` is one command. `doc_path()` loses its branch and becomes one join; the index links become siblings |
+| **WS9** | **The trust boundary moves with the file, and the two traversals become one.** `.venastine/` is gated because its content becomes system-prompt text, so a root `AGENTS.md` reaching the same place with no grant would be D17's own stated threat arriving through the door WS8 opens. `workspace_trust.content_files()` lists it, and its paths become PROJECT-relative — `AGENTS.md` and `.venastine/AGENTS.md` are different files and a listing that cannot tell them apart is not one anybody can act on. Every existing grant re-prompts once, correctly, because the set being consented to changed. `is_trusted()` asks the LISTING whether there is anything to trust rather than asking whether the directory exists, so a repo with an `AGENTS.md` and no `.venastine/` now prompts. The trust prompt SHOWS the file, previewed rather than pasted: it is the plainest instance of that prompt's own criterion, and `settings.json` and `mcp.json` were already shown while saying less. And `_content_hash()` now iterates `content_files()` instead of walking a second time — closing the item AGENTS.md lists as still open, since two traversals that must agree by construction is exactly how #18 drifted |
+| **WS10** | **The window query falls back to the LISTING, and a model absent from a complete one is an ANSWER.** `models.retrieve` stays first: it is one call and it is right for Groq, Together and Mistral, while a listing can be hundreds of entries. On failure `client.models.list()` is tried once per provider and matched by `id`, with the same alias sniff plus OpenRouter's nested `top_provider.context_length`. A complete listing that does not name the model has told us this provider has nothing to say about it, so it is cached rather than retried — #35's cap exists to stop exactly that kind of repetition. A listing that itself fails reports the RETRIEVE error, because the listing is not a second opinion but the same question by another route, and naming the fallback's endpoint would hide the one the user configured. `MODEL_CONTEXT_WINDOWS`' values were right and its COMMENT was stale — the `context-1m-2025-08-07` gate it described was a Sonnet 4-era fact and never applied to the models listed — which is the dangerous combination once WS5 makes the table decide when every thread folds |
+
+### Deliberately not in §44
+
+- **A `CONTEXT.md` fallback.** WS8's reason: a second path that must keep agreeing with the first.
+- **`CLAUDE.md` / `QWEN.md` pointer stubs from `/init`.** One file, one copy. A user who wants
+  them can write two lines; a harness that writes three files with one meaning is the shape this
+  project keeps removing.
+- **Google `include_thoughts`.** Still O2's decision, unchanged.
+- **A proportional keep-recent floor or warning margin.** WS5 states why both stay absolute; if a
+  real long thread shows the fold losing too much at once, that is the number to revisit and this
+  is the sentence that says so.
 
 ## Open Questions — None Remaining
 

@@ -31,12 +31,14 @@ python main.py --mode research --attended "q"     # §25: approve every gated ca
 python main.py --mode research --review "q"       # §20: review the finished run, consent to each correction
 # §21a compaction runs automatically in every shell; /compact triggers it by hand in the TUI
 # §26: /claims [run id] or ctrl+l opens a run's claims; /copy [last|report|claims|all] [--file path]
+# §44: /window <tokens|off> is REMEMBERED per (provider, model) now and sets
+#   the number the compaction trigger is a share of; /trigger stays ephemeral
 python main.py --summary <thread>                  # §21c: print a thread's distilled summary
 python main.py --ref <thread> --ref <thread>       # §21c: attach other threads' summaries as context
 # §21c in the TUI: /summary distils this conversation; /ref [--list|--clear] references another
 # §27/batch 18 in the TUI: /threads lists conversations only (most recently active
 #   first, capped at 200 with a notice); /resume <thread-id> opens any thread by id
-python main.py --init                              # §24: scaffold this project's documentation set
+python main.py --init                              # §24/§44: scaffold AGENTS.md and the stubs it links
 python main.py --init --research-project           # §24: skip the type question on a piped run
 # §24 in the TUI: /init [--software|--research]
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
@@ -69,18 +71,28 @@ and every piece of state from cwd with an env override.
 **The launcher must never set `PYTHONPATH` or `AGENT_WORKSPACE`** (test-pinned,
 `test_the_launcher_never_sets_the_two_variables_that_would_break_it`). `tools/isolation.py` builds
 its child's `PYTHONPATH` from the *parent's resolved `sys.path`* on purpose, so an injected value is
-inherited into that computation and poisons it. `WORKSPACE_DIR` is a **permission boundary**, not a
-storage path — `file_ops` auto-approves writes inside it — so pointing it at a shared home directory
-would silently auto-approve writes there from every project. That second one is the trap: it is the
-obvious next move after seeing `APP_DB_PATH` redirected two lines above, and it is wrong.
+inherited into that computation and poisons it. `WORKSPACE_DIR` is a **permission boundary** —
+`file_ops` auto-approves writes inside it — so pointing it at a shared home directory would silently
+auto-approve writes there from every project. That second one is the trap: it is the obvious next
+move after seeing `APP_DB_PATH` redirected two lines above, and it is wrong.
+
+**Since §44 it is also the PROJECT PATH, which makes that rule stricter rather than looser** (WS7).
+`main()` sets `project_path` to the resolved workspace when `AGENT_WORKSPACE` is *named*, so trust,
+`.venastine/`, `/init`'s destination and `UserMemory`'s project scope all follow it. PRESENCE, never
+value: the default `./workspace` is a subdirectory of the launch directory, so a value test would
+move the project one level down for everyone who set nothing. An injected value from the launcher
+would now relocate a user's whole project, not merely widen a write boundary.
 
 **State is global, artifacts are local.** The launcher sets `APP_DB_PATH` and `AGENT_LOG_FILE` to
 `~/.config/venastine/` — together, on one decision, because a global database writing to a local log
 is worse than either. `main.py` sets `project_path = os.getcwd()` and `UserMemory` carries `scope`
 *and* `project_path` (M12/D25) precisely so ONE database can tell projects apart; per-directory
-databases would stack an accidental scoping axis on that deliberate one. `AGENT_OUTPUT_DIR` is left
-alone: `output/` is write-only (nothing reads it back — the report and claims live in the
-`PipelineRunRecord` row), so artifacts belong beside the work. An existing `./app.db` always wins.
+databases would stack an accidental scoping axis on that deliberate one. `AGENT_OUTPUT_DIR` follows the
+workspace since §44: `output/` is write-only (nothing reads it back — the report and claims live in
+the `PipelineRunRecord` row), so artifacts belong beside the work, and "beside the work" is the
+workspace once one is named. Its default is one expression with no branch —
+`os.path.join(os.environ.get("AGENT_WORKSPACE", "."), "output")` — so an unset variable still means
+`./output`. An existing `./app.db` always wins.
 
 **`~/.config/venastine` on every platform, Windows included.** The Python half already resolves its
 user tier with `os.path.expanduser` in three modules; a Node-idiomatic `%APPDATA%` would split one
@@ -115,7 +127,7 @@ published npm version can never be replaced — only deprecated.
 Read these before changing anything non-trivial — they carry design decisions that are locked, not defaults to re-derive.
 
 - **ARCHITECTURE.md** — what's built, file-by-file contracts ("what belongs here / what does NOT"), known gotchas (§11).
-- **ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **ROADMAP_v2.md** (§13–§43, all built) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I13 from §24, J1–J14 from §23, E1–E12 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A11 from §32, W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37, O1–O8 from §38 Q1–Q6 from §39, UN1–UN6 from §40, X1–X7 from §41, RA1–RA6 from §42 and RM1–RM6 from §43). Section and D-numbers are stable and cross-referenced everywhere.
+- **ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **ROADMAP_v2.md** (§13–§43, all built) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I13 from §24, J1–J14 from §23, E1–E12 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A11 from §32, W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37, O1–O8 from §38 Q1–Q6 from §39, UN1–UN6 from §40, X1–X7 from §41, RA1–RA6 from §42, RM1–RM6 from §43 and WS1–WS10 from §44). Section and D-numbers are stable and cross-referenced everywhere.
 
 **Six namespaces use the same `LETTER+NUMBER` shape, and only the first is the
 record.** An id that resolves to two places is a cross-reference that fails
@@ -158,7 +170,8 @@ That qualifier is load-bearing, not pedantry (audit #128). This file used to say
 | `database.py` | The engine/connection only | Table classes, CRUD, awareness of what data exists |
 | `storage.py` | Schema (table classes) + CRUD | Active conversation state, provider-specific shapes |
 | `core/memory.py` | Active in-run state, provider-neutral, write-through | SQL, table classes, provider shapes |
-| `core/session.py` | Ephemeral per-session number overrides, and what clears them | Resolving those numbers; persisting anything, ever |
+| `core/session.py` | The ephemeral `/trigger` override, and what clears it | Resolving that number; persisting anything, ever |
+| `core/model_windows.py` | The remembered context window per `(provider, model)` | Deciding whether a number is a sensible window |
 | `core/client.py` | One call + provider format translation | Looping, retry, tool dispatch, bookkeeping |
 | `core/loop.py` | Call-dispatch-repeat control flow | Provider formats, tool policy, pipeline state |
 | `security/permissions.py` | Policy (`is_tool_allowed`, `requires_approval`) | Dispatch mechanics |
@@ -199,7 +212,9 @@ A **shell**, not a feature home. D12 makes the CLI a permanent fallback, so anyt
 - **Active bodies are appended outside `with_catalogs()`** (K6) — see the progressive-disclosure note in ARCHITECTURE §4. This is the one cross-shell leak the design can have.
 - **Schemas need no mid-loop refresh** (K7, settling ROADMAP_v2's Rev. 3 verification item). Activation happens between turns, and `_run()` recomputes `registry.schemas()` at the top of every call.
 
-`/model [[PROVIDER] name]` switches provider/model for the session and is **remembered for the next launch** beside `settings.json`, never in it (§43, RM3 — see the paragraph below). It refuses while `_busy`, re-runs the mount-time effort validation because effort is per-model, and warns rather than refuses on an empty `API_KEY` so a local OpenAI-compatible endpoint stays usable. `/effort` and `/thinking` still persist nothing.
+`/model [[PROVIDER] name]` switches provider/model for the session and is **remembered for the next launch** beside `settings.json`, never in it (§43, RM3 — see the paragraph below). It refuses while `_busy`, re-runs the mount-time effort validation because effort is per-model, and warns rather than refuses on an empty `API_KEY` so a local OpenAI-compatible endpoint stays usable. `/effort` and `/thinking` still persist nothing. `/window` DOES persist, since §44 — but to
+`core/model_windows.py`, not here, because `core/compaction.py` reads it and D12 forbids core
+importing the shell (WS6).
 
 **Nothing writes to `settings.json`; the theme AND the model are remembered BESIDE it**
 (batch 36, extended by §43). `/theme` used to persist nothing either, and a colour scheme
@@ -379,7 +394,13 @@ Anthropic, OpenAI-compatible (any `is_v1_compatible` provider), and Google are a
 
 **D21 — streaming must not silently degrade token accounting.** `supports_stream_usage` is read from `providers.json`; all three streaming branches *raise* if the flag is set but the stream ends with zero usage (audit #40 brought Anthropic in line). A silently-zero budget disables the budget stop condition. Do not soften this to a `getattr(..., 0)` default. **The flag has nothing to do with whether text streams** — deltas are yielded on every branch regardless of it, and §38 records that misreading because it is where anyone chasing streaming latency looks first.
 
-**Thinking is captured and is DISPLAY-ONLY** (§38, O1–O3). `StreamToken`/`LoopEvent` carry a `thinking_delta` beside `token_delta`; it never joins `ModelResponse.text`, is never persisted and never goes back on the wire, so every branch returns byte-identical responses to the pre-§38 ones. The Anthropic branch iterates the `MessageStream` rather than `stream.text_stream` — the two share one underlying iterator, so a caller gets text or both, never text plus thinking — matching the SDK's synthetic `TextEvent`/`ThinkingEvent`. The OpenAI-compatible branch reads `reasoning_content` **or** `reasoning`, because there is no standard name and `ChoiceDelta` is `extra="allow"`.
+**Thinking is captured, persisted, and echoed back to the model that wrote it** (§38 O1–O3, as amended by §44 WS3/WS4). `StreamToken`/`LoopEvent` still carry a `thinking_delta` beside `token_delta` for DISPLAY; the Anthropic branch iterates the `MessageStream` rather than `stream.text_stream` — the two share one underlying iterator, so a caller gets text or both, never text plus thinking — matching the SDK's synthetic `TextEvent`/`ThinkingEvent`, and the OpenAI-compatible branch reads `reasoning_content` **or** `reasoning`, because there is no standard name and `ChoiceDelta` is `extra="allow"`.
+
+**`display: "summarized"` is sent EXPLICITLY, and §38 shipped without it.** On Fable 5, Opus 5, Opus 4.8/4.7 and Sonnet 5 the default is `"omitted"`: thinking blocks still stream, with EMPTY text. So `ev.thinking` was `""`, `core/loop.py`'s `if token.thinking_delta` never fired, and §38 rendered nothing at all on Anthropic for its whole life — invisible because the OpenAI-compatible branch is unaffected and that is where it was being used. The raw chain of thought is never exposed on any model; `"summarized"` is the readable form.
+
+**What is PERSISTED is the provider's own blocks, not the streamed prose** (WS3). `ModelResponse.thinking` is `{provider, model, blocks}`, read off `get_final_message()` and stored in a nullable `MessageLog.thinking` column (additive, the `pinned` precedent). An Anthropic block carries a `signature` the model verifies against its own state, so a record rebuilt from the deltas would be unsigned and useless. `_to_neutral` adds the key ONLY when a row carried reasoning, so every pre-§44 message reconstructs to exactly the shape it always did. `redacted_thinking` is stored and never rendered; `core/replay.py` pulls the prose back out by field name for the two shells.
+
+**And it goes back on the wire, gated on the `(provider, model)` pair** (WS4). Blocks return unchanged to the model that produced them and to nothing else — after a `/model` switch the thread is full of blocks the new model never wrote. Anthropic's lead the assistant content array, because that is the order they were emitted in. The OpenAI-compatible side is opt-in per provider (`echoes_reasoning` in `providers.json`): DeepSeek 400s on `reasoning_content` as input, OpenRouter varies by model. Google is unchanged. Before §44 the model had never seen its own reasoning at all — not across a restart, and not between two turns of one live session.
 
 **Two providers show no thinking, by construction rather than by bug** (O2). `OPENAI`'s Chat Completions endpoint returns no reasoning text at all, and `GOOGLE`'s request deliberately does not ask for thought summaries — `ThinkingConfig(include_thoughts=True)` exists on the pin, and setting it is an owner decision (it changes a verified provider's request and bills the summaries), not an omission to fix. Both SDK shapes are asserted against the REAL packages in `tests/test_sdk_conformance.py`: a field rename here fails *silently*, since `getattr` returns `None` and every stream then looks like it carried nothing.
 
@@ -459,25 +480,34 @@ A long thread is now condensed rather than left to hit a wall. Compaction adds a
 returns every message ever written however many times this has run (AC1), which is
 what makes an early, frequent trigger safe.
 
-- **The trigger is a working-set target, not `context_limit - buffer`** (M1). §21
-  specified the latter and it can never fire: a window-derived threshold sits at a
-  size a working thread never reaches. The trigger reads measured context size and
-  has NEVER keyed off the billing meter; since batch 27 nothing else does either —
-  there is no default spend ceiling, so `effective_compaction()`'s headroom warning
-  speaks only when settings.json actually configures `max_token_budget`.
-  A SESSION override (`/window`, `core/session.py`) is checked before all of
-  it, bound to the `(provider, model)` it was set for and cleared by `/model`;
-  `/trigger` does the same for the working-set ceiling, injected at
-  `thresholds()` through D27's existing per-invocation slot rather than as a
-  fifth tier. **`trigger_tokens` is an ABSOLUTE prompt size, not a margin below
-  the window** -- the `window - margin` shape is the BACKSTOP's, and misreading
-  the two as one is what made this feature hard to specify. Under all of that,
-  `MODEL_CONTEXT_WINDOWS` is the FALLBACK, not the only source: `context_limit()`
-  prefers the provider's own answer (`client.context_window_for`, primed before
-  every send) and normalizes the model id — a dated or `vendor/`-prefixed name used
-  to miss the table entirely and take the 200k default silently. A missing entry is
-  cheaper than §21 feared but not free: it also sets `_input_budget()`, which gates
-  the lossy truncation in `summarize_thread()`.
+- **The trigger is a SHARE of the model's window** (WS5, reversing M1). M1 made it a
+  flat 40k and argued that a window-derived threshold "sits at a size a working
+  thread never reaches" — arithmetic about `MAX_TOKEN_BUDGET`, then a default spend
+  ceiling of 250k. **Batch 27 deleted that ceiling**, so nothing competes with a
+  large trigger and the constant outlived its own argument: a 1M-window thread was
+  folding at 4% of its window. `compaction.derived_trigger()` is
+  `COMPACTION_TRIGGER_FRACTION` (0.85) × `context_limit()`. A FRACTION, not
+  `window - margin` — that shape is the BACKSTOP's and cannot be right at both ends
+  of the roster, since 40k below 1M is a rounding error and 40k below 64k leaves 24k.
+  The derived value is a DEFAULT and sits LAST: an explicit `/compact` override, a
+  session `/trigger` bound to its `(provider, model)`, and settings.json's
+  `trigger_tokens` all outrank it, arriving at `thresholds()` through D27's existing
+  per-invocation slot rather than as a fifth tier. `COMPACTION_TRIGGER_TOKENS`
+  survives as the trigger for the one caller with no model in scope,
+  `pin_measurements`, so #89's cap is unchanged.
+- **`context_limit()` now decides when every thread folds, so its sources matter**
+  (WS6, WS10). Order: a REMEMBERED window (`core/model_windows.py`, written by
+  `/window`, kept per `(provider, model)` across launches) → the provider's own
+  answer (`client.context_window_for`, primed before every send) → the normalized
+  `MODEL_CONTEXT_WINDOWS` lookup — a dated or `vendor/`-prefixed name used to miss
+  the table and take the default silently — → `DEFAULT_CONTEXT_WINDOW` (256k),
+  warned. The remembered value outranking the QUERY is a deliberate inversion of
+  this project's usual direction: a query can be confidently wrong where a typed
+  number is a statement about the deployment being run. The query itself falls back
+  from `models.retrieve` to `models.list` because a `vendor/model` id has no per-id
+  route on OpenRouter or NVIDIA — the reader was always right and the ROUTE was the
+  bug. A missing window still also sets `_input_budget()`, which gates the lossy
+  truncation in `summarize_thread()`.
 - **The spend meter is optional; the size instrument is not.** Batch 27 deleted the
   constants: no default ceiling anywhere, and the only cap is the user's
   `max_token_budget` setting. What every caller gains unconditionally is the size
@@ -1006,9 +1036,19 @@ worker, and how a malformed answer decodes.
 
 ### Project scaffolding (`project_init/`, §24)
 
-`/init` reads a project and writes its documentation set: `.venastine/CONTEXT.md`
+`/init` reads a project and writes its documentation set: a root `AGENTS.md`
 as the hub, plus the documents it links. `--init` on the CLI (M21's precedent —
 the CLI has no command layer).
+
+**The hub is `AGENTS.md` at the ROOT, and `.venastine/` is configuration only**
+(§44 WS8, reversing I9). I9 put it inside `.venastine/` so the one file every
+agent reads sat inside the trust boundary; §44 keeps the boundary and moves the
+file. A project shared WITHOUT `.venastine/` — the ordinary thing to do when you
+do not want to ship your configuration — used to arrive as a set of root
+documents pointing at a hub that was not in the archive; and `AGENTS.md` is the
+name other harnesses already look for, so an initialized project is legible to
+them without a second copy of one meaning under a second filename. `CONTEXT.md`
+is gone outright, not kept as a fallback. `doc_path()` is one join now.
 
 - **`write` and `read` are globally denied and cannot be re-enabled at runtime.**
   Not a default: `is_tool_allowed()` reads `config.ToolPermissions()` directly,
@@ -1035,9 +1075,9 @@ the CLI has no command layer).
   `skills/builtin/`. ARCHITECTURE.md used to say the most a prompt-injected pass
   gains is the README (audit #97); understating a security bound is the one
   direction that costs something.
-- **`CONTEXT.md` is the hub and the only document in `.venastine/`** (I9). The
-  rest are ordinary committed root files it links out to, so the one file every
-  agent reads is also the map of the ones it does not.
+- **The hub is the map of the documents it links** (I9, as relocated by WS8). All
+  of them are ordinary committed root files now, so the one file every agent reads
+  sits beside the ones it does not.
 - **The index is generated, and is a pure function of the kind** (I11). It first
   marked which documents already existed — which rewrote `CONTEXT.md` on every
   later `/init` (the index changed because the previous run had created the
@@ -1067,7 +1107,9 @@ the CLI has no command layer).
   already makes after a channel approval.
 - **No confirm route means nothing is written** (I5) — §25's V6, sixth instance.
 - **Trust is re-granted only for a project that was ALREADY trusted** (I6), and
-  the state is captured **before** the write, since the hash has moved afterwards.
+  the state is captured **before** the write, since the hash has moved afterwards —
+  which is still true with the hub at the root, because WS9 puts the root
+  `AGENTS.md` inside the hash.
   In an untrusted project `.venastine/` may already hold agents, skills and an
   `mcp.json` that arrived with a cloned repo, and granting as a side effect of
   `/init` would wave all of it through. `CONTEXT.md` is never special-cased out of
@@ -1098,7 +1140,9 @@ the CLI has no command layer).
 
 `core/config_loader.py` discovers `.md` agents/skills across three tiers — harness (`<root>/{agents,skills}/builtin/`) → project (`.venastine/`, trust-gated) → user (`~/.config/venastine/`) — parses line-anchored YAML frontmatter, and merges `settings.json` (unknown keys **raise**). `core/workspace_trust.py` owns only the D17 trust store (resolved path + sorted-walk content hash); `main.py` owns the prompting UX.
 
-**Trust is keyed to the PROJECT PATH (`os.getcwd()`) and the presence of `.venastine/`** — not to `AGENT_WORKSPACE` (§43, RM6). `config.WORKSPACE_DIR` is `file_ops`' permission boundary and deliberately not a project path (see the distribution section above), so changing it never asks about trust; and `is_trusted()` returns `True` outright for a project with no `.venastine/` directory, because there is nothing to trust, nothing to list and no question to ask. An empty directory is that case, and so is this repository — silence at launch is the correct outcome there rather than a missing prompt.
+**Trust is keyed to the PROJECT PATH, which is `AGENT_WORKSPACE` when one is named and `os.getcwd()` otherwise** (§44 WS7, reversing RM6). RM6 recorded the opposite and the report that reopened it is what the split looked like in use: the file tools confined to the workspace while `/init` scaffolded the harness.
+
+**What a grant covers is `content_files()`, and that is now the root `AGENTS.md` plus everything under `.venastine/`** (WS9). The hub reaching a system prompt from outside the boundary would be D17's own stated threat arriving through the door WS8 opened, so the listing carries it — with PROJECT-relative paths, because `AGENTS.md` and `.venastine/AGENTS.md` are different files. `is_trusted()` asks that listing whether there is anything to trust rather than asking whether the directory exists, so a cloned repo shipping an `AGENTS.md` and no `.venastine/` now prompts, and a project with neither is silent as before. Every grant made before §44 re-prompts exactly once, because the set being consented to genuinely changed. `_content_hash()` iterates `content_files()` instead of walking a second time — the deeper fix this file used to list as still open, since two traversals that must agree by construction is how #18 drifted.
 
 Load-bearing: untrusted project content is **absent**, not loaded-and-disabled. Trust-store and user-config paths resolve at call time, not import time (tests redirect them). Provider/model precedence is CLI > `settings.json` > `config.py`, which only works because argparse defaults are `None` (`main.resolve_runtime_defaults`). Since §43 the TUI adds one tier of its own between the first two — a remembered `/model` pair, applied only when no flag spoke and only while `default_provider`/`default_model` still say what they said when it was chosen. The CLI is unchanged and does not read that store.
 
