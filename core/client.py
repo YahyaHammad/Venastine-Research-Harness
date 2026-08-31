@@ -336,7 +336,41 @@ def _is_empty_assistant_turn(msg: dict) -> bool:
             and not msg.get("tool_calls"))
 
 
-def _messages_for_provider(provider_name: str, neutral_messages: list[dict]) -> list:
+def _echoed_blocks(provider_name: str, model: Optional[str],
+                   msg: dict) -> list:
+    """This turn's stored thinking blocks, if they may go back (§44).
+
+    THE GATE IS THE PAIR, and it is the whole safety argument. A stored
+    record names the provider and model that produced it; blocks go back
+    UNCHANGED to that model and to nothing else. An Anthropic block carries
+    a signature the model verifies against its own state, so handing it to
+    a different model is at best ignored and at worst a 400 -- and after a
+    /model switch the thread is full of blocks the new model never wrote.
+    Dropping them is always safe: the harness then does exactly what it did
+    before this batch.
+
+    Empty for every message written before §44, which is what keeps the
+    translation byte-identical for every existing thread.
+    """
+    record = msg.get("thinking")
+    if not isinstance(record, dict) or not model:
+        return []
+    if record.get("provider") != provider_name or record.get("model") != model:
+        return []
+    return [b for b in record.get("blocks") or [] if isinstance(b, dict)]
+
+
+def _messages_for_provider(provider_name: str, neutral_messages: list[dict],
+                           model: Optional[str] = None,
+                           echo_reasoning: bool = False) -> list:
+    """The wire shape for one provider.
+
+    `model` and `echo_reasoning` are §44's: they decide whether a stored
+    thinking record may travel. Both DEFAULT to the pre-§44 behaviour --
+    no model means no echo, and the OpenAI-compatible side is opt-in per
+    provider -- so a caller that does not pass them gets exactly the
+    translation this function produced before.
+    """
     # One rule, above the split (#13, #36). Note this can leave two
     # consecutive user turns -- which is the shape Google's branch has
     # always produced here, and which
@@ -417,7 +451,11 @@ def _messages_for_provider(provider_name: str, neutral_messages: list[dict]) -> 
                 translated.append({"role": "user", "content": msg["content"]})
 
             elif role == "assistant":
-                content = []
+                # §44. FIRST in the content array, because that is the
+                # order the model emitted them in and the order the API
+                # documents for the replay -- a signed block after the
+                # text it preceded is not the same message.
+                content = list(_echoed_blocks(provider_name, model, msg))
                 if msg.get("text"):
                     content.append({"type": "text", "text": msg["text"]})
                 for tc in msg.get("tool_calls", []):
@@ -454,6 +492,20 @@ def _messages_for_provider(provider_name: str, neutral_messages: list[dict]) -> 
 
         elif role == "assistant":
             entry: dict = {"role": "assistant", "content": msg.get("text") or None}
+            # §44, and OPT-IN PER PROVIDER rather than on by default.
+            # There is no standard for sending reasoning back on this wire
+            # the way there is for receiving it: DeepSeek documents that
+            # reasoning_content must not be supplied on input and 400s,
+            # while OpenRouter accepts it for some models and ignores it
+            # for others. Off means today's behaviour exactly, so a
+            # provider that has never been tried cannot be broken by this.
+            if echo_reasoning:
+                echoed = "\n\n".join(
+                    b.get("text", "") for b in _echoed_blocks(
+                        provider_name, model, msg)
+                    if b.get("text"))
+                if echoed:
+                    entry["reasoning_content"] = echoed
             if msg.get("tool_calls"):
                 entry["tool_calls"] = [
                     {
@@ -1026,10 +1078,6 @@ def call_model_stream(
     silently reporting zero (which disables budget enforcement and §21's
     compaction trigger).
     """
-    translated_messages = _messages_for_provider(provider_name, messages)
-    sampling = _sampling_kwargs(provider_name, model, temperature)
-    thinking = _thinking_for_provider(provider_name, effort)
-
     # Read once so every branch applies the same D21 usage-or-raise rule --
     # all three of them, since audit #40. This comment used to claim that in
     # its first sentence and take it back in the second ("the flag only gates
@@ -1040,6 +1088,19 @@ def call_model_stream(
     supports_stream_usage = provider_data.get(provider_name, {}).get(
         "supports_stream_usage", False
     )
+    # §44. Whether this OpenAI-compatible provider accepts its own
+    # reasoning back on the next request. supports_stream_usage's
+    # precedent: a per-provider fact that cannot be discovered and must not
+    # be guessed, so it lives beside the endpoint it describes and defaults
+    # to the conservative answer.
+    echoes_reasoning = provider_data.get(provider_name, {}).get(
+        "echoes_reasoning", False
+    )
+
+    translated_messages = _messages_for_provider(
+        provider_name, messages, model, echoes_reasoning)
+    sampling = _sampling_kwargs(provider_name, model, temperature)
+    thinking = _thinking_for_provider(provider_name, effort)
 
     if provider_name == "ANTHROPIC":
         stream_kwargs = dict(

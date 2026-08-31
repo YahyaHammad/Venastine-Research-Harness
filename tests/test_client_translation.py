@@ -35,6 +35,123 @@ def _no_provider_data(monkeypatch):
     monkeypatch.setattr("core.client.load_provider_data", lambda: {})
 
 
+class TestReasoningGoesBackToTheModelThatWroteIt:
+    """§44, the half that closes the drift.
+
+    §38's O1 kept thinking off the wire and sidestepped "does a provider
+    need its own reasoning returned?" by never returning any. That answer
+    stopped being free once it was clear the model had NEVER seen its own
+    reasoning -- not across a restart and not between two turns of one live
+    session -- so every turn re-derived what the turn before it had already
+    worked out.
+
+    THE GATE IS THE (provider, model) PAIR, and every test here is about
+    when the blocks do NOT travel. An Anthropic block carries a signature
+    verified against the model's own state, so the only safe destination is
+    the model that wrote it; dropping is always safe, because dropping is
+    exactly what the harness did before this batch.
+    """
+
+    def _thought(self, text="Let me think.", provider="ANTHROPIC",
+                 model="claude-opus-5", signature="sig-1"):
+        return {"role": "assistant", "text": "Because.", "tool_calls": [],
+                "thinking": {"provider": provider, "model": model,
+                             "blocks": [{"type": "thinking", "thinking": text,
+                                         "signature": signature}]}}
+
+    def test_the_blocks_go_back_unchanged_and_first(self):
+        """UNCHANGED, field for field: a re-serialised copy would not
+        verify. FIRST, because that is the order the model emitted them in
+        and a signed block after the text it preceded is a different
+        message."""
+        out = _messages_for_provider(
+            "ANTHROPIC", [self._thought()], "claude-opus-5")
+
+        assert out[0]["content"] == [
+            {"type": "thinking", "thinking": "Let me think.",
+             "signature": "sig-1"},
+            {"type": "text", "text": "Because."},
+        ]
+
+    def test_a_different_model_does_not_receive_them(self):
+        """The /model switch. After one, the thread is full of blocks the
+        new model never wrote and cannot verify."""
+        out = _messages_for_provider(
+            "ANTHROPIC", [self._thought()], "claude-haiku-4-5")
+
+        assert out[0]["content"] == [{"type": "text", "text": "Because."}]
+
+    def test_a_different_provider_does_not_receive_them(self):
+        """Same model NAME on another provider is not the same model --
+        and it is a real shape, since a gateway may serve `claude-opus-5`
+        under its own name."""
+        out = _messages_for_provider(
+            "OPENROUTER", [self._thought()], "claude-opus-5",
+            echo_reasoning=True)
+
+        assert "reasoning_content" not in out[0]
+
+    def test_no_model_means_no_echo(self):
+        """The default. A caller that does not say which model it is
+        talking to gets the pre-§44 translation, byte for byte."""
+        out = _messages_for_provider("ANTHROPIC", [self._thought()])
+
+        assert out[0]["content"] == [{"type": "text", "text": "Because."}]
+
+    def test_a_turn_that_did_not_think_is_translated_as_it_always_was(self):
+        """Every thread written before §44 has to cross this function
+        unchanged, or the batch is a migration rather than an addition."""
+        plain = {"role": "assistant", "text": "Because.", "tool_calls": []}
+
+        assert _messages_for_provider("ANTHROPIC", [plain], "claude-opus-5") \
+            == [{"role": "assistant",
+                 "content": [{"type": "text", "text": "Because."}]}]
+
+    def test_the_v1_side_is_opt_in_per_provider(self):
+        """There is no standard for sending reasoning back on this wire the
+        way there is for receiving it: DeepSeek documents that
+        reasoning_content must not be supplied on input and 400s, while
+        OpenRouter takes it for some models and ignores it for others. Off
+        is today's behaviour, so a provider nobody has tried cannot be
+        broken by this."""
+        msg = self._thought(provider="OPENROUTER", model="minimax/minimax-m3")
+        msg["thinking"]["blocks"] = [{"type": "reasoning_content",
+                                      "text": "Hmm."}]
+
+        off = _messages_for_provider(
+            "OPENROUTER", [msg], "minimax/minimax-m3", echo_reasoning=False)
+        on = _messages_for_provider(
+            "OPENROUTER", [msg], "minimax/minimax-m3", echo_reasoning=True)
+
+        assert "reasoning_content" not in off[0]
+        assert on[0]["reasoning_content"] == "Hmm."
+        assert on[0]["content"] == "Because.", "the answer is untouched"
+
+    def test_google_never_receives_reasoning(self):
+        """O2's other half: Google is not asked for thought summaries, so
+        there is nothing of its own to give back, and its Content parts
+        have no field for one."""
+        out = _messages_for_provider(
+            "GOOGLE", [self._thought(provider="GOOGLE", model="gemini-2.5-pro")],
+            "gemini-2.5-pro")
+
+        assert [p.text for p in out[0].parts] == ["Because."]
+
+    def test_redacted_blocks_travel_even_though_nothing_renders_them(self):
+        """Opaque to us, meaningful to the model. core/replay.py draws
+        nothing for these; the wire still has to carry them or a turn that
+        had one breaks on the next send."""
+        msg = self._thought()
+        msg["thinking"]["blocks"] = [{"type": "redacted_thinking",
+                                      "data": "Blob=="}]
+
+        out = _messages_for_provider(
+            "ANTHROPIC", [msg], "claude-opus-5")
+
+        assert out[0]["content"][0] == {"type": "redacted_thinking",
+                                        "data": "Blob=="}
+
+
 def _call(client, provider_name, model, messages, system_prompt,
           tool_schemas, temperature=None, effort=None):
     """Drive the real streaming call and return its final ModelResponse.

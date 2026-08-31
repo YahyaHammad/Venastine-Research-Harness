@@ -719,6 +719,7 @@ Deliberately not settings.json keys: editing these means editing the file in you
 | `API_KEY` | The credential, stored directly |
 | `is_v1_compatible` | `true` routes the provider through the OpenAI-compatible translation |
 | `supports_stream_usage` | Promises streamed responses carry token usage. If a stream then ends with none, the harness **raises** rather than accounting zero tokens — a silent zero would disable the budget stop condition while looking healthy. Endpoints that don't return streaming usage ship with `false` |
+| `echoes_reasoning` | Opt in to sending this provider's own reasoning back on the next request (§44). Off everywhere by default: there is no standard for it the way there is for receiving reasoning — DeepSeek documents that `reasoning_content` must not be supplied on input and returns a 400, while OpenRouter accepts it for some models and ignores it for others. Anthropic needs no flag; its thinking blocks are signed and are echoed to the model that produced them automatically |
 
 `mcp.json` entries are tabulated under [MCP servers](#mcp-servers).
 
@@ -743,7 +744,7 @@ classifier is described under *Security model* above. If you have a fork or a lo
 note that `ToolApprovals.shell` now ships `False` and `SHELL_APPROVAL_MODE` is the gate — see
 `tests/BREAKING_CHANGES.md` §24.
 
-Run the test suite with `pytest` — 3044 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
+Run the test suite with `pytest` — 3055 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
 
 ## Documentation
 

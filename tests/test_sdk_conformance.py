@@ -441,6 +441,35 @@ def test_the_anthropic_stream_is_iterable_and_names_its_delta_events():
             "provider")
 
 
+def test_the_anthropic_thinking_block_still_carries_a_signature():
+    """§44. The echo rests entirely on this shape.
+
+    core/client.py keeps `b.model_dump()` off get_final_message() and puts
+    the result back on the wire unchanged, because the model verifies its
+    own state through the block's `signature` rather than through the
+    prose. Two ways that could break silently: the field could be renamed,
+    in which case the dump still round-trips but no longer verifies; or
+    `model_dump` could go, in which case the capture raises inside a
+    generator on the default provider.
+
+    D22's rule -- ask the REAL package, because a double built from what
+    the code expects agrees with the code by construction, which is #35's
+    whole lesson.
+    """
+    with real_package("anthropic", "httpx"):
+        from anthropic.types import ThinkingBlock, RedactedThinkingBlock
+
+        assert "signature" in ThinkingBlock.model_fields, (
+            "anthropic's ThinkingBlock no longer carries .signature -- the "
+            "blocks §44 echoes back would be unsigned, and the API rejects "
+            "an unsigned thinking block")
+        assert "thinking" in ThinkingBlock.model_fields
+        assert hasattr(ThinkingBlock, "model_dump"), (
+            "the capture in core/client.py calls model_dump() on these")
+        # The redacted sibling is opaque to us and still has to travel.
+        assert "data" in RedactedThinkingBlock.model_fields
+
+
 def test_the_openai_delta_keeps_unmodelled_reasoning_fields():
     """§38 O3, the OpenAI-compatible half, and the same property
     test_openai_models_keep_unknown_provider_fields turns on one layer up.

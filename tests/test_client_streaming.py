@@ -75,9 +75,18 @@ class _FakeAnthropicStream:
 
 class _FakeAnthropicClient:
     def __init__(self, events, final_message):
-        self.messages = SimpleNamespace(
-            stream=lambda **kwargs: _FakeAnthropicStream(events, final_message)
-        )
+        # The kwargs are RECORDED, not swallowed by a **kwargs the test
+        # cannot see. Batch 42's lesson, in the other file: a translation
+        # asserted through its own function cannot detect a break in the
+        # wiring that calls it, and replacing the arguments with None left
+        # every modal test green.
+        self.sent = []
+
+        def _stream(**kwargs):
+            self.sent.append(kwargs)
+            return _FakeAnthropicStream(events, final_message)
+
+        self.messages = SimpleNamespace(stream=_stream)
 
 
 def test_stream_anthropic_text_and_tool_use(monkeypatch):
@@ -448,6 +457,60 @@ class TestThinkingIsCapturedAndKeptOutOfTheAnswer:
             "blocks": [{"type": "reasoning_content",
                         "text": "Let me count."}]}
         assert response.text == "A"
+
+    def test_the_stored_blocks_reach_the_request(self, monkeypatch):
+        """The WIRING, not the translation. _messages_for_provider is
+        tested directly in test_client_translation.py, and a test there
+        cannot see whether call_model_stream actually hands it the model
+        and the flag -- passing None for both would leave every one of
+        those green while the feature did nothing."""
+        monkeypatch.setattr("core.client.load_provider_data", lambda: {})
+        final_message = SimpleNamespace(
+            content=[SimpleNamespace(type="text", text="ok")],
+            usage=SimpleNamespace(input_tokens=1, output_tokens=1),
+        )
+        client = _FakeAnthropicClient([_text_event("ok")], final_message)
+        history = [
+            {"role": "user", "content": "why?"},
+            {"role": "assistant", "text": "Because.", "tool_calls": [],
+             "thinking": {"provider": "ANTHROPIC", "model": "claude-opus-5",
+                          "blocks": [{"type": "thinking", "thinking": "Hmm.",
+                                      "signature": "sig"}]}},
+            {"role": "user", "content": "and now?"},
+        ]
+
+        list(call_model_stream(
+            client, "ANTHROPIC", "claude-opus-5", history, "sys", []))
+
+        sent = client.sent[0]["messages"]
+        assert sent[1]["content"][0] == {
+            "type": "thinking", "thinking": "Hmm.", "signature": "sig"}
+
+    def test_the_v1_flag_is_read_from_providers_json(self, monkeypatch):
+        """echoes_reasoning is supports_stream_usage's precedent: a
+        per-provider fact that cannot be discovered, so it sits beside the
+        endpoint it describes and defaults to the conservative answer."""
+        monkeypatch.setattr("core.client.load_provider_data", lambda: {
+            "OPENROUTER": {"echoes_reasoning": True}})
+        chunks = [
+            _oai_chunk(SimpleNamespace(content="ok", tool_calls=None)),
+        ]
+        client = _FakeOpenAIClient(chunks)
+        history = [
+            {"role": "user", "content": "why?"},
+            {"role": "assistant", "text": "Because.", "tool_calls": [],
+             "thinking": {"provider": "OPENROUTER", "model": "m",
+                          "blocks": [{"type": "reasoning_content",
+                                      "text": "Hmm."}]}},
+            {"role": "user", "content": "and now?"},
+        ]
+
+        list(call_model_stream(client, "OPENROUTER", "m", history, "sys", []))
+
+        # The system prompt is messages[0] on this branch, so the assistant
+        # turn is index 2.
+        sent = client.chat.completions.last_kwargs["messages"]
+        assert sent[2]["reasoning_content"] == "Hmm."
 
     def test_anthropic_ignores_event_kinds_it_does_not_render(self, monkeypatch):
         """The SDK emits signature, content_block_stop and message_stop
