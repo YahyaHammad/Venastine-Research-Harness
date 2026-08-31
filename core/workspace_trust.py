@@ -2,7 +2,7 @@
 core/workspace_trust.py
 
 Workspace trust gate (ROADMAP_v2 §14, D17). Project-level `.venastine/`
-content (agents, skills, settings.json, CONTEXT.md, mcp.json) only loads
+content (agents, skills, settings.json, AGENTS.md, mcp.json) only loads
 after a one-time explicit user confirmation, keyed by resolved project
 path + a content hash of everything under `.venastine/`. Changed content
 after trust was granted produces a different hash and re-triggers the
@@ -29,70 +29,120 @@ def venastine_dir(project_path: str) -> str:
     return os.path.join(os.path.realpath(project_path), ".venastine")
 
 
+#: The project's context document, and the ONE file outside .venastine/
+#: that the loader injects into a system prompt (§44, replacing
+#: .venastine/CONTEXT.md). Defined HERE rather than beside /init, because
+#: the interesting fact about it is that it is inside the trust boundary:
+#: config_loader reads it, tools/builtin/project_docs writes it, and
+#: project_init/doc_sets names it, all from this one constant.
+PROJECT_CONTEXT_FILENAME = "AGENTS.md"
+
+
 def content_files(project_path: str) -> list[str]:
-    """Sorted relative paths of every file under the project's
-    .venastine/ (empty list when the directory is absent)."""
-    root = venastine_dir(project_path)
-    if not os.path.isdir(root):
-        return []
+    """Sorted PROJECT-RELATIVE paths of everything a grant covers.
+
+    Everything under .venastine/, plus the root AGENTS.md when it exists.
+
+    THE ROOT FILE IS IN HERE BECAUSE IT REACHES THE SYSTEM PROMPT (§44).
+    D17 gates .venastine/ for one reason: its content becomes instructions,
+    and "project" means "arrived with a repo you cloned". Moving the hub
+    out of that directory without moving the boundary would have left a
+    cloned AGENTS.md entering an opted-in agent's system prompt with no
+    prompt at all -- D17's own stated threat, through the door §44 opened.
+    This module's invariant is the one that says so: the loader must read
+    no file the trust listing omits.
+
+    PATHS ARE RELATIVE TO THE PROJECT, not to .venastine/, which they were
+    before. They have to be: "AGENTS.md" and ".venastine/AGENTS.md" are
+    different files and a listing that could not tell them apart would be
+    a listing you cannot trust. The strings feed the hash, so every
+    existing grant re-prompts exactly once -- correct, because the set
+    being consented to has genuinely changed.
+    """
+    resolved = os.path.realpath(project_path)
     out = []
-    for dirpath, dirs, files in os.walk(root):
-        dirs.sort()
-        for fname in sorted(files):
-            # posix separators so the hash (and the trust-prompt listing)
-            # are identical regardless of platform path conventions
-            out.append(os.path.relpath(os.path.join(dirpath, fname), root)
-                       .replace(os.sep, "/"))
+    if os.path.isfile(os.path.join(resolved, PROJECT_CONTEXT_FILENAME)):
+        out.append(PROJECT_CONTEXT_FILENAME)
+    root = venastine_dir(project_path)
+    if os.path.isdir(root):
+        for dirpath, dirs, files in os.walk(root):
+            dirs.sort()
+            for fname in sorted(files):
+                # posix separators so the hash (and the trust-prompt
+                # listing) are identical regardless of platform path
+                # conventions
+                rel = os.path.relpath(os.path.join(dirpath, fname), resolved)
+                out.append(rel.replace(os.sep, "/"))
     return out
 
 
 def _content_hash(project_path: str) -> str:
-    """Hashes relative path + content of every file under .venastine/.
+    """Hashes relative path + content of everything content_files() lists.
 
-    Two corrections to the obvious implementation, both of which matter
-    because this hash is a security control rather than a cache key
-    (ROADMAP_v2 §14, Rev. 3):
+    ONE TRAVERSAL, NOT TWO THAT MUST AGREE (§44). This walked the tree a
+    second time and had to arrive at the same set as content_files() by
+    construction rather than by sharing code -- which #18 already showed
+    is not a safe way to keep two traversals aligned, and which AGENTS.md
+    recorded as the deeper fix still open. It iterates the listing now, so
+    the trust PROMPT and the trust DIGEST are one set of files by
+    definition: a file the listing omits cannot enter the hash, and this
+    module's invariant is that the loader may read no such file.
+
+    Two corrections survive from §14, both of which matter because this
+    hash is a security control rather than a cache key (Rev. 3):
 
       1. `os.walk` yields subdirectories in filesystem order, not sorted
          order. Sorting `files` alone is not enough -- `dirs` must be
-         sorted IN PLACE so os.walk itself descends deterministically,
-         or the same unchanged .venastine/ can hash differently between
-         runs and re-prompt for trust that was already granted.
+         sorted IN PLACE so os.walk itself descends deterministically, or
+         the same unchanged project can hash differently between runs and
+         re-prompt for trust that was already granted. That sort now lives
+         in content_files(), which is the traversal.
       2. Hashing file CONTENT only makes the path invisible to the hash.
          Two files swapping names produces an identical digest -- and the
          directory a definition lives in is what determines how it's
          loaded. The relative path is fed in too, with \\0 separators, so
          concatenation boundaries can't be forged.
     """
-    root = venastine_dir(project_path)
+    resolved = os.path.realpath(project_path)
     hasher = hashlib.sha256()
-    for dirpath, dirs, files in os.walk(root):
-        dirs.sort()  # deterministic descent -- see (1)
-        for fname in sorted(files):
-            path = os.path.join(dirpath, fname)
-            rel = os.path.relpath(path, root).replace(os.sep, "/")
-            hasher.update(rel.encode("utf-8"))
-            hasher.update(b"\0")
-            # Bounded reads, and regular files only. This hash runs BEFORE
-            # the user has consented to anything, over content that arrived
-            # with a directory they cloned: f.read() on a multi-GB blob is
-            # one unbounded allocation at startup, and open() on a FIFO
-            # (os.walk lists it, and a symlink to one resolves) blocks
-            # forever. Neither is content worth reading to decide whether
-            # to trust it -- its presence and name are enough.
-            if os.path.isfile(path):
-                with open(path, "rb") as f:
-                    for chunk in iter(lambda: f.read(1 << 16), b""):
-                        hasher.update(chunk)
-            else:
-                hasher.update(b"<non-regular file>")
-            hasher.update(b"\0")
+    for rel in content_files(project_path):
+        path = os.path.join(resolved, rel.replace("/", os.sep))
+        hasher.update(rel.encode("utf-8"))
+        hasher.update(b"\0")
+        # Bounded reads, and regular files only. This hash runs BEFORE the
+        # user has consented to anything, over content that arrived with a
+        # directory they cloned: f.read() on a multi-GB blob is one
+        # unbounded allocation at startup, and open() on a FIFO (os.walk
+        # lists it, and a symlink to one resolves) blocks forever. Neither
+        # is content worth reading to decide whether to trust it -- its
+        # presence and name are enough.
+        if os.path.isfile(path):
+            with open(path, "rb") as f:
+                for chunk in iter(lambda: f.read(1 << 16), b""):
+                    hasher.update(chunk)
+        else:
+            hasher.update(b"<non-regular file>")
+        hasher.update(b"\0")
     return hasher.hexdigest()
 
 
 def is_trusted(project_path: str) -> bool:
+    """Whether this project's content may load.
+
+    "Nothing to trust" is now asked of the LISTING rather than of the
+    .venastine/ directory alone (§44). A project can have a root AGENTS.md
+    and no .venastine/ at all -- that is the ordinary shape of a repo
+    someone shares without their configuration, and it is exactly the
+    shape that must not walk into a system prompt unasked. The shortcut
+    narrows accordingly: a cloned repo shipping an AGENTS.md now prompts,
+    where before it was silent because the directory was absent.
+
+    An EMPTY .venastine/ also reads as nothing to trust now, where it
+    previously hashed to a constant and compared. Nothing loads from an
+    empty directory, so there was never a question to ask there.
+    """
     resolved = os.path.realpath(project_path)
-    if not os.path.isdir(os.path.join(resolved, ".venastine")):
+    if not content_files(project_path):
         return True  # nothing to trust -- no project-level content at all
     current_hash = _content_hash(project_path)
     store = _load_trust_store()

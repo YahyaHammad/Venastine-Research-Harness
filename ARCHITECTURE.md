@@ -50,7 +50,7 @@ Venastine Research Harness/
 ├── CLAUDE.md / QWEN.md             # pointers to AGENTS.md, so a harness that auto-loads one of those names finds the context instead of a second copy of it
 ├── DEVLOG.md                       # implementation notes for built ROADMAP sections -- see §0
 │
-├── tests/                          # 3059 tests, all offline, ~25-45s depending on the machine (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
+├── tests/                          # 3065 tests, all offline, ~25-45s depending on the machine (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
 │   ├── conftest.py                 # fixtures: make_model_response, make_stream_from_response, make_stream_sequence, FakeStorage, ...
 │   ├── BREAKING_CHANGES.md         # what-breaks-it / symptom / fix per area
 │   ├── test_cli.py                 # 90 tests -- ROADMAP §1 thread_id passthrough + UUID validation + §14 parser defaults/resolution/trust flow + §29 N1-N8 the one stdin reader, N2's channel deadline, every request kind rendered, and the startup block main(argv) made reachable + #102's four declining defaults
@@ -64,7 +64,7 @@ Venastine Research Harness/
 │   ├── test_client_streaming.py    # 23 tests -- ROADMAP §13 direct call_model_stream coverage (3 providers + D21 + fragment accumulation); §38's thinking capture, incl. that reasoning never joins the answer text
 │   ├── test_loop_stop_conditions.py# 4 tests -- ROADMAP verbatim stop conditions + #45's belt (a non-positive max_steps raises a named ValueError)
 │   ├── test_streaming_loop.py      # 18 tests -- ROADMAP §13 generator event ordering, exception propagation, D20 persistence, permission_channel, and #158's actionable headless denial (name-gated vs argument-gated)
-│   ├── test_workspace_trust.py     # 22 tests -- ROADMAP_v2 §14 AC1/AC2 + hash-control properties (path-in-hash, determinism)
+│   ├── test_workspace_trust.py     # 26 tests -- ROADMAP_v2 §14 AC1/AC2 + hash-control properties (path-in-hash, determinism)
 │   ├── test_config_loader.py       # 71 tests -- ROADMAP_v2 §14 frontmatter AC4, tier precedence D8/D18, settings merge, CONTEXT opt-in AC5, catalog, #45's repair-not-reject max_steps
 │   ├── test_load_skill.py          # 8 tests -- load_skill view-only retrieval, D24 permission declaration, catalog prompt injection
 │   ├── test_orchestrator.py        # 37 tests -- full pipeline mocked + JSON-retry + §5 failure/success/acceptance
@@ -84,7 +84,7 @@ Venastine Research Harness/
 │   ├── test_permission_context.py  # 21 tests -- ROADMAP_v2 §15 AC1-AC7 (stricter wins, mcp default, redaction survives, D24, unregister) + schemas filtering
 │   ├── test_agents.py              # 47 tests -- ROADMAP_v2 §18 AC1-AC3 (intersection, depth, manager surface), dispatch injection, headless filter + warning, goal mode, catalog, D24, TUI commands, and R16's "a headless run cannot spawn at all"
 │   ├── test_catalog_advertisement.py # 19 tests -- ROADMAP_v2 §32 A1/A2 (#68): is_advertised as the one predicate schemas/headless_hidden/with_catalogs all read, every pass id driven headless, and the grant that cannot re-admit a GRANT_NEVER catalog
-│   ├── test_catalog_text.py        # 19 tests -- ROADMAP_v2 §32 A5/A6 (#131): a description cannot leave its bullet or forge a prompt section, the cap and its boundary, our own files already comply, and the trust prompt showing the NORMALISED text it is deciding about
+│   ├── test_catalog_text.py        # 21 tests -- ROADMAP_v2 §32 A5/A6 (#131): a description cannot leave its bullet or forge a prompt section, the cap and its boundary, our own files already comply, and the trust prompt showing the NORMALISED text it is deciding about
 │   ├── test_spawnable.py           # 12 tests -- ROADMAP_v2 §32 A3/A4 (#69): a harness agent that omits `spawnable` is a build error naming every offender, a stranger's silence gets the safe answer, and the default install advertises no spawnable agent at all
 │   ├── test_spawn_preflight.py     # 14 tests -- ROADMAP_v2 §32 A7 (#70): one refusal_reason read by the loop, by dispatch ahead of its approval gate, and by run() as the direct-caller backstop -- plus the control that a valid spawn IS still signed off
 │   ├── test_spend_and_size.py     # 17 tests -- batch 27 (#4): the spend meter and the size instrument separated. Wrappers default to a sentinel that resolves settings.json max_token_budget (uncapped unless set; explicit None stays uncapped); turn growth/billed figures ride ModelResponse (unpriced, first call's inherited prompt excluded, compaction shrinks clamped); the TUI usage line and the CLI early-stop figures are the consumers

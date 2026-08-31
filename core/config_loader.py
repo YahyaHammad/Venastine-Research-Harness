@@ -608,7 +608,7 @@ def _validate_settings(data, source: str) -> None:
             # supporting it would let a cloned repo set "never" and turn
             # `cat ~/.aws/credentials` into an unprompted host read. D17's
             # trust gate is not a substitute: the same prompt covers a
-            # README-shaped CONTEXT.md, and nobody reading it is deciding
+            # README-shaped AGENTS.md, and nobody reading it is deciding
             # about their shell gate.
             raise ValueError(
                 f"settings.json at {source}: shell_approval_mode is "
@@ -842,17 +842,23 @@ def initialize(project_path: str) -> None:
     if not trusted:
         logger.warning(
             "Project .venastine/ at %s is not trusted; project-level "
-            "content (agents, skills, settings, CONTEXT.md) will not load.",
+            "content (agents, skills, settings, AGENTS.md) will not load.",
             project_path,
         )
     settings = _load_merged_settings(project_path, trusted)
     context = None
     if trusted:
+        # §44: the project ROOT, not .venastine/. The hub is an ordinary
+        # committed file now, so a project shared WITHOUT its configuration
+        # is not a project with a dangling pointer -- which is the whole
+        # reason it moved. workspace_trust still covers it: the file is in
+        # content_files() and in the hash, because what reaches a system
+        # prompt is what a grant has to be about.
         context_path = os.path.join(
-            workspace_trust.venastine_dir(project_path), "CONTEXT.md")
+            project_path, workspace_trust.PROJECT_CONTEXT_FILENAME)
         if os.path.exists(context_path):
             # Degrade, don't abort. UnicodeDecodeError is a ValueError, so
-            # an unreadable CONTEXT.md would reach main.load_project_config's
+            # an unreadable AGENTS.md would reach main.load_project_config's
             # handler and SystemExit(1) EVERY invocation in this directory
             # -- including plain chat, which never reads the file. Every
             # other malformed content file in this module warns and skips.
@@ -1003,7 +1009,7 @@ def get_agent(name: str) -> Optional[AgentDef]:
 
 
 def context_for_agent(agent: Optional[AgentDef]) -> Optional[str]:
-    """CONTEXT.md is opt-in per agent (use_project_context), so no agent
+    """AGENTS.md is opt-in per agent (use_project_context), so no agent
     (or an agent without the flag) never pays its token cost. Untrusted
     projects have context=None regardless."""
     if _state is None or agent is None or not agent.use_project_context:
@@ -1079,7 +1085,14 @@ def _catalog_entries(root: str, files: list) -> list:
     """
     out = []
     for rel in files:
-        parts = rel.split("/")
+        # §44: the listing is PROJECT-relative now, so the .venastine/
+        # prefix is stripped before matching. Matching the raw string
+        # would silently describe nothing -- the trust prompt would still
+        # render, still list the files, and simply stop saying what any of
+        # them would tell the model, which is the half #131 added.
+        if not rel.startswith(".venastine/"):
+            continue
+        parts = rel[len(".venastine/"):].split("/")
         if len(parts) < 2 or parts[0] not in ("agents", "skills"):
             continue
         if not rel.lower().endswith(".md"):
@@ -1088,10 +1101,17 @@ def _catalog_entries(root: str, files: list) -> list:
         defn = _parse_md_file(os.path.join(root, *parts), kind,
                               "project")
         if defn is None:
-            out.append((kind, rel, "(could not be read -- see the log)"))
+            out.append((kind, "/".join(parts),
+                        "(could not be read -- see the log)"))
         else:
             out.append((kind, defn.name, defn.description))
     return out
+
+
+#: How much of the project context document the trust prompt shows. Enough
+#: to recognise what the file is for, short enough that the prompt stays
+#: readable -- the whole thing is what a grant covers, not what it prints.
+_HUB_PREVIEW_LINES = 20
 
 
 def describe_project_content(project_path: str) -> str:
@@ -1101,8 +1121,36 @@ def describe_project_content(project_path: str) -> str:
     or a skill's description reaches every system prompt (#131)."""
     root = workspace_trust.venastine_dir(project_path)
     files = workspace_trust.content_files(project_path)
-    lines = [f"Project .venastine/ content ({root}):"]
+    lines = [f"Project content ({os.path.realpath(project_path)}):"]
     lines += [f"  - {rel}" for rel in files]
+
+    # §44. The hub is shown VERBATIM, and it is the strongest instance of
+    # this function's own stated criterion -- "the ones whose contents
+    # change what runs". settings.json picks a provider and mcp.json names
+    # a command; AGENTS.md is prose that goes into the system prompt of
+    # every opted-in agent, which is the plainest form of "tells the model
+    # what to do" this prompt can be asked to cover. Bounded to the first
+    # few lines because a project's context document is not small and an
+    # unbounded paste is a prompt nobody reads to the end of.
+    hub = os.path.join(os.path.realpath(project_path),
+                       workspace_trust.PROJECT_CONTEXT_FILENAME)
+    if os.path.exists(hub):
+        try:
+            with open(hub, "r", encoding="utf-8-sig") as f:
+                body = f.read()
+        except (OSError, UnicodeDecodeError) as e:
+            lines.append(
+                f"{workspace_trust.PROJECT_CONTEXT_FILENAME}: could not be "
+                f"read ({e})")
+        else:
+            shown = body.splitlines()
+            lines.append(
+                f"{workspace_trust.PROJECT_CONTEXT_FILENAME} would enter "
+                f"every opted-in agent's system prompt; it begins:")
+            lines += ["  | " + line for line in shown[:_HUB_PREVIEW_LINES]]
+            if len(shown) > _HUB_PREVIEW_LINES:
+                lines.append(
+                    f"  | … {len(shown) - _HUB_PREVIEW_LINES} more lines")
 
     # settings.json and mcp.json are shown VERBATIM, the rest by name.
     # These two are the ones whose contents change what runs: settings can

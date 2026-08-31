@@ -9,15 +9,28 @@ about when to write. That split is why the allowlist `write_project_doc`
 enforces can be read from here without a cycle, and why the templates below
 can be asserted against directly in tests.
 
-THE HUB IS THE POINT. CONTEXT.md is the only document §14's loader reads,
+THE HUB IS THE POINT. AGENTS.md is the only document §14's loader reads,
 and the only one injected into an opted-in agent's prompt. Everything else
-is an ordinary committed root file that CONTEXT.md links out to -- so the
+is an ordinary committed root file that AGENTS.md links out to -- so the
 one file the model always sees is also the map of the ones it does not.
 That index is generated from these tuples rather than written by the model
 (I11): a model listing its own documents is a model that can get a relative
 path wrong in the single file every agent reads.
 
-STUBS, NOT INVENTED CONTENT (I10). CONTEXT.md is generated in full by a
+THE HUB IS AGENTS.md AND IT LIVES AT THE ROOT (§44, reversing I9). I9 put
+it in `.venastine/` so the one file every agent reads sat inside the trust
+boundary. The boundary is still there -- workspace_trust.content_files()
+covers the root AGENTS.md explicitly, and a grant is still what lets it
+load -- but the FILE is now an ordinary committed document, for two
+reasons that pull the same way. A project shared without `.venastine/`
+(because its owner did not want to ship their configuration) previously
+arrived as a set of documents pointing at a hub that was not in the
+archive. And AGENTS.md is the filename other harnesses already look for,
+so a project this command initializes is legible to them without a second
+copy of the same content under a second name -- which is the failure this
+repository records about itself at the top of its own AGENTS.md.
+
+STUBS, NOT INVENTED CONTENT (I10). AGENTS.md is generated in full by a
 model that has actually read the project. These are skeletons: real
 headings, and for each one a statement of what belongs in it and what does
 not. A DEVLOG written for a project with no history, or an ARCHITECTURE
@@ -30,7 +43,10 @@ from __future__ import annotations
 
 from typing import Optional
 
-CONTEXT = "CONTEXT.md"
+# The name lives in core/workspace_trust because the load-bearing fact
+# about it is that a grant covers it. Imported rather than repeated: three
+# copies of this literal is how one of them goes stale.
+from core.workspace_trust import PROJECT_CONTEXT_FILENAME as HUB
 
 SOFTWARE = "software"
 RESEARCH = "research"
@@ -66,7 +82,7 @@ _SETS = {SOFTWARE: _SOFTWARE_DOCS, RESEARCH: _RESEARCH_DOCS}
 
 def document_set(kind: str) -> tuple:
     """The non-hub documents for a project kind, in the order they should
-    appear in CONTEXT.md's index. Raises on an unknown kind rather than
+    appear in AGENTS.md's index. Raises on an unknown kind rather than
     defaulting to software: a caller that got the kind wrong would scaffold
     the wrong seven files and only find out by reading them."""
     if kind not in _SETS:
@@ -85,7 +101,7 @@ def all_document_names() -> frozenset:
     confinement this provides is "a known document name, never a path",
     which is unaffected by the set being the larger one.
     """
-    return frozenset((CONTEXT,) + _SOFTWARE_DOCS + _RESEARCH_DOCS)
+    return frozenset((HUB,) + _SOFTWARE_DOCS + _RESEARCH_DOCS)
 
 
 # ---------------------------------------------------------------------------
@@ -259,7 +275,9 @@ def render_stub(name: str, facts: Optional[dict] = None) -> str:
     out.append("")
     for heading in sections:
         out += [f"## {heading}", "", "_Not yet written._", ""]
-    out += [f"Linked from [{CONTEXT}](.venastine/{CONTEXT}).", ""]
+    # A plain sibling link since §44: the hub is a root file now, so the
+    # `.venastine/` hop this used to make is gone in both directions.
+    out += [f"Linked from [{HUB}]({HUB}).", ""]
     return "\n".join(out)
 
 
@@ -286,14 +304,14 @@ def _fact_lines(name: str, facts: dict) -> list:
 
 
 def render_index(kind: str) -> str:
-    """CONTEXT.md's documentation index, generated from the set (I11).
+    """AGENTS.md's documentation index, generated from the set (I11).
 
     A PURE FUNCTION OF THE KIND, and that is load-bearing rather than tidy.
     The first version marked which documents already existed, so /init left
     them alone (I12) but said so in the hub. Two things were wrong with it,
     both found by running the command twice: the index changed on the second
     run purely because the first had created the files, which rewrote
-    CONTEXT.md for no reason and defeated the "nothing to do" path -- and the
+    AGENTS.md for no reason and defeated the "nothing to do" path -- and the
     mark itself was false, labelling documents /init had authored moments
     earlier as pre-existing work it had preserved.
 
@@ -304,6 +322,9 @@ def render_index(kind: str) -> str:
              "This file is the hub. Each document below states what belongs "
              "in it and what does not.", ""]
     for name in document_set(kind):
-        lines.append(f"- [{name}](../{name}) — {_STUBS[name][0]}")
+        # A SIBLING path, not `../` (§44). The hub sat in `.venastine/`
+        # and had to climb out; it is a root file now and every document
+        # it links is beside it.
+        lines.append(f"- [{name}]({name}) — {_STUBS[name][0]}")
     lines.append("")
     return "\n".join(lines)
