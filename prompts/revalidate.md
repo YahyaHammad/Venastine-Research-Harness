@@ -12,7 +12,7 @@ Respond with ONLY this JSON structure:
 ```json
 {
   "grounding": [
-    {"claim_id": "c001", "sources": [{"url": "...", "authority_score": 0.0, "similarity_score": 0.0}], "status": "grounded"}
+    {"claim_id": "c001", "sources": [{"url": "...", "quote": "...", "similarity_score": 0.0, "authority_adjustment": 0.0, "authority_reason": "..."}], "status": "grounded"}
   ],
   "critic": [
     {"claim_id": "c001", "fallacies": ["..."], "contradictions": ["..."], "severity": 0.0}
@@ -21,3 +21,5 @@ Respond with ONLY this JSON structure:
 ```
 
 Include an entry in both `grounding` and `critic` for every claim you were given, even if a section is empty (e.g. `"fallacies": []`).
+
+The `sources` entries follow Pass 3a's rules exactly, and this is a re-check rather than a re-use: quote the passage verbatim from the source, score `similarity_score` against the passage you quoted and against the REVISED claim text, and leave `authority_adjustment` at `0.0` unless this specific page is stronger or weaker than its domain suggests. A source that supported the original wording may not support the revision, and carrying its old score across is the thing re-validation exists to catch.

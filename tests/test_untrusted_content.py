@@ -34,7 +34,15 @@ PASS_DIGESTS = {
     "Pass 0": "492adfcd9d4ac9a8",
     "Pass 1": "58e02a1cecd7d581",
     "Pass 2": "fb56b62cf20c800f",
-    "Pass 3a": "a90c695c63256dcb",
+    # Batch 46 (§45, SQ2/SQ4) rewrote Pass 3a deliberately: a source now
+    # carries the verbatim `quote` its similarity was scored from, and
+    # `authority_score` is gone -- authority is computed from the domain
+    # in core/reasoning/source_scoring.py, and the model supplies only a
+    # bounded `authority_adjustment` with a stated reason. The rubric for
+    # `similarity_score` gained anchored bands so the no-embedder
+    # fallback is consistent run to run. The digest moving is this guard
+    # confirming the change was seen.
+    "Pass 3a": "1e90e3dc8a832e98",
     # Batch 19 (#77/E13) reworded Pass 3b deliberately -- the critic now
     # receives every surviving candidate, and the prompt says so. The
     # digest moving is the guard confirming the change was seen.
@@ -42,7 +50,11 @@ PASS_DIGESTS = {
     "Pass 3c": "8f2bc9b1231ea65f",
     "Pass 4": "744f6b116d0a352b",
     "Pass 6a": "6cd6acf94d4c898f",
-    "Pass 6b": "da805a6d5e12df4a",
+    # Batch 46 (§45): the same source shape, because 6b re-runs 3a and
+    # _apply_grounding is literally the same function. It also now says
+    # that a source supporting the ORIGINAL wording may not support the
+    # revision, which is the thing re-validation exists to catch.
+    "Pass 6b": "315a49518702ae59",
     "Final synthesis": "80ef84e07a41a225",
 }
 

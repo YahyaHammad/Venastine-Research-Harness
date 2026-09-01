@@ -80,6 +80,7 @@ from core.reasoning.json_retry import retry_until_json
 from core.reasoning.payload_validation import validate as _validate_payload
 from core.reasoning.pipeline_storage import create_pipeline_run, update_pipeline_run
 from core.reasoning.source_corpus import SourceCorpus
+from core.reasoning.source_scoring import score_grounding_sources
 from safety.policy_enforcement import redact_secrets
 from tools.registry import registry
 
@@ -677,6 +678,7 @@ def _ground_and_score(run: PipelineRun, grounding_entries: list[dict], corpus) -
     applied = _apply_grounding(run.claims, grounding_entries)
     if corpus is not None:
         run.source_documents = corpus.artifact_entries()
+    score_grounding_sources(run, corpus=corpus)
     return applied
 
 

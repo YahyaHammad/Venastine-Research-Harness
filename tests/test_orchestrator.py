@@ -132,6 +132,18 @@ def _build_pass_mock(call_log: list, canned_pass_responses: dict):
 # ---- Canned pass payloads -------------------------------------------------
 # ---------------------------------------------------------------------------
 
+def _source(url, similarity=0.9, quote="the passage that supports it"):
+    """A well-formed §45 source entry, as source_grounding.md asks for it.
+
+    A helper rather than a literal at every site: the shape is now five
+    keys, and a fixture that drifts from the prompt makes the scoring
+    stage emit coercion lines that the test using it did not expect and
+    cannot explain.
+    """
+    return {"url": url, "quote": quote, "similarity_score": similarity,
+            "authority_adjustment": 0.0, "authority_reason": ""}
+
+
 def _clean_pipeline_payloads():
     """Canned payloads for a pipeline where all claims end up clean and
     the 6a/6c retry loop is never entered.
@@ -184,11 +196,19 @@ def _clean_pipeline_payloads():
                 "source_span": "60:100",
             },
         ]),
-        # Pass 3a - grounding entries (JSON list)
+        # Pass 3a - grounding entries (JSON list). §45: a source carries
+        # the quote it was scored from and the model's own similarity, so
+        # this fixture is a payload source_grounding.md would actually
+        # produce. A source missing them is not "clean" -- the scoring
+        # stage corrects it and says so in the trace, which is what the
+        # trace-order test below would then see.
         "Pass 3a": json.dumps([
-            {"claim_id": "C1", "sources": [{"url": "https://example.com/shor"}], "status": "grounded"},
-            {"claim_id": "C2", "sources": [{"url": "https://example.com/rsa"}], "status": "grounded"},
-            {"claim_id": "C3", "sources": [{"url": "https://example.com/nist"}], "status": "grounded"},
+            {"claim_id": "C1", "sources": [_source("https://example.com/shor")],
+             "status": "grounded"},
+            {"claim_id": "C2", "sources": [_source("https://example.com/rsa")],
+             "status": "grounded"},
+            {"claim_id": "C3", "sources": [_source("https://example.com/nist")],
+             "status": "grounded"},
         ]),
         # Pass 3b - critic entries (JSON list)
         "Pass 3b": json.dumps([

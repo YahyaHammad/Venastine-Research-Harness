@@ -125,6 +125,190 @@ MODELS_REJECTING_SAMPLING_PARAMS = frozenset({
 # Example to enable: {"provider_name": "OPENAI", "model": "gpt-5.1"}
 CRITIC_MODEL: dict | None = None
 
+# --- Source authority: domain classes (ROADMAP_v2 §45, SQ4) ---
+# What a source is worth before anything is known about the specific page.
+# Two tables, deliberately: a CLASS carries the number, and a SUFFIX names
+# which class a host belongs to. A user who thinks preprints deserve more
+# edits one number; a user adding their field's own trusted domain edits a
+# membership. One combined {suffix: score} table would make the first of
+# those a find-and-replace across a hundred rows.
+#
+# THE SIGNAL IS A RESTRICTED REGISTRY, NOT A FAMILIAR SUFFIX. `.gov`,
+# `.mil`, `.int` and `.edu` gate registration -- you cannot buy one -- and
+# so do `gov.uk`, `ac.uk`, `gc.ca` and their equivalents worldwide, which
+# is why source_scoring derives the `<kind>.<cc>` forms rather than
+# enumerating them here. `.org` gates nothing at all and never has, so it
+# sits barely above `.com`; treating it as trustworthy is the single most
+# common version of this mistake.
+#
+# INCOMPLETE ON PURPOSE, and safe when incomplete: an unlisted host takes
+# DEFAULT_DOMAIN_AUTHORITY, which is the generic-commercial number. The
+# failure mode is a good source scored ordinary, never a bad source scored
+# authoritative, and the model's bounded adjustment (below) is the route
+# for the first.
+DOMAIN_AUTHORITY_CLASSES: dict[str, float] = {
+    "restricted_registry": 0.90,     # .gov .mil .int .edu, gov.uk, ac.uk...
+    "intergovernmental": 0.90,       # WHO, UN, World Bank, OECD, EU
+    "standards_body": 0.88,          # IETF, W3C, ISO, NIST, IEC
+    "peer_reviewed_publisher": 0.85,
+    "established_news": 0.65,
+    "preprint_server": 0.60,         # not peer reviewed; §45 SQ5 refines this
+    "reference_tertiary": 0.55,      # encyclopaedias -- a pointer to a source
+    "generic_org": 0.55,             # an unrestricted registry, small bump
+    "generic_commercial": 0.45,
+    "blog_platform": 0.30,
+    "forum_qa": 0.25,
+    "social_media": 0.15,
+    "content_farm": 0.10,
+}
+
+DEFAULT_DOMAIN_AUTHORITY = 0.45      # == generic_commercial, for an unknown host
+
+# host suffix -> class. Longest suffix wins, so `blogs.nature.com` can be
+# listed separately from `nature.com` if it ever needs to be.
+DOMAIN_AUTHORITY_SUFFIXES: dict[str, str] = {
+    # Restricted registries. The bare TLDs; the `<kind>.<cc>` second-level
+    # forms are derived in source_scoring.py rather than listed.
+    "gov": "restricted_registry",
+    "mil": "restricted_registry",
+    "int": "restricted_registry",
+    "edu": "restricted_registry",
+
+    # Intergovernmental bodies, whose hosts are ordinary .org/.int names.
+    "who.int": "intergovernmental",
+    "un.org": "intergovernmental",
+    "europa.eu": "intergovernmental",
+    "oecd.org": "intergovernmental",
+    "imf.org": "intergovernmental",
+    "worldbank.org": "intergovernmental",
+    "iaea.org": "intergovernmental",
+
+    # Standards bodies.
+    "ietf.org": "standards_body",
+    "rfc-editor.org": "standards_body",
+    "w3.org": "standards_body",
+    "iso.org": "standards_body",
+    "iec.ch": "standards_body",
+    "ieee.org": "standards_body",
+    "unicode.org": "standards_body",
+    "ecma-international.org": "standards_body",
+
+    # Peer-reviewed publishers and indexes.
+    "nature.com": "peer_reviewed_publisher",
+    "science.org": "peer_reviewed_publisher",
+    "sciencemag.org": "peer_reviewed_publisher",
+    "nejm.org": "peer_reviewed_publisher",
+    "thelancet.com": "peer_reviewed_publisher",
+    "bmj.com": "peer_reviewed_publisher",
+    "cell.com": "peer_reviewed_publisher",
+    "pnas.org": "peer_reviewed_publisher",
+    "sciencedirect.com": "peer_reviewed_publisher",
+    "springer.com": "peer_reviewed_publisher",
+    "link.springer.com": "peer_reviewed_publisher",
+    "onlinelibrary.wiley.com": "peer_reviewed_publisher",
+    "wiley.com": "peer_reviewed_publisher",
+    "tandfonline.com": "peer_reviewed_publisher",
+    "sagepub.com": "peer_reviewed_publisher",
+    "acm.org": "peer_reviewed_publisher",
+    "aps.org": "peer_reviewed_publisher",
+    "acs.org": "peer_reviewed_publisher",
+    "plos.org": "peer_reviewed_publisher",
+    "frontiersin.org": "peer_reviewed_publisher",
+    "mdpi.com": "peer_reviewed_publisher",
+    "jstor.org": "peer_reviewed_publisher",
+    "pubmed.ncbi.nlm.nih.gov": "peer_reviewed_publisher",
+
+    # Preprint servers and repositories -- not peer reviewed.
+    "arxiv.org": "preprint_server",
+    "biorxiv.org": "preprint_server",
+    "medrxiv.org": "preprint_server",
+    "chemrxiv.org": "preprint_server",
+    "ssrn.com": "preprint_server",
+    "papers.ssrn.com": "preprint_server",
+    "osf.io": "preprint_server",
+    "researchsquare.com": "preprint_server",
+    "semanticscholar.org": "preprint_server",
+
+    # News organisations with a correction policy and a masthead. An
+    # ALLOWLIST, because "news site" is not a property of a domain suffix
+    # and the alternative is scoring every .com that publishes articles.
+    "reuters.com": "established_news",
+    "apnews.com": "established_news",
+    "bbc.com": "established_news",
+    "bbc.co.uk": "established_news",
+    "ft.com": "established_news",
+    "economist.com": "established_news",
+    "nytimes.com": "established_news",
+    "washingtonpost.com": "established_news",
+    "wsj.com": "established_news",
+    "theguardian.com": "established_news",
+    "npr.org": "established_news",
+    "pbs.org": "established_news",
+    "bloomberg.com": "established_news",
+    "nikkei.com": "established_news",
+    "afp.com": "established_news",
+    "dw.com": "established_news",
+
+    # Tertiary references -- they summarise sources rather than being one.
+    "wikipedia.org": "reference_tertiary",
+    "wikimedia.org": "reference_tertiary",
+    "wiktionary.org": "reference_tertiary",
+    "britannica.com": "reference_tertiary",
+
+    "org": "generic_org",
+
+    # Blog and newsletter platforms: the host says nothing about the author.
+    "medium.com": "blog_platform",
+    "substack.com": "blog_platform",
+    "wordpress.com": "blog_platform",
+    "blogspot.com": "blog_platform",
+    "blogger.com": "blog_platform",
+    "tumblr.com": "blog_platform",
+    "wixsite.com": "blog_platform",
+    "ghost.io": "blog_platform",
+
+    # Forums and Q&A. Often correct, never attributable.
+    "reddit.com": "forum_qa",
+    "quora.com": "forum_qa",
+    "stackexchange.com": "forum_qa",
+    "stackoverflow.com": "forum_qa",
+    "news.ycombinator.com": "forum_qa",
+    "4chan.org": "content_farm",
+
+    # Social media. Speculation and unattributed claims travel here fastest,
+    # which is the whole reason a claim needs grounding elsewhere.
+    "x.com": "social_media",
+    "twitter.com": "social_media",
+    "facebook.com": "social_media",
+    "instagram.com": "social_media",
+    "tiktok.com": "social_media",
+    "threads.net": "social_media",
+    "linkedin.com": "social_media",
+    "mastodon.social": "social_media",
+    "bsky.app": "social_media",
+    "youtube.com": "social_media",
+    "vk.com": "social_media",
+    "weibo.com": "social_media",
+    "t.me": "social_media",
+
+    # Aggregators that republish without attribution, and image boards with
+    # no text to ground anything in. The measured case: a Pinterest pin
+    # scored similarity 1.0 on a Nobel Prize claim.
+    "pinterest.com": "content_farm",
+    "answers.com": "content_farm",
+    "ehow.com": "content_farm",
+    "scribd.com": "content_farm",
+    "coursehero.com": "content_farm",
+    "chegg.com": "content_farm",
+}
+
+# How far the model may move a computed authority, in either direction
+# (§45, SQ4). Small on purpose: it is a correction for what a domain
+# cannot see -- a primary source on an ordinary host, an opinion column on
+# a masthead -- not a second opinion about the number. An adjustment
+# arriving without a reason is discarded rather than clamped.
+AUTHORITY_ADJUSTMENT_CAP = 0.15
+
 # --- Reasoning effort (ROADMAP_v2 §16; default changed batch 25, #139) ---
 # The default effort level requested when the user has not chosen one.
 #
