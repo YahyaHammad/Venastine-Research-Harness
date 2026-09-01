@@ -78,6 +78,49 @@ def _with_events(response, events):
     return response
 
 
+def run_pipeline(*args, **kwargs):
+    """Run the research pipeline synchronously and return the finished
+    PipelineRun.
+
+    THIS IS TEST INFRASTRUCTURE NOW, AND IT ALWAYS WAS. §22 turned the
+    pipeline into `stream_deep_research_pipeline` plus a drainer and kept
+    `run_deep_research_pipeline` as the synchronous name so nothing would
+    churn (P3). Both shells then left anyway -- `main.run_research` and
+    `tui/app.py` iterate the generator, each with a comment saying they
+    deliberately do not call the wrapper -- so by the time anyone counted,
+    its fifty call sites were all in this directory and none in the
+    program. A convenience only tests use belongs beside `drain` and
+    `pass_stream`, not in `core/reasoning/`, where three docstrings went on
+    describing it as the live entry point.
+
+    Nothing about the pipeline changed: this is the same two calls the
+    deleted wrapper made.
+    """
+    from core.reasoning.orchestrator import (
+        run_pipeline_to_completion, stream_deep_research_pipeline)
+    return run_pipeline_to_completion(
+        stream_deep_research_pipeline(*args, **kwargs))
+
+
+def run_pass(*args, **kwargs):
+    """Run ONE research pass synchronously and return its ModelResponse.
+
+    `run_deep_research_pipeline`'s story one layer down: §26 made
+    `_run_pass` iterate `stream_deep_research_mode`, and the synchronous
+    `run_deep_research_mode` it replaced kept its name for the same
+    compatibility reason and then had no production caller either.
+
+    `drain`, not `run_to_completion`: the response carrying `thread_id` is
+    the generator's RETURN value, and the terminal event holds the copy
+    without it. That is the distinction `core/loop.return_value_of` existed
+    to make -- and `drain` above has been the identical function on this
+    side of the fence the whole time, which is why retiring the wrapper
+    needed no replacement for it.
+    """
+    from core.loop import RunAgentLoop
+    return drain(RunAgentLoop.stream_deep_research_mode(*args, **kwargs))
+
+
 def well_shaped(pass_id: str) -> str:
     """The smallest payload `pass_id` accepts, as JSON text.
 

@@ -34,8 +34,6 @@ CONTAINED = "contained"      # confined to the workspace (a Docker container)
 UNCONTAINED = "uncontained"  # runs with the user's own authority (host)
 UNAVAILABLE = "unavailable"  # no backend can run it
 
-CONTAINMENTS = frozenset({CONTAINED, UNCONTAINED, UNAVAILABLE})
-
 # ---------------------------------------------------------------------------
 # ---- Approval modes -------------------------------------------------------
 # ---------------------------------------------------------------------------

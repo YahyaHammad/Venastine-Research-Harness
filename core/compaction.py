@@ -435,24 +435,6 @@ def _as_text(messages) -> str:
     return "\n\n".join(lines)
 
 
-#: Every exit `compact()` reports (batch 16, #44). The caller decides how
-#: each becomes a LOG line and whether it becomes a NOTICE -- how often
-#: this function runs is run-scope knowledge the loop has and this module
-#: lacks. Three of them are STANDING CONDITIONS (blocked, all-pinned,
-#: missing-agent) and share one notice kind, so the loop's existing
-#: once-per-run dedup governs their WARNINGs too instead of each firing
-#: its own per-evaluation line.
-COMPACTION_OUTCOMES = (
-    "folded",         # a checkpoint was written (kind="compaction")
-    "blocked",        # the keep floors protect everything
-    "all-pinned",     # everything newly foldable is pinned (#89's silent path, named now)
-    "missing-agent",  # the compactor definition is absent
-    "no-progress",    # the fold boundary has not moved past the last checkpoint
-    "reentrant",      # a compaction is already running in this process
-    "failed",         # the compactor produced nothing usable
-)
-
-
 def pin_measurements(thread_id, last_n: int) -> dict:
     """What #89's cap is measured against, in M10's character proxy.
 
@@ -502,6 +484,33 @@ def pin_measurements(thread_id, last_n: int) -> dict:
     }
 
 
+def _truncate_oldest(text: str, budget: int) -> tuple:
+    """`(text, notice)` -- drop the earliest characters over `budget`.
+
+    Returns the text unchanged and `None` when it already fits. The OLDEST
+    material goes, because recent turns are the referent-heavy ones, and
+    the cut is stated in the returned notice so both callers can put it in
+    the instruction AND in the stored row.
+
+    ONE COPY, since batch 45. This was eight identical lines in `compact()`
+    and in `summarize_thread()`, notice string included, marked as
+    deliberate nowhere -- the shape
+    `safety/policy_enforcement.param_digest` calls this project's canonical
+    bug when it explains why the digest is not written twice. The two were
+    equivalent only by accident: the second guarded on a separate
+    `original` variable that happened to equal `len(thread_text)` at that
+    point, so the condition and the arithmetic under it could have drifted
+    apart without either copy looking wrong.
+    """
+    if len(text) // CHARS_PER_TOKEN <= budget:
+        return text, None
+    keep_chars = max(0, budget * CHARS_PER_TOKEN)
+    dropped = len(text) - keep_chars
+    notice = (f"[Source truncated: the earliest {dropped} characters were "
+              f"not summarized.]")
+    return f"{notice}\n{text[-keep_chars:]}", notice
+
+
 def _input_budget(model: str, provider_name: Optional[str] = None) -> int:
     """One-call INPUT ceiling for a summarizer prompt, in proxy tokens.
 
@@ -530,9 +539,31 @@ def compact(memory, model: str, provider_name: str,
     three different conventions (WARNING per evaluation, debug-only,
     nothing at all). Now every exit is data:
 
-        {"status": <one of COMPACTION_OUTCOMES>,
+        {"status": <one of the seven below>,
          "kind":   <notice kind for the loop's per-run dedup, or None>,
          "text":   <a human line both shells render>}
+
+    The seven statuses, which are this function's whole vocabulary:
+
+        folded         a checkpoint was written (kind="compaction")
+        blocked        the keep floors protect everything
+        all-pinned     everything newly foldable is pinned (#89's silent
+                       path, named now)
+        missing-agent  the compactor definition is absent
+        no-progress    the fold boundary has not moved past the last
+                       checkpoint
+        reentrant      a compaction is already running in this process
+        failed         the compactor produced nothing usable
+
+    Three of them are STANDING CONDITIONS (blocked, all-pinned,
+    missing-agent) and share one notice kind, so the loop's existing
+    once-per-run dedup governs their WARNINGs too instead of each firing
+    its own per-evaluation line. They are enumerated HERE, at the function
+    that produces them, rather than in a module-level tuple: batch 16 kept
+    a `COMPACTION_OUTCOMES` sequence beside this docstring and nothing ever
+    read it, which is `CODE_STAGES`' shape exactly (see the note in
+    core/reasoning/events.py) -- a list whose only future was drifting away
+    from the call sites while looking like a contract.
 
     REPORTABILITY LIVES WITH THE CALLER. How often this function runs --
     once at the turn boundary plus once after every step -- is run-scope
@@ -671,14 +702,8 @@ def compact(memory, model: str, provider_name: str,
     # Still over -- or no previous summary existed to chain onto. Truncate
     # the OLDEST material (recent turns are the referent-heavy ones) and
     # state the cut in both places the summary travels.
-    truncation_notice = None
-    if len(segment_text) // CHARS_PER_TOKEN > budget:
-        keep_chars = max(0, budget * CHARS_PER_TOKEN)
-        dropped = len(segment_text) - keep_chars
-        truncation_notice = (
-            f"[Source truncated: the earliest {dropped} characters were "
-            f"not summarized.]")
-        segment_text = f"{truncation_notice}\n{segment_text[-keep_chars:]}"
+    segment_text, truncation_notice = _truncate_oldest(segment_text, budget)
+    if truncation_notice:
         original = len(segment_text)
 
     _compacting = True
@@ -812,14 +837,8 @@ def summarize_thread(thread_id, model: str, provider_name: str,
     # row, so every referencing thread sees it.
     budget = max(1_000, _input_budget(model, provider_name)
                  - config.SUMMARY_TARGET_CHARS // CHARS_PER_TOKEN)
-    truncation_notice = None
-    if original // CHARS_PER_TOKEN > budget:
-        keep_chars = max(0, budget * CHARS_PER_TOKEN)
-        dropped = len(thread_text) - keep_chars
-        truncation_notice = (
-            f"[Source truncated: the earliest {dropped} characters were "
-            f"not summarized.]")
-        thread_text = f"{truncation_notice}\n{thread_text[-keep_chars:]}"
+    thread_text, truncation_notice = _truncate_oldest(thread_text, budget)
+    if truncation_notice:
         original = len(thread_text)
 
     agent = manager.get(config.COMPACTOR_AGENT)

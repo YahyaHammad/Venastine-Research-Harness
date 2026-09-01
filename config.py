@@ -263,8 +263,11 @@ AUTO_APPROVE_SANDBOX_FALLBACK = False    # auto-approve fallback runs (no per-ru
 # ~/.aws/credentials` returns your keys to the model. You reach that by
 # writing "never", not by switching off a field that reads like "stop
 # nagging me" -- which is the actual fix for audit #157.
+# The legal set lives with the code that ENFORCES it --
+# security/capability.APPROVAL_MODES, which validate_mode() reads. A second
+# copy here was read by nothing but a test asserting its literal, so the two
+# could have disagreed and only the unenforced one would have been wrong.
 SHELL_APPROVAL_MODE = "tiered"
-SHELL_APPROVAL_MODES = ("always", "tiered", "never")
 SANDBOX_DOCKER_IMAGE = os.environ.get("AGENT_SANDBOX_IMAGE", "python:3.13-slim")
 SANDBOX_TIMEOUT_SECONDS = 120
 SANDBOX_MEMORY_MB = 2048

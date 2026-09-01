@@ -36,7 +36,8 @@ import pytest
 import config
 from core.loop import RunAgentLoop
 from core.reasoning import orchestrator
-from tests.conftest import drain, make_model_response, pass_stream, well_shaped
+from tests.conftest import (drain, make_model_response, pass_stream,
+                            run_pass, well_shaped)
 
 
 def _pass_returning(mocker, response):
@@ -162,7 +163,7 @@ class TestTheSpendCap:
         mocker.patch.object(RunAgentLoop, "_run", side_effect=_capture)
         mocker.patch.object(config_loader, "get_settings",
                             return_value={"max_token_budget": 777_000})
-        RunAgentLoop.run_deep_research_mode(
+        run_pass(
             pass_input="in", model="m", pass_id="Pass 1")
 
         assert seen["budget"] == 777_000
@@ -186,7 +187,7 @@ class TestTheSpendCap:
         mocker.patch.object(RunAgentLoop, "_run", side_effect=_capture)
         mocker.patch.object(config_loader, "get_settings",
                             return_value={"max_token_budget": 777_000})
-        RunAgentLoop.run_deep_research_mode(
+        run_pass(
             pass_input="in", model="m", pass_id="Pass 1",
             max_total_tokens=None)
 

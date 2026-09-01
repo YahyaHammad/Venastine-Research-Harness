@@ -28,7 +28,7 @@ import pytest
 import prompts.system_prompts as system_prompts
 from core import config_loader
 from core.loop import advertisement_facts
-from tests.conftest import make_model_response
+from tests.conftest import make_model_response, run_pass
 from tools.base import BUDGET_IO, GRANT_ANYWHERE, GRANT_NEVER, ToolSpec
 from tools.context import ToolContext
 from tools.registry import registry
@@ -302,7 +302,7 @@ class TestTheFactsSurviveTheCallSite:
         # §26 made it delegate to stream_deep_research_mode, which is
         # where the prompt is assembled -- so this drives the real chain
         # rather than the function the assertions above already cover.
-        RunAgentLoop.run_deep_research_mode(
+        run_pass(
             pass_input="x", model="m", pass_id="Pass 1",
             provider_name="ANTHROPIC", max_steps=1,
             authorization=authorization)

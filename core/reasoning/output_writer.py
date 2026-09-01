@@ -3,7 +3,7 @@ core/reasoning/output_writer.py
 
 Writes every pass's output to OUTPUT_DIR/<run_id>/, matching the
 original pipeline spec's file layout (ROADMAP §12). NOT called
-automatically from run_deep_research_pipeline() -- that function stays
+automatically from the pipeline -- it stays
 a pure computation returning a PipelineRun; writing files (or not) is
 the CALLER's decision (see main.py's research mode, §1). This keeps the
 pipeline function's side effects minimal and makes it trivially testable
@@ -86,7 +86,7 @@ def write_run_artifacts(run: PipelineRun) -> str:
     if run.run_id is None:
         raise ValueError(
             "Cannot write artifacts: run.run_id is None. "
-            "Persistence must be enabled (run_deep_research_pipeline "
+            "Persistence must be enabled (the pipeline "
             "sets run_id via create_pipeline_run)."
         )
 

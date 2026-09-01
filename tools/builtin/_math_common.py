@@ -310,9 +310,12 @@ def _reject_escaped_value(value: Any, _depth: int = 0) -> None:
                 f"which is not a SymPy type")
         return
 
+    # No types.ModuleType here: the branch above already raised for one,
+    # so a second listing is unreachable and reads as if this arm were the
+    # module guard.
     if isinstance(value, (types.FunctionType, types.BuiltinFunctionType,
                           types.MethodType, types.BuiltinMethodType,
-                          types.MethodWrapperType, types.ModuleType)):
+                          types.MethodWrapperType)):
         raise MathParseError(
             "expression evaluated to a function or method, which is "
             "never a mathematical value")
@@ -347,7 +350,7 @@ def safe_parse(expr_str: str, symbols: Optional[list[str]] = None):
         _reject_escaped_value(result)
         return result
     except MathParseError:
-        # A refusal from _reject_unsafe_names already says which name was
+        # A refusal from _validate_ast already says which name or node was
         # refused and what to do instead. Re-wrapping it in "Could not
         # parse expression '<the whole payload>'" buries that under the
         # string the model just sent, and echoes the payload back into

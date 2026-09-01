@@ -42,7 +42,8 @@ from core.reasoning import orchestrator
 # exist in two copies. These tests moved with it rather than being
 # duplicated, so there is still exactly one place that ordering is pinned.
 from safety import policy_enforcement
-from tests.conftest import drain, make_model_response, pass_stream, well_shaped
+from tests.conftest import (drain, make_model_response, pass_stream,
+                            run_pass, well_shaped)
 from tests.test_orchestrator import _build_pass_mock, _clean_pipeline_payloads
 
 
@@ -394,22 +395,29 @@ class TestCodeStages:
 
 
 # ===========================================================================
-# ---- The drainer keeps every existing caller ------------------------------
+# ---- Draining a pass keeps the thread_id ----------------------------------
 # ===========================================================================
 
-class TestTheDrainerIsUnchanged:
+class TestDrainingAPass:
+    """These used to pin `RunAgentLoop.run_deep_research_mode`, §26's
+    synchronous wrapper. That wrapper is retired -- no production caller
+    was left once `_run_pass` began iterating the generator -- so the
+    subject here is the property the wrapper existed to deliver, asserted
+    against `stream_deep_research_mode` itself."""
 
-    def test_run_deep_research_mode_still_returns_a_model_response(self, mocker):
-        """§26 made it the drainer applied to the streaming sibling. Its
-        signature and return type are what fifteen test doubles and every
-        pre-§26 caller depend on."""
+    def test_draining_a_pass_returns_the_response_with_its_thread_id(self, mocker):
+        """The RETURN value, not the terminal event. `thread_id` is
+        attached after the loop finishes, so a drainer that reads the event
+        hands back a response missing it -- and the only symptom would be
+        §3's JSON retry opening a new thread instead of correcting the
+        failed one."""
         mocker.patch.object(
             orchestrator.RunAgentLoop, "_run",
             side_effect=lambda *a, **k: iter([LoopEvent(
                 final_response=make_model_response(text="answer"),
                 stop_reason="complete")]))
 
-        response = RunAgentLoop.run_deep_research_mode(
+        response = run_pass(
             pass_input="in", model="m", pass_id="Pass 1")
 
         assert response.text == "answer"
@@ -423,7 +431,7 @@ class TestTheDrainerIsUnchanged:
                             side_effect=lambda *a, **k: iter([]))
 
         with pytest.raises(RuntimeError, match="final_response"):
-            RunAgentLoop.run_deep_research_mode(
+            run_pass(
                 pass_input="in", model="m", pass_id="Pass 1")
 
 

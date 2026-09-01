@@ -38,12 +38,16 @@ existed still yields a theme.
 
 Nothing in core/ is imported, and nothing here knows a theme name or a
 provider name: this module stores strings, and tui/app.py decides
-whether they still mean anything.
+whether they still mean anything. The read and the atomic write are
+json_store's, at the project root -- shared with the three sibling
+stores and reachable from every layer, so borrowing them costs no edge
+into core/ and the sentence above still holds.
 """
 
-import json
 import logging
 import os
+
+from json_store import read_versioned, write_json_atomic
 
 logger = logging.getLogger(__name__)
 
@@ -80,19 +84,8 @@ def _read_raw() -> dict:
     Shared by the loaders and by `_remember`, so a write can only ever
     preserve records this build would also have read.
     """
-    path = store_path()
-    if not os.path.exists(path):
-        return {}
-    try:
-        with open(path, "r", encoding="utf-8-sig") as f:
-            data = json.load(f)
-    except (OSError, ValueError):
-        logger.debug("Could not read %s; starting on the configured "
-                     "preferences.", path)
-        return {}
-    if not isinstance(data, dict) or data.get("version") != STORE_VERSION:
-        return {}
-    return data
+    return read_versioned(store_path(), STORE_VERSION,
+                          "starting on the configured preferences.")
 
 
 def load_theme() -> dict | None:
@@ -150,12 +143,10 @@ def _remember(fields: dict, noun: str) -> bool:
     READ-MODIFY-WRITE, per the module docstring: the theme record and
     the model record share a file and are written at different moments.
 
-    Written via a temp file and os.replace, which is atomic on POSIX and
-    on Windows -- _save_trust_store's reasoning, and it costs three
-    lines: a truncate-then-write leaves the file empty for the length of
-    the write and permanently damaged if the process dies inside it.
-    Unlike that one there is no 0600, because this holds no secret; the
-    trust store's mode protects the list of projects a user trusts.
+    The atomic write is json_store's, shared with the three sibling
+    stores -- _save_trust_store's reasoning, which that module now states
+    once. No 0600 is passed, because this holds no secret; the trust
+    store's mode protects the list of projects a user trusts.
 
     A failure WARNS and returns False rather than raising. The TUI's
     TranscriptLogHandler routes WARNING+ into the transcript, so a user
@@ -169,12 +160,8 @@ def _remember(fields: dict, noun: str) -> bool:
     payload = dict(_read_raw())
     payload.update(fields)
     payload["version"] = STORE_VERSION
-    tmp = f"{path}.tmp"
     try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
-        os.replace(tmp, path)
+        write_json_atomic(path, payload)
     except OSError as exc:
         logger.warning("Could not save the %s preference to %s (%s). The "
                        "%s applies to this session only.", noun, path, exc,

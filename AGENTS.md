@@ -182,9 +182,11 @@ That qualifier is load-bearing, not pedantry (audit #128). This file used to say
 
 ### The loop (`core/loop.py`)
 
-`RunAgentLoop._run()` is a **generator** yielding `LoopEvent`s (`core/events.py`). Three public entry points — `run_agent_conversation`, `run_deep_research_mode`, `continue_conversation` — all return a `ModelResponse`. Never reimplement the loop elsewhere.
+`RunAgentLoop._run()` is a **generator** yielding `LoopEvent`s (`core/events.py`). Two public entry points — `run_agent_conversation` and `continue_conversation` — return a `ModelResponse`; a research pass is `stream_deep_research_mode()`, a generator its caller drains. Never reimplement the loop elsewhere.
 
-`run_agent_conversation` and `continue_conversation` drain `_run()` directly via `run_to_completion()`. `run_deep_research_mode` is one step further out since §26: it drains `stream_deep_research_mode()` — a generator that forwards `_run()`'s events and *returns* the response — via `return_value_of()`. Two drainers because they answer different questions: `run_to_completion` reads the response off the terminal event, and `return_value_of` reads a generator's return value, which is the only place `thread_id` has been attached.
+`run_agent_conversation` and `continue_conversation` drain `_run()` directly via `run_to_completion()`. A pass is one step further out since §26: `stream_deep_research_mode()` forwards `_run()`'s events and *returns* the response, and `_run_pass` takes that return value with `yield from _translate(...)`.
+
+**The two questions are still different, and only one of them is production's.** `run_to_completion` reads the response off the terminal event — right for a bare `_run()`, which returns nothing. A generator that returns its own value needs the other question asked, because `thread_id` is attached after the loop finishes and the terminal event carries the copy without it. §26 answered it with a second drainer, `return_value_of`, beside `run_to_completion`; its only caller was the synchronous `run_deep_research_mode` wrapper, and when that retired (see §26 below) the helper went with it. `tests/conftest.drain` had been the byte-identical function on the test side the whole time, which is why nothing needed writing to replace it.
 
 Three stop conditions, all in `_run()`: no tool calls (`complete`), `max_steps` exhausted (`max_steps_reached`), cumulative input+output tokens ≥ `max_total_tokens` (`token_budget_exceeded`). `stop_reason` and `thread_id` are set by `_run()`/the wrappers, never by `call_model_stream()`.
 
@@ -224,7 +226,12 @@ hand-authored, so a session rewriting it is a decision rather than a convenience
 remembered in `tui/preferences.py`'s `~/.config/venastine/ui_preferences.json` — user tier
 only, which no project can reach — following `trusted_projects.json` and
 `known_mcp_servers.json`: `expanduser` at call time, versioned, failing soft on anything
-unreadable. `/effort` and `/thinking` are unchanged.
+unreadable. Since batch 45 the four stores share their MECHANICS through root
+`json_store.py` (atomic write, versioned fail-soft read) and nothing else: each keeps its
+own module, path, `STORE_VERSION` and failure posture, because those were decided
+separately. That extraction is also what made `known_mcp_servers.json` atomic — it was
+the one of the four writing a CONSENT record through a bare `open(path, "w")`, while its
+three siblings each explained at length why that is unacceptable. `/effort` and `/thinking` are unchanged.
 
 **The model has a second reason not to be written into that file** (RM3): a project's
 `.venastine/settings.json` is inside D17's trust content hash, so a session writing
@@ -422,7 +429,7 @@ Invariants that look like simplification opportunities but are not:
 - **`_synthesis_input` is a function, not a string built once.** §20 re-runs synthesis after an accepted correction; reusing the earlier string regenerates the report from the UNCORRECTED claims, so the report changes for no reason while the correction silently goes nowhere.
 - **`vars(c)` serializes `Claim` at every site** — find them with `grep -rn 'vars(c' --include='*.py' .`, not from a list. Adding a nested-dataclass field to `Claim` requires migrating *all* of them to `dataclasses.asdict(c)` in one change. This bullet used to enumerate three (orchestrator's passes, `pipeline_storage.update_pipeline_run`, `output_writer.write_run_artifacts`) and §26 added two more in `tui/app.py` that fell out of both this list and `base.py`'s (audit #108) — an enumeration that says *all* has to be complete to mean anything.
 - **`update_pipeline_run(status=...)` defaults to `None`, not `"running"`** — so a data-only checkpoint can't reset a `complete`/`failed` row.
-- **The pipeline is a GENERATOR, and the public name is not it** (§22). `stream_deep_research_pipeline()` yields `PipelineEvent`s; `run_pipeline_to_completion()` drains; `run_deep_research_pipeline()` is the drainer applied to the generator and is unchanged for every caller. Same shape as `_run()` / `run_to_completion()`, for the same reason. A shell that wants live progress iterates; everything else keeps calling the wrapper.
+- **The pipeline is a GENERATOR** (§22). `stream_deep_research_pipeline()` yields `PipelineEvent`s; `run_pipeline_to_completion()` drains. Same shape as `_run()` / `run_to_completion()`, for the same reason. **P3's third name is retired.** It kept a synchronous `run_deep_research_pipeline()` so §22 would change no caller — and then both shells moved to the generator anyway, to render progress, each with a comment saying it deliberately did not call the wrapper. What was left was a public function with no production caller, fifty call sites in `tests/`, and three docstrings still calling it the live entry point. The convenience is `tests/conftest.run_pipeline` now, which is what it had become. Its pass-level twin `run_deep_research_mode` retired with it and for the same reason; `tests/conftest.run_pass` is that one.
 - **`_Progress.checkpoint()` is the only place a trace line is recorded** (§22). It persists, then yields every line appended since it last ran — so §5's per-pass persistence and the events are DERIVED from `run.trace` rather than emitted beside it. This is what finally made "a checkpoint after every trace line" true: `review.py` writes fifteen lines and checkpointed after none, and `json_retry.py` appends straight to the list. Both are now carried without either module changing, which is also why a JSON-parse retry needs no event kind. Persist-before-emit is deliberate: a generator only advances while someone iterates it, so emitting first would make durability depend on a UI continuing to read.
 - **An abandoned pipeline generator leaves `status='running'`** (§22). `GeneratorExit` is not an `Exception`, so a consumer that stops iterating is recorded as abandoned rather than failed — and the persist-before-emit ordering is what keeps the checkpoints it already took.
 - **A pass's `LoopEvent`s are TRANSLATED, not propagated** (§22 P2 as amended by §26), and `PipelineEvent` is a separate, kind-discriminated type from `LoopEvent` (§22 P1) — adding §22's or §26's kinds to that flat bag is the thing the decision rejected, and `test_pipeline_events.py` fails if `LoopEvent` grows an EIGHTH field. (It has seven: six payload fields plus `stop_reason`. This paragraph said "six-field bag" and "a seventh field" in consecutive clauses — counting payloads once and fields once — which audit #128 caught as a wording defect with no gap behind it: the test asserts the exact seven-name set, so any addition goes red.) §22 kept a pass opaque on the premise that its internals were not worth seeing; the first real ten-pass run disproved that, so `_run_pass` now iterates `RunAgentLoop.stream_deep_research_mode()` and converts a chosen subset into pipeline kinds. A consumer still sees exactly one event type — that is what P1/P2 were protecting, and it still holds.
@@ -446,7 +453,7 @@ Invariants that look like simplification opportunities but are not:
 
 ### Authorized tool use in the pipeline (§25)
 
-The pipeline could not call any approval-gated tool in any shell — `run_deep_research_mode` had no way to receive a `permission_channel`, so every pass ran headless. Authorization is now **two independent axes**, not a mode: a grant set (possibly empty) and an `ApprovalProvider` (possibly absent). Both absent is the default and changes nothing.
+The pipeline could not call any approval-gated tool in any shell — the pass entry point had no way to receive a `permission_channel`, so every pass ran headless. Authorization is now **two independent axes**, not a mode: a grant set (possibly empty) and an `ApprovalProvider` (possibly absent). Both absent is the default and changes nothing.
 
 - **A grant covers only tools with no `approval_check`** (R2, `registry.grantable`). A per-call gate was never consented to by name. This *narrowed* §18's shipped sign-off at the shared mechanism — a signed-off subagent calling `shell` now prompts its parent.
 - **`spawn_subagent` is excluded from *every* grant path** (R4, `grant_policy=GRANT_NEVER`): approving a spawn *is* the §18 sign-off, so pre-granting it compounds one yes into unbounded delegated authority. "Every" is R13's correction — the exclusion used to live in a frozenset in the pipeline's module, so the sign-off R4's argument is *about* went on offering it (#67).
@@ -465,7 +472,7 @@ The eight JSON-emitting passes go through `_run_pass_with_json_retry()`, which r
 
 The research pipeline can now review its own finished output and correct it, one consented change at a time. Off by default (D9: `config.SUBAGENT_REVIEW`, `settings.json` `research.subagent_review`, `--review` / `--no-review`, `/research --review`).
 
-- **The orchestrator invokes it; the shell supplies consent as data** (V3). `core/reasoning/review.py` owns what may be corrected, `run_deep_research_pipeline` decides when. The alternative — a post-pipeline stage each shell calls, mirroring `write_run_artifacts` — is exactly the shape that left `/research` in the TUI writing no output directory at all.
+- **The orchestrator invokes it; the shell supplies consent as data** (V3). `core/reasoning/review.py` owns what may be corrected, the pipeline decides when. The alternative — a post-pipeline stage each shell calls, mirroring `write_run_artifacts` — is exactly the shape that left `/research` in the TUI writing no output directory at all.
 - **"Requested" and "can be asked" are two parameters** (`subagent_review` and `review`). `build_review_consent()` returns `None` on a non-tty stdin, so collapsing them would make `--review` on a piped run skip the review entirely and report nothing.
 - **No consent route means nothing is applied** (V6). The review still runs and still records. Same rule §25 applies to gated tools: the inability to ask is not permission to proceed.
 - **The reviewer inherits the run's `RunAuthorization` unchanged** (V7) — same grants, same provider, same `GrantBudget` **instance**. No new security axis.
@@ -826,7 +833,7 @@ prints pass lines and trace lines as they arrive.
   the whole app fail to lay out with `'NoneType' object has no attribute 'get_height'`.
   `ResearchProgress._redraw` is named that way on purpose.
 - **Repointing the shells broke twelve test doubles, silently.** A patch on
-  `run_deep_research_pipeline` no longer intercepts anything, so the REAL pipeline
+  the synchronous wrapper no longer intercepts anything, so the REAL pipeline
   runs. `test_e2e.py`, `test_review.py` and `test_tui.py` now patch
   `stream_deep_research_pipeline` with generator fakes routed through one helper each.
   Same shape for `_run_pass` / `_run_pass_with_json_retry` / `_review_stage`: a
@@ -838,12 +845,13 @@ prints pass lines and trace lines as they arrive.
 A run is now readable while it happens. Five gaps, all found by watching a real ten-pass
 run rather than by reading the code.
 
-- **`stream_deep_research_mode()` is the third generator/drainer pair**, and
-  `run_deep_research_mode()` is its drainer — unchanged signature and return type. A
-  callback parameter was rejected: §23 AC1 exists to stop a third bespoke channel.
+- **`stream_deep_research_mode()` is the third generator/drainer pair.** A callback
+  parameter was rejected: §23 AC1 exists to stop a third bespoke channel. Its
+  synchronous drainer `run_deep_research_mode()` is retired — see the §22 bullet
+  above; `_run_pass` iterates the generator, and the only remaining callers were tests.
 - **The response is RETURNED, never read off the terminal event.** `thread_id` is
-  attached after the loop finishes, so `return_value_of()` sits beside
-  `run_to_completion()` and `_translate` uses `next()` rather than `for` — a `for` loop
+  attached after the loop finishes, so the caller must drain with something that keeps
+  a generator's return value and `_translate` uses `next()` rather than `for` — a `for` loop
   swallows a generator's return value, and the only symptom would be §3's JSON retry
   opening a new thread instead of correcting the failed one.
 - **One translation site** (`_translate`), consumed by both pass entry points. Two sites
@@ -1146,7 +1154,7 @@ is gone outright, not kept as a fallback. `doc_path()` is one join now.
 
 Load-bearing: untrusted project content is **absent**, not loaded-and-disabled. Trust-store and user-config paths resolve at call time, not import time (tests redirect them). Provider/model precedence is CLI > `settings.json` > `config.py`, which only works because argparse defaults are `None` (`main.resolve_runtime_defaults`). Since §43 the TUI adds one tier of its own between the first two — a remembered `/model` pair, applied only when no flag spoke and only while `default_provider`/`default_model` still say what they said when it was chosen. The CLI is unchanged and does not read that store.
 
-**A symlinked PROJECT tier root is treated as absent (#18).** `os.walk` follows the path handed to it as `top` but not symlinked subdirectories, and the two sides of the trust boundary start from different places: `workspace_trust` walks from `.venastine`, so `skills/` is a subdirectory it will not descend, while `_md_files` walks from `.venastine/skills`, so it *is* the top and gets followed. Directory names never enter the hash either, so the link contributed nothing — not even its own name. Behind it, definitions loaded as project tier while being absent from the trust prompt's listing **and** from the hash, so their bodies could be rewritten freely after one grant with `is_trusted()` still returning `True`. The payload is instructions, not data: a project-tier body becomes system-prompt content. Git stores symlinks natively, so this arrives on clone — D17's own stated threat. The guard is scoped to the **project** tier deliberately; nothing hashes the harness or user directories, and symlinking `~/.config/venastine/` into a dotfiles repo is legitimate. The invariant to keep however this is later refined: **the loader must read no file the trust listing omits** (`test_workspace_trust.py`). The deeper fix — making `content_files()` and `_content_hash()` one traversal rather than two that must agree — is still open.
+**A symlinked PROJECT tier root is treated as absent (#18).** `os.walk` follows the path handed to it as `top` but not symlinked subdirectories, and the two sides of the trust boundary start from different places: `workspace_trust` walks from `.venastine`, so `skills/` is a subdirectory it will not descend, while `_md_files` walks from `.venastine/skills`, so it *is* the top and gets followed. Directory names never enter the hash either, so the link contributed nothing — not even its own name. Behind it, definitions loaded as project tier while being absent from the trust prompt's listing **and** from the hash, so their bodies could be rewritten freely after one grant with `is_trusted()` still returning `True`. The payload is instructions, not data: a project-tier body becomes system-prompt content. Git stores symlinks natively, so this arrives on clone — D17's own stated threat. The guard is scoped to the **project** tier deliberately; nothing hashes the harness or user directories, and symlinking `~/.config/venastine/` into a dotfiles repo is legitimate. The invariant to keep however this is later refined: **the loader must read no file the trust listing omits** (`test_workspace_trust.py`). The deeper fix that used to be recorded here — making `content_files()` and `_content_hash()` one traversal rather than two that must agree — was done by WS9 and is described four paragraphs above; the sentence claiming it was still open outlived it by a batch.
 
 Progressive disclosure: system prompts list skills as name + one-line description only; full bodies enter context solely via the `load_skill` tool result. Assembly lives in one place — `prompts/system_prompts.py`'s `with_skill_catalog()` / `pass_prompt()` — so the catalog can't diverge between an attempt and its JSON retry.
 

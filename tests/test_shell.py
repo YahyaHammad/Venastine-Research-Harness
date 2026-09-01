@@ -705,7 +705,12 @@ class TestTheModeIsTheGateAndTheFieldIsTheRatchet:
         import importlib
         fresh = importlib.import_module("config")
         assert fresh.SHELL_APPROVAL_MODE == "tiered"
-        assert fresh.SHELL_APPROVAL_MODES == ("always", "tiered", "never")
+        # The legal set is asserted where validate_mode() reads it. config
+        # used to carry a second copy that nothing enforced, so this line
+        # could have passed against a tuple the gate never consulted.
+        from security.capability import APPROVAL_MODES
+        assert APPROVAL_MODES == ("always", "tiered", "never")
+        assert fresh.SHELL_APPROVAL_MODE in APPROVAL_MODES
 
     def test_the_shipped_approvals_field_is_the_ratchet_not_the_gate(self):
         """§28 flipped this to False and the two must move together: with
@@ -1262,6 +1267,28 @@ class TestTheMirroredResolversMatchTheirOwners:
                 == protected_paths.user_config_dir())
 
     def test_the_log_directory_matches_logging_setup(self, monkeypatch):
+        """The same DEFAULT. The two orderings were measured and are not
+        worth a second assertion.
+
+        This applies protected_paths' ordering (`realpath(dirname(x))`) to
+        logging_setup's constant, so it pins the shared default and not how
+        each side turns a path into a directory -- and configure_logging
+        does normalize in the other order (`dirname(abspath(x))`). A
+        spelling loop over `logs/app.log`, `app.log`, `logs/../app.log`,
+        `./logs/app.log`, `logs/./app.log`, `a/b/../app.log` and an
+        absolute path was written to close that, then mutation-checked: on
+        Windows and under WSL the two orderings agree on every one, and
+        three plausible re-orderings of `_log_dir` left the loop GREEN. It
+        was removed rather than kept, because a block that cannot fail
+        reads as coverage this file does not have.
+
+        ONE REAL ASYMMETRY, and it is deliberate. Through a SYMLINKED log
+        directory `abspath` keeps the link path and `realpath` follows it,
+        so the owner says `<cwd>/linked` and the mirror says `<cwd>/real`.
+        The mirror is the correct one here -- it names the directory a bind
+        mount has to target, and the handler writing through the link
+        reaches the same real file. Do not "fix" it by dropping realpath.
+        """
         import logging_setup
         monkeypatch.delenv("AGENT_LOG_FILE", raising=False)
         assert (os.path.realpath(

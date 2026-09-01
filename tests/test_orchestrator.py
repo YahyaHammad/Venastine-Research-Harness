@@ -58,7 +58,7 @@ this banner named the sprung version of it. Any change to:
       -> A double on a name `_run_pass` no longer calls raises NOTHING. It
          is `mocker.patch.object` on a real attribute, so the patch itself
          succeeds and only the interception is lost.
-  (5) Roadmap §5 pipeline persistence: run_deep_research_pipeline()
+  (5) Roadmap §5 pipeline persistence: run_pipeline()
       calls create_pipeline_run() up front, a data-only
       update_pipeline_run(run.run_id, run) checkpoint after EVERY
       run.log() trace line, and a terminal update with
@@ -85,9 +85,8 @@ import pytest
 
 import config
 from core.loop import RunAgentLoop
-from core.reasoning.orchestrator import run_deep_research_pipeline
 from core.reasoning.pipeline_storage import load_pipeline_run
-from tests.conftest import make_model_response, pass_stream
+from tests.conftest import make_model_response, pass_stream, run_pipeline
 
 
 # ---------------------------------------------------------------------------
@@ -277,7 +276,7 @@ def test_pipeline_runs_all_passes_in_expected_order(mocker):
         side_effect=pass_stream(_build_pass_mock(call_log, payloads)),
     )
 
-    run = run_deep_research_pipeline(
+    run = run_pipeline(
         user_query="Quantum computing risks to encryption?",
         model="claude-test",
         provider_name="ANTHROPIC",
@@ -326,7 +325,7 @@ def test_pipeline_6a6c_retry_loop_continues_until_max_retries_then_fallback(mock
         side_effect=pass_stream(_build_pass_mock(call_log, payloads)),
     )
 
-    run = run_deep_research_pipeline(
+    run = run_pipeline(
         user_query="test query",
         model="claude-test",
         provider_name="ANTHROPIC",
@@ -432,7 +431,7 @@ def test_a_claim_pass_6a_omits_still_exhausts_its_retries(mocker):
         side_effect=pass_stream(_build_pass_mock(call_log, payloads)),
     )
 
-    run = run_deep_research_pipeline(
+    run = run_pipeline(
         user_query="test query", model="claude-test", provider_name="ANTHROPIC",
     )
 
@@ -474,7 +473,7 @@ def test_a_pass_6a_response_naming_nothing_still_exhausts_the_loop(mocker):
         side_effect=pass_stream(_build_pass_mock(call_log, payloads)),
     )
 
-    run = run_deep_research_pipeline(
+    run = run_pipeline(
         user_query="test query", model="claude-test", provider_name="ANTHROPIC",
     )
 
@@ -513,7 +512,7 @@ def test_a_retry_round_does_not_re_tier_a_claim_outside_its_batch(mocker):
         side_effect=pass_stream(_build_pass_mock([], payloads)),
     )
 
-    run = run_deep_research_pipeline(
+    run = run_pipeline(
         user_query="test query", model="claude-test", provider_name="ANTHROPIC",
     )
 
@@ -557,7 +556,7 @@ def test_pipeline_trace_contains_expected_lines_in_order(mocker):
         side_effect=pass_stream(_build_pass_mock(call_log, payloads)),
     )
 
-    run = run_deep_research_pipeline(
+    run = run_pipeline(
         user_query="test query",
         model="claude-test",
         provider_name="ANTHROPIC",
@@ -643,7 +642,7 @@ def test_pipeline_failure_marks_run_failed_and_persists_partial_snapshot(mocker)
     mocker.patch.object(orch_mod, "update_pipeline_run", side_effect=spy_update)
 
     with pytest.raises(RuntimeError, match="simulated mid-pipeline failure"):
-        run_deep_research_pipeline(
+        run_pipeline(
             user_query="test query",
             model="claude-test",
             provider_name="ANTHROPIC",
@@ -707,7 +706,7 @@ def test_pipeline_success_marks_run_complete(mocker):
 
     mocker.patch.object(orch_mod, "update_pipeline_run", side_effect=spy_update)
 
-    run = run_deep_research_pipeline(
+    run = run_pipeline(
         user_query="Quantum computing risks to encryption?",
         model="claude-test",
         provider_name="ANTHROPIC",
@@ -784,7 +783,7 @@ def test_crash_after_pass_3b_leaves_claims_populated_via_load(mocker):
     mocker.patch.object(orch_mod, "create_pipeline_run", side_effect=spy_create)
 
     with pytest.raises(RuntimeError, match="simulated crash after Pass 3b"):
-        run_deep_research_pipeline(
+        run_pipeline(
             user_query="acceptance criterion query",
             model="claude-test",
             provider_name="ANTHROPIC",
@@ -866,7 +865,7 @@ def test_hard_kill_bypasses_except_block_checkpoint_survives(mocker):
     mocker.patch.object(orch_mod, "create_pipeline_run", side_effect=spy_create)
 
     with pytest.raises(KeyboardInterrupt, match="simulated hard kill"):
-        run_deep_research_pipeline(
+        run_pipeline(
             user_query="hard kill query",
             model="claude-test",
             provider_name="ANTHROPIC",
@@ -945,7 +944,7 @@ def test_json_retry_path_calls_continue_conversation_on_malformed_json(mocker):
     mocker.patch.object(RunAgentLoop, "continue_conversation", side_effect=fake_continue)
 
     with pytest.raises(ValueError, match="did not return valid JSON"):
-        run_deep_research_pipeline(
+        run_pipeline(
             user_query="test",
             model="claude-test",
             provider_name="ANTHROPIC",
@@ -1045,7 +1044,7 @@ def test_each_candidate_runs_on_its_own_provider_and_model(monkeypatch, mocker):
         ]))),
     )
 
-    run_deep_research_pipeline(
+    run_pipeline(
         user_query="test", model="main-model", provider_name="ANTHROPIC",
         ensemble_mode=True,
     )
@@ -1080,7 +1079,7 @@ def test_a_failed_candidate_is_named_traced_and_skipped(monkeypatch, mocker):
     mocker.patch.object(RunAgentLoop, "stream_deep_research_mode",
                         side_effect=pass_stream(side_effect))
 
-    run = run_deep_research_pipeline(
+    run = run_pipeline(
         user_query="test", model="main-model", provider_name="ANTHROPIC",
         ensemble_mode=True,
     )
@@ -1133,7 +1132,7 @@ def test_candidate_labels_follow_survivors_not_roster_positions(monkeypatch, moc
     mocker.patch.object(RunAgentLoop, "stream_deep_research_mode",
                         side_effect=pass_stream(side_effect))
 
-    run = run_deep_research_pipeline(
+    run = run_pipeline(
         user_query="test", model="main-model", provider_name="ANTHROPIC",
         ensemble_mode=True,
     )
@@ -1185,7 +1184,7 @@ def test_the_trace_maps_a_candidate_number_to_the_model_that_produced_it(
     mocker.patch.object(RunAgentLoop, "stream_deep_research_mode",
                         side_effect=pass_stream(side_effect))
 
-    run = run_deep_research_pipeline(
+    run = run_pipeline(
         user_query="test", model="main-model", provider_name="ANTHROPIC",
         ensemble_mode=True,
     )
@@ -1250,7 +1249,7 @@ def test_pass_3b_sees_every_survivor_under_the_labels_pass2_used(monkeypatch, mo
     mocker.patch.object(RunAgentLoop, "stream_deep_research_mode",
                         side_effect=pass_stream(side_effect))
 
-    run_deep_research_pipeline(
+    run_pipeline(
         user_query="test", model="main-model", provider_name="ANTHROPIC",
         ensemble_mode=True,
     )
@@ -1303,7 +1302,7 @@ def test_pass_3b_keeps_the_single_candidate_shape_outside_ensemble(mocker):
     mocker.patch.object(RunAgentLoop, "stream_deep_research_mode",
                         side_effect=pass_stream(side_effect))
 
-    run_deep_research_pipeline(user_query="test", model="main-model",
+    run_pipeline(user_query="test", model="main-model",
                                provider_name="ANTHROPIC")
 
     assert pass3b_inputs[0].startswith("Raw response:\nOne plain response."), (
@@ -1340,7 +1339,7 @@ def test_one_surviving_candidate_scores_without_a_penalty(monkeypatch, mocker):
     mocker.patch.object(RunAgentLoop, "stream_deep_research_mode",
                         side_effect=pass_stream(side_effect))
 
-    run = run_deep_research_pipeline(
+    run = run_pipeline(
         user_query="test", model="main-model", provider_name="ANTHROPIC",
         ensemble_mode=True,
     )
@@ -1374,7 +1373,7 @@ def test_every_candidate_failing_is_an_error_not_an_empty_report(monkeypatch, mo
                         side_effect=pass_stream(side_effect))
 
     with pytest.raises(RuntimeError, match="every ensemble candidate failed"):
-        run_deep_research_pipeline(
+        run_pipeline(
             user_query="test", model="main-model", provider_name="ANTHROPIC",
             ensemble_mode=True,
         )
@@ -1395,7 +1394,7 @@ def test_ensemble_n_is_ignored_in_favour_of_the_roster(monkeypatch, mocker, capl
     )
 
     with caplog.at_level(logging.WARNING, logger="core.reasoning.orchestrator"):
-        run = run_deep_research_pipeline(
+        run = run_pipeline(
             user_query="test", model="m", provider_name="ANTHROPIC",
             ensemble_mode=True, ensemble_n=99,
         )
@@ -1442,7 +1441,7 @@ def test_pipeline_ensemble_mode_passes_1_runs_n_times(monkeypatch, mocker):
         side_effect=pass_stream(_build_pass_mock(call_log, payloads)),
     )
 
-    run = run_deep_research_pipeline(
+    run = run_pipeline(
         user_query="test", model="m", provider_name="ANTHROPIC",
         ensemble_mode=True,
     )
@@ -1475,7 +1474,7 @@ def test_pipeline_non_ensemble_mode_single_pass_1(mocker):
         side_effect=pass_stream(_build_pass_mock(call_log, payloads)),
     )
 
-    run = run_deep_research_pipeline(
+    run = run_pipeline(
         user_query="test", model="m", provider_name="ANTHROPIC",
         ensemble_mode=False,
     )
@@ -1604,7 +1603,7 @@ class TestTheCheckpointReportsWhatWasApplied:
             RunAgentLoop, "stream_deep_research_mode",
             side_effect=pass_stream(_build_pass_mock([], payloads)))
 
-        run = run_deep_research_pipeline(
+        run = run_pipeline(
             user_query="q", model="claude-test", provider_name="ANTHROPIC")
 
         assert _trace_line(run, "Pass 3a:") == (
@@ -1624,7 +1623,7 @@ class TestTheCheckpointReportsWhatWasApplied:
             RunAgentLoop, "stream_deep_research_mode",
             side_effect=pass_stream(_build_pass_mock([], payloads)))
 
-        run = run_deep_research_pipeline(
+        run = run_pipeline(
             user_query="q", model="claude-test", provider_name="ANTHROPIC")
 
         assert _trace_line(run, "Pass 3b:") == (
@@ -1643,7 +1642,7 @@ class TestTheCheckpointReportsWhatWasApplied:
             RunAgentLoop, "stream_deep_research_mode",
             side_effect=pass_stream(_build_pass_mock([], payloads)))
 
-        run = run_deep_research_pipeline(
+        run = run_pipeline(
             user_query="q", model="claude-test", provider_name="ANTHROPIC")
 
         assert _trace_line(run, "Pass 4:") == (
@@ -1657,7 +1656,7 @@ class TestTheCheckpointReportsWhatWasApplied:
             RunAgentLoop, "stream_deep_research_mode",
             side_effect=pass_stream(_build_pass_mock([], _clean_pipeline_payloads())))
 
-        run = run_deep_research_pipeline(
+        run = run_pipeline(
             user_query="q", model="claude-test", provider_name="ANTHROPIC")
 
         assert _trace_line(run, "Pass 3a:") == (
@@ -1682,7 +1681,7 @@ class TestTheCheckpointReportsWhatWasApplied:
             RunAgentLoop, "stream_deep_research_mode",
             side_effect=pass_stream(_build_pass_mock([], payloads)))
 
-        run = run_deep_research_pipeline(
+        run = run_pipeline(
             user_query="q", model="claude-test", provider_name="ANTHROPIC")
 
         assert _trace_line(run, "Pass 6a:") == (
@@ -1780,7 +1779,7 @@ def test_effort_reaches_every_model_call_in_the_pipeline(mocker):
         side_effect=pass_stream(side_effect),
     )
 
-    run_deep_research_pipeline(
+    run_pipeline(
         user_query="q", model="claude-test", provider_name="ANTHROPIC",
         effort="high",
     )
@@ -1810,7 +1809,7 @@ def test_without_an_effort_the_passes_receive_none(mocker):
         side_effect=pass_stream(side_effect),
     )
 
-    run_deep_research_pipeline(
+    run_pipeline(
         user_query="q", model="claude-test", provider_name="ANTHROPIC")
 
     assert efforts and all(e is None for e in efforts), (
@@ -1845,7 +1844,7 @@ def test_the_json_retry_carries_the_pass_effort(mocker):
                         side_effect=fake_continue)
 
     with pytest.raises(ValueError, match="did not return valid JSON"):
-        run_deep_research_pipeline(
+        run_pipeline(
             user_query="test", model="claude-test", provider_name="ANTHROPIC",
             effort="high")
 

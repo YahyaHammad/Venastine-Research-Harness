@@ -36,6 +36,7 @@ Venastine Research Harness/
 ├── env_secrets.py                 # misc TOOL keys (.env) -- NOT LLM provider keys
 ├── database.py                    # the DB engine + table creation -- owns the CONNECTION only
 ├── storage.py                     # thread/message schema + CRUD -- owns PERSISTENCE only
+├── json_store.py                  # batch 45: the atomic-write + versioned-read mechanics the four user-tier JSON stores (trust, MCP, model windows, UI prefs) each had a copy of. Mechanics only -- every store keeps its own module, path, version and failure posture
 ├── logging_setup.py                # logging config -- see ROADMAP.md §2, DEVLOG.md §2
 ├── providers.json.example            # tracked template -- LLM provider credentials structure (empty keys)
 ├── providers.json                   # gitignored runtime file -- written by credentials.py, NOT tracked
@@ -244,6 +245,7 @@ Venastine Research Harness/
     ├── registry.py                # the ONLY file that imports both security.permissions AND every tool module. §15: context-aware schemas/approval_needed/dispatch, runtime unregister, D24 import-time check
     └── builtin/
         ├── _math_common.py        # shared safe-expression-parsing foundation for the 6 math tools
+        ├── _net_common.py         # batch 45: TTLCache, the response cache web_search.py and arxiv.py each had a copy of. One INSTANCE per tool, never shared -- an equal key string from the two would otherwise collide
         ├── web_search.py          # DuckDuckGo search
         ├── fetch_url.py           # fetch a specific URL's content (§15/D24: ToolPermissions/ToolApprovals fields added -- it was registered but denied on every call before that)
         ├── get_time.py            # current UTC time
@@ -306,6 +308,31 @@ This section exists specifically because earlier drafts of this project put pers
 **Does NOT belong here:** any notion of "the current conversation" or "what the agent loop is doing this turn" — that's `core/memory.py`'s job. `storage.py` has no concept of an active run; it only knows how to durably read and write rows given a `thread_id`.
 
 **Naming note:** there is no `user_id` anywhere in this schema. This app runs one database per local user, so every row in a given database already belongs to the same person — a column that never varies within its own table provides no information. Do not add `user_id` back without a concrete reason (e.g. genuine multi-profile support within one shared local install).
+
+### 4.5b `json_store.py` — how a small user-tier JSON file is read and written
+
+**Belongs here:** the temp-file-plus-`os.replace` write (with an optional mode
+for the temp file), and the fail-soft versioned read. Mechanics, and nothing
+else.
+
+**Does NOT belong here:** anything about what a store MEANS. Four stores use
+it and they disagree on purpose — `core/workspace_trust.py` is unversioned,
+fails CLOSED and raises on a failed write; `mcp_client/config.py` carries F3's
+legacy-v1 re-ask arm; `core/model_windows.py` and `tui/preferences.py` fail
+soft and WARN. Each keeps its own module, path, `STORE_VERSION` and error
+policy, argued where it lives.
+
+**Why the project root.** `core/model_windows.py` is read by
+`core/compaction.py`; `tui/preferences.py` states it imports nothing from
+`core/`; `mcp_client/` and `security/` each document a reason not to reach into
+`core/` either. A root module is the one place all four already see, like
+`config`, `storage` and `credentials`.
+
+**What it fixed on the way in.** Three of the four wrote atomically and each
+spent four to eight docstring lines explaining why a truncate-then-write is
+unacceptable. The fourth — `mcp_client`'s, which stores a record of CONSENT —
+used a bare `open(path, "w")` and said nothing. Sharing the write is what makes
+that stop being a convention four comments long with one copy not following it.
 
 ### 4.6 `core/memory.py` — the ACTIVE conversation state only
 
@@ -992,8 +1019,10 @@ session has left.
 
 ### 4.28 `project_init/` — `/init` and the project documentation set (ROADMAP_v2 §24)
 
-`/init` reads a project and scaffolds its documentation: `.venastine/CONTEXT.md` as the
-hub, plus the documents it links. `--init` on the CLI (M21 — no command layer there).
+`/init` reads a project and scaffolds its documentation: a root `AGENTS.md` as the
+hub, plus the documents it links. (§44 WS8 moved the hub there, reversing I9 --
+`.venastine/` is configuration only now, and `CONTEXT.md` is gone outright rather
+than kept as a fallback.) `--init` on the CLI (M21 — no command layer there).
 
 **Four modules, split by what they can be wrong about.** `doc_sets.py` is data and pure
 rendering (which documents, where each lives, what a stub looks like), so it can be
@@ -1017,8 +1046,8 @@ which would have handed every agent and all ten research passes standing file ac
 serve one command.
 
 **`write_project_doc` has no path parameter.** It takes a document *name* from a fixed
-allowlist, and the destination is derived: `CONTEXT.md` under `.venastine/`, everything
-else at the project root. "Cannot be aimed elsewhere" is therefore structural rather than
+allowlist, and the destination is derived -- the hub and everything else alike sit at
+the project root. "Cannot be aimed elsewhere" is therefore structural rather than
 validated. The allowlist is the union of both sets plus the hub, so a research project
 that grows a codebase can gain an `ARCHITECTURE.md` without being re-classified first.
 
@@ -1045,12 +1074,12 @@ prompt-injected pass can read the system prompt of every agent it might later be
 
 **One consent, covering a named list.** `write_project_doc` is approval-gated, so a naive
 implementation prompts eight times for one command — the shape of consent that gets
-clicked through. The user sees the `CONTEXT.md` diff and the exact list of files once,
+clicked through. The user sees the hub's diff and the exact list of files once,
 and that answer is passed as `approval_callback` to each dispatch: the same move
 `core/loop.py` makes after a channel approval. With no way to ask, nothing is written
 (§25's V6, sixth instance).
 
-**Only `CONTEXT.md` is generated; the rest are stubs.** One model call drafts the hub —
+**Only the hub is generated; the rest are stubs.** One model call drafts the hub —
 short, factual, and re-sent with every request, so every sentence is paid for repeatedly.
 The others are templates carrying real headings and a what-belongs/what-does-not pair,
 interpolating only facts the manifest established deterministically. A DEVLOG invented
@@ -1059,7 +1088,7 @@ linked from the hub, and read as established.
 
 **The index is a pure function of the project kind**, and that was a bug fix. Marking
 which documents already existed made the index change on the second `/init` purely
-because the first had created them — rewriting `CONTEXT.md` for no reason, defeating the
+because the first had created them — rewriting the hub for no reason, defeating the
 "nothing to do" path, and labelling documents `/init` had authored moments earlier as
 preserved pre-existing work. Which files a run left alone is a fact about that run and is
 in its report.
@@ -1070,7 +1099,8 @@ The state is captured *before* it, because the D17 content hash has moved afterw
 the state the distinction exists to tell apart. An untrusted project is left untrusted:
 its `.venastine/` may already hold agents, skills and an `mcp.json` that arrived with a
 cloned repo, and granting as a side effect of `/init` would wave all of it through.
-`CONTEXT.md` is never special-cased out of the hash.
+The hub is never special-cased out of the hash -- and since WS9 the root `AGENTS.md`
+is inside `content_files()`, so that statement covers it where it now lives.
 
 ### 4.29 `core/interaction.py` — the response channel (ROADMAP_v2 §23)
 

@@ -28,7 +28,8 @@ recreated through the new config.
 import pytest
 
 import config
-from core.reasoning.orchestrator import _ensemble_roster, run_deep_research_pipeline
+from core.reasoning.orchestrator import _ensemble_roster
+from tests.conftest import run_pipeline
 
 TWO_DISTINCT = [
     {"provider_name": "ANTHROPIC", "model": "claude-opus-5"},
@@ -125,7 +126,7 @@ def test_the_refusal_lands_before_any_work(mocker, monkeypatch):
     run_pass = mocker.patch("core.reasoning.orchestrator._run_pass")
 
     with pytest.raises(ValueError, match="ENSEMBLE_MODELS"):
-        run_deep_research_pipeline(
+        run_pipeline(
             user_query="anything", model="claude-sonnet-5",
             provider_name="ANTHROPIC", ensemble_mode=True,
         )
@@ -148,7 +149,7 @@ def test_ensemble_off_is_unaffected_on_a_sampling_rejecting_model(mocker):
 
     model = next(iter(config.MODELS_REJECTING_SAMPLING_PARAMS))
     with pytest.raises(RuntimeError, match="reached the pipeline body"):
-        run_deep_research_pipeline(
+        run_pipeline(
             user_query="anything", model=model, provider_name="ANTHROPIC",
             ensemble_mode=False,
         )
@@ -177,7 +178,7 @@ def test_ensemble_now_runs_on_a_sampling_rejecting_model(mocker, monkeypatch):
     )
 
     with pytest.raises(RuntimeError, match="reached the pipeline body"):
-        run_deep_research_pipeline(
+        run_pipeline(
             user_query="anything", model="claude-sonnet-5",
             provider_name="ANTHROPIC", ensemble_mode=True,
         )

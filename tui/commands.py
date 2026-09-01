@@ -32,11 +32,6 @@ class CommandRegistry:
     def register(self, command: SlashCommand) -> None:
         self._commands[command.name] = command
 
-    def unregister(self, name: str) -> None:
-        """Idempotent, mirroring ToolRegistry.unregister -- a skill being
-        deactivated mid-session (§19) may run its teardown more than once."""
-        self._commands.pop(name, None)
-
     def get(self, name: str) -> Optional[SlashCommand]:
         return self._commands.get(name)
 

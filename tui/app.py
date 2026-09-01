@@ -2223,9 +2223,10 @@ def _cmd_research(app: VenastineApp, args: str) -> None:
     This docstring described the pre-§22 world in the present tense until
     audit #108 -- "coarse by construction ... the trace and report land
     when it returns" -- while _start_research 190 lines below said the
-    opposite and explained why: run_deep_research_pipeline would still
-    work, but the DRAINER is exactly what throws every intermediate event
-    away, which is what made this view coarse for two sections.
+    opposite and explained why: draining would still work, but the DRAINER
+    is exactly what throws every intermediate event away, which is what
+    made this view coarse for two sections. (The synchronous wrapper that
+    sentence named is retired; run_pipeline_to_completion is the drainer.)
 
     §25: --grant [names] takes the same values as the CLI flag and goes
     through the same parser, so the two shells cannot offer different
@@ -2431,7 +2432,7 @@ def _start_research(app: VenastineApp, query: str, authorization) -> None:
         from core.reasoning.output_writer import write_run_artifacts
         error = None
         try:
-            # §22: ITERATED, not called. run_deep_research_pipeline would
+            # §22: ITERATED, not drained. A drainer would
             # still work and would still return the same run -- it is the
             # drainer applied to this generator -- but the drainer is
             # exactly what throws every intermediate event away, which is

@@ -36,7 +36,7 @@ from core.reasoning.authorization import (
     GRANT_PICKER, NOTHING_TO_GRANT, GrantSpecError, candidates,
     parse_grant_spec,
 )
-from tests.conftest import drain, pass_stream, well_shaped
+from tests.conftest import drain, pass_stream, run_pass, well_shaped
 from tools.base import (
     GRANT_ANYWHERE, GRANT_NEVER, GRANT_POLICIES, GRANT_SIGNOFF_ONLY, ToolSpec,
     assert_grant_policy_declared,
@@ -607,7 +607,7 @@ class TestAuthorizationReachesThePasses:
 
         provider = ResponseChannel(ask=lambda request: True)
         budget = GrantBudget(7)
-        RunAgentLoop.run_deep_research_mode(
+        run_pass(
             "in", "m", "Pass 1",
             authorization=RunAuthorization(
                 granted_tools={"mcp__lib__search"}, provider=provider,

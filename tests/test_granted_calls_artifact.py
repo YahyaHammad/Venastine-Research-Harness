@@ -16,6 +16,7 @@ import pytest
 from core.approval import RunAuthorization
 from core.reasoning.base import PipelineRun
 from core.reasoning.output_writer import write_run_artifacts
+from tests.conftest import run_pipeline
 
 
 @pytest.fixture
@@ -84,7 +85,7 @@ class TestTheTrailSurvivesAFailedRun:
 
         auth = RunAuthorization(granted_tools={"mcp__lib__search"})
         with pytest.raises(RuntimeError):
-            orchestrator.run_deep_research_pipeline(
+            run_pipeline(
                 user_query="q", model="m", authorization=auth)
 
         # The sharing is what is asserted: appending to one is visible on

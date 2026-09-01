@@ -14,12 +14,13 @@ tools use.
 from __future__ import annotations
 
 import logging
-import time
 import xml.etree.ElementTree as ET
 from typing import Optional
 
 import httpx
 from pydantic import BaseModel, Field, field_validator
+
+from tools.builtin._net_common import TTLCache
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +41,9 @@ REQUEST_TIMEOUT_S = 10.0
 MAX_RETRIES = 2
 CACHE_TTL_S = 300
 
-_cache: dict[str, tuple[float, list[dict]]] = {}
+# One instance per tool, never shared: an equal key string from an
+# arXiv query and a web query would otherwise collide.
+_cache = TTLCache(CACHE_TTL_S)
 
 
 # ---- Schema exposed to the LLM -------------------------------------------
@@ -93,23 +96,6 @@ class ArxivSearchError(Exception):
     error dict instead, so a transient network failure cannot fail a
     ten-pass research run. Kept because it is part of this module's
     public surface and something outside the repo may catch it."""
-
-
-# ---- Cache helpers ----------------------------------------------------------
-
-def _cache_get(key: str) -> Optional[list[dict]]:
-    entry = _cache.get(key)
-    if not entry:
-        return None
-    ts, results = entry
-    if time.time() - ts > CACHE_TTL_S:
-        _cache.pop(key, None)
-        return None
-    return results
-
-
-def _cache_set(key: str, results: list[dict]) -> None:
-    _cache[key] = (time.time(), results)
 
 
 # ---- Query construction -----------------------------------------------------
@@ -197,7 +183,7 @@ def run(params: dict) -> dict:
     parsed = ArxivSearchParams(**params)
     cache_key = f"{parsed.keywords}|{parsed.category}|{parsed.max_results}|{parsed.sort_by}"
 
-    results = _cache_get(cache_key)
+    results = _cache.get(cache_key)
     if results is not None:
         logger.info("arxiv_search cache hit for %r", parsed.keywords)
     else:
@@ -208,7 +194,7 @@ def run(params: dict) -> dict:
             try:
                 xml_text = _call_arxiv_api(search_query, parsed.max_results, parsed.sort_by)
                 results = _parse_atom_feed(xml_text)
-                _cache_set(cache_key, results)
+                _cache.set(cache_key, results)
                 break
             except (httpx.HTTPError, ET.ParseError) as e:
                 last_exc = e

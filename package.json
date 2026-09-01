@@ -43,6 +43,7 @@
     "credentials.py",
     "env_secrets.py",
     "logging_setup.py",
+    "json_store.py",
     "core/",
     "tools/",
     "tui/",

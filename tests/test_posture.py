@@ -306,7 +306,7 @@ class TestNothingReachableChangesIt:
         shipping calls it."""
         offenders = []
         for rel, src in _production_sources():
-            for seam in ("override_for_tests", "reset_from_config_for_tests"):
+            for seam in ("override_for_tests",):
                 if seam in src and not rel.endswith("security/posture.py"):
                     offenders.append(f"{rel} ({seam})")
         assert offenders == [], (

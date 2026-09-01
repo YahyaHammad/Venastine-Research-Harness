@@ -1289,8 +1289,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--init",
         action="store_true",
-        help="Generate this project's documentation set -- .venastine/"
-             "CONTEXT.md plus the stubs it links -- and exit.",
+        help="Generate this project's documentation set -- a root AGENTS.md "
+             "plus the stubs it links -- and exit.",
     )
     parser.add_argument(
         "--software-project",
@@ -1506,7 +1506,7 @@ def load_project_config(project_path: str, trust_flag: bool) -> dict:
     buries the one line that says which key in which file. Covers
     ValueError (unknown key, wrong type, and json.JSONDecodeError, which
     subclasses it -- so a corrupt settings.json or trusted_projects.json
-    lands here too) and OSError (an unreadable CONTEXT.md or config dir).
+    lands here too) and OSError (an unreadable AGENTS.md or config dir).
     """
     try:
         _ensure_workspace_trust(project_path, trust_flag)

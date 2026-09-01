@@ -12,7 +12,7 @@ prior output rather than being asked again from a clean slate. That is
 the whole reason this is a thread continuation and not a fresh call.
 
 WHY THIS IS ITS OWN MODULE. The orchestrator's version hardcoded
-run_deep_research_mode as the first attempt and pass_prompt(pass_id) as
+stream_deep_research_mode as the first attempt and pass_prompt(pass_id) as
 the system prompt -- correct for the ten passes, wrong for anything else.
 §20's reviewer is agent-shaped: it starts through
 run_agent_conversation with an agent's own system prompt. Copying twenty
@@ -49,7 +49,7 @@ from typing import Any, Callable, Optional
 import config
 from core.reasoning.payload_validation import PayloadShapeError
 
-MAX_JSON_RETRIES = getattr(config, "MAX_JSON_RETRIES", 2)
+MAX_JSON_RETRIES = config.MAX_JSON_RETRIES
 
 
 def parse_json_response(text: str) -> Any:

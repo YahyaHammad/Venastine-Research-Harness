@@ -49,6 +49,22 @@ const REQUIRED = [
   'bin/venastine.mjs',
 ];
 
+/**
+ * Root-level Python modules that must NOT ship, with the reason.
+ *
+ * Everything else at the root that ends in `.py` is production source the
+ * harness imports, and `files` in package.json lists those INDIVIDUALLY --
+ * so adding a module to the repo and forgetting the allowlist ships a
+ * package that ImportErrors on its first run, silently, with nothing here
+ * saying so. That happened in batch 45 with `json_store.py`, which is why
+ * this check exists: the claim earned it by drifting.
+ */
+const ROOT_PY_NOT_SHIPPED = new Set([
+  // Test bootstrap. pyproject sets packages=[]/py-modules=[] for the same
+  // reason: installed as a top-level name it collides with other projects'.
+  'conftest.py',
+]);
+
 /** Anything matching these must never leave this machine. */
 const FORBIDDEN = [
   { label: 'provider credentials', test: (f) => f === 'providers.json' },
@@ -132,6 +148,15 @@ function packedFiles() {
   return JSON.parse(json)[0].files.map((f) => f.path);
 }
 
+/** Root-level `*.py` that production imports -- everything but the exempt set. */
+function rootPythonModules() {
+  return fs
+    .readdirSync(ROOT, { withFileTypes: true })
+    .filter((e) => e.isFile() && e.name.endsWith('.py'))
+    .map((e) => e.name)
+    .filter((name) => !ROOT_PY_NOT_SHIPPED.has(name));
+}
+
 const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
 const pyVersion = versionFromPyproject();
 
@@ -148,6 +173,16 @@ if (files) {
   for (const required of REQUIRED) {
     if (!files.includes(required)) {
       problems.push(`${required} is missing from the tarball. Add it to \`files\` in package.json.`);
+    }
+  }
+  for (const module of rootPythonModules()) {
+    if (!files.includes(module)) {
+      problems.push(
+        `${module} is a root Python module and is NOT in the tarball.\n` +
+        '  `files` lists root modules one by one, so a new one is excluded by\n' +
+        '  default and the package ImportErrors on first run. Add it to `files`\n' +
+        '  in package.json, or to ROOT_PY_NOT_SHIPPED here with the reason.'
+      );
     }
   }
   for (const { label, test } of FORBIDDEN) {

@@ -50,10 +50,11 @@ reports). Same split as tui/preferences.py, which stores strings and knows
 no theme names.
 """
 
-import json
 import logging
 import os
 from typing import Optional
+
+from json_store import read_versioned, write_json_atomic
 
 logger = logging.getLogger(__name__)
 
@@ -83,24 +84,20 @@ def _key(provider_name: str, model: str) -> str:
 
 
 def _read_raw() -> dict:
-    """The store as it stands, or {} for anything unusable.
+    """The remembered windows, or {} for anything unusable.
 
-    {} covers a missing file, an unreadable one, a non-object and a
-    version this build does not know. The worst consequence of forgetting
-    is falling back to the derived window, which is where every user
-    starts; there is no security property here to fail closed for.
+    json_store.read_versioned covers a missing file, an unreadable one, a
+    non-object and a version this build does not know. The worst
+    consequence of forgetting is falling back to the derived window, which
+    is where every user starts; there is no security property here to fail
+    closed for, which is why the shared fail-soft reader is the right one
+    and workspace_trust's is not.
+
+    The `windows` sub-key is unwrapped HERE, because the shape under the
+    version is this module's business and not the store helper's.
     """
-    path = store_path()
-    if not os.path.exists(path):
-        return {}
-    try:
-        with open(path, "r", encoding="utf-8-sig") as f:
-            data = json.load(f)
-    except (OSError, ValueError):
-        logger.debug("Could not read %s; using derived context windows.", path)
-        return {}
-    if not isinstance(data, dict) or data.get("version") != STORE_VERSION:
-        return {}
+    data = read_versioned(store_path(), STORE_VERSION,
+                          "using derived context windows.")
     windows = data.get("windows")
     return windows if isinstance(windows, dict) else {}
 
@@ -108,9 +105,9 @@ def _read_raw() -> dict:
 def _write(windows: dict, action: str) -> bool:
     """Persist the whole map. True if it reached disk.
 
-    Temp file plus os.replace, atomic on POSIX and on Windows: a
-    truncate-then-write leaves the file empty for the length of the write
-    and permanently damaged if the process dies inside it.
+    The atomic write itself is json_store's, shared with the three sibling
+    stores; the ERROR POLICY stays here, because whether a failed write is
+    a warning or an exception is a fact about what the file means.
 
     A failure WARNS and returns False rather than raising. The TUI routes
     WARNING+ into the transcript through TranscriptLogHandler, so someone
@@ -118,13 +115,9 @@ def _write(windows: dict, action: str) -> bool:
     rather than discovering it at the next launch.
     """
     path = store_path()
-    tmp = f"{path}.tmp"
     try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"version": STORE_VERSION, "windows": windows}, f,
-                      indent=2, sort_keys=True)
-        os.replace(tmp, path)
+        write_json_atomic(path, {"version": STORE_VERSION, "windows": windows},
+                          sort_keys=True)
     except OSError as exc:
         logger.warning("Could not %s the context window in %s (%s).",
                        action, path, exc)

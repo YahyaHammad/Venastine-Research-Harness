@@ -324,7 +324,7 @@ WRITE_TOOL_SCHEMA = {
             "name": {
                 "type": "string",
                 "description": "One of the project's standard document names, "
-                               "e.g. CONTEXT.md or ARCHITECTURE.md.",
+                               "e.g. AGENTS.md or ARCHITECTURE.md.",
             },
             "content": {
                 "type": "string",
@@ -371,7 +371,7 @@ def write_run(params: dict) -> dict:
     name = (params.get("name") or "").strip()
     known = _known_doc_names()
     if name not in known:
-        # Not coerced to CONTEXT.md, and not accepted as a path. An
+        # Not coerced to the hub, and not accepted as a path. An
         # unrecognised name is the one case where this tool could become a
         # general writer, so it fails loudly and lists what it accepts.
         return {"error": f"write_project_doc: {name!r} is not one of this "

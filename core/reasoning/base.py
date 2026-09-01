@@ -146,7 +146,7 @@ class PipelineRun:
     """
 
     user_query: str
-    # Set by run_deep_research_pipeline() once a PipelineRunRecord is
+    # Set by stream_deep_research_pipeline() once a PipelineRunRecord is
     # created in storage; stays None in tests that bypass persistence.
     # ROADMAP §5 (pipeline persistence minimal core): the record lets a
     # run that fails mid-pipeline be inspected and (future) resumed.

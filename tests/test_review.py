@@ -32,7 +32,7 @@ from core.approval import (
 )
 from core.events import LoopEvent
 from core.loop import RunAgentLoop
-from tests.conftest import make_model_response, pass_stream
+from tests.conftest import make_model_response, pass_stream, run_pipeline
 
 
 def _capturing_run(captured):
@@ -1117,7 +1117,7 @@ class TestTheStageIsWiredIntoThePipeline:
             review_module, "run_review",
             side_effect=lambda run, *a, **k: ([TEXT_FINDING], uuid4()))
 
-        run = orchestrator.run_deep_research_pipeline(
+        run = run_pipeline(
             user_query="q", model="m", provider_name="ANTHROPIC",
             subagent_review=True,
             review=_consent(("accept", "")))
@@ -1152,7 +1152,7 @@ class TestTheStageIsWiredIntoThePipeline:
             side_effect=_as_generator(_explode))
 
         with pytest.raises(RuntimeError, match="reviewer exploded"):
-            orchestrator.run_deep_research_pipeline(
+            run_pipeline(
                 user_query="q", model="m", provider_name="ANTHROPIC",
                 subagent_review=True)
 
@@ -1182,7 +1182,7 @@ class TestTheStageIsWiredIntoThePipeline:
             orchestrator, "_review_stage",
             side_effect=_as_generator(lambda *a, **k: order.append("review")))
 
-        orchestrator.run_deep_research_pipeline(
+        run_pipeline(
             user_query="q", model="m", provider_name="ANTHROPIC")
 
         assert order[-2:] == ["Final synthesis", "review"]
@@ -1263,7 +1263,7 @@ class TestRequestedIsSeparateFromCanBeAsked:
             side_effect=_as_generator(lambda *a, **k: captured.update(k)))
         mocker.patch.object(config, "SUBAGENT_REVIEW", True)
 
-        orchestrator.run_deep_research_pipeline(
+        run_pipeline(
             user_query="q", model="m", provider_name="ANTHROPIC")
 
         assert captured["enabled"] is True

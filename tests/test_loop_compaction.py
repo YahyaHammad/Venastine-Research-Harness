@@ -23,7 +23,7 @@ from core import compaction
 from core.events import LoopEvent
 from core.loop import RunAgentLoop, run_to_completion
 from tests.conftest import (
-    FakeMemory, make_model_response, make_stream_sequence,
+    FakeMemory, make_model_response, make_stream_sequence, run_pass,
 )
 
 
@@ -232,7 +232,7 @@ def test_a_research_pass_asks_in_backstop_mode(mocker):
                  side_effect=make_stream_sequence(make_model_response(text="hi")))
     mocker.patch("core.loop.ConversationMemory", FakeMemory)
 
-    RunAgentLoop.run_deep_research_mode("q", "claude-sonnet-5", "Pass 1")
+    run_pass("q", "claude-sonnet-5", "Pass 1")
 
     assert seen == ["backstop"]
 

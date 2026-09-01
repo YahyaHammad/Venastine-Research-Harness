@@ -774,7 +774,7 @@ registry.register(ToolSpec(
     # authorises 15 document names, resolved to paths by the tool and
     # overwritten in place, for the rest of a ten-pass run that is reading
     # attacker-controlled web pages -- with no diff and no second
-    # question. One of them is .venastine/CONTEXT.md, which config_loader
+    # question. One of them is the root AGENTS.md, which config_loader
     # injects into every agent that opts in, so it reaches M17's own
     # justification for excluding `remember` ("outlives the conversation
     # and silently shapes ones you have not started yet") through a

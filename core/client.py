@@ -103,7 +103,7 @@ class ModelResponse:
     tool_calls: list[ToolCallRequest] = field(default_factory=list)
     usage: dict = field(default_factory=lambda: {"input_tokens": 0, "output_tokens": 0})
     stop_reason: str = "complete"  # set by RunAgentLoop._run(), not here -- see core/loop.py
-    thread_id: Optional[UUID] = None  # set by the public entry points (run_deep_research_mode,
+    thread_id: Optional[UUID] = None  # set by the entry points (stream_deep_research_mode,
                                       # continue_conversation) so callers can persist/retry
                                       # against the same thread. call_model() itself NEVER
                                       # sets this -- it has no thread concept.

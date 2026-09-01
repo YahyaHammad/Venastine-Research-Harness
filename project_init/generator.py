@@ -10,7 +10,7 @@ painting one. The shells supply consent and rendering as callbacks; every
 decision about what happens lives here.
 
 THE AGENT PRODUCES TEXT; THIS MODULE WRITES (I8). The initializer gets
-`read_project_doc` and nothing else, and returns CONTEXT.md's prose as its
+`read_project_doc` and nothing else, and returns the hub document's prose as its
 final answer. Diffing, asking and dispatching `write_project_doc` happen
 here, because consent belongs to the shell (§20's V3) and a tool writing
 from inside the loop could not show a human a diff first.
@@ -18,7 +18,7 @@ from inside the loop could not show a human a diff first.
 ONE CONSENT, A NAMED LIST. `write_project_doc` is approval-gated, so a naive
 implementation would prompt eight times for one command -- which is the
 shape of consent that gets clicked through. The user is asked once, shown
-the CONTEXT.md diff and the exact list of files that will be created, and
+the hub's diff and the exact list of files that will be created, and
 that answer is then passed as `approval_callback` to each dispatch. Same
 move core/loop.py makes after a channel approval, and for the same reason.
 """
@@ -97,27 +97,36 @@ def _read_existing_context(project_path: str) -> Optional[str]:
         with open(path, "r", encoding="utf-8-sig") as f:
             return f.read()
     except (OSError, UnicodeDecodeError) as e:
-        # Degrade like config_loader does with an unreadable CONTEXT.md.
+        # Degrade like config_loader does with an unreadable hub document.
         # An undecodable existing file must not stop /init from writing a
         # good one -- but it is also not something to revise, so the run
         # proceeds as if there were none.
-        logger.warning("Could not read the existing CONTEXT.md at %s; "
-                       "generating a fresh one: %s", path, e)
+        logger.warning("Could not read the existing %s at %s; "
+                       "generating a fresh one: %s", HUB_FILENAME, path, e)
         return None
 
 
 def _task(manifest_text: str, existing: Optional[str], kind: str) -> str:
     """The user message: the manifest, plus the current file if there is
     one (I4). Both go HERE and not in the system prompt -- see
-    project_init/manifest.py on why that distinction is load-bearing."""
+    project_init/manifest.py on why that distinction is load-bearing.
+
+    THE HUB'S NAME IS INTERPOLATED, NEVER SPELLED (§44 WS8). This function
+    said "Write CONTEXT.md" for two batches after the hub became the root
+    AGENTS.md: the shell wrote to the right path, and the model drafted a
+    document that called itself by the old name. Reading the constant means
+    the next relocation cannot leave the prompt behind again.
+    """
+    from tools.builtin.project_docs import HUB_FILENAME
+
     parts = [
-        f"Write CONTEXT.md for this {kind} project.",
+        f"Write {HUB_FILENAME} for this {kind} project.",
         "",
         manifest_text,
     ]
     if existing:
         parts += [
-            "## The current CONTEXT.md",
+            f"## The current {HUB_FILENAME}",
             "",
             "This already exists and may contain hand edits. Revise it: keep "
             "everything still true, correct what the project has outgrown, "
@@ -140,7 +149,7 @@ def _run_initializer(project_path: str, kind: str, existing: Optional[str],
     if agent is None:
         raise InitError(
             f"The {config.INITIALIZER_AGENT!r} agent is not available, so "
-            f"there is nothing to generate CONTEXT.md with.")
+            f"there is nothing to generate the hub document with.")
 
     context = manager.active_context(agent)
     system_prompt = manager.system_prompt_for(
@@ -163,8 +172,8 @@ def _run_initializer(project_path: str, kind: str, existing: Optional[str],
     body = (response.text or "").strip()
     if not body:
         raise InitError(
-            "The initializer returned nothing, so there is no CONTEXT.md to "
-            "write. Nothing has been changed.")
+            "The initializer returned nothing, so there is no hub document "
+            "to write. Nothing has been changed.")
     return body
 
 
@@ -315,7 +324,7 @@ def generate(
         # TECHNICAL_DEBT.md" left no way to tell whether nothing had
         # happened or most of it had.
         #
-        # NOTHING IS ROLLED BACK, deliberately. CONTEXT.md's previous
+        # NOTHING IS ROLLED BACK, deliberately. The hub's previous
         # content was overwritten at the first step and cannot be restored,
         # so "rolled back" would be true of the stubs and false of the one
         # file that mattered -- and deleting documents out of someone's
@@ -361,7 +370,7 @@ def _write(registry, granted, name: str, content: str) -> None:
 def _settle_trust(project_path: str, was_trusted: bool) -> str:
     """I6. Re-grant only for a project that was ALREADY trusted.
 
-    Writing CONTEXT.md changes the D17 content hash, so a project the user
+    Writing the hub changes the D17 content hash, so a project the user
     had approved becomes untrusted purely because they ran this command --
     the trust system working as designed, producing a bad outcome. Since
     they just authored the content, re-granting is unambiguous.
@@ -370,7 +379,7 @@ def _settle_trust(project_path: str, was_trusted: bool) -> str:
     agents, skills and an mcp.json that arrived with a repo someone cloned.
     Granting trust as a side effect of /init would launder all of it in --
     a hole in D17 opened from a direction the trust prompt never sees.
-    CONTEXT.md is never special-cased out of the hash either; that would be
+    The hub is never special-cased out of the hash either; that would be
     the same hole with a smaller mouth.
     """
     if not was_trusted:

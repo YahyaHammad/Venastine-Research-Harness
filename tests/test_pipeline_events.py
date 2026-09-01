@@ -39,7 +39,7 @@ from core.reasoning import orchestrator
 from core.reasoning.base import PipelineRun
 from core.reasoning.events import PIPELINE_EVENT_KINDS, PipelineEvent
 from core.reasoning.pipeline_storage import load_pipeline_run
-from tests.conftest import pass_stream
+from tests.conftest import pass_stream, run_pipeline
 from tests.test_orchestrator import _build_pass_mock, _clean_pipeline_payloads
 
 
@@ -60,18 +60,23 @@ def _stream(mocker, **kwargs):
 
 
 # ===========================================================================
-# ---- AC1: the synchronous entry point is unchanged ------------------------
+# ---- AC1: draining the generator yields the finished run ------------------
 # ===========================================================================
 
-class TestTheDrainerKeepsEveryExistingCaller:
+class TestDrainingThePipeline:
+    """P3 kept a synchronous `run_deep_research_pipeline` so §22 would
+    change no caller. Both shells then moved to the generator anyway, so
+    the wrapper is retired and `run_pipeline_to_completion` is the drainer.
+    AC1's actual content -- a caller that wants only the finished run can
+    still get one, and gets the SAME one a streaming consumer sees -- is
+    what these two assert."""
 
-    def test_the_public_function_still_returns_a_finished_run(self, mocker):
-        """The whole point of P3. run_deep_research_pipeline is now the
-        drainer applied to the generator, and a caller must not be able
-        to tell."""
+    def test_draining_the_generator_returns_a_finished_run(self, mocker):
+        """A caller that does not want progress drains and must not be
+        able to tell that a generator was involved."""
         _canned(mocker)
 
-        run = orchestrator.run_deep_research_pipeline(
+        run = run_pipeline(
             user_query="Quantum computing risks to encryption?",
             model="claude-test", provider_name="ANTHROPIC",
         )
@@ -188,7 +193,7 @@ class TestOneTraceWriter:
         fake: what streamed and what persisted are the same lines."""
         _canned(mocker)
 
-        run = orchestrator.run_deep_research_pipeline(
+        run = run_pipeline(
             user_query="Quantum computing risks to encryption?",
             model="claude-test", provider_name="ANTHROPIC",
         )

@@ -553,9 +553,15 @@ def _maybe_compact(memory, model, provider_name, notices, mode):
 def run_to_completion(gen) -> ModelResponse:
     """Consumes a _run() generator fully, discarding intermediate events,
     and returns the final ModelResponse — this is what keeps
-    run_agent_conversation() / run_deep_research_mode() /
-    continue_conversation() backward compatible with every existing
-    caller."""
+    run_agent_conversation() and continue_conversation(), the two public
+    entry points, synchronous for every caller.
+
+    It reads the response off the TERMINAL EVENT, which is right for a
+    bare _run(): that generator returns nothing. A generator that returns
+    its own value -- stream_deep_research_mode(), whose response carries
+    `thread_id` attached after the loop finished -- needs the other
+    question asked, and `tests/conftest.drain` is where that lives now
+    that the pass wrapper is gone."""
     final = None
     for event in gen:
         if event.final_response is not None:
@@ -582,28 +588,6 @@ def _resolve_spend_cap(max_total_tokens) -> Optional[int]:
         from core.config_loader import spend_cap
         return spend_cap()
     return max_total_tokens
-
-
-def return_value_of(gen):
-    """Drains a generator and returns what it RETURNED, not what it yielded.
-
-    ROADMAP_v2 §26. `run_to_completion()` above reads the ModelResponse off
-    the terminal LoopEvent, which is right for a bare `_run()` -- that
-    generator returns nothing. `stream_deep_research_mode()` does return a
-    value (the response, with `thread_id` attached after the loop finished),
-    and reading its terminal event instead would silently hand back a
-    response missing that assignment.
-
-    A SEPARATE helper rather than a branch inside run_to_completion(): the
-    two answer different questions, and one function that sometimes reads
-    the event and sometimes the return value is the kind of "exactly one
-    field is populated" convention §22 P1 declined to add more of.
-    """
-    try:
-        while True:
-            next(gen)
-    except StopIteration as stop:
-        return stop.value
 
 
 class RunAgentLoop:
@@ -1145,7 +1129,7 @@ class RunAgentLoop:
 
         authorization (§20): a RunAuthorization, for an agent-shaped run
         that is part of a research run -- §20's reviewer is the first.
-        §25 added the bundle to run_deep_research_mode and
+        §25 added the bundle to the pass entry point and
         continue_conversation and stopped here, because nothing
         agent-shaped needed it yet; a reviewer inheriting its run's grants
         and BUDGET does.
@@ -1224,49 +1208,6 @@ class RunAgentLoop:
         return response
 
     @staticmethod
-    def run_deep_research_mode(
-        pass_input: str,
-        model: str,
-        pass_id: str,
-        provider_name: str = DEFAULT_PROVIDER,
-        max_steps: int = config.MAX_ITERATIONS,
-        # #4: _SPEND_UNSET resolves the configured settings.json cap; a
-        # pass has no separate ceiling any more. The old constant existed
-        # because the chat budget was misread as a size limit -- with the
-        # meter correctly a spend meter and uncapped by default, the
-        # workaround's reason is gone (TECHNICAL_DEBT item 9, closed).
-        max_total_tokens: Optional[int] = _SPEND_UNSET,
-        temperature: Optional[float] = None,
-        effort: Optional[str] = None,
-        context: Optional[ToolContext] = None,
-        authorization=None,
-    ) -> ModelResponse:
-        """
-        Runs ONE research pass. `pass_input` is whatever the orchestrator
-        decided this pass should see (the original goal for pass 1, the
-        accumulated PipelineContext summary for every pass after that) --
-        this function doesn't know or care which. A fresh ConversationMemory
-        is created per call: each pass gets its own thread, not a shared one.
-
-        authorization (§25): a core.approval.RunAuthorization, or None for
-        the pre-§25 behaviour -- no grants, nobody to ask, every gated tool
-        hidden. Built by the SHELL that launched the pipeline and passed
-        down unchanged; this function takes no view on what it contains.
-
-        §26: this is now the DRAINER applied to stream_deep_research_mode(),
-        the same relationship run_deep_research_pipeline() has to
-        stream_deep_research_pipeline() and the three public wrappers have
-        to _run(). Signature and return type are unchanged, so every caller
-        that does not want a pass's internals keeps calling this.
-        """
-        return return_value_of(RunAgentLoop.stream_deep_research_mode(
-            pass_input=pass_input, model=model, pass_id=pass_id,
-            provider_name=provider_name, max_steps=max_steps,
-            max_total_tokens=max_total_tokens, temperature=temperature,
-            effort=effort, context=context, authorization=authorization,
-        ))
-
-    @staticmethod
     def stream_deep_research_mode(
         pass_input: str,
         model: str,
@@ -1303,8 +1244,10 @@ class RunAgentLoop:
         existed -- which §23 has now merged into core.interaction.
 
         The response is RETURNED rather than read off the terminal event
-        because `thread_id` is attached after the loop finishes -- see
-        return_value_of().
+        because `thread_id` is attached after the loop finishes. A caller
+        must therefore drain this with something that keeps a generator's
+        return value: `yield from` (what _run_pass does) or
+        `tests/conftest.drain`, never run_to_completion().
 
         §27: the fresh thread per pass is a LOCKED INVARIANT, not the
         defect §27's second bug looked like -- passes share distilled JSON

@@ -355,7 +355,7 @@ def _package_json_test(project_path: str) -> Optional[str]:
             data = json.load(f)
     except (OSError, ValueError):
         # A malformed package.json is the project's problem, not /init's.
-        # Degrade like config_loader does with an unreadable CONTEXT.md.
+        # Degrade like config_loader does with an unreadable hub document.
         logger.debug("Could not parse package.json at %s", path, exc_info=True)
         return None
     if isinstance(data, dict) and isinstance(data.get("scripts"), dict):

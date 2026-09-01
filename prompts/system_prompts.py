@@ -253,7 +253,7 @@ def pass_prompt(pass_id: str, callable_only: bool = False,
                 granted=None) -> str:
     """A research pass's system prompt with the catalogs it can use.
 
-    BOTH the pass entry point (loop.run_deep_research_mode) and the §3
+    BOTH the pass entry point (loop.stream_deep_research_mode) and the §3
     JSON-retry path (orchestrator) must go through here so the catalogs
     cannot diverge between an original attempt and its retry -- and
     since #68 that includes the two facts, or a retry would see a

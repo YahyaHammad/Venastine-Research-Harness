@@ -21,7 +21,8 @@ State lives in files, in one of two places depending on how you installed it —
 | `~/.config/venastine/runtime/<version>-<hash>/` | The Python virtual environment an npm install builds on first run, after asking. Holds the pinned dependencies, no data of yours | First `venastine` run, with your consent |
 | `~/.config/venastine/settings.json` & `~/.config/venastine/mcp.json` | Your user-tier settings/MCP servers | On first trust / settings save |
 | `~/.config/venastine/trusted_projects.json` | Workspace trust store (path + content hash) | After you answer the trust prompt |
-| `<project>/.venastine/` | Project-tier config — `settings.json`, `mcp.json`, `CONTEXT.md`, plus any project `agents/` and `skills/`. Loaded only after you trust the workspace (`core/workspace_trust.py`) | You create it, or `/init` does |
+| `<project>/.venastine/` | Project-tier config — `settings.json`, `mcp.json`, plus any project `agents/` and `skills/`. Loaded only after you trust the workspace (`core/workspace_trust.py`) | You create it, or `/init` does |
+| `<project>/AGENTS.md` | The project's hub document, injected into the system prompt of any agent that opts in. An ordinary committed file, but it is inside the same trust boundary as `.venastine/` and a change to it re-triggers the trust prompt | You write it, or `/init` does |
 
 Everything above is **local-only** by default, and three separate mechanisms keep it out of the three ways this project is distributed: `.gitignore` for `git push`, `.gitattributes` `export-ignore` for `git archive` and "Download ZIP", and the `files` allowlist in `package.json` for the npm tarball. `app.db`, `logs/`, `output/`, `providers.json` and `.env` are excluded by all three.
 

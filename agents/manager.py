@@ -151,7 +151,7 @@ class AgentManager:
                           granted=None) -> str:
         """The full system prompt for a run AS this agent: base + skill /
         agent catalogs, then the agent's own body, then the project's
-        CONTEXT.md iff the agent opts in (use_project_context). One
+        AGENTS.md iff the agent opts in (use_project_context). One
         assembly point so every caller produces the same prompt.
 
         active_skills (§19) reaches only the catalog, where it MARKS the
@@ -181,10 +181,11 @@ class AgentManager:
         if context:
             prompt = f"{prompt}\n\n## Project context\n\n{context}"
         # ROADMAP_v2 §21b: durable memories, the third context tier beside
-        # CONTEXT.md and gated the same way (use_memory). Appended HERE and
-        # not inside with_catalogs, which feeds pass_prompt() -- injecting
-        # there would put every memory into all ten research passes, which
-        # is §19's K6 trap in its second instance.
+        # the project's AGENTS.md and gated the same way (use_memory).
+        # Appended HERE and not inside with_catalogs, which feeds
+        # pass_prompt() -- injecting there would put every memory into all
+        # ten research passes, which is §19's K6 trap in its second
+        # instance.
         memories = memory_manager.prompt_fragment(agent)
         if memories:
             prompt = f"{prompt}\n\n{memories}"

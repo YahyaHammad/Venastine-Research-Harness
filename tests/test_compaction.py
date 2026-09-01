@@ -582,7 +582,7 @@ def test_an_empty_summary_skips_compaction(fake_storage, summaries):
     nothing at all -- the one outcome worse than not compacting. Batch 16
     (#44) turned the silent None into a named outcome so /compact can say
     what happened instead of implying nothing was attempted. Batch 20
-    (#136) went further: status aligns with COMPACTION_OUTCOMES' own
+    (#136) went further: status aligns with compact()'s own documented
     "failed" vocabulary and the kind is compaction_failed, so the loop
     both SHOWS it (once per run) and LATCHES on it."""
     memory = ConversationMemory()

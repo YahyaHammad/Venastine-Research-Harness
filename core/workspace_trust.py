@@ -17,6 +17,8 @@ import hashlib
 import json
 import os
 
+from json_store import write_json_atomic
+
 
 def _trust_store_path() -> str:
     # Resolved at call time, not import time, so tests can redirect the
@@ -179,11 +181,16 @@ def _load_trust_store() -> dict:
 
 
 def _save_trust_store(store: dict) -> None:
-    """Write via a temp file and os.replace, which is atomic on POSIX and
-    on Windows. A truncate-then-write leaves the store empty for the
+    """Write atomically, via json_store, which the three sibling user-tier
+    stores share. A truncate-then-write leaves the store empty for the
     length of the write, and permanently damaged if the process dies
     inside it -- for a file whose whole job is remembering a security
     decision.
+
+    RAISES, unlike model_windows and preferences, which warn and return
+    False. That policy stays here rather than in the shared helper: a
+    trust grant that silently did not persist is worse than a crash, and
+    a remembered theme that did not is not.
 
     0600 on the TEMP FILE, not on the destination (#19). os.replace
     carries the source file's mode across, so setting it afterwards would
@@ -197,10 +204,4 @@ def _save_trust_store(store: dict) -> None:
     consistency with credentials.py rather than because this file is the
     dangerous one.
     """
-    path = _trust_store_path()
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = f"{path}.tmp"
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        json.dump(store, f, indent=2)
-    os.replace(tmp, path)
+    write_json_atomic(_trust_store_path(), store, mode=0o600)

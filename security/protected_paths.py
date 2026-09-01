@@ -92,12 +92,18 @@ def harness_root() -> str:
 def user_config_dir() -> str:
     """`~/.config/venastine`, resolved at CALL time.
 
-    Mirrors core.config_loader.user_config_dir rather than importing it.
+    Mirrors core.config_loader._user_config_dir rather than importing it.
     security/ imports config, credentials and the stdlib; reaching into
     core/ from here would invert the layering the sandbox module's
     `_within` docstring sets out. The duplication is pinned by
-    test_protected_paths_match_their_owners, so drift is a test failure
-    rather than a silent hole.
+    `TestTheMirroredResolversMatchTheirOwners` in tests/test_shell.py, so
+    drift is a test failure rather than a silent hole.
+
+    That sentence named a private function without its underscore and a
+    test that has never existed under the name given, for two batches --
+    the guard was real and the citation was not, which is the worse half
+    of the pair to get wrong: a reader who greps the name finds nothing
+    and concludes the duplication is unguarded.
     """
     return os.path.realpath(os.path.expanduser("~/.config/venastine"))
 

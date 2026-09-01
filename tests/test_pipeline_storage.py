@@ -46,6 +46,7 @@ from core.reasoning.pipeline_storage import (
     load_pipeline_run,
     update_pipeline_run,
 )
+from tests.conftest import run_pipeline
 
 
 # ---------------------------------------------------------------------------
@@ -217,7 +218,7 @@ def test_inner_storage_failure_propagates_original_exception_and_logs_run_id(moc
 
     with caplog.at_level(logging.ERROR, logger="core.reasoning.orchestrator"):
         with pytest.raises(ValueError, match="did not return valid JSON"):
-            orch_mod.run_deep_research_pipeline(
+            run_pipeline(
                 user_query="test", model="claude-test", provider_name="ANTHROPIC",
             )
 

@@ -6,13 +6,13 @@ Web search tool for the agent harness, using DuckDuckGo exclusively via the
 from __future__ import annotations
 
 import logging
-import time
 from typing import Optional
 
 from pydantic import BaseModel, Field, field_validator
 from ddgs import DDGS
 
 from safety.policy_enforcement import is_url_permitted
+from tools.builtin._net_common import TTLCache
 
 logger = logging.getLogger(__name__)
 
@@ -66,24 +66,9 @@ REQUEST_TIMEOUT_S = 8.0
 MAX_RETRIES = 2
 CACHE_TTL_S = 300
 
-_cache: dict[str, tuple[float, list[SearchResult]]] = {}
-
-
-# ---- Cache helpers ----------------------------------------------------------
-
-def _cache_get(key: str) -> Optional[list[SearchResult]]:
-    entry = _cache.get(key)
-    if not entry:
-        return None
-    ts, results = entry
-    if time.time() - ts > CACHE_TTL_S:
-        _cache.pop(key, None)
-        return None
-    return results
-
-
-def _cache_set(key: str, results: list[SearchResult]) -> None:
-    _cache[key] = (time.time(), results)
+# One instance per tool, never shared: an equal key string from an
+# arXiv query and a web query would otherwise collide.
+_cache = TTLCache(CACHE_TTL_S)
 
 
 # ---- Provider call ----------------------------------------------------------
@@ -128,7 +113,7 @@ def run(params: dict) -> dict:
     parsed = WebSearchParams(**params)
     cache_key = f"{parsed.query}|{parsed.num_results}"
 
-    results = _cache_get(cache_key)
+    results = _cache.get(cache_key)
     if results is not None:
         logger.info("web_search cache hit for %r", parsed.query)
     else:
@@ -138,7 +123,7 @@ def run(params: dict) -> dict:
             try:
                 raw = _call_ddgs(parsed.query, parsed.num_results)
                 results = _normalize(raw)
-                _cache_set(cache_key, results)
+                _cache.set(cache_key, results)
                 break
             except Exception as e: # Simpler to try again then elaborate on every error type
                 last_exc = e

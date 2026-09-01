@@ -33,6 +33,8 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+from json_store import write_json_atomic
+
 logger = logging.getLogger(__name__)
 
 # Keys this harness actually reads. Anything else is ignored, not an
@@ -337,20 +339,20 @@ def _read_store() -> tuple:
             if isinstance(k, str)}, True
 
 
-def load_known_servers() -> dict:
-    """The acknowledged name -> digest mapping, whatever the version."""
-    return _read_store()[0]
+def is_known(cfg: ServerConfig) -> bool:
+    """Whether this exact server entry has already been acknowledged.
 
-
-def is_known(cfg: ServerConfig, store: Optional[dict] = None) -> bool:
-    if store is None:
-        servers, legacy = _read_store()
-        # F3: a v1 consent was given under a prompt that never named the
-        # field it most needed to name. It does not count.
-        if legacy:
-            return False
-        return servers.get(cfg.name) == entry_digest(cfg)
-    return store.get(cfg.name) == entry_digest(cfg)
+    Reads the store itself rather than taking one. It used to accept a
+    pre-read `store=` for callers batching several checks, and no caller
+    ever passed one -- so the branch was dead while the parameter went on
+    advertising an optimisation nobody could see was unused.
+    """
+    servers, legacy = _read_store()
+    # F3: a v1 consent was given under a prompt that never named the
+    # field it most needed to name. It does not count.
+    if legacy:
+        return False
+    return servers.get(cfg.name) == entry_digest(cfg)
 
 
 def remember_server(cfg: ServerConfig) -> None:
@@ -363,7 +365,15 @@ def remember_server(cfg: ServerConfig) -> None:
         # only, and the others keep asking until they are answered.
         servers = {}
     servers[cfg.name] = entry_digest(cfg)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    payload = {"version": KNOWN_STORE_VERSION, "servers": servers}
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2)
+    # ATOMIC since batch 45, and this was the odd one out. Its three
+    # sibling stores each wrote through a temp file and os.replace, and
+    # each spent four to eight docstring lines on why -- a
+    # truncate-then-write leaves the file empty for the length of the
+    # write and permanently damaged if the process dies inside it. This
+    # one used a bare open(path, "w") and said nothing, for a file that
+    # records CONSENT: the same class of data as the trust store, which
+    # is the sibling that argues hardest for the guarantee. Sharing the
+    # write is what stops a convention four comments long from having a
+    # fourth copy that does not follow it.
+    write_json_atomic(path, {"version": KNOWN_STORE_VERSION,
+                             "servers": servers})

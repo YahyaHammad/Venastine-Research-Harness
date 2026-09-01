@@ -38,23 +38,30 @@ pipeline_storage.py provides the read API.
 ROADMAP_v2 §22 (pipeline observability): the pipeline is a GENERATOR
 yielding PipelineEvents (core/reasoning/events.py), so a shell can render
 pass boundaries, trace lines, claim tiers and retries as they happen
-rather than waiting for the whole run. Three names, exactly §13's shape:
+rather than waiting for the whole run. Two names:
 
   stream_deep_research_pipeline()  the generator
-  run_pipeline_to_completion()     the drainer
-  run_deep_research_pipeline()     the unchanged synchronous entry point,
-                                   which is the drainer applied to the
-                                   generator
+  run_pipeline_to_completion()     the drainer, for a caller that wants
+                                   only the finished PipelineRun
 
-Decision P3: the public name did NOT become the generator. Every existing
-caller -- main.py, tui/app.py and fifteen test sites -- keeps receiving a
-finished PipelineRun from a call that looks exactly as it did (§22 AC1),
-and only a shell that wants live progress opts into the generator.
+DECISION P3 IS RETIRED, and it is worth saying why rather than quietly
+dropping a name. P3 kept a third, synchronous `run_deep_research_pipeline()`
+-- the drainer applied to the generator -- so that "every existing caller:
+main.py, tui/app.py and fifteen test sites" would go on working unchanged.
+Both shells then left of their own accord: `main.run_research` and
+`tui/app.py` iterate the generator so they can render progress, each with a
+comment saying it deliberately does not call the wrapper. That left a
+public function with no production caller and fifty call sites in tests,
+while this docstring went on naming it the live entry point. The
+convenience moved to `tests/conftest.run_pipeline`, which is what it had
+become; P3's argument was sound and its premise expired.
 
-Decision P2: a pass's own LoopEvents are NOT forwarded up. Each pass
-still runs through run_deep_research_mode() -> run_to_completion(), so
-core/loop.py, core/client.py, json_retry.py and review.py's internals are
-untouched by this section.
+Decision P2: a pass's own LoopEvents are NOT forwarded up as LoopEvents --
+_run_pass TRANSLATES a chosen subset into PipelineEvents (§26 amended this;
+§22 had kept a pass fully opaque). It iterates
+RunAgentLoop.stream_deep_research_mode() directly. `run_deep_research_mode`,
+the synchronous wrapper this line used to name, is gone for
+`run_deep_research_pipeline`'s reason and one layer down.
 """
 
 from __future__ import annotations
@@ -79,7 +86,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_PROVIDER = "ANTHROPIC"
 FLAGGED_TIERS = {"LOW", "UNVERIFIED"}
-MAX_RETRIES = getattr(config, "MAX_PIPELINE_RETRIES", 2)
+MAX_RETRIES = config.MAX_PIPELINE_RETRIES
 # The JSON-retry budget lives in core/reasoning/json_retry.py since the
 # §20 extraction; a second constant here was a dead knob that invited
 # no-op patches (review §19-20 f9).
@@ -844,39 +851,6 @@ def run_pipeline_to_completion(gen) -> PipelineRun:
             "Pipeline generator completed without yielding a run_complete event"
         )
     return final
-
-
-def run_deep_research_pipeline(
-    user_query: str,
-    model: str,
-    provider_name: str = DEFAULT_PROVIDER,
-    ensemble_mode: bool | None = None,
-    ensemble_n: int | None = None,
-    authorization=None,
-    review=None,
-    subagent_review: bool | None = None,
-    effort: str | None = None,
-) -> PipelineRun:
-    """The synchronous entry point: run the pipeline, return the finished
-    PipelineRun. Unchanged in signature and behaviour by §22 (AC1) --
-    every caller that does not want live progress keeps calling this.
-
-    A shell that DOES want progress iterates
-    stream_deep_research_pipeline() directly; this is that generator with
-    the drainer applied, exactly as core/loop.py's three public wrappers
-    relate to _run().
-    """
-    return run_pipeline_to_completion(stream_deep_research_pipeline(
-        user_query=user_query,
-        model=model,
-        provider_name=provider_name,
-        ensemble_mode=ensemble_mode,
-        ensemble_n=ensemble_n,
-        authorization=authorization,
-        review=review,
-        subagent_review=subagent_review,
-        effort=effort,
-    ))
 
 
 def stream_deep_research_pipeline(

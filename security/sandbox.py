@@ -531,10 +531,10 @@ def _run_inert(
 def _venastine_readonly_mount(workspace_real: str) -> list[str]:
     """A nested read-only bind for `.venastine/`, or nothing (§28 G6).
 
-    `.venastine/` holds CONTEXT.md, mcp.json and the project's agents and
-    skills -- content that is injected into system prompts and that names
-    commands the harness will spawn. D17 gates loading it behind a trust
-    hash; this stops a sandboxed command REWRITING it in between.
+    `.venastine/` holds mcp.json and the project's agents and skills --
+    content that is injected into system prompts and that names commands
+    the harness will spawn. D17 gates loading it behind a trust hash; this
+    stops a sandboxed command REWRITING it in between.
     /workspace stays writable so builds still work; only the subtree is
     read-only, which Docker resolves by mount depth.
 
@@ -558,6 +558,16 @@ def _venastine_readonly_mount(workspace_real: str) -> list[str]:
     this covers WRITES on the Docker path only. It does not cover reads,
     the subprocess fallback (which mounts nothing), or the harness's own
     `agents/builtin` when the workspace is the harness repo.
+
+    AND SINCE §44 IT DOES NOT COVER THE HUB. WS8 moved the project's
+    context document out of `.venastine/` to a root `AGENTS.md`, and WS9
+    put that file inside D17's content hash -- so the one document this
+    docstring named first is now trust-gated content sitting OUTSIDE the
+    subtree this mount protects. Dormant rather than live, because
+    `config.ToolPermissions.shell` ships False and `is_tool_allowed` reads
+    it directly, so nothing reaches the Docker path at all. Recorded here
+    rather than fixed: widening the mount to a second bind is a §28 G6
+    decision, not a comment repair.
     """
     venastine = os.path.realpath(os.path.join(workspace_real, ".venastine"))
     if not venastine.startswith(os.path.realpath(workspace_real) + os.sep):

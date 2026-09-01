@@ -12,8 +12,7 @@ import json
 
 import config
 from core.loop import RunAgentLoop
-from core.reasoning.orchestrator import run_deep_research_pipeline
-from tests.conftest import make_model_response, pass_stream
+from tests.conftest import make_model_response, pass_stream, run_pipeline
 
 
 # ---------------------------------------------------------------------------
@@ -103,7 +102,7 @@ def test_critic_routing_sends_3a_3b_6c_to_critic_model(mocker):
         side_effect=pass_stream(_build_routing_mock(call_log, payloads)),
     )
 
-    run_deep_research_pipeline(
+    run_pipeline(
         user_query="test query",
         model="claude-test",
         provider_name="ANTHROPIC",
@@ -145,7 +144,7 @@ def test_no_critic_model_means_uniform_routing(mocker):
         side_effect=pass_stream(_build_routing_mock(call_log, payloads)),
     )
 
-    run_deep_research_pipeline(
+    run_pipeline(
         user_query="test query",
         model="claude-test",
         provider_name="ANTHROPIC",

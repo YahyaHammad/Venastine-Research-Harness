@@ -8630,3 +8630,174 @@ applied to a second control.
    quantifies over the numbered list, so the omission is invisible to it, and
    backfilling two entries is somebody's decision about that document rather than
    this batch's.
+
+## Batch 45 — the code that outlived its reason, and the prose that outlived the code (2026-09-01)
+
+A sweep for stale code after a run of feature batches, not a feature. Five groups: dead
+symbols, two retired entry points, four duplicated mechanics, the prose §44 left behind,
+and one guard that turned out to exist under another name.
+
+Every deletion below was measured before it was made — `git grep` over `*.py` and `*.md`,
+separating code references from prose ones — because this repository's whole documentation
+posture makes "looks unused" and "is unused" easy to confuse in both directions.
+
+### What was deleted, with the measurement
+
+| Symbol | Site | What the count was |
+|---|---|---|
+| `CONTAINMENTS` | `security/capability.py` | one line in the repo, the definition. Its sibling `APPROVAL_MODES` is read by `validate_mode()`; this frozenset never was |
+| `COMPACTION_OUTCOMES` | `core/compaction.py` | prose only — its own docstring, DEVLOG, BREAKING_CHANGES, one test comment. Zero code references. `CODE_STAGES`' shape exactly, which #84 deleted for the same reason |
+| `reset_from_config_for_tests()` | `security/posture.py` | its only other occurrence was a STRING LITERAL in `test_posture.py`, asserting production never calls it. Neither did any test |
+| `load_known_servers()` | `mcp_client/config.py` | one line in the repo. Superseded by `is_known()` |
+| `CommandRegistry.unregister` | `tui/commands.py` | no callers. Its docstring named a consumer — a skill teardown — that does not exist |
+| `BaseModel` import | `tools/builtin/get_time.py` | the one genuine unused import in the tree; `get_time` is the only builtin with no `*Params` model |
+
+Plus four dead branches: `is_known(cfg, store=…)`'s `store` argument, which no caller
+anywhere passed; a second `types.ModuleType` in `_math_common`'s function/method tuple, made
+unreachable by the branch above it that already raised for one; and
+`getattr(config, "MAX_JSON_RETRIES", 2)` / `getattr(config, "MAX_PIPELINE_RETRIES", 2)`,
+whose fallbacks are unreachable because `config.py` defines both — and which restated each
+constant's value a second time, so a change to one would have been half-applied silently.
+
+`config.SHELL_APPROVAL_MODES` went too, and that one is worth naming: it was the same three
+values as `security/capability.APPROVAL_MODES`, and only the second is what `validate_mode()`
+enforces. The `config` copy was read by exactly one test, which asserted its literal. Two
+spellings of one gate's legal set, one of them unenforced, is a disagreement waiting to be
+written; the test now asserts the enforced tuple and that the shipped default is in it.
+
+### The two entry points that outlived their own argument
+
+`run_deep_research_pipeline` (§22, decision P3) and `RunAgentLoop.run_deep_research_mode`
+(§26) were synchronous wrappers kept so that a generator migration would churn no callers.
+P3 named the beneficiaries: "main.py, tui/app.py and fifteen test sites".
+
+**Both shells left of their own accord.** §22's own P4 gave the TUI live progress and §26
+gave the CLI it, so each now iterates the generator — with a comment at
+`tui/app.py` saying it deliberately does not call the wrapper. What remained was a public
+function with no production caller, fifty call sites in `tests/`, and three docstrings plus
+AGENTS.md still calling it the live entry point. A stability decision that ends in the
+documentation describing a path nothing takes has stopped paying for itself.
+
+Both are retired. `tests/conftest.run_pipeline` and `run_pass` are the synchronous forms,
+which is what they had become. `core.loop.return_value_of` went with them — its only caller
+was the pass wrapper, and `tests/conftest.drain` had been the byte-identical function on the
+test side the whole time, so nothing needed writing to replace it.
+
+P3 is struck through in `ROADMAP_v2.md` with the reason rather than deleted, and the two
+`BREAKING_CHANGES.md` rows that pinned the wrappers are marked retired in place.
+
+**Two things checked rather than assumed.** The tests whose docstrings say they patch
+`run_deep_research_mode` actually patch `stream_deep_research_mode` through
+`conftest.pass_stream`; only the prose was stale, so there were no vacuous tests hiding
+here. And the two classes that existed to pin the wrappers still assert live properties once
+repointed — that draining a pass keeps the `thread_id` the terminal event drops, and that a
+drained pipeline is the same run a streaming consumer sees — so they were renamed to say what
+they now pin instead of being deleted with their subject.
+
+### Four mechanics that had four copies
+
+**`json_store.py`, at the project root.** Four user-tier stores — `trusted_projects.json`,
+`known_mcp_servers.json`, `model_windows.json`, `ui_preferences.json` — each rolled their own
+atomic write, and two rolled the same versioned fail-soft read twice over. They now share the
+mechanics and nothing else: each keeps its own module, path, `STORE_VERSION` and failure
+posture, because those were decided separately and are argued where they live.
+
+The extraction paid for itself immediately. Three of the four wrote through a temp file and
+`os.replace`, each spending four to eight docstring lines on why a truncate-then-write is
+unacceptable. The fourth — `mcp_client`'s, which stores a record of CONSENT, the same class
+of data as the trust store — used a bare `open(path, "w")` and said nothing. That is what a
+convention four comments long decays into, and it is now structurally impossible.
+
+Root, not `core/`: `core/compaction.py` reads `model_windows`, `tui/preferences.py` states it
+imports nothing from `core/`, and `mcp_client/` and `security/` each document a reason not to
+either. A root module is the one place all four already see.
+
+**`core/compaction._truncate_oldest`.** Eight identical lines in `compact()` and
+`summarize_thread()`, user-visible notice string included, marked deliberate nowhere. They
+were equivalent only by accident: the second guarded on a separate `original` variable that
+happened to equal `len(thread_text)` at that point, so the condition and the arithmetic under
+it could have drifted apart without either copy looking wrong.
+
+**`tools/builtin/_net_common.TTLCache`.** `web_search.py` and `arxiv.py` had an identical
+`_cache_get`/`_cache_set` pair, a `CACHE_TTL_S = 300` each and a bare dict each. One INSTANCE
+per tool, never shared — a `TTLCache` common to both would let an equal key string from an
+arXiv query and a web query collide, which is a correctness bug rather than a tidiness one.
+
+**The math tools' `run()` tails were NOT extracted**, having been looked at properly. They
+are three variants rather than four copies — `geometry` carries an extra
+`(IndexError, TypeError)` arm, `logic` returns its result unserialized — and each `try:`
+opens far above its tail, so sharing them means restructuring four tool entry points into
+inner functions to save about twelve lines. Recorded as considered and declined.
+
+### The prose §44 left behind
+
+WS8 moved the project hub from `.venastine/CONTEXT.md` to a root `AGENTS.md`. The code
+resolved correctly through the one constant the whole time. **Everything the model reads
+still said `CONTEXT.md`:** `agents/builtin/initializer.md` in eight places including the
+`description:` frontmatter that reaches the agent catalog; `generator._task`'s literal
+`"Write CONTEXT.md for this {kind} project."`; the `## The current CONTEXT.md` heading under
+which the existing `AGENTS.md` was shown to the model; and `write_project_doc`'s schema,
+which advertised `CONTEXT.md` as an example of a name `_known_doc_names()` rejects.
+
+So `/init` wrote to the right path and asked for a document that would name itself wrongly,
+while the initializer's read-priority list sent it to look for a file that cannot exist —
+one of its twelve steps spent on a guaranteed miss. `_task` interpolates the constant now,
+so the next relocation cannot leave the prompt behind again.
+
+`main.py`'s `--init` help, `PRIVACY.md`'s directory table, `ARCHITECTURE.md` §4.28 in six
+places, and comments in `tools/registry.py`, `agents/manager.py`, `security/sandbox.py`,
+`project_init/manifest.py` and `tools/builtin/project_docs.py` were all still describing the
+old layout. `README.md` had zero stale mentions — it was updated at the time and
+ARCHITECTURE was not, which is the split TECHNICAL_DEBT §7 predicts.
+
+`AGENTS.md` also contradicted itself four lines apart about `content_files()`: WS9's fix was
+recorded, and the "the deeper fix is still open" sentence it superseded was left standing.
+
+**One thing was recorded rather than fixed.** `security/sandbox._venastine_readonly_mount`
+binds `.venastine/` read-only so a sandboxed command cannot rewrite trust-gated content
+between the hash check and the load. WS8 moved the hub OUT of that subtree and WS9 put it
+inside the content hash — so the one document that function's docstring named first is now
+trust-gated content the mount does not cover. Dormant, because `ToolPermissions.shell` ships
+`False` and nothing reaches the Docker path. Widening the mount is a §28 G6 decision and not
+a comment repair, so it is named in that function's "Known limits" paragraph and left for a
+decision.
+
+### The guard that already existed
+
+`security/protected_paths.user_config_dir` claimed its duplication was "pinned by
+`test_protected_paths_match_their_owners`". No such name exists in the repository — but
+`TestTheMirroredResolversMatchTheirOwners` does, in `tests/test_shell.py`, with five tests
+doing exactly what was promised. The guard was real and the citation was not, which is the
+worse half of the pair to get wrong: a reader who greps the name finds nothing and concludes
+the duplication is unguarded. The docstring also named a private function without its
+underscore. Both corrected.
+
+**And the ordering divergence that was suspected there is not real.** `logging_setup`
+normalizes then takes the dirname; `protected_paths` takes the dirname then resolves. Over
+`logs/app.log`, `app.log`, `logs/../app.log`, `./logs/app.log`, `logs/./app.log`,
+`a/b/../app.log` and an absolute path, on Windows and under WSL, the two agree on every one.
+A spelling loop pinning that was written, then mutation-checked, and **three plausible
+re-orderings of `_log_dir` left it GREEN** — so it was removed rather than kept, because a
+block that cannot fail reads as coverage this file does not have. What was measured is in the
+test's docstring instead, along with the one real asymmetry: through a SYMLINKED log
+directory the two genuinely differ, and the mirror is the correct one, because it names the
+directory a bind mount has to target.
+
+### What was deliberately left alone
+
+`security/sandbox.py`, `capability.py` and `posture.py` — about 1300 lines unreachable at
+runtime because `ToolPermissions.shell` ships `False` — are a shipped capability disabled by
+default config, not dead code. `_sampling_kwargs` and `MODELS_REJECTING_SAMPLING_PARAMS` are
+the backstop AGENTS.md forbids deleting. `ensemble_n` is vestigial by E3 and removing the
+settings key would make every `settings.json` that sets it raise.
+`credentials.save_credentials`/`load_credentials` have no production callers and DEVLOG
+already records the decision to keep them. `env_secrets.py` is unwired rather than rotten —
+ARCHITECTURE §4.3 names its future consumer. `matplotlib` looks like it belongs in an extra
+until you notice `test_output_writer.py` asserts the chart is produced.
+
+`COMPACTION_TRIGGER_TOKENS` was checked and is live: it is the default behind
+`compaction.trigger_tokens`, consumed by `pin_measurements`. The four `with_*` prompt tiers
+were checked and all three assembly sites agree; J11's convergence stays a deferral.
+
+Suite: 3046 passed, 19 skipped, unchanged in both numbers from the baseline, plus the
+integration marker and a WSL run for the POSIX mode bits Windows skips.

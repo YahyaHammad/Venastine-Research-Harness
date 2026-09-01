@@ -3,7 +3,7 @@ core/reasoning/pipeline_storage.py
 
 Persistence layer for deep-research pipeline runs (ROADMAP §5). A
 PipelineRunRecord row is created at the start of
-run_deep_research_pipeline(), checkpointed with a data-only
+stream_deep_research_pipeline(), checkpointed with a data-only
 update_pipeline_run() call after every pass's trace-log line, and
 flipped to a terminal status (complete / failed) at the end. The
 load_pipeline_run() read API returns the stored state as a plain dict
@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 
 
 class PipelineRunRecord(SQLModel, table=True):
-    """One row per run_deep_research_pipeline() invocation. `status` is
+    """One row per stream_deep_research_pipeline() invocation. `status` is
     'running' from creation until the wrapping try/except in the
     orchestrator flips it to 'complete' or 'failed'. The four data
     columns carry the run's structured output (or the partial state

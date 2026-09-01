@@ -30,7 +30,7 @@ from uuid import uuid4
 
 import pytest
 
-from tests.conftest import settle
+from tests.conftest import run_pass, settle
 import storage
 from core.replay import last_assistant_text, replay_entries
 
@@ -69,7 +69,7 @@ class TestWhatEachPathCreates:
             make_model_response(text="done", tool_calls=None,
                                 usage={"input_tokens": 1, "output_tokens": 1})))
 
-        RunAgentLoop.run_deep_research_mode(
+        run_pass(
             pass_input="q", model="m", pass_id="Pass 0")
 
         assert created == ["research_pass"]

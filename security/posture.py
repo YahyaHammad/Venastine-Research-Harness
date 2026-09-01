@@ -300,16 +300,3 @@ def override_for_tests(**overrides: Any) -> Iterator[Posture]:
         yield _posture
     finally:
         _posture, _read = before, before_read
-
-
-def reset_from_config_for_tests() -> Posture:
-    """Re-read `config` and clear the bound flag. TESTS ONLY.
-
-    The suite mutates `config` constants directly in places that predate
-    this module; this is how such a test re-syncs. Production code never
-    calls it -- the whole point is that config is read once.
-    """
-    global _posture, _read
-    _posture = _from_config()
-    _read = False
-    return _posture
