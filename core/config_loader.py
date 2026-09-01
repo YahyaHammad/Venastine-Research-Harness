@@ -617,6 +617,27 @@ def _validate_settings(data, source: str) -> None:
                 f"settings.json beats the user's. Set "
                 f"config.SHELL_APPROVAL_MODE in config.py instead (same "
                 f"posture as ensemble_models and research.granted_tools).")
+        if key in ("critic_model", "embedder_model"):
+            # ROADMAP_v2 §45 (SQ7), and the fourth application of R12's
+            # rule. Both name a PROVIDER the pipeline will call: the critic
+            # sees every claim, and the embedder is sent claim text and the
+            # text of every page the run fetched. A project's settings.json
+            # beats the user's and arrives with a directory you cloned, so
+            # supporting either would let that directory choose where a
+            # research run's content is sent.
+            #
+            # By name rather than as an unknown key for the reason the
+            # other three are: the generic message reads as an oversight
+            # someone should fix by adding support, and this omission is
+            # the design. `/critic` and `/embedder` write to the user-tier
+            # store in core/pipeline_models.py, which is the route.
+            raise ValueError(
+                f"settings.json at {source}: {key} is deliberately not "
+                f"supported -- it names a provider this harness sends "
+                f"research content to, and a project's settings.json beats "
+                f"the user's. Use /critic or /embedder, or set "
+                f"config.CRITIC_MODEL / config.EMBEDDER_MODEL in config.py "
+                f"(same posture as ensemble_models).")
         if key not in _KNOWN_SETTINGS:
             raise ValueError(f"settings.json at {source}: unknown key {key!r}")
         expected = _KNOWN_SETTINGS[key]

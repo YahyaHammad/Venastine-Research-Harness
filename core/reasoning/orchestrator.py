@@ -11,11 +11,15 @@ consistency check feeding Pass 5's scoring). No filesystem output yet
 (returns a PipelineRun object; the /output/<run_id>/ file-writing system
 is a separate, later piece of work).
 
-ROADMAP §11 (critic-model routing): when config.CRITIC_MODEL is set,
+ROADMAP §11 (critic-model routing): when a critic pair is configured,
 Pass 3a, 3b, and 6c (which re-runs 3a/3b logic) use the critic
 provider/model instead of the generator's. Every other pass keeps using
 the main provider_name/model. This prevents a model from checking its
-own output for errors with the same blind spots.
+own output for errors with the same blind spots. §45 (SQ7) moved WHERE
+that pair comes from: core/pipeline_models.resolve("critic") owns the
+precedence -- a `/critic` choice in the user-tier store, else
+config.CRITIC_MODEL -- so the routing is reachable without editing the
+checkout, which for §11's whole life it was not.
 
 ROADMAP §3 (malformed-JSON recovery): JSON-emitting passes are wrapped in
 _run_pass_with_json_retry, which on a parse failure re-enters the SAME
@@ -71,6 +75,7 @@ import logging
 
 import config
 import prompts.system_prompts as system_prompts
+from core import pipeline_models
 from core.loop import RunAgentLoop, advertisement_facts
 from core.reasoning.base import Claim, PipelineRun, resolve_by_id
 from core.reasoning.confidence_scoring import run_confidence_tiering
@@ -994,10 +999,20 @@ def stream_deep_research_pipeline(
     # and persists a snapshot of the partial run before re-raising.
     run.run_id = create_pipeline_run(user_query)
 
-    # ROADMAP §11: resolve critic provider/model once. When CRITIC_MODEL
-    # is None these fall back to the main provider/model — no-op routing.
-    critic_provider = config.CRITIC_MODEL["provider_name"] if config.CRITIC_MODEL else provider_name
-    critic_model = config.CRITIC_MODEL["model"] if config.CRITIC_MODEL else model
+    # ROADMAP §11: resolve critic provider/model once. When no critic is
+    # configured these fall back to the main provider/model — no-op
+    # routing.
+    #
+    # §45 (SQ7): through pipeline_models.resolve rather than
+    # config.CRITIC_MODEL directly, so a `/critic` choice reaches the CLI,
+    # the TUI and a spawned run alike. That function owns the precedence —
+    # the user-tier store outranks config.py — and owning it in one place
+    # is the point: §11 gave this routing to config.py alone, which meant
+    # the methodology's own "a model must not check its own output" was
+    # available only to whoever could edit the checkout.
+    critic = pipeline_models.resolve("critic")
+    critic_provider = critic["provider_name"] if critic else provider_name
+    critic_model = critic["model"] if critic else model
 
     progress = _Progress(run)
 

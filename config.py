@@ -125,6 +125,43 @@ MODELS_REJECTING_SAMPLING_PARAMS = frozenset({
 # Example to enable: {"provider_name": "OPENAI", "model": "gpt-5.1"}
 CRITIC_MODEL: dict | None = None
 
+# --- Embedder routing (ROADMAP_v2 §45, SQ2/SQ7) ---
+# The model that turns a claim and a source passage into vectors, so
+# `similarity_score` is a cosine rather than a self-report. None -- the
+# default -- means the pipeline warns once at launch and falls back to the
+# grounding model's own number, under source_grounding.md's anchored
+# rubric.
+#
+# `config.py` ONLY, with no settings.json key, following CRITIC_MODEL and
+# ENSEMBLE_MODELS (E2): choosing a provider is a grant, and this one sends
+# claim text and fetched page text to whoever is named. `/embedder` writes
+# to the user-tier store in core/pipeline_models.py, which OUTRANKS this.
+# Example: {"provider_name": "OPENAI", "model": "text-embedding-3-small"}
+EMBEDDER_MODEL: dict | None = None
+
+# Asymmetric embedders score materially worse without their prefixes and
+# produce NO ERROR AT ALL when they are missing, which is why this is a
+# table rather than something inferred. Keyed by a substring of the model
+# slug, longest match wins; a model matching nothing gets no prefix, which
+# is correct for every symmetric embedder (OpenAI's, Cohere's, Voyage's).
+#
+# `task_type` is Google's equivalent and is ignored by every other
+# provider. Incomplete on purpose: an unlisted asymmetric model scores
+# lower than it should, which is visible in the artifact as a low cosine
+# on a source that plainly matches -- and adding a row is the fix.
+EMBEDDER_PREFIXES: dict[str, dict] = {
+    "e5-": {"query": "query: ", "passage": "passage: "},
+    "multilingual-e5": {"query": "query: ", "passage": "passage: "},
+    "bge-": {"query": "Represent this sentence for searching relevant passages: ",
+             "passage": ""},
+    "gte-": {"query": "", "passage": ""},
+    "nomic-embed": {"query": "search_query: ", "passage": "search_document: "},
+    "gemini-embedding": {"query_task_type": "RETRIEVAL_QUERY",
+                         "passage_task_type": "RETRIEVAL_DOCUMENT"},
+    "text-embedding-004": {"query_task_type": "RETRIEVAL_QUERY",
+                           "passage_task_type": "RETRIEVAL_DOCUMENT"},
+}
+
 # --- Source authority: domain classes (ROADMAP_v2 §45, SQ4) ---
 # What a source is worth before anything is known about the specific page.
 # Two tables, deliberately: a CLASS carries the number, and a SUFFIX names

@@ -215,6 +215,25 @@ class TurnFinished(Message):
         super().__init__()
 
 
+class EmbedderProbeReady(Message):
+    """The `/embedder` validation probe finished, off the UI thread.
+
+    EffortLevelsReady's reason exactly: this is an HTTP call carrying the
+    SDK's default timeout, and running it inline freezes the app until it
+    returns. It carries the pair it was asked about rather than reading
+    the app's state on arrival, because the user may have typed another
+    command in the meantime and a probe must not report on a model nobody
+    asked for.
+    """
+
+    def __init__(self, provider_name, model, dimension, error):
+        super().__init__()
+        self.provider_name = provider_name
+        self.model = model
+        self.dimension = dimension
+        self.error = error
+
+
 class EffortLevelsReady(Message):
     """The effort-level lookup finished, off the UI thread.
 
@@ -670,6 +689,52 @@ class VenastineApp(App):
 
         self.run_worker(work, thread=True, exit_on_error=False,
                         name="effort-levels")
+
+    def start_embedder_probe(self, provider_name: str, model: str) -> None:
+        """Embed one short string, to find out whether this pair works.
+
+        A MEASUREMENT RATHER THAN A TABLE (§45, SQ7). Whether a provider
+        has an embeddings endpoint, whether this slug is an embedding
+        model rather than a chat one, and whether the key is accepted are
+        three questions one call answers -- and the alternative is a
+        static capability list that goes stale as providers ship
+        endpoints, whose wrong answers surface three passes into a
+        research run.
+        """
+        def work() -> None:
+            try:
+                from core.client import embed_texts
+
+                result = embed_texts(provider_name, model, ["probe"])
+                self.post_message(EmbedderProbeReady(
+                    provider_name, model, result.dimension, None))
+            except Exception as e:  # noqa: BLE001 - reported to the user
+                self.post_message(
+                    EmbedderProbeReady(provider_name, model, None, e))
+
+        self.run_worker(work, thread=True, exit_on_error=False,
+                        name="embedder-probe")
+
+    def on_embedder_probe_ready(self, message: EmbedderProbeReady) -> None:
+        """REMEMBER ONLY WHAT WORKED. A pair stored before the probe
+        answers would survive a restart as a setting that fails on every
+        research run, which is the shape /model's unknown-provider refusal
+        already exists to prevent one door along."""
+        from core import pipeline_models
+
+        if message.error is not None:
+            self._transcript.write_error(
+                f"{message.provider_name} | {message.model} cannot be used "
+                f"as an embedder: {message.error}")
+            return
+
+        self._transcript.write_system(
+            f"Embedder set to {message.provider_name} | {message.model} "
+            f"({message.dimension}-dimensional). Source similarity becomes "
+            f"a cosine from the next research run.")
+        if pipeline_models.remember(
+                "embedder", message.provider_name, message.model):
+            self._transcript.write_system("Remembered for the next launch.")
 
     def on_effort_levels_ready(self, message: EffortLevelsReady) -> None:
         if message.validate_only:
@@ -3073,6 +3138,204 @@ def _cmd_quit(app: VenastineApp, args: str) -> None:
     app.exit()
 
 
+# ---------------------------------------------------------------------------
+# ---- §45 (SQ7): the two pipeline model roles that are not the session model
+# ---------------------------------------------------------------------------
+#
+# `/critic` and `/embedder` are `_cmd_model` with one difference each, so
+# the parsing, the provider check and the busy refusal are shared rather
+# than written twice. What differs is what a role MEANS when it is unset:
+# an absent critic silently routes every pass to the generator, which is
+# the thing §11 exists to prevent; an absent embedder falls back to the
+# grounding model's own similarity, which §45 designed for and warns about
+# once per run.
+
+
+def _pipeline_role_args(app: VenastineApp, args: str, command: str):
+    """(provider, model) for a `/critic`-shaped command, or None.
+
+    None means the handler has already written the reason. Shared with
+    `_cmd_model`'s rules verbatim -- an unknown provider REFUSES, because
+    api_initialization would raise the same ValueError on the next run, a
+    long way from the typo that caused it.
+    """
+    from credentials import load_provider_data
+
+    parts = args.split()
+    if len(parts) == 1:
+        provider, model = app.provider_name, parts[0]
+    elif len(parts) == 2:
+        provider, model = parts[0].upper(), parts[1]
+    else:
+        app._transcript.write_error(
+            f"Usage: /{command} <name>, or /{command} <PROVIDER> <name>, "
+            f"or /{command} off.")
+        return None
+
+    providers = load_provider_data()
+    if provider not in providers:
+        app._transcript.write_error(
+            f"Unknown provider {provider!r}. Configured: "
+            f"{', '.join(sorted(providers)) or 'none'}.")
+        return None
+    if not providers[provider].get("API_KEY"):
+        # WARN, don't refuse -- _cmd_model's rule. An OpenAI-compatible
+        # endpoint running locally legitimately takes no key.
+        from credentials import missing_key_message
+
+        app._transcript.write_error(missing_key_message(provider))
+    return provider, model
+
+
+def _clear_pipeline_role(app: VenastineApp, role: str, label: str) -> None:
+    """`/critic off`. Three outcomes, because the store has three.
+
+    "Cleared" is not the same as "unset": config.py may still answer, and
+    saying otherwise would be a lie about behaviour the next run will
+    show. So the sentence names what is in force AFTERWARDS.
+    """
+    from core import pipeline_models
+
+    outcome = pipeline_models.forget(role)
+    if outcome == "failed":
+        # The WARNING inside forget() has already reached the transcript
+        # through TranscriptLogHandler.
+        app._transcript.write_error(f"The remembered {label} could not be cleared.")
+        return
+    if outcome == "absent":
+        app._transcript.write_system(f"No {label} was remembered.")
+    else:
+        app._transcript.write_system(f"Remembered {label} cleared.")
+    remaining = pipeline_models.resolve(role)
+    if remaining:
+        app._transcript.write_system(
+            f"config.py still sets {label}: {remaining['provider_name']} | "
+            f"{remaining['model']}.")
+
+
+def _cmd_critic(app: VenastineApp, args: str) -> None:
+    """Route the grounding and critic passes to a different model.
+
+    §11's routing, finally reachable without editing the checkout (§45,
+    SQ7). It has always been `config.CRITIC_MODEL` and nothing else, which
+    made this project's own stated methodology -- "a model checking its
+    own output for errors shares that model's blind spots" -- available
+    only to whoever could edit installed source.
+
+    Applies to Pass 3a, Pass 3b and Pass 6b. It takes effect on the NEXT
+    run: the pipeline resolves the pair when it starts, so a run already
+    in flight keeps the critic it began with. That is also why this
+    refuses while busy.
+
+    NOT cleared by /model, unlike §21's per-model session overrides. The
+    whole point of a critic is that it is a DIFFERENT model from the
+    generator; clearing it when the generator changes would silently
+    restore the arrangement it exists to avoid.
+    """
+    from core import pipeline_models
+
+    if not args:
+        current = pipeline_models.resolve("critic")
+        if current:
+            source = ("remembered" if pipeline_models.remembered("critic")
+                      else "config.py")
+            app._transcript.write_system(
+                f"Critic model: {current['provider_name']} | "
+                f"{current['model']} ({source}).")
+        else:
+            app._transcript.write_system(
+                f"No critic model set — passes 3a, 3b and 6b run on "
+                f"{app.provider_name} | {app.model}, the same model that "
+                f"generated the claims.")
+        app._transcript.write_system(
+            "Usage: /critic <name>, or /critic <PROVIDER> <name>, or "
+            "/critic off.")
+        return
+
+    if app._busy:
+        app._transcript.write_error(
+            "Still working — wait for this turn to finish.")
+        return
+
+    if args.strip().lower() in ("off", "clear", "auto", "none"):
+        _clear_pipeline_role(app, "critic", "critic model")
+        return
+
+    resolved = _pipeline_role_args(app, args, "critic")
+    if resolved is None:
+        return
+    provider, model = resolved
+
+    app._transcript.write_system(
+        f"Critic model set to {provider} | {model}. Passes 3a, 3b and 6b "
+        f"will use it from the next research run.")
+    if provider == app.provider_name and model == app.model:
+        # Said, not refused. A single-model setup is a legitimate thing to
+        # want; silently accepting it while §11's rationale says the
+        # opposite is what would be wrong.
+        app._transcript.write_error(
+            "That is the same model that generates the claims, so the "
+            "critic passes will share its blind spots — which is the "
+            "arrangement critic routing exists to avoid.")
+    if pipeline_models.remember("critic", provider, model):
+        app._transcript.write_system("Remembered for the next launch.")
+
+
+def _cmd_embedder(app: VenastineApp, args: str) -> None:
+    """Choose the model that scores how close a source is to a claim.
+
+    §45 (SQ2). Without one, `similarity_score` is the grounding model's
+    own estimate of how well a source it chose supports a claim it is
+    checking, under an anchored rubric. With one, it is a cosine between
+    the claim and the passage the source actually contains.
+
+    THE SELECTION IS PROBED, not looked up in a table. A one-token
+    embedding validates the provider, the model slug and the key in a
+    single measurement and reports the dimension; a static
+    `supports_embeddings` list would be a guess that goes stale as
+    providers add endpoints, and the failure it guesses wrong about
+    arrives three passes into a research run. The probe runs in a worker
+    for `start_effort_lookup`'s reason -- an HTTP call on the UI thread
+    freezes the whole app until it returns.
+    """
+    from core import pipeline_models
+
+    if not args:
+        current = pipeline_models.resolve("embedder")
+        if current:
+            source = ("remembered" if pipeline_models.remembered("embedder")
+                      else "config.py")
+            app._transcript.write_system(
+                f"Embedder: {current['provider_name']} | {current['model']} "
+                f"({source}).")
+        else:
+            app._transcript.write_system(
+                "No embedder set — source similarity is scored by the "
+                "grounding model itself, which is a self-report. Set one "
+                "for an objective cosine.")
+        app._transcript.write_system(
+            "Usage: /embedder <name>, or /embedder <PROVIDER> <name>, or "
+            "/embedder off.")
+        return
+
+    if app._busy:
+        app._transcript.write_error(
+            "Still working — wait for this turn to finish.")
+        return
+
+    if args.strip().lower() in ("off", "clear", "auto", "none"):
+        _clear_pipeline_role(app, "embedder", "embedder")
+        return
+
+    resolved = _pipeline_role_args(app, args, "embedder")
+    if resolved is None:
+        return
+    provider, model = resolved
+
+    app._transcript.write_system(f"Checking {provider} | {model}…")
+    app.start_embedder_probe(provider, model)
+
+
 def register_builtin_commands() -> None:
     """Idempotent — registering by name overwrites, so a re-import or a
     second app instance in the test suite does not duplicate entries."""
@@ -3084,6 +3347,10 @@ def register_builtin_commands() -> None:
                      _cmd_thinking, "[on|off]"),
         SlashCommand("model", "switch provider and/or model for this session",
                      _cmd_model, "[[PROVIDER] name]"),
+        SlashCommand("critic", "route the grounding and critic passes to another model",
+                     _cmd_critic, "[[PROVIDER] name|off]"),
+        SlashCommand("embedder", "choose the model that scores source similarity",
+                     _cmd_embedder, "[[PROVIDER] name|off]"),
         SlashCommand("research", "run the deep-research pipeline",
                      _cmd_research,
                      "[--attended] [--review|--no-review] "
