@@ -30,13 +30,16 @@ from core.reasoning.base import Claim
 from core.reasoning.confidence_scoring import (
     score_claim,
     run_confidence_tiering,
+    AUTHORITY_FULL_CREDIT,
     CRITIC_WEIGHT_FACTOR,
     DISAGREEMENT_PENALTY_FACTOR,
     GROUNDING_WEIGHT_FACTOR,
     GROUNDING_WEIGHTS,
     NON_FACTUAL_SCORE_CAP,
+    SOURCE_QUALITY_FLOOR,
     TIER_THRESHOLDS,
 )
+from core.reasoning.orchestrator import FLAGGED_TIERS
 
 
 # ---------------------------------------------------------------------------
@@ -723,3 +726,186 @@ class TestPassFourSaysWhatItHadToCorrect:
         run = self._run_with(grounding_status="grounded",
                              asserted_by_candidates=[1, 2, 3], ensemble_n=3)
         assert run.trace == []
+
+
+# ===========================================================================
+# ---- §45 (SQ3): what a grounding is worth ---------------------------------
+# ===========================================================================
+
+
+def _scored_source(authority, similarity):
+    return {"url": "https://example.com/p", "authority_score": authority,
+            "similarity_score": similarity, "similarity_method": "llm"}
+
+
+def _factual(sources=(), status="grounded", severity=0.0, flags=()):
+    claim = Claim(id="c001", text="A factual claim.", type="factual")
+    claim.grounding_status = status
+    claim.grounding_sources = list(sources)
+    claim.critic_severity = severity
+    claim.assumption_flags = list(flags)
+    return claim
+
+
+class TestTheFormulaIsUnchangedWhenNothingScoredSources:
+    """SQ3's load-bearing promise. `sources_scored=False` -- every caller
+    that predates §45, every §20 correction, every hand-built claim -- must
+    reproduce the pre-§45 arithmetic exactly, or the regression guard the
+    rest of this file provides is measuring a different function."""
+
+    def test_a_grounded_claim_scores_exactly_what_it_always_did(self):
+        tier, breakdown = score_claim(_factual())
+        assert breakdown["raw_score"] == round(
+            GROUNDING_WEIGHT_FACTOR + CRITIC_WEIGHT_FACTOR, 4)
+        assert tier == "HIGH"
+
+    def test_sources_present_but_unscored_change_nothing(self):
+        """An empty list is ambiguous and so is a populated one: only the
+        caller knows whether a scoring stage ran."""
+        tier, breakdown = score_claim(
+            _factual(sources=[_scored_source(0.1, 0.1)]))
+        assert breakdown["raw_score"] == round(
+            GROUNDING_WEIGHT_FACTOR + CRITIC_WEIGHT_FACTOR, 4)
+        assert tier == "HIGH"
+
+    def test_no_source_quality_keys_appear_in_the_breakdown(self):
+        """B10: a field that did nothing must not be present. A reader
+        recomputing from the breakdown would otherwise subtract a
+        multiplier that was never applied."""
+        _, breakdown = score_claim(_factual())
+        for key in ("source_quality", "source_quality_multiplier",
+                    "grounding_weight", "source_count"):
+            assert key not in breakdown
+
+
+class TestSourceQualityScalesTheGrounding:
+
+    def test_a_strong_source_reproduces_the_pre_45_score(self):
+        """The promise stated the other way round: a claim grounded in a
+        peer-reviewed publisher that plainly says it is worth exactly what
+        every grounded claim used to be worth."""
+        claim = _factual(sources=[_scored_source(AUTHORITY_FULL_CREDIT, 1.0)])
+        tier, breakdown = score_claim(claim, sources_scored=True)
+        assert breakdown["raw_score"] == round(
+            GROUNDING_WEIGHT_FACTOR + CRITIC_WEIGHT_FACTOR, 4)
+        assert tier == "HIGH"
+
+    def test_authority_above_the_reference_does_not_buy_more(self):
+        """Capped, not allowed to compensate for weak relevance: a
+        government site that does not discuss the claim is still not
+        evidence for it."""
+        strong = score_claim(_factual(sources=[_scored_source(1.0, 1.0)]),
+                             sources_scored=True)[1]["raw_score"]
+        reference = score_claim(
+            _factual(sources=[_scored_source(AUTHORITY_FULL_CREDIT, 1.0)]),
+            sources_scored=True)[1]["raw_score"]
+        assert strong == reference
+
+    def test_a_weak_source_costs_the_claim_its_tier(self):
+        """The measured case that started §45: a Pinterest pin carrying
+        similarity 1.0 on a Nobel Prize claim."""
+        pin = _factual(sources=[_scored_source(0.10, 1.0)])
+        tier, breakdown = score_claim(pin, sources_scored=True)
+        assert breakdown["source_quality_multiplier"] == SOURCE_QUALITY_FLOOR
+        assert tier == "LOW"
+
+    def test_a_perfectly_authoritative_but_irrelevant_source_scores_low(self):
+        """A product, not an average. Multiplication is the only shape
+        that says an authoritative source which does not discuss the claim
+        is worth nothing."""
+        tier, _ = score_claim(_factual(sources=[_scored_source(0.9, 0.05)]),
+                              sources_scored=True)
+        assert tier == "LOW"
+
+    def test_the_best_source_carries_the_claim(self):
+        """MAX across sources. A claim cited to one primary source and
+        three blogs is grounded in the primary source."""
+        claim = _factual(sources=[_scored_source(0.15, 0.9),
+                                  _scored_source(0.9, 1.0),
+                                  _scored_source(0.25, 0.4)])
+        _, breakdown = score_claim(claim, sources_scored=True)
+        assert breakdown["source_quality_multiplier"] == 1.0
+
+    def test_a_preprint_alone_does_not_make_a_claim_high(self):
+        """arXiv is not peer reviewed, and §45 says so in the one place it
+        changes an outcome. This is the behaviour a reader of a report is
+        entitled to rely on."""
+        import config
+        from core.reasoning.source_scoring import classify_domain
+
+        _, authority = classify_domain("https://arxiv.org/abs/2005.14165")
+        tier, _ = score_claim(_factual(sources=[_scored_source(authority, 1.0)]),
+                              sources_scored=True)
+        assert tier == "MEDIUM"
+
+    def test_the_floor_stops_short_of_zero(self):
+        """A weak-but-real grounding still outscores one nothing
+        supports, and the forced-UNVERIFIED rule handles the latter."""
+        weak = score_claim(_factual(sources=[_scored_source(0.0, 0.0)]),
+                           sources_scored=True)[1]
+        assert weak["grounding_component"] == SOURCE_QUALITY_FLOOR
+        ungrounded = score_claim(_factual(status="ungrounded"),
+                                 sources_scored=True)[1]
+        assert ungrounded["grounding_component"] == 0.0
+
+    def test_partial_status_and_source_quality_compose(self):
+        """The weight and the multiplier are separate facts and both are
+        recorded, so the breakdown can be recomputed."""
+        claim = _factual(sources=[_scored_source(0.9, 1.0)], status="partial")
+        _, breakdown = score_claim(claim, sources_scored=True)
+        assert breakdown["grounding_weight"] == GROUNDING_WEIGHTS["partial"]
+        assert breakdown["grounding_component"] == pytest.approx(
+            GROUNDING_WEIGHTS["partial"]
+            * breakdown["source_quality_multiplier"])
+
+
+class TestTheFloorIsNotOnAThresholdBoundary:
+    """The first draft used 0.4, and 0.5*0.4 + 0.35 is exactly 0.55 --
+    the MEDIUM threshold -- so the floor guaranteed MEDIUM for every
+    grounded claim however bad its sources were. A floor that makes the
+    worst case indistinguishable from the ordinary one is not a floor."""
+
+    def test_the_worst_possible_grounding_is_flagged(self):
+        tier, _ = score_claim(_factual(sources=[_scored_source(0.0, 0.0)]),
+                              sources_scored=True)
+        assert tier in FLAGGED_TIERS
+
+    def test_the_tier_still_discriminates_across_the_domain_table(self):
+        """Swept, because the failure this catches is a table that has
+        collapsed rather than any single wrong value."""
+        import config
+
+        tiers = set()
+        for authority in config.DOMAIN_AUTHORITY_CLASSES.values():
+            tier, _ = score_claim(
+                _factual(sources=[_scored_source(authority, 1.0)]),
+                sources_scored=True)
+            tiers.add(tier)
+        assert {"HIGH", "MEDIUM", "LOW"} <= tiers, (
+            f"source quality no longer separates the domain table: {tiers}")
+
+
+class TestMalformedSourcesCannotBreakTiering:
+    """Pass 5 makes no model call, so a value it had to work around has
+    nowhere else to surface -- and it must never raise."""
+
+    @pytest.mark.parametrize("sources", [
+        "not a list",
+        ["not a dict"],
+        [{"url": "u"}],
+        [{"authority_score": "high", "similarity_score": 0.9}],
+        [{"authority_score": True, "similarity_score": True}],
+        [{"authority_score": None, "similarity_score": None}],
+    ])
+    def test_an_unusable_source_scores_as_no_source(self, sources):
+        claim = _factual(sources=sources) if isinstance(sources, list) else _factual()
+        if not isinstance(sources, list):
+            claim.grounding_sources = sources
+        tier, breakdown = score_claim(claim, sources_scored=True)
+        assert breakdown["source_quality"] == 0.0
+        assert tier in FLAGGED_TIERS
+
+    def test_out_of_range_values_are_clamped_rather_than_trusted(self):
+        claim = _factual(sources=[_scored_source(9.0, 9.0)])
+        _, breakdown = score_claim(claim, sources_scored=True)
+        assert breakdown["source_quality"] == 1.0

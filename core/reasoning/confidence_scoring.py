@@ -50,6 +50,45 @@ NON_FACTUAL_SCORE_CAP = 0.65    # claims never grounded can't reach HIGH
 # byte-for-byte regression guard holds by construction.
 DISAGREEMENT_PENALTY_FACTOR = 0.15
 
+# ROADMAP_v2 §45 (SQ3). What a grounding is WORTH.
+#
+# MULTIPLICATIVE, NOT A FOURTH TERM, and that is the whole design. §10
+# shipped a fourth weighted term for consistency and reversed it (see
+# E8 above): redistributing 0.5/0.35 to make room meant grounding counted
+# for less whenever the feature was on, and the new term could only ever
+# subtract. Scaling the grounding component instead says what is actually
+# meant -- how much is this grounding worth -- and leaves the non-scored
+# formula LITERALLY unchanged rather than coincidentally equal, so the
+# byte-for-byte regression guard holds by construction here too.
+#
+# BOTH CONSTANTS BELOW WERE SET BY MEASUREMENT, not by taste, and the
+# first draft of each was wrong in a way only a sweep showed.
+#
+# AUTHORITY_FULL_CREDIT exists because the domain table is a RANKING and
+# this formula needs an EVIDENTIAL scale. Feeding `authority` in raw
+# multiplied two rank-scales together and landed everything in the middle:
+# swept across the whole table, only a `.gov` at similarity 1.0 still
+# reached HIGH, and Nature, arXiv, Reddit and a Pinterest pin were
+# indistinguishable at MEDIUM -- a tier that no longer discriminates,
+# which is the opposite of the point. At or above a peer-reviewed
+# publisher, authority is not what limits a claim's confidence, so that is
+# where full credit starts.
+#
+# SOURCE_QUALITY_FLOOR was 0.4 in the first draft, and 0.4 is exactly the
+# worst available value: 0.5*0.4 + 0.35 == 0.55, which IS the MEDIUM
+# threshold, so the floor guaranteed MEDIUM for every grounded claim
+# however bad its sources were. At 0.25 a claim grounded only in a content
+# farm lands LOW -- flagged, and sent to the 6a/6b loop to find something
+# better, which is the measured Pinterest case getting the treatment it
+# always should have.
+#
+# NOT ZERO, though: a weak-but-real grounding is still better evidenced
+# than one nothing supports, and the forced-UNVERIFIED rule below already
+# handles the latter.
+AUTHORITY_FULL_CREDIT = 0.85
+SOURCE_QUALITY_FLOOR = 0.25
+
+
 TIER_THRESHOLDS = [
     (0.8, "HIGH"),
     (0.55, "MEDIUM"),
@@ -57,7 +96,57 @@ TIER_THRESHOLDS = [
 ]  # anything below the lowest threshold, or an ungrounded factual claim, is UNVERIFIED
 
 
-def score_claim(claim: Claim, ensemble_n: int = 0) -> tuple[ConfidenceTier, dict]:
+def source_quality(claim: Claim, scored: bool):
+    """The best source this claim has, as authority x similarity, or None.
+
+    A PRODUCT, not an average (§45, SQ3). An authoritative source that
+    does not discuss the claim and a perfect match on a content farm are
+    both worth nothing, and only multiplication says so. MAX across
+    sources, because grounding asks whether ANY credible source supports
+    the claim -- a noisy-OR that rewarded corroboration would let five
+    mediocre blogs outscore one primary source.
+
+    `scored` IS THE WHOLE SAFETY PROPERTY, and it is passed rather than
+    inferred. An empty source list is ambiguous on its own: it means "the
+    model claimed this was grounded and cited nothing" on a run that went
+    through §45's scoring stage, and it means "this claim was built
+    without one" everywhere else -- a test, a §20 correction, a resume.
+    Reading 0.0 from the second would re-tier claims nothing has measured,
+    which is exactly the silent rescoring this module's own history is
+    about. So None (leave the formula alone) is the answer whenever the
+    caller has not said scoring ran.
+    """
+    if not scored:
+        return None
+    sources = claim.grounding_sources
+    if not isinstance(sources, list):
+        return 0.0
+    values = []
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        authority = source.get("authority_score")
+        relevance = source.get("similarity_score")
+        if any(isinstance(v, bool) or not isinstance(v, (int, float))
+               for v in (authority, relevance)):
+            continue
+        # Authority is normalised against AUTHORITY_FULL_CREDIT before the
+        # product: the table ranks source types, and a rank multiplied by
+        # a rank is not evidence. Above the reference it is capped rather
+        # than allowed to compensate for weak relevance -- a government
+        # site that does not discuss the claim is still not evidence for
+        # it, which is the property the product exists to express.
+        credit = min(1.0, max(0.0, float(authority)) / AUTHORITY_FULL_CREDIT)
+        values.append(credit * min(1.0, max(0.0, float(relevance))))
+    # 0.0 rather than None for a claim with no scorable source at all:
+    # scoring DID run, and it found nothing behind a claim the model
+    # asserted. source_scoring already says so in the trace; this is the
+    # same finding reaching the score.
+    return max(values) if values else 0.0
+
+
+def score_claim(claim: Claim, ensemble_n: int = 0,
+                sources_scored: bool = False) -> tuple[ConfidenceTier, dict]:
     """Returns (tier, score_breakdown). Pure function -- no side effects,
     easy to unit test claim-by-claim without running any pass.
 
@@ -95,7 +184,13 @@ def score_claim(claim: Claim, ensemble_n: int = 0) -> tuple[ConfidenceTier, dict
     if claim_type not in CLAIM_TYPES:
         unrecognised_type, claim_type = claim_type, "factual"
 
-    grounding_component = GROUNDING_WEIGHTS[status]
+    # §45 (SQ3). What the grounding is WORTH, not a fourth axis beside it.
+    # None -- no scoring stage ran for this claim -- gives a multiplier of
+    # 1.0, which is the pre-§45 arithmetic exactly.
+    quality = source_quality(claim, sources_scored)
+    quality_multiplier = 1.0 if quality is None else max(SOURCE_QUALITY_FLOOR,
+                                                         quality)
+    grounding_component = GROUNDING_WEIGHTS[status] * quality_multiplier
     critic_component = 1.0 - claim.critic_severity
     assumption_penalty = ASSUMPTION_FLAG_PENALTY * len(claim.assumption_flags)
 
@@ -200,6 +295,18 @@ def score_claim(claim: Claim, ensemble_n: int = 0) -> tuple[ConfidenceTier, dict
     }
     if formula == "factual":
         breakdown["grounding_component"] = grounding_component
+        # B10's property, extended: the breakdown alone must let a reader
+        # recompute grounding_component. Written ONLY on the factual
+        # branch and only when scoring ran, so a field that did nothing is
+        # never present -- which is the exact defect B10 records for
+        # `grounding_component` and `disagreement_penalty` on a
+        # speculative claim.
+        if quality is not None:
+            breakdown["grounding_weight"] = GROUNDING_WEIGHTS[status]
+            breakdown["source_quality"] = round(quality, 4)
+            breakdown["source_quality_multiplier"] = round(quality_multiplier, 4)
+            breakdown["source_count"] = len(claim.grounding_sources) \
+                if isinstance(claim.grounding_sources, list) else 0
     else:
         breakdown["capped_critic_component"] = capped_critic
     if ensemble_n > 0:
@@ -234,6 +341,7 @@ def build_coverage_gap_entries(completeness: dict) -> list[dict]:
 def run_confidence_tiering(
     run: PipelineRun, ensemble_n: int = 0,
     claims: list[Claim] | None = None,
+    sources_scored: bool = False,
 ) -> None:
     """The actual Pass 5 entry point the orchestrator calls. Mutates
     the claims in place; zero LLM calls. Pass ensemble_n > 0 to use
@@ -254,7 +362,8 @@ def run_confidence_tiering(
     narrowed call leaves it exactly as the full one would.
     """
     for claim in (run.claims if claims is None else claims):
-        tier, breakdown = score_claim(claim, ensemble_n=ensemble_n)
+        tier, breakdown = score_claim(claim, ensemble_n=ensemble_n,
+                                      sources_scored=sources_scored)
         claim.confidence_tier = tier
         claim.score_breakdown = breakdown
         _report_coercions(run, claim, breakdown, ensemble_n)

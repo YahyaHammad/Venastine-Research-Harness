@@ -688,6 +688,21 @@ def _ground_and_score(run: PipelineRun, grounding_entries: list[dict], corpus,
     return applied
 
 
+def _sources_were_scored(run: PipelineRun) -> bool:
+    """Whether §45's scoring stage ran for this run.
+
+    Pass 5 needs this because an empty source list is AMBIGUOUS on its own
+    -- "the model claimed grounded and cited nothing" on a scored run,
+    "this claim was built without a scoring stage" everywhere else -- and
+    only the first should cost a claim its grounding weight.
+
+    Derived from the run rather than tracked in a flag, so it cannot go
+    stale: the stage runs exactly when Pass 3a produced grounding, which
+    is exactly when some factual claim carries a status.
+    """
+    return any(c.grounding_status is not None for c in run.claims)
+
+
 def _apply_critic(claims: list[Claim], critic_entries: list[dict]) -> int:
     by_id = resolve_by_id(claims)
     applied = set()
@@ -1199,7 +1214,8 @@ def stream_deep_research_pipeline(
         yield from progress.checkpoint(f"Pass 4: assumption audit complete, {flagged_count} of {len(run.claims)} claim(s) flagged.")
 
         # --- Pass 5: confidence tiering (0 LLM calls) ---
-        run_confidence_tiering(run, ensemble_n=effective_n)
+        run_confidence_tiering(run, ensemble_n=effective_n,
+                               sources_scored=_sources_were_scored(run))
         yield from _stage("Pass 5")
         yield from _tier_events(run)
         yield from progress.checkpoint("Pass 5: confidence tiers assigned (pure code, zero LLM calls).")
@@ -1271,7 +1287,8 @@ def stream_deep_research_pipeline(
             # round's batch: 6b is only asked about `flagged`, and re-tiering
             # the whole run once per round recomputes claims that are already
             # finished, from score data those rounds did not change.
-            run_confidence_tiering(run, ensemble_n=effective_n, claims=flagged)
+            run_confidence_tiering(run, ensemble_n=effective_n, claims=flagged,
+                                   sources_scored=_sources_were_scored(run))
             yield from _tier_events(run)
 
             still_flagged = [c for c in flagged if c.confidence_tier in FLAGGED_TIERS]
