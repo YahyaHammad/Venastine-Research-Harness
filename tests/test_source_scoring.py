@@ -25,7 +25,10 @@ import config
 from core.reasoning.base import Claim, PipelineRun
 from core.reasoning.source_corpus import SourceCorpus
 from core.reasoning.source_scoring import (
-    classify_domain, score_grounding_sources, strip_markup,
+    EMBED_MAX_RETRIES, EmbeddingScorer, WINDOW_CHARS, calibrate,
+    calibration_for, chunk_text, claim_query_text, classify_domain, cosine,
+    l2_normalize, make_scorer, prefixes_for, score_grounding_sources,
+    source_passages, split_sentences, strip_markup,
 )
 
 
@@ -415,3 +418,369 @@ class TestTheTraceStaysReadable:
         score_grounding_sources(run)
         assert "c000, c001, c002" in run.trace[0]
         assert "c003" not in run.trace[0]
+
+
+# ---------------------------------------------------------------------------
+# Similarity: chunking, cosine, calibration (SQ2)
+# ---------------------------------------------------------------------------
+
+class TestChunking:
+    """The one idea is MATCHING GRANULARITY. A claim is one sentence and a
+    fetched page is 5000 characters; one vector for the page averages
+    twenty topics and the claim's contributes a few percent of its
+    direction. That is the dilution these windows exist to remove."""
+
+    def _page(self, n=40):
+        return " ".join(
+            f"Sentence {i} concerns quantum computing and encryption."
+            for i in range(n))
+
+    def test_a_window_is_about_the_size_of_a_claim(self):
+        windows = chunk_text(self._page())
+        assert windows
+        assert all(len(w) <= WINDOW_CHARS for w in windows)
+        # Packed greedily, so they are not trivially short either.
+        assert max(len(w) for w in windows) > WINDOW_CHARS * 0.7
+
+    def test_consecutive_windows_overlap(self):
+        """So a claim stated across a boundary still lands whole inside
+        some window."""
+        windows = chunk_text(self._page())
+        assert len(windows) >= 2
+        tail = split_sentences(windows[0])[-1]
+        assert tail in windows[1]
+
+    def test_the_window_count_is_bounded(self):
+        windows = chunk_text(self._page(500), max_windows=5)
+        assert len(windows) == 5
+
+    def test_an_overlong_sentence_is_hard_split(self):
+        """Raw HTML produces unpunctuated navigation blobs constantly. One
+        4000-character 'sentence' would otherwise become a single diluted
+        window and crowd out the rest of the page."""
+        windows = chunk_text("word " * 900, window_chars=200)
+        assert len(windows) > 1
+        assert all(len(w) <= 200 for w in windows)
+
+    def test_markup_is_stripped_before_chunking(self):
+        windows = chunk_text("<p>Real text about a treaty signed in 1947.</p>"
+                             "<script>var x=1</script>")
+        assert windows == ["Real text about a treaty signed in 1947."]
+
+    def test_empty_and_whitespace_produce_no_windows(self):
+        assert chunk_text("") == []
+        assert chunk_text("   \n  ") == []
+        assert chunk_text("<div></div>") == []
+
+    def test_a_short_page_is_one_window(self):
+        assert chunk_text("A single short sentence.") == \
+            ["A single short sentence."]
+
+
+class TestCosineAndCalibration:
+
+    def test_normalising_makes_cosine_a_dot_product(self):
+        u = l2_normalize([3.0, 4.0])
+        assert cosine(u, u) == pytest.approx(1.0)
+        assert cosine(u, l2_normalize([-3.0, -4.0])) == pytest.approx(-1.0)
+        assert cosine(u, l2_normalize([4.0, -3.0])) == pytest.approx(0.0)
+
+    def test_a_zero_vector_is_left_alone_rather_than_divided_by(self):
+        assert l2_normalize([0.0, 0.0]) == [0.0, 0.0]
+        assert cosine([0.0, 0.0], l2_normalize([1.0, 1.0])) == 0.0
+
+    def test_mismatched_lengths_score_zero_rather_than_raising(self):
+        """embed_texts rejects a ragged batch at the boundary, so reaching
+        here means two vectors from different calls -- and failing a run
+        over it would undo SQ10's whole contract."""
+        assert cosine([1.0, 0.0], [1.0]) == 0.0
+        assert cosine([], []) == 0.0
+
+    def test_calibration_maps_the_band_onto_zero_to_one(self):
+        assert calibrate(0.25, 0.25, 0.85) == pytest.approx(0.0)
+        assert calibrate(0.85, 0.25, 0.85) == pytest.approx(1.0)
+        assert calibrate(0.55, 0.25, 0.85) == pytest.approx(0.5)
+
+    def test_outside_the_band_clamps(self):
+        assert calibrate(0.0, 0.25, 0.85) == 0.0
+        assert calibrate(0.99, 0.25, 0.85) == 1.0
+
+    def test_a_degenerate_band_passes_the_cosine_through(self):
+        """Refusing to score is worse than scoring on an uncalibrated
+        scale that the recorded raw cosine still explains."""
+        assert calibrate(0.5, 0.9, 0.1) == 0.5
+
+    def test_the_band_is_per_model_because_the_floor_is(self):
+        """Unrelated text sits near 0.1 on some embedders and above 0.7 on
+        others; one band would read the same passage as 'irrelevant' on
+        one model and 'supports the claim' on another."""
+        assert calibration_for("text-embedding-3-small") != \
+            calibration_for("intfloat/e5-large-v2")
+
+    def test_an_unlisted_model_takes_the_default_band(self):
+        band = calibration_for("some-new-embedder")
+        assert band == (config.DEFAULT_SIMILARITY_CALIBRATION["floor"],
+                        config.DEFAULT_SIMILARITY_CALIBRATION["ceiling"])
+
+    def test_the_longest_matching_slug_wins(self):
+        assert prefixes_for("intfloat/multilingual-e5-large")["query"] == "query: "
+
+    def test_a_symmetric_model_gets_no_prefix(self):
+        assert prefixes_for("text-embedding-3-small") == {}
+
+
+class TestTheClaimSide:
+
+    def test_a_self_contained_claim_is_embedded_verbatim(self):
+        claim = Claim(id="c1", type="factual",
+                      text="The Treaty of Waitangi was signed on 6 February "
+                           "1840 by representatives of the British Crown.")
+        claim.entities = ["Treaty of Waitangi"]
+        assert claim_query_text(claim) == claim.text
+
+    def test_a_short_claim_borrows_its_entities(self):
+        """Pass 2 is asked for self-contained claims and mostly produces
+        them; 'It was signed in 1947' is the case that needs its subject
+        back."""
+        claim = Claim(id="c1", type="factual", text="It was signed in 1947.")
+        claim.entities = ["Treaty of Dunkirk"]
+        assert claim_query_text(claim).startswith("Treaty of Dunkirk")
+        assert "signed in 1947" in claim_query_text(claim)
+
+    def test_a_short_claim_with_no_entities_is_left_alone(self):
+        claim = Claim(id="c1", type="factual", text="It was signed in 1947.")
+        assert claim_query_text(claim) == "It was signed in 1947."
+
+
+class TestThePassageSide:
+
+    def test_the_quote_is_its_own_window_and_comes_first(self):
+        """It is the passage the model said it relied on, so it is the
+        most specific evidence available -- and scoring it directly means
+        a source whose captured text was truncated before the relevant
+        paragraph still scores on the part that mattered."""
+        corpus = SourceCorpus()
+        corpus.add("fetch_url", {"url": "https://e.com/p",
+                                 "content": "Other text. " * 40,
+                                 "truncated": False})
+        passages = source_passages(
+            {"url": "https://e.com/p", "quote": "the exact sentence"}, corpus)
+        assert passages[0] == "the exact sentence"
+        assert len(passages) > 1
+
+    def test_a_source_with_no_captured_text_still_offers_its_quote(self):
+        passages = source_passages(
+            {"url": "https://e.com/p", "quote": "the exact sentence"}, None)
+        assert passages == ["the exact sentence"]
+
+    def test_a_source_with_neither_offers_nothing(self):
+        assert source_passages({"url": "https://e.com/p", "quote": ""}, None) == []
+
+
+# ---------------------------------------------------------------------------
+# The embedder path end to end
+# ---------------------------------------------------------------------------
+
+class _FakeScorerBackend:
+    """Deterministic 'embeddings': a vector per registered keyword.
+
+    Not random and not a mock returning a constant -- the point of these
+    tests is that the RIGHT window wins, which needs texts that genuinely
+    differ in the space.
+    """
+
+    def __init__(self, error_after=None):
+        self.batches = []
+        self.prefixes = []
+        self._error_after = error_after
+        self.axes = {"nobel": 0, "encryption": 1, "cooking": 2}
+
+    def __call__(self, provider_name, model, texts, *, prefix="", task_type=""):
+        from core.client import EmbeddingError, EmbeddingResult
+
+        # The PREFIX is recorded beside the batch rather than applied
+        # here: embed_texts prepends it, and this double stands in for
+        # embed_texts, so applying it too would test the fake.
+        self.batches.append(list(texts))
+        self.prefixes.append(prefix)
+        if self._error_after is not None and len(self.batches) > self._error_after:
+            raise EmbeddingError("provider is down")
+        vectors = []
+        for text in texts:
+            vector = [0.05, 0.05, 0.05]
+            for word, axis in self.axes.items():
+                if word in text.lower():
+                    vector[axis] = 1.0
+            vectors.append(vector)
+        return EmbeddingResult(vectors=vectors, model=model,
+                               provider_name=provider_name,
+                               usage={"input_tokens": 7 * len(texts)})
+
+
+@pytest.fixture
+def fake_embedder(mocker):
+    def install(backend=None):
+        backend = backend or _FakeScorerBackend()
+        mocker.patch("core.client.embed_texts", side_effect=backend)
+        return backend
+    return install
+
+
+def _corpus_with(url, content):
+    corpus = SourceCorpus()
+    corpus.add("fetch_url", {"url": url, "content": content, "truncated": False})
+    return corpus
+
+
+class TestScoringWithAnEmbedder:
+
+    def test_the_cosine_replaces_the_models_number_and_says_so(self, fake_embedder):
+        fake_embedder()
+        claim = _claim(sources=[_source(quote="Kipling won the nobel prize",
+                                        similarity_score=0.2)])
+        claim.text = "Kipling won the nobel prize in 1907."
+        run = _run(claim)
+        score_grounding_sources(run, scorer=EmbeddingScorer("OPENAI", "m"))
+
+        source = _only_source(run)
+        assert source["similarity_method"] == "embedding"
+        assert source["similarity_score_llm"] == 0.2, \
+            "the model's own number must survive beside the measurement"
+        assert source["similarity_score"] > 0.5
+        assert 0.0 <= source["cosine"] <= 1.0
+        assert source["embedder"] == "OPENAI|m"
+
+    def test_the_best_window_wins_rather_than_the_page_average(self, fake_embedder):
+        """MAX, not mean. Grounding asks whether the source contains a
+        passage that states the claim; a mean over a long page answers a
+        different and weaker question, and a long mostly-irrelevant page
+        containing the answer is the ordinary case."""
+        fake_embedder()
+        corpus = _corpus_with(
+            "https://e.com/p",
+            "A page about cooking. " * 90 + "Kipling won the nobel prize. "
+            + "More about cooking. " * 90)
+        claim = _claim(sources=[_source("https://e.com/p", quote="")])
+        claim.text = "Kipling won the nobel prize."
+        run = _run(claim)
+        score_grounding_sources(run, corpus=corpus,
+                                scorer=EmbeddingScorer("OPENAI", "m"))
+
+        source = _only_source(run)
+        assert source["similarity_method"] == "embedding"
+        assert source["cosine"] > source["cosine_top_mean"], \
+            "one matching window in a long page must not be averaged away"
+        assert source["windows_scored"] > 3
+
+    def test_an_irrelevant_source_scores_low(self, fake_embedder):
+        fake_embedder()
+        claim = _claim(sources=[_source(quote="A page about cooking.")])
+        claim.text = "Kipling won the nobel prize in 1907."
+        run = _run(claim)
+        score_grounding_sources(run, scorer=EmbeddingScorer("OPENAI", "m"))
+        assert _only_source(run)["similarity_score"] < 0.5
+
+    def test_every_text_is_embedded_once_across_the_whole_run(self, fake_embedder):
+        """A claim with six sources is one query embedding, not six -- and
+        per-source calls are what make an embedder slower than the pass it
+        is scoring."""
+        backend = fake_embedder()
+        claim = _claim(sources=[_source(f"https://e.com/{i}",
+                                        quote="Kipling won the nobel prize")
+                                for i in range(6)])
+        run = _run(claim)
+        score_grounding_sources(run, scorer=EmbeddingScorer("OPENAI", "m"))
+
+        sent = [text for batch in backend.batches for text in batch]
+        assert len(sent) == len(set(sent)), "a text was embedded twice"
+        assert len(backend.batches) == 2, "one batch per role, not per source"
+
+    def test_the_query_and_passage_roles_do_not_share_a_cache_entry(
+            self, fake_embedder):
+        """An asymmetric embedder gives one string two different vectors
+        depending on its prefix. Collapsing them would score a claim
+        against a passage-space vector of itself."""
+        backend = fake_embedder()
+        scorer = EmbeddingScorer("OPENAI", "intfloat/e5-large")
+        scorer.prime(["same text"], is_query=True)
+        scorer.prime(["same text"], is_query=False)
+        assert backend.batches == [["same text"], ["same text"]], (
+            "the second role was served from the first role's cache entry")
+        assert backend.prefixes == ["query: ", "passage: "]
+
+    def test_the_trace_reports_the_calls_and_the_tokens(self, fake_embedder):
+        fake_embedder()
+        run = _run(_claim(sources=[_source(quote="Kipling won the nobel prize")]))
+        score_grounding_sources(run, scorer=EmbeddingScorer("OPENAI", "m"))
+        assert any("scored by cosine" in line and "token" in line
+                   for line in run.trace)
+
+
+class TestTheFallbackWhenTheEmbedderFails:
+    """SQ10: one transient failure must not fail a ten-pass run, and the
+    artifact must never hide which numbers were measured."""
+
+    def test_a_failure_leaves_the_models_number_in_place_and_labelled(
+            self, fake_embedder):
+        fake_embedder(_FakeScorerBackend(error_after=0))
+        run = _run(_claim(sources=[_source(quote="Kipling won the nobel prize",
+                                           similarity_score=0.65)]))
+        score_grounding_sources(run, scorer=EmbeddingScorer("OPENAI", "m"))
+
+        source = _only_source(run)
+        assert source["similarity_method"] == "llm"
+        assert source["similarity_score"] == 0.65
+        assert "cosine" not in source
+
+    def test_the_failure_is_retried_before_it_is_believed(self, fake_embedder):
+        backend = fake_embedder(_FakeScorerBackend(error_after=0))
+        run = _run(_claim(sources=[_source(quote="Kipling won the nobel prize")]))
+        score_grounding_sources(run, scorer=EmbeddingScorer("OPENAI", "m"))
+        assert len(backend.batches) == EMBED_MAX_RETRIES + 1
+
+    def test_one_failure_stops_the_scorer_for_the_rest_of_the_run(
+            self, fake_embedder):
+        """A provider that is down stays down for the next forty batches,
+        and retrying each turns one outage into a run that takes minutes
+        to produce the fallback it was always going to produce."""
+        backend = fake_embedder(_FakeScorerBackend(error_after=0))
+        scorer = EmbeddingScorer("OPENAI", "m")
+        run = _run(*[_claim(f"c{i:03d}",
+                            [_source(quote="Kipling won the nobel prize")])
+                     for i in range(5)])
+        score_grounding_sources(run, scorer=scorer)
+        assert not scorer.usable
+        assert len(backend.batches) == EMBED_MAX_RETRIES + 1
+
+    def test_the_trace_names_the_cause_and_how_far_it_got(self, fake_embedder):
+        fake_embedder(_FakeScorerBackend(error_after=0))
+        run = _run(_claim(sources=[_source(quote="Kipling won the nobel prize")]))
+        score_grounding_sources(run, scorer=EmbeddingScorer("OPENAI", "m"))
+        assert any("provider is down" in line for line in run.trace)
+
+    def test_no_scorer_at_all_leaves_every_source_self_reported(self):
+        run = _run(_claim(sources=[_source(similarity_score=0.4)]))
+        score_grounding_sources(run, scorer=None)
+        assert _only_source(run)["similarity_method"] == "llm"
+        assert _only_source(run)["similarity_score"] == 0.4
+
+
+class TestTheWarningWhenNoEmbedderIsSet:
+
+    def test_a_run_without_one_says_so_in_its_own_record(self):
+        """The trace has to be able to explain its own numbers. A reader
+        assuming `similarity_score` is a measurement is exactly what this
+        line prevents."""
+        run = _run()
+        assert make_scorer(run) is None
+        assert any("no embedder configured" in line for line in run.trace)
+
+    def test_a_configured_embedder_produces_a_scorer_and_no_warning(self):
+        from core import pipeline_models
+
+        pipeline_models.remember("embedder", "OPENAI", "text-embedding-3-small")
+        run = _run()
+        scorer = make_scorer(run)
+        assert scorer is not None
+        assert scorer.model == "text-embedding-3-small"
+        assert run.trace == []

@@ -593,14 +593,36 @@ def test_pipeline_trace_contains_expected_lines_in_order(mocker):
         "Pass 3c:", "Pass 4:", "Pass 5:", "D1:", "Pass 6c:", "Merge:",
         "Final synthesis",
     ]
-    actual_starts = []
+    # §45: the trace also carries RUN-LEVEL lines, which are not a pass's
+    # one line and never were one. There is exactly one so far -- source
+    # scoring saying that this run has no embedder, so every
+    # `similarity_score` in its artifact is the grounding model's own
+    # estimate rather than a measurement. It is in the trace rather than
+    # only in the log because the run's record has to be able to explain
+    # its own numbers.
+    #
+    # STILL STRICT IN BOTH DIRECTIONS: the pass sequence must be exactly
+    # this, AND every line that is not a pass line must be one of the
+    # run-level prefixes below. A stray line still fails.
+    expected_run_level_starts = ["Source scoring:"]
+
+    actual_starts, run_level = [], []
     for line in run.trace:
         matched = next((p for p in expected_pass_starts if line.startswith(p)), None)
-        # "Final synthesis complete." has no colon, so the last entry
-        # above is intentionally colon-free.
-        actual_starts.append(matched or line)
+        if matched is not None:
+            # "Final synthesis complete." has no colon, so that entry is
+            # intentionally colon-free.
+            actual_starts.append(matched)
+            continue
+        aside = next((p for p in expected_run_level_starts
+                      if line.startswith(p)), None)
+        run_level.append(aside or line)
+
     assert actual_starts == expected_pass_starts, (
         f"Trace order or content mismatch.\n expected: {expected_pass_starts}\n got:      {actual_starts}\n"
+    )
+    assert run_level == expected_run_level_starts, (
+        f"Unaccounted-for trace lines.\n expected: {expected_run_level_starts}\n got:      {run_level}\n"
     )
 
 

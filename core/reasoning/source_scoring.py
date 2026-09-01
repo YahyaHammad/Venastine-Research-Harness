@@ -36,8 +36,10 @@ fail a ten-pass run over one bad float.
 
 from __future__ import annotations
 
+import hashlib
 import html
 import logging
+import math
 import re
 
 import config
@@ -305,12 +307,418 @@ def _score_authority(source: dict, scored: dict, claim,
     scored["authority_score"] = round(_clamp(base + adjustment), 4)
 
 
+# ===========================================================================
+# ---- Similarity: chunking, cosine, calibration (SQ2) ----------------------
+# ===========================================================================
+
+# --- Tunable -- change these, not the logic below, to retune similarity ---
+#
+# THE ONE IDEA HERE IS MATCHING GRANULARITY. A claim is one sentence; a
+# fetched page is up to 5000 characters. Embedding the page whole averages
+# twenty topics into one vector, and the claim's topic contributes a few
+# percent of its direction -- that IS the dilution, and it makes every long
+# source look equally irrelevant. A window of roughly a claim's own length
+# asks the question grounding actually asks: does this source contain a
+# passage that states this.
+WINDOW_CHARS = 480              # ~120 tokens, the same order as a claim
+WINDOW_OVERLAP_SENTENCES = 1    # so a claim straddling a boundary is not lost
+MAX_WINDOWS = 24                # more than fetch_url's 5000 chars can produce
+
+# Below this, a claim is short enough to be pronoun-bearing ("It was signed
+# in 1947") despite Pass 2 being asked for self-contained ones, so its
+# entities are prepended. Above it, adding them dilutes the query with the
+# very topic words every window shares.
+CLAIM_MIN_CHARS = 80
+
+# How many windows the recorded `cosine_top_mean` averages. It is NOT the
+# score -- max is -- and exists so a reader can tell one matching sentence
+# from a document that is wholly on point.
+TOP_K = 3
+
+# Inputs per embeddings request. Providers cap both the number of inputs
+# and the tokens per input; this is well under every published limit and
+# keeps one failed request from costing a whole run's vectors.
+EMBED_BATCH_SIZE = 96
+
+# Retries per batch. Immediate, with no backoff, following arxiv.py: a
+# transient failure is worth one more try, and sleeping inside a research
+# pass buys little while making the suite slow.
+EMBED_MAX_RETRIES = 2
+
+_SENTENCE_RE = re.compile(r"(?<=[.!?])\s+|\n+")
+
+
+def split_sentences(text: str) -> list:
+    """Rough sentence split, deliberately.
+
+    An abbreviation ("Dr. Smith") splits where it should not, and the cost
+    of that is one window boundary in the wrong place -- which a MAX over
+    overlapping windows absorbs. A real sentence tokenizer is a dependency,
+    and #145's posture is that a dependency earns its place by fixing
+    something measured.
+    """
+    return [part.strip() for part in _SENTENCE_RE.split(text or "") if part.strip()]
+
+
+def chunk_text(text: str, window_chars: int = WINDOW_CHARS,
+               max_windows: int = MAX_WINDOWS,
+               overlap: int = WINDOW_OVERLAP_SENTENCES) -> list:
+    """`text` as overlapping windows of about `window_chars`.
+
+    Sentences are packed greedily and windows overlap by `overlap`
+    sentences, so a claim stated across a boundary still lands whole
+    inside some window. A single sentence longer than the budget is hard
+    split rather than emitted oversized -- one 4000-character
+    "sentence" (an unpunctuated navigation blob, which raw HTML produces
+    constantly) would otherwise become one diluted window and crowd out
+    the rest of the page.
+    """
+    cleaned = strip_markup(text)
+    if not cleaned:
+        return []
+
+    sentences = []
+    for sentence in split_sentences(cleaned):
+        while len(sentence) > window_chars:
+            sentences.append(sentence[:window_chars])
+            sentence = sentence[window_chars:]
+        if sentence:
+            sentences.append(sentence)
+    if not sentences:
+        return []
+
+    windows = []
+    start = 0
+    while start < len(sentences) and len(windows) < max_windows:
+        end, length = start, 0
+        while end < len(sentences):
+            addition = len(sentences[end]) + (1 if end > start else 0)
+            if end > start and length + addition > window_chars:
+                break
+            length += addition
+            end += 1
+        windows.append(" ".join(sentences[start:end]))
+        if end >= len(sentences):
+            break
+        # At least one sentence forward, so an overlap wider than the
+        # window cannot stall the loop.
+        start = max(start + 1, end - overlap)
+    return windows
+
+
+def l2_normalize(vector) -> list:
+    """Unit length, so cosine is a dot product.
+
+    A zero vector is returned unchanged rather than divided by zero. It
+    then scores 0.0 against everything, which is the honest reading of a
+    vector carrying no direction -- and `embed_texts` already refuses a
+    response that is all zeros, so this is the single-vector case.
+    """
+    norm = math.sqrt(sum(component * component for component in vector))
+    if norm == 0.0:
+        return list(vector)
+    return [component / norm for component in vector]
+
+
+def cosine(left, right) -> float:
+    """Cosine similarity of two ALREADY-NORMALIZED vectors.
+
+    Pure Python on purpose: `numpy` is not a dependency, and a few hundred
+    1536-dimensional dot products is microseconds. Mismatched lengths
+    score 0.0 rather than raising -- `embed_texts` rejects a ragged batch
+    at the boundary, so reaching here means two vectors from different
+    calls, and failing a run over it would undo SQ10's whole contract.
+    """
+    if len(left) != len(right) or not left:
+        return 0.0
+    return sum(a * b for a, b in zip(left, right))
+
+
+def calibrate(raw: float, floor: float, ceiling: float) -> float:
+    """Raw cosine onto 0-1, using this model's useful band.
+
+    Unrelated text sits near 0.1 on some embedders and above 0.7 on
+    others, so the same passage would read as "irrelevant" on one and
+    "supports the claim" on another. An inverted or degenerate band
+    (floor >= ceiling) falls back to passing the cosine through clamped,
+    because refusing to score is worse than scoring on an uncalibrated
+    scale that the recorded raw cosine still explains.
+    """
+    if ceiling <= floor:
+        return _clamp(raw)
+    return _clamp((raw - floor) / (ceiling - floor))
+
+
+def _table_lookup(table: dict, model: str, default):
+    """Longest matching slug substring wins, else `default`."""
+    best = None
+    for fragment, value in table.items():
+        if fragment in model and (best is None or len(fragment) > len(best[0])):
+            best = (fragment, value)
+    return best[1] if best else default
+
+
+def calibration_for(model: str) -> tuple:
+    band = _table_lookup(config.SIMILARITY_CALIBRATION, model,
+                         config.DEFAULT_SIMILARITY_CALIBRATION)
+    return float(band["floor"]), float(band["ceiling"])
+
+
+def prefixes_for(model: str) -> dict:
+    return _table_lookup(config.EMBEDDER_PREFIXES, model, {})
+
+
+class EmbeddingScorer:
+    """One run's embedder: batching, caching, and the fallback.
+
+    STATEFUL AND RUN-SCOPED, because both things it holds are per-run: a
+    vector cache keyed by the text itself (a claim is embedded once
+    however many sources it has, and a page fetched twice is chunked
+    twice into identical windows), and a `failed` flag.
+
+    ONE FAILURE DISABLES THE SCORER FOR THE REST OF THE RUN, after its
+    retries. That is SQ10 taken seriously rather than half-applied: a
+    provider that is down stays down for the next forty batches, and
+    retrying each of them turns one outage into a run that takes minutes
+    to produce the fallback it was always going to produce. Every source
+    then carries `similarity_method: "llm"`, and the trace says when the
+    switch happened.
+    """
+
+    def __init__(self, provider_name: str, model: str) -> None:
+        self.provider_name = provider_name
+        self.model = model
+        self.failed_reason = None
+        self.input_tokens = 0
+        self.calls = 0
+        self._cache: dict = {}
+        prefixes = prefixes_for(model)
+        self._query_prefix = prefixes.get("query", "")
+        self._passage_prefix = prefixes.get("passage", "")
+        self._query_task = prefixes.get("query_task_type", "")
+        self._passage_task = prefixes.get("passage_task_type", "")
+        self.floor, self.ceiling = calibration_for(model)
+
+    @property
+    def usable(self) -> bool:
+        return self.failed_reason is None
+
+    def _key(self, text: str, is_query: bool) -> str:
+        # The ROLE is part of the key: an asymmetric embedder gives the
+        # same string two different vectors depending on which prefix it
+        # was sent with, and collapsing them would silently score a claim
+        # against a passage-space vector of itself.
+        role = "q" if is_query else "p"
+        return f"{role}:{hashlib.sha256(text.encode('utf-8')).hexdigest()}"
+
+    def prime(self, texts, is_query: bool) -> None:
+        """Embed everything not already cached, in batches.
+
+        Called once per role per stage so the whole run's claims are one
+        request and the whole run's windows are a handful -- rather than
+        one request per source, which is the shape that makes an embedder
+        slower than the pass it is scoring.
+        """
+        if not self.usable:
+            return
+        pending, seen = [], set()
+        for text in texts:
+            key = self._key(text, is_query)
+            if key in self._cache or key in seen:
+                continue
+            seen.add(key)
+            pending.append(text)
+
+        prefix = self._query_prefix if is_query else self._passage_prefix
+        task = self._query_task if is_query else self._passage_task
+        for start in range(0, len(pending), EMBED_BATCH_SIZE):
+            batch = pending[start:start + EMBED_BATCH_SIZE]
+            vectors = self._embed(batch, prefix, task)
+            if vectors is None:
+                return
+            for text, vector in zip(batch, vectors):
+                self._cache[self._key(text, is_query)] = l2_normalize(vector)
+
+    def _embed(self, batch, prefix, task):
+        """The batch, or None once the scorer has given up on this run."""
+        from core.client import EmbeddingError, embed_texts
+
+        last = None
+        for _ in range(EMBED_MAX_RETRIES + 1):
+            try:
+                result = embed_texts(self.provider_name, self.model, batch,
+                                     prefix=prefix, task_type=task)
+            except EmbeddingError as exc:
+                last = exc
+                continue
+            self.calls += 1
+            self.input_tokens += result.usage.get("input_tokens", 0)
+            return result.vectors
+        self.failed_reason = str(last)
+        return None
+
+    def vector(self, text: str, is_query: bool):
+        return self._cache.get(self._key(text, is_query))
+
+    def score(self, query: str, passages) -> dict | None:
+        """The best window's calibrated similarity, or None.
+
+        MAX, not mean. Grounding asks whether the source contains a
+        passage that states the claim, which is a max question; a mean
+        over a long page answers "is this page broadly about the topic",
+        which is a different and weaker question. `cosine_top_mean` is
+        recorded beside it so a reader can tell one matching sentence from
+        a document that is wholly on point.
+        """
+        if not self.usable or not passages:
+            return None
+        query_vector = self.vector(query, True)
+        if query_vector is None:
+            return None
+        scores = [cosine(query_vector, vector) for vector in
+                  (self.vector(p, False) for p in passages)
+                  if vector is not None]
+        if not scores:
+            return None
+        scores.sort(reverse=True)
+        top = scores[:TOP_K]
+        return {
+            "cosine": round(scores[0], 4),
+            "cosine_top_mean": round(sum(top) / len(top), 4),
+            "windows_scored": len(scores),
+            "similarity_score": round(
+                calibrate(scores[0], self.floor, self.ceiling), 4),
+        }
+
+
+def claim_query_text(claim, min_chars: int = CLAIM_MIN_CHARS) -> str:
+    """What gets embedded for a claim.
+
+    Its text verbatim -- Pass 2 produces atomic, self-contained claims, so
+    there is nothing to add. The exception is a claim short enough to be
+    pronoun-bearing anyway ("It was signed in 1947"), where the entities
+    Pass 2 already extracted are the missing subject. Prepending them to
+    EVERY claim would be worse: the entity words appear in every window of
+    the source too, so they raise every score alike and compress the range
+    the calibration band depends on.
+    """
+    text = (claim.text or "").strip()
+    if len(text) >= min_chars or not claim.entities:
+        return text
+    return f"{', '.join(str(e) for e in claim.entities)} — {text}"
+
+
+def source_passages(scored: dict, corpus, window_chars: int = WINDOW_CHARS,
+                    max_windows: int = MAX_WINDOWS) -> list:
+    """The windows a source is scored over.
+
+    THE QUOTE IS ITS OWN WINDOW, first. It is the passage the model said
+    it relied on, so it is the most specific evidence available -- and
+    scoring it directly means a source whose captured text was truncated
+    before the relevant paragraph still scores on the part that mattered.
+    The document's own windows follow, so a fabricated or badly chosen
+    quote cannot LOWER a score the page itself earns.
+    """
+    passages = []
+    quote = scored.get("quote")
+    if quote:
+        passages.append(quote)
+    document = corpus.get(scored["url"]) if corpus is not None else None
+    if document is not None:
+        passages.extend(chunk_text(document.text, window_chars, max_windows))
+    return passages
+
+
 # ---------------------------------------------------------------------------
 # ---- The stage ------------------------------------------------------------
 # ---------------------------------------------------------------------------
 
+def make_scorer(run=None):
+    """The run's EmbeddingScorer, or None with the warning said once.
+
+    SQ2's fallback is deliberate and announced. A run with no embedder
+    still produces a `similarity_score` for every source -- the grounding
+    model's own, under source_grounding.md's anchored bands -- and the
+    artifact marks every one of them `similarity_method: "llm"`. What must
+    not happen is a reader assuming the number is a measurement. So the
+    trace says so at the top of the run rather than leaving it to be
+    inferred from a field.
+    """
+    from core import pipeline_models
+
+    chosen = pipeline_models.resolve("embedder")
+    if chosen is None:
+        if run is not None:
+            run.log(
+                "Source scoring: no embedder configured, so similarity is "
+                "the grounding model's own estimate of sources it chose "
+                "(similarity_method=\"llm\" on every source). Set one with "
+                "/embedder for a measured cosine.")
+        return None
+    return EmbeddingScorer(chosen["provider_name"], chosen["model"])
+
+
+def _apply_embeddings(run, claims, corpus, scorer, window_chars, max_windows,
+                      claim_min_chars) -> None:
+    """Replace every scorable source's similarity with a cosine.
+
+    TWO PHASES, and that is the whole reason this is not done inside
+    `score_source`. Every text the run needs is embedded first, in
+    batches, then every pair is scored from the cache -- so a run with
+    twenty claims and sixty sources makes a handful of requests instead of
+    sixty. Per-source calls would make the embedder slower than the pass
+    it is scoring, which is how a good measurement gets turned off.
+    """
+    plan = []
+    for claim in claims:
+        query = claim_query_text(claim, claim_min_chars)
+        if not query:
+            continue
+        for scored in claim.grounding_sources:
+            passages = source_passages(scored, corpus, window_chars,
+                                       max_windows)
+            if passages:
+                plan.append((query, scored, passages))
+    if not plan:
+        return
+
+    scorer.prime([query for query, _, _ in plan], is_query=True)
+    scorer.prime([p for _, _, passages in plan for p in passages],
+                 is_query=False)
+
+    measured = 0
+    for query, scored, passages in plan:
+        result = scorer.score(query, passages)
+        if result is None:
+            continue
+        scored.update(result)
+        scored["similarity_method"] = "embedding"
+        scored["embedder"] = f"{scorer.provider_name}|{scorer.model}"
+        measured += 1
+
+    if scorer.usable:
+        run.log(
+            f"Source scoring: {measured} source(s) scored by cosine against "
+            f"{scorer.model} in {scorer.calls} call(s), "
+            f"{scorer.input_tokens} embedding token(s).")
+    else:
+        # NAMED, and the count says how far it got. A run where the
+        # embedder died after twelve sources has twelve measured scores
+        # and the rest self-reported, and an artifact whose readers cannot
+        # tell which is which is the thing similarity_method exists for.
+        run.log(
+            f"Source scoring: the embedder failed and the rest of this run "
+            f"falls back to the grounding model's own similarity "
+            f"({measured} source(s) measured before it stopped). "
+            f"Cause: {scorer.failed_reason}")
+
+
 def score_grounding_sources(run, claims=None, corpus=None,
-                            overrides: dict | None = None) -> int:
+                            overrides: dict | None = None,
+                            scorer=None,
+                            window_chars: int = WINDOW_CHARS,
+                            max_windows: int = MAX_WINDOWS,
+                            claim_min_chars: int = CLAIM_MIN_CHARS) -> int:
     """Rewrite every claim's `grounding_sources` with computed scores.
 
     Returns the number of sources scored. Called from
@@ -326,8 +734,9 @@ def score_grounding_sources(run, claims=None, corpus=None,
     """
     coercions = _Coercions()
     scored_count = 0
+    targets = list(run.claims if claims is None else claims)
 
-    for claim in (run.claims if claims is None else claims):
+    for claim in targets:
         sources = claim.grounding_sources
         if not isinstance(sources, list):
             # The payload boundary type-guards this at the pass that sent
@@ -354,6 +763,14 @@ def score_grounding_sources(run, claims=None, corpus=None,
             coercions.note(
                 f"were claimed as {claim.grounding_status} with no scorable "
                 f"source", claim.id)
+
+    # AFTER the per-source pass, so the embedder is handed sources whose
+    # quotes and urls have already been coerced into shape -- and so a
+    # payload the first phase rejected entirely never costs an embedding
+    # call.
+    if scorer is not None and scorer.usable:
+        _apply_embeddings(run, targets, corpus, scorer, window_chars,
+                          max_windows, claim_min_chars)
 
     coercions.report(run)
     return scored_count

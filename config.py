@@ -149,6 +149,32 @@ EMBEDDER_MODEL: dict | None = None
 # provider. Incomplete on purpose: an unlisted asymmetric model scores
 # lower than it should, which is visible in the artifact as a low cosine
 # on a source that plainly matches -- and adding a row is the fix.
+# Raw cosine is NOT a 0-1 score, and treating it as one is the quiet way
+# to publish a wrong number. Unrelated text sits near 0.1 on some models
+# and above 0.7 on others, so the same passage would score "irrelevant" on
+# one embedder and "supports the claim" on another. This maps the useful
+# band onto 0-1: below `floor` is noise, above `ceiling` is as close as
+# that model gets.
+#
+# Keyed by a substring of the model slug, longest match wins; anything
+# unlisted takes DEFAULT_SIMILARITY_CALIBRATION. The RAW cosine is always
+# recorded beside the calibrated score, so a bad row here is visible in
+# the artifact and fixable after the fact rather than baked in.
+SIMILARITY_CALIBRATION: dict[str, dict] = {
+    "text-embedding-3": {"floor": 0.10, "ceiling": 0.65},
+    "text-embedding-ada": {"floor": 0.70, "ceiling": 0.92},
+    "e5-": {"floor": 0.70, "ceiling": 0.92},
+    "multilingual-e5": {"floor": 0.70, "ceiling": 0.92},
+    "bge-": {"floor": 0.55, "ceiling": 0.85},
+    "gte-": {"floor": 0.55, "ceiling": 0.88},
+    "nomic-embed": {"floor": 0.40, "ceiling": 0.80},
+    "embed-english": {"floor": 0.25, "ceiling": 0.80},
+    "voyage": {"floor": 0.35, "ceiling": 0.85},
+    "gemini-embedding": {"floor": 0.35, "ceiling": 0.85},
+}
+
+DEFAULT_SIMILARITY_CALIBRATION = {"floor": 0.25, "ceiling": 0.85}
+
 EMBEDDER_PREFIXES: dict[str, dict] = {
     "e5-": {"query": "query: ", "passage": "passage: "},
     "multilingual-e5": {"query": "query: ", "passage": "passage: "},

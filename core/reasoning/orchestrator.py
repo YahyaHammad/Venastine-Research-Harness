@@ -85,7 +85,7 @@ from core.reasoning.json_retry import retry_until_json
 from core.reasoning.payload_validation import validate as _validate_payload
 from core.reasoning.pipeline_storage import create_pipeline_run, update_pipeline_run
 from core.reasoning.source_corpus import SourceCorpus
-from core.reasoning.source_scoring import score_grounding_sources
+from core.reasoning.source_scoring import make_scorer, score_grounding_sources
 from safety.policy_enforcement import redact_secrets
 from tools.registry import registry
 
@@ -659,7 +659,8 @@ def _apply_grounding(claims: list[Claim], grounding_entries: list[dict]) -> int:
     return len(applied)
 
 
-def _ground_and_score(run: PipelineRun, grounding_entries: list[dict], corpus) -> int:
+def _ground_and_score(run: PipelineRun, grounding_entries: list[dict], corpus,
+                      scorer=None) -> int:
     """Apply Pass 3a/6b's grounding, then everything §45 derives from it.
 
     THE ONE SEAM BOTH GROUNDING SITES GO THROUGH. There are two -- Pass 3a
@@ -683,7 +684,7 @@ def _ground_and_score(run: PipelineRun, grounding_entries: list[dict], corpus) -
     applied = _apply_grounding(run.claims, grounding_entries)
     if corpus is not None:
         run.source_documents = corpus.artifact_entries()
-    score_grounding_sources(run, corpus=corpus)
+    score_grounding_sources(run, corpus=corpus, scorer=scorer)
     return applied
 
 
@@ -984,6 +985,14 @@ def stream_deep_research_pipeline(
     # no captured text for it and fall back to the model's own number.
     corpus = SourceCorpus()
 
+    # §45 (SQ2). Resolved ONCE, before Pass 0, so the warning about
+    # running without one is the first thing the trace says rather than
+    # something a reader meets forty lines in beside a score it already
+    # explains. One scorer for the whole run, because its vector cache and
+    # its give-up flag are both run-scoped: a claim is embedded once
+    # however many sources it has, and a provider that is down stays down.
+    scorer = make_scorer(run)
+
     # §25 audit trail: ONE list, shared, not two kept in step. The run and
     # the authorization bundle now refer to the same object, so a granted
     # call is visible on the PipelineRun the moment it happens -- including
@@ -1137,7 +1146,7 @@ def stream_deep_research_pipeline(
                 f"to every claim referencing it):\n{json.dumps(unique_entities)}"
             )
             grounding_json = _parse_json_response((yield from _run_pass_with_json_retry("Pass 3a", pass3a_input, critic_model, critic_provider, run.trace, authorization=authorization, corpus=corpus, pass_threads=run.pass_threads, claim_ids=[c.id for c in run.claims], effort=effort)))
-            grounded = _ground_and_score(run, grounding_json, corpus)
+            grounded = _ground_and_score(run, grounding_json, corpus, scorer)
             yield from progress.checkpoint(f"Pass 3a: grounded {grounded} of {len(factual_claims)} factual claim(s), across {len(unique_entities)} deduplicated entities.")
 
             # E13/#77. Two or more survivors: the claims were extracted
@@ -1253,7 +1262,7 @@ def stream_deep_research_pipeline(
             # --- Pass 6b: re-validate the revised subset only (batched, reuses Pass 5's code) ---
             pass6b_input = json.dumps([vars(c) for c in flagged])
             revalidation = _parse_json_response((yield from _run_pass_with_json_retry("Pass 6b", pass6b_input, critic_model, critic_provider, run.trace, authorization=authorization, corpus=corpus, pass_threads=run.pass_threads, claim_ids=[c.id for c in run.claims], effort=effort)))
-            _ground_and_score(run, revalidation.get("grounding", []), corpus)
+            _ground_and_score(run, revalidation.get("grounding", []), corpus, scorer)
             _apply_critic(run.claims, revalidation.get("critic", []))
             # 6b's own checkpoint below already reports an EFFECT -- how
             # many claims came out clean -- rather than what it was asked
