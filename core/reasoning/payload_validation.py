@@ -122,7 +122,28 @@ class Spec:
 _GROUNDING_ENTRY = Spec(
     top="array",
     entry_required=frozenset({"claim_id", "status"}),
-    entry_types={"claim_id": str},
+    # §45 (SQ2). `sources` is TYPE-GUARDED BUT NOT REQUIRED, and the
+    # asymmetry is the point. B4's rule is that a check earns its place by
+    # having a demonstrated consequence:
+    #
+    #   the type      §45's scoring stage ITERATES this value. A string
+    #                 there scores one source per character, and a null
+    #                 raises inside a stage that runs after the model call
+    #                 it would need to retry.
+    #   not required  source_grounding.md says an ungrounded claim's
+    #                 `sources` "may be an empty list", and a model that
+    #                 omits the key entirely on a claim it could not
+    #                 source has said the same thing. Failing that run
+    #                 costs a corrective retry to add `[]` to an entry
+    #                 nothing reads.
+    #
+    # The case this leaves open -- `grounded` with no sources at all -- is
+    # NOT unhandled; it is handled where it means something. The scoring
+    # stage scores it as zero source quality and says so in the trace,
+    # which is the honest answer to a claim asserted as grounded with
+    # nothing behind it. Rejecting it here would instead ask the model to
+    # try again, and a model that had no sources still has none.
+    entry_types={"claim_id": str, "sources": list},
     enums={"status": GROUNDING_STATUSES},
     ids="claim_id",
 )
