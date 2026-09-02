@@ -1824,14 +1824,14 @@ async def test_new_thread_redraws_the_window(_mocked_loop):
 @pytest.mark.asyncio
 async def test_new_thread_clears_the_state_that_answers_for_a_thread(
         _mocked_loop):
-    """switch_to_thread's list, and switch_to_thread's reason: /copy last
-    and /claims read these, so leaving them set makes the new thread
-    answer with the old one's content."""
+    """switch_to_thread's list, and switch_to_thread's reason: /claims
+    reads these, so leaving them set makes the new thread answer with the
+    old one's content. /copy last is on the list through the transcript
+    reset, which has its own pin above."""
     from tui.app import _cmd_new
 
     app = VenastineApp("ANTHROPIC", "test-model", {})
     async with app.run_test() as pilot:
-        app._last_response = "the previous thread's answer"
         app._last_run = object()
         app._live_claims = {"c1": {"tier": "HIGH"}}
         app._tool_names["call-1"] = "read"
@@ -1840,7 +1840,6 @@ async def test_new_thread_clears_the_state_that_answers_for_a_thread(
         _cmd_new(app, "")
         await pilot.pause()
 
-        assert app._last_response == ""
         assert app._last_run is None
         assert app._live_claims == {}
         assert app._tool_names == {}
@@ -1967,7 +1966,7 @@ async def test_a_one_shot_surfaces_the_notices_its_turn_raised(
         app.query_one("#prompt").value = "/grill-me"
         await pilot.press("enter")
 
-        assert await settle(pilot, lambda: app._last_response == "grilled"), \
+        assert await settle(pilot, lambda: app._transcript.last_answer() == "grilled"), \
             "the one-shot never finished"
 
         rendered = [txt for _role, txt in app._transcript._entries
@@ -2055,7 +2054,7 @@ async def test_the_one_shot_never_adds_the_memories_tier(
     async with app.run_test() as pilot:
         app.query_one("#prompt").value = "/grill-me"
         await pilot.press("enter")
-        assert await settle(pilot, lambda: app._last_response == "grilled"), \
+        assert await settle(pilot, lambda: app._transcript.last_answer() == "grilled"), \
             "/grill-me never ran"
 
     assert not mem_calls, \
@@ -2436,7 +2435,7 @@ async def test_the_one_shot_answer_reloads_the_live_memory(
         app.query_one("#prompt").value = "/grill-me"
         await pilot.press("enter")
         assert await settle(pilot,
-                            lambda: app._last_response == "grilled")
+                            lambda: app._transcript.last_answer() == "grilled")
 
         assert app.memory is not before, "the live memory was never reloaded"
         assert app.memory.thread_id == before.thread_id

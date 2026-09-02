@@ -58,7 +58,7 @@ from core.loop import (
     with_goal, with_refs, with_memories, with_todos,
 )
 from core.memory import ConversationMemory
-from core.replay import last_assistant_text, replay_entries
+from core.replay import replay_entries
 # Module scope, not inside _cmd_research: _split_research_flags needs the
 # sentinel too, and two shells comparing against two different object()
 # instances would look identical and behave differently.
@@ -405,15 +405,14 @@ class VenastineApp(App):
         # new session starts clean. A LIST, not a set: activation order is
         # the order the bodies are pinned in.
         self.active_skills: list = []
-        # `_last_response` is the most
-        # recent model answer by any route (streamed turn, one-shot,
-        # §26. What /copy and /claims read. `_last_response` is the most
-        # recent model answer by any route (streamed turn, one-shot,
-        # research report); `_last_run` is the finished PipelineRun, which
-        # carries the claims with their full metadata; `_live_claims` is
-        # the partial picture assembled from events while a run is still
-        # going, so /claims answers during a run rather than only after.
-        self._last_response: str = ""
+        # §26. What /claims reads. `_last_run` is the finished
+        # PipelineRun, which carries the claims with their full metadata;
+        # `_live_claims` is the partial picture assembled from events
+        # while a run is still going, so /claims answers during a run
+        # rather than only after. The last ANSWER is deliberately not
+        # here: /copy last reads Transcript.last_answer(), because a
+        # field beside the entry log is a second writer that has to be
+        # kept in step and was not.
         self._last_run = None
         self._live_claims: dict = {}
         # Chat-mode tool_call id -> name, so a failed tool_result can be
@@ -1135,9 +1134,10 @@ class VenastineApp(App):
             self._render_notice(notice)
         # write_answer, not write(): a one-shot answer is a model answer,
         # and rendering it as a bare row left it unlabelled, uncoloured,
-        # outside the entry log and therefore invisible to /copy.
+        # outside the entry log and therefore invisible to /copy. That is
+        # also all this path has to do for /copy last now -- the entry IS
+        # the record.
         self._transcript.write_answer(message.text or "")
-        self._last_response = message.text or ""
 
     def refresh_usage_line(self) -> None:
         """#4: repaint the sidebar usage line from thread state.
@@ -1746,11 +1746,14 @@ class VenastineApp(App):
         # ends mid-reasoning (a stop condition, an error) still gets its
         # closing delimiter and drops the indicator.
         self._end_thinking()
-        # flush_stream returns what it committed (§26), so /copy tracks the
-        # last answer without a second buffer shadowing the transcript's.
-        flushed = self._transcript.flush_stream()
-        if flushed:
-            self._last_response = flushed
+        # Committing what is left of the span, and nothing else. This used
+        # to capture flush_stream()'s return into `_last_response` for
+        # /copy -- which never fired, because the terminal `final_response`
+        # event in on_loop_event_message has already flushed by the time
+        # this runs and a second flush returns "". The entry log is the
+        # record now (Transcript.last_answer), so there is no second buffer
+        # to keep in step and no flush site that has to remember to.
+        self._transcript.flush_stream()
         self._raven.resume_animation()
         self._raven.state = ravens.IDLE
         if message.error is not None:
@@ -1842,7 +1845,6 @@ class VenastineApp(App):
             return
         run = message.run
         self._last_run = run
-        self._last_response = run.final_report or ""
         # §22: the trace is NOT re-printed here. Every line already
         # arrived as a trace_line event and was written as it happened;
         # dumping run.trace again would print the whole run twice.
@@ -1957,10 +1959,11 @@ class VenastineApp(App):
         # survived a thread switch, so /claims or ctrl+l after a resume
         # showed the PREVIOUS thread's research run under the new
         # thread's id. Cleared before the replay, so a failure below
-        # cannot leave stale state pointing at the wrong thread.
+        # cannot leave stale state pointing at the wrong thread. The last
+        # ANSWER is on this list by a different route now: it lives in the
+        # transcript's entry log, which `reset()` below drops.
         self._last_run = None
         self._live_claims = {}
-        self._last_response = ""
         self._tool_names.clear()
         self._file_calls.clear()
         # CLEAR, then replay. Swapping memory without clearing left the
@@ -2012,7 +2015,6 @@ class VenastineApp(App):
             else:
                 self._transcript.write_role(role, text)
         if entries:
-            self._last_response = last_assistant_text(entries)
             noun = "entry" if len(entries) == 1 else "entries"
             self._transcript.write_system(
                 f"— end of {len(entries)} replayed {noun} —")
@@ -2615,11 +2617,12 @@ def _cmd_new(app: VenastineApp, args: str) -> None:
     app.refresh_goal_banner()
     app.refresh_todo_panel()
     # switch_to_thread's list, for switch_to_thread's reasons: `/claims`
-    # and `/copy last` read these, and a stale panel pointing at the
-    # wrong thread is wrong where a blank one is merely unhelpful.
+    # reads these, and a stale panel pointing at the wrong thread is
+    # wrong where a blank one is merely unhelpful. `/copy last` is on the
+    # same list through `_transcript.reset()` below, which drops the entry
+    # log it reads.
     app._last_run = None
     app._live_claims = {}
-    app._last_response = ""
     app._tool_names.clear()
     app._file_calls.clear()
     # State first, then the screen, then anything written -- so a
@@ -3069,7 +3072,9 @@ def _parse_copy_args(args: str):
 def _copy_payload(app: VenastineApp, target: str):
     """(text, description), with text None when there is nothing."""
     if target == "last":
-        return (app._last_response or None), "the last response"
+        # From the transcript's entry log, not from a field beside it --
+        # see Transcript.last_answer for what the field got wrong.
+        return (app._transcript.last_answer() or None), "the last response"
     if target == "report":
         run = app._last_run
         return ((run.final_report if run and run.final_report else None),

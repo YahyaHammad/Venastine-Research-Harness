@@ -42,8 +42,9 @@ from core.reasoning import orchestrator
 # exist in two copies. These tests moved with it rather than being
 # duplicated, so there is still exactly one place that ordering is pinned.
 from safety import policy_enforcement
-from tests.conftest import (drain, make_model_response, pass_stream,
-                            run_pass, well_shaped)
+from tests.conftest import (drain, make_model_response,
+                            make_stream_sequence, pass_stream, run_pass,
+                            settle, well_shaped)
 from tests.test_orchestrator import _build_pass_mock, _clean_pipeline_payloads
 
 
@@ -727,7 +728,9 @@ async def test_copy_sends_the_last_response_to_the_clipboard(mocker):
     async with app.run_test() as pilot:
         await pilot.pause()
         copied = mocker.patch.object(type(app), "copy_to_clipboard")
-        app._last_response = "the answer worth keeping"
+        # Through the transcript, which is where /copy last reads from --
+        # setting a field beside it is what let the real bug hide.
+        app._transcript.write_answer("the answer worth keeping")
 
         app.query_one("#prompt").value = "/copy"
         await pilot.press("enter")
@@ -735,6 +738,90 @@ async def test_copy_sends_the_last_response_to_the_clipboard(mocker):
 
     copied.assert_called_once()
     assert copied.call_args.args[0] == "the answer worth keeping"
+
+
+@pytest.mark.asyncio
+async def test_copy_last_is_the_answer_the_turn_just_produced(mocker):
+    """Batch 48. The test every /copy last test above should have been.
+
+    Each of them arranged the answer by hand -- `app._last_response =
+    "..."` -- which proves the payload branch and nothing about how that
+    value got there. It never did: on_loop_event_message flushed the
+    stream at the terminal `final_response` event and threw the return
+    value away, so on_turn_finished's flush found the span already closed,
+    got "", and left the field at whatever it held. A fresh session
+    therefore reported "Nothing to copy" after a perfectly good answer.
+
+    So this one runs a REAL turn through the loop and asks the command for
+    it. Nothing is assigned; the only route from the model to the
+    clipboard is the one the app actually uses.
+    """
+    from tui.app import VenastineApp
+
+    mocker.patch("core.loop.api_initialization", return_value=object())
+    mocker.patch("core.loop.call_model_stream",
+                 side_effect=make_stream_sequence(
+                     make_model_response(text="the answer worth keeping")))
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        copied = mocker.patch.object(type(app), "copy_to_clipboard")
+        app.query_one("#prompt").value = "say something"
+        await pilot.press("enter")
+        assert await settle(pilot, lambda: not app._busy), "the turn never ended"
+
+        app.query_one("#prompt").value = "/copy"
+        await pilot.press("enter")
+        await pilot.pause()
+
+    copied.assert_called_once()
+    assert copied.call_args.args[0].strip() == "the answer worth keeping"
+
+
+@pytest.mark.asyncio
+async def test_copy_last_after_a_resume_is_the_new_answer_not_the_replayed_one(
+        mocker):
+    """Batch 48, the shape it was reported in.
+
+    A thread with one exchange, left and reopened: the replay seeded the
+    per-thread state with that thread's newest answer, and because no
+    later turn could update it, every /copy last for the rest of the
+    session handed back the answer from BEFORE the close -- in a
+    one-exchange thread, the first message.
+
+    The replayed state is arranged through the two calls switch_to_thread's
+    replay loop actually makes (write_user / write_answer per entry) rather
+    than through storage, because the fake sqlmodel cannot answer a
+    history query for an existing thread. That the REPLAY reaches
+    last_answer() is pinned where the replay is, on the real path:
+    test_thread_legibility's AC4 resume test. This is the other half --
+    that a real turn afterwards supersedes it.
+    """
+    from tui.app import VenastineApp
+
+    mocker.patch("core.loop.api_initialization", return_value=object())
+    mocker.patch("core.loop.call_model_stream",
+                 side_effect=make_stream_sequence(
+                     make_model_response(text="the answer from after it")))
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        copied = mocker.patch.object(type(app), "copy_to_clipboard")
+        app._transcript.write_user("what did we decide?")
+        app._transcript.write_answer("the answer from before the close")
+        app._transcript.write_system("— end of 2 replayed entries —")
+        assert app._transcript.last_answer() == "the answer from before the close"
+
+        app.query_one("#prompt").value = "and now?"
+        await pilot.press("enter")
+        assert await settle(pilot, lambda: not app._busy), "the turn never ended"
+
+        app.query_one("#prompt").value = "/copy last"
+        await pilot.press("enter")
+        await pilot.pause()
+
+    copied.assert_called_once()
+    assert copied.call_args.args[0].strip() == "the answer from after it"
 
 
 @pytest.mark.asyncio
@@ -749,7 +836,7 @@ async def test_copy_to_a_file_writes_what_it_says_it_wrote(mocker, tmp_path):
     async with app.run_test() as pilot:
         await pilot.pause()
         copied = mocker.patch.object(type(app), "copy_to_clipboard")
-        app._last_response = "written, not sent"
+        app._transcript.write_answer("written, not sent")
 
         app.query_one("#prompt").value = f"/copy last --file {target}"
         await pilot.press("enter")
@@ -795,7 +882,7 @@ async def test_an_unknown_copy_option_is_an_error_not_a_silent_write(mocker):
         errors = []
         mocker.patch.object(type(app._transcript), "write_error",
                             lambda self, t: errors.append(t))
-        app._last_response = "text"
+        app._transcript.write_answer("text")
 
         app.query_one("#prompt").value = "/copy last --fiel out.txt"
         await pilot.press("enter")
@@ -878,7 +965,7 @@ async def test_a_finished_run_advertises_its_claims():
         await pilot.pause()
 
         assert app._last_run is run
-        assert app._last_response == "the report"
+        assert app._transcript.last_answer() == "the report"
     assert any("ctrl+l" in line and "1 claim" in line for line in written)
 
 

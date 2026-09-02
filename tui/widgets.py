@@ -1145,6 +1145,35 @@ class Transcript(RichLog):
         for role, text in self._entries:
             self._render_entry(role, text)
 
+    def last_answer(self) -> str:
+        """The most recent answer in this session, or "" (for /copy last).
+
+        DERIVED, not tracked. `_last_response` used to shadow this list
+        from the app, fed by whichever flush site happened to keep
+        flush_stream()'s return value -- and the one that mattered did
+        not: on_loop_event_message flushes at the terminal `final_response`
+        event and discards, so the flush in on_turn_finished found the
+        span already closed and returned "" on every streamed turn. The
+        field then held whatever had last been assigned by another route
+        (a replayed thread's newest answer, a research report) or nothing
+        at all, which is what /copy last handed back.
+
+        Every route already writes its answer here -- a streamed span as
+        one entry updated in place, a one-shot and a report through
+        write_answer, a replay through write_answer per entry -- so
+        reading the entry log is the same answer with no second writer to
+        keep in step. `reset()` is what clears it, which is the per-thread
+        reset §27 AC4 and §43 RM2 already call.
+
+        An empty string when the last answer WAS empty, matching what the
+        field did: /copy then says there is nothing to copy rather than
+        skipping back to an older answer the session has moved past.
+        """
+        for role, text in reversed(self._entries):
+            if role == "assistant":
+                return text
+        return ""
+
     def as_text(self) -> str:
         """The session as plain text, for /copy all."""
         # `diff` is deliberately absent: the canonical block already
