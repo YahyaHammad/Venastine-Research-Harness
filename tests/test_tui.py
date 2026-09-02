@@ -3226,9 +3226,20 @@ async def test_every_modal_keeps_its_decision_on_screen(
 
 
 @pytest.mark.asyncio
-async def test_a_bounded_box_reserves_its_bound_not_its_content():
+@pytest.mark.parametrize("box_id,short,long", [
+    ("#permission-params-box", {"q": "x"}, {"q": "x" * 900}),
+    ("#permission-command-box", {"q": "x"}, {"q": "x"}),
+], ids=["payload", "command"])
+async def test_a_bounded_box_reserves_its_bound_not_its_content(
+        box_id, short, long):
     """Batch 49. The toolkit fact the whole fix rests on, pinned on its
     own so a survivor is legible when the sheet above goes red.
+
+    BOTH boxes, because a definite height on the command block survived
+    the first mutation pass: it reserves four rows for a one-line command
+    and the dialog is still inside itself, so nothing failed -- the waste
+    is real and invisible, and the next person to copy the spelling
+    copies it to the payload box where it is not.
 
     §46 bounded the payload with a DEFINITE `height`, having measured a
     scrollable container at `height: auto` rendering zero rows. The zero
@@ -3244,25 +3255,40 @@ async def test_a_bounded_box_reserves_its_bound_not_its_content():
     apart -- and it STOPS at the bound for a long one, with every hidden
     row still scrollable.
     """
+    # The command box only exists when a tool declares a headline, so the
+    # two cases differ in what makes the block long: the payload grows
+    # with `params`, the pinned command with the command itself.
+    headline = "echo hi" if box_id == "#permission-command-box" else None
+    long_headline = ("docker run --rm -v /workspace:/workspace -w "
+                     "/workspace --env-file /workspace/.env --network none "
+                     "python:3.13 bash -c 'pip install -q ruff pytest && "
+                     "ruff check . --output-format concise && python -m "
+                     "pytest -q tests/ -x --tb=short --maxfail=1 && echo "
+                     "the-command-is-long-enough-to-need-five-rows-here'")
+    if headline is None:
+        long_headline = None
+
     app = VenastineApp("ANTHROPIC", "test-model", {})
     async with app.run_test(size=(80, 24)) as pilot:
         app.push_screen(
-            PermissionScreen("web_search", {"q": "x"}, None, "short"),
+            PermissionScreen("web_search", short, None, "short", headline),
             lambda _a: None)
         await pilot.pause()
         await pilot.pause()
-        small = app.screen.query_one("#permission-params-box")
-        small_rows, small_content = small.region.height, small.virtual_size.height
+        small = app.screen.query_one(box_id)
+        small_rows = small.region.height
+        small_content = small.virtual_size.height
         small_dialog = app.screen.query_one("#permission-dialog").region.height
         app.screen.dismiss(None)
         await pilot.pause()
 
         app.push_screen(
-            PermissionScreen("web_search", {"q": "x" * 900}, None, "short"),
+            PermissionScreen("web_search", long, None, "short",
+                             long_headline or headline),
             lambda _a: None)
         await pilot.pause()
         await pilot.pause()
-        big = app.screen.query_one("#permission-params-box")
+        big = app.screen.query_one(box_id)
         rows, content, reachable = (big.region.height,
                                     big.virtual_size.height, big.max_scroll_y)
         big_dialog = app.screen.query_one("#permission-dialog").region.height
@@ -3274,8 +3300,8 @@ async def test_a_bounded_box_reserves_its_bound_not_its_content():
         "the box did not shrink to a short payload, so it is carrying a "
         "definite height again -- which is the spelling that reserves rows "
         "its parent then cannot give the buttons")
-    assert small_rows < bound and small_dialog < big_dialog, (
-        "this fixture no longer distinguishes a short payload from a long "
+    assert small_rows < bound and small_dialog <= big_dialog, (
+        "this fixture no longer distinguishes a short block from a long "
         "one, so it cannot test the shrinking")
     assert rows == bound, f"a {content}-row payload drew {rows} rows, not {bound}"
     assert rows + reachable == content, (
@@ -3358,6 +3384,50 @@ async def test_a_consent_surface_opens_focused_on_the_declining_answer(
         assert focused is not None and focused.id == expected, (
             f"{name} opens focused on {getattr(focused, 'id', None)!r}, so "
             f"Enter answers with that. It must be {expected!r}.")
+
+
+@pytest.mark.asyncio
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bar_id,make_screen", [
+    ("#permission-buttons",
+     lambda: PermissionScreen("shell", {"c": "x"}, None, "r", "echo hi")),
+    ("#question-buttons",
+     lambda: QuestionScreen("Which?", ["a", "b"], False, True)),
+], ids=["permission", "question"])
+async def test_the_decision_bar_is_centred_in_its_dialog(bar_id, make_screen):
+    """Batch 49, and the second half of what was reported.
+
+    The dialog was centred and its contents were not. Allow and Deny were
+    two cells of a two-column Grid, and a Grid places a widget at the LEFT
+    of its cell -- so a 16-wide Allow sat flush against the padding while
+    a 16-wide Deny left ~22 dead columns beside it, and the modal read as
+    though its right border were too far out. Measured before the fix at
+    x=8 and x=51 in a region ending at 91.
+
+    The assertion is on the GAPS rather than on the CSS, because `align:
+    center middle` is one of several spellings that would satisfy it and
+    none of them is the claim -- the claim is that the two answers sit
+    symmetrically in the box that asks the question.
+    """
+    from textual.widgets import Button
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test(size=(90, 30)) as pilot:
+        app.push_screen(make_screen(), lambda _a: None)
+        await pilot.pause()
+        await pilot.pause()
+        bar = app.screen.query_one(bar_id)
+        buttons = sorted(bar.query(Button), key=lambda b: b.region.x)
+        region = bar.content_region
+        left = buttons[0].region.x - region.x
+        right = region.right - (buttons[-1].region.x + buttons[-1].region.width)
+        app.screen.dismiss(None)
+        await pilot.pause()
+
+    assert abs(left - right) <= 1, (
+        f"{bar_id} has {left} columns to the left of its first button and "
+        f"{right} to the right of its last, so the answers are not centred "
+        f"in the dialog that is centred around them")
 
 
 @pytest.mark.asyncio
@@ -3460,7 +3530,11 @@ async def test_an_option_at_the_cap_still_fits_two_lines():
     words = " ".join(f"workspace_directory_{i}" for i in range(8))[:cap]
     prose = ("Create the virtual environment inside the workspace directory "
              "and leave it there after the task finishes so it is reused")[:cap]
-    options = [words, prose, "x" * cap, words]
+    # DIFFERENT lengths, which is the reported symptom: at `width: auto`
+    # four options of the same length are four buttons of the same width,
+    # so a fixture built from equal-length strings cannot fail. Two long,
+    # two short.
+    options = [words, prose, "x" * cap, "leave it"]
 
     app = VenastineApp("ANTHROPIC", "test-model", {})
     async with app.run_test(size=(80, 24)) as pilot:
@@ -3472,6 +3546,11 @@ async def test_an_option_at_the_cap_still_fits_two_lines():
                    for i in range(len(options))]
         rows = [b.region.height - 2 for b in buttons]
         widths = {b.region.width for b in buttons}
+        # scrollable_content_region, not content_region: the scrollbar
+        # takes two columns from what the children actually get, and a
+        # full-width button is as wide as what is left.
+        available = app.screen.query_one(
+            "#question-options").scrollable_content_region.width
         app.screen.dismiss(None)
         await pilot.pause()
 
@@ -3479,11 +3558,13 @@ async def test_an_option_at_the_cap_still_fits_two_lines():
         f"an option of {cap} characters wrapped to {rows} content rows, so "
         f"MAX_OPTION_CHARS is claiming a bound the modal does not have -- "
         f"lower it, or widen #question-dialog")
-    assert len(widths) == 1, (
-        f"the option buttons are {sorted(widths)} columns wide. They were "
-        f"`width: auto` until batch 49, which is what made a long one "
-        f"truncate and a set of them ragged; one width is the fix and the "
-        f"same width for all of them is how it is visible")
+    assert widths == {available}, (
+        f"the option buttons are {sorted(widths)} columns wide inside a "
+        f"{available}-column region. They were `width: auto` until batch 49, "
+        f"which is what made a long one truncate at the dialog edge and a "
+        f"set of them ragged -- so the assertion is that each one FILLS the "
+        f"region, not merely that they agree with each other, which they "
+        f"also did when they were all as wide as their labels")
 
 # ---------------------------------------------------------------------------
 # ---- §46 (EP1/EP3): the modal's subject must be ON SCREEN -----------------

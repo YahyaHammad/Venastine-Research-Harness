@@ -412,6 +412,39 @@ class TestTheTuiModal:
         assert answer["value"]["options"] == ["blue"]
 
     @pytest.mark.asyncio
+    async def test_enter_in_the_answer_box_sends_what_was_typed(self):
+        """Batch 49. Textual posts `Input.Submitted` and QuestionScreen
+        handled nothing, so the one affordance whose entire purpose is
+        being typed into had no way to send what was typed -- and the
+        Answer button it needed instead was, until this batch, the child
+        clipped off the bottom of the dialog. Tab still reached it, which
+        is why this was invisible rather than fatal.
+
+        Asserted through the same dict the button produces, because the
+        handler routes through the same `_answer` -- one shape of answer,
+        one place that builds it.
+        """
+        from tests.conftest import settle
+        from tui.app import VenastineApp
+        from tui.screens import QuestionScreen
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            answer = self._ask_on_a_thread(
+                app, {"question": "where?", "options": ["red", "blue"]})
+            assert await settle(
+                pilot, lambda: isinstance(app.screen, QuestionScreen)), \
+                "the question modal never opened"
+            app.screen.query_one("#question-text").value = "somewhere else"
+            app.screen.query_one("#question-text").focus()
+            await pilot.pause()
+            await pilot.press("enter")
+            assert await settle(pilot, lambda: "value" in answer), \
+                "Enter in the answer box sent nothing"
+        assert answer["value"]["text"] == "somewhere else"
+        assert answer["value"]["options"] == []
+
+    @pytest.mark.asyncio
     async def test_escape_is_no_answer_not_a_deferral(self):
         """The distinction the Discuss button exists for. Escape must not
         decode into the thing the user could have chosen deliberately."""
