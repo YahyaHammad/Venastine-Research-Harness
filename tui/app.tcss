@@ -94,19 +94,19 @@ ReviewScreen {
 }
 
 #permission-dialog {
-    grid-size: 2 3;
-    grid-gutter: 1 2;
-    /* Every row `auto` (§46, EP1). The middle one was `1fr`, which
-       resolves to ZERO inside a `height: auto` container -- so
-       #permission-params rendered at height 0 AND virtual_size 0, and
-       the notice, the agent's stated reason and the whole payload were
-       absent from every permission modal this app has ever shown. Not
-       clipped and scrollable: absent, with nothing to scroll to.
-       Measured against HEAD in a worktree, not inferred.
-       What bounds a long payload now is a definite height on the
-       ScrollBox, which is the only spelling that both renders and
-       scrolls -- see #permission-params-box. */
-    grid-rows: auto auto auto;
+    /* A VERTICAL, not a grid (batch 49). §46 left this a two-column grid
+       in which every child carried `column-span: 2`, so the second column
+       held nothing but the Deny button -- and `grid-size` being static is
+       the only reason the `with-headline` class existed, to tell the
+       stylesheet whether the screen had composed three children or four.
+       A Vertical does not need telling, so the template somebody had to
+       keep in sync is gone rather than commented.
+       The `1fr` row EP1 removed is still not to come back: a fractional
+       row inside a `height: auto` container resolves to ZERO, and it is
+       what made the payload absent from every permission modal this app
+       had ever shown. What bounds a long payload is `max-height` on the
+       ScrollBox -- see #permission-params-box for why not a definite
+       `height`, which is what EP1 shipped and what took the buttons. */
     padding: 1 2;
     /* 90% with a cap, not a fixed 60 (§46, EP1). Width is what decides
        how many rows the notice and the reason cost, and those rows are
@@ -117,27 +117,23 @@ ReviewScreen {
     width: 90%;
     max-width: 96;
     height: auto;
-    max-height: 20;
+    /* 22, which is what the deleted `.with-headline` block used: the
+       four rows the pinned command takes are the reason that block
+       existed, and with one template the taller shape sets the cap.
+       Still inside the 24-row floor #112 pins, and `height: auto` means
+       a short approval is nowhere near it -- `web_search` measures 14. */
+    max-height: 22;
     border: thick $warning;
     background: $surface;
 }
 
-/* Four rows instead of three, when a tool declared a headline (EP1).
-   ConfirmScreen and ProjectKindScreen reuse #permission-dialog with
-   three children and keep the rule above. */
-#permission-dialog.with-headline {
-    grid-size: 2 4;
-    grid-rows: auto auto auto auto;
-    /* Measured at 22 rows with the row heights below, inside the 24-row
-       floor test_every_modal_is_centred_bounded_and_styled pins. Change
-       either box height and re-run that test rather than re-deriving
-       the sum. */
-    max-height: 22;
-}
-
+/* The blank row between blocks was `grid-gutter: 1 2` and a Vertical
+   has no gutter, so it is a margin now. It is not decoration: §46 pinned
+   the command OUTSIDE the payload precisely so the two read as separate
+   claims about the call, and flush against each other they do not. */
 #permission-title {
-    column-span: 2;
     text-style: bold;
+    margin-bottom: 1;
 }
 
 /* The pinned subject of the question (§46, EP1), and the split
@@ -149,36 +145,70 @@ ReviewScreen {
    cannot eat the modal. Deliberately not $text-muted -- this is the
    one thing on the screen the reader must actually read. */
 #permission-command-box {
-    column-span: 2;
-    height: 4;
+    height: auto;
+    max-height: 4;
+    margin-bottom: 1;
 }
 
 #permission-command {
     text-style: bold;
 }
 
-/* DEFINITE heights, not auto with a max (EP3). A ScrollBox asked for
-   `height: auto` resolves to zero rows, and a Static asked for
-   `max-height` reports no content past the bound -- so the two
-   spellings that read as "grow to fit, then scroll" are the two that
-   render nothing and truncate silently. */
+/* `auto` WITH a `max-height`, not a definite height (batch 49,
+   amending EP3). EP3 got the Static half right -- a Static given
+   `max-height` reports no content past the bound, so its hidden rows
+   are gone rather than below the fold -- and the ScrollBox half wrong.
+   A scrollable container asked for `height: auto` does NOT resolve to
+   zero; EP1's `1fr` ROW did, and the box was measured inside one. With
+   the row `auto`, a DEFINITE height bounds what the box draws and not
+   what its parent reserves, so the row kept growing with the payload
+   and pushed the decision bar past the dialog's own `max-height`, where
+   it was clipped away -- on nine of fourteen modal shapes, `shell`'s
+   among them. `auto` with a `max-height` reports the bound upward, and
+   still shrinks to a two-line payload, which a definite height never
+   did. Do not "restore" one:
+   test_a_bounded_box_reserves_its_bound_not_its_content fails. */
+/* 7 rows, and NO margin below it -- the arithmetic is the point.
+   A dialog capped at 22 has 18 rows inside it, and the title, its
+   margin, the pinned command, its margin and the decision bar claim 11
+   of them whether or not the payload wants more. Leaving the last
+   blank row off buys the slack a title that wraps to two lines needs,
+   which is the one length here that nothing bounds.
+   Everything past row 7 is scrollable, and on the shell modal every
+   line of it also appears above. */
 #permission-params-box {
-    column-span: 2;
-    height: 9;
+    height: auto;
+    max-height: 7;
 }
 
 #permission-params {
-    column-span: 2;
     height: auto;
     color: $text-muted;
 }
 
-/* Four rows go to the pinned command, so the payload keeps five. It
-   is the block that can afford them: everything in it appears
-   elsewhere on the screen already, and unlike before, what does not
-   fit can now be scrolled to. */
-#permission-dialog.with-headline #permission-params-box {
-    height: 5;
+/* THE DECISION BAR (batch 49). One rule for every consent surface,
+   because the defect it answers was one defect on nine of them: the
+   buttons were the LAST children of a dialog whose body could outgrow
+   it, so they were what fell off. In a bar they are one child, and the
+   bounded bodies above keep the sum inside the dialog.
+   Centred rather than stretched: the dialog was always centred and its
+   contents were not -- Allow sat flush against the left padding and a
+   16-wide Deny left ~22 dead columns beside it. Filling the columns
+   instead would have made the permissive answer a target half the width
+   of the modal. `height: auto` so a bar costs exactly its buttons. */
+#permission-buttons,
+#grant-buttons,
+#review-buttons,
+#question-buttons {
+    height: auto;
+    align: center middle;
+}
+
+#permission-buttons Button,
+#grant-buttons Button,
+#review-buttons Button,
+#question-buttons Button {
+    margin: 0 1;
 }
 
 ThreadPickerScreen {
@@ -211,10 +241,12 @@ ClaimsScreen {
     padding-bottom: 1;
 }
 
-#claims-body {
+/* The Static keeps the colour and the box keeps the bound (batch 49);
+   `max-height` on the Static itself was EP3's truncation-without-scroll,
+   on the one screen that exists to show every claim. */
+#claims-body-box {
     height: auto;
     max-height: 14;
-    overflow-y: auto;
 }
 
 /* §25 research grant picker. Warning-bordered like the permission modal
@@ -239,9 +271,13 @@ ClaimsScreen {
     color: $text-muted;
 }
 
+/* 8, not 14 (batch 49). A dialog has 18 rows inside it on the 24-row
+   floor, and the title, the two-sentence help, the bar and this list
+   have to share them -- at 14 the confirm button was off the bottom
+   with twenty tools offered. */
 #grant-list {
     height: auto;
-    max-height: 14;
+    max-height: 8;
     margin-bottom: 1;
 }
 
@@ -290,10 +326,38 @@ QuestionScreen {
     width: 100%;
 }
 
-#question-body {
+#question-body-box {
+    height: auto;
+    max-height: 4;
     padding: 1 0;
     width: 100%;
-    overflow-y: auto;
+}
+
+#question-body {
+    height: auto;
+    width: 100%;
+}
+
+/* The single-select options. Bounded like the SelectionList the
+   multi-select branch uses, and for the same reason -- four options of
+   two lines each is 16 rows, and the dialog has 18. */
+#question-options {
+    height: auto;
+    max-height: 6;
+    width: 100%;
+    margin-bottom: 1;
+}
+
+/* FIXED WIDTH, and it is what stops the truncation (batch 49). At
+   Button's default `width: auto` an option is as wide as its label
+   unwrapped -- measured at 119 columns inside a 60-column dialog, so a
+   long option was CUT at the dialog edge, and three options of
+   different lengths gave three different right edges. At `width: 100%`
+   the same label WRAPS to two centred lines and every option is the
+   same size. Nothing is truncated anywhere: ask_user refuses an option
+   too long to render rather than shortening it. */
+#question-options Button {
+    width: 100%;
 }
 
 #question-help {
@@ -304,16 +368,18 @@ QuestionScreen {
 
 #question-list {
     height: auto;
-    max-height: 8;
+    max-height: 6;
     margin-bottom: 1;
 }
 
 /* The sign-off's list is capped like the grant list it is modelled on:
    its length is the subagent's gated tool set, and uncapped it pushed
-   the decision buttons off-screen (#112). */
+   the decision buttons off-screen (#112). Capped at 14 it still did --
+   #112 bounded the list and nothing bounded the SUM, which is the
+   defect batch 49 answers. */
 #signoff-list {
     height: auto;
-    max-height: 14;
+    max-height: 8;
     margin-bottom: 1;
 }
 
@@ -336,10 +402,13 @@ QuestionScreen {
     text-style: bold;
 }
 
+#review-body-box {
+    height: auto;
+    max-height: 8;
+}
+
 #review-body {
     height: auto;
-    max-height: 10;
-    overflow-y: auto;
 }
 
 /* §38's collapsed thinking line. `height: auto` and hidden until a span

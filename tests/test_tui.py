@@ -35,7 +35,7 @@ import config
 from tests.conftest import (make_model_response, make_stream_sequence,
                             pump, settle)
 from tui.app import VenastineApp
-from tui.screens import PermissionScreen
+from tui.screens import PermissionScreen, ScrollBox
 
 
 @pytest.mark.asyncio
@@ -3070,6 +3070,216 @@ async def test_every_modal_actually_draws_its_body(
         "scrolled out of it")
 
 
+
+# ---------------------------------------------------------------------------
+# ---- batch 49: the same screens, with content that OVERFLOWS them ---------
+# ---------------------------------------------------------------------------
+#
+# _modal_cases() above is every screen at its SMALLEST: "Body text.", one
+# claim, two short options. Every one of them fit, so three parametrised
+# tests were green while nine of these shapes were losing buttons off the
+# bottom -- the domain was too small to fail, which is the same trap the
+# batch 15 citation check hit from the other side.
+#
+# Content here is sized from what these screens actually receive: a shell
+# notice and a stated reason are two or three wrapped lines each, /init
+# confirms a list of files, a sign-off offers a subagent's whole gated set,
+# and an ask_user option is whatever the model wrote.
+
+_LONG_OPTION = ("Create `/workspace/.venv` and leave it in place after the "
+                "task so the next run does not have to build it again")
+_NOTICE = ("SANDBOXED: not a read-only command, so it needs a sandbox. Runs "
+           "in a Docker container, workspace mounted at /workspace.")
+_REASON = ("Checking the sandbox mount table to answer the user question "
+           "about whether the host workspace path is visible from inside "
+           "the container.")
+
+
+def _overflowing_modal_cases():
+    """The same constructors, given enough to outgrow the dialog."""
+    from tui.screens import (
+        ClaimsScreen, ConfirmScreen, GrantPickerScreen, QuestionScreen,
+        ReviewScreen, SubagentSignoffScreen,
+    )
+
+    claim = {"id": "c001", "text": "Water boils at 100C.",
+             "confidence_tier": "HIGH"}
+    return [
+        ("permission-shell-long",
+         lambda: PermissionScreen(
+             "shell", {"command": "cat /proc/self/mountinfo",
+                       "rationale": _REASON},
+             _NOTICE, _REASON, "cat /proc/self/mountinfo"),
+         "#permission-dialog"),
+        ("permission-long-payload",
+         lambda: PermissionScreen("remember", {"text": "x" * 400,
+                                               "rationale": _REASON},
+                                  _NOTICE, _REASON, None),
+         "#permission-dialog"),
+        ("grant-long",
+         lambda: GrantPickerScreen([(f"tool_{i}", "does a thing")
+                                    for i in range(20)]),
+         "#grant-dialog"),
+        ("signoff-long",
+         lambda: SubagentSignoffScreen("researcher",
+                                       [f"tool_{i}" for i in range(20)]),
+         "#grant-dialog"),
+        ("question-single-long",
+         lambda: QuestionScreen(
+             "Where should the venv be created, and what should I do with "
+             "it after the task is finished and the sandbox is torn down?",
+             [_LONG_OPTION, _LONG_OPTION[:60], _LONG_OPTION[:40],
+              _LONG_OPTION[:90]], False, True),
+         "#question-dialog"),
+        ("question-multi-long",
+         lambda: QuestionScreen("Which of these should we do?",
+                                [_LONG_OPTION, _LONG_OPTION[:60],
+                                 _LONG_OPTION[:40]], True, True),
+         "#question-dialog"),
+        ("review-long",
+         lambda: ReviewScreen({"kind": "text", "reason": "x " * 120,
+                               "proposed": "y " * 120, "severity": "high"},
+                              1, 3),
+         "#review-dialog"),
+        ("claims-long",
+         lambda: ClaimsScreen([dict(claim, id=f"c{i:03d}")
+                               for i in range(20)]),
+         "#claims-dialog"),
+        ("confirm-long",
+         lambda: ConfirmScreen("Write these files?",
+                               "\n".join(f"docs/file_{i}.md"
+                                          for i in range(30))),
+         "#permission-dialog"),
+    ]
+
+
+_DECISION_CASES = _modal_cases() + _overflowing_modal_cases()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(80, 24), (100, 30), (160, 45)],
+                         ids=["floor", "medium", "large"])
+@pytest.mark.parametrize("name,make_screen,dialog_id", _DECISION_CASES,
+                         ids=[c[0] for c in _DECISION_CASES])
+async def test_every_modal_keeps_its_decision_on_screen(
+        name, make_screen, dialog_id, size):
+    """Batch 49, and the assertion this file did not have.
+
+    #112 pinned where the DIALOG sits and §46 pinned that its body draws
+    rows. Neither could see the buttons, and the buttons are the only
+    part of a consent surface that does anything -- so `shell`'s approval
+    modal shipped with no Allow and no Deny at all, and the user who
+    reported it was looking at an empty band where they had been.
+
+    One defect, nine shapes. A dialog is `height: auto` with a
+    `max-height`, its body could outgrow both, and the buttons are the
+    LAST children -- so the buttons are what the clip takes. Measured
+    before the fix: `shell` and any payload over ~5 lines lost both,
+    /init's confirmation and its project-kind question lost both, the
+    grant picker lost its only confirm, the sign-off lost both, the
+    review modal lost three of four (Refine, Reject, Reject the rest --
+    every answer except Accept), and the question modal lost Answer and
+    Discuss instead.
+
+    A DECISION button must be visible without scrolling. An OPTION
+    button inside a bounded scroll region only has to be REACHABLE --
+    that is what the region is for, and conflating the two would forbid
+    the scrolling that makes four long options fit at all.
+    """
+    from textual.widgets import Button
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test(size=size) as pilot:
+        app.push_screen(make_screen(), lambda _a: None)
+        await pilot.pause()
+        await pilot.pause()
+
+        dialog = app.screen.query_one(dialog_id)
+        content = dialog.content_region
+        clipped, unreachable = [], []
+        for button in app.screen.query(Button):
+            box, node = None, button.parent
+            while node is not None and node is not dialog:
+                if isinstance(node, ScrollBox):
+                    box = node
+                    break
+                node = node.parent
+            if box is None:
+                if not content.contains_region(button.region):
+                    clipped.append(button.id)
+            elif box.virtual_size.height > box.region.height + box.max_scroll_y:
+                unreachable.append(button.id)
+        app.screen.dismiss(None)
+        await pilot.pause()
+
+    assert not clipped, (
+        f"{name} at {size[0]}x{size[1]}: {', '.join(clipped)} is outside "
+        f"the dialog it belongs to. A modal that asks a question and hides "
+        f"the answers is worse than one that never rendered -- it looks "
+        f"finished.")
+    assert not unreachable, (
+        f"{name} at {size[0]}x{size[1]}: {', '.join(unreachable)} cannot be "
+        f"scrolled to inside its own box, so it is truncated rather than "
+        f"below the fold (§46, EP3)")
+
+
+@pytest.mark.asyncio
+async def test_a_bounded_box_reserves_its_bound_not_its_content():
+    """Batch 49. The toolkit fact the whole fix rests on, pinned on its
+    own so a survivor is legible when the sheet above goes red.
+
+    §46 bounded the payload with a DEFINITE `height`, having measured a
+    scrollable container at `height: auto` rendering zero rows. The zero
+    was EP1's `1fr` ROW -- measured again with the row `auto`, `height:
+    auto` draws its content and `height: auto; max-height: N` draws N.
+
+    A definite height bounds what the box DRAWS and not what its parent
+    RESERVES, so the row kept the payload's full height and pushed the
+    decision bar out of the dialog. `auto` with a `max-height` reports
+    the bound upward instead, and the two halves of that are what this
+    asserts: it SHRINKS below the bound for a short payload -- which the
+    definite height never did, and which is what tells the two spellings
+    apart -- and it STOPS at the bound for a long one, with every hidden
+    row still scrollable.
+    """
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test(size=(80, 24)) as pilot:
+        app.push_screen(
+            PermissionScreen("web_search", {"q": "x"}, None, "short"),
+            lambda _a: None)
+        await pilot.pause()
+        await pilot.pause()
+        small = app.screen.query_one("#permission-params-box")
+        small_rows, small_content = small.region.height, small.virtual_size.height
+        small_dialog = app.screen.query_one("#permission-dialog").region.height
+        app.screen.dismiss(None)
+        await pilot.pause()
+
+        app.push_screen(
+            PermissionScreen("web_search", {"q": "x" * 900}, None, "short"),
+            lambda _a: None)
+        await pilot.pause()
+        await pilot.pause()
+        big = app.screen.query_one("#permission-params-box")
+        rows, content, reachable = (big.region.height,
+                                    big.virtual_size.height, big.max_scroll_y)
+        big_dialog = app.screen.query_one("#permission-dialog").region.height
+        bound = int(big.styles.max_height.value)
+        app.screen.dismiss(None)
+        await pilot.pause()
+
+    assert small_rows == small_content, (
+        "the box did not shrink to a short payload, so it is carrying a "
+        "definite height again -- which is the spelling that reserves rows "
+        "its parent then cannot give the buttons")
+    assert small_rows < bound and small_dialog < big_dialog, (
+        "this fixture no longer distinguishes a short payload from a long "
+        "one, so it cannot test the shrinking")
+    assert rows == bound, f"a {content}-row payload drew {rows} rows, not {bound}"
+    assert rows + reachable == content, (
+        f"{content} rows of payload, {rows} shown, {reachable} scrollable -- "
+        "the remainder is truncated, not below the fold")
+
 # ---------------------------------------------------------------------------
 # ---- §46 (EP1/EP3): the modal's subject must be ON SCREEN -----------------
 # ---------------------------------------------------------------------------
@@ -3232,7 +3442,14 @@ async def test_the_consent_surface_is_not_mouse_only():
 async def test_a_tool_with_no_headline_gets_no_pinned_block():
     """`shell` is the only tool declaring one, and every other modal --
     web_search, the MCP tools, ConfirmScreen, ProjectKindScreen -- must
-    be untouched, including its three-row grid template."""
+    be untouched.
+
+    It asserted the absence of the `with-headline` class until batch 49,
+    when the dialog stopped being a Grid and the class went with it: a
+    Grid's row count is static and a Vertical's is not, so the template
+    that had to be told how many children there were is gone. What is
+    left to assert is what that class was FOR -- that a tool declaring no
+    headline is not charged the rows one costs."""
     from tui.app import VenastineApp
     from tui.screens import PermissionScreen
 
@@ -3244,14 +3461,14 @@ async def test_a_tool_with_no_headline_gets_no_pinned_block():
         await pilot.pause()
         await pilot.pause()
         found = app.screen.query("#permission-command")
-        dialog = app.screen.query_one("#permission-dialog")
-        has_class = dialog.has_class("with-headline")
+        boxes = app.screen.query("#permission-command-box")
         app.screen.dismiss(False)
         await pilot.pause()
 
     assert len(found) == 0, "a headline-less tool grew a pinned block"
-    assert not has_class, (
-        "the four-row grid template was applied to a three-child dialog")
+    assert len(boxes) == 0, (
+        "a headline-less tool grew the container for one, which costs rows "
+        "the payload and the decision bar need")
 
 
 # ---------------------------------------------------------------------------
