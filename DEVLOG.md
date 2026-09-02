@@ -9215,6 +9215,106 @@ restores to HEAD, not to a stash.
 - `ROADMAP_v2.md` (§26 L5, amended), `AGENTS.md`, `ARCHITECTURE.md`, `README.md`,
   `tests/BREAKING_CHANGES.md`.
 
+## Batch 50 — a template for the file that cannot explain itself (2026-09-02)
+
+`.venastine/` holds project-level `settings.json` and `mcp.json`, both loaded by the
+harness, both inside the D17 trust boundary — and nothing in the repository could
+produce a starting copy of either. The schema reached a user in exactly two places:
+a table in README.md, and the startup error for typing a key wrong.
+
+The second one is the sharp edge, and it is why "just write one by hand" is worse
+advice than it sounds. `_validate_settings` **raises** on an unknown key, so
+settings.json has no comment syntax, no `$schema` line, and no way to carry a key
+that is present but switched off. The file has to be correct the first time or the
+harness stops starting in that directory.
+
+`/init` grew a third flag, independent of `--software` and `--research`. On its own
+it writes the two files, creates `agents/` and `skills/`, and makes no model call;
+named beside a kind it does both halves under one consent. `--init --project-config`
+at the CLI, refused rather than ignored without `--init` — someone who types it and
+gets an ordinary chat session has been told nothing.
+
+### The premise was false for six keys
+
+The claim a template of defaults makes is that it changes nothing until you edit it.
+That is only true for a key nobody reads by PRESENCE, so it was measured rather than
+assumed: every candidate key was written **alone** into a trusted project and the
+observable state diffed against a project with no file at all. Six of thirty-eight
+moved something:
+
+```
+default_provider          None -> 'ANTHROPIC'          _startup_pair's staleness key
+default_model             None -> 'claude-sonnet-5'          "         "
+effort                    tui_effort_named: False -> True
+compaction.trigger_tokens trigger_is_configured: False -> True
+ensemble_mode             None -> False
+research.subagent_review  None -> False
+```
+
+Each is a contract somebody wrote down, not an artefact of the probe. `_startup_pair`
+says it outright — "edit either, **add either**, or remove either and the file
+re-asserts itself" — so scaffolding the provider/model pair discards a model chosen
+with `/model` in that project. `_effort_named` exists to tell a level a human chose
+from one derived from a default, and its comment says a default-derived level must
+not fire the mount-time probe, or every launch warns on models with no effort table
+(#138's healthy-mount silence). `_trigger_is_configured()` asks
+`"trigger_tokens" in ...`, so writing the default disables the window-derived trigger
+— the nastiest of the six, because the file only says `40000` and gives no hint that
+it has taken over. The last two are both `config.py if the value is None`, so an
+explicit `false` outranks `config.py` rather than deferring to it.
+
+All six are omitted, with the reason recorded per key in `config_files.OMITTED`, and
+the user's call on the trade: a project config is primarily for agents, skills and
+tuning the research pipeline, and provider and model are the same across a person's
+projects anyway. What survives is thirty-two keys that are provably inert — asserted
+over the whole observable set at once rather than key by key, because the interesting
+failure is a key that is inert alone and not in company.
+
+### Inert in every value, and noisy
+
+The round-trip test caught the one the value diff could not see. `grounding_weights`
+carries a `None` key — the weight for a claim with no grounding status — and JSON has
+no null key: it serialises as the string `"null"`, which `_apply_grounding_weights`
+then rejects against `GROUNDING_STATUSES` and logs about on **every launch**. The
+merged values were identical, so nothing about the numbers was wrong. The template
+now emits exactly the keys the loader will accept, and "inert" includes the log.
+
+### What replaces the permission layer, and why it is not the allowlist
+
+§24's AC3 says the write goes through the permission layer. `write_project_doc` denies
+`.venastine/` by path segment and names `mcp.json` and `settings.json` as the reason,
+so `--config` writes directly, under the same single consent — the shape
+`_settle_trust` already uses to write the trust store from here. Widening that
+allowlist was the alternative and is rejected in the record: the tool is advertised to
+every run and all ten research passes, and `mcp.json` names a local command to
+execute. A narrower gate on one command is not worth a wider capability on every
+other.
+
+The trust settle runs on the config-only path too, which is the part with no documents
+in it to trigger it. A project with no `.venastine/` is vacuously trusted — there is
+nothing to trust — so creating one flips `is_trusted()` from a shortcut to a hash
+comparison, and without the re-grant the command would cost the user a trust prompt
+for a file they had just authored. An untrusted project is still not laundered into a
+trusted one (I6), and is told so.
+
+### Smaller things
+
+`/init`'s parser is a token loop now, modelled on `_split_research_flags`, so the flags
+compose in either written order. It is also stricter: a single `.lstrip("-")` accepted
+`/init software` and `/init ---software`, and a command that writes files into someone's
+project should not be reachable by a typo that happens to normalise.
+
+`json_store.write_json_atomic` takes `trailing_newline`, off by default. The four
+stores it already serves are machine state nobody opens; these two are the first files
+written through it that a person is meant to edit and commit.
+
+And the CLI init fixture builds its args off the real parser. The hand-made
+`SimpleNamespace` was a second copy of the flag set and went stale the first time a
+flag was added, failing four tests with an `AttributeError` that said nothing about
+what any of them was for.
+
+Count 3426 -> 3461.
+
 ## Batch 49 — the decision is the part that falls off (2026-09-02)
 
 Two reports, five days after #190 shipped §46: the shell approval modal has no Allow

@@ -43,11 +43,12 @@ python main.py --ref <thread> --ref <thread>       # §21c: attach other threads
 #   first, capped at 200 with a notice); /resume <thread-id> opens any thread by id
 python main.py --init                              # §24/§44: scaffold AGENTS.md and the stubs it links
 python main.py --init --research-project           # §24: skip the type question on a piped run
-# §24 in the TUI: /init [--software|--research]
+python main.py --init --project-config             # §24 I17: .venastine/settings.json + mcp.json, no model call
+# §24 in the TUI: /init [--software|--research] [--config]
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 3426 tests, offline, ~25-45s by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 3461 tests, offline, ~25-45s by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -130,7 +131,7 @@ published npm version can never be replaced — only deprecated.
 Read these before changing anything non-trivial — they carry design decisions that are locked, not defaults to re-derive.
 
 - **ARCHITECTURE.md** — what's built, file-by-file contracts ("what belongs here / what does NOT"), known gotchas (§11).
-- **ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **ROADMAP_v2.md** (§13–§45, all built) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I13 from §24, J1–J14 from §23, E1–E12 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A11 from §32, W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37, O1–O8 from §38 Q1–Q6 from §39, UN1–UN6 from §40, X1–X7 from §41, RA1–RA6 from §42, RM1–RM6 from §43, WS1–WS10 from §44, SQ1–SQ10 from §45 and EP1–EP8 from §46). Section and D-numbers are stable and cross-referenced everywhere.
+- **ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **ROADMAP_v2.md** (§13–§45, all built) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I17 from §24, J1–J14 from §23, E1–E12 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A11 from §32, W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37, O1–O8 from §38 Q1–Q6 from §39, UN1–UN6 from §40, X1–X7 from §41, RA1–RA6 from §42, RM1–RM6 from §43, WS1–WS10 from §44, SQ1–SQ10 from §45 and EP1–EP8 from §46). Section and D-numbers are stable and cross-referenced everywhere.
 
 **Six namespaces use the same `LETTER+NUMBER` shape, and only the first is the
 record.** An id that resolves to two places is a cross-reference that fails
@@ -1245,6 +1246,20 @@ is gone outright, not kept as a fallback. `doc_path()` is one join now.
 - **The initializer is a SIXTH thread source.** §27 found the compactor as the
   fifth; this run is labelled `thread_kind=THREAD_KIND_SUBAGENT` for the same
   reason.
+- **A project-tier config file is not inert because its values are defaults** (batch 50, I16).
+  `settings.json` merges with `merged.update(project)`, so a project key wins by PRESENCE and
+  not by difference — and six keys are read by presence somewhere further downstream, which
+  makes writing their own default a decision rather than a restatement. `_trigger_is_configured()`
+  is the clearest: it asks `"trigger_tokens" in ...`, so scaffolding the default disables the
+  window-derived trigger and the file gives no hint that it did. `/init --config` omits all six,
+  each with its reason in `config_files.OMITTED`, and the test asserts the scaffold is inert
+  over the whole observable set — **including the log**, which is how the last one turned up:
+  `grounding_weights` carries a `None` key, JSON has no null key, and it round-trips as the
+  string `"null"` that `_apply_grounding_weights` then warns about on every launch.
+- **`--config` writes into `.venastine/` directly** (I14), because `write_project_doc` denies that
+  directory by path segment and names `mcp.json` as the reason. Do not "fix" that by widening
+  the allowlist: the tool is advertised to every run and all ten research passes, and `mcp.json`
+  names a local command to execute. The single consent is what replaces the tool's gate.
 - **Detect-then-confirm, but ask outright for a blank folder** (I13). With no
   manifests, no source and no docs there is nothing to infer from, so a proposal
   would be a guess wearing a finding's clothes. The proposal itself is a Python

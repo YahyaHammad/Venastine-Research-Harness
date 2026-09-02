@@ -524,7 +524,7 @@ An agent's or a skill's `name` and `description` go straight into the system pro
 
 ### MCP servers
 
-Configured in `mcp.json`, at `~/.config/venastine/mcp.json` or `.venastine/mcp.json`. Claude Code compatible, and unrecognised keys are ignored so a config shared with another client works as-is:
+Configured in `mcp.json`, at `~/.config/venastine/mcp.json` or `.venastine/mcp.json` — `/init --config` creates an empty project one to fill in. Claude Code compatible, and unrecognised keys are ignored so a config shared with another client works as-is:
 
 ```json
 {"mcpServers": {"files": {"command": "npx", "args": ["-y", "@example/server"]}}}
@@ -574,7 +574,7 @@ The first connection to a **user-level** server asks once, showing the resolved 
 | `/forget <id>` | Delete one memory by id — never by substring |
 | `/summary` | Distil this conversation and show it. Describes; does **not** fold — that is `/compact` |
 | `/ref [--list\|--clear]` | Pick another conversation and attach its summary to this one as standing context; `--list` and `--clear` manage attachments |
-| `/init [--software\|--research]` | Scaffold the project documentation set |
+| `/init [--software\|--research] [--config]` | Scaffold the project documentation set; `--config` adds `.venastine/settings.json` and `mcp.json` with default values, and on its own is the whole command |
 
 Keys: **ctrl+c** quit · **ctrl+t** thread picker · **ctrl+l** claims view.
 
@@ -585,6 +585,10 @@ When a subagent is spawned, you are asked which of its approval-gated tools it m
 `/init` reads the project and writes its documentation set. A root `AGENTS.md` is the hub — the short, factual description this harness injects into every agent that opts into project context, and the filename other agent harnesses look for too — and it links out to the documents that hold the detail: `ARCHITECTURE`, `ROADMAP`, `DEVLOG`, `TECHNICAL_DEBT`, `DOCUMENTATION_STANDARDS`, `TEST_WRITING` and `BREAKING_CHANGES` for a codebase, or `RESEARCH_QUESTIONS`, `METHODOLOGY`, `SOURCES`, `FINDINGS`, `LIMITATIONS`, `EXPERIMENT_LOG` and `OPEN_QUESTIONS` for written work. It asks which kind you have — proposing an answer when there is something to go on, and asking outright when the folder is empty.
 
 Only `AGENTS.md` is written for you in full; the rest arrive as skeletons with real headings and a note in each saying what belongs in it and what does not. That is deliberate: a DEVLOG invented for a project with no history is fiction in a file that then gets committed and read as fact. Documents you already have are never touched, and regeneration revises your `AGENTS.md` rather than replacing it — you see a diff and approve it before anything is written. Everything `/init` writes is an ordinary committed file at the project root, so a repository shared without its `.venastine/` configuration is still a repository whose documentation makes sense. From the CLI it is `--init`, with `--software-project` / `--research-project` to skip the question.
+
+`/init --config` is the other half, and it is independent of the two above: it writes `.venastine/settings.json` and `.venastine/mcp.json`, and creates `.venastine/agents/` and `.venastine/skills/`. On its own it makes **no model call** and costs nothing — no document set, no question about which kind of project this is; combined (`/init --software --config`) it does both under one confirmation. An existing `settings.json` or `mcp.json` is never touched, per file, so a project with one and not the other gets the other. From the CLI it is `--init --project-config`.
+
+The settings file it writes is **every key with a shipped default, at that default** — because the file cannot explain itself. An unknown key raises at startup, so there is no comment syntax, no `$schema` line and no way to leave a key in the file but switched off; the scaffold is the schema. Six keys are deliberately left out, because something reads them by *presence* rather than by value, so writing their own default would decide rather than restate: `default_provider` and `default_model` (adding either discards a model you picked with `/model` in that project), `effort` (makes every launch probe the provider's effort table), `compaction.trigger_tokens` (disables the window-derived trigger, invisibly), `ensemble_mode` and `research.subagent_review` (both defer to `config.py` only while absent). Set any of those by hand and they work normally. Everything the scaffold does write changes nothing until you edit it — and because a project's `settings.json` beats yours by *presence*, the command tells you which of your own keys the new file has taken over before it asks to write it.
 
 `/summary` distils this conversation and shows it — it does **not** shorten what the model sees; that is `/compact`. `/ref` picks another conversation, summarises it, and attaches that summary to this one as standing context: you choose what crosses between threads, so nothing read or argued in one conversation can steer another without your say-so. `/ref --list` and `/ref --clear` are the way back out, and the summaries are labelled so the model knows they are not part of this conversation. From the CLI the same two are launch flags: `--summary <thread>` and a repeatable `--ref <thread>`.
 
@@ -655,6 +659,7 @@ Everything `python main.py` accepts. Wherever a value can come from more than on
 | `--trust-project` | Grant workspace trust non-interactively for scripts/CI, printing what it trusts as it does so |
 | `--init` | Generate this project's documentation set and exit. On a pipe there is no consent route, so it reports what it would write and writes nothing |
 | `--software-project` / `--research-project` | With `--init`: choose the document set without asking. At most one of the two |
+| `--project-config` | With `--init`: create `.venastine/settings.json` and `mcp.json` with default values, plus `agents/` and `skills/`. Without a document-set flag it is the whole command and makes no model call. Refused without `--init`, rather than ignored |
 
 **Combinations the parser refuses** (rather than ignoring):
 
@@ -712,8 +717,8 @@ In the TUI stderr is detached before the screen is taken (anything written there
 |---|---|---|
 | `providers.json` | LLM provider keys | gitignored; path movable with `AGENT_PROVIDERS_FILE` |
 | `.env` | tool API keys | gitignored |
-| `settings.json` | defaults and modes | unknown keys **raise**; user copy at `~/.config/venastine/settings.json`, project copy at `.venastine/settings.json` (loaded only when trusted) |
-| `mcp.json` | MCP servers | unknown keys ignored; same two locations |
+| `settings.json` | defaults and modes | unknown keys **raise**; user copy at `~/.config/venastine/settings.json`, project copy at `.venastine/settings.json` (loaded only when trusted). `/init --config` writes a project copy with every defaulted key in it |
+| `mcp.json` | MCP servers | unknown keys ignored; same two locations. `/init --config` writes an empty project copy |
 | `trusted_projects.json` | workspace-trust store | user-level (`~/.config/venastine/`); written by the trust prompt or `--trust-project`, keyed to resolved path + content hash |
 | `AGENTS.md` | project context for the model | project root; covered by workspace trust |
 
@@ -724,7 +729,7 @@ Precedence for provider and model is CLI flag > `settings.json` > `config.py`. T
 
 #### Every `settings.json` key
 
-An unknown key raises at startup, naming the file and the key — a typo must never read as a setting.
+An unknown key raises at startup, naming the file and the key — a typo must never read as a setting. `/init --config` writes a project `settings.json` containing every key below that has a shipped default, at that default, so you can edit rather than transcribe.
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
@@ -833,7 +838,7 @@ classifier is described under *Security model* above. If you have a fork or a lo
 note that `ToolApprovals.shell` now ships `False` and `SHELL_APPROVAL_MODE` is the gate — see
 `tests/BREAKING_CHANGES.md` §24.
 
-Run the test suite with `pytest` — 3426 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
+Run the test suite with `pytest` — 3461 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
 
 ## Documentation
 

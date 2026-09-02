@@ -51,10 +51,10 @@ Venastine Research Harness/
 ├── CLAUDE.md / QWEN.md             # pointers to AGENTS.md, so a harness that auto-loads one of those names finds the context instead of a second copy of it
 ├── DEVLOG.md                       # implementation notes for built ROADMAP sections -- see §0
 │
-├── tests/                          # 3426 tests, all offline, ~25-45s depending on the machine (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
+├── tests/                          # 3461 tests, all offline, ~25-45s depending on the machine (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
 │   ├── conftest.py                 # fixtures: make_model_response, make_stream_from_response, make_stream_sequence, FakeStorage, ...
 │   ├── BREAKING_CHANGES.md         # what-breaks-it / symptom / fix per area
-│   ├── test_cli.py                 # 90 tests -- ROADMAP §1 thread_id passthrough + UUID validation + §14 parser defaults/resolution/trust flow + §29 N1-N8 the one stdin reader, N2's channel deadline, every request kind rendered, and the startup block main(argv) made reachable + #102's four declining defaults
+│   ├── test_cli.py                 # 91 tests -- ROADMAP §1 thread_id passthrough + UUID validation + §14 parser defaults/resolution/trust flow + §29 N1-N8 the one stdin reader, N2's channel deadline, every request kind rendered, and the startup block main(argv) made reachable + #102's four declining defaults
 │   ├── test_fetch_url.py           # 31 tests -- audit #120/#58: fetch_url's whole surface, which no test had ever executed. #53/#54's per-hop policy check, twice: once on the fake httpx and once on REAL httpx through a MockTransport
 │   ├── test_e2e.py                 # 5 tests -- e2e chat (multi-turn + tool use), research mode, error handling ×3
 │   ├── test_logging_setup.py       # 7 tests -- configure_logging fallback on bad log path, stderr=False, and #132's redacting formatter (message, traceback, and a real dispatch)
@@ -136,7 +136,7 @@ Venastine Research Harness/
 │   ├── test_interaction.py        # 92 tests -- ROADMAP_v2 §23 J2-J7: core/interaction.py's decode, the declining default per kind, CHOICE and SUBAGENT_SIGNOFF validated against the request, and the strict review decoder
 │   ├── test_question_tool.py      # 50 tests -- ROADMAP_v2 §23 slice 2: ask_user through the injected response_channel, QUESTION's three-way answer, and both shells' renderers; batch 49 adds the per-option length cap (refused, never trimmed) and Enter in the answer box
 │   ├── test_todo.py               # 60 tests -- ROADMAP_v2 §23 slice 2: todo_write's whole-list write (J13), the notice forwarded and stripped (J10), and the panel reading its content from thread state; batch 41 adds TestTheMarkerVocabulary (X3) -- the shared ☐/▸/☑/☒/· constants, pinned by codepoint and measured one cell wide under Rich
-│   ├── test_project_init.py       # 130 tests -- ROADMAP_v2 §24 I1-I13: the two narrow tools, the generated index, stubs vs invented content, one consent covering a named list, and the I6 trust re-grant + §29 N5 the CLI's --init down the response channel
+│   ├── test_project_init.py       # 164 tests -- ROADMAP_v2 §24 I1-I17: the two narrow tools, the generated index, stubs vs invented content, one consent covering a named list, and the I6 trust re-grant + §29 N5 the CLI's --init down the response channel + batch 50's `--config`: the template IS the loader's vocabulary, and writing it changes nothing measurable including the log
 │   ├── test_truncated_pass.py     # 11 tests -- _check_not_truncated at the pass: truncated-with-text traces and continues, truncated-with-nothing raises naming the pass, and it runs BEFORE the JSON retry
 │   ├── test_tool_failure_containment.py # 12 tests -- dispatch() turning a raising handler into an {"error": ...} result, the two exceptions deliberately raised above it, and the error result still going through check_output_policy
 │   ├── test_tool_arguments.py    # 21 tests -- §33 the same containment one layer UP (#37): a tool-call `arguments` string cut mid-object by the token limit used to raise JSONDecodeError out of call_model_stream into the pipeline's except Exception. The parse, the empty-arguments fallback unit 3's P10 deleted while green, and the whole turn end to end -- refused, never dispatched, never asked about, and the reason still reaching the model
@@ -218,6 +218,7 @@ Venastine Research Harness/
 ├── project_init/                  # ROADMAP_v2 §24: /init. Namespace package, mirroring memories/
 │   ├── doc_sets.py                # WHICH documents each project kind gets, where each lives, and the stub templates. Data + pure rendering, no I/O. render_index() is a pure function of the KIND (I11) -- §34 pinned the exact line set, since the old test could not see an extra name
 │   ├── manifest.py                # deterministic discovery: the listing the agent is shown, and the facts the stubs interpolate. No model call, no tool call. ONE _MANIFEST_TABLE answers every question about a manifest filename (§34 U9, #96), and the readable listing asks project_docs' own predicate (U2, #94)
+│   ├── config_files.py            # batch 50 (I14-I17): the .venastine/settings.json and mcp.json templates. Data + pure rendering, like doc_sets.py. Defaults READ from config_loader.shipped_defaults(); OMITTED names every key it will not write, and why
 │   ├── generator.py               # the ONE place that decides what /init does -- both shells call generate()
 │   └── tui_commands.py            # /init registered into §16's slash registry
 │
@@ -1052,9 +1053,10 @@ hub, plus the documents it links. (§44 WS8 moved the hub there, reversing I9 --
 `.venastine/` is configuration only now, and `CONTEXT.md` is gone outright rather
 than kept as a fallback.) `--init` on the CLI (M21 — no command layer there).
 
-**Four modules, split by what they can be wrong about.** `doc_sets.py` is data and pure
-rendering (which documents, where each lives, what a stub looks like), so it can be
-asserted directly. `manifest.py` is a directory walk. `generator.py` is the only place
+**Five modules, split by what they can be wrong about.** `doc_sets.py` and `config_files.py`
+are data and pure rendering (which documents and which settings, where each lives, what a
+stub and a template look like), so both can be asserted directly. `manifest.py` is a
+directory walk. `generator.py` is the only place
 that *decides* anything, and both shells call it — §26's L6 and §27's T5 again, because a
 per-shell implementation is how the CLI and the TUI come to disagree about whether an
 existing document is overwritten, which is policy and not painting. `tui_commands.py`
@@ -1072,6 +1074,24 @@ raises `ToolCallDenied` **before** the `approval_callback` is consulted, for eve
 §24 adds `read_project_doc` and `write_project_doc` instead of flipping either global,
 which would have handed every agent and all ten research passes standing file access to
 serve one command.
+
+**`/init --config` and the one write that does NOT go through that tool** (batch 50, I14-I17).
+`write_project_doc` denies `.venastine/` by path segment, naming `mcp.json` and `settings.json`
+as the reason, so the third flag writes them directly under the same single consent — the shape
+`_settle_trust` already uses to write the trust store from here. Widening the allowlist was the
+alternative and is rejected in the record: `mcp.json` names a local command to execute, and the
+tool is advertised to every run and all ten passes, not only to this one command.
+
+The template is every setting with a shipped default, at that default, read from
+`config_loader.shipped_defaults()` rather than retyped — `_validate_settings` raises on an
+unknown key, so the file carries no comment, no `$schema` and no inert line, and it has to be
+right the first time or the harness stops starting in that directory. Six keys are omitted
+because a consumer reads them by PRESENCE, so writing their own default decides rather than
+restates: the `/model` staleness pair, `effort`'s `_effort_named`, `compaction.trigger_tokens`
+(which silently disables the window-derived trigger), and the two `is None` mode switches. What
+survives is inert across the whole observable set including the log, and the run still names
+every key the new file takes over from the user's own `settings.json` before it asks — a
+project tier beats a user tier by presence (D29), which is true even of a file of defaults.
 
 **`write_project_doc` has no path parameter.** It takes a document *name* from a fixed
 allowlist, and the destination is derived -- the hub and everything else alike sit at

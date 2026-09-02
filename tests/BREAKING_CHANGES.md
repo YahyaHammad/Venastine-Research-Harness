@@ -2954,6 +2954,23 @@ Count 2786 -> 2815.
 | `on_mount`'s banner line moved into `_write_session_banner()` | A test patching or asserting the banner write at mount | Same text, one producer, now called by `/new` as well. Two copies of a status line are two copies that can disagree |
 
 
+## Batch 50 — a template for the file that cannot explain itself (2026-09-02)
+
+| Change | What breaks | Symptom / fix |
+|---|---|---|
+| `generator.generate()` takes `scaffold_docs=True` and `scaffold_config=False` | A caller passing positional arguments past `provider_name` — none does, they are keyword-only | `--config` alone is `(False, True)`: no kind question, no initializer, no spend. Two flags rather than a second entry point, because a config-only path beside `generate()` would be a second answer to "is an existing file overwritten" and a second place to forget the trust settle |
+| `/init`'s TUI parser is a token LOOP, and stricter | A test passing `/init software` or `/init ---software` | Both were accepted by the old single `.lstrip("-")` and are now the error. `_split_init_flags(args) -> (kind, scaffold_config, problem)` is the seam to assert against; the flags compose in either written order, following `_split_research_flags` |
+| The CLI init fixture builds `args` from `main.build_parser()` | A test constructing a `SimpleNamespace` for `run_init_command` | It went stale the moment `--project-config` was added, failing four tests with an `AttributeError` about the flag rather than anything they were testing. Pass `argv=[...]` to `_run` instead |
+| `--project-config` without `--init` EXITS 1 | Nothing today | Deliberately unlike `--software-project` / `--research-project`, which are silently ignored. Those two keep their silence because changing them is a behaviour change with users; this flag has none yet |
+| `.venastine/settings.json` and `mcp.json` are written DIRECTLY, not through `write_project_doc` | Any assumption that every `/init` write goes through the tool layer (§24 AC3) | That tool denies `.venastine/` by path segment and names these two files as the reason. **Do not widen its allowlist to "fix" this**: it is advertised to every run and all ten research passes, and `mcp.json` names a local command to execute. The single consent is what replaces the gate |
+| The settings template is EVERY key the loader knows, minus `config_files.OMITTED` | Adding a settings key without adding a line to the template | `test_the_template_names_every_setting_the_loader_knows` fails and names the missing key. That is the trade `_KNOWN_TUI`'s comment already takes ("adding a preference is a schema change, on purpose"), moved one file along — the alternative is a schema that has quietly fallen behind, where an omission reads as "this one is not settable" |
+| Six keys are omitted because writing their own default is NOT restating it | Any change that adds a presence-sensitive read of a scaffolded key | `test_the_scaffolded_settings_file_changes_nothing` fails, naming the key and both values. Put it in `OMITTED` with the reason — do not adjust the expected value. The six are `default_provider`, `default_model`, `effort`, `compaction.trigger_tokens`, `ensemble_mode` and `research.subagent_review`; `_trigger_is_configured()` is the model of the class, since it asks `"trigger_tokens" in ...` |
+| "Inert" includes the LOG | A template key whose value survives the merge but warns on the way | Same test, which compares warnings between a project with the file and one without. `grounding_weights` carries a `None` key, JSON has no null key, and it round-trips as `"null"` — rejected against `GROUNDING_STATUSES` and logged every launch, with every merged number identical |
+| `json_store.write_json_atomic` takes `trailing_newline: bool = False` | Nothing — every existing store writes the same bytes | On for the two scaffolded files only: they are the first written through it that a human is meant to edit and commit, and a committed file with no final newline carries git's marker in every diff of it |
+| An existing `.venastine/settings.json` or `mcp.json` is never overwritten, per file | Nothing | I12 applied to the file it was written for. A project with a settings.json and no mcp.json still gets the mcp.json, and the run reports what it left alone |
+
+Count 3426 -> 3461.
+
 ## Batch 49 — the decision is the part that falls off (2026-09-02)
 
 | Change | What breaks | Symptom / fix |
