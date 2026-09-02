@@ -35,7 +35,9 @@ import config
 from tests.conftest import (make_model_response, make_stream_sequence,
                             pump, settle)
 from tui.app import VenastineApp
-from tui.screens import PermissionScreen, ScrollBox
+from tui.screens import (
+    PermissionScreen, QuestionScreen, ScrollBox,
+)
 
 
 @pytest.mark.asyncio
@@ -3279,6 +3281,159 @@ async def test_a_bounded_box_reserves_its_bound_not_its_content():
     assert rows + reachable == content, (
         f"{content} rows of payload, {rows} shown, {reachable} scrollable -- "
         "the remainder is truncated, not below the fold")
+
+
+# ---------------------------------------------------------------------------
+# ---- batch 49: what focus LOOKS like, and where it starts ----------------
+# ---------------------------------------------------------------------------
+
+#: (name, factory, the id focus must land on). `None` means "not a Button":
+#: GrantPickerScreen and ProjectKindScreen have no declining button -- escape
+#: is the decline on both -- so there is nothing to focus that would make
+#: Enter safe, and focusing the affirmative one for consistency would be the
+#: exact inversion the rest of this table exists to prevent.
+def _focus_cases():
+    from tui.screens import (
+        ConfirmScreen, GrantPickerScreen, ProjectKindScreen, ReviewScreen,
+        SubagentSignoffScreen,
+    )
+    return [
+        ("permission", lambda: PermissionScreen("shell", {"c": "x"}, None,
+                                                "r", "echo hi"), "deny"),
+        ("permission-plain", lambda: PermissionScreen("remember", {"t": "x"},
+                                                      None, "r"), "deny"),
+        ("confirm", lambda: ConfirmScreen("Write these?", "a.md\nb.md"),
+         "deny"),
+        ("signoff-empty", lambda: SubagentSignoffScreen("bare", []),
+         "signoff-refuse"),
+        ("signoff-full", lambda: SubagentSignoffScreen("r", ["web_search"]),
+         "signoff-refuse"),
+        ("review", lambda: ReviewScreen({"kind": "text", "reason": "r",
+                                         "proposed": "p"}, 0),
+         "review-reject"),
+        ("grant", lambda: GrantPickerScreen([("web_search", "Search.")]),
+         None),
+        ("project-kind", lambda: ProjectKindScreen(), None),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name,make_screen,expected", _focus_cases(),
+                         ids=[c[0] for c in _focus_cases()])
+async def test_a_consent_surface_opens_focused_on_the_declining_answer(
+        name, make_screen, expected):
+    """Batch 49. Whichever widget holds focus is what Enter fires, and
+    ConfirmScreen -- /init asking whether to write a set of files --
+    opened focused on its affirmative button, because a plain `Static`
+    body is not focusable and the Yes button was therefore the first
+    thing that was. So Enter said yes.
+
+    The declining answer costs nothing when it is pressed by accident,
+    which is the whole argument, and it is already recorded one door
+    along: GrantPickerScreen ships every option unticked so that "the
+    convenient action must not be the permissive one". A key a person
+    presses without looking is more convenient than a tick.
+
+    Two screens are `None` deliberately. Neither has a declining BUTTON
+    -- escape declines on both -- so there is nothing here to make Enter
+    safe, and the assertion is the weaker one that matters: focus must
+    not be sitting on an answer.
+    """
+    from textual.widgets import Button
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        app.push_screen(make_screen(), lambda _a: None)
+        await pilot.pause()
+        await pilot.pause()
+        focused = app.screen.focused
+        app.screen.dismiss(None)
+        await pilot.pause()
+
+    if expected is None:
+        assert not isinstance(focused, Button), (
+            f"{name} has no declining button, so Enter must not be sitting "
+            f"on an answer -- it is on {focused.id!r}")
+    else:
+        assert focused is not None and focused.id == expected, (
+            f"{name} opens focused on {getattr(focused, 'id', None)!r}, so "
+            f"Enter answers with that. It must be {expected!r}.")
+
+
+@pytest.mark.asyncio
+async def test_a_focused_button_is_not_drawn_in_reverse():
+    """Batch 49. Textual's Button sets `text-style:
+    $button-focus-text-style` when focused and this theme resolves that
+    to `reverse`, which inverts the LABEL and nothing else -- so a
+    focused green Allow drew its word green-on-white and read as a
+    highlighted selection rather than as where the keyboard was. The
+    replacement tints the whole button, which is the thing a person
+    looks at.
+
+    Asserted on the RESOLVED style rather than on the stylesheet text,
+    because the rule has to WIN against a DEFAULT_CSS nested `&:focus`
+    -- reading app.tcss would pass whether or not it did.
+    """
+    from textual.widgets import Button
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        app.push_screen(
+            PermissionScreen("web_search", {"q": "x"}, None), lambda _a: None)
+        await pilot.pause()
+        allow = app.screen.query_one("#allow", Button)
+        allow.focus()
+        await pilot.pause()
+        style = str(allow.styles.text_style)
+        tint = allow.styles.background_tint
+        app.screen.dismiss(None)
+        await pilot.pause()
+
+    assert "reverse" not in style, (
+        f"a focused button is drawn with {style!r}; `reverse` swaps the "
+        "label's colours and nothing else, which is the look that was "
+        "reported as an oddly highlighted Allow")
+    assert tint is not None and tint.a > 0, (
+        "dropping `reverse` left nothing in its place, so a focused button "
+        "is now indistinguishable from an unfocused one")
+
+
+@pytest.mark.asyncio
+async def test_the_answer_box_lines_up_with_the_options():
+    """Batch 49. Textual's Input takes a `tall` border on all four sides
+    and a Button takes one on the top and bottom only, so two widgets at
+    the same `x` drew their left edges a column apart -- close enough to
+    read as a mistake and far enough to see.
+
+    Fixed by taking the Input's side edges off rather than giving the
+    Buttons two they do not want, so the assertion is about both: same
+    box, same edge.
+    """
+    from textual.widgets import Button, Input
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test(size=(90, 30)) as pilot:
+        app.push_screen(
+            QuestionScreen("Where should the venv go?",
+                           ["in the workspace", "somewhere ephemeral"],
+                           False, True),
+            lambda _a: None)
+        await pilot.pause()
+        await pilot.pause()
+        option = app.screen.query_one("#question-opt-0", Button)
+        box = app.screen.query_one("#question-text", Input)
+        option_x, box_x = option.region.x, box.region.x
+        edges = (box.styles.border_left[0], box.styles.border_right[0],
+                 option.styles.border_left[0], option.styles.border_right[0])
+        app.screen.dismiss(None)
+        await pilot.pause()
+
+    assert option_x == box_x, (
+        f"the option buttons start at column {option_x} and the answer box "
+        f"at {box_x}")
+    assert not any(edges), (
+        f"one of these two still draws a side border ({edges}), so their "
+        "left edges are a column apart however their boxes line up")
 
 # ---------------------------------------------------------------------------
 # ---- §46 (EP1/EP3): the modal's subject must be ON SCREEN -----------------

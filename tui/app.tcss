@@ -211,6 +211,33 @@ ReviewScreen {
     margin: 0 1;
 }
 
+/* FOCUS WITHOUT `reverse` (batch 49). Textual's Button carries
+   `text-style: $button-focus-text-style` when focused and this theme
+   resolves that to `reverse`, which inverts the LABEL and nothing else
+   -- so a focused green Allow drew its word as green on white and read
+   as a highlighted selection rather than as the keyboard's position.
+   Bold plus a lifted background tints the whole button instead, which
+   is what a person actually looks for, and it composes with all
+   fourteen palettes because both values come from the theme rather than
+   from a literal (#116). */
+Button:focus {
+    text-style: bold;
+    background-tint: $foreground 25%;
+}
+
+/* The answer box lines up with the options above it (batch 49).
+   Textual's Input takes a `tall` border on all four sides and a Button
+   takes one on the top and bottom only, so at the same `x` the Input's
+   left edge is drawn a column in from the option buttons' -- close
+   enough to look like a mistake and far enough to see. Dropping the two
+   side edges gives both widgets the same box, rather than giving the
+   buttons a border they do not want. */
+#question-text,
+#review-note {
+    border-left: none;
+    border-right: none;
+}
+
 ThreadPickerScreen {
     align: center middle;
 }
