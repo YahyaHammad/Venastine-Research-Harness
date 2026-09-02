@@ -893,6 +893,129 @@ async def test_an_unknown_copy_option_is_an_error_not_a_silent_write(mocker):
 
 
 @pytest.mark.asyncio
+async def test_copy_conversation_leaves_the_harness_out_and_copy_all_keeps_it(
+        mocker):
+    """Batch 48. `/copy all` handed back the session's whole screen --
+    /help's output, the launch banner, `Resumed thread <uuid>.`, `— end of
+    N replayed entries —` -- because as_text() walked every entry
+    regardless of role.
+
+    `all` still does, and that is #140's decision rather than an
+    oversight: it is the superset, and the harness lines are exactly what
+    reconstructs what happened. `conversation` is the target that
+    promises they are absent. BOTH halves are asserted here, in one test,
+    because the failure worth catching is someone collapsing the two.
+    """
+    from tui.app import VenastineApp
+
+    mocker.patch("core.loop.api_initialization", return_value=object())
+    mocker.patch("core.loop.call_model_stream",
+                 side_effect=make_stream_sequence(
+                     make_model_response(text="an answer to keep")))
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        sent = []
+        mocker.patch.object(type(app), "copy_to_clipboard",
+                            lambda self, text: sent.append(text))
+        app.query_one("#prompt").value = "/help"
+        await pilot.press("enter")
+        await pilot.pause()
+        app.query_one("#prompt").value = "a question to keep"
+        await pilot.press("enter")
+        assert await settle(pilot, lambda: not app._busy), "the turn never ended"
+
+        app.query_one("#prompt").value = "/copy conversation"
+        await pilot.press("enter")
+        await pilot.pause()
+        app.query_one("#prompt").value = "/copy all"
+        await pilot.press("enter")
+        await pilot.pause()
+
+    conversation, everything = sent
+    assert "a question to keep" in conversation
+    assert "an answer to keep" in conversation
+    for harness_line in ("Type /help for commands.", "Commands:",
+                         "theme dark-plain"):
+        assert harness_line not in conversation, \
+            f"/copy conversation carried the harness line {harness_line!r}"
+        assert harness_line in everything, \
+            f"/copy all lost {harness_line!r} -- it is the superset (#140)"
+    assert "an answer to keep" in everything
+
+
+@pytest.mark.asyncio
+async def test_the_conversation_is_every_conversation_role_and_no_meta_one():
+    """The filter, against the classification rather than a hand-listed
+    expectation -- so a role moved between the two sets moves what this
+    test demands, and a role in neither is caught by the pin in
+    tests/test_themes.py that they account for every one.
+
+    Written through write_role, which is `_emit`, which is the single
+    write path every rendering route funnels into.
+    """
+    from tui import diffs
+    from tui.widgets import CONVERSATION_ROLES, META_ROLES, Transcript
+
+    transcript = Transcript()
+    needles = {}
+    for role in sorted(CONVERSATION_ROLES | META_ROLES):
+        if role == "diff":
+            # The one role whose text is a parsed structure rather than a
+            # line: _render_diff reads it back, so a marker string would
+            # raise before it ever reached the entry log.
+            transcript.write_role(role, diffs.build_block(
+                "marker_for_diff.py", "before", "after"))
+            needles[role] = "marker_for_diff.py"
+        else:
+            transcript.write_role(role, f"marker for {role}")
+            needles[role] = f"marker for {role}"
+
+    conversation = transcript.as_text(CONVERSATION_ROLES)
+    everything = transcript.as_text()
+
+    for role in sorted(CONVERSATION_ROLES):
+        assert needles[role] in conversation, \
+            f"{role!r} is a conversation role and /copy conversation lost it"
+    for role in sorted(META_ROLES):
+        assert needles[role] not in conversation, \
+            f"{role!r} is a harness role and /copy conversation carried it"
+    for role in sorted(CONVERSATION_ROLES | META_ROLES):
+        assert needles[role] in everything, \
+            f"/copy all lost {role!r} -- it is the superset (#140)"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_tool_with_no_known_name_is_still_a_tool_error():
+    """Batch 48. The named branch one line above writes `tool_error`; this
+    one wrote `error`, the role the harness uses for its own failures. One
+    role meaning two things is what stops a copy telling the exchange
+    apart from the narration -- and §41 X2's weight rule says the same
+    thing about the rendering: plain, because a tool that failed is not
+    the harness raising its voice.
+
+    `_tool_names` is empty here, which is the real way this happens: the
+    map is cleared at every turn boundary, so a result arriving without
+    its call is a result with no name to print.
+    """
+    from tui.app import LoopEventMessage, VenastineApp
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._transcript.reset()
+        app._tool_names.clear()
+        app.post_message(LoopEventMessage(LoopEvent(
+            tool_result={"id": "gone", "result": {"error": "it went wrong"}})))
+        await settle(pilot, lambda: any(
+            "it went wrong" in text for _role, text in app._transcript._entries))
+        entries = list(app._transcript._entries)
+
+    roles = [role for role, text in entries if "it went wrong" in text]
+    assert roles == ["tool_error"], entries
+
+
+@pytest.mark.asyncio
 async def test_ctrl_l_opens_the_claims_view_while_the_input_has_focus():
     """The binding-conflict check, and the reason the key is not ctrl+k:
     Textual's Input binds ctrl+k to delete_right_all and holds focus

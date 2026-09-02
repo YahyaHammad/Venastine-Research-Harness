@@ -30,6 +30,7 @@ import pytest
 
 from tests.conftest import pump
 from tui import themes
+from tui.widgets import CONVERSATION_ROLES, META_ROLES
 from tui.themes import ALL_THEMES, THEME_NAMES, role_styles
 
 GRID_NAMES = [
@@ -186,6 +187,58 @@ def test_every_message_role_is_actually_reachable():
     styles = role_styles(ALL_THEMES[0])
     missing = [r for r in MESSAGE_ROLES if r not in styles]
     assert not missing, f"MESSAGE_ROLES names roles the palette lacks: {missing}"
+
+
+# ---- Batch 48: and which of those roles is the CONVERSATION -----------------
+
+#: The entry roles MESSAGE_ROLES does not name, and why each is absent
+#: from it rather than from here. `assistant` is deliberately unstyled, so
+#: the colour checks skip it; `diff` paints a background and has its own
+#: pair of floors below; `assistant_label` is the other direction -- a
+#: label drawn beside an entry rather than an entry that can be copied.
+ENTRY_ROLES = sorted((set(MESSAGE_ROLES) - {"assistant_label"})
+                     | {"assistant", "diff"})
+
+
+def test_every_transcript_role_is_classified_as_conversation_or_harness():
+    """Batch 48. `/copy conversation` is an ALLOWLIST, which fails in the
+    safe direction -- an unclassified role goes missing from the copy
+    rather than leaking a harness line into it. Safe is not the same as
+    correct, and a role nobody classified is a role whose absence nobody
+    decided, so it is caught here rather than by someone noticing their
+    tool calls are gone.
+
+    Held against MESSAGE_ROLES because that list is already the
+    hand-maintained inventory of what a transcript line can be, and one
+    inventory that two checks read is the whole point -- a second list
+    would drift from the first exactly the way this project keeps
+    recording.
+    """
+    classified = CONVERSATION_ROLES | META_ROLES
+    unclassified = [r for r in ENTRY_ROLES if r not in classified]
+    assert not unclassified, (
+        f"{unclassified} can appear in the transcript and are in neither "
+        f"CONVERSATION_ROLES nor META_ROLES, so /copy conversation drops "
+        f"them without anyone having decided to. Classify them in "
+        f"tui/widgets.py.")
+
+    invented = sorted(classified - set(ENTRY_ROLES))
+    assert not invented, (
+        f"{invented} are classified but cannot reach a transcript entry. "
+        f"Either the role went away and the classification should follow, "
+        f"or MESSAGE_ROLES above is missing it.")
+
+
+def test_the_two_role_sets_do_not_overlap():
+    """The guard against 'fix' by widening: adding a role to both sets
+    makes the check above pass while /copy conversation quietly carries
+    the harness line the target exists to leave out."""
+    both = sorted(CONVERSATION_ROLES & META_ROLES)
+    assert not both, (
+        f"{both} are both conversation and harness. A role means one "
+        f"thing; if this one genuinely means two, the producer is what "
+        f"needs splitting -- see the `tool_error` line in tui/app.py.")
+
 
 
 # ---- Contrast floors ----------------------------------------------------------

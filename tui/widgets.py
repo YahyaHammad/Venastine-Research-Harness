@@ -99,6 +99,29 @@ MARK_RUNNING = "▸"
 MARK_STAGE = "·"
 
 
+# Batch 48. Which transcript roles are the CONVERSATION, and which are
+# the harness talking about itself. `/copy all` reads neither -- it is a
+# superset by decision (#140), and the harness lines are exactly what
+# reconstructs what happened -- but `/copy conversation` promises that
+# none of them are in it, and that promise needs a list.
+#
+# An ALLOWLIST, because it fails in the safe direction: a role added
+# later is meta until someone classifies it, so the worst a forgotten
+# role can do is go missing from `conversation` rather than leak a
+# harness line into it. tests/test_themes.py holds both halves against
+# MESSAGE_ROLES, so a new role has to be classified rather than land in
+# one target or the other by accident.
+CONVERSATION_ROLES = frozenset({
+    "user", "assistant", "thinking", "tool", "tool_error", "diff"})
+
+# `pass` and `pass_done` are here rather than above deliberately: a
+# ten-pass run's boundaries are progress reporting about the harness,
+# not the exchange, so a research run copies as the query, the tool
+# lines and the report.
+META_ROLES = frozenset({
+    "system", "warning", "error", "pass", "pass_done", "success"})
+
+
 class RavenPanel(Static):
     """Corner raven: what the harness is doing right now."""
 
@@ -1174,8 +1197,15 @@ class Transcript(RichLog):
                 return text
         return ""
 
-    def as_text(self) -> str:
-        """The session as plain text, for /copy all."""
+    def as_text(self, roles: "frozenset[str] | None" = None) -> str:
+        """The session as plain text, for /copy all and /copy conversation.
+
+        `roles` filters the entry log; None keeps everything, which is
+        what /copy all wants. A parameter rather than a second method, so
+        the label table below stays the only copy -- two renderers of one
+        entry log is the shape §22 spent a section removing from the
+        trace.
+        """
         # `diff` is deliberately absent: the canonical block already
         # opens with the path it describes, so a label would announce
         # the file twice.
@@ -1183,6 +1213,8 @@ class Transcript(RichLog):
                   "thinking": "thinking"}
         out = []
         for role, text in self._entries:
+            if roles is not None and role not in roles:
+                continue
             label = labels.get(role)
             out.append(f"{label}: {text}" if label else text)
         return "\n\n".join(out)

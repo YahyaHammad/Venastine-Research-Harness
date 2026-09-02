@@ -78,8 +78,8 @@ from tui.screens import (
 )
 from security import posture
 from tui.widgets import (
-    EffortRaven, GoalBanner, PostureBadge, RavenPanel, ResearchProgress,
-    ThinkingIndicator, TodoPanel, Transcript, UsageLine,
+    CONVERSATION_ROLES, EffortRaven, GoalBanner, PostureBadge, RavenPanel,
+    ResearchProgress, ThinkingIndicator, TodoPanel, Transcript, UsageLine,
 )
 
 logger = logging.getLogger(__name__)
@@ -1246,7 +1246,14 @@ class VenastineApp(App):
                 if tool_name:
                     transcript.write_role("tool_error", f"  ✗ {tool_name}  {error_text}")
                 else:
-                    transcript.write_error(f"  ✗ {error_text}")
+                    # `tool_error`, not `error` (batch 48). A failed tool
+                    # whose call id went missing is still a failed tool,
+                    # and `error` is the harness's own voice -- one role
+                    # meaning two things is what stops /copy telling the
+                    # exchange apart from the narration. §41 X2's weight
+                    # rule agrees: plain, not bold.
+                    transcript.write_role(
+                        "tool_error", f"  ✗ {error_text}")
             # §41 (X4). AT THE RESULT, and only a successful one. A
             # call can still be denied at the permission gate or
             # refused by the tool (old_text not unique, path
@@ -2978,7 +2985,10 @@ def _cmd_claims(app: VenastineApp, args: str) -> None:
     app.show_claims(args.strip())
 
 
-_COPY_TARGETS = ("last", "report", "claims", "all")
+# Narrow to broad, which is the order /help prints them in. `all` stays
+# last because it is the superset (#140): the transcript entire, plus the
+# report and the claims that never reach it.
+_COPY_TARGETS = ("last", "report", "claims", "conversation", "all")
 
 # (#30/#32) The picker caps its list and says so; older threads stay
 # reachable by id through /resume. A modal listing thousands of rows is
@@ -3079,6 +3089,16 @@ def _copy_payload(app: VenastineApp, target: str):
         run = app._last_run
         return ((run.final_report if run and run.final_report else None),
                 "the research report")
+    if target == "conversation":
+        # Batch 48. `/copy all` is everything on screen, harness lines
+        # included, and that is what its name promises and what #140
+        # settled. But the thing most often wanted is the exchange
+        # without /help's output, without `Resumed thread <uuid>.`,
+        # without `— end of N replayed entries —` and without the
+        # banner -- so that is a target of its own rather than a
+        # narrowing of the one whose name says everything.
+        return (app._transcript.as_text(CONVERSATION_ROLES).strip() or None,
+                "this conversation")
     if target == "claims":
         run = app._last_run
         claims = ([vars(c) for c in run.claims] if run and run.claims
