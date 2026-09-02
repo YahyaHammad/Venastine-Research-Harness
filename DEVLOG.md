@@ -9105,3 +9105,112 @@ function that builds an argv and opens one process.
   prevent, reached from the other side.
 - **Digest-pinning `SANDBOX_DOCKER_IMAGE`.** Logged instead (EP7). A pin nobody bumps is its own
   failure mode, and the log turns a silent substitution into a visible one.
+
+## Batch 48 — /copy: the last response that was never the last (2026-09-02)
+
+Two defects in `/copy`, both found by using the app rather than by reading it, and both
+in the same place: the command had a second copy of something the transcript already
+held.
+
+`/copy` is TUI-only. `main.py` has no slash commands at all — every line there is a chat
+turn — so there is no CLI half of this to fix, which is worth stating because D12 makes
+"one shell has it and the other does not" the project's standing suspicion.
+
+### The last response was whatever had last been assigned
+
+`on_loop_event_message` handles the terminal `final_response` event with
+`transcript.flush_stream()` and throws the return value away. `on_turn_finished` then
+calls `flush_stream()` again — and a second flush on a closed span returns `""`, so
+`if flushed:` never fired and `_last_response` was never updated on a streamed chat
+turn. Measured directly, which is how it stopped being a theory:
+
+```
+>>> t.stream_delta('the last answer\n'); t.flush_stream(); t.flush_stream()
+'the last answer\n'
+''                      # what on_turn_finished actually saw
+```
+
+**Two symptoms, one cause, and only one of them looks like a bug.** A resumed thread had
+`_last_response` seeded by the replay, so `/copy last` handed back that thread's newest
+answer *from before the close* — in a one-exchange thread, the first message, which is
+exactly how it was reported. A thread that was never closed had nothing seed it at all,
+so the command said `Nothing to copy: the last response.` after a perfectly good answer.
+The second is the more common one and the easier to dismiss as "the command needs a
+research run first".
+
+The field had five feeders and one of them mattered; the widget's own `write_user`,
+`write_system`, `write_error`, `write_role`, `write_answer` and `rerender` all flush
+implicitly and discard too, so a `/theme` mid-answer or a WARNING routed by
+`TranscriptLogHandler` would have broken it by the same route on a build where the
+capture did fire. §26's own comment said what should have happened — "so /copy tracks
+the last answer without a second buffer shadowing the transcript's" — and then kept the
+buffer.
+
+So `Transcript.last_answer()` scans `_entries` backwards for the newest `assistant`
+entry, and `_last_response` goes with its six write sites and
+`core.replay.last_assistant_text`, which had no other caller. Every route already writes
+its answer to the entry log: a streamed span as one entry updated in place (§38), a
+one-shot and a research report through `write_answer`, a replay through `write_answer`
+per entry. §27 AC4 and §43 RM2's per-thread reset is already carried by
+`Transcript.reset()`.
+
+**Why the fix that keeps the field was rejected.** Capturing `flush_stream()`'s return at
+all four app-side flush sites is a three-line diff and leaves the second buffer, the six
+implicit flush sites in the widget, and the next flush site nobody has written yet. The
+defect is the shadowing, not the missing assignment.
+
+**Why no test caught it.** Every `/copy last` test set `app._last_response = "..."` and
+then asserted the payload branch. That is a real test of `_copy_payload` and no test at
+all of the thing that was broken. Two now drive a real turn through the loop and ask the
+command for it; the mutation that restores the original wiring kills four tests, and the
+one that makes `last_answer` scan forwards instead of backwards kills exactly the resume
+test — the reported symptom, isolated.
+
+### `/copy all` copied the harness talking about itself
+
+`as_text()` walked every `_entries` row regardless of role, so the payload carried
+`/help`'s output, the launch banner, `Resumed thread <uuid>.` and
+`— end of N replayed entries —` along with the conversation.
+
+`all` still does. #140 made it the SUPERSET deliberately — it had been the target whose
+name promised everything and carried the least — and the harness lines are exactly what
+reconstructs what happened: which tool was denied, when compaction fired, which thread
+was resumed. Filtering them out would leave no way to get them at all. So the fifth
+target is the narrow one: `/copy conversation` is the exchange, and `all` is unchanged.
+
+The classification is an **allowlist** (`CONVERSATION_ROLES` against `META_ROLES` in
+`tui/widgets.py`) because it fails in the safe direction: a role added later is meta
+until someone classifies it, so the worst a forgotten role can do is go missing from
+`conversation` rather than leak a harness line into it. Safe is not correct, so
+`tests/test_themes.py` holds both sets against `MESSAGE_ROLES` — the inventory that
+already exists for the colour checks — and fails on a role in neither, or in both.
+
+`pass` and `pass_done` are meta: a ten-pass run's boundaries are progress reporting
+about the harness, so a research run copies as the query, the tool lines and the report.
+
+**One producer had to be split before the split was sayable.** A failed tool whose call
+id is not in `_tool_names` was written with role `error` — the role the harness uses for
+its own failures — while its named sibling one line above used `tool_error`. One role
+meaning two things is precisely what stops a copy telling the exchange apart from the
+narration, and §41 X2's weight rule had already decided which it should be: plain, not
+bold, because a tool that failed is not the harness raising its voice.
+
+### The trap this batch hit
+
+`git checkout -- tui/` between mutation runs, with the fix still uncommitted, silently
+reverted the fix. The mutation harness asserts that its pattern APPLIED — the recorded
+defence against scoring kills for a mutation that never landed — and that is what caught
+it: the next mutation reported its pattern absent. Commit before mutating; the harness
+restores to HEAD, not to a stash.
+
+### Files
+
+- `tui/widgets.py` — `last_answer()`, `as_text(roles=...)`, `CONVERSATION_ROLES` /
+  `META_ROLES`.
+- `tui/app.py` — `_copy_payload`'s `last` and `conversation` branches, `_COPY_TARGETS`,
+  `_last_response` and its six write sites removed, the unnamed tool failure's role.
+- `core/replay.py` — `last_assistant_text` removed.
+- `tests/test_research_legibility.py` (+5), `tests/test_themes.py` (+2),
+  `tests/test_tui.py`, `tests/test_thread_legibility.py` (-1).
+- `ROADMAP_v2.md` (§26 L5, amended), `AGENTS.md`, `ARCHITECTURE.md`, `README.md`,
+  `tests/BREAKING_CHANGES.md`.

@@ -562,7 +562,7 @@ The first connection to a **user-level** server asks once, showing the resolved 
 | `/trigger [tokens\|off]` | Override **when this chat compacts**, for this session only. An absolute prompt size (`80k`), not a margin below the window. A value below the warning margin or the keep-recent floor is refused naming it; a value below the thread's current size is accepted and says a fold is coming |
 | `/window [tokens\|off]` | Set this model's **context window** and remember it, per `(provider, model)` and across launches. It outranks both the provider's own answer and the built-in table, and it moves everything derived from the window: the chat compaction trigger, the research-pass backstop and the summarizer's input budget. Above what the provider reports it warns rather than refusing, because raising it is the point — a gateway or a self-hosted endpoint can report its own default rather than your deployment's |
 | `/claims [run id]` | Open the claims view — tier, grounding status, assumption flags, score breakdown per claim — during a run or afterwards (**ctrl+l**) |
-| `/copy [last\|report\|claims\|all] [--file <path>]` | Copy out of the session. Defaults to the last response; `all` is transcript plus report plus claims. Clipboard delivery cannot be confirmed, so `--file <path>` is the route that provably worked |
+| `/copy [last\|report\|claims\|conversation\|all] [--file <path>]` | Copy out of the session. Defaults to the last response; `conversation` is the exchange alone — your turns, the answers, the reasoning, the tool calls and the diffs; `all` is everything on screen (the harness's own lines included) plus report plus claims. Clipboard delivery cannot be confirmed, so `--file <path>` is the route that provably worked |
 | `/threads` | Conversations-only picker — research runs' internal threads excluded — most recently active first, capped at 200 with a notice (**ctrl+t**) |
 | `/resume <thread-id>` | Open any thread by id, however old |
 | `/new` | Start a fresh thread; created lazily on your next message, so `/new` twice leaves nothing behind |
@@ -593,6 +593,8 @@ Only `AGENTS.md` is written for you in full; the rest arrive as skeletons with r
 `/model` switches provider and model, and the pair comes back at the next launch: it is saved in `~/.config/venastine/ui_preferences.json`, beside `settings.json` and never into it. Editing `default_provider` / `default_model` there still wins — the store records what the file said when you chose, so changing it (or adding it, or removing it) re-asserts the file — and `--provider` / `--model` pin one launch without disturbing what is remembered.
 
 `/copy` exists because Textual 1.0 cannot select text at all. Clipboard delivery uses an escape sequence that some multiplexers drop silently and **cannot be confirmed**, so `--file <path>` is the route that provably worked. Shift+drag usually bypasses the mouse capture and lets your terminal select natively.
+
+`/copy conversation` and `/copy all` are two targets on purpose. `all` is everything the session put on screen — `/help`'s output, the launch banner, `Resumed thread <uuid>.`, the replay marker — plus the research report and the claims, which is what you want when reconstructing what happened. `conversation` is the exchange with none of that.
 
 ### The CLI reads stdin exactly once
 
@@ -831,7 +833,7 @@ classifier is described under *Security model* above. If you have a fork or a lo
 note that `ToolApprovals.shell` now ships `False` and `SHELL_APPROVAL_MODE` is the gate — see
 `tests/BREAKING_CHANGES.md` §24.
 
-Run the test suite with `pytest` — 3343 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
+Run the test suite with `pytest` — 3349 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
 
 ## Documentation
 

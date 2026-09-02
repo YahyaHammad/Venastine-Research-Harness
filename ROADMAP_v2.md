@@ -1759,7 +1759,7 @@ three are TUI presentation.
 | **L2** | **Every** zero-LLM stage is announced, not just the two that were noticed. D0/D1/D2/Merge were invisible for exactly the same reason, and fixing only the reported symptom leaves the panel with different gaps rather than none. `D2` emits once per **round**, not once per exhausted claim. |
 | **L3** | Claims render in a scrollable modal (`/claims`, `ctrl+l`), taking plain dicts so the finished-run, stored-run and mid-run sources share one shape. |
 | **L4** | Role-based palette resolved from the `Theme` object. Assistant label is `venastine ›`. |
-| **L5** | `/copy [last\|report\|claims\|all] [--file <path>]`. OSC 52 cannot be confirmed, so `--file` is the route that provably worked. |
+| **L5** | `/copy [last\|report\|claims\|conversation\|all] [--file <path>]`. OSC 52 cannot be confirmed, so `--file` is the route that provably worked. **Amended in batch 48** with the fifth target: `all` is the superset and copies the harness's own lines with everything else (#140 decided that, and they are what reconstructs what happened), so the exchange without them is a target of its own rather than a narrowing of the one whose name says everything. `last` reads the transcript's entry log, not a field beside it. |
 | **L6** | The CLI prints the new kinds too — a capability visible in one shell and not the other is the split this project keeps warning about. |
 
 ### What the build found

@@ -2954,6 +2954,21 @@ Count 2786 -> 2815.
 | `on_mount`'s banner line moved into `_write_session_banner()` | A test patching or asserting the banner write at mount | Same text, one producer, now called by `/new` as well. Two copies of a status line are two copies that can disagree |
 
 
+## Batch 48 — /copy: the last response that was never the last (2026-09-02)
+
+| Change | What breaks | Symptom / fix |
+|---|---|---|
+| `VenastineApp._last_response` is GONE | Any test or caller reading or arranging it — five in `test_research_legibility.py`, `test_tui.py` and `test_thread_legibility.py` did | `AttributeError`. Read `app._transcript.last_answer()`, and ARRANGE it by writing to the transcript (`write_answer`) rather than by setting a field. That is the whole point: every `/copy last` test set the field by hand, which is why nobody noticed the field was never being set by the app |
+| `core.replay.last_assistant_text` is GONE | An import of it — only the TUI and one test had one | `ImportError`. It existed for §27 AC4's state reset, which is now carried by `Transcript.reset()` dropping the entry log. `replay_entries` is untouched |
+| `on_turn_finished` no longer captures `flush_stream()`'s return | Nothing — it never worked | It still flushes, because the span still has to be committed. The capture was dead: `on_loop_event_message` flushes at the terminal `final_response` event, so this one always saw a closed span and got `""`. If you find yourself re-adding it, the answer you want is `Transcript.last_answer()` |
+| `Transcript.as_text()` takes an optional `roles` | Nothing — it defaults to `None`, which is every entry | `as_text(CONVERSATION_ROLES)` is `/copy conversation`; bare `as_text()` is still `/copy all`'s transcript half, harness lines included (#140) |
+| `_COPY_TARGETS` has five entries | A test asserting `/help`'s `/copy` line, or the usage string | Both derive from the tuple. `conversation` sits before `all`, narrow to broad |
+| A new transcript role must clear FOUR checks, not three | Adding a role to `MESSAGE_ROLES` in `tests/test_themes.py` | Batch 41's three (pairwise-distinct strings, ≥ 120 redmean separation, no `dim` outside `system`) plus this batch's: it must be in `CONVERSATION_ROLES` or `META_ROLES` in `tui/widgets.py`, and not in both. An unclassified role is silently absent from `/copy conversation` — safe, but nobody decided it |
+| A failed tool with no known call id writes role `tool_error`, not `error` | A test asserting that line is bold red, or asserting on the `error` role | Intended. `error` is the harness's own voice and one role cannot mean both; §41 X2's weight rule already said a failed tool is plain rather than bold. The named branch one line above was already `tool_error` |
+| `_cmd_new` clears the transcript and FOUR per-thread fields | The batch 43 row above, which says five | `_last_response` left the list. `/copy last` is still cleared by `/new` — through `_transcript.reset()`, which drops the entry log it now reads |
+
+Count 3343 -> 3349.
+
 ## Batch 47 — §46, where a command runs and whether anyone can see it (2026-09-02)
 
 | Change | What breaks | Symptom / fix |
