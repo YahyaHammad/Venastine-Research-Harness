@@ -281,6 +281,74 @@ class TestPlanCanDelegateWithoutNarrowingTheChild:
 
 
 # ===========================================================================
+# ---- A14: the three that read the project they are working in -------------
+# ===========================================================================
+
+class TestTheProjectContextTheyOptedInTo:
+    """A14. Found by a mutation, not by review: flipping
+    `use_project_context` to false on `plan` left the whole suite green.
+
+    Every agent §32 shipped with sets it false and each has a reason --
+    the compactor summarises a transcript it is handed, the initializer
+    is WRITING the file, the pipeline-reviewer reviews a research run.
+    These three read a codebase in order to answer a question about it,
+    which is the case the file was made for, so the flag is a decision
+    here rather than an inherited default, and a decision nothing checks
+    is one that reverts by tidying.
+    """
+
+    CANARY = "CANARY b51 -- this project pins its own conventions here."
+
+    @pytest.fixture(autouse=True)
+    def _no_memory_tier(self, monkeypatch):
+        """§21b's fragment is assembled by the same function and needs a
+        database. This class is about the PROJECT-CONTEXT tier, so the
+        memory tier is silenced rather than stubbed into the assertion --
+        `context_for_agent` does not consult it either way, and
+        test_memory_injection.py owns that half.
+        """
+        import agents.manager as agents_manager
+
+        monkeypatch.setattr(agents_manager.memory_manager, "prompt_fragment",
+                            lambda agent: "")
+
+    def _project(self, root):
+        from core import workspace_trust
+
+        (root / "AGENTS.md").write_text(self.CANARY, encoding="utf-8")
+        workspace_trust.grant_trust(str(root))
+        config_loader.initialize(str(root))
+
+    @pytest.mark.parametrize("name", ("plan", "explore", "review"))
+    def test_each_one_receives_the_projects_own_agents_md(
+            self, real_harness_tier, name):
+        """Through the assembled prompt, because that is what the run
+        gets -- the frontmatter is a claim and `context_for_agent` is
+        the function that would stop honouring it."""
+        self._project(real_harness_tier)
+
+        prompt = manager.system_prompt_for(
+            config_loader.get_agent(name), "BASE")
+
+        assert self.CANARY in prompt, (
+            f"{name} is not reading the project's AGENTS.md. A14 opts all "
+            f"three in deliberately; without it the agent still answers, "
+            f"and answers without the project's own conventions")
+
+    def test_an_agent_that_did_not_opt_in_still_does_not(
+            self, real_harness_tier):
+        """The control. `context_for_agent` returning the context
+        unconditionally would satisfy every assertion above, and would
+        put this file into every compactor run at its own token cost."""
+        self._project(real_harness_tier)
+
+        prompt = manager.system_prompt_for(
+            config_loader.get_agent("compactor"), "BASE")
+
+        assert self.CANARY not in prompt
+
+
+# ===========================================================================
 # ---- A12: what the model is now told exists -------------------------------
 # ===========================================================================
 

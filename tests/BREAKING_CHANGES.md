@@ -2967,10 +2967,11 @@ Count 2786 -> 2815.
 | `plan`'s whitelist must remain a superset of every spawnable agent's | Adding a tool to `explore` or `review` without adding it to `plan` | `test_a_spawn_under_plan_loses_nothing` fails. C6 intersects, so the child would silently lose it (A13) |
 | `explore`/`review` declare `read` and `shell`, which global config DENIES | A test assuming a spawned explore can read a file | On a stock install it cannot: `config.ToolPermissions` ships `read`/`write`/`edit`/`shell` as False and D14's global check is unconditional. `STOCK_TOOLS` in `test_shipped_roster.py` is what a default install can actually call |
 | Asserting read-only through `is_tool_allowed` for `write`/`edit` is VACUOUS | A "stricter" test that adds them back to the policy-layer check | It answers False whatever the whitelist says. Assert those against the declaration; the policy layer for `write_project_doc`, `remember`, `spawn_subagent` |
+| All three new agents set `use_project_context: true` | Setting one back to the default `false` | `test_each_one_receives_the_projects_own_agents_md` fails naming the agent. It was a mutation SURVIVOR before that test existed: the agent goes on answering, without the project's conventions, and nothing reports it |
 | `AGENTS.md`'s TUI material moved out of the Skills section | A tool or script keyed on those heading offsets | Nothing in the repo is; the headings are `### The TUI (tui/, §16)`, `### Agents (agents/, §18/§32)`, `### Skills (skills/, §19)` |
 | The decision-family map now claims `E1–E14` and `A1–A15` | Nothing — both were already in the record | `test_every_decision_id_the_map_claims_is_in_the_record` pins the claim; note it does NOT pin that a range covers its family, which is how `E13`/`E14` sat outside their own index |
 
-Count 3462 -> 3477.
+Count 3462 -> 3483.
 
 ## Batch 50 — a template for the file that cannot explain itself (2026-09-02)
 

@@ -9583,6 +9583,26 @@ cannot come out the other way is worth less than no test.
   allowed the spawn.
 - Discovery emits **zero warnings** across all 21 shipped definitions.
 
+### The one gap fifteen mutations found
+
+Fourteen killed, and the per-row detail is the reason that N/N total is not the
+thing to read. `plan-stops-reading-the-project` — flipping `use_project_context`
+back to `false`, the default every earlier agent uses — left the whole suite
+**green**.
+
+A14 is a decision with a written reason and nothing checked it. The agent still
+runs, still answers, and answers without the project's own conventions in front
+of it: the third instance in this batch of degraded-rather-than-broken with the
+caller unable to tell, after A4 (the input axis) and A13 (the permission axis).
+
+Closed through the assembled prompt rather than the frontmatter, because
+`system_prompt_for` is what a run receives and `context_for_agent` is the
+function that could stop honouring the flag. The control asserts `compactor`
+still does NOT get the file — a `context_for_agent` that returned the context
+unconditionally would satisfy every other assertion and would put a project's
+AGENTS.md into every compaction at its own token cost. Verified against the
+mutation by hand: with the flag false, `plan` fails and the other two pass.
+
 ### The typo nothing caught
 
 `allowed_tools` is a whitelist that narrows, so a misspelled entry does not warn, does
@@ -9606,4 +9626,4 @@ registry, for agents and for skills.
   `ROADMAP_v2.md` (§32 amended in place, A1–A11 → A1–A15), `tests/BREAKING_CHANGES.md`,
   `TECHNICAL_DEBT.md`.
 
-Count 3462 -> 3477.
+Count 3462 -> 3483.
