@@ -15,7 +15,9 @@ State lives in files, in one of two places depending on how you installed it —
 |---|---|---|
 | `app.db` (`APP_DB_PATH`) — `~/.config/venastine/app.db` on an npm install | SQLite: `MessageLog`, `ConversationThread`, `CompactionCheckpoint`, `ThreadSummary`, `UserMemory` (`storage.py`) and `PipelineRunRecord` (`core/reasoning/pipeline_storage.py`) — every chat turn, every research pass, and any `remember` memories | First run creates it |
 | `logs/app.log` (`AGENT_LOG_FILE`, 1 MB × 3 rotated) — under `~/.config/venastine/logs/` on an npm install | **INFO and above** by default (`AGENT_LOG_LEVEL` overrides), including provider/HTTP traces. Redacted via `safety/policy_enforcement.redact_secrets` (same patterns as tool output) but may still contain query text | Every run appends |
-| `output/<run_id>/` (`AGENT_OUTPUT_DIR`) | Per-run artifacts: `report.md`, `report.pdf` (if `weasyprint`), `00_plan.md` … `07_review.json`, `sources/`, `trace.md` | Every ` --mode research` run |
+| `output/<run_id>/` (`AGENT_OUTPUT_DIR`) | Per-run artifacts: `report.md`, `report.pdf` (if `weasyprint`), `00_plan.md` … `07_review.json`, `trace.md` | Every ` --mode research` run |
+| `output/<run_id>/sources/` | **Since §45: the text of every page a run retrieved**, one `<sha256>.txt` per document, plus an `index.json` of urls, tools, timestamps, hashes and lengths. This is what makes a similarity score checkable rather than something you take on trust. Everything written here has been through the same redaction tool output gets. Set `PERSIST_SOURCE_TEXT = False` in `config.py` to keep the index and drop the text | Every research run that fetched anything |
+| `~/.config/venastine/pipeline_models.json` | The `/critic` and `/embedder` model choices — provider and model name only, no keys | You run either command |
 | `providers.json` (`AGENT_PROVIDERS_FILE`) & `.env` (`AGENT_ENV_FILE`) | Your local secrets (LLM provider keys + tool API keys). Gitignored, `export-ignore`d, and excluded from the npm tarball by the `files` allowlist; never sent except as described below | You create via `cp *.example` |
 | `~/.config/venastine/providers.json` | Optional user-level provider keys. An npm install reads this **only** when the current directory has no `providers.json` of its own — a local one always wins | You create it, for a command you run from anywhere |
 | `~/.config/venastine/runtime/<version>-<hash>/` | The Python virtual environment an npm install builds on first run, after asking. Holds the pinned dependencies, no data of yours | First `venastine` run, with your consent |
@@ -32,6 +34,8 @@ Only explicit external calls you configured or the model chose:
 
 * **LLM provider** — the prompt + tool results are sent to the provider named in `providers.json` (e.g. `ANTHROPIC`, `OPENAI`, your OpenAI-compatible endpoint at `API_URL`). No other party sees them from this harness.
 * **Tool fetches** — `web_search` (via `ddgs` → DuckDuckGo/Brave/etc.), `fetch_url` (direct HTTP GET), `arxiv_search`, and any **MCP server** you listed in `mcp.json` (stdio `command` or http `url`/`headers`). Each is a real HTTP/process call; the target site/server sees the request.
+* **Embedder** — if you set one with `/embedder`, each claim's text and windows of the pages a run fetched are sent to that provider to be turned into vectors. It is a second provider seeing your research content, which is why choosing it is a command rather than a `settings.json` key a cloned repository could set. With no embedder configured, nothing is sent and every run says so in its trace.
+* **OpenAlex** (`api.openalex.org`) — **off by default**. When `SCHOLAR_LOOKUP` is on, the DOI or arXiv id of each cited paper is looked up to score its venue, citation standing and authors. What leaves is the identifier and the shape of the cohort query — never your claim text, never your query. No contact address is sent unless you set `SCHOLAR_MAILTO` yourself; the harness never derives one from your git config or environment. This is the one call made outside the tool layer, so it does not appear in `granted_calls.json`.
 * Nothing else. There is no crash reporter, no update check, no hosted proxy.
 
 Fetched content is subject to its origin's terms (including `robots.txt` / ToS). See the grounding note in `README.md` — do not republish `report.md`/`report.pdf` with large verbatim excerpts without rights.
@@ -47,7 +51,8 @@ No automatic expiry — a thread lives until you delete it.
   To remove the Python environment as well: `venastine --venastine-reinstall` deletes it, or `rm -rf ~/.config/venastine/runtime/`. Uninstalling the package (`npm rm -g @yahyahammad/venastine`) does **not** remove anything under `~/.config/venastine/` — that is your data and config, and it is left for you to delete.
 * **One thread:** there is no single-thread delete command; wiping the DB is the intended granularity (threads are cheap and local).
 * **Durable memories:** `python main.py --memories` to list, `python main.py --forget <id>` to delete one by id (never by substring, by design).
-* **Settings/trust:** delete `~/.config/venastine/settings.json` or `trusted_projects.json` entries directly.
+* **Settings/trust:** delete `~/.config/venastine/settings.json` or `trusted_projects.json` entries directly. The same folder holds `ui_preferences.json`, `model_windows.json` and `pipeline_models.json` — remembered UI and model choices, no keys and no content.
+* **Fetched page text only:** `rm -rf output/*/sources/` removes the retrieved text while leaving each run's report, claims and scores in place. The scores stay, but nothing can re-derive them afterwards.
 
 ## If you publish a report
 

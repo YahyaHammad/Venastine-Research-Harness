@@ -8801,3 +8801,163 @@ were checked and all three assembly sites agree; J11's convergence stays a defer
 
 Suite: 3046 passed, 19 skipped, unchanged in both numbers from the baseline, plus the
 integration marker and a WSL run for the POSIX mode bits Windows skips.
+
+
+## Batch 46 — §45: what a source is worth, and how close it actually is (2026-09-02)
+
+Landed as six commits on `batch-46-source-scoring`. §45 was specified and built in the same batch,
+following the clarification cycle: the owner answered eight design questions across two rounds before
+any code was written, and the answers are the SQ1–SQ10 record in `ROADMAP_v2.md`.
+
+**What prompted it.** Pass 3a returned `authority_score` and `similarity_score` per cited source and
+one model invented both. Verified before planning: the two field names appear in exactly two files
+in the repository, both of them prompt markdown, and in no Python file at all. `sources` was not a
+required key in the Pass 3a payload spec, its element shape was unchecked, and nothing range-checked
+either float. Neither score was read by anything — `confidence_scoring.py` consumes
+`grounding_status` alone, through a three-value table. And no source text survived the pass, so
+nothing *could* have checked them. A run already on disk shows the cost: a Pinterest pin carrying
+`similarity_score: 1.0` beside the Wikipedia article, on the same claim.
+
+### Commit 1 — capture what a claim was grounded in
+
+`core/reasoning/source_corpus.py`. `_translate` already sees every tool result and deliberately
+forwards only `ok` plus an error string to the UI; the corpus is a SECOND SINK beside that, not a
+change to it. Text is redacted on entry through `redact_output_text` even though
+`check_output_policy` has already run — `_translate`'s own stated rule, that one boundary owns
+"nothing leaves here unredacted", rather than depending on a guarantee made two layers away.
+
+The module owns URL identity for the pipeline. Every arXiv spelling collapses onto one key,
+including the pre-2007 `math.GT/0309136` form whose archive prefix contains a slash — an id pattern
+excluding slashes silently stops recognising every paper before 2007, which is the kind of thing
+that fails quietly for a year.
+
+`_ground_and_score` was introduced here as the one seam both grounding sites cross. There are two —
+Pass 3a and Pass 6b's re-validation — and everything §45 adds has to happen at both.
+
+### Commit 2 — authority is computed, and the model only corrects it
+
+Two tables in `config.py`: a CLASS carries the score, a SUFFIX names membership. Tuning what
+preprints are worth is then one number, and adding a trusted domain is one row.
+
+**Deviation from the plan, and an owner-approved reordering.** The plan built the domain table in
+slice B, step 6. It moved here because the prompt change removes `authority_score`, and something
+has to supply the base the same day or authority disappears between slices. B1 is pure code with no
+network, so pulling it forward drags nothing of slice B's OpenAlex work with it.
+
+The signal is a RESTRICTED REGISTRY rather than a familiar suffix. `.org` gates nothing and never
+has, so it sits barely above `.com`. `{gov,mil,edu,ac}.{cc}` is derived rather than enumerated, and
+matching is on label boundaries — `evilgov.com` is not a government, and `example.ac` is Ascension
+Island's open commercial registry rather than a university.
+
+An adjustment with no reason is DISCARDED rather than clamped: the reason is what makes it
+auditable, and an unexplained nudge is the invented number this replaces.
+
+### Commit 3 — the embedder call, and the two commands that were missing
+
+`core/client.embed_texts` (§33's rule applied to a second kind of model call) and
+`core/pipeline_models.py` (RM4's two-records-one-file store, in `core/` for WS6's reason).
+
+`/critic` gives §11's routing a command for the first time. It has been `config.CRITIC_MODEL` and
+nothing else since it shipped, which left this project's own stated methodology — a model must not
+check its own output — available only to whoever could edit the checkout.
+
+`/embedder` PROBES rather than consulting a table. Whether a provider has an embeddings endpoint,
+whether a slug is an embedding model, and whether the key works are three questions one call
+answers, and a static capability list would be a guess whose wrong answers surface three passes into
+a run.
+
+Three failure modes are treated as errors rather than data, because each produces a WRONG NUMBER
+rather than an exception: a batch reordered by the provider (so the response is sorted by its
+explicit `index`), a ragged batch, and all-zero vectors — which read as "no source supports this
+claim" and are indistinguishable from a real finding.
+
+### Commit 4 — similarity becomes a measurement
+
+The one idea is MATCHING GRANULARITY. Embedding a 5000-character page whole averages twenty topics
+into one vector and the claim's contributes a few percent of its direction; windows about the length
+of a claim ask the question grounding actually asks. Max over windows, not mean. The quote is its
+own window and comes first.
+
+Raw cosine is not a 0–1 score — unrelated text sits near 0.1 on some models and above 0.7 on others
+— so a per-model band maps the useful range onto 0–1, and the RAW cosine is always recorded so a bad
+calibration row is visible in the artifact rather than baked into it.
+
+No new dependency: cosine is a pure-Python dot product over L2-normalised vectors.
+
+### Commit 5 — a grounding is worth what its sources are worth, and the knobs
+
+**The owner chose "add a weighted term to Pass 5", and it shipped as a MULTIPLIER instead.** That is
+a deviation, and it was surfaced before implementing rather than taken silently: a fourth weighted
+term is the exact shape §10 shipped for ensemble consistency and then reversed, because
+redistributing 0.5/0.35 to make room made grounding count for less whenever the feature was on. The
+owner picked the modulation from three options once the trade was stated.
+
+**Both constants were set by measurement, and both first drafts were wrong.** Feeding raw authority
+into the product multiplied two RANK scales: swept across the domain table, only a `.gov` at
+similarity 1.0 still reached HIGH, and Nature, arXiv, Reddit and a Pinterest pin were
+indistinguishable at MEDIUM. `AUTHORITY_FULL_CREDIT = 0.85` gives the formula an evidential scale.
+And `SOURCE_QUALITY_FLOOR` was 0.4, which is exactly the worst available value — `0.5*0.4 + 0.35`
+IS the MEDIUM threshold, so the floor guaranteed MEDIUM for every grounded claim however bad its
+sources. The sweep is now a test.
+
+**Deviation from the plan's settings shape.** The owner's chosen preview nested the knobs under
+`research`. They shipped as TOP-LEVEL `confidence` and `source_scoring` sections for a mechanical
+reason stated in the plan and the record: `_NESTED_SETTINGS` supports exactly one level of nesting,
+and deepening the merge is the code path review finding F2 already broke once.
+
+### Commit 6 — what a cited paper is worth
+
+`fwci` and `citation_normalized_percentile` are NULL on preprints. That was measured against the
+live API during planning, on a paper with 3019 citations, and it is what makes the whole cohort-
+counting design necessary rather than merely nice: arXiv is the only scholarly source this harness
+reaches, so OpenAlex's ready-made normalisation does not cover the case that matters.
+
+Also measured during planning, and it shaped the calibration: computer-science preprints published
+in 2024 number 106,277, of which 76,630 (72%) have zero citations and 1,139 (1.07%) have more than
+nine. A median-based normaliser is degenerate on that distribution; a percentile is not.
+
+**The lifecycle model the owner asked about is deferred, not dismissed, and §45 says why.** Matching
+the cohort on a ±30-day window makes the age normalisation exact rather than modelled, so a fitted
+accrual curve adds nothing for a paper old enough to carry signal — and below 60 days it would be
+fitting noise. The trigger to revisit is named in the record.
+
+Verified end to end against the live API: the GPT-3 preprint scores 0.82 against arxiv.org's flat
+domain class of 0.60, and an unremarkable preprint scores below it. That separation is the whole
+reason slice B exists.
+
+### Files
+
+New: `core/reasoning/source_corpus.py`, `core/reasoning/source_scoring.py`,
+`core/reasoning/scholar.py`, `core/pipeline_models.py`, and four test modules.
+Modified: `core/client.py`, `core/reasoning/{orchestrator,confidence_scoring,payload_validation,
+output_writer,base}.py`, `core/config_loader.py`, `config.py`, `tui/app.py`,
+`prompts/{source_grounding,revalidate}.md`, `tests/conftest.py`.
+
+### Verification
+
+Full suite green at every commit. 3271 → 3310 tests. Every existing
+`test_confidence_scoring.py` regression passes UNMODIFIED, which is the property SQ3 promised: at
+`sources_scored=False` the formula is the pre-§45 one, literally rather than coincidentally.
+
+Two live verifications that could not be done offline and are recorded here because the fixtures
+were transcribed from them: the OpenAlex field shapes (including the null `fwci` on a preprint), and
+the cohort counting queries.
+
+### Still open
+
+- No live end-to-end research run with a real embedder yet — that needs a provider key and is the
+  owner's to run. The offline path is fully covered; what a real run would add is calibration
+  evidence for `SIMILARITY_CALIBRATION`, which is why the raw cosine is recorded on every source.
+- `arxiv.py`'s 600-character abstract cap and `fetch_url`'s 5000-character content cap both bound
+  how good any similarity score can be. Named in §45's "deliberately not" list rather than changed,
+  because a tool's output cap is every pass's token cost.
+
+### Deliberately not in batch 46
+
+- A lifecycle model for citation accrual (deferred with its trigger, above).
+- A noisy-OR source aggregator: it rewards corroboration, and lets five mediocre blogs outscore one
+  primary source.
+- Fetching arXiv PDFs. `pdf_url` is returned and has never been used.
+- Readability extraction for `fetch_url`. Tag-stripping is enough to stop markup poisoning the
+  vectors.
+- Forwarding tool result bodies to the UI. The corpus is a second sink; §26's boundary is unchanged.

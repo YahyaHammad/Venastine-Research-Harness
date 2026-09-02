@@ -149,6 +149,7 @@ Venastine Research Harness/
 │   ├── events.py                  # §13: LoopEvent dataclass -- the single event type _run() yields (token_delta / tool_call_start / tool_result / permission_request / notice / final_response / stop_reason)
 │   ├── workspace_trust.py         # ROADMAP_v2 §14 (D17): trust store keyed by resolved path + content hash; is_trusted/grant_trust; sorted-walk deterministic hash with path-in-hash
 │   ├── config_loader.py           # ROADMAP_v2 §14: three-tier .md discovery (harness/project/user), line-anchored frontmatter parse, settings.json merge with loud unknown-key rejection, root AGENTS.md opt-in (§44), frontmatter-only skill catalog
+│   ├── pipeline_models.py          # §45 SQ7: the remembered /critic and /embedder pairs. In core/ because the pipeline reads them and D12 forbids core importing the shell
 │   ├── model_windows.py           # ROADMAP_v2 §44 (WS6): the remembered context window per (provider, model), user-tier, outranking both the provider query and MODEL_CONTEXT_WINDOWS. Its own module because core/compaction.py reads it and D12 forbids core importing the shell
 │   ├── memory.py                  # ConversationMemory -- in-run message list, provider-NEUTRAL shape, backed by storage.py + resume-shape fix. §21a: assembles the DERIVED view (checkpoint summary + pinned rows + tail) and owns pin_last's ordinal-to-id mapping
 │   ├── compaction.py              # ROADMAP_v2 §21a: when to compact (M1 working-set trigger, M6 pipeline backstop), what may be folded (M4/M5's three floors), and the compactor agent run + ratio retry. Owns the re-entrancy guard. §21c adds summarize_thread() -- a whole-thread DESCRIPTION that folds nothing
@@ -165,7 +166,10 @@ Venastine Research Harness/
 │       ├── review.py              # ROADMAP_v2 §20: the post-pipeline review -- propose (run_review) / consent (walk_consent) / correct (apply), three functions so the mutating one has no model in it
 │       ├── json_retry.py          # ROADMAP §3's malformed-JSON recovery, shared by the ten passes and §20's reviewer. Takes an ALREADY-OBTAINED response; each caller starts its own first attempt
 │       ├── pipeline_storage.py    # ROADMAP §5: PipelineRunRecord table + create/update/load_pipeline_run. §27: pass_threads_json + classify_legacy_pass_threads (raw SQL, the ensure_columns seam)
-│       └── output_writer.py      # ROADMAP §12: write_run_artifacts -- human-browsable /output/<run_id>/ directory
+│       ├── output_writer.py       # ROADMAP §12: write_run_artifacts -- human-browsable /output/<run_id>/ directory. §45: finally populates sources/
+│       ├── source_corpus.py       # §45 SQ2: what a claim was grounded IN -- tool results collected per run, redacted on entry, keyed by normalised URL. Owns URL identity for the pipeline (every arXiv spelling collapses onto one key)
+│       ├── source_scoring.py      # §45 SQ2/SQ4: domain classification, markup stripping, sentence-packed windows, cosine + per-model calibration, quote verification, and the per-source coercions. Nothing here raises
+│       └── scholar.py             # §45 SQ5/SQ9: OpenAlex. Peer review, cohort citation percentile, author standing. Injectable fetch, OFF by default -- the one network call outside the tool layer
 │
 ├── prompts/
 │   ├── system_prompts.py          # loads every pass's .md file into passes_prompts dict; §14: with_skill_catalog()/pass_prompt() append the frontmatter-only skill catalog to chat + research prompts; §32 A1/A2: both catalogs are gated on registry.is_advertised(), the SAME predicate schemas() uses, so a headless run is never told to call a tool it has no schema for (#68)
@@ -1200,6 +1204,100 @@ every-default-declines check without being named in either.
 and `todo_write` (`tools/builtin/todo.py`). Neither goes through the approval
 bridge and neither is gated (J12/J9) — see §11's entries for why, and for the
 generic tool-result `notice` route that feeds the TUI's `TodoPanel`.
+
+### 4.30 Source scoring — what a cited source is worth (ROADMAP_v2 §45)
+
+Pass 3a returned two numbers per cited source, `authority_score` and
+`similarity_score`, and one model invented both. Neither was validated, neither
+was consumed by anything, and no source text survived the pass — so nothing
+*could* have checked them. A run on disk scored a Pinterest pin
+`similarity_score: 1.0` beside the Wikipedia article on the same claim. Five
+modules replace that, and each owns one job.
+
+**`core/reasoning/source_corpus.py` — what a claim was grounded IN.**
+
+*Belongs here:* collecting `fetch_url` / `arxiv_search` / `web_search` results
+into a run-scoped store keyed by normalised URL; redaction on entry; and **URL
+identity for the pipeline** — every arXiv spelling (`abs`/`pdf`, versioned, the
+`export.` host, the pre-2007 slashed id) collapsing onto one key, so a model
+citing the paper it fetched is not told its own citation has no text.
+*Does NOT belong here:* anything about what the text is worth. It stores and
+serves; it does not score.
+*Consumers:* `source_scoring` (windows and quote checks), `output_writer`
+(`sources/`), `scholar` (which imports `arxiv_id_from_url` rather than
+re-deriving it).
+*Why this matters:* it attaches to `_translate` as a **second sink**, not a
+change to it — §26's rule that a successful result body never reaches the UI is
+untouched. Two copies of "what counts as the same paper" is how the corpus and
+the scholarly lookup come to disagree about one source in one artifact.
+
+**`core/reasoning/source_scoring.py` — the scoring stage.**
+
+*Belongs here:* the domain-class table's *logic* (the table itself is data in
+`config.py`); markup stripping; sentence-packed windowing; cosine and its
+per-model calibration; the `EmbeddingScorer`'s batching, caching and give-up
+flag; quote verification; and the per-source coercions with their trace lines.
+*Does NOT belong here:* the model call itself (`core/client.embed_texts`), the
+confidence formula (`confidence_scoring`), or any table of values (`config.py`).
+*Why this matters:* **nothing here raises.** Every input is a value a model
+produced; a source that cannot be scored is dropped, an out-of-range number is
+clamped, and each is reported to `run.trace` aggregated by kind — sixty lines in
+a twenty-line trace is the same as no trace. It is silent on a clean payload,
+which `test_orchestrator`'s trace-order test depends on.
+
+**`core/reasoning/scholar.py` — OpenAlex.**
+
+*Belongs here:* DOI/arXiv resolution, peer-review detection, cohort percentiles,
+author standing, and the one HTTP call, which is **injectable** so the whole
+module is testable offline.
+*Does NOT belong here:* anything about non-scholarly sources.
+*Why this matters:* `fwci` and `citation_normalized_percentile` are null on
+preprints — verified against the live API — and arXiv is the only scholarly
+source this harness reaches, so the ready-made normalisation does not cover the
+case that matters. Cohort counting does, and it self-calibrates across fields
+because the comparison set is the same field. It is the **first network call in
+this harness made by something that is not a registered tool**, so it does not
+appear in `granted_calls.json`; that is stated rather than worked around, and it
+is off by default.
+
+**`core/pipeline_models.py` — the critic and embedder roles.**
+
+*Belongs here:* the user-tier store for the two `(provider, model)` pairs that
+are not the session model, and the precedence between it and `config.py`.
+*Does NOT belong here:* deciding whether a model is a usable embedder — that is
+`/embedder`'s probe, the same split `model_windows` has with `/window`.
+*Why this matters:* it lives in `core/` because the pipeline reads it and D12
+forbids core importing the shell (WS6's argument). Precedence **inverts**
+`model_windows`: there a configured value could be confidently wrong about a
+deployment, so the person won; here `config.py` is the harness default and the
+store is a choice made at a command prompt.
+
+**`core/client.embed_texts` — the embedding call.**
+
+§33's rule applied to a second kind of model call: this file is where a model
+call lives, and it shares `api_initialization` and its client cache with the
+chat path. Three failure modes are treated as errors rather than data, because
+each produces a *wrong number* downstream rather than an exception — a batch
+reordered by the provider, a ragged batch, and all-zero vectors, which read as
+"no source supports this claim" and are indistinguishable from a real finding.
+
+**How it composes.** `_ground_and_score` in the orchestrator is the one seam both
+grounding sites go through (Pass 3a and Pass 6b's re-validation), because a
+source re-grounded after a revision must be re-scored against the revised claim.
+Per-source quality is `authority × similarity`, aggregated as the max across a
+claim's sources, and it **scales Pass 5's grounding component** rather than
+adding a fourth weighted term — §10 shipped a fourth term and reversed it, and
+scaling leaves the unscored formula literally unchanged so the byte-for-byte
+regression guard holds by construction.
+
+**Known gotcha.** The domain table is a *ranking*; the formula needs an
+*evidential* scale. Feeding authority in raw multiplies two rank-scales and
+collapses the tier — swept across the table, Nature, arXiv, Reddit and a
+Pinterest pin all landed MEDIUM. `AUTHORITY_FULL_CREDIT` is what separates them,
+and `test_confidence_scoring` sweeps the table so a future retune that collapses
+it fails rather than shipping.
+
+---
 
 ## 5. Request lifecycle — regular conversation, traced end to end
 

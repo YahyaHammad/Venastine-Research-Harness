@@ -87,6 +87,7 @@ Pass 1   Generate        the first full answer
 Pass 2   Extract         break that answer into individually checkable claims
   D0     Route           are there factual claims? (pure code)
 Pass 3a  Ground          check each factual claim against real sources
+  Score  Rate sources   what each cited source is worth (pure code + embeddings)
 Pass 3b  Critique        attack each factual claim on its merits
 Pass 3c  Completeness    what did the answer never address at all?
 Pass 4   Assumptions     what is being taken for granted and never stated?
@@ -114,9 +115,91 @@ Every claim comes out with a tier, a score, and the breakdown that produced it.
 | **UNVERIFIED** | below 0.3 — **or any factual claim that could not be grounded, regardless of score** |
 | **UNVERIFIED_COVERAGE** | not a claim at all: something Pass 3c found the answer never addressed |
 
-For a factual claim the score is `0.5 × grounding + 0.35 × (1 − critic severity) − 0.15 per assumption flag`. Non-factual claims (opinion, projection, definition) are capped at 0.65 and can never reach HIGH, because there was nothing to ground them against. The weights live at the top of `core/reasoning/confidence_scoring.py` and are meant to be tuned.
+For a factual claim the score is `0.5 × grounding + 0.35 × (1 − critic severity) − 0.15 per assumption flag`. Non-factual claims (opinion, projection, definition) are capped at 0.65 and can never reach HIGH, because there was nothing to ground them against.
+
+**A grounding is worth what its sources are worth.** The grounding term is scaled by the best source the claim has, scored as authority × relevance — so a claim supported by a primary source that plainly says it scores exactly what any grounded claim used to, and one whose only support is a social-media post or a content farm lands LOW and goes back through the revise loop to find something better. A source that is authoritative but does not discuss the claim counts for as little as a perfect match on a junk site; multiplying is the only shape that says both.
+
+Every number in the formula is tunable, from `settings.json`'s `confidence` and `source_scoring` sections or by editing the defaults at the top of `core/reasoning/confidence_scoring.py`. A value outside its range falls back to the default for that one constant and says so once — a mistyped weight should not refuse to start a ten-pass run, and should not silently discard the nine weights beside it that were right.
 
 A claim that stays flagged after two revise/re-validate rounds falls to UNVERIFIED rather than being quietly retried forever.
+
+### What a source is worth, and how close it actually is
+
+Pass 3a used to hand back two numbers per cited source — how authoritative it is, and how well it
+matches the claim — and one model invented both. Nothing checked either, nothing consumed either,
+and no source text survived the pass, so nothing *could* have checked them. A real run on disk
+scored a Pinterest pin `similarity_score: 1.0` beside the Wikipedia article, on the same claim.
+
+**Authority is computed from the source, not asked for.** A domain class sets it — restricted
+registries (`.gov`, `.mil`, `.int`, `.edu`, and `gov.uk`/`ac.uk`-style second levels) at the top,
+then standards bodies and peer-reviewed publishers, down through news, preprint servers and generic
+hosts to blogs, forums, social media and content farms. Note that `.org` sits barely above `.com`:
+anyone can buy one, and treating it as trustworthy is the most common version of this mistake. The
+model may then adjust the computed number by at most ±0.15, and only with a stated reason — for
+what a domain cannot see, like a manufacturer's own spec sheet on an ordinary `.com`, or an opinion
+column on a masthead. An adjustment with no reason is discarded. Base, adjustment, reason and method
+are all recorded, so the score can be recomputed from the artifact.
+
+**Similarity is a cosine, when you configure an embedder.** `/embedder <PROVIDER> <model>` picks the
+model; the selection is probed rather than looked up in a table, so a provider without an embeddings
+endpoint or a chat slug passed by mistake fails at the prompt rather than three passes into a run.
+Each source's captured text is split into windows about the length of a claim and the best-matching
+one wins — embedding a 5000-character page whole averages twenty topics into one vector and makes
+every long source look equally irrelevant, which is the dilution the windows exist to remove. Raw
+cosine is not a 0–1 score (unrelated text sits near 0.1 on some models and above 0.7 on others), so
+a per-model band maps the useful range onto 0–1 and the raw cosine is recorded beside it.
+
+Without an embedder, every run says so in its first trace line and similarity stays the grounding
+model's own estimate — under an anchored rubric, and marked `similarity_method: "llm"` on every
+source, so no reader has to guess which numbers were measured. The model's estimate is recorded even
+when a cosine replaces it, so the two are comparable on every run.
+
+**The model's quote is checked against the page.** Pass 3a is asked for the verbatim span it relied
+on, and that span is looked for in the text the run actually retrieved. `quote_verified` has three
+answers: `true`, `false` — meaning the run fetched this page and the quoted words are not in it,
+which is a fabricated citation — and `null`, meaning there was nothing to check against, which is
+not the same thing.
+
+**Cited papers can be scored on their own standing.** With `SCHOLAR_LOOKUP = True` in `config.py`,
+an arXiv or DOI URL is resolved against OpenAlex and scored on venue (peer-reviewed or preprint),
+citation standing, and author h-index. Citation standing is a percentile *within the paper's own
+field-and-year cohort*, measured by two counting queries rather than modelled — OpenAlex's own
+field-normalised metrics are null on preprints, and arXiv is where most cited preprints come from.
+A paper too young, or in a cohort too small, reports that and drops the term rather than scoring
+low; a retraction floors the source outright. It is **off by default**: it is the one network call
+this harness makes outside the tool layer, and an out-of-the-box run should make none you did not
+ask for.
+
+The knobs, under `confidence` and `source_scoring` in `settings.json`, each overriding a default in
+code:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `confidence.source_quality_floor` | `0.25` | How little a grounding can be worth when its sources are weak — never zero, because a weak grounding still beats none |
+| `confidence.authority_full_credit` | `0.85` | Authority at or above which a source is not what limits the claim |
+| `confidence.grounding_weight_factor` | `0.5` | Weight of the grounding term |
+| `confidence.critic_weight_factor` | `0.35` | Weight of the critic term |
+| `confidence.assumption_flag_penalty` | `0.15` | Subtracted per assumption flag |
+| `confidence.disagreement_penalty_factor` | `0.15` | Subtracted in proportion to cross-candidate dissent |
+| `confidence.non_factual_score_cap` | `0.65` | Ceiling for claims that were never grounded |
+| `confidence.grounding_weights` | `1.0 / 0.5 / 0.0` | Per grounded / partial / ungrounded |
+| `confidence.tier_thresholds` | `0.8 / 0.55 / 0.3` | HIGH / MEDIUM / LOW; must stay ordered |
+| `source_scoring.window_chars` | `480` | Window size a source is chunked into |
+| `source_scoring.max_windows` | `24` | Windows scored per source |
+| `source_scoring.claim_min_chars` | `80` | Below this, a claim's entities are prepended to the query |
+| `source_scoring.similarity_floor` / `_ceiling` | per-model | Cosine band; unset means use the table for your embedder |
+| `source_scoring.authority_adjustment_cap` | `0.15` | How far the model may move a computed authority |
+| `source_scoring.domain_overrides` | `{}` | `{"host": score}` — how you add your own field's trusted domains |
+| `source_scoring.venue_weight` / `citation_weight` / `author_weight` | `0.4 / 0.4 / 0.2` | How a paper's score is composed |
+| `source_scoring.min_cohort_size` | `200` | Below this the cohort widens before a percentile is trusted |
+| `source_scoring.min_citation_age_days` | `60` | Below this, citation counts are noise and the term is dropped |
+
+A value outside its range falls back to the default for that one key and warns once per run, rather
+than refusing to start the run — unlike the compaction knobs above, where an incoherent value burns
+model calls on every turn. An *unknown* key still raises, as everywhere else in `settings.json`.
+`critic_model` and `embedder_model` are rejected there by name: both name a provider this harness
+sends research content to, and a project's `settings.json` outranks your own — use `/critic` and
+`/embedder`, or `config.py`.
 
 ### A pass that answers the wrong shape is corrected, then it stops the run
 
@@ -152,13 +235,15 @@ Set `CRITIC_MODEL` and passes 3a, 3b and 6c run on a *different* provider and mo
 Every run writes `output/<run_id>/`:
 
 ```
-00_plan.md            04_confidence.json    trace.md
-01_raw_response.md    05_assumptions.json   report.md
+00_plan.md            04_assumptions.json   trace.md
+01_raw_response.md    05_confidence.json    report.md
 02_claims.json        06_revisions.json     report.pdf          (if weasyprint installed)
 03_grounding.json     07_review.json        confidence_chart.png
 03_critic.json        granted_calls.json    sources/  code/
-03_completeness.json
+03_completeness.json  pass_threads.json
 ```
+
+`sources/` holds what each cited page actually served: `index.json` lists every URL the run retrieved text from — with the tool, the timestamp, a content hash and the length — and one `<sha256>.txt` per document holds the text itself, redacted. That is what makes a similarity score checkable after the fact rather than a number you have to take on trust; set `PERSIST_SOURCE_TEXT = False` in `config.py` to keep the index and drop the text.
 
 In ensemble mode the Pass-1 slot is `01_candidate_1.md`, `01_candidate_2.md`, … — one file per surviving candidate, numbered to match the trace and each claim's `asserted_by_candidates` tags, since no single candidate is "the" response the claims came from.
 
@@ -470,6 +555,8 @@ The first connection to a **user-level** server asks once, showing the resolved 
 | `/effort [level\|auto]` | Switch reasoning effort, offering only levels this model accepts (Anthropic's are queried live). Session-only (`tui.effort` persists) |
 | `/thinking [on\|off]` | Show or hide reasoning inline for this session. Session-only (`tui.show_thinking` persists) |
 | `/model [[PROVIDER] name]` | Switch provider and/or model, and it is remembered for the next launch. Refuses mid-turn, warns on a missing key, revalidates effort against the new model, and notes if an active agent pins its own |
+| `/critic [[PROVIDER] name\|off]` | Route the grounding and critic passes (3a, 3b, 6b) to a different model than the generator, so it is not checking its own output for errors. Remembered across launches; not cleared by `/model`, since being a different model is the point. Bare reports what is in force and where it came from |
+| `/embedder [[PROVIDER] name\|off]` | Choose the embedding model that scores how close each source is to the claim it was cited for. The selection is **probed** — one embedding call checks the provider, the slug and the key, and reports the dimension — and only what worked is remembered. Without one, similarity stays the grounding model's own estimate and every run says so |
 | `/research [--attended] [--review\|--no-review] [--grant[=a,b]] <query>` | Run the pipeline live from the TUI. Leading flags compose in any order before the query; bare `--grant` opens the picker, `--grant=a,b` names them (`--grant-tools=` works as an alias); without flags, `research.*` settings apply |
 | `/compact [--strength 1-5]` | Fold older turns now instead of waiting for the trigger. Recent turns keep exactly the protection an automatic compaction gives them |
 | `/trigger [tokens\|off]` | Override **when this chat compacts**, for this session only. An absolute prompt size (`80k`), not a margin below the window. A value below the warning margin or the keep-recent floor is refused naming it; a value below the thread's current size is accepted and says a fold is coming |
@@ -491,7 +578,7 @@ The first connection to a **user-level** server asks once, showing the resolved 
 
 Keys: **ctrl+c** quit · **ctrl+t** thread picker · **ctrl+l** claims view.
 
-Three behaviours worth knowing: an unknown slash command is an error, never a chat turn — a mistyped command cannot silently burn a request. `/effort` and `/thinking` persist nothing, so make those stick through settings.json or launch flags; `/theme` and `/model` are the exceptions — they are remembered for the next launch, in a file of their own beside settings.json rather than by rewriting it. And the commands that spend money or swap models mid-session (`/compact`, `/summary`, `/research`, `/init`, `/model`, `/grill-me`) refuse while a turn is still running rather than acting underneath it.
+Three behaviours worth knowing: an unknown slash command is an error, never a chat turn — a mistyped command cannot silently burn a request. `/effort` and `/thinking` persist nothing, so make those stick through settings.json or launch flags; `/theme`, `/model`, `/critic` and `/embedder` are the exceptions — they are remembered for the next launch, in files of their own beside settings.json rather than by rewriting it. And the commands that spend money or swap models mid-session (`/compact`, `/summary`, `/research`, `/init`, `/model`, `/critic`, `/embedder`, `/grill-me`) refuse while a turn is still running rather than acting underneath it.
 
 When a subagent is spawned, you are asked which of its approval-gated tools it may use without asking again — per tool, all unticked by default. Running it with none selected is fine, and refusing the spawn entirely is a separate answer from granting it nothing. Before this, approving a spawn authorised the child's whole set.
 

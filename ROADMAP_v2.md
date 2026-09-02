@@ -170,7 +170,7 @@ the namespace list in `AGENTS.md`.
 - **§42. The consent surface — what a modal shows, and what the agent says it is doing** — BUILT (the permission modal parsed console markup out of the payload it exists to show; `shell` gained a display-only `rationale`)
 - **§43. Who is speaking, and what the session remembers** — BUILT (the `venastine ›` label rendered after a turn's reasoning; `/new` left the previous conversation on screen; a `/model` switch was forgotten at exit; workspace trust was reported broken and is not)
 - **§44. The provider it is on, the reasoning it kept, and the project it is in** — BUILT (a remembered `/model` pair left the launch key warning naming the wrong provider; reasoning was never persisted, never echoed, and — measured here — never rendered at all on Anthropic; `/init` scaffolded the harness instead of the workspace; the compaction trigger was a flat 40k on every window)
-- **§45. What a source is worth, and how close it actually is** — **(IN PROGRESS: slice A landing; slice B specified)** (the two scores per cited source were model self-reports that nothing checked and nothing consumed; no source text survived the pass, so nothing could have)
+- **§45. What a source is worth, and how close it actually is** — **(BUILT: both slices)** (the two scores per cited source were model self-reports that nothing checked and nothing consumed; no source text survived the pass, so nothing could have)
 - **Open Questions — None Remaining** (Rev. 3 — all decisions locked; verification items only)
 - **Why these calls, not just what they are** (Rev. 3 — the reasoning patterns behind several decisions above)
 
@@ -3668,8 +3668,8 @@ No code changed; the answer is written down instead, in AGENTS.md and ARCHITECTU
 
 ## §45. What a source is worth, and how close it actually is
 
-**Status: IN PROGRESS.** Slice A landing; slice B specified and not yet built. Pass 3a has always
-asked one model to invent two numbers per cited source, and nothing anywhere checked either of them.
+**Status: BUILT** (batch 46; both slices). Pass 3a has always asked one model to invent two numbers
+per cited source, and nothing anywhere checked either of them.
 
 **Both scores exist only in prompt text.** `authority_score` and `similarity_score` appear in
 `prompts/source_grounding.md` and `prompts/revalidate.md` and in no Python file at all. `sources`
