@@ -727,13 +727,58 @@ def _apply_embeddings(run, claims, corpus, scorer, window_chars, max_windows,
             f"Cause: {scorer.failed_reason}")
 
 
+def _apply_scholar(run, claims, scholar) -> None:
+    """Replace a cited paper's domain class with what OpenAlex knows.
+
+    A THIRD PHASE for `_apply_embeddings`' reason: it makes network calls,
+    and the per-source pass has to stay a pure rewrite of what the model
+    sent. It runs AFTER that pass so it is handed urls that have already
+    been coerced into shape.
+
+    A source that is not a resolvable paper keeps its domain class and
+    gains nothing, which is the right answer -- `authority_method` says
+    which of the two produced the number, so no reader has to guess.
+
+    THE ADJUSTMENT IS REAPPLIED, not discarded. The model's bounded nudge
+    is about THIS PAGE -- a retracted-but-uncorrected posting, an author
+    manuscript that differs from the published version -- and it is as
+    true of a paper as of any other source. Re-derived from the recorded
+    adjustment rather than kept, because the base underneath it changed.
+    """
+    upgraded = 0
+    for claim in claims:
+        for scored in claim.grounding_sources:
+            if not scholar.usable:
+                break
+            authority, signals = scholar.authority_for(scored["url"])
+            if authority is None:
+                continue
+            scored["authority_base"] = round(authority, 4)
+            scored["authority_method"] = "scholar"
+            scored["scholar"] = signals
+            scored["authority_score"] = round(
+                _clamp(authority + scored.get("authority_adjustment", 0.0)), 4)
+            upgraded += 1
+
+    if upgraded:
+        run.log(f"Source scoring: {upgraded} cited paper(s) scored from "
+                f"OpenAlex (venue, citation percentile within their own "
+                f"field-and-year cohort, author standing) in "
+                f"{scholar.calls} lookup(s).")
+    if scholar.failed_reason:
+        run.log(f"Source scoring: the scholarly lookup stopped after "
+                f"{upgraded} paper(s); the rest keep their domain class. "
+                f"Cause: {scholar.failed_reason}")
+
+
 def score_grounding_sources(run, claims=None, corpus=None,
                             overrides: dict | None = None,
                             scorer=None,
                             window_chars: int = WINDOW_CHARS,
                             max_windows: int = MAX_WINDOWS,
                             claim_min_chars: int = CLAIM_MIN_CHARS,
-                            authority_adjustment_cap: float | None = None) -> int:
+                            authority_adjustment_cap: float | None = None,
+                            scholar=None) -> int:
     """Rewrite every claim's `grounding_sources` with computed scores.
 
     Returns the number of sources scored. Called from
@@ -780,10 +825,13 @@ def score_grounding_sources(run, claims=None, corpus=None,
                 f"were claimed as {claim.grounding_status} with no scorable "
                 f"source", claim.id)
 
-    # AFTER the per-source pass, so the embedder is handed sources whose
-    # quotes and urls have already been coerced into shape -- and so a
-    # payload the first phase rejected entirely never costs an embedding
-    # call.
+    # BOTH network phases run AFTER the per-source pass, so each is handed
+    # sources whose quotes and urls have already been coerced into shape
+    # -- and so a payload the first phase rejected entirely never costs a
+    # call. Scholar first: it rewrites `authority_base`, and the trace
+    # then reads in the order the numbers were produced.
+    if scholar is not None and scholar.usable:
+        _apply_scholar(run, targets, scholar)
     if scorer is not None and scorer.usable:
         _apply_embeddings(run, targets, corpus, scorer, window_chars,
                           max_windows, claim_min_chars)

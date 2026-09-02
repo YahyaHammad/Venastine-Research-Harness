@@ -85,6 +85,7 @@ from core.reasoning.json_retry import parse_json_response as _parse_json_respons
 from core.reasoning.json_retry import retry_until_json
 from core.reasoning.payload_validation import validate as _validate_payload
 from core.reasoning.pipeline_storage import create_pipeline_run, update_pipeline_run
+from core.reasoning.scholar import ScholarLookup
 from core.reasoning.source_corpus import SourceCorpus
 from core.reasoning.source_scoring import make_scorer, score_grounding_sources
 from safety.policy_enforcement import redact_secrets
@@ -661,7 +662,7 @@ def _apply_grounding(claims: list[Claim], grounding_entries: list[dict]) -> int:
 
 
 def _ground_and_score(run: PipelineRun, grounding_entries: list[dict], corpus,
-                      scorer=None, knobs=None) -> int:
+                      scorer=None, knobs=None, scholar=None) -> int:
     """Apply Pass 3a/6b's grounding, then everything §45 derives from it.
 
     THE ONE SEAM BOTH GROUNDING SITES GO THROUGH. There are two -- Pass 3a
@@ -687,7 +688,7 @@ def _ground_and_score(run: PipelineRun, grounding_entries: list[dict], corpus,
         run.source_documents = corpus.artifact_entries()
     knobs = knobs or {}
     score_grounding_sources(
-        run, corpus=corpus, scorer=scorer,
+        run, corpus=corpus, scorer=scorer, scholar=scholar,
         overrides=knobs.get("domain_overrides"),
         **{k: knobs[k] for k in ("window_chars", "max_windows",
                                  "claim_min_chars",
@@ -1017,6 +1018,12 @@ def stream_deep_research_pipeline(
     scorer = make_scorer(run, floor=scoring_knobs["similarity_floor"],
                          ceiling=scoring_knobs["similarity_ceiling"])
 
+    # §45 (SQ9). OFF by default, so an out-of-the-box run makes no call
+    # the user did not ask for. One lookup object for the run, for the
+    # scorer's reason: its cohort cache and its give-up flag are both
+    # run-scoped.
+    scholar = ScholarLookup(knobs=scoring_knobs)
+
     # §45 (SQ6). Both knob sections resolved ONCE, here, with warn=True so
     # a mistyped weight is said once per run rather than once per claim --
     # `effective_compaction`'s gating, for its reason. score_claim stays a
@@ -1178,7 +1185,7 @@ def stream_deep_research_pipeline(
             )
             grounding_json = _parse_json_response((yield from _run_pass_with_json_retry("Pass 3a", pass3a_input, critic_model, critic_provider, run.trace, authorization=authorization, corpus=corpus, pass_threads=run.pass_threads, claim_ids=[c.id for c in run.claims], effort=effort)))
             grounded = _ground_and_score(run, grounding_json, corpus, scorer,
-                                         scoring_knobs)
+                                         scoring_knobs, scholar)
             yield from progress.checkpoint(f"Pass 3a: grounded {grounded} of {len(factual_claims)} factual claim(s), across {len(unique_entities)} deduplicated entities.")
 
             # E13/#77. Two or more survivors: the claims were extracted
@@ -1297,7 +1304,7 @@ def stream_deep_research_pipeline(
             pass6b_input = json.dumps([vars(c) for c in flagged])
             revalidation = _parse_json_response((yield from _run_pass_with_json_retry("Pass 6b", pass6b_input, critic_model, critic_provider, run.trace, authorization=authorization, corpus=corpus, pass_threads=run.pass_threads, claim_ids=[c.id for c in run.claims], effort=effort)))
             _ground_and_score(run, revalidation.get("grounding", []), corpus,
-                              scorer, scoring_knobs)
+                              scorer, scoring_knobs, scholar)
             _apply_critic(run.claims, revalidation.get("critic", []))
             # 6b's own checkpoint below already reports an EFFECT -- how
             # many claims came out clean -- rather than what it was asked

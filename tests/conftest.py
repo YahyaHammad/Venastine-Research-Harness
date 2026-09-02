@@ -513,6 +513,24 @@ def isolate_model_windows(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def clear_scholar_cache():
+    """Drop §45's OpenAlex response cache between tests.
+
+    `_net_common.TTLCache.clear` exists for exactly this and says why:
+    a test must not inherit a previous test's answers. This cache is
+    module-level and keyed by request, so without the reset a test that
+    injects a FAILING fetch is served the payload a passing test cached a
+    moment earlier -- and asserts happily against a fake it never
+    called.
+    """
+    from core.reasoning import scholar
+
+    scholar._cache.clear()
+    yield
+    scholar._cache.clear()
+
+
+@pytest.fixture(autouse=True)
 def isolate_pipeline_models(tmp_path_factory, monkeypatch):
     """Point the remembered critic/embedder store somewhere disposable.
 
