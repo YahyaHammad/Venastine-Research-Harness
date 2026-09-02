@@ -1597,6 +1597,325 @@ async def test_an_explicit_flag_skips_the_kind_modal(project, fake_agent):
         assert await settle(pilot, lambda: (project / "FINDINGS.md").exists())
 
 
+# ---------------------------------------------------------------------------
+# ---- Scaffolding the configuration (§24 I17) ------------------------------
+# ---------------------------------------------------------------------------
+
+class TestScaffoldingTheConfiguration:
+    """`--config`: the two files, the two directories, and one consent.
+
+    The properties worth pinning are the ones the assembly can silently
+    lose -- that it costs nothing, that it never lands on a file somebody
+    tuned, that the trust settle still happens when there are no documents
+    to trigger it, and that the shadow report reaches the user BEFORE the
+    question rather than in the receipt afterwards.
+    """
+
+    def _run(self, project, said, **overrides):
+        kwargs = {
+            "project_path": str(project),
+            "confirm": lambda summary: said.append("CONSENT " + summary) or True,
+            "notify": said.append,
+            "scaffold_docs": False,
+            "scaffold_config": True,
+        }
+        kwargs.update(overrides)
+        return generator.generate(**kwargs)
+
+    def _venastine(self, project):
+        return project / ".venastine"
+
+    def test_it_writes_both_files_and_both_directories(self, project):
+        from project_init import config_files
+
+        said = []
+        notice = self._run(project, said)
+        root = self._venastine(project)
+        assert (root / config_files.SETTINGS_FILENAME).is_file()
+        assert (root / config_files.MCP_FILENAME).is_file()
+        for name in config_files.TIER_DIRS:
+            assert (root / name).is_dir(), (
+                f"{name}/ is where a project-tier agent or skill goes, and "
+                f"the directory name is the only place that is written down "
+                f"outside the README")
+        assert "settings.json" in notice["text"]
+
+    def test_the_files_end_with_a_newline(self, project):
+        """These two are the first files written through json_store that a
+        human is meant to edit and COMMIT, and a committed file with no
+        final newline carries git's marker in every diff of it."""
+        from project_init import config_files
+
+        self._run(project, [])
+        for name in (config_files.SETTINGS_FILENAME,
+                     config_files.MCP_FILENAME):
+            text = (self._venastine(project) / name).read_text(
+                encoding="utf-8")
+            assert text.endswith("\n"), f"{name} has no trailing newline"
+
+    def test_it_costs_nothing(self, project, monkeypatch):
+        """The whole reason `--config` is a flag and not an addition to a
+        normal run: no initializer, no kind question, no spend.
+
+        The model call is not merely unfaked here -- it is made to RAISE,
+        so a future refactor that reaches it fails loudly instead of
+        quietly billing everyone who runs the command.
+        """
+        from core.loop import RunAgentLoop
+
+        def _explode(**_kwargs):
+            raise AssertionError("--config made a model call")
+
+        monkeypatch.setattr(RunAgentLoop, "run_agent_conversation",
+                            staticmethod(_explode))
+        asked = []
+        self._run(project, [],
+                  choose_kind=lambda *a: asked.append(a) or "software")
+        assert asked == [], "--config asked which kind of project this is"
+
+    def test_one_consent_covers_the_files_and_the_directories(self, project):
+        said = []
+        self._run(project, said)
+        consent = [line for line in said if line.startswith("CONSENT ")]
+        assert len(consent) == 1, (
+            "one command, one question -- eight prompts is the shape of "
+            "consent that gets clicked through, which is why I5 exists")
+        assert ".venastine/settings.json" in consent[0]
+        assert ".venastine/mcp.json" in consent[0]
+        assert ".venastine/agents/" in consent[0]
+
+    def test_declining_writes_nothing(self, project):
+        notice = self._run(project, [], confirm=lambda _summary: False)
+        assert not self._venastine(project).exists(), (
+            "a declined --config left a .venastine/ behind, which is also "
+            "a project that now has to answer a trust prompt")
+        assert "Declined" in notice["text"]
+
+    def test_a_pipe_writes_nothing_and_says_why(self, project):
+        """V6's sixth instance again: the inability to ask is not
+        permission to proceed."""
+        notice = self._run(project, [], confirm=None)
+        assert not self._venastine(project).exists()
+        assert "confirm" in notice["text"]
+
+    def test_an_existing_file_is_left_exactly_as_it_was(self, project):
+        """I12, applied to the file it was written for. A scaffold of
+        defaults landing on a settings.json somebody tuned would be this
+        command destroying the thing it exists to help you start.
+
+        Per FILE, so a project with a settings.json and no mcp.json still
+        gets the mcp.json.
+        """
+        from project_init import config_files
+
+        root = self._venastine(project)
+        root.mkdir()
+        mine = '{"tui": {"theme": "nord"}}'
+        (root / config_files.SETTINGS_FILENAME).write_text(
+            mine, encoding="utf-8")
+
+        said = []
+        notice = self._run(project, said)
+        assert (root / config_files.SETTINGS_FILENAME).read_text(
+            encoding="utf-8") == mine
+        assert (root / config_files.MCP_FILENAME).is_file()
+        assert "Left alone" in notice["text"]
+        assert any("Leaving existing configuration" in line for line in said)
+
+    def test_a_second_run_reports_only_what_it_looked_at(self, project):
+        """#95's complaint, in the happy direction: a `--config` run that
+        found everything in place must not report on a document set it
+        never opened."""
+        self._run(project, [])
+        notice = self._run(project, [])
+        assert "Nothing to do" in notice["text"]
+        assert "AGENTS.md" not in notice["text"]
+
+    def test_the_trust_grant_survives_the_write(self, project):
+        """I6, reached by the path that has no documents in it.
+
+        A project with no `.venastine/` is vacuously trusted -- there is
+        nothing to trust -- so creating one flips `is_trusted()` from a
+        shortcut to a hash comparison. The user authored this content a
+        moment ago, so the re-grant is unambiguous; without it, running
+        the command would cost them a trust prompt for their own file.
+        """
+        assert workspace_trust.is_trusted(str(project)), \
+            "the fixture is already untrusted, so this proves nothing"
+        notice = self._run(project, [])
+        assert workspace_trust.is_trusted(str(project)), notice["text"]
+        assert "trust" in notice["text"].lower()
+
+    def test_an_untrusted_project_is_not_laundered_into_a_trusted_one(
+            self, project):
+        """The other half of I6, and the reason it is only half. An
+        untrusted `.venastine/` may already hold agents, skills and an
+        mcp.json that arrived with a repo somebody cloned; granting trust
+        as a side effect of writing one file into it would wave all of
+        that through -- a hole in D17 opened from a direction the trust
+        prompt never sees.
+        """
+        root = self._venastine(project)
+        (root / "agents").mkdir(parents=True)
+        (root / "agents" / "theirs.md").write_text(
+            "---\nname: theirs\ndescription: d\n---\n\nBody.\n",
+            encoding="utf-8")
+        assert not workspace_trust.is_trusted(str(project))
+
+        notice = self._run(project, [])
+        assert not workspace_trust.is_trusted(str(project))
+        assert "not trusted" in notice["text"]
+
+    def test_the_shadow_report_arrives_before_the_question(self, project):
+        """§24 I16. A project settings.json beats the user's by PRESENCE,
+        so this file starts deciding keys the user's own file was
+        deciding -- said where it can still change the answer, not in the
+        receipt afterwards.
+        """
+        import json
+        import pathlib
+
+        # `_isolated_home` has already pointed HOME at tmp_path, and
+        # _user_config_dir() resolves from it at call time.
+        user_dir = pathlib.Path(config_loader._user_config_dir())
+        user_dir.mkdir(parents=True, exist_ok=True)
+        (user_dir / "settings.json").write_text(
+            json.dumps({"compaction": {"strength": 5}}), encoding="utf-8")
+
+        said = []
+        self._run(project, said)
+        shadow = [i for i, line in enumerate(said)
+                  if "compaction.strength" in line]
+        consent = [i for i, line in enumerate(said)
+                   if line.startswith("CONSENT ")]
+        assert shadow, "the report never mentioned the key it takes over"
+        assert shadow[0] < consent[0], (
+            "the shadow report came after the consent, where it can no "
+            "longer change the answer")
+
+    def test_a_kind_beside_it_writes_both_halves(self, project, fake_agent):
+        """One command, one consent, documents and configuration."""
+        from project_init import config_files
+
+        said = []
+        notice = self._run(project, said, scaffold_docs=True, kind="software")
+        assert len([line for line in said
+                    if line.startswith("CONSENT ")]) == 1
+        assert (project / "AGENTS.md").is_file()
+        assert (self._venastine(project)
+                / config_files.SETTINGS_FILENAME).is_file()
+        assert "AGENTS.md" in notice["text"]
+        assert ".venastine/settings.json" in notice["text"]
+
+
+class TestTheInitFlags:
+    """`/init`'s own parsing, which grew a third flag and a loop."""
+
+    def _errors(self, args):
+        class _T:
+            def __init__(self):
+                self.errors = []
+
+            def write_error(self, text):
+                self.errors.append(text)
+
+        class _App:
+            _busy = True   # stop before the worker; parsing is the subject
+
+            def __init__(self):
+                self._transcript = _T()
+
+        from project_init.tui_commands import _cmd_init
+        app = _App()
+        _cmd_init(app, args)
+        return app._transcript.errors
+
+    @pytest.mark.parametrize("args,expected", [
+        ("", (None, False)),
+        ("--config", (None, True)),
+        ("--software", ("software", False)),
+        ("--software --config", ("software", True)),
+        # Either written order. Handling one flag and then the other in a
+        # fixed sequence is exactly how that stopped being true for
+        # /research's --grant and --attended.
+        ("--config --research", ("research", True)),
+        ("--CONFIG", (None, True)),
+    ])
+    def test_the_flags_compose_in_either_order(self, args, expected):
+        from project_init.tui_commands import _split_init_flags
+
+        kind, config, problem = _split_init_flags(args)
+        assert problem is None
+        assert (kind, config) == expected
+
+    @pytest.mark.parametrize("args", [
+        "--webapp",
+        # Accepted before this batch, via a single `.lstrip("-")`.
+        "software",
+        "---software",
+        "--software --research",
+    ])
+    def test_what_is_refused(self, args):
+        from project_init.tui_commands import _split_init_flags
+
+        _kind, _config, problem = _split_init_flags(args)
+        assert problem, f"{args!r} was accepted"
+        assert "Usage: /init" in problem
+        assert self._errors(args), "the refusal never reached the transcript"
+
+    def test_config_alone_means_config_only(self, project, monkeypatch):
+        """The rule in one place: `--config` by itself skips the document
+        set, and named beside a kind it does both."""
+        from project_init.tui_commands import _split_init_flags
+
+        for args, docs in (("--config", False), ("--software --config", True),
+                           ("--software", True), ("", True)):
+            kind, config, _problem = _split_init_flags(args)
+            assert (not config or kind is not None) is docs, args
+
+
+@pytest.mark.asyncio
+async def test_config_only_goes_straight_to_one_confirmation(project,
+                                                             monkeypatch):
+    """`/init --config` end to end: worker, modal, files.
+
+    The unit tests above drive generate() directly, so none of them can
+    see the shell half -- that the kind modal never opens, that the one
+    consent is a ConfirmScreen and not a Choice, and that `_busy` is
+    released on a path with no model call in it to release it.
+
+    The initializer is made to RAISE rather than merely left unfaked: a
+    config-only run that reached it would otherwise pass here by
+    answering with a fixture.
+    """
+    from core.loop import RunAgentLoop
+    from tui.app import VenastineApp
+    from tui.screens import ConfirmScreen
+    from project_init.tui_commands import _cmd_init
+    from project_init import config_files
+
+    def _explode(**_kwargs):
+        raise AssertionError("/init --config made a model call")
+
+    monkeypatch.setattr(RunAgentLoop, "run_agent_conversation",
+                        staticmethod(_explode))
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        _cmd_init(app, "--config")
+        assert await settle(
+            pilot, lambda: isinstance(app.screen, ConfirmScreen)), \
+            "--config never reached its one consent"
+        body = app.screen._body
+        app.screen.dismiss(True)
+        assert await settle(pilot, lambda: app._busy is False)
+
+    assert ".venastine/settings.json" in body
+    root = project / ".venastine"
+    assert (root / config_files.SETTINGS_FILENAME).is_file()
+    assert (root / config_files.MCP_FILENAME).is_file()
+
+
 def test_an_unknown_flag_is_reported(project):
     """Registered and reachable, and a typo says so rather than becoming a
     chat turn — the registry's rule for unknown commands, applied to args."""
@@ -1670,8 +1989,15 @@ class TestTheCliInitGoesDownTheChannel:
     """
 
     @staticmethod
-    def _run(monkeypatch, tmp_path, lines, interactive=True):
-        """Drive run_init_command, capturing what generate() was handed."""
+    def _run(monkeypatch, tmp_path, lines, interactive=True, argv=()):
+        """Drive run_init_command, capturing what generate() was handed.
+
+        `args` comes off the REAL parser rather than a SimpleNamespace.
+        The hand-made one was a second copy of the flag set and went stale
+        the first time a flag was added, failing four tests with an
+        AttributeError that said nothing about what any of them was for --
+        and an argv is what run_init_command is actually handed.
+        """
         import main
         from project_init import generator
         from tests.conftest import FakeStdinReader
@@ -1687,9 +2013,39 @@ class TestTheCliInitGoesDownTheChannel:
         monkeypatch.setattr(generator, "generate", _fake_generate)
         monkeypatch.setattr(main.sys.stdin, "isatty", lambda: interactive)
 
-        args = SimpleNamespace(research_project=False, software_project=False)
+        args = main.build_parser().parse_args(["--init", *argv])
         code = main.run_init_command(args, "ANTHROPIC", "m")
         return code, seen, reader
+
+    def test_the_config_flag_alone_asks_for_no_documents(self, monkeypatch,
+                                                         tmp_path):
+        """§24 I17 through the CLI: `--init --project-config` is the
+        configuration and nothing else, so the generator is told not to
+        touch the document set -- which is what keeps it from making a
+        model call, asking the kind question, or costing anything."""
+        code, seen, _reader = self._run(monkeypatch, tmp_path, [],
+                                        argv=["--project-config"])
+        assert code == 0
+        assert seen["scaffold_config"] is True
+        assert seen["scaffold_docs"] is False
+
+    def test_a_kind_beside_it_asks_for_both(self, monkeypatch, tmp_path):
+        """Named with a kind it is both halves, under one consent."""
+        code, seen, _reader = self._run(
+            monkeypatch, tmp_path, [],
+            argv=["--project-config", "--software-project"])
+        assert code == 0
+        assert (seen["scaffold_config"], seen["scaffold_docs"]) == (True, True)
+        assert seen["kind"] == doc_sets.SOFTWARE
+
+    def test_without_it_nothing_is_scaffolded_into_venastine(self,
+                                                             monkeypatch,
+                                                             tmp_path):
+        """The default is unchanged: a plain --init writes documents and
+        does not create a `.venastine/` in a project that has none."""
+        code, seen, _reader = self._run(monkeypatch, tmp_path, [])
+        assert code == 0
+        assert (seen["scaffold_config"], seen["scaffold_docs"]) == (False, True)
 
     def test_confirm_is_asked_through_the_channel(self, monkeypatch, tmp_path):
         code, seen, reader = self._run(monkeypatch, tmp_path, ["y"])
