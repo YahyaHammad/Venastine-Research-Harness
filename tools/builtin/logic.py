@@ -45,7 +45,7 @@ TOOL_SCHEMA = {
         "Mechanically check propositional logic claims: simplify a boolean "
         "expression, check whether two expressions are logically "
         "equivalent, check satisfiability, check whether an expression is "
-        "a tautology (always true), or generate a full truth table."
+        "a tautology (always true), or generate a full truth table (inputs and output as true/false booleans)."
     ),
     "input_schema": LogicParams.model_json_schema(),
 }
@@ -78,7 +78,10 @@ def run(params: dict) -> dict:
             free_syms = sorted(expr.free_symbols, key=str)
             rows = list(truth_table(expr, free_syms))
             result = [
-                {"inputs": dict(zip([str(s) for s in free_syms], row[0])), "output": row[1]}
+                {
+                    "inputs": {str(s): bool(v) for s, v in zip(free_syms, row[0])},
+                    "output": bool(row[1]),
+                }
                 for row in rows
             ]
 
