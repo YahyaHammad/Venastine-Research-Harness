@@ -467,6 +467,296 @@ class TestTheDocumentSets:
 
 
 # ---------------------------------------------------------------------------
+# ---- The .venastine/ templates (§24 I14-I17) ------------------------------
+# ---------------------------------------------------------------------------
+
+class TestTheConfigTemplates:
+    """What `/init --config` writes, and the two claims it makes.
+
+    Both are easy to lose and neither is visible in a diff. The template
+    is EVERY setting that has a shipped default -- lost the moment
+    somebody adds a settings key and not a line here. And writing it
+    CHANGES NOTHING until a human edits it -- lost the moment somebody
+    adds a consumer that reads a key by presence rather than by value,
+    which six existing keys already do.
+    """
+
+    def _vocabulary(self):
+        """Every leaf setting the loader knows, as dotted paths.
+
+        Computed from `_KNOWN_SETTINGS` / `_NESTED_SETTINGS` rather than
+        from the template, or the comparison below is the template
+        against itself. Section names are containers and drop out; they
+        are not settings anyone sets.
+        """
+        nested = config_loader._NESTED_SETTINGS
+        paths = {key for key in config_loader._KNOWN_SETTINGS
+                 if key not in nested}
+        for section, keys in nested.items():
+            paths |= {"%s.%s" % (section, key) for key in keys}
+        return paths
+
+    def test_the_template_names_every_setting_the_loader_knows(self):
+        """The load-bearing one. A settings.json cannot carry a comment or
+        an inert key, so this file IS the discoverable schema -- and a
+        schema that has quietly fallen behind the loader is worse than
+        none, because the omission reads as "this one is not settable".
+
+        Adding a settings key now fails this test until the template
+        catches up or OMITTED says why not. That is the same trade
+        `_KNOWN_TUI` already takes ("adding a preference is a schema
+        change, on purpose"), moved one file along.
+        """
+        from project_init import config_files
+
+        written = config_files.leaf_paths(config_files.render_settings())
+        expected = self._vocabulary() - set(config_files.OMITTED)
+        assert written == expected, (
+            "the scaffolded settings.json and the loader's vocabulary have "
+            "diverged. Missing from the template: %s. Written but unknown "
+            "to the loader (this one is a startup error for anyone who runs "
+            "the command): %s"
+            % (sorted(expected - written) or "none",
+               sorted(written - expected) or "none"))
+
+    def test_the_template_omits_only_what_it_can_name(self):
+        """Every exclusion is a key that still exists, with a reason.
+
+        Without this, OMITTED is where a deleted setting hides forever and
+        where "I could not get this one to work" hides as policy.
+        """
+        from project_init import config_files
+
+        vocabulary = self._vocabulary()
+        for path, reason in config_files.OMITTED.items():
+            assert path in vocabulary, (
+                f"OMITTED names {path!r}, which the loader no longer knows "
+                f"-- delete the entry rather than leaving a reason for a "
+                f"key nobody can set")
+            assert len(reason) > 40, (
+                f"OMITTED[{path!r}] is {len(reason)} characters. A silent "
+                f"omission and an unexplained one cost the reader the same")
+
+    def test_the_scaffolded_settings_file_loads(self, tmp_path):
+        """Round-tripped through the loader that will actually read it.
+
+        `_validate_settings` raises on an unknown key, an unknown nested
+        key, a wrong type, and two values by name -- so a template that is
+        wrong does not degrade, it stops the harness from starting in
+        every directory it was scaffolded into. Asserting the dict looks
+        right is not the same test.
+        """
+        import json
+
+        from project_init import config_files
+
+        path = tmp_path / "settings.json"
+        path.write_text(json.dumps(config_files.render_settings(), indent=2),
+                        encoding="utf-8")
+        loaded = config_loader._read_settings_file(str(path))
+        assert loaded == config_files.render_settings()
+
+    def _observed(self, root, payload):
+        """Everything the settings decide, for a project whose
+        `.venastine/settings.json` is `payload` (None = no file at all)."""
+        import json
+        import shutil
+
+        import main
+        from core import compaction
+
+        vdir = root / ".venastine"
+        if payload is None:
+            if vdir.exists():
+                shutil.rmtree(str(vdir))
+        else:
+            vdir.mkdir(exist_ok=True)
+            (vdir / "settings.json").write_text(
+                json.dumps(payload, indent=2), encoding="utf-8")
+            workspace_trust.grant_trust(str(root))
+        config_loader.reset()
+        config_loader.initialize(str(root))
+        assert workspace_trust.is_trusted(str(root)), \
+            "the fixture is untrusted, so it would prove only that " \
+            "untrusted content does not load"
+        settings = config_loader.get_settings()
+        args = SimpleNamespace(provider=None, model=None, effort=None,
+                               attended=None, review=None)
+        return {
+            "spend_cap": config_loader.spend_cap(),
+            "compaction": config_loader.effective_compaction(),
+            "confidence": config_loader.effective_confidence(warn=True),
+            # warn=True, because a template can be inert in every VALUE
+            # it produces and still log on every launch -- which is what
+            # the None grounding-weight key did.
+            "source_scoring": config_loader.effective_source_scoring(warn=True),
+            # PRESENCE, not value -- the check that makes a written
+            # trigger_tokens outrank the window-derived one.
+            "trigger_is_configured": compaction._trigger_is_configured(),
+            "runtime": main.resolve_runtime_defaults(args, settings),
+            "effort": main.resolve_effort(args, settings),
+            "attended": main.resolve_attended(args, settings),
+            "review": main.resolve_review(args, settings),
+            "ensemble": (settings.get("ensemble_mode"),
+                         settings.get("ensemble_n")),
+        }
+
+    def test_the_scaffolded_settings_file_changes_nothing(self, tmp_path,
+                                                          caplog):
+        """The claim the word "defaults" actually makes, asserted whole.
+
+        Not key by key: the interesting failure is a key that is inert on
+        its own and not in company, and a per-key sweep would miss it.
+        Six keys were dropped from the template because this test found
+        them -- default_provider and default_model re-assert over a
+        remembered /model choice, `effort` flips `_effort_named`,
+        `compaction.trigger_tokens` disables the derived trigger, and
+        `ensemble_mode` / `research.subagent_review` are both resolved as
+        `config.py if the value is None`, so writing `false` outranks
+        config.py rather than restating it.
+        """
+        import logging
+
+        from project_init import config_files
+
+        root = tmp_path / "proj"
+        root.mkdir()
+        with caplog.at_level(logging.WARNING):
+            without = self._observed(root, None)
+            quiet = [record.getMessage() for record in caplog.records]
+            caplog.clear()
+            with_file = self._observed(root, config_files.render_settings())
+            noisy = [record.getMessage() for record in caplog.records]
+        assert noisy == quiet, (
+            "the scaffolded settings.json is inert in its values and not in "
+            "its output -- it logs %r that a project without one does not. "
+            "A scaffold that warns on every launch is a scaffold people "
+            "delete" % [line for line in noisy if line not in quiet])
+        differing = {key for key in without if without[key] != with_file[key]}
+        assert not differing, (
+            "the scaffolded settings.json is not inert: "
+            + "; ".join("%s %r -> %r" % (key, without[key], with_file[key])
+                        for key in sorted(differing))
+            + ". Either the value is no longer the default, or something "
+              "started reading that key by PRESENCE -- in which case it "
+              "belongs in config_files.OMITTED with the reason")
+
+    def test_the_scaffolded_settings_file_does_not_move_the_tui(self):
+        """The same claim for the three `tui` values, which are the only
+        ones in the template typed out rather than read from a constant.
+
+        config.py holds no TUI values on purpose, so their defaults are
+        literals inside `VenastineApp.__init__` with nothing to import.
+        Driving the real app is what makes the literals safe: a drift
+        between this file and that one fails here rather than shipping a
+        scaffold that quietly changes how the TUI starts.
+        """
+        from project_init import config_files
+        from tui.app import VenastineApp
+
+        bare = VenastineApp("ANTHROPIC", "test-model", {})
+        scaffolded = VenastineApp("ANTHROPIC", "test-model",
+                                  config_files.render_settings())
+        for attribute in ("_animations", "_show_thinking", "_todo_position",
+                          "effort", "_effort_named", "_settings_theme"):
+            assert getattr(bare, attribute) == getattr(scaffolded, attribute), (
+                f"{attribute} is {getattr(bare, attribute)!r} with no "
+                f"settings.json and {getattr(scaffolded, attribute)!r} with "
+                f"the scaffolded one")
+
+    def test_it_does_not_discard_a_model_chosen_with_slash_model(
+            self, monkeypatch):
+        """The behavioural reason `default_provider` and `default_model`
+        are omitted -- and the one thing the sweep above cannot see.
+
+        `resolve_runtime_defaults` collapses a missing key to the same
+        constant the template would write, so the merged value is
+        identical either way. The whole difference is in `_startup_pair`,
+        which compares the RAW key against what settings.json said when
+        the choice was made, and its docstring is explicit: "edit either,
+        ADD either, or remove either and the file re-asserts itself". A
+        scaffold naming the pair -- even at the value already in force --
+        would silently drop the model the user picked with /model, in
+        that project only, with nothing on screen to explain it.
+
+        Found by a mutation that put `default_provider` back and died
+        only to the vocabulary check, which would not have caught anyone
+        adding it on purpose.
+        """
+        import credentials
+
+        from project_init import config_files
+        from tui import preferences
+        from tui.app import VenastineApp
+
+        chosen = ("OPENROUTER", "some/other-model")
+        monkeypatch.setattr(credentials, "load_provider_data",
+                            lambda: {chosen[0]: {"api_key": "k"}})
+        assert preferences.remember_model(chosen[0], chosen[1], None, None), \
+            "the preference store did not accept the fixture, so a restore "\
+            "cannot be observed either way"
+
+        bare = VenastineApp("ANTHROPIC", "test-model", {})
+        assert (bare.provider_name, bare.model) == chosen, (
+            "the remembered pair is not restored even with no settings.json, "
+            "so this fixture cannot tell the two cases apart")
+
+        scaffolded = VenastineApp("ANTHROPIC", "test-model",
+                                  config_files.render_settings())
+        assert (scaffolded.provider_name, scaffolded.model) == chosen, (
+            "the scaffolded settings.json discarded a model chosen with "
+            "/model. Something put default_provider or default_model back "
+            "into the template -- they are the staleness key, and adding "
+            "either re-asserts the file")
+        assert scaffolded._model_restored is True
+
+    def test_the_scaffolded_mcp_file_yields_no_servers(self, tmp_path):
+        """Through the real discovery, not by comparing the dict.
+
+        `mcp.json` validates by CONNECTION rather than by schema (§17
+        decision G), so "it parses" is not the question -- the question is
+        whether a project that ran the command starts connecting to
+        something. The answer has to be no servers, not one disabled one.
+        """
+        import json
+
+        from mcp_client import config as mcp_config
+        from project_init import config_files
+
+        root = tmp_path / "proj"
+        (root / ".venastine").mkdir(parents=True)
+        (root / ".venastine" / config_files.MCP_FILENAME).write_text(
+            json.dumps(config_files.render_mcp(), indent=2), encoding="utf-8")
+        assert mcp_config.load_server_configs(str(root), True) == {}
+
+    def test_the_shadow_report_names_only_what_it_takes_over(self):
+        """§24 I16. A project settings.json beats the user's by PRESENCE,
+        so even a file of pure defaults takes every key it names away from
+        `~/.config/venastine/settings.json`.
+
+        Differences only. A key the user set to the same value changes
+        nothing observable, and listing it trains the reader to skim the
+        ones that do.
+        """
+        from project_init import config_files
+
+        ours = config_files.render_settings()
+        user = {
+            "max_token_budget": 250000,
+            "compaction": {"strength": 5,
+                           "strategy": ours["compaction"]["strategy"]},
+            # Not in the template at all -- omitted, so nothing is taken
+            # over and it must not be reported.
+            "default_model": "claude-opus-5",
+        }
+        report = config_files.shadowed(user)
+        assert [row[0] for row in report] == ["compaction.strength",
+                                              "max_token_budget"]
+        assert ("compaction.strength", 5, ours["compaction"]["strength"]) \
+            in report
+
+
+# ---------------------------------------------------------------------------
 # ---- Discovery -------------------------------------------------------------
 # ---------------------------------------------------------------------------
 
@@ -1353,6 +1643,325 @@ async def test_an_explicit_flag_skips_the_kind_modal(project, fake_agent):
         assert await settle(pilot, lambda: (project / "FINDINGS.md").exists())
 
 
+# ---------------------------------------------------------------------------
+# ---- Scaffolding the configuration (§24 I17) ------------------------------
+# ---------------------------------------------------------------------------
+
+class TestScaffoldingTheConfiguration:
+    """`--config`: the two files, the two directories, and one consent.
+
+    The properties worth pinning are the ones the assembly can silently
+    lose -- that it costs nothing, that it never lands on a file somebody
+    tuned, that the trust settle still happens when there are no documents
+    to trigger it, and that the shadow report reaches the user BEFORE the
+    question rather than in the receipt afterwards.
+    """
+
+    def _run(self, project, said, **overrides):
+        kwargs = {
+            "project_path": str(project),
+            "confirm": lambda summary: said.append("CONSENT " + summary) or True,
+            "notify": said.append,
+            "scaffold_docs": False,
+            "scaffold_config": True,
+        }
+        kwargs.update(overrides)
+        return generator.generate(**kwargs)
+
+    def _venastine(self, project):
+        return project / ".venastine"
+
+    def test_it_writes_both_files_and_both_directories(self, project):
+        from project_init import config_files
+
+        said = []
+        notice = self._run(project, said)
+        root = self._venastine(project)
+        assert (root / config_files.SETTINGS_FILENAME).is_file()
+        assert (root / config_files.MCP_FILENAME).is_file()
+        for name in config_files.TIER_DIRS:
+            assert (root / name).is_dir(), (
+                f"{name}/ is where a project-tier agent or skill goes, and "
+                f"the directory name is the only place that is written down "
+                f"outside the README")
+        assert "settings.json" in notice["text"]
+
+    def test_the_files_end_with_a_newline(self, project):
+        """These two are the first files written through json_store that a
+        human is meant to edit and COMMIT, and a committed file with no
+        final newline carries git's marker in every diff of it."""
+        from project_init import config_files
+
+        self._run(project, [])
+        for name in (config_files.SETTINGS_FILENAME,
+                     config_files.MCP_FILENAME):
+            text = (self._venastine(project) / name).read_text(
+                encoding="utf-8")
+            assert text.endswith("\n"), f"{name} has no trailing newline"
+
+    def test_it_costs_nothing(self, project, monkeypatch):
+        """The whole reason `--config` is a flag and not an addition to a
+        normal run: no initializer, no kind question, no spend.
+
+        The model call is not merely unfaked here -- it is made to RAISE,
+        so a future refactor that reaches it fails loudly instead of
+        quietly billing everyone who runs the command.
+        """
+        from core.loop import RunAgentLoop
+
+        def _explode(**_kwargs):
+            raise AssertionError("--config made a model call")
+
+        monkeypatch.setattr(RunAgentLoop, "run_agent_conversation",
+                            staticmethod(_explode))
+        asked = []
+        self._run(project, [],
+                  choose_kind=lambda *a: asked.append(a) or "software")
+        assert asked == [], "--config asked which kind of project this is"
+
+    def test_one_consent_covers_the_files_and_the_directories(self, project):
+        said = []
+        self._run(project, said)
+        consent = [line for line in said if line.startswith("CONSENT ")]
+        assert len(consent) == 1, (
+            "one command, one question -- eight prompts is the shape of "
+            "consent that gets clicked through, which is why I5 exists")
+        assert ".venastine/settings.json" in consent[0]
+        assert ".venastine/mcp.json" in consent[0]
+        assert ".venastine/agents/" in consent[0]
+
+    def test_declining_writes_nothing(self, project):
+        notice = self._run(project, [], confirm=lambda _summary: False)
+        assert not self._venastine(project).exists(), (
+            "a declined --config left a .venastine/ behind, which is also "
+            "a project that now has to answer a trust prompt")
+        assert "Declined" in notice["text"]
+
+    def test_a_pipe_writes_nothing_and_says_why(self, project):
+        """V6's sixth instance again: the inability to ask is not
+        permission to proceed."""
+        notice = self._run(project, [], confirm=None)
+        assert not self._venastine(project).exists()
+        assert "confirm" in notice["text"]
+
+    def test_an_existing_file_is_left_exactly_as_it_was(self, project):
+        """I12, applied to the file it was written for. A scaffold of
+        defaults landing on a settings.json somebody tuned would be this
+        command destroying the thing it exists to help you start.
+
+        Per FILE, so a project with a settings.json and no mcp.json still
+        gets the mcp.json.
+        """
+        from project_init import config_files
+
+        root = self._venastine(project)
+        root.mkdir()
+        mine = '{"tui": {"theme": "nord"}}'
+        (root / config_files.SETTINGS_FILENAME).write_text(
+            mine, encoding="utf-8")
+
+        said = []
+        notice = self._run(project, said)
+        assert (root / config_files.SETTINGS_FILENAME).read_text(
+            encoding="utf-8") == mine
+        assert (root / config_files.MCP_FILENAME).is_file()
+        assert "Left alone" in notice["text"]
+        assert any("Leaving existing configuration" in line for line in said)
+
+    def test_a_second_run_reports_only_what_it_looked_at(self, project):
+        """#95's complaint, in the happy direction: a `--config` run that
+        found everything in place must not report on a document set it
+        never opened."""
+        self._run(project, [])
+        notice = self._run(project, [])
+        assert "Nothing to do" in notice["text"]
+        assert "AGENTS.md" not in notice["text"]
+
+    def test_the_trust_grant_survives_the_write(self, project):
+        """I6, reached by the path that has no documents in it.
+
+        A project with no `.venastine/` is vacuously trusted -- there is
+        nothing to trust -- so creating one flips `is_trusted()` from a
+        shortcut to a hash comparison. The user authored this content a
+        moment ago, so the re-grant is unambiguous; without it, running
+        the command would cost them a trust prompt for their own file.
+        """
+        assert workspace_trust.is_trusted(str(project)), \
+            "the fixture is already untrusted, so this proves nothing"
+        notice = self._run(project, [])
+        assert workspace_trust.is_trusted(str(project)), notice["text"]
+        assert "trust" in notice["text"].lower()
+
+    def test_an_untrusted_project_is_not_laundered_into_a_trusted_one(
+            self, project):
+        """The other half of I6, and the reason it is only half. An
+        untrusted `.venastine/` may already hold agents, skills and an
+        mcp.json that arrived with a repo somebody cloned; granting trust
+        as a side effect of writing one file into it would wave all of
+        that through -- a hole in D17 opened from a direction the trust
+        prompt never sees.
+        """
+        root = self._venastine(project)
+        (root / "agents").mkdir(parents=True)
+        (root / "agents" / "theirs.md").write_text(
+            "---\nname: theirs\ndescription: d\n---\n\nBody.\n",
+            encoding="utf-8")
+        assert not workspace_trust.is_trusted(str(project))
+
+        notice = self._run(project, [])
+        assert not workspace_trust.is_trusted(str(project))
+        assert "not trusted" in notice["text"]
+
+    def test_the_shadow_report_arrives_before_the_question(self, project):
+        """§24 I16. A project settings.json beats the user's by PRESENCE,
+        so this file starts deciding keys the user's own file was
+        deciding -- said where it can still change the answer, not in the
+        receipt afterwards.
+        """
+        import json
+        import pathlib
+
+        # `_isolated_home` has already pointed HOME at tmp_path, and
+        # _user_config_dir() resolves from it at call time.
+        user_dir = pathlib.Path(config_loader._user_config_dir())
+        user_dir.mkdir(parents=True, exist_ok=True)
+        (user_dir / "settings.json").write_text(
+            json.dumps({"compaction": {"strength": 5}}), encoding="utf-8")
+
+        said = []
+        self._run(project, said)
+        shadow = [i for i, line in enumerate(said)
+                  if "compaction.strength" in line]
+        consent = [i for i, line in enumerate(said)
+                   if line.startswith("CONSENT ")]
+        assert shadow, "the report never mentioned the key it takes over"
+        assert shadow[0] < consent[0], (
+            "the shadow report came after the consent, where it can no "
+            "longer change the answer")
+
+    def test_a_kind_beside_it_writes_both_halves(self, project, fake_agent):
+        """One command, one consent, documents and configuration."""
+        from project_init import config_files
+
+        said = []
+        notice = self._run(project, said, scaffold_docs=True, kind="software")
+        assert len([line for line in said
+                    if line.startswith("CONSENT ")]) == 1
+        assert (project / "AGENTS.md").is_file()
+        assert (self._venastine(project)
+                / config_files.SETTINGS_FILENAME).is_file()
+        assert "AGENTS.md" in notice["text"]
+        assert ".venastine/settings.json" in notice["text"]
+
+
+class TestTheInitFlags:
+    """`/init`'s own parsing, which grew a third flag and a loop."""
+
+    def _errors(self, args):
+        class _T:
+            def __init__(self):
+                self.errors = []
+
+            def write_error(self, text):
+                self.errors.append(text)
+
+        class _App:
+            _busy = True   # stop before the worker; parsing is the subject
+
+            def __init__(self):
+                self._transcript = _T()
+
+        from project_init.tui_commands import _cmd_init
+        app = _App()
+        _cmd_init(app, args)
+        return app._transcript.errors
+
+    @pytest.mark.parametrize("args,expected", [
+        ("", (None, False)),
+        ("--config", (None, True)),
+        ("--software", ("software", False)),
+        ("--software --config", ("software", True)),
+        # Either written order. Handling one flag and then the other in a
+        # fixed sequence is exactly how that stopped being true for
+        # /research's --grant and --attended.
+        ("--config --research", ("research", True)),
+        ("--CONFIG", (None, True)),
+    ])
+    def test_the_flags_compose_in_either_order(self, args, expected):
+        from project_init.tui_commands import _split_init_flags
+
+        kind, config, problem = _split_init_flags(args)
+        assert problem is None
+        assert (kind, config) == expected
+
+    @pytest.mark.parametrize("args", [
+        "--webapp",
+        # Accepted before this batch, via a single `.lstrip("-")`.
+        "software",
+        "---software",
+        "--software --research",
+    ])
+    def test_what_is_refused(self, args):
+        from project_init.tui_commands import _split_init_flags
+
+        _kind, _config, problem = _split_init_flags(args)
+        assert problem, f"{args!r} was accepted"
+        assert "Usage: /init" in problem
+        assert self._errors(args), "the refusal never reached the transcript"
+
+    def test_config_alone_means_config_only(self, project, monkeypatch):
+        """The rule in one place: `--config` by itself skips the document
+        set, and named beside a kind it does both."""
+        from project_init.tui_commands import _split_init_flags
+
+        for args, docs in (("--config", False), ("--software --config", True),
+                           ("--software", True), ("", True)):
+            kind, config, _problem = _split_init_flags(args)
+            assert (not config or kind is not None) is docs, args
+
+
+@pytest.mark.asyncio
+async def test_config_only_goes_straight_to_one_confirmation(project,
+                                                             monkeypatch):
+    """`/init --config` end to end: worker, modal, files.
+
+    The unit tests above drive generate() directly, so none of them can
+    see the shell half -- that the kind modal never opens, that the one
+    consent is a ConfirmScreen and not a Choice, and that `_busy` is
+    released on a path with no model call in it to release it.
+
+    The initializer is made to RAISE rather than merely left unfaked: a
+    config-only run that reached it would otherwise pass here by
+    answering with a fixture.
+    """
+    from core.loop import RunAgentLoop
+    from tui.app import VenastineApp
+    from tui.screens import ConfirmScreen
+    from project_init.tui_commands import _cmd_init
+    from project_init import config_files
+
+    def _explode(**_kwargs):
+        raise AssertionError("/init --config made a model call")
+
+    monkeypatch.setattr(RunAgentLoop, "run_agent_conversation",
+                        staticmethod(_explode))
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        _cmd_init(app, "--config")
+        assert await settle(
+            pilot, lambda: isinstance(app.screen, ConfirmScreen)), \
+            "--config never reached its one consent"
+        body = app.screen._body
+        app.screen.dismiss(True)
+        assert await settle(pilot, lambda: app._busy is False)
+
+    assert ".venastine/settings.json" in body
+    root = project / ".venastine"
+    assert (root / config_files.SETTINGS_FILENAME).is_file()
+    assert (root / config_files.MCP_FILENAME).is_file()
+
+
 def test_an_unknown_flag_is_reported(project):
     """Registered and reachable, and a typo says so rather than becoming a
     chat turn — the registry's rule for unknown commands, applied to args."""
@@ -1426,8 +2035,15 @@ class TestTheCliInitGoesDownTheChannel:
     """
 
     @staticmethod
-    def _run(monkeypatch, tmp_path, lines, interactive=True):
-        """Drive run_init_command, capturing what generate() was handed."""
+    def _run(monkeypatch, tmp_path, lines, interactive=True, argv=()):
+        """Drive run_init_command, capturing what generate() was handed.
+
+        `args` comes off the REAL parser rather than a SimpleNamespace.
+        The hand-made one was a second copy of the flag set and went stale
+        the first time a flag was added, failing four tests with an
+        AttributeError that said nothing about what any of them was for --
+        and an argv is what run_init_command is actually handed.
+        """
         import main
         from project_init import generator
         from tests.conftest import FakeStdinReader
@@ -1443,9 +2059,39 @@ class TestTheCliInitGoesDownTheChannel:
         monkeypatch.setattr(generator, "generate", _fake_generate)
         monkeypatch.setattr(main.sys.stdin, "isatty", lambda: interactive)
 
-        args = SimpleNamespace(research_project=False, software_project=False)
+        args = main.build_parser().parse_args(["--init", *argv])
         code = main.run_init_command(args, "ANTHROPIC", "m")
         return code, seen, reader
+
+    def test_the_config_flag_alone_asks_for_no_documents(self, monkeypatch,
+                                                         tmp_path):
+        """§24 I17 through the CLI: `--init --project-config` is the
+        configuration and nothing else, so the generator is told not to
+        touch the document set -- which is what keeps it from making a
+        model call, asking the kind question, or costing anything."""
+        code, seen, _reader = self._run(monkeypatch, tmp_path, [],
+                                        argv=["--project-config"])
+        assert code == 0
+        assert seen["scaffold_config"] is True
+        assert seen["scaffold_docs"] is False
+
+    def test_a_kind_beside_it_asks_for_both(self, monkeypatch, tmp_path):
+        """Named with a kind it is both halves, under one consent."""
+        code, seen, _reader = self._run(
+            monkeypatch, tmp_path, [],
+            argv=["--project-config", "--software-project"])
+        assert code == 0
+        assert (seen["scaffold_config"], seen["scaffold_docs"]) == (True, True)
+        assert seen["kind"] == doc_sets.SOFTWARE
+
+    def test_without_it_nothing_is_scaffolded_into_venastine(self,
+                                                             monkeypatch,
+                                                             tmp_path):
+        """The default is unchanged: a plain --init writes documents and
+        does not create a `.venastine/` in a project that has none."""
+        code, seen, _reader = self._run(monkeypatch, tmp_path, [])
+        assert code == 0
+        assert (seen["scaffold_config"], seen["scaffold_docs"]) == (False, True)
 
     def test_confirm_is_asked_through_the_channel(self, monkeypatch, tmp_path):
         code, seen, reader = self._run(monkeypatch, tmp_path, ["y"])

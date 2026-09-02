@@ -53,7 +53,8 @@ logger = logging.getLogger(__name__)
 
 
 def write_json_atomic(path: str, payload, *, mode: Optional[int] = None,
-                      indent: int = 2, sort_keys: bool = False) -> None:
+                      indent: int = 2, sort_keys: bool = False,
+                      trailing_newline: bool = False) -> None:
     """Write `payload` as JSON to `path`, atomically. Raises OSError.
 
     Temp file plus `os.replace`, which is atomic on POSIX and on Windows.
@@ -66,16 +67,29 @@ def write_json_atomic(path: str, payload, *, mode: Optional[int] = None,
     the trust store passes one today, and its docstring says why it is for
     consistency with credentials.py rather than because the file holds a
     secret.
+
+    `trailing_newline` is off by default so every existing store writes
+    the same bytes it always did. The four here are machine state nobody
+    opens; §24's `/init --config` scaffold is the first file written
+    through this that a human is meant to edit and COMMIT, and a
+    committed file with no final newline carries git's "No newline at end
+    of file" marker in every diff of it, forever after.
     """
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = f"{path}.tmp"
+
+    def _dump(handle) -> None:
+        json.dump(payload, handle, indent=indent, sort_keys=sort_keys)
+        if trailing_newline:
+            handle.write("\n")
+
     if mode is None:
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=indent, sort_keys=sort_keys)
+            _dump(f)
     else:
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=indent, sort_keys=sort_keys)
+            _dump(f)
     os.replace(tmp, path)
 
 

@@ -943,6 +943,23 @@ class TestStartupDoesNoWorkBeforeArgparse:
         assert "create_db" in startup
         assert startup.index("create_db") < startup.index("run_chat")
 
+    def test_project_config_without_init_is_refused_not_ignored(
+            self, startup, capsys):
+        """§24 I17. `--software-project` and `--research-project` are
+        silently ignored without `--init`, and this one deliberately is
+        not: someone who types `--project-config` on its own and gets an
+        ordinary chat session has been told nothing about why their
+        project still has no settings.json.
+
+        The older two keep their silence -- changing them is a behaviour
+        change with users, and this flag has none yet.
+        """
+        import main
+
+        assert main.main(["--project-config"]) == 1
+        assert "init" not in startup and "run_chat" not in startup
+        assert "--init" in capsys.readouterr().out
+
     def test_the_early_exits_skip_the_legacy_sweep(self, startup):
         """N6. The sweep exists to keep the THREAD PICKER uncluttered and
         none of these shows one, while #82 measured it at 441ms on a

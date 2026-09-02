@@ -849,6 +849,12 @@ def run_init_command(args, provider_name: str, model: str) -> int:
     elif args.software_project:
         kind = doc_sets.SOFTWARE
 
+    # `--project-config` alone is the configuration and nothing else: no
+    # kind question, no initializer, no spend. Named with a kind, it is
+    # both under one consent. Same rule as the TUI's `/init --config`,
+    # because it is the same command.
+    scaffold_docs = not args.project_config or kind is not None
+
     interactive = sys.stdin.isatty()
 
     # §29 (N5). Down the same channel as every other CLI question, with
@@ -885,6 +891,8 @@ def run_init_command(args, provider_name: str, model: str) -> int:
             confirm=_confirm if interactive else None,
             notify=print,
             choose_kind=_choose_kind if interactive else None,
+            scaffold_docs=scaffold_docs,
+            scaffold_config=args.project_config,
         )
     except InitError as e:
         print(f"\n{e}")
@@ -1311,6 +1319,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--research-project",
         action="store_true",
         help="With --init: scaffold the research document set without asking.",
+    )
+    # §24 I17. Spelled out for the same reason as the two above: a bare
+    # `--config` at top level reads as "the path to a config file", which
+    # is not what it does.
+    parser.add_argument(
+        "--project-config",
+        action="store_true",
+        help="With --init: create .venastine/settings.json and mcp.json "
+             "with default values, plus the agents/ and skills/ "
+             "directories. On its own -- with neither --software-project "
+             "nor --research-project -- it is the whole command, and runs "
+             "no model call.",
     )
     return parser
 
@@ -1807,6 +1827,15 @@ def main(argv=None) -> int:
     # initialize() has just settled.
     if args.init:
         return run_init_command(args, provider, model)
+    if args.project_config:
+        # REFUSED rather than ignored, unlike its two siblings above.
+        # Someone who types this and gets an ordinary chat session has
+        # been told nothing about why their project has no settings.json.
+        # The older two keep their silence: changing them is a behaviour
+        # change, and this one has no users yet to surprise.
+        print("--project-config is part of --init. "
+              "Re-run as: --init --project-config")
+        return 1
 
     # Argument validation before connecting anything: parser.error() exits,
     # and doing it after setup_mcp() would spawn stdio server subprocesses

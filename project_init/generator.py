@@ -32,7 +32,8 @@ from typing import Callable, Optional
 
 import config
 from core import config_loader, workspace_trust
-from project_init import doc_sets, manifest as manifest_mod
+from project_init import (config_files, doc_sets,
+                          manifest as manifest_mod)
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +87,84 @@ def _existing_documents(project_path: str, kind: str) -> set:
     from tools.builtin.project_docs import doc_path
     return {name for name in doc_sets.document_set(kind)
             if os.path.exists(doc_path(project_path, name))}
+
+
+def _config_plan(project_path: str) -> dict:
+    """What `--config` would create here: `{"files", "dirs", "existing"}`.
+
+    AN EXISTING FILE IS NEVER OVERWRITTEN (I12, applied to the file it was
+    written for). The document rule -- only the hub is diffed and asked
+    about, because it is the only file /init claims to author -- reads
+    even harder here: settings.json and mcp.json are configuration
+    somebody tuned, and a scaffold of defaults landing on top of a tuned
+    file would be this command destroying the thing it exists to help you
+    start. Left alone and reported, per file, so a project with a
+    settings.json and no mcp.json still gets the mcp.json.
+
+    Directories are listed separately because creating one is not writing
+    anything: they carry nothing into the D17 hash (`content_files()`
+    walks files) and git does not track an empty directory, so they are a
+    hint on this machine and never part of what a clone receives.
+    """
+    root = workspace_trust.venastine_dir(project_path)
+    names = (config_files.SETTINGS_FILENAME, config_files.MCP_FILENAME)
+    return {
+        "files": [name for name in names
+                  if not os.path.exists(os.path.join(root, name))],
+        "existing": [name for name in names
+                     if os.path.exists(os.path.join(root, name))],
+        "dirs": [name for name in config_files.TIER_DIRS
+                 if not os.path.isdir(os.path.join(root, name))],
+    }
+
+
+def _write_config(project_path: str, name: str) -> None:
+    """One configuration file, written DIRECTLY (I14).
+
+    Not through `write_project_doc`, which denies `.venastine/` by path
+    segment and names these two files as the reason. Extending that
+    allowlist was the alternative and is rejected in the record: it would
+    advertise, to every run and all ten research passes, a tool that can
+    author a file naming a local command to execute. What replaces the
+    tool's approval gate is the same single consent that already covers
+    the document set -- the shape `_settle_trust` already uses to write
+    the trust store from here.
+
+    OSError becomes InitError, so a full disk or a read-only mount takes
+    the same reporting path as a failed document write (#95) rather than
+    escaping as a traceback.
+    """
+    from json_store import write_json_atomic
+
+    payload = (config_files.render_settings()
+               if name == config_files.SETTINGS_FILENAME
+               else config_files.render_mcp())
+    path = os.path.join(workspace_trust.venastine_dir(project_path), name)
+    try:
+        write_json_atomic(path, payload, trailing_newline=True)
+    except OSError as e:
+        raise InitError(f"Could not write {path}: {e}")
+
+
+def _shadow_lines() -> list:
+    """What the scaffolded settings.json takes over from the user's own.
+
+    A project settings.json beats the user's (D29) by PRESENCE and not by
+    difference, so even a file of pure defaults starts deciding every key
+    it names. Said BEFORE the consent, where it can still change the
+    answer, rather than in the report afterwards.
+    """
+    shadowed = config_files.shadowed(config_loader.user_settings())
+    if not shadowed:
+        return []
+    lines = ["This project's settings.json will now decide "
+             f"{len(shadowed)} key{'' if len(shadowed) == 1 else 's'} your "
+             f"own settings.json was deciding:"]
+    lines += [f"  {path}: {theirs!r} -> {ours!r}"
+              for path, theirs, ours in shadowed]
+    lines.append("Delete those lines from the new file to go back to "
+                 "yours.")
+    return lines
 
 
 def _read_existing_context(project_path: str) -> Optional[str]:
@@ -198,8 +277,10 @@ def generate(
     confirm: Optional[Callable] = None,
     notify: Optional[Callable] = None,
     choose_kind: Optional[Callable] = None,
+    scaffold_docs: bool = True,
+    scaffold_config: bool = False,
 ) -> dict:
-    """Scaffold this project's documentation set.
+    """Scaffold this project's documentation set, its configuration, or both.
 
     confirm(summary) -> bool   the one consent (I5). None means there is no
                                way to ask, and therefore nothing is written.
@@ -208,6 +289,16 @@ def generate(
                                resolves the project kind. Called with
                                blank=True when there is nothing to infer
                                from (I13), in which case `proposal` is None.
+    scaffold_docs              the AGENTS.md hub and the stubs it links.
+    scaffold_config            `.venastine/settings.json`, `mcp.json` and
+                               the two tier directories (§24 I17).
+
+    TWO FLAGS RATHER THAN TWO FUNCTIONS. `--config` on its own is a
+    different OPERATION -- no kind question, no initializer, no spend --
+    but it is not a different set of decisions, and the decisions are
+    what this module exists to hold in one place. A config-only entry
+    point beside this one would be a second answer to "is an existing
+    file overwritten" and a second place to forget the trust settle.
 
     Returns a notice dict in the {"kind", "text"} shape both shells render.
     """
@@ -219,53 +310,78 @@ def generate(
         raise InitError("No project directory has been resolved.")
     root = os.path.realpath(root)
     say = notify or (lambda _text: None)
+    if not scaffold_docs and not scaffold_config:
+        raise InitError("/init was asked to scaffold nothing.")
+
+    body = None
+    diff = ""
+    to_create = []
+    already_there = set()
+    context_path = doc_path(root, HUB_FILENAME)
 
     # ---- 1. Which set --------------------------------------------------
-    if kind is None:
-        blank = manifest_mod.is_blank(root)
-        proposal, reason = (None, "") if blank else propose_kind(root)
-        if choose_kind is None:
-            # No way to ask. Refusing beats scaffolding seven files of the
-            # wrong kind into someone's project -- V6's rule, and the wrong
-            # answer here is expensive to undo by hand.
-            raise InitError(
-                "The project type could not be determined and there is no "
-                "way to ask. Re-run with --software or --research.")
-        kind = choose_kind(proposal, reason, blank)
+    # Only when there is a set. `--config` alone asks nothing and spends
+    # nothing, which is the whole of why it is a separate flag rather
+    # than an addition to a run that always costs a model call.
+    if scaffold_docs:
         if kind is None:
-            return {"kind": "init", "text": "Cancelled — nothing was written."}
-    if kind not in doc_sets.PROJECT_KINDS:
-        raise InitError(f"Unknown project type {kind!r}; expected one of "
-                        f"{', '.join(doc_sets.PROJECT_KINDS)}.")
+            blank = manifest_mod.is_blank(root)
+            proposal, reason = (None, "") if blank else propose_kind(root)
+            if choose_kind is None:
+                # No way to ask. Refusing beats scaffolding seven files of
+                # the wrong kind into someone's project -- V6's rule, and
+                # the wrong answer here is expensive to undo by hand.
+                raise InitError(
+                    "The project type could not be determined and there is "
+                    "no way to ask. Re-run with --software or --research.")
+            kind = choose_kind(proposal, reason, blank)
+            if kind is None:
+                return {"kind": "init",
+                        "text": "Cancelled — nothing was written."}
+        if kind not in doc_sets.PROJECT_KINDS:
+            raise InitError(f"Unknown project type {kind!r}; expected one of "
+                            f"{', '.join(doc_sets.PROJECT_KINDS)}.")
 
-    # ---- 2. Generate ---------------------------------------------------
-    existing_context = _read_existing_context(root)
-    say(f"Reading the project and drafting {HUB_FILENAME}…")
-    body = _run_initializer(root, kind, existing_context, model, provider_name)
+        # ---- 2. Generate -----------------------------------------------
+        existing_context = _read_existing_context(root)
+        say(f"Reading the project and drafting {HUB_FILENAME}…")
+        body = _run_initializer(root, kind, existing_context, model,
+                                provider_name)
 
-    already_there = _existing_documents(root, kind)
-    body = f"{body.rstrip()}\n\n{doc_sets.render_index(kind)}"
+        already_there = _existing_documents(root, kind)
+        body = f"{body.rstrip()}\n\n{doc_sets.render_index(kind)}"
 
-    to_create = [name for name in doc_sets.document_set(kind)
-                 if name not in already_there]
+        to_create = [name for name in doc_sets.document_set(kind)
+                     if name not in already_there]
+        diff = build_diff(existing_context, body, context_path)
 
     # ---- 3. Show, then ask once ----------------------------------------
-    context_path = doc_path(root, HUB_FILENAME)
-    diff = build_diff(existing_context, body, context_path)
-    if not diff and not to_create:
-        return {"kind": "init",
-                "text": f"{HUB_FILENAME} is already up to date and every "
-                        f"document in the {kind} set exists. Nothing to do."}
+    plan = _config_plan(root) if scaffold_config else {"files": [],
+                                                       "existing": [],
+                                                       "dirs": []}
+    if not diff and not to_create and not plan["files"] and not plan["dirs"]:
+        return {"kind": "init", "text": _nothing_to_do(kind, scaffold_docs,
+                                                       scaffold_config)}
 
-    if diff:
-        say(diff)
-    else:
-        say(f"{HUB_FILENAME} is unchanged.")
-    if to_create:
-        say("Will also create, as stubs: " + ", ".join(to_create))
-    if already_there:
-        say("Leaving existing documents untouched: "
-            + ", ".join(sorted(already_there)))
+    if scaffold_docs:
+        if diff:
+            say(diff)
+        else:
+            say(f"{HUB_FILENAME} is unchanged.")
+        if to_create:
+            say("Will also create, as stubs: " + ", ".join(to_create))
+        if already_there:
+            say("Leaving existing documents untouched: "
+                + ", ".join(sorted(already_there)))
+    if plan["files"]:
+        say("Will create, with default values: "
+            + ", ".join(".venastine/" + name for name in plan["files"]))
+        if config_files.SETTINGS_FILENAME in plan["files"]:
+            for line in _shadow_lines():
+                say(line)
+    if plan["existing"]:
+        say("Leaving existing configuration untouched: "
+            + ", ".join(".venastine/" + name for name in plan["existing"]))
 
     if confirm is None:
         # §25's V6, and the same rule §20 applies to review corrections: the
@@ -274,7 +390,8 @@ def generate(
         return {"kind": "init",
                 "text": "Nothing was written: there is no way to confirm "
                         "these changes here. Re-run on a terminal."}
-    if not confirm(_consent_summary(context_path, to_create, bool(diff))):
+    if not confirm(_consent_summary(context_path, to_create, bool(diff),
+                                    plan)):
         return {"kind": "init", "text": "Declined — nothing was written."}
 
     # ---- 4. Write ------------------------------------------------------
@@ -285,16 +402,31 @@ def generate(
 
     granted = lambda _name, _params: True  # noqa: E731 -- consent is above
     written = []
-    facts = manifest_mod.detect_facts(root)
+    made = []
 
     failure = None
     try:
-        if diff:
-            _write(registry, granted, HUB_FILENAME, body)
-            written.append(HUB_FILENAME)
-        for name in to_create:
-            _write(registry, granted, name, doc_sets.render_stub(name, facts))
-            written.append(name)
+        if scaffold_docs:
+            facts = manifest_mod.detect_facts(root)
+            if diff:
+                _write(registry, granted, HUB_FILENAME, body)
+                written.append(HUB_FILENAME)
+            for name in to_create:
+                _write(registry, granted, name,
+                       doc_sets.render_stub(name, facts))
+                written.append(name)
+        # The directories first, so a failure to write settings.json still
+        # leaves a `.venastine/` whose shape says where the rest goes.
+        for name in plan["dirs"]:
+            os.makedirs(
+                os.path.join(workspace_trust.venastine_dir(root), name),
+                exist_ok=True)
+            made.append(".venastine/" + name + "/")
+        for name in plan["files"]:
+            _write_config(root, name)
+            written.append(".venastine/" + name)
+    except OSError as e:
+        failure = f"Could not create a directory under .venastine/: {e}"
     except ToolCallDenied as e:
         failure = f"The write was denied: {e}"
     except InitError as e:
@@ -342,13 +474,47 @@ def generate(
 
     lines = [f"Wrote {len(written)} file{'' if len(written) == 1 else 's'}: "
              + ", ".join(written)]
+    if made:
+        lines.append("Created: " + ", ".join(made))
     if already_there:
         lines.append("Left alone: " + ", ".join(sorted(already_there)))
+    if plan["existing"]:
+        lines.append("Left alone: "
+                     + ", ".join(".venastine/" + name
+                                 for name in plan["existing"]))
     lines.append(trust_note)
     return {"kind": "init", "text": "\n".join(line for line in lines if line)}
 
 
-def _consent_summary(context_path: str, to_create: list, changing: bool) -> str:
+def _nothing_to_do(kind, scaffold_docs: bool, scaffold_config: bool) -> str:
+    """The message for a run that found everything already in place.
+
+    Assembled from the halves that actually ran, so a `--config` run in a
+    configured project does not report on a document set it never looked
+    at -- which is the same complaint #95 makes about a failure naming
+    the one file that did NOT change.
+    """
+    from tools.builtin.project_docs import HUB_FILENAME
+
+    parts = []
+    if scaffold_docs:
+        parts.append(f"{HUB_FILENAME} is already up to date and every "
+                     f"document in the {kind} set exists")
+    if scaffold_config:
+        parts.append(".venastine/ already has its settings.json and "
+                     "mcp.json")
+    return " and ".join(parts) + ". Nothing to do."
+
+
+def _consent_summary(context_path: str, to_create: list, changing: bool,
+                     plan: Optional[dict] = None) -> str:
+    """ONE consent covering everything the run will touch (I5).
+
+    The configuration files are named in it rather than asked about
+    separately: eight prompts for one command is the shape of consent that
+    gets clicked through, which is the reason this summary exists at all.
+    """
+    plan = plan or {"files": [], "dirs": []}
     parts = []
     if changing:
         parts.append(f"write {context_path}")
@@ -356,6 +522,13 @@ def _consent_summary(context_path: str, to_create: list, changing: bool) -> str:
         parts.append(f"create {len(to_create)} stub document"
                      f"{'' if len(to_create) == 1 else 's'} "
                      f"({', '.join(to_create)})")
+    if plan["files"]:
+        parts.append("create " + ", ".join(".venastine/" + name
+                                           for name in plan["files"])
+                     + " with default values")
+    if plan["dirs"]:
+        parts.append("create " + ", ".join(".venastine/" + name + "/"
+                                           for name in plan["dirs"]))
     return "/init will " + " and ".join(parts) + ". Proceed?"
 
 

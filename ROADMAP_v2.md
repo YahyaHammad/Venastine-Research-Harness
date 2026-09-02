@@ -1650,6 +1650,8 @@ Open question to settle at build time: whether the list is thread-scoped state i
 
 **Added during §16, built after §21c.** A command that reads the project and writes `.venastine/CONTEXT.md`, the free-text project context §14 already loads and injects into opted-in agents' prompts.
 
+**Widened again in batch 50, on the user's report.** `.venastine/` was a configuration surface nothing could produce a starting file for: `settings.json` and `mcp.json` were documented in a README table and nowhere else, in a directory whose settings file RAISES on an unknown key. `/init` grew a third flag, independent of the two below, and I14-I17 record it.
+
 **Widened at build time, on the user's correction.** The spec generated one file. What ships scaffolds a SET: `CONTEXT.md` is the hub and the only document inside `.venastine/`, and it links out to ordinary committed root documents — `ARCHITECTURE`, `ROADMAP`, `DEVLOG`, `TECHNICAL_DEBT`, `DOCUMENTATION_STANDARDS`, `TEST_WRITING`, `BREAKING_CHANGES` for a software project, or `RESEARCH_QUESTIONS`, `METHODOLOGY`, `SOURCES`, `FINDINGS`, `LIMITATIONS`, `EXPERIMENT_LOG`, `OPEN_QUESTIONS` plus the shared `DOCUMENTATION_STANDARDS` for a research one.
 
 ### Two interactions to design around, not discover
@@ -1660,7 +1662,7 @@ Open question to settle at build time: whether the list is thread-scoped state i
 
 **Correction found at build time: neither option was available as written.** `write` is not merely `False` by default — it is unoverridable at runtime. `is_tool_allowed()` reads `config.ToolPermissions()` directly, `settings.json` has no `permissions` section and `_KNOWN_SETTINGS` raises on an unknown key, and D14 forbids a `ToolContext` widening anything, with the global check running first and unconditionally. `dispatch("write", …)` therefore raises `ToolCallDenied` before the `approval_callback` is ever consulted, for every user, out of the box. `read` is blocked identically, which also ruled out an agent that explores the project with the existing read tool. I1 and I2 are what the preference above became once that was true.
 
-### Decisions record (I1–I13)
+### Decisions record (I1–I17)
 
 | # | Decision | Why |
 |---|---|---|
@@ -1677,12 +1679,32 @@ Open question to settle at build time: whether the list is thread-scoped state i
 | **I11** | The index is generated, and is a **pure function of the kind** | Found by running the command twice. An index that marked which documents already existed changed on the second run purely because the first had created them — rewriting `CONTEXT.md` for no reason and defeating the "nothing to do" path — and the mark was false, labelling documents `/init` had authored moments earlier as preserved pre-existing work. Which files a run left alone is a fact about that RUN, and belongs in its report |
 | **I12** | An existing document is **never** overwritten by the stub path | Only `CONTEXT.md` goes through diff-and-confirm, because it is the only file `/init` claims to author |
 | **I13** | **Detect-then-confirm** for an established project; **ask outright** for a blank folder | With no manifests, no source and no docs there is nothing to infer from, so a proposal would be a guess wearing a finding's clothes. The proposal is a Python heuristic rather than a model call — a code manifest is a strong, checkable signal, and the user confirms either way |
+| **I14** | `--config` writes into `.venastine/` **directly**, under the same single consent, rather than through `write_project_doc` | That tool denies `.venastine/` by path segment and names these two files as the reason. Extending its allowlist was the alternative and is rejected below: `mcp.json` names a local command to execute, and a tool that can author one is advertised to every run and all ten research passes, not only to `/init`. Writing from the shell after an explicit yes is the shape `_settle_trust` already uses for the trust store |
+| **I15** | The template is **every setting that has a shipped default**, at that default, with the values READ from the constants the loader resolves against | JSON has no comment syntax and `_validate_settings` raises on an unknown key, so the file cannot carry an explanation or an inert line — it IS the discoverable schema, and it has to be right the first time or the harness will not start in that directory. A retyped default is a second copy of it; `config_loader.shipped_defaults()` exists so there is one |
+| **I16** | Six keys are **omitted because writing their own default is not restating it**, and the run reports what the file shadows in the user's own settings | Measured, not assumed: each key was written alone into a trusted project and the observable state diffed against a project with no file. `default_provider`/`default_model` are the `/model` store's staleness key, so adding them discards a remembered choice; `effort` flips `_effort_named` and makes every launch probe the provider's effort table; `compaction.trigger_tokens` is read by PRESENCE, so writing it silently disables the window-derived trigger; `ensemble_mode` and `research.subagent_review` are both `config.py if the value is None`, so an explicit `false` outranks config.py rather than deferring to it. What survives changes nothing until a human edits it — but a project settings.json still beats the user's by PRESENCE (D29), so the run names every key it takes over before it asks |
+| **I17** | `--config` **alone is a different operation** — no kind question, no initializer, no spend — but not a different set of decisions | Two keyword flags on `generate()` rather than a second entry point beside it. A config-only path of its own would be a second answer to "is an existing file overwritten" and a second place to forget the trust settle, which is the split §24 exists to prevent. Named beside a kind it is both halves, under one consent |
+
+### Rejected in batch 50
+
+- **Adding `settings.json` and `mcp.json` to `write_project_doc`'s allowlist**, to keep AC3 literally
+  true. The tool is advertised to every run; `mcp.json` names a local command to execute. A
+  narrower gate on one command is not worth a wider capability on every other.
+- **A template of `null`s**, so a key could be shown without being set. `_trigger_is_configured()`
+  tests `"trigger_tokens" in ...` — presence, not value — so a null-valued template would read as
+  a configured compaction trigger. Presence is load-bearing here, which is what I16 is about.
+- **Writing the six non-inert keys anyway and warning about them.** The warning is real and would
+  have been shown, but it makes `--config` a command that changes six things for someone who ran
+  it to see the schema. A project settings.json is primarily for agents, skills and pipeline
+  tuning; provider and model are the same across a user's projects, and stay in the user tier.
 
 ### Acceptance criteria
 
 1. Running `/init` on a trusted project leaves it trusted, without weakening the content hash. ✓ (I6)
 2. The generated file is the user's to edit — regeneration must not silently overwrite hand-edits without saying so. ✓ (I4 revises rather than replaces; I5 diffs and asks; I12 never touches the other documents)
-3. The write goes through the permission layer. ✓ (I1)
+3. The write goes through the permission layer. ✓ (I1) — **for the documents.** Batch 50's `--config`
+   writes into `.venastine/`, which that layer refuses on purpose; I14 records what replaces it.
+4. A scaffolded configuration changes nothing until it is edited. ✓ (I16), asserted over the whole
+   observable set including the log, rather than key by key.
 
 ---
 
