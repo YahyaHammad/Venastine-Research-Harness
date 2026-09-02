@@ -1357,3 +1357,192 @@ def call_model_stream(
         text="".join(text_parts), tool_calls=calls, usage=usage,
         thinking=_thinking_record(provider_name, model, reasoning_blocks),
     ))
+
+
+# ===========================================================================
+# ---- Embeddings (ROADMAP_v2 §45, SQ2/SQ7) ---------------------------------
+# ===========================================================================
+#
+# §33's rule is that this file is where a model call lives, and an
+# embedding is a model call. It shares `api_initialization` and its client
+# cache with the chat path, so an embedder on a provider already in use
+# costs no second client.
+#
+# WHAT THIS DELIBERATELY DOES NOT SHARE. No streaming, no tool
+# translation, no `effort`, no context-window check, and no entry in
+# `ModelResponse`: none of those mean anything for a call that takes
+# strings and returns vectors. `EmbeddingResult` is its own small shape
+# for the same reason ToolCallRequest is -- widening ModelResponse with
+# three fields that are null on every chat turn is how a response object
+# stops describing anything.
+
+
+class EmbeddingError(RuntimeError):
+    """An embedding call that could not produce usable vectors.
+
+    ITS OWN TYPE, so §45's scoring stage can catch exactly this and fall
+    back to the model's own similarity (SQ10) without also swallowing a
+    programming error from inside its own chunker. The message names the
+    provider and the model, because the two most common causes -- a
+    provider with no embeddings endpoint, and a chat model slug passed to
+    one -- are both fixed by changing one of those two words.
+    """
+
+
+@dataclass
+class EmbeddingResult:
+    """Vectors for the texts that were sent, in the order they were sent.
+
+    `usage` mirrors ModelResponse's shape but carries input tokens only:
+    an embedding call produces no output tokens, and reporting a zero
+    under a key that means something elsewhere would put embedding spend
+    into a total that is documented as billed input+output of model calls.
+    §45 counts it separately and says so.
+    """
+
+    vectors: list = field(default_factory=list)
+    model: str = ""
+    provider_name: str = ""
+    usage: dict = field(default_factory=lambda: {"input_tokens": 0})
+
+    @property
+    def dimension(self) -> int:
+        return len(self.vectors[0]) if self.vectors else 0
+
+
+# Providers with no embeddings endpoint at all, where the failure is worth
+# naming rather than surfacing as a 404 from inside a research run.
+#
+# ANTHROPIC IS NOT AN OVERSIGHT. There is no Anthropic embeddings API; the
+# recommended route is a third-party embedder, which this harness reaches
+# as its own provider entry. OPENROUTER proxies chat completions only.
+#
+# INCOMPLETE ON PURPOSE, and safe when incomplete -- the same posture as
+# MODELS_REJECTING_SAMPLING_PARAMS. An unlisted provider that turns out to
+# have no endpoint fails loudly on the probe `/embedder` runs at selection
+# time, which is a measurement rather than a guess and is why there is no
+# `supports_embeddings` table to keep in step with the world.
+PROVIDERS_WITHOUT_EMBEDDINGS = frozenset({"ANTHROPIC", "OPENROUTER"})
+
+
+def embed_texts(provider_name: str, model: str, texts,
+                *, prefix: str = "", task_type: str = "") -> EmbeddingResult:
+    """Embed `texts` with `model` on `provider_name`.
+
+    `prefix` is prepended to every text in this call. Asymmetric embedders
+    -- e5's `"query: "` / `"passage: "`, BGE's instruction prefix -- score
+    materially worse without it and produce no error at all, so it is
+    configuration rather than something inferred from a model slug.
+    `task_type` is Google's equivalent (`RETRIEVAL_QUERY` /
+    `RETRIEVAL_DOCUMENT`) and is ignored elsewhere.
+
+    Raises EmbeddingError, never a provider exception: the caller's whole
+    contract (SQ10) is to degrade to a documented fallback, and it cannot
+    do that against an exception type that differs per SDK.
+    """
+    items = [f"{prefix}{text}" for text in texts]
+    if not items:
+        return EmbeddingResult(model=model, provider_name=provider_name)
+
+    if provider_name in PROVIDERS_WITHOUT_EMBEDDINGS:
+        raise EmbeddingError(
+            f"{provider_name} has no embeddings endpoint. Configure an "
+            f"embedder on a provider that does -- /embedder <PROVIDER> "
+            f"<model> -- or leave it unset to score similarity with the "
+            f"grounding model itself."
+        )
+
+    try:
+        client = api_initialization(provider_name)
+    except ValueError as exc:
+        raise EmbeddingError(str(exc)) from exc
+
+    try:
+        if provider_name == "GOOGLE":
+            vectors, tokens = _embed_google(client, model, items, task_type)
+        else:
+            vectors, tokens = _embed_openai_compatible(client, model, items)
+    except EmbeddingError:
+        raise
+    except Exception as exc:
+        raise EmbeddingError(
+            f"{provider_name} embeddings call failed for model {model!r}: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
+
+    _check_vectors(provider_name, model, vectors, len(items))
+    return EmbeddingResult(
+        vectors=vectors, model=model, provider_name=provider_name,
+        usage={"input_tokens": tokens},
+    )
+
+
+def _embed_openai_compatible(client, model, items):
+    """`/v1/embeddings`, which is what every is_v1_compatible provider
+    exposes if it exposes embeddings at all.
+
+    SORTED BY INDEX rather than trusted in arrival order. The response
+    carries an explicit `index` per item precisely because the order is
+    not guaranteed, and a silently permuted batch pairs every claim with
+    another claim's vector -- a wrong number with no symptom, which is the
+    failure this whole section exists to stop producing.
+    """
+    response = client.embeddings.create(model=model, input=items)
+    data = sorted(response.data, key=lambda item: getattr(item, "index", 0))
+    vectors = [list(item.embedding) for item in data]
+    usage = getattr(response, "usage", None)
+    return vectors, int(getattr(usage, "prompt_tokens", 0) or 0)
+
+
+def _embed_google(client, model, items, task_type):
+    """google-genai's `embed_content`, which takes the batch as
+    `contents` and returns `embeddings[].values`.
+
+    The config object is built ONLY when a task type was given, and
+    through getattr rather than a direct import of the types module: a
+    pinned SDK that does not carry EmbedContentConfig would otherwise turn
+    an optional tuning parameter into an import error on every Google
+    embedding call. D22's rule -- check the dependency's real shape, do
+    not assume it.
+    """
+    kwargs = {"model": model, "contents": items}
+    if task_type:
+        from google.genai import types as genai_types
+        config_cls = getattr(genai_types, "EmbedContentConfig", None)
+        if config_cls is not None:
+            kwargs["config"] = config_cls(task_type=task_type)
+        else:
+            logger.warning(
+                "Ignoring embedder task_type=%r: the installed google-genai "
+                "has no EmbedContentConfig.", task_type)
+
+    response = client.models.embed_content(**kwargs)
+    vectors = [list(item.values) for item in (response.embeddings or [])]
+    # google-genai reports embedding token usage inconsistently across
+    # releases; absent is reported as zero rather than guessed at.
+    metadata = getattr(response, "metadata", None)
+    return vectors, int(getattr(metadata, "billable_character_count", 0) or 0)
+
+
+def _check_vectors(provider_name, model, vectors, expected) -> None:
+    """Three ways a successful response is still unusable.
+
+    All three produce a WRONG NUMBER rather than an error downstream: a
+    short batch pairs texts with the wrong vectors, a ragged batch makes
+    cosine compare different spaces, and an empty vector makes every
+    cosine zero -- which reads as "no source supports this claim" and is
+    indistinguishable from a real finding.
+    """
+    if len(vectors) != expected:
+        raise EmbeddingError(
+            f"{provider_name} returned {len(vectors)} embedding(s) for "
+            f"{expected} input(s) with model {model!r}.")
+    dimensions = {len(v) for v in vectors}
+    if len(dimensions) > 1:
+        raise EmbeddingError(
+            f"{provider_name} returned embeddings of differing dimensions "
+            f"{sorted(dimensions)} for model {model!r}.")
+    if dimensions == {0}:
+        raise EmbeddingError(
+            f"{provider_name} returned empty embeddings for model "
+            f"{model!r}.")

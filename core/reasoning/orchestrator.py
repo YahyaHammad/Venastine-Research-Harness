@@ -11,11 +11,15 @@ consistency check feeding Pass 5's scoring). No filesystem output yet
 (returns a PipelineRun object; the /output/<run_id>/ file-writing system
 is a separate, later piece of work).
 
-ROADMAP §11 (critic-model routing): when config.CRITIC_MODEL is set,
+ROADMAP §11 (critic-model routing): when a critic pair is configured,
 Pass 3a, 3b, and 6c (which re-runs 3a/3b logic) use the critic
 provider/model instead of the generator's. Every other pass keeps using
 the main provider_name/model. This prevents a model from checking its
-own output for errors with the same blind spots.
+own output for errors with the same blind spots. §45 (SQ7) moved WHERE
+that pair comes from: core/pipeline_models.resolve("critic") owns the
+precedence -- a `/critic` choice in the user-tier store, else
+config.CRITIC_MODEL -- so the routing is reachable without editing the
+checkout, which for §11's whole life it was not.
 
 ROADMAP §3 (malformed-JSON recovery): JSON-emitting passes are wrapped in
 _run_pass_with_json_retry, which on a parse failure re-enters the SAME
@@ -71,6 +75,8 @@ import logging
 
 import config
 import prompts.system_prompts as system_prompts
+from core import pipeline_models
+from core.config_loader import effective_confidence, effective_source_scoring
 from core.loop import RunAgentLoop, advertisement_facts
 from core.reasoning.base import Claim, PipelineRun, resolve_by_id
 from core.reasoning.confidence_scoring import run_confidence_tiering
@@ -79,6 +85,9 @@ from core.reasoning.json_retry import parse_json_response as _parse_json_respons
 from core.reasoning.json_retry import retry_until_json
 from core.reasoning.payload_validation import validate as _validate_payload
 from core.reasoning.pipeline_storage import create_pipeline_run, update_pipeline_run
+from core.reasoning.scholar import ScholarLookup
+from core.reasoning.source_corpus import SourceCorpus
+from core.reasoning.source_scoring import make_scorer, score_grounding_sources
 from safety.policy_enforcement import redact_secrets
 from tools.registry import registry
 
@@ -162,7 +171,7 @@ _ACTIVITY_CHARS = 2000
 # to where it now lives, not handed a local rebinding.
 
 
-def _translate(pass_id: str, stream):
+def _translate(pass_id: str, stream, corpus=None):
     """Turn one pass's LoopEvents into PipelineEvents, and return the
     ModelResponse the pass produced (ROADMAP_v2 §26).
 
@@ -214,7 +223,14 @@ def _translate(pass_id: str, stream):
                                 true of blocked and failed compactions and
                                 FALSE of successful ones (INFO only --
                                 audit #172). A trace line lands in
-                                trace.md and both shells print it."""
+                                trace.md and both shells print it.
+
+    §45 (SQ2). `corpus` is a SECOND SINK for tool results, not a change to
+    what is translated. The rule above -- a successful result body never
+    reaches the UI -- is unchanged; this is a different consumer with a
+    different need, and the scoring stage cannot check a quote against a
+    page nobody kept. None, the default, collects nothing: that is every
+    caller that predates §45 and every test double."""
     names: dict = {}          # tool_call id -> name, since tool_result has none
     streamed = 0
     announced = 0
@@ -254,9 +270,17 @@ def _translate(pass_id: str, stream):
         if event.tool_result:
             result = event.tool_result.get("result")
             failed = isinstance(result, dict) and "error" in result
+            name = names.get(event.tool_result.get("id"))
+            if corpus is not None and not failed:
+                # BEFORE the yield, for #42's reason one layer up: a
+                # generator only advances while someone iterates it, so
+                # collecting after the yield would make the corpus depend
+                # on a consumer continuing to read. `corpus.add` ignores
+                # every tool it does not recognise.
+                corpus.add(name, result)
             yield PipelineEvent(
                 kind="tool_result", pass_id=pass_id,
-                tool=names.get(event.tool_result.get("id")),
+                tool=name,
                 ok=not failed,
                 # Redacted here too, though dispatch() already ran the
                 # result through check_output_policy. One rule owned at one
@@ -394,7 +418,7 @@ def _pass_failed_event(pass_id: str, exc: BaseException) -> PipelineEvent:
 def _run_pass(pass_id: str, pass_input: str, model: str, provider_name: str,
               temperature: float | None = None, authorization=None,
               trace: list[str] | None = None, pass_threads: list | None = None,
-              effort: str | None = None):
+              effort: str | None = None, corpus=None):
     """One LLM-backed pass. Every actual model call in this file goes
     through this single function.
 
@@ -417,7 +441,7 @@ def _run_pass(pass_id: str, pass_input: str, model: str, provider_name: str,
         response = yield from _translate(pass_id, RunAgentLoop.stream_deep_research_mode(
             pass_input=pass_input, model=model, pass_id=pass_id, provider_name=provider_name,
             temperature=temperature, authorization=authorization, effort=effort,
-        ))
+        ), corpus=corpus)
         _record_granted_calls(pass_id, response, authorization)
         _record_pass_thread(pass_id, response, pass_threads)
         _check_not_truncated(pass_id, response, trace)
@@ -489,6 +513,7 @@ def _run_pass_with_json_retry(
     claim_ids: list | None = None,
     ensemble: bool = False,
     effort: str | None = None,
+    corpus=None,
 ):
     """Runs one JSON-emitting pass and recovers from malformed JSON.
 
@@ -537,13 +562,20 @@ def _run_pass_with_json_retry(
     event. Making it visible means a streaming sibling for
     continue_conversation too, which is chat's entry point as well -- a
     larger change than the thing it would show.
+
+    §45 inherits that limit rather than widening it: a page fetched during
+    a corrective retry reaches no corpus either, so a source cited only
+    from such a fetch scores with `similarity_method: "llm"` like any
+    other source with no captured text. It degrades to the documented
+    fallback instead of to a wrong number, which is why the limit is
+    stated here and not worked around.
     """
     yield PipelineEvent(kind="pass_start", pass_id=pass_id)
     try:
         response = yield from _translate(pass_id, RunAgentLoop.stream_deep_research_mode(
             pass_input=pass_input, model=model, pass_id=pass_id, provider_name=provider_name,
             temperature=temperature, authorization=authorization, effort=effort,
-        ))
+        ), corpus=corpus)
         _record_granted_calls(pass_id, response, authorization)
         # §27: the retries re-enter THIS thread (continue_conversation), so one
         # entry per pass is the whole truth however many corrections it took.
@@ -627,6 +659,56 @@ def _apply_grounding(claims: list[Claim], grounding_entries: list[dict]) -> int:
             claim.grounding_status = entry.get("status")
             applied.add(claim.id)
     return len(applied)
+
+
+def _ground_and_score(run: PipelineRun, grounding_entries: list[dict], corpus,
+                      scorer=None, knobs=None, scholar=None) -> int:
+    """Apply Pass 3a/6b's grounding, then everything §45 derives from it.
+
+    THE ONE SEAM BOTH GROUNDING SITES GO THROUGH. There are two -- Pass 3a
+    and Pass 6b's re-validation -- and §45 adds work that has to happen at
+    both: a source scored only on the run's first grounding would carry a
+    stale number after a revision changed the claim it was scored against.
+    Deriving beside each call instead is the shape the "fix at the
+    producer" rule exists to prevent, and a third caller could then arrive
+    without it.
+
+    Returns what `_apply_grounding` returned, so the checkpoint lines that
+    interpolate it keep reporting what was APPLIED rather than what the
+    pass was asked about (§30, B5).
+
+    `run.source_documents` is refreshed HERE, and this is its only writer.
+    Late enough to include everything grounding retrieved, and early
+    enough that a run dying in a later pass still carries the evidence it
+    had already gathered -- the failure path being where an unattended
+    run's record matters most.
+    """
+    applied = _apply_grounding(run.claims, grounding_entries)
+    if corpus is not None:
+        run.source_documents = corpus.artifact_entries()
+    knobs = knobs or {}
+    score_grounding_sources(
+        run, corpus=corpus, scorer=scorer, scholar=scholar,
+        overrides=knobs.get("domain_overrides"),
+        **{k: knobs[k] for k in ("window_chars", "max_windows",
+                                 "claim_min_chars",
+                                 "authority_adjustment_cap") if k in knobs})
+    return applied
+
+
+def _sources_were_scored(run: PipelineRun) -> bool:
+    """Whether §45's scoring stage ran for this run.
+
+    Pass 5 needs this because an empty source list is AMBIGUOUS on its own
+    -- "the model claimed grounded and cited nothing" on a scored run,
+    "this claim was built without a scoring stage" everywhere else -- and
+    only the first should cost a claim its grounding weight.
+
+    Derived from the run rather than tracked in a flag, so it cannot go
+    stale: the stage runs exactly when Pass 3a produced grounding, which
+    is exactly when some factual claim carries a status.
+    """
+    return any(c.grounding_status is not None for c in run.claims)
 
 
 def _apply_critic(claims: list[Claim], critic_entries: list[dict]) -> int:
@@ -918,6 +1000,37 @@ def stream_deep_research_pipeline(
 
     run = PipelineRun(user_query=user_query)
 
+    # §45 (SQ2). RUN-SCOPED, and attached to every pass rather than only to
+    # the two that ground. The question it answers is "what did this run
+    # retrieve from this URL", which is not a per-pass question: a page
+    # Pass 1 fetched and Pass 3a then cited without re-fetching is still
+    # evidence about that URL, and scoping the corpus to 3a would report
+    # no captured text for it and fall back to the model's own number.
+    corpus = SourceCorpus()
+
+    # §45 (SQ2). Resolved ONCE, before Pass 0, so the warning about
+    # running without one is the first thing the trace says rather than
+    # something a reader meets forty lines in beside a score it already
+    # explains. One scorer for the whole run, because its vector cache and
+    # its give-up flag are both run-scoped: a claim is embedded once
+    # however many sources it has, and a provider that is down stays down.
+    scoring_knobs = effective_source_scoring(warn=True)
+    scorer = make_scorer(run, floor=scoring_knobs["similarity_floor"],
+                         ceiling=scoring_knobs["similarity_ceiling"])
+
+    # §45 (SQ9). OFF by default, so an out-of-the-box run makes no call
+    # the user did not ask for. One lookup object for the run, for the
+    # scorer's reason: its cohort cache and its give-up flag are both
+    # run-scoped.
+    scholar = ScholarLookup(knobs=scoring_knobs)
+
+    # §45 (SQ6). Both knob sections resolved ONCE, here, with warn=True so
+    # a mistyped weight is said once per run rather than once per claim --
+    # `effective_compaction`'s gating, for its reason. score_claim stays a
+    # pure function of its arguments, and a run's numbers cannot change
+    # halfway through it.
+    confidence_weights = effective_confidence(warn=True)
+
     # §25 audit trail: ONE list, shared, not two kept in step. The run and
     # the authorization bundle now refer to the same object, so a granted
     # call is visible on the PipelineRun the moment it happens -- including
@@ -933,16 +1046,26 @@ def stream_deep_research_pipeline(
     # and persists a snapshot of the partial run before re-raising.
     run.run_id = create_pipeline_run(user_query)
 
-    # ROADMAP §11: resolve critic provider/model once. When CRITIC_MODEL
-    # is None these fall back to the main provider/model — no-op routing.
-    critic_provider = config.CRITIC_MODEL["provider_name"] if config.CRITIC_MODEL else provider_name
-    critic_model = config.CRITIC_MODEL["model"] if config.CRITIC_MODEL else model
+    # ROADMAP §11: resolve critic provider/model once. When no critic is
+    # configured these fall back to the main provider/model — no-op
+    # routing.
+    #
+    # §45 (SQ7): through pipeline_models.resolve rather than
+    # config.CRITIC_MODEL directly, so a `/critic` choice reaches the CLI,
+    # the TUI and a spawned run alike. That function owns the precedence —
+    # the user-tier store outranks config.py — and owning it in one place
+    # is the point: §11 gave this routing to config.py alone, which meant
+    # the methodology's own "a model must not check its own output" was
+    # available only to whoever could edit the checkout.
+    critic = pipeline_models.resolve("critic")
+    critic_provider = critic["provider_name"] if critic else provider_name
+    critic_model = critic["model"] if critic else model
 
     progress = _Progress(run)
 
     try:
         # --- Pass 0: preliminary plan ---
-        run.plan = _parse_json_response((yield from _run_pass_with_json_retry("Pass 0", user_query, model, provider_name, run.trace, authorization=authorization, pass_threads=run.pass_threads, effort=effort)))
+        run.plan = _parse_json_response((yield from _run_pass_with_json_retry("Pass 0", user_query, model, provider_name, run.trace, authorization=authorization, corpus=corpus, pass_threads=run.pass_threads, effort=effort)))
         yield from progress.checkpoint(f"Pass 0: plan produced ({len(run.plan.get('key_entities_or_subjects', []))} key entities anticipated).")
 
         # --- Pass 1: initial generation (ensemble mode: N candidates) ---
@@ -1030,13 +1153,13 @@ def stream_deep_research_pipeline(
                         "each provider's error."
                     )
         else:
-            run.raw_response = yield from _run_pass("Pass 1", pass1_input, model, provider_name, authorization=authorization, trace=run.trace, pass_threads=run.pass_threads, effort=effort)
+            run.raw_response = yield from _run_pass("Pass 1", pass1_input, model, provider_name, authorization=authorization, corpus=corpus, trace=run.trace, pass_threads=run.pass_threads, effort=effort)
             pass2_input = f"Response to extract claims from:\n{run.raw_response}"
             run.log("Pass 1: initial generation complete.")
         yield from progress.checkpoint()
 
         # --- Pass 2: claim extraction & classification ---
-        claims_json = _parse_json_response((yield from _run_pass_with_json_retry("Pass 2", pass2_input, model, provider_name, run.trace, authorization=authorization, pass_threads=run.pass_threads, ensemble=effective_n >= 2, effort=effort)))
+        claims_json = _parse_json_response((yield from _run_pass_with_json_retry("Pass 2", pass2_input, model, provider_name, run.trace, authorization=authorization, corpus=corpus, pass_threads=run.pass_threads, ensemble=effective_n >= 2, effort=effort)))
         run.claims = [_claim_from_json(c) for c in claims_json]
         for claim in run.claims:
             yield PipelineEvent(kind="claim_extracted", claim_id=claim.id,
@@ -1060,8 +1183,9 @@ def stream_deep_research_pipeline(
                 f"Deduplicated entities to research (search each ONCE, map results back "
                 f"to every claim referencing it):\n{json.dumps(unique_entities)}"
             )
-            grounding_json = _parse_json_response((yield from _run_pass_with_json_retry("Pass 3a", pass3a_input, critic_model, critic_provider, run.trace, authorization=authorization, pass_threads=run.pass_threads, claim_ids=[c.id for c in run.claims], effort=effort)))
-            grounded = _apply_grounding(run.claims, grounding_json)
+            grounding_json = _parse_json_response((yield from _run_pass_with_json_retry("Pass 3a", pass3a_input, critic_model, critic_provider, run.trace, authorization=authorization, corpus=corpus, pass_threads=run.pass_threads, claim_ids=[c.id for c in run.claims], effort=effort)))
+            grounded = _ground_and_score(run, grounding_json, corpus, scorer,
+                                         scoring_knobs, scholar)
             yield from progress.checkpoint(f"Pass 3a: grounded {grounded} of {len(factual_claims)} factual claim(s), across {len(unique_entities)} deduplicated entities.")
 
             # E13/#77. Two or more survivors: the claims were extracted
@@ -1084,7 +1208,7 @@ def stream_deep_research_pipeline(
                     f"Raw response:\n{run.raw_response}\n\n"
                     f"Factual claims with grounding:\n{json.dumps([vars(c) for c in factual_claims])}"
                 )
-            critic_json = _parse_json_response((yield from _run_pass_with_json_retry("Pass 3b", pass3b_input, critic_model, critic_provider, run.trace, authorization=authorization, pass_threads=run.pass_threads, claim_ids=[c.id for c in run.claims], effort=effort)))
+            critic_json = _parse_json_response((yield from _run_pass_with_json_retry("Pass 3b", pass3b_input, critic_model, critic_provider, run.trace, authorization=authorization, corpus=corpus, pass_threads=run.pass_threads, claim_ids=[c.id for c in run.claims], effort=effort)))
             critiqued = _apply_critic(run.claims, critic_json)
             yield from progress.checkpoint(f"Pass 3b: critique applied to {critiqued} of {len(factual_claims)} factual claim(s).")
         else:
@@ -1097,7 +1221,7 @@ def stream_deep_research_pipeline(
 
         # --- Pass 3c: completeness, independent of Pass 1's raw_response ---
         pass3c_input = f"Original query:\n{user_query}\n\nPreliminary plan:\n{json.dumps(run.plan)}"
-        run.completeness = _parse_json_response((yield from _run_pass_with_json_retry("Pass 3c", pass3c_input, model, provider_name, run.trace, authorization=authorization, pass_threads=run.pass_threads, effort=effort)))
+        run.completeness = _parse_json_response((yield from _run_pass_with_json_retry("Pass 3c", pass3c_input, model, provider_name, run.trace, authorization=authorization, corpus=corpus, pass_threads=run.pass_threads, effort=effort)))
         yield from progress.checkpoint(
             f"Pass 3c: coverage_score={run.completeness.get('coverage_score')}, "
             f"{len(run.completeness.get('gaps', []))} gap(s) identified."
@@ -1109,12 +1233,14 @@ def stream_deep_research_pipeline(
             f"All claims:\n{json.dumps([vars(c) for c in run.claims])}\n\n"
             f"Completeness findings:\n{json.dumps(run.completeness)}"
         )
-        run.assumptions = _parse_json_response((yield from _run_pass_with_json_retry("Pass 4", pass4_input, model, provider_name, run.trace, authorization=authorization, pass_threads=run.pass_threads, claim_ids=[c.id for c in run.claims], effort=effort)))
+        run.assumptions = _parse_json_response((yield from _run_pass_with_json_retry("Pass 4", pass4_input, model, provider_name, run.trace, authorization=authorization, corpus=corpus, pass_threads=run.pass_threads, claim_ids=[c.id for c in run.claims], effort=effort)))
         flagged_count = _apply_assumption_flags(run.claims, run.assumptions)
         yield from progress.checkpoint(f"Pass 4: assumption audit complete, {flagged_count} of {len(run.claims)} claim(s) flagged.")
 
         # --- Pass 5: confidence tiering (0 LLM calls) ---
-        run_confidence_tiering(run, ensemble_n=effective_n)
+        run_confidence_tiering(run, ensemble_n=effective_n,
+                               sources_scored=_sources_were_scored(run),
+                               weights=confidence_weights)
         yield from _stage("Pass 5")
         yield from _tier_events(run)
         yield from progress.checkpoint("Pass 5: confidence tiers assigned (pure code, zero LLM calls).")
@@ -1135,7 +1261,7 @@ def stream_deep_research_pipeline(
                 }
                 for c in flagged
             ])
-            revisions = _parse_json_response((yield from _run_pass_with_json_retry("Pass 6a", pass6a_input, model, provider_name, run.trace, authorization=authorization, pass_threads=run.pass_threads, claim_ids=[c.id for c in flagged], effort=effort)))
+            revisions = _parse_json_response((yield from _run_pass_with_json_retry("Pass 6a", pass6a_input, model, provider_name, run.trace, authorization=authorization, corpus=corpus, pass_threads=run.pass_threads, claim_ids=[c.id for c in flagged], effort=effort)))
 
             # COUNT THE ROUND, NOT THE REVISION. The increment used to live
             # inside the loop below, so only a claim Pass 6a NAMED counted --
@@ -1176,8 +1302,9 @@ def stream_deep_research_pipeline(
 
             # --- Pass 6b: re-validate the revised subset only (batched, reuses Pass 5's code) ---
             pass6b_input = json.dumps([vars(c) for c in flagged])
-            revalidation = _parse_json_response((yield from _run_pass_with_json_retry("Pass 6b", pass6b_input, critic_model, critic_provider, run.trace, authorization=authorization, pass_threads=run.pass_threads, claim_ids=[c.id for c in run.claims], effort=effort)))
-            _apply_grounding(run.claims, revalidation.get("grounding", []))
+            revalidation = _parse_json_response((yield from _run_pass_with_json_retry("Pass 6b", pass6b_input, critic_model, critic_provider, run.trace, authorization=authorization, corpus=corpus, pass_threads=run.pass_threads, claim_ids=[c.id for c in run.claims], effort=effort)))
+            _ground_and_score(run, revalidation.get("grounding", []), corpus,
+                              scorer, scoring_knobs, scholar)
             _apply_critic(run.claims, revalidation.get("critic", []))
             # 6b's own checkpoint below already reports an EFFECT -- how
             # many claims came out clean -- rather than what it was asked
@@ -1186,7 +1313,9 @@ def stream_deep_research_pipeline(
             # round's batch: 6b is only asked about `flagged`, and re-tiering
             # the whole run once per round recomputes claims that are already
             # finished, from score data those rounds did not change.
-            run_confidence_tiering(run, ensemble_n=effective_n, claims=flagged)
+            run_confidence_tiering(run, ensemble_n=effective_n, claims=flagged,
+                                   sources_scored=_sources_were_scored(run),
+                                   weights=confidence_weights)
             yield from _tier_events(run)
 
             still_flagged = [c for c in flagged if c.confidence_tier in FLAGGED_TIERS]
@@ -1223,7 +1352,7 @@ def stream_deep_research_pipeline(
         yield from progress.checkpoint(f"Merge: final claim set assembled -- {len(run.claims)} claim(s), {len(run.coverage_gaps)} coverage gap(s).")
 
         # --- Final synthesis ---
-        run.final_report = yield from _run_pass("Final synthesis", _synthesis_input(run), model, provider_name, authorization=authorization, trace=run.trace, pass_threads=run.pass_threads, effort=effort)
+        run.final_report = yield from _run_pass("Final synthesis", _synthesis_input(run), model, provider_name, authorization=authorization, corpus=corpus, trace=run.trace, pass_threads=run.pass_threads, effort=effort)
         yield from progress.checkpoint("Final synthesis complete.")
 
         # --- §20: review, consent, correct ---

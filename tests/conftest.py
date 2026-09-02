@@ -513,6 +513,48 @@ def isolate_model_windows(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def clear_scholar_cache():
+    """Drop §45's OpenAlex response cache between tests.
+
+    `_net_common.TTLCache.clear` exists for exactly this and says why:
+    a test must not inherit a previous test's answers. This cache is
+    module-level and keyed by request, so without the reset a test that
+    injects a FAILING fetch is served the payload a passing test cached a
+    moment earlier -- and asserts happily against a fake it never
+    called.
+    """
+    from core.reasoning import scholar
+
+    scholar._cache.clear()
+    yield
+    scholar._cache.clear()
+
+
+@pytest.fixture(autouse=True)
+def isolate_pipeline_models(tmp_path_factory, monkeypatch):
+    """Point the remembered critic/embedder store somewhere disposable.
+
+    isolate_model_windows' argument, fourth instance, and here the stakes
+    are higher than a threshold: since §45 the orchestrator resolves the
+    CRITIC pair through this store BEFORE config.CRITIC_MODEL, so without
+    the redirect every routing test in the suite would depend on whether
+    the person running it had ever typed /critic -- and a `/embedder`
+    test's write would land in their real
+    ~/.config/venastine/pipeline_models.json.
+
+    A FILE PER TEST for the same reason as its three siblings: both
+    commands write on every use, and a shared file would let one test's
+    choice decide another test's provider.
+    """
+    from core import pipeline_models
+
+    path = tmp_path_factory.getbasetemp() / "pipeline-models-{}.json".format(
+        next(_ui_prefs_counter))
+    monkeypatch.setattr(pipeline_models, "store_path", lambda: str(path))
+    return path
+
+
+@pytest.fixture(autouse=True)
 def isolate_provider_check(tmp_path_factory, monkeypatch):
     """Give the launch provider check a keyed copy of providers.json.
 

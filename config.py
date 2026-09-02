@@ -125,6 +125,325 @@ MODELS_REJECTING_SAMPLING_PARAMS = frozenset({
 # Example to enable: {"provider_name": "OPENAI", "model": "gpt-5.1"}
 CRITIC_MODEL: dict | None = None
 
+# --- Embedder routing (ROADMAP_v2 §45, SQ2/SQ7) ---
+# The model that turns a claim and a source passage into vectors, so
+# `similarity_score` is a cosine rather than a self-report. None -- the
+# default -- means the pipeline warns once at launch and falls back to the
+# grounding model's own number, under source_grounding.md's anchored
+# rubric.
+#
+# `config.py` ONLY, with no settings.json key, following CRITIC_MODEL and
+# ENSEMBLE_MODELS (E2): choosing a provider is a grant, and this one sends
+# claim text and fetched page text to whoever is named. `/embedder` writes
+# to the user-tier store in core/pipeline_models.py, which OUTRANKS this.
+# Example: {"provider_name": "OPENAI", "model": "text-embedding-3-small"}
+EMBEDDER_MODEL: dict | None = None
+
+# Asymmetric embedders score materially worse without their prefixes and
+# produce NO ERROR AT ALL when they are missing, which is why this is a
+# table rather than something inferred. Keyed by a substring of the model
+# slug, longest match wins; a model matching nothing gets no prefix, which
+# is correct for every symmetric embedder (OpenAI's, Cohere's, Voyage's).
+#
+# `task_type` is Google's equivalent and is ignored by every other
+# provider. Incomplete on purpose: an unlisted asymmetric model scores
+# lower than it should, which is visible in the artifact as a low cosine
+# on a source that plainly matches -- and adding a row is the fix.
+# Raw cosine is NOT a 0-1 score, and treating it as one is the quiet way
+# to publish a wrong number. Unrelated text sits near 0.1 on some models
+# and above 0.7 on others, so the same passage would score "irrelevant" on
+# one embedder and "supports the claim" on another. This maps the useful
+# band onto 0-1: below `floor` is noise, above `ceiling` is as close as
+# that model gets.
+#
+# Keyed by a substring of the model slug, longest match wins; anything
+# unlisted takes DEFAULT_SIMILARITY_CALIBRATION. The RAW cosine is always
+# recorded beside the calibrated score, so a bad row here is visible in
+# the artifact and fixable after the fact rather than baked in.
+SIMILARITY_CALIBRATION: dict[str, dict] = {
+    "text-embedding-3": {"floor": 0.10, "ceiling": 0.65},
+    "text-embedding-ada": {"floor": 0.70, "ceiling": 0.92},
+    "e5-": {"floor": 0.70, "ceiling": 0.92},
+    "multilingual-e5": {"floor": 0.70, "ceiling": 0.92},
+    "bge-": {"floor": 0.55, "ceiling": 0.85},
+    "gte-": {"floor": 0.55, "ceiling": 0.88},
+    "nomic-embed": {"floor": 0.40, "ceiling": 0.80},
+    "embed-english": {"floor": 0.25, "ceiling": 0.80},
+    "voyage": {"floor": 0.35, "ceiling": 0.85},
+    "gemini-embedding": {"floor": 0.35, "ceiling": 0.85},
+}
+
+DEFAULT_SIMILARITY_CALIBRATION = {"floor": 0.25, "ceiling": 0.85}
+
+EMBEDDER_PREFIXES: dict[str, dict] = {
+    "e5-": {"query": "query: ", "passage": "passage: "},
+    "multilingual-e5": {"query": "query: ", "passage": "passage: "},
+    "bge-": {"query": "Represent this sentence for searching relevant passages: ",
+             "passage": ""},
+    "gte-": {"query": "", "passage": ""},
+    "nomic-embed": {"query": "search_query: ", "passage": "search_document: "},
+    "gemini-embedding": {"query_task_type": "RETRIEVAL_QUERY",
+                         "passage_task_type": "RETRIEVAL_DOCUMENT"},
+    "text-embedding-004": {"query_task_type": "RETRIEVAL_QUERY",
+                           "passage_task_type": "RETRIEVAL_DOCUMENT"},
+}
+
+# --- Source authority: domain classes (ROADMAP_v2 §45, SQ4) ---
+# What a source is worth before anything is known about the specific page.
+# Two tables, deliberately: a CLASS carries the number, and a SUFFIX names
+# which class a host belongs to. A user who thinks preprints deserve more
+# edits one number; a user adding their field's own trusted domain edits a
+# membership. One combined {suffix: score} table would make the first of
+# those a find-and-replace across a hundred rows.
+#
+# THE SIGNAL IS A RESTRICTED REGISTRY, NOT A FAMILIAR SUFFIX. `.gov`,
+# `.mil`, `.int` and `.edu` gate registration -- you cannot buy one -- and
+# so do `gov.uk`, `ac.uk`, `gc.ca` and their equivalents worldwide, which
+# is why source_scoring derives the `<kind>.<cc>` forms rather than
+# enumerating them here. `.org` gates nothing at all and never has, so it
+# sits barely above `.com`; treating it as trustworthy is the single most
+# common version of this mistake.
+#
+# INCOMPLETE ON PURPOSE, and safe when incomplete: an unlisted host takes
+# DEFAULT_DOMAIN_AUTHORITY, which is the generic-commercial number. The
+# failure mode is a good source scored ordinary, never a bad source scored
+# authoritative, and the model's bounded adjustment (below) is the route
+# for the first.
+DOMAIN_AUTHORITY_CLASSES: dict[str, float] = {
+    "restricted_registry": 0.90,     # .gov .mil .int .edu, gov.uk, ac.uk...
+    "intergovernmental": 0.90,       # WHO, UN, World Bank, OECD, EU
+    "standards_body": 0.88,          # IETF, W3C, ISO, NIST, IEC
+    "peer_reviewed_publisher": 0.85,
+    "established_news": 0.65,
+    "preprint_server": 0.60,         # not peer reviewed; §45 SQ5 refines this
+    "reference_tertiary": 0.55,      # encyclopaedias -- a pointer to a source
+    "generic_org": 0.55,             # an unrestricted registry, small bump
+    "generic_commercial": 0.45,
+    "blog_platform": 0.30,
+    "forum_qa": 0.25,
+    "social_media": 0.15,
+    "content_farm": 0.10,
+}
+
+DEFAULT_DOMAIN_AUTHORITY = 0.45      # == generic_commercial, for an unknown host
+
+# host suffix -> class. Longest suffix wins, so `blogs.nature.com` can be
+# listed separately from `nature.com` if it ever needs to be.
+DOMAIN_AUTHORITY_SUFFIXES: dict[str, str] = {
+    # Restricted registries. The bare TLDs; the `<kind>.<cc>` second-level
+    # forms are derived in source_scoring.py rather than listed.
+    "gov": "restricted_registry",
+    "mil": "restricted_registry",
+    "int": "restricted_registry",
+    "edu": "restricted_registry",
+
+    # Intergovernmental bodies, whose hosts are ordinary .org/.int names.
+    "who.int": "intergovernmental",
+    "un.org": "intergovernmental",
+    "europa.eu": "intergovernmental",
+    "oecd.org": "intergovernmental",
+    "imf.org": "intergovernmental",
+    "worldbank.org": "intergovernmental",
+    "iaea.org": "intergovernmental",
+
+    # Standards bodies.
+    "ietf.org": "standards_body",
+    "rfc-editor.org": "standards_body",
+    "w3.org": "standards_body",
+    "iso.org": "standards_body",
+    "iec.ch": "standards_body",
+    "ieee.org": "standards_body",
+    "unicode.org": "standards_body",
+    "ecma-international.org": "standards_body",
+
+    # Peer-reviewed publishers and indexes.
+    "nature.com": "peer_reviewed_publisher",
+    "science.org": "peer_reviewed_publisher",
+    "sciencemag.org": "peer_reviewed_publisher",
+    "nejm.org": "peer_reviewed_publisher",
+    "thelancet.com": "peer_reviewed_publisher",
+    "bmj.com": "peer_reviewed_publisher",
+    "cell.com": "peer_reviewed_publisher",
+    "pnas.org": "peer_reviewed_publisher",
+    "sciencedirect.com": "peer_reviewed_publisher",
+    "springer.com": "peer_reviewed_publisher",
+    "link.springer.com": "peer_reviewed_publisher",
+    "onlinelibrary.wiley.com": "peer_reviewed_publisher",
+    "wiley.com": "peer_reviewed_publisher",
+    "tandfonline.com": "peer_reviewed_publisher",
+    "sagepub.com": "peer_reviewed_publisher",
+    "acm.org": "peer_reviewed_publisher",
+    "aps.org": "peer_reviewed_publisher",
+    "acs.org": "peer_reviewed_publisher",
+    "plos.org": "peer_reviewed_publisher",
+    "frontiersin.org": "peer_reviewed_publisher",
+    "mdpi.com": "peer_reviewed_publisher",
+    "jstor.org": "peer_reviewed_publisher",
+    "pubmed.ncbi.nlm.nih.gov": "peer_reviewed_publisher",
+
+    # Preprint servers and repositories -- not peer reviewed.
+    "arxiv.org": "preprint_server",
+    "biorxiv.org": "preprint_server",
+    "medrxiv.org": "preprint_server",
+    "chemrxiv.org": "preprint_server",
+    "ssrn.com": "preprint_server",
+    "papers.ssrn.com": "preprint_server",
+    "osf.io": "preprint_server",
+    "researchsquare.com": "preprint_server",
+    "semanticscholar.org": "preprint_server",
+
+    # News organisations with a correction policy and a masthead. An
+    # ALLOWLIST, because "news site" is not a property of a domain suffix
+    # and the alternative is scoring every .com that publishes articles.
+    "reuters.com": "established_news",
+    "apnews.com": "established_news",
+    "bbc.com": "established_news",
+    "bbc.co.uk": "established_news",
+    "ft.com": "established_news",
+    "economist.com": "established_news",
+    "nytimes.com": "established_news",
+    "washingtonpost.com": "established_news",
+    "wsj.com": "established_news",
+    "theguardian.com": "established_news",
+    "npr.org": "established_news",
+    "pbs.org": "established_news",
+    "bloomberg.com": "established_news",
+    "nikkei.com": "established_news",
+    "afp.com": "established_news",
+    "dw.com": "established_news",
+
+    # Tertiary references -- they summarise sources rather than being one.
+    "wikipedia.org": "reference_tertiary",
+    "wikimedia.org": "reference_tertiary",
+    "wiktionary.org": "reference_tertiary",
+    "britannica.com": "reference_tertiary",
+
+    "org": "generic_org",
+
+    # Blog and newsletter platforms: the host says nothing about the author.
+    "medium.com": "blog_platform",
+    "substack.com": "blog_platform",
+    "wordpress.com": "blog_platform",
+    "blogspot.com": "blog_platform",
+    "blogger.com": "blog_platform",
+    "tumblr.com": "blog_platform",
+    "wixsite.com": "blog_platform",
+    "ghost.io": "blog_platform",
+
+    # Forums and Q&A. Often correct, never attributable.
+    "reddit.com": "forum_qa",
+    "quora.com": "forum_qa",
+    "stackexchange.com": "forum_qa",
+    "stackoverflow.com": "forum_qa",
+    "news.ycombinator.com": "forum_qa",
+    "4chan.org": "content_farm",
+
+    # Social media. Speculation and unattributed claims travel here fastest,
+    # which is the whole reason a claim needs grounding elsewhere.
+    "x.com": "social_media",
+    "twitter.com": "social_media",
+    "facebook.com": "social_media",
+    "instagram.com": "social_media",
+    "tiktok.com": "social_media",
+    "threads.net": "social_media",
+    "linkedin.com": "social_media",
+    "mastodon.social": "social_media",
+    "bsky.app": "social_media",
+    "youtube.com": "social_media",
+    "vk.com": "social_media",
+    "weibo.com": "social_media",
+    "t.me": "social_media",
+
+    # Aggregators that republish without attribution, and image boards with
+    # no text to ground anything in. The measured case: a Pinterest pin
+    # scored similarity 1.0 on a Nobel Prize claim.
+    "pinterest.com": "content_farm",
+    "answers.com": "content_farm",
+    "ehow.com": "content_farm",
+    "scribd.com": "content_farm",
+    "coursehero.com": "content_farm",
+    "chegg.com": "content_farm",
+}
+
+# How far the model may move a computed authority, in either direction
+# (§45, SQ4). Small on purpose: it is a correction for what a domain
+# cannot see -- a primary source on an ordinary host, an opinion column on
+# a masthead -- not a second opinion about the number. An adjustment
+# arriving without a reason is discarded rather than clamped.
+AUTHORITY_ADJUSTMENT_CAP = 0.15
+
+# --- The sources/ artifact (ROADMAP_v2 §45, SQ8) ---
+# Whether output/<run_id>/sources/ keeps the TEXT each cited page served,
+# or only its hash, size and provenance.
+#
+# On by default, because it is what makes a similarity score reproducible
+# after the run -- and the directory output_writer has created since §12
+# was described by fetch_url.py's own comment for just as long. Everything
+# written there has been through redact_output_text on entry to the
+# corpus.
+#
+# It is new data at rest, so it has a switch and PRIVACY.md says what it
+# holds. Turning it off costs the audit trail, not the scores: the corpus
+# still exists in memory for the run that computes them.
+PERSIST_SOURCE_TEXT = True
+
+# --- Scholarly authority: OpenAlex (ROADMAP_v2 §45, SQ5/SQ9) ---
+# OFF BY DEFAULT. This is the first network call in this harness made by
+# something that is not a registered tool, so it bypasses the approval
+# registry and granted_calls.json -- and an out-of-the-box run must make
+# no call the user did not ask for. With it off, a paper takes its
+# preprint-server or publisher domain class and nothing else.
+SCHOLAR_LOOKUP = False
+
+SCHOLAR_API_URL = "https://api.openalex.org"
+SCHOLAR_TIMEOUT_S = 8.0
+SCHOLAR_MAX_RETRIES = 2
+SCHOLAR_CACHE_TTL_S = 900
+
+# OpenAlex asks for a contact address to put a caller in its "polite pool"
+# (higher rate limits). EMPTY BY DEFAULT AND NEVER DERIVED: an address is
+# personal data, and sending one the user did not type -- from a git
+# config, an environment variable, anywhere -- is not a rate-limit
+# optimisation, it is an unasked-for disclosure.
+SCHOLAR_MAILTO = ""
+
+# How a paper's score is composed. Renormalised over whichever terms are
+# actually available, so a paper too young to have a citation percentile
+# is not scored as though it had a bad one.
+SCHOLAR_VENUE_WEIGHT = 0.40
+SCHOLAR_CITATION_WEIGHT = 0.40
+SCHOLAR_AUTHOR_WEIGHT = 0.20
+
+# Venue credit. A preprint scores lower than a comparable published paper
+# -- generally, not strictly, which is why it is a weight and not a gate.
+SCHOLAR_VENUE_CREDIT = {
+    "journal": 1.0,
+    "conference": 1.0,
+    "book series": 0.85,
+    "repository": 0.55,     # arXiv, bioRxiv, institutional repositories
+    "unknown": 0.6,
+}
+
+# max h-index across a paper's authors, log-saturated. 60 is a full career
+# at the top of most fields; the curve is deliberately flat above it,
+# because the difference between 60 and 90 says more about field size and
+# career length than about this paper.
+SCHOLAR_H_SATURATION = 60
+
+# Below this many works, a field-and-year cohort is too small for a
+# percentile to mean anything and the window widens instead.
+SCHOLAR_MIN_COHORT_SIZE = 200
+
+# Below this age, citation counts are noise: 72% of computer-science
+# preprints from 2024 have zero citations, so a three-week-old paper's
+# zero says nothing at all. The term is DROPPED and the remaining weights
+# renormalise, rather than being scored as low impact.
+SCHOLAR_MIN_CITATION_AGE_DAYS = 60
+
+# A retracted paper is not evidence, whatever its venue or citation count
+# -- and a heavily cited retraction is the most dangerous shape there is.
+SCHOLAR_RETRACTED_AUTHORITY = 0.05
+
 # --- Reasoning effort (ROADMAP_v2 §16; default changed batch 25, #139) ---
 # The default effort level requested when the user has not chosen one.
 #

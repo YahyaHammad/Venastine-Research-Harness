@@ -170,6 +170,7 @@ the namespace list in `AGENTS.md`.
 - **§42. The consent surface — what a modal shows, and what the agent says it is doing** — BUILT (the permission modal parsed console markup out of the payload it exists to show; `shell` gained a display-only `rationale`)
 - **§43. Who is speaking, and what the session remembers** — BUILT (the `venastine ›` label rendered after a turn's reasoning; `/new` left the previous conversation on screen; a `/model` switch was forgotten at exit; workspace trust was reported broken and is not)
 - **§44. The provider it is on, the reasoning it kept, and the project it is in** — BUILT (a remembered `/model` pair left the launch key warning naming the wrong provider; reasoning was never persisted, never echoed, and — measured here — never rendered at all on Anthropic; `/init` scaffolded the harness instead of the workspace; the compaction trigger was a flat 40k on every window)
+- **§45. What a source is worth, and how close it actually is** — **(BUILT: both slices)** (the two scores per cited source were model self-reports that nothing checked and nothing consumed; no source text survived the pass, so nothing could have)
 - **Open Questions — None Remaining** (Rev. 3 — all decisions locked; verification items only)
 - **Why these calls, not just what they are** (Rev. 3 — the reasoning patterns behind several decisions above)
 
@@ -3662,3 +3663,94 @@ No code changed; the answer is written down instead, in AGENTS.md and ARCHITECTU
 | **RM4** | **Two records in one file, so both writers read-modify-write, and `STORE_VERSION` does NOT move.** The theme and the model are chosen at different moments by different commands. A writer serialising only its own fields would silently drop the other's — `/theme` forgetting the model, then `/model` forgetting the theme, each correct in its own test — so `_remember` merges into `_read_raw()` and each loader validates only its own keys. The version stays 1 because the model keys are OPTIONAL and their absence already reads as "nothing remembered": a store written before this batch keeps its theme and gains the pair on the first `/model`. Bumping would have thrown away every existing user's theme once, to express something the loaders already handle |
 | **RM5** | **`cli_pinned` is passed, not inferred.** `main.resolve_runtime_defaults` has already collapsed `--provider`/`--model` into the resolved pair by the time the app is built, so the TUI cannot tell a flag from a default by looking at what it was handed. The rejected alternative — comparing the resolved pair against `settings.json` — reads a flag that happens to match the configured value as absent, which is the same "a default is indistinguishable from a decision" defect `_theme_persisting` exists to prevent, arriving through the other door. It is one boolean on `VenastineApp.__init__` and `tui.app.run`, computed in `main()` where the parsed arguments actually are |
 | **RM6** | **Workspace trust is left exactly as it is, and the reason is documented at both surfaces.** Trust keys off the project path and the presence of `.venastine/`; `AGENT_WORKSPACE` is a permission boundary for `file_ops` and not a project path; a project with no `.venastine/` has nothing to trust, so silence at launch is the correct outcome rather than a missing prompt. The considered addition — a mount line stating the project's trust state — was declined by the owner: the behaviour is right, and a fifth surface describing it is UN3's "one description of the posture" argument applied to a second security control. What was missing was the sentence, so the sentence is what was added |
+
+---
+
+## §45. What a source is worth, and how close it actually is
+
+**Status: BUILT** (batch 46; both slices). Pass 3a has always asked one model to invent two numbers
+per cited source, and nothing anywhere checked either of them.
+
+**Both scores exist only in prompt text.** `authority_score` and `similarity_score` appear in
+`prompts/source_grounding.md` and `prompts/revalidate.md` and in no Python file at all. `sources`
+was not a required key in the Pass 3a payload spec, its element shape was unchecked, and nothing
+range-checked either float. A run on disk carries the consequence: a Pinterest pin scored
+`similarity_score: 1.0` beside the Wikipedia article, on the same claim.
+
+**And neither score affected anything.** `confidence_scoring.py` reads `grounding_status` alone,
+through the coarse `{grounded: 1.0, partial: 0.5, ungrounded: 0.0}` table. The two floats reached
+the artifact and Pass 6a's `grounding_feedback` and stopped there — so the pipeline collected a
+judgement about how good a source was, published it, and then scored the claim as though every
+grounded claim were grounded equally well.
+
+**No source text survived the pass, so nothing could have checked them.** `_apply_grounding` copies
+the model's `sources` list onto the claim and nothing else; `03_grounding.json` is URLs and two
+invented floats. The `sources/` directory `output_writer` has created since §12 was never written
+to — while `fetch_url.py`'s own comment already described the artifact that would fill it ("the
+grounding passes attribute fetched text to the URL in this field, and output_writer builds each
+run's sources/ directory from it"). Recovering what a claim was grounded in meant opening the pass
+thread by hand.
+
+**The retrieval budget is smaller than the design assumed.** `arxiv_search` returns a 600-character
+truncated abstract and never fetches `pdf_url`; `fetch_url` returns at most 5000 characters of raw,
+un-stripped HTML; `web_search` returns 300-character snippets. A grounding verdict on a long page is
+made from its first 5 KB of markup, and any similarity measure has to be honest about that.
+
+**FWCI does not cover preprints, which is the only scholarly source this harness has.** OpenAlex's
+field-weighted citation impact and its citation percentile are both `null` on preprint records —
+verified against the API, on a paper with 3019 citations. So the ready-made normalisation cannot
+answer for arXiv, and the section computes its own from cohort counts instead: works matched on
+field, type and publication window, counted twice. Measured while specifying this: computer-science
+preprints published in 2024 number 106,277, of which 76,630 (72%) have zero citations and 1,139
+(1.07%) have more than nine. A median-based normaliser is degenerate on that distribution; a
+percentile is not.
+
+### What this section amends
+
+Three locked positions change. Each is argued below rather than quietly overwritten, because this
+project's convention on finding no record is to re-derive — so a decision that changed without its
+reasoning changing with it is one that gets changed back.
+
+| id | was | becomes |
+|---|---|---|
+| §10 E8/E10, and AGENTS.md's note that `core/reasoning` weights are deliberately not user-tunable | the scoring constants are module constants, because the formula's shape is pinned by regression tests | every constant is overridable through `settings.json`. The SHAPE stays pinned: the regression tests assert the formula at default values, and the defaults do not move. What becomes configurable is the numbers a particular research project needs — the case the asymmetry never served, since a user with a specific field had no route to tune at all short of editing installed source |
+| §10 E8 | consistency is a PENALTY, so the base formula is unchanged by construction | unchanged, and deliberately so. SQ3 does NOT add a fourth weighted term: it scales an existing one, so E8's by-construction property survives untouched. The redistribution §10 shipped and then reversed is not repeated |
+| §21 `effective_compaction()` raises on an incoherent value | — | `effective_confidence()` and `effective_source_scoring()` WARN AND FALL BACK to the default for that one constant. Compaction raises because a bad trigger burns real model calls on every turn of every conversation; a bad scoring weight costs the shape of a number in one report, and refusing to start a ten-pass run over a mistyped weight is the worse failure. Unknown KEYS still raise, unchanged — that is a schema question, not a range one |
+
+### Design Decisions Record — §45 (SQ1–SQ10)
+
+| id | decision |
+|---|---|
+| **SQ1** | **One record, two build slices.** Slice A is similarity — capture, quote, embedder, cosine, calibration. Slice B is authority — the domain-class table and the scholarly lookup. Each ships independently and slice A is useful without slice B, but the record is written once, because the two halves multiply into one per-source quality and a `q` whose halves were specified separately is a `q` whose halves disagree about their range |
+| **SQ2** | **The source text is CAPTURED, and the model's quote is verified against it.** Tool results are collected during every pass into a run-scoped `SourceCorpus` — no extra calls, no extra tokens, because `_translate` already sees every result — and the model additionally supplies the verbatim span it relied on. Two things follow that neither half gives alone: a cosine computed against the passage a claim was actually grounded in rather than against a whole page, and a quote absent from the corpus, which is a fabricated citation and a signal this pipeline had no way to raise. The corpus is a SECOND SINK beside `_translate`, not a change to it: §26's boundary — a successful result body never reaches the UI — is untouched. The rejected alternative was re-fetching each cited URL in deterministic code after the pass, which doubles network traffic, re-crosses the URL policy, and creates a second fetch path beside the tool |
+| **SQ3** | **Source quality MODULATES the grounding component; it is not a fourth axis.** `grounding_component = GROUNDING_WEIGHTS[status] * max(SOURCE_QUALITY_FLOOR, q_max)`, where `q = authority * similarity` per source and `q_max` is the best one the claim has. The multiplicative form says what is meant — how much is this grounding actually worth — where a fourth weighted term says that source quality is evidence independent of grounding, which it is not. At `q_max = 1.0` the arithmetic is byte-identical to today, so §10's regression guard holds by construction rather than by coincidence, and every other term is untouched: the critic component, the assumption penalty, the disagreement penalty, the non-factual cap and the forced-UNVERIFIED rule for an ungrounded factual claim all behave exactly as they did. The floor exists because a weak-but-real grounding must still outscore no grounding at all. Aggregation is `max` and that is a choice: a noisy-OR rewarding corroboration lets five mediocre blogs outscore one primary source |
+| **SQ4** | **Authority is a deterministic base plus a bounded model nudge.** The domain class — or, for a resolvable paper, the scholarly score — sets the base in code; the model may adjust it by at most ±0.15 and only with a stated reason. Neither half alone is right: a table cannot tell a manufacturer's own spec sheet from marketing on the same `.com`, and a model asked for the whole number reproduces the Pinterest 1.0. Base, adjustment, reason and method are recorded separately, so a reader can recompute the score from the artifact alone — B10's property, applied to a second object. An adjustment with no reason is dropped and traced |
+| **SQ5** | **Citation impact is MEASURED, not modelled.** The empirical percentile of a paper's citation count within a cohort matched on OpenAlex field, work type and publication-date window — two counting queries, cached, since papers share cohorts. Matching the cohort IS the age and field normalisation, exactly rather than approximately, which is why no lifecycle curve is fitted: field differences self-calibrate because the comparison set is the same field. The window is the calendar year, narrowed to ±30 days for a paper under six months old, because a January paper has eleven months more than a December one. A paper too young (`insufficient_age`) or a cohort too small (`insufficient_cohort`) DROPS the term and renormalises the remaining weights rather than scoring zero: absence of evidence about a three-week-old preprint is not evidence of low impact, and 72% of its cohort has no citations either |
+| **SQ6** | **Every scoring constant is user-tunable, and an out-of-range value falls back to its own default with one warning per run.** Resolved ONCE at pipeline start into a frozen weights object passed into `score_claim`, which keeps that function pure, keeps the warning to one line rather than one per claim (`effective_compaction`'s `warn=True` gating, for its reason), and — load-bearing — defaults to the module constants, so every existing caller and every existing test is unchanged. `confidence` and `source_scoring` are TOP-LEVEL settings sections rather than nested under `research`: `_NESTED_SETTINGS` supports exactly one level and both the validator and the cross-tier merge iterate it, and deepening that merge is the code path review finding F2 already broke once |
+| **SQ7** | **`/embedder` and `/critic`, both, and the selection is PROBED rather than tabulated.** `CRITIC_MODEL` has been reachable only by editing `config.py` since §11; adding the embedder without it would leave two of three pipeline model roles reachable by command and one not. Both follow `_cmd_model` exactly, and both persist to a `core/` store rather than `tui/preferences.py` because the pipeline reads them and D12 forbids core importing the shell — WS6's argument, unchanged. A one-token embedding at selection time validates provider, model and key in one measurement and caches the dimension; a static `supports_embeddings` table would be a guess that goes stale, and the probe cannot. Choosing a provider is a grant (E2), so `embedder_model` and `critic_model` are rejected from `settings.json` BY NAME, like `ensemble_models`. A `/model` switch does not clear either: they are orthogonal to the generation model, unlike §21's per-model session overrides |
+| **SQ8** | **The captured text is written to `sources/`, redacted, with a config opt-out.** Delivering the artifact `fetch_url.py` has described since §12, and the only thing that makes a similarity score reproducible after the run. Redacted through `redact_output_text` ON ENTRY to the corpus even though `check_output_policy` has already run — `_translate`'s rule, that one boundary owns "nothing leaves here unredacted", rather than depending on a guarantee made two layers away. It is new data at rest, so `PRIVACY.md` says so and the switch exists |
+| **SQ9** | **The OpenAlex client is direct, policy-checked, traced — and OFF BY DEFAULT.** It is the first network call in this harness made by something that is not a registered tool, so it bypasses the approval registry and `granted_calls.json`, and that is stated rather than worked around: routing deterministic scoring code through the tool layer would make a pure function call a dispatcher. It reuses `is_url_permitted` and the tools' own `TTLCache`, writes every lookup to the trace, and has a kill switch. Off by default because an out-of-the-box run must make no call the user did not ask for; a `mailto` for the polite pool is a config value, and no address is sent unless one is set |
+| **SQ10** | **An embedder failure degrades the score, it does not fail the run.** Bounded retry, then per-source fallback to the model's own similarity, marked `similarity_method: "llm"` and traced. `arxiv.py` settled this shape already — returning an error rather than raising, because one transient network failure must not fail a ten-pass run — and the asymmetry with a pass payload is the right one: a malformed payload means a run that will report something untrue, while a missing embedding means a documented fallback that says which number it is |
+
+### Deliberately not in §45
+
+- **The citation lifecycle model.** Deferred, not dismissed. Matching the cohort on a ±30-day window
+  makes the age normalisation exact rather than modelled, so a lognormal accrual curve adds nothing
+  for a paper old enough to carry signal — and below 60 days, with 72% of the cohort at zero
+  citations, it would be fitting noise and calling it a number. The trigger to revisit is named:
+  if `insufficient_cohort` turns up persistently on narrow fields in real runs, a model is the
+  fallback that replaces widening the window.
+- **A noisy-OR source aggregator.** It rewards corroboration, which is right, and lets five
+  mediocre blogs outscore one primary source, which is not. The aggregator is a named function; swap
+  it if real runs argue otherwise.
+- **Raising `arxiv.py`'s 600-character abstract cap or `fetch_url`'s 5000-character content cap.**
+  Both directly bound how good any similarity score can be — a 600-character abstract usually loses
+  the results sentences, which is where a claim's specifics live. But a tool's output cap is every
+  pass's token cost, and that is a separate decision from this one.
+- **Fetching arXiv PDFs.** `pdf_url` is returned and has never been used. Full text would change
+  grounding quality more than anything in this section, and needs an extractor, a size budget and
+  its own record.
+- **Readability extraction for `fetch_url`.** Tag-stripping is enough to stop markup poisoning the
+  vectors. Boilerplate removal is a bigger, separately-arguable change.
+- **Forwarding tool result bodies to the UI.** The corpus is a second sink. §26's boundary is not
+  relaxed to build it.

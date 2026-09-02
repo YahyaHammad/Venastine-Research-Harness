@@ -195,6 +195,21 @@ class PipelineRun:
     # are: a nested dataclass here forces every vars(run)/vars(c) site to
     # asdict() in one change.
     pass_threads: list[dict] = field(default_factory=list)
+    # §45 (SQ2/SQ8): one entry per URL this run actually retrieved text
+    # from -- {"url", "title", "tool", "retrieved_at", "sha256", "chars",
+    # "text"}. Populated from the live SourceCorpus once grounding has
+    # finished; the corpus object itself stays inside the pipeline
+    # generator.
+    #
+    # A list[dict] for the same reason granted_calls, subagent_reviews and
+    # pass_threads are, and here the reason is sharper: the corpus IS a
+    # dataclass, and putting it on this object directly is exactly the
+    # nested-dataclass field the note on Claim above forbids.
+    #
+    # In-memory working data, like candidates[].text: pipeline_storage
+    # names the fields it writes and this is not among them, so a run's
+    # fetched pages reach output/<run_id>/sources/ and never the database.
+    source_documents: list[dict] = field(default_factory=list)
     final_report: str = ""
 
     def log(self, message: str) -> None:

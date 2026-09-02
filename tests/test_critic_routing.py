@@ -45,6 +45,19 @@ def _build_routing_mock(call_log: list, canned: dict):
     return side_effect
 
 
+def _source(url="https://www.nist.gov/reference", similarity=1.0):
+    """A well-formed §45 source entry.
+
+    Not decoration: since §45 (SQ3) a claim asserted as `grounded` while
+    citing nothing scores its grounding at SOURCE_QUALITY_FLOOR, so a
+    fixture with an empty source list is a fixture about a DIFFERENT
+    claim than the one these tests mean to describe.
+    """
+    return {"url": url, "quote": "the passage that supports it",
+            "similarity_score": similarity, "authority_adjustment": 0.0,
+            "authority_reason": ""}
+
+
 def _payloads_with_retry_loop():
     """Canned payloads that exercise both 3a/3b (factual claims C1, C3)
     and the 6a/6c retry loop (speculative claim C2 stays flagged through
@@ -59,8 +72,8 @@ def _payloads_with_retry_loop():
             {"id": "C3", "text": "C is well-documented.", "type": "factual", "entities": ["C"], "source_span": ""},
         ]),
         "Pass 3a": json.dumps([
-            {"claim_id": "C1", "sources": [], "status": "grounded"},
-            {"claim_id": "C3", "sources": [], "status": "grounded"},
+            {"claim_id": "C1", "sources": [_source()], "status": "grounded"},
+            {"claim_id": "C3", "sources": [_source()], "status": "grounded"},
         ]),
         "Pass 3b": json.dumps([
             {"claim_id": "C1", "fallacies": [], "contradictions": [], "severity": 0.0},

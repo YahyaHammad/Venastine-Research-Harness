@@ -132,6 +132,26 @@ def _build_pass_mock(call_log: list, canned_pass_responses: dict):
 # ---- Canned pass payloads -------------------------------------------------
 # ---------------------------------------------------------------------------
 
+def _source(url="https://www.nist.gov/reference", similarity=1.0,
+            quote="the passage that supports it"):
+    """A well-formed §45 source entry, as source_grounding.md asks for it.
+
+    A helper rather than a literal at every site: the shape is now five
+    keys, and a fixture that drifts from the prompt makes the scoring
+    stage emit coercion lines that the test using it did not expect and
+    cannot explain.
+
+    THE DEFAULT URL IS AUTHORITATIVE ON PURPOSE. Since §45 (SQ3) a
+    grounding is worth what its sources are worth, so "a clean claim"
+    means one grounded in a strong source -- `example.com` is a generic
+    commercial host and would score these fixtures MEDIUM, which is
+    correct behaviour and the wrong fixture for a test about a clean
+    claim reaching HIGH.
+    """
+    return {"url": url, "quote": quote, "similarity_score": similarity,
+            "authority_adjustment": 0.0, "authority_reason": ""}
+
+
 def _clean_pipeline_payloads():
     """Canned payloads for a pipeline where all claims end up clean and
     the 6a/6c retry loop is never entered.
@@ -184,11 +204,19 @@ def _clean_pipeline_payloads():
                 "source_span": "60:100",
             },
         ]),
-        # Pass 3a - grounding entries (JSON list)
+        # Pass 3a - grounding entries (JSON list). §45: a source carries
+        # the quote it was scored from and the model's own similarity, so
+        # this fixture is a payload source_grounding.md would actually
+        # produce. A source missing them is not "clean" -- the scoring
+        # stage corrects it and says so in the trace, which is what the
+        # trace-order test below would then see.
         "Pass 3a": json.dumps([
-            {"claim_id": "C1", "sources": [{"url": "https://example.com/shor"}], "status": "grounded"},
-            {"claim_id": "C2", "sources": [{"url": "https://example.com/rsa"}], "status": "grounded"},
-            {"claim_id": "C3", "sources": [{"url": "https://example.com/nist"}], "status": "grounded"},
+            {"claim_id": "C1", "sources": [_source("https://www.nature.com/articles/shor-factoring")],
+             "status": "grounded"},
+            {"claim_id": "C2", "sources": [_source("https://www.rfc-editor.org/rfc/rfc8017")],
+             "status": "grounded"},
+            {"claim_id": "C3", "sources": [_source("https://csrc.nist.gov/projects/pqc")],
+             "status": "grounded"},
         ]),
         # Pass 3b - critic entries (JSON list)
         "Pass 3b": json.dumps([
@@ -226,8 +254,8 @@ def _one_claim_stuck_through_retry_payloads():
         ]),
         # Ground only C1 and C3 well; C2 is speculative (skips grounding).
         "Pass 3a": json.dumps([
-            {"claim_id": "C1", "sources": [], "status": "grounded"},
-            {"claim_id": "C3", "sources": [], "status": "grounded"},
+            {"claim_id": "C1", "sources": [_source()], "status": "grounded"},
+            {"claim_id": "C3", "sources": [_source()], "status": "grounded"},
         ]),
         # C2 has high critic severity -> low critic_component.
         "Pass 3b": json.dumps([
@@ -382,7 +410,7 @@ def _two_claims_stuck_through_retry_payloads(six_a_rounds: list):
              "entities": ["D"], "source_span": ""},
         ]),
         "Pass 3a": json.dumps([
-            {"claim_id": "C1", "sources": [], "status": "grounded"},
+            {"claim_id": "C1", "sources": [_source()], "status": "grounded"},
         ]),
         "Pass 3b": json.dumps([
             {"claim_id": "C1", "fallacies": [], "contradictions": [], "severity": 0.0},
@@ -573,14 +601,36 @@ def test_pipeline_trace_contains_expected_lines_in_order(mocker):
         "Pass 3c:", "Pass 4:", "Pass 5:", "D1:", "Pass 6c:", "Merge:",
         "Final synthesis",
     ]
-    actual_starts = []
+    # §45: the trace also carries RUN-LEVEL lines, which are not a pass's
+    # one line and never were one. There is exactly one so far -- source
+    # scoring saying that this run has no embedder, so every
+    # `similarity_score` in its artifact is the grounding model's own
+    # estimate rather than a measurement. It is in the trace rather than
+    # only in the log because the run's record has to be able to explain
+    # its own numbers.
+    #
+    # STILL STRICT IN BOTH DIRECTIONS: the pass sequence must be exactly
+    # this, AND every line that is not a pass line must be one of the
+    # run-level prefixes below. A stray line still fails.
+    expected_run_level_starts = ["Source scoring:"]
+
+    actual_starts, run_level = [], []
     for line in run.trace:
         matched = next((p for p in expected_pass_starts if line.startswith(p)), None)
-        # "Final synthesis complete." has no colon, so the last entry
-        # above is intentionally colon-free.
-        actual_starts.append(matched or line)
+        if matched is not None:
+            # "Final synthesis complete." has no colon, so that entry is
+            # intentionally colon-free.
+            actual_starts.append(matched)
+            continue
+        aside = next((p for p in expected_run_level_starts
+                      if line.startswith(p)), None)
+        run_level.append(aside or line)
+
     assert actual_starts == expected_pass_starts, (
         f"Trace order or content mismatch.\n expected: {expected_pass_starts}\n got:      {actual_starts}\n"
+    )
+    assert run_level == expected_run_level_starts, (
+        f"Unaccounted-for trace lines.\n expected: {expected_run_level_starts}\n got:      {run_level}\n"
     )
 
 
@@ -1014,8 +1064,8 @@ def _ensemble_payloads(candidates):
              "entities": ["B"], "source_span": "", "asserted_by_candidates": [1, 3]},
         ]),
         "Pass 3a": json.dumps([
-            {"claim_id": "C1", "sources": [], "status": "grounded"},
-            {"claim_id": "C2", "sources": [], "status": "grounded"},
+            {"claim_id": "C1", "sources": [_source()], "status": "grounded"},
+            {"claim_id": "C2", "sources": [_source()], "status": "grounded"},
         ]),
         "Pass 3b": json.dumps([
             {"claim_id": "C1", "fallacies": [], "contradictions": [], "severity": 0.0},
@@ -1280,7 +1330,7 @@ def test_pass_3b_keeps_the_single_candidate_shape_outside_ensemble(mocker):
              "entities": ["A"], "source_span": ""},
         ]),
         "Pass 3a": json.dumps([
-            {"claim_id": "C1", "sources": [], "status": "grounded"},
+            {"claim_id": "C1", "sources": [_source()], "status": "grounded"},
         ]),
         "Pass 3b": json.dumps([
             {"claim_id": "C1", "fallacies": [], "contradictions": [], "severity": 0.0},
@@ -1322,7 +1372,7 @@ def test_one_surviving_candidate_scores_without_a_penalty(monkeypatch, mocker):
         {"id": "C1", "text": "Claim A.", "type": "factual", "entities": ["A"],
          "source_span": "", "asserted_by_candidates": [1]},
     ])
-    payloads["Pass 3a"] = json.dumps([{"claim_id": "C1", "sources": [], "status": "grounded"}])
+    payloads["Pass 3a"] = json.dumps([{"claim_id": "C1", "sources": [_source()], "status": "grounded"}])
     payloads["Pass 3b"] = json.dumps([
         {"claim_id": "C1", "fallacies": [], "contradictions": [], "severity": 0.0}])
     inner = _build_pass_mock([], payloads)
@@ -1424,8 +1474,8 @@ def test_pipeline_ensemble_mode_passes_1_runs_n_times(monkeypatch, mocker):
              "entities": ["B"], "source_span": "", "asserted_by_candidates": [1, 3]},
         ]),
         "Pass 3a": json.dumps([
-            {"claim_id": "C1", "sources": [], "status": "grounded"},
-            {"claim_id": "C2", "sources": [], "status": "grounded"},
+            {"claim_id": "C1", "sources": [_source()], "status": "grounded"},
+            {"claim_id": "C2", "sources": [_source()], "status": "grounded"},
         ]),
         "Pass 3b": json.dumps([
             {"claim_id": "C1", "fallacies": [], "contradictions": [], "severity": 0.0},
@@ -1597,7 +1647,7 @@ class TestTheCheckpointReportsWhatWasApplied:
         payloads = _partly_wrong_payloads("Pass 3a", [
             {"claim_id": "C1", "sources": [{"url": "u"}], "status": "grounded"},
             {"claim_id": "C2", "sources": [{"url": "u"}], "status": "grounded"},
-            {"claim_id": "nonsense", "sources": [], "status": "grounded"},
+            {"claim_id": "nonsense", "sources": [_source()], "status": "grounded"},
         ])
         mocker.patch.object(
             RunAgentLoop, "stream_deep_research_mode",
