@@ -2954,6 +2954,25 @@ Count 2786 -> 2815.
 | `on_mount`'s banner line moved into `_write_session_banner()` | A test patching or asserting the banner write at mount | Same text, one producer, now called by `/new` as well. Two copies of a status line are two copies that can disagree |
 
 
+## Batch 51 — the catalog that was empty (2026-09-02)
+
+| Change | What breaks | Symptom / fix |
+|---|---|---|
+| `agent_catalog_text()` is no longer `""` on the default install | Any test asserting it is empty, or that `## Available agents` is absent from an attended prompt | `test_spawnable.py::test_none_of_the_four_shipped_agents_is_spawnable` was exactly that test and is now `test_exactly_two_shipped_agents_are_spawnable`. A headless prompt is unchanged — `spawn_subagent` is unreachable there (R16) |
+| Seven agents ship, not four | A test counting `config_loader.get_agents()` against the real harness tier | Use the roster, not the number. `real_harness_tier` is the fixture that reaches the real files |
+| Fourteen skills ship, not four, and `software/` is a new category folder | A test asserting the skill catalog's length, or the set of categories | The catalog grew 610 → 2093 characters and it rides every research pass, so a byte-identical pass-prompt assertion must be regenerated |
+| `explore` and `review` are SPAWNABLE | A test asserting that no shipped agent is | That was the assertion §32 wrote to fail on this day; see the first row |
+| A new shipped agent must declare `spawnable` | Adding `agents/builtin/x.md` without it | `assert_spawnable_declared` raises at discovery naming every offender. This has always been true; the roster is the first time it applies to more than four files |
+| Every tool a shipped agent or skill names must be REGISTERED | A typo in `allowed_tools` / `additional_tools` | `test_shipped_roster.py` fails naming the file and the token. Before this, a whitelist typo silently removed the tool the author meant to include |
+| `plan`'s whitelist must remain a superset of every spawnable agent's | Adding a tool to `explore` or `review` without adding it to `plan` | `test_a_spawn_under_plan_loses_nothing` fails. C6 intersects, so the child would silently lose it (A13) |
+| `explore`/`review` declare `read` and `shell`, which global config DENIES | A test assuming a spawned explore can read a file | On a stock install it cannot: `config.ToolPermissions` ships `read`/`write`/`edit`/`shell` as False and D14's global check is unconditional. `STOCK_TOOLS` in `test_shipped_roster.py` is what a default install can actually call |
+| Asserting read-only through `is_tool_allowed` for `write`/`edit` is VACUOUS | A "stricter" test that adds them back to the policy-layer check | It answers False whatever the whitelist says. Assert those against the declaration; the policy layer for `write_project_doc`, `remember`, `spawn_subagent` |
+| All three new agents set `use_project_context: true` | Setting one back to the default `false` | `test_each_one_receives_the_projects_own_agents_md` fails naming the agent. It was a mutation SURVIVOR before that test existed: the agent goes on answering, without the project's conventions, and nothing reports it |
+| `AGENTS.md`'s TUI material moved out of the Skills section | A tool or script keyed on those heading offsets | Nothing in the repo is; the headings are `### The TUI (tui/, §16)`, `### Agents (agents/, §18/§32)`, `### Skills (skills/, §19)` |
+| The decision-family map now claims `E1–E14` and `A1–A15` | Nothing — both were already in the record | `test_every_decision_id_the_map_claims_is_in_the_record` pins the claim; note it does NOT pin that a range covers its family, which is how `E13`/`E14` sat outside their own index |
+
+Count 3462 -> 3483.
+
 ## Batch 50 — a template for the file that cannot explain itself (2026-09-02)
 
 | Change | What breaks | Symptom / fix |

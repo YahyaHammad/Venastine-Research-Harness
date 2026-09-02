@@ -11,7 +11,7 @@ allowed_tools:
   - load_skill
 use_project_context: true
 use_memory: true
-max_steps: 30
+max_steps: 20
 # §32 A3/A4 (#69). A task string in a fresh thread is EXACTLY this
 # agent's input -- "find every caller of X", "what does this project
 # use for Y", "who has measured Z" -- so unlike the four agents that

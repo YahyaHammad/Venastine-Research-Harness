@@ -230,6 +230,61 @@ def test_the_tree_states_a_correct_count_for_every_collected_test_file(request):
     )
 
 
+#: Directories the tree is expected to enumerate module by module. Not a
+#: walk of everything: `tests/` has its own check above, and generated or
+#: vendored trees have no business being listed by hand.
+_MAPPED_DIRS = (
+    ".", "bin", "scripts", "core", "core/reasoning", "prompts", "security",
+    "safety", "mcp_client", "agents", "skills", "memories", "project_init",
+    "tui", "tools", "tools/builtin",
+)
+
+
+def test_the_tree_names_every_production_module():
+    """Batch 51. The sibling check above is strict in both directions for
+    TEST files and says why -- "the tree is the authoritative list of what
+    each part of the suite covers; a new test file belongs in it". The
+    production half had no check at all, and had quietly lost eight modules
+    and two whole directories: core/session.py,
+    core/reasoning/payload_validation.py, tools/isolation.py, ask_user.py,
+    remember.py, todo.py, and bin/ and scripts/ entirely -- while AGENTS.md
+    gives bin/venastine.mjs a section of its own.
+
+    Matched on TREE ENTRIES, not on the file's text. The first version of
+    this audit ran as a substring search, reported six, and missed two:
+    `todo.py` matches inside `test_todo.py`, and `payload_validation.py`
+    inside `test_payload_validation.py`. A check that reads the whole
+    document cannot tell "listed in the map" from "mentioned in a
+    paragraph", which is the distinction the map is for.
+    """
+    with open(os.path.join(ROOT, "ARCHITECTURE.md"), encoding="utf-8") as f:
+        tree = f.read().split("```")[1]
+    entries = {e.rstrip("/").split("/")[-1]
+               for e in re.findall(r"[\u251c\u2514]\u2500\u2500\s+([\w./-]+)", tree)}
+    assert entries, (
+        "no tree entries parsed out of ARCHITECTURE.md's first fenced "
+        "block. If the tree moved or its drawing characters changed, point "
+        "this at the new one rather than deleting the check.")
+
+    missing = []
+    for folder in _MAPPED_DIRS:
+        directory = os.path.join(ROOT, folder)
+        if not os.path.isdir(directory):
+            continue
+        for name in sorted(os.listdir(directory)):
+            if not name.endswith((".py", ".mjs")) or name == "__init__.py":
+                continue
+            if name not in entries:
+                missing.append(f"{folder}/{name}")
+
+    assert not missing, (
+        "ARCHITECTURE.md's source tree does not name these modules:\n  "
+        + "\n  ".join(missing)
+        + "\nThe tree is this document's map of the codebase. A module it "
+          "omits is one nobody finds by reading the map, and eight of them "
+          "accumulated before anyone diffed it.")
+
+
 def test_no_tree_entry_names_a_test_file_that_does_not_exist():
     """The other direction, and it needs no session -- so it runs even
     mid-change.
@@ -721,6 +776,54 @@ def test_every_decision_id_the_map_claims_is_in_the_record():
         f"they are not there: {missing}. Either move the definition into "
         f"the record or stop claiming the record holds it -- a reader who "
         f"greps and finds nothing re-derives the decision.")
+
+
+def test_a_claimed_range_covers_its_whole_family():
+    """Batch 51. The two checks around this one both PASS on a range that
+    stops short, and that is how E13 and E14 came to sit outside the index
+    that says where decisions live.
+
+    The forward check asserts every id the map claims is in the record --
+    true of E1-E12, which is a subset. The reverse check asserts every
+    family is named -- E is named. Neither looks at the endpoint, so a map
+    saying `E1-E12` against a record holding E14 is green in both
+    directions, while AGENTS.md's own ensemble section cites E13 and E14 by
+    number three hundred lines below it.
+
+    The cost is the one #16's docstring already names: this project's
+    convention on finding no record is to RE-DERIVE the decision. A
+    reader who greps the map for the E family, reads to E12 and stops has
+    been told the record ends there.
+
+    Families written as a LIST rather than a range are skipped -- C is
+    sparse on purpose (only the Rev. 1 conflicts with live citations were
+    recovered), and _claimed_ids' docstring explains why claiming C1-C10
+    would be worse than claiming five.
+    """
+    record = _decision_definitions()
+    flat = _map_line()
+
+    highest_defined = {}
+    for one in record:
+        hit = re.match(r"([A-Z]+)(\d+)$", one)
+        if hit:
+            family, number = hit.group(1), int(hit.group(2))
+            highest_defined[family] = max(
+                highest_defined.get(family, 0), number)
+
+    short = []
+    for hit in re.finditer(r"\b([A-Z]{1,2})(\d+)-[A-Z]{0,2}(\d+)\b", flat):
+        family, top = hit.group(1), int(hit.group(3))
+        defined = highest_defined.get(family)
+        if defined is not None and defined > top:
+            short.append(f"{family}: map claims through {family}{top}, "
+                         f"record defines {family}{defined}")
+
+    assert not short, (
+        "AGENTS.md's map claims a range that stops short of its family:\n  "
+        + "\n  ".join(short)
+        + "\nExtend the range. A decision outside the index that says where "
+          "decisions live is one the next reader re-derives.")
 
 
 def test_the_map_names_every_family_the_record_defines():

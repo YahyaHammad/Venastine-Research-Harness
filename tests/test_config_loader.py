@@ -719,7 +719,7 @@ class TestCategoryDiscovery:
         assert config_loader.get_skill("security/recon") is None
 
     def test_agents_stay_flat(self, _redirect_roots):
-        """K4 is skills-only: agents/builtin/ holds one file, and
+        """K4 is skills-only: agent definitions stay flat, and
         speculative structure for it is structure nobody asked for.
         Asserted so flipping the branch is a test failure rather than a
         silent behaviour change in the other kind."""

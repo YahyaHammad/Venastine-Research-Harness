@@ -496,7 +496,19 @@ Markdown files with YAML frontmatter, discovered from three tiers (built-in, you
 
 A skill declaring `additional_tools` is stating a *need*, not granting anything — activation proceeds and tells you what is missing.
 
-An agent declares `spawnable` — whether the `spawn_subagent` tool can actually feed it. A task string in a fresh thread is all a spawn can pass, and an agent that needs a transcript, a thread or a finished research run cannot be given one; spawning it anyway produces a confident answer about nothing. The four built-in agents each have a real caller that supplies what they need, so none of them is spawnable, and the catalog no longer offers them as a route that cannot work. Your own agents are not spawnable unless they say so.
+An agent declares `spawnable` — whether the `spawn_subagent` tool can actually feed it. A task string in a fresh thread is all a spawn can pass, and an agent that needs a transcript, a thread or a finished research run cannot be given one; spawning it anyway produces a confident answer about nothing. Your own agents are not spawnable unless they say so.
+
+Seven ship. Five are not spawnable, each because a real caller supplies something a task string cannot carry — `compactor` (a stretch of transcript), `initializer` (a document manifest), `pipeline-reviewer` (a finished research run), `grill-me` and `plan` (the live conversation). Two are:
+
+| agent | for | reach it with |
+|---|---|---|
+| `plan` | designing an approach before the work starts — reads what exists, names the decisions, says what would make the plan wrong | `/agent plan` |
+| `explore` | finding where something lives and how it is wired, in a codebase or in the literature, and reporting locations and evidence | `spawn_subagent`, or `/agent explore` |
+| `review` | reading a finished change or document against what it claims to do, and reporting defects with the evidence for each | `spawn_subagent`, or `/agent review` |
+
+`explore` and `review` are **read-only by omission**: `write`, `edit`, `write_project_doc` and `remember` are simply absent from their tool lists, so no configuration makes one reachable. They do list `read` and `shell`, which are [denied by default](#what-needs-approval-by-default) and cannot be enabled at runtime — so on a stock install `explore` works from `read_project_doc` and the three network tools, and both become code agents only where you have enabled file access in `config.py`. Approving a spawn of either grants nothing standing: `shell` carries a per-call gate, so it is excluded from every grant path by name and each non-inert command still asks.
+
+Fourteen skills ship, under `security/`, `crypto/`, `math/`, `research/` and `software/` — methodologies for reviewing code, debugging, designing tests, designing experiments, statistical inference, reproducibility, evaluating sources, technical writing, numerical methods, formal specification, literature review, proof writing, cryptography verification and cybersecurity research.
 
 #### Writing your own
 
@@ -513,7 +525,7 @@ Agent frontmatter fields:
 | `approval_overrides` | mapping | `{}` | Can only ever *add* prompts, never remove one |
 | `use_project_context` | bool | `false` | Inject the project's root `AGENTS.md` into the system prompt |
 | `use_memory` | bool | `true` | Inject durable memories (plain chat counts as opted in) |
-| `max_steps` | int ≥ 1 | caller's ceiling | May narrow a run's step budget, never widen it; an invalid value is repaired to the default with a warning naming what it read |
+| `max_steps` | int ≥ 1 | caller's ceiling | **Replaces** the caller's ceiling rather than narrowing it — a value above `MAX_ITERATIONS` raises it, making this the one frontmatter field that can widen anything; an invalid value is repaired to the default with a warning naming what it read |
 | `spawnable` | bool | `false` for your files | Whether `spawn_subagent` may feed this agent |
 
 Skill frontmatter fields: `name` (required), `description`, and `additional_tools` — a list of tool names stating what the skill's methodology *depends on*. It grants nothing: activation proceeds and tells you what is missing under the current agent.
@@ -698,7 +710,7 @@ Three things can end a turn or pass early:
 | Stop reason | When |
 |---|---|
 | `complete` | The model answered without calling another tool |
-| `max_steps_reached` | Step ceiling hit — 50 by default; an agent's own `max_steps` narrows it |
+| `max_steps_reached` | Step ceiling hit — 50 by default; an agent's own `max_steps` replaces that number, in either direction |
 | `token_budget_exceeded` | Only when `max_token_budget` is configured: cumulative billed spend crossed it |
 
 The CLI names the figures behind an early stop — billed this turn, and the thread's measured context size — rather than a bare reason, because "budget exceeded" invites exactly the misreading that there is a size problem.
@@ -838,7 +850,7 @@ classifier is described under *Security model* above. If you have a fork or a lo
 note that `ToolApprovals.shell` now ships `False` and `SHELL_APPROVAL_MODE` is the gate — see
 `tests/BREAKING_CHANGES.md` §24.
 
-Run the test suite with `pytest` — 3462 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
+Run the test suite with `pytest` — 3483 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
 
 ## Documentation
 
