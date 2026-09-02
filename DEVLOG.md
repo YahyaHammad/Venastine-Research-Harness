@@ -8805,7 +8805,7 @@ integration marker and a WSL run for the POSIX mode bits Windows skips.
 
 ## Batch 46 — §45: what a source is worth, and how close it actually is (2026-09-02)
 
-Landed as six commits on `batch-46-source-scoring`. §45 was specified and built in the same batch,
+Landed as seven commits on `batch-46-source-scoring`. §45 was specified and built in the same batch,
 following the clarification cycle: the owner answered eight design questions across two rounds before
 any code was written, and the answers are the SQ1–SQ10 record in `ROADMAP_v2.md`.
 
@@ -8925,6 +8925,28 @@ Verified end to end against the live API: the GPT-3 preprint scores 0.82 against
 domain class of 0.60, and an unremarkable preprint scores below it. That separation is the whole
 reason slice B exists.
 
+### Commit 7 — two defects an end-to-end run found that the unit tests did not
+
+The suite was green before this commit. Driving the real pipeline through the real artifact writer
+with canned model calls and a deterministic fake embedder surfaced both.
+
+**`claim_query_text` scored the ORIGINAL text on every retry round.** `revalidate.md` says Pass 6b
+scores against the REVISED claim, and Pass 6a writes that revision to `claim.revision_text` --
+`claim.text` is untouched until 6c merges it. So every 6b round measured its sources against a
+sentence the claim no longer asserted. **The vector cache made it silent**: the query was unchanged,
+so the round was a cache hit that cost nothing and reported nothing. Nothing in the unit tests could
+see it, because none of them exercised a claim across a revision.
+
+**The embedding counters read as per-round when they are cumulative.** The trace said "in 2 call(s),
+30 embedding token(s)" three times, which a reader totals to six calls and ninety tokens. The line
+now says "run total so far", and a test pins that two consecutive scoring rounds over a warm cache
+print the identical figure. Under-reporting spend is the wrong direction to be ambiguous in.
+
+Also in this commit: `grounding_component` rounds once, at the point of use, rather than recording
+an unrounded product (`0.7264705882352941`) beside eight fields at four decimal places. That is
+E10's rule applied to a second derived value -- rounding on the way out instead is exactly how E10's
+two numbers came to disagree.
+
 ### Files
 
 New: `core/reasoning/source_corpus.py`, `core/reasoning/source_scoring.py`,
@@ -8935,7 +8957,7 @@ output_writer,base}.py`, `core/config_loader.py`, `config.py`, `tui/app.py`,
 
 ### Verification
 
-Full suite green at every commit. 3271 → 3310 tests. Every existing
+Full suite green at every commit. 3271 → 3313 tests, the last three from commit 7's end-to-end findings. Every existing
 `test_confidence_scoring.py` regression passes UNMODIFIED, which is the property SQ3 promised: at
 `sources_scored=False` the formula is the pre-§45 one, literally rather than coincidentally.
 

@@ -551,6 +551,24 @@ class TestTheClaimSide:
         claim = Claim(id="c1", type="factual", text="It was signed in 1947.")
         assert claim_query_text(claim) == "It was signed in 1947."
 
+    def test_a_revision_is_what_gets_scored(self):
+        """Pass 6b re-validates the claim Pass 6a rewrote, and
+        revalidate.md says so -- but `claim.text` still holds the
+        ORIGINAL, because 6c is what merges a revision into final_text.
+        Scoring the original measures sources against a sentence the claim
+        no longer asserts, and the vector cache makes it SILENT: the query
+        is unchanged, so the round is a cache hit that costs nothing and
+        reports nothing. Found by running the pipeline end to end."""
+        claim = Claim(id="c1", type="factual",
+                      text="The treaty was signed in 1947 by four nations.")
+        claim.revision_text = "The treaty was signed in 1948 by three nations."
+        assert claim_query_text(claim) == claim.revision_text
+
+    def test_an_unrevised_claim_still_uses_its_own_text(self):
+        claim = Claim(id="c1", type="factual",
+                      text="The treaty was signed in 1947 by four nations.")
+        assert claim_query_text(claim) == claim.text
+
 
 class TestThePassageSide:
 
@@ -714,6 +732,22 @@ class TestScoringWithAnEmbedder:
         score_grounding_sources(run, scorer=EmbeddingScorer("OPENAI", "m"))
         assert any("scored by cosine" in line and "token" in line
                    for line in run.trace)
+
+    def test_the_reported_counters_say_they_are_cumulative(self, fake_embedder):
+        """This stage runs once per grounding -- Pass 3a, then every 6b
+        round -- so a line reading "in 2 calls" three times invites a
+        reader to total it to six. Under-reporting spend is the wrong
+        direction to be ambiguous in."""
+        fake_embedder()
+        scorer = EmbeddingScorer("OPENAI", "m")
+        run = _run(_claim(sources=[_source(quote="Kipling won the nobel prize")]))
+        score_grounding_sources(run, scorer=scorer)
+        score_grounding_sources(run, scorer=scorer)
+        lines = [line for line in run.trace if "scored by cosine" in line]
+        assert len(lines) == 2
+        assert all("run total so far" in line for line in lines)
+        assert lines[0] == lines[1], (
+            "the second round was a cache hit, so the totals must not move")
 
 
 class TestTheFallbackWhenTheEmbedderFails:

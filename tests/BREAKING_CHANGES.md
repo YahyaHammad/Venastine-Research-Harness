@@ -2979,4 +2979,4 @@ depends on. So a Pass 3a fixture missing `similarity_score`, or carrying `"sourc
 `grounded` claim, does not merely test something slightly stale — it makes an unrelated test fail
 with a message about trace ordering. When a payload fixture and a prompt disagree, fix the fixture.
 
-Count 3271 -> 3310.
+Count 3271 -> 3313.

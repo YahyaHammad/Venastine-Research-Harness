@@ -613,8 +613,17 @@ def claim_query_text(claim, min_chars: int = CLAIM_MIN_CHARS) -> str:
     EVERY claim would be worse: the entity words appear in every window of
     the source too, so they raise every score alike and compress the range
     the calibration band depends on.
+
+    THE REVISION WINS WHERE THERE IS ONE. Pass 6b re-validates the claim
+    Pass 6a rewrote, and `revalidate.md` says so in as many words -- but
+    `claim.text` still holds the ORIGINAL, because 6c is what finally
+    merges a revision into `final_text`. Scoring against `claim.text` on a
+    retry round measures a source against a sentence the claim no longer
+    asserts, and the vector cache makes it silent: the query is unchanged,
+    so it is a cache hit and the round costs nothing and reports nothing.
+    Found by running the pipeline end to end and reading the trace.
     """
-    text = (claim.text or "").strip()
+    text = (claim.revision_text or claim.text or "").strip()
     if len(text) >= min_chars or not claim.entities:
         return text
     return f"{', '.join(str(e) for e in claim.entities)} — {text}"
@@ -711,10 +720,16 @@ def _apply_embeddings(run, claims, corpus, scorer, window_chars, max_windows,
         measured += 1
 
     if scorer.usable:
+        # THE COUNTERS ARE CUMULATIVE, and the line says so. This stage
+        # runs once per grounding -- Pass 3a and then every 6b round -- so
+        # a line reading "in 2 calls, 30 tokens" three times invites a
+        # reader to total it to six calls and ninety tokens, when the
+        # scorer's cache means the later rounds cost nothing. Under-
+        # reporting spend is the wrong direction to be ambiguous in.
         run.log(
             f"Source scoring: {measured} source(s) scored by cosine against "
-            f"{scorer.model} in {scorer.calls} call(s), "
-            f"{scorer.input_tokens} embedding token(s).")
+            f"{scorer.model} (run total so far: {scorer.calls} call(s), "
+            f"{scorer.input_tokens} embedding token(s)).")
     else:
         # NAMED, and the count says how far it got. A run where the
         # embedder died after twelve sources has twelve measured scores

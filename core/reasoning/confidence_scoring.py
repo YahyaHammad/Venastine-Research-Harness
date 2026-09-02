@@ -236,9 +236,16 @@ def score_claim(claim: Claim, ensemble_n: int = 0,
     # §45 (SQ3). What the grounding is WORTH, not a fourth axis beside it.
     # None -- no scoring stage ran for this claim -- gives a multiplier of
     # 1.0, which is the pre-§45 arithmetic exactly.
+    # ROUNDED ONCE, HERE, then used for both the formula and the
+    # breakdown -- E10's rule applied to a second derived value. The
+    # unrounded product of two fractions records as
+    # `grounding_component: 0.7264705882352941` in an artifact whose other
+    # fields are all 4 decimal places, and rounding it on the way OUT
+    # instead is exactly how E10's two values came to disagree: the score
+    # would be computed from one number and published as another.
     quality = source_quality(claim, sources_scored, w["authority_full_credit"])
     quality_multiplier = (1.0 if quality is None
-                          else max(w["source_quality_floor"], quality))
+                          else round(max(w["source_quality_floor"], quality), 4))
     grounding_weight = w["grounding_weights"].get(status, 0.0)
     grounding_component = grounding_weight * quality_multiplier
     critic_component = 1.0 - claim.critic_severity
@@ -350,7 +357,7 @@ def score_claim(claim: Claim, ensemble_n: int = 0,
         if quality is not None:
             breakdown["grounding_weight"] = grounding_weight
             breakdown["source_quality"] = round(quality, 4)
-            breakdown["source_quality_multiplier"] = round(quality_multiplier, 4)
+            breakdown["source_quality_multiplier"] = quality_multiplier
             breakdown["source_count"] = len(claim.grounding_sources) \
                 if isinstance(claim.grounding_sources, list) else 0
     else:
