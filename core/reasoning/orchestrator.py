@@ -76,6 +76,7 @@ import logging
 import config
 import prompts.system_prompts as system_prompts
 from core import pipeline_models
+from core.config_loader import effective_confidence, effective_source_scoring
 from core.loop import RunAgentLoop, advertisement_facts
 from core.reasoning.base import Claim, PipelineRun, resolve_by_id
 from core.reasoning.confidence_scoring import run_confidence_tiering
@@ -660,7 +661,7 @@ def _apply_grounding(claims: list[Claim], grounding_entries: list[dict]) -> int:
 
 
 def _ground_and_score(run: PipelineRun, grounding_entries: list[dict], corpus,
-                      scorer=None) -> int:
+                      scorer=None, knobs=None) -> int:
     """Apply Pass 3a/6b's grounding, then everything §45 derives from it.
 
     THE ONE SEAM BOTH GROUNDING SITES GO THROUGH. There are two -- Pass 3a
@@ -684,7 +685,13 @@ def _ground_and_score(run: PipelineRun, grounding_entries: list[dict], corpus,
     applied = _apply_grounding(run.claims, grounding_entries)
     if corpus is not None:
         run.source_documents = corpus.artifact_entries()
-    score_grounding_sources(run, corpus=corpus, scorer=scorer)
+    knobs = knobs or {}
+    score_grounding_sources(
+        run, corpus=corpus, scorer=scorer,
+        overrides=knobs.get("domain_overrides"),
+        **{k: knobs[k] for k in ("window_chars", "max_windows",
+                                 "claim_min_chars",
+                                 "authority_adjustment_cap") if k in knobs})
     return applied
 
 
@@ -1006,7 +1013,16 @@ def stream_deep_research_pipeline(
     # explains. One scorer for the whole run, because its vector cache and
     # its give-up flag are both run-scoped: a claim is embedded once
     # however many sources it has, and a provider that is down stays down.
-    scorer = make_scorer(run)
+    scoring_knobs = effective_source_scoring(warn=True)
+    scorer = make_scorer(run, floor=scoring_knobs["similarity_floor"],
+                         ceiling=scoring_knobs["similarity_ceiling"])
+
+    # §45 (SQ6). Both knob sections resolved ONCE, here, with warn=True so
+    # a mistyped weight is said once per run rather than once per claim --
+    # `effective_compaction`'s gating, for its reason. score_claim stays a
+    # pure function of its arguments, and a run's numbers cannot change
+    # halfway through it.
+    confidence_weights = effective_confidence(warn=True)
 
     # §25 audit trail: ONE list, shared, not two kept in step. The run and
     # the authorization bundle now refer to the same object, so a granted
@@ -1161,7 +1177,8 @@ def stream_deep_research_pipeline(
                 f"to every claim referencing it):\n{json.dumps(unique_entities)}"
             )
             grounding_json = _parse_json_response((yield from _run_pass_with_json_retry("Pass 3a", pass3a_input, critic_model, critic_provider, run.trace, authorization=authorization, corpus=corpus, pass_threads=run.pass_threads, claim_ids=[c.id for c in run.claims], effort=effort)))
-            grounded = _ground_and_score(run, grounding_json, corpus, scorer)
+            grounded = _ground_and_score(run, grounding_json, corpus, scorer,
+                                         scoring_knobs)
             yield from progress.checkpoint(f"Pass 3a: grounded {grounded} of {len(factual_claims)} factual claim(s), across {len(unique_entities)} deduplicated entities.")
 
             # E13/#77. Two or more survivors: the claims were extracted
@@ -1215,7 +1232,8 @@ def stream_deep_research_pipeline(
 
         # --- Pass 5: confidence tiering (0 LLM calls) ---
         run_confidence_tiering(run, ensemble_n=effective_n,
-                               sources_scored=_sources_were_scored(run))
+                               sources_scored=_sources_were_scored(run),
+                               weights=confidence_weights)
         yield from _stage("Pass 5")
         yield from _tier_events(run)
         yield from progress.checkpoint("Pass 5: confidence tiers assigned (pure code, zero LLM calls).")
@@ -1278,7 +1296,8 @@ def stream_deep_research_pipeline(
             # --- Pass 6b: re-validate the revised subset only (batched, reuses Pass 5's code) ---
             pass6b_input = json.dumps([vars(c) for c in flagged])
             revalidation = _parse_json_response((yield from _run_pass_with_json_retry("Pass 6b", pass6b_input, critic_model, critic_provider, run.trace, authorization=authorization, corpus=corpus, pass_threads=run.pass_threads, claim_ids=[c.id for c in run.claims], effort=effort)))
-            _ground_and_score(run, revalidation.get("grounding", []), corpus, scorer)
+            _ground_and_score(run, revalidation.get("grounding", []), corpus,
+                              scorer, scoring_knobs)
             _apply_critic(run.claims, revalidation.get("critic", []))
             # 6b's own checkpoint below already reports an EFFECT -- how
             # many claims came out clean -- rather than what it was asked
@@ -1288,7 +1307,8 @@ def stream_deep_research_pipeline(
             # the whole run once per round recomputes claims that are already
             # finished, from score data those rounds did not change.
             run_confidence_tiering(run, ensemble_n=effective_n, claims=flagged,
-                                   sources_scored=_sources_were_scored(run))
+                                   sources_scored=_sources_were_scored(run),
+                                   weights=confidence_weights)
             yield from _tier_events(run)
 
             still_flagged = [c for c in flagged if c.confidence_tier in FLAGGED_TIERS]

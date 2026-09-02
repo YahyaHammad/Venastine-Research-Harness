@@ -197,7 +197,8 @@ class _Coercions:
 
 
 def score_source(source: dict, claim, corpus, coercions: _Coercions,
-                 overrides: dict | None = None) -> dict | None:
+                 overrides: dict | None = None,
+                 authority_adjustment_cap: float | None = None) -> dict | None:
     """One cited source, scored. None if it cannot be scored at all.
 
     Returns a NEW dict rather than mutating in place: the model's entry is
@@ -218,7 +219,8 @@ def score_source(source: dict, claim, corpus, coercions: _Coercions,
 
     scored = {"url": url}
     _score_relevance(source, scored, corpus, claim, coercions)
-    _score_authority(source, scored, claim, coercions, overrides)
+    _score_authority(source, scored, claim, coercions, overrides,
+                     authority_adjustment_cap)
     return scored
 
 
@@ -279,13 +281,15 @@ def _verify_quote(quote: str, url: str, corpus):
 
 
 def _score_authority(source: dict, scored: dict, claim,
-                     coercions: _Coercions, overrides: dict | None) -> None:
+                     coercions: _Coercions, overrides: dict | None,
+                     adjustment_cap: float | None = None) -> None:
     class_name, base = classify_domain(scored["url"], overrides)
     scored["authority_class"] = class_name
     scored["authority_base"] = round(base, 4)
     scored["authority_method"] = "domain"
 
-    cap = config.AUTHORITY_ADJUSTMENT_CAP
+    cap = (config.AUTHORITY_ADJUSTMENT_CAP if adjustment_cap is None
+           else adjustment_cap)
     adjustment = _as_number(source.get("authority_adjustment")) or 0.0
     reason = source.get("authority_reason")
     reason = reason.strip() if isinstance(reason, str) else ""
@@ -485,7 +489,9 @@ class EmbeddingScorer:
     switch happened.
     """
 
-    def __init__(self, provider_name: str, model: str) -> None:
+    def __init__(self, provider_name: str, model: str,
+                 floor: float | None = None,
+                 ceiling: float | None = None) -> None:
         self.provider_name = provider_name
         self.model = model
         self.failed_reason = None
@@ -497,7 +503,13 @@ class EmbeddingScorer:
         self._passage_prefix = prefixes.get("passage", "")
         self._query_task = prefixes.get("query_task_type", "")
         self._passage_task = prefixes.get("passage_task_type", "")
-        self.floor, self.ceiling = calibration_for(model)
+        table_floor, table_ceiling = calibration_for(model)
+        # A band the user set OUTRANKS the table, model_windows' inversion
+        # for model_windows' reason: the table cannot know about a model
+        # shipped after this release, and someone who measured their own
+        # embedder's floor is stating a fact about the deployment.
+        self.floor = table_floor if floor is None else floor
+        self.ceiling = table_ceiling if ceiling is None else ceiling
 
     @property
     def usable(self) -> bool:
@@ -633,7 +645,8 @@ def source_passages(scored: dict, corpus, window_chars: int = WINDOW_CHARS,
 # ---- The stage ------------------------------------------------------------
 # ---------------------------------------------------------------------------
 
-def make_scorer(run=None):
+def make_scorer(run=None, floor: float | None = None,
+                ceiling: float | None = None):
     """The run's EmbeddingScorer, or None with the warning said once.
 
     SQ2's fallback is deliberate and announced. A run with no embedder
@@ -655,7 +668,8 @@ def make_scorer(run=None):
                 "(similarity_method=\"llm\" on every source). Set one with "
                 "/embedder for a measured cosine.")
         return None
-    return EmbeddingScorer(chosen["provider_name"], chosen["model"])
+    return EmbeddingScorer(chosen["provider_name"], chosen["model"],
+                           floor=floor, ceiling=ceiling)
 
 
 def _apply_embeddings(run, claims, corpus, scorer, window_chars, max_windows,
@@ -718,7 +732,8 @@ def score_grounding_sources(run, claims=None, corpus=None,
                             scorer=None,
                             window_chars: int = WINDOW_CHARS,
                             max_windows: int = MAX_WINDOWS,
-                            claim_min_chars: int = CLAIM_MIN_CHARS) -> int:
+                            claim_min_chars: int = CLAIM_MIN_CHARS,
+                            authority_adjustment_cap: float | None = None) -> int:
     """Rewrite every claim's `grounding_sources` with computed scores.
 
     Returns the number of sources scored. Called from
@@ -750,7 +765,8 @@ def score_grounding_sources(run, claims=None, corpus=None,
 
         rewritten = []
         for source in sources:
-            scored = score_source(source, claim, corpus, coercions, overrides)
+            scored = score_source(source, claim, corpus, coercions,
+                                  overrides, authority_adjustment_cap)
             if scored is not None:
                 rewritten.append(scored)
         claim.grounding_sources = rewritten

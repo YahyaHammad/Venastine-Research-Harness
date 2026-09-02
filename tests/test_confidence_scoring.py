@@ -38,6 +38,7 @@ from core.reasoning.confidence_scoring import (
     NON_FACTUAL_SCORE_CAP,
     SOURCE_QUALITY_FLOOR,
     TIER_THRESHOLDS,
+    default_weights,
 )
 from core.reasoning.orchestrator import FLAGGED_TIERS
 
@@ -909,3 +910,183 @@ class TestMalformedSourcesCannotBreakTiering:
         claim = _factual(sources=[_scored_source(9.0, 9.0)])
         _, breakdown = score_claim(claim, sources_scored=True)
         assert breakdown["source_quality"] == 1.0
+
+
+# ===========================================================================
+# ---- §45 (SQ6): the scoring knobs -----------------------------------------
+# ===========================================================================
+
+
+class TestTheScoringSectionsResolve:
+    """WHAT WOULD MAKE THESE VACUOUS: asserting a value round-trips
+    through a dict. What can actually be wrong is the POLICY -- these two
+    sections warn and fall back where compaction raises, and that
+    difference is an amendment argued in §45, not an oversight."""
+
+    def _settings(self, monkeypatch, payload):
+        from core import config_loader
+
+        monkeypatch.setattr(config_loader, "get_settings", lambda: payload)
+
+    def test_the_defaults_are_the_modules_own_constants(self):
+        from core.config_loader import effective_confidence
+        from core.reasoning import confidence_scoring as cs
+
+        values = effective_confidence()
+        assert values["grounding_weight_factor"] == cs.GROUNDING_WEIGHT_FACTOR
+        assert values["source_quality_floor"] == cs.SOURCE_QUALITY_FLOOR
+        assert values["tier_thresholds"]["HIGH"] == 0.8
+
+    def test_a_supplied_weight_wins(self, monkeypatch):
+        from core.config_loader import effective_confidence
+
+        self._settings(monkeypatch,
+                       {"confidence": {"critic_weight_factor": 0.2}})
+        assert effective_confidence()["critic_weight_factor"] == 0.2
+
+    def test_an_out_of_range_weight_falls_back_and_warns(self, monkeypatch, caplog):
+        """effective_compaction RAISES on an incoherent value because a bad
+        trigger burns model calls on every turn. A bad scoring weight costs
+        the shape of one number in one report, and refusing to start a
+        ten-pass run over it is the worse failure."""
+        from core.config_loader import effective_confidence
+        from core.reasoning import confidence_scoring as cs
+
+        self._settings(monkeypatch,
+                       {"confidence": {"critic_weight_factor": 7.0}})
+        with caplog.at_level("WARNING"):
+            values = effective_confidence(warn=True)
+        assert values["critic_weight_factor"] == cs.CRITIC_WEIGHT_FACTOR
+        assert "critic_weight_factor" in caplog.text
+
+    def test_one_bad_key_does_not_discard_the_good_ones_beside_it(
+            self, monkeypatch):
+        """A user retuning six numbers and fat-fingering the seventh should
+        get six retuned numbers and one sentence, not none of them."""
+        from core.config_loader import effective_confidence
+
+        self._settings(monkeypatch, {"confidence": {
+            "critic_weight_factor": 0.2, "source_quality_floor": "oops"}})
+        values = effective_confidence()
+        assert values["critic_weight_factor"] == 0.2
+        assert values["source_quality_floor"] == 0.25
+
+    def test_a_boolean_is_not_a_weight(self, monkeypatch):
+        from core.config_loader import effective_confidence
+
+        self._settings(monkeypatch, {"confidence": {"critic_weight_factor": True}})
+        assert effective_confidence()["critic_weight_factor"] == 0.35
+
+    def test_grounding_weights_merge_by_status(self, monkeypatch):
+        from core.config_loader import effective_confidence
+
+        self._settings(monkeypatch,
+                       {"confidence": {"grounding_weights": {"partial": 0.8}}})
+        weights = effective_confidence()["grounding_weights"]
+        assert weights["partial"] == 0.8
+        assert weights["grounded"] == 1.0, "an unlisted status kept its default"
+
+    def test_an_unknown_grounding_status_is_ignored_and_warned(
+            self, monkeypatch, caplog):
+        from core.config_loader import effective_confidence
+
+        self._settings(monkeypatch, {
+            "confidence": {"grounding_weights": {"Grounded": 0.9}}})
+        with caplog.at_level("WARNING"):
+            weights = effective_confidence(warn=True)["grounding_weights"]
+        assert "Grounded" not in weights
+        assert "unknown status" in caplog.text
+
+    def test_tier_thresholds_must_stay_ordered(self, monkeypatch, caplog):
+        """Out of order, a tier becomes unreachable and a published tier
+        stops matching the table that defines it. The WHOLE table falls
+        back, unlike the scalars -- these three are only meaningful
+        together."""
+        from core.config_loader import effective_confidence
+
+        self._settings(monkeypatch, {
+            "confidence": {"tier_thresholds": {"HIGH": 0.2, "LOW": 0.9}}})
+        with caplog.at_level("WARNING"):
+            thresholds = effective_confidence(warn=True)["tier_thresholds"]
+        assert thresholds == {"HIGH": 0.8, "MEDIUM": 0.55, "LOW": 0.3}
+        assert "descend" in caplog.text
+
+    def test_an_ordered_threshold_change_is_accepted(self, monkeypatch):
+        from core.config_loader import effective_confidence
+
+        self._settings(monkeypatch, {
+            "confidence": {"tier_thresholds": {"HIGH": 0.9}}})
+        assert effective_confidence()["tier_thresholds"]["HIGH"] == 0.9
+
+    def test_domain_overrides_are_normalised_and_filtered(self, monkeypatch):
+        from core.config_loader import effective_source_scoring
+
+        self._settings(monkeypatch, {"source_scoring": {"domain_overrides": {
+            ".Example.GOV.AU": 0.9, "bad.com": "high", "worse.com": 3}}})
+        overrides = effective_source_scoring()["domain_overrides"]
+        assert overrides == {"example.gov.au": 0.9}
+
+    def test_a_similarity_band_must_not_invert(self, monkeypatch, caplog):
+        from core.config_loader import effective_source_scoring
+
+        self._settings(monkeypatch, {"source_scoring": {
+            "similarity_floor": 0.9, "similarity_ceiling": 0.1}})
+        with caplog.at_level("WARNING"):
+            values = effective_source_scoring(warn=True)
+        assert values["similarity_floor"] is None
+        assert values["similarity_ceiling"] is None
+
+    def test_an_unset_band_means_use_the_per_model_table(self):
+        from core.config_loader import effective_source_scoring
+
+        values = effective_source_scoring()
+        assert values["similarity_floor"] is None
+
+    def test_an_unknown_key_in_either_section_still_raises(self, tmp_path):
+        """A schema question, not a range one. §14's loud-rejection rule is
+        what makes adding a setting a deliberate act, and §45 does not
+        soften it."""
+        import json
+
+        from core import config_loader
+
+        for section in ("confidence", "source_scoring"):
+            with pytest.raises(ValueError, match=f"unknown {section} key"):
+                config_loader._validate_settings(
+                    {section: {"no_such_knob": 1}}, str(tmp_path / "s.json"))
+
+
+class TestTheResolvedWeightsReachTheFormula:
+    """The half that can silently not exist: a resolver nobody reads is a
+    settings section that does nothing."""
+
+    def test_score_claim_uses_a_supplied_threshold_table(self):
+        weights = default_weights()
+        weights["tier_thresholds"] = {"HIGH": 0.5, "MEDIUM": 0.3, "LOW": 0.1}
+        claim = _factual(severity=0.5)
+        assert score_claim(claim)[0] == "MEDIUM"
+        assert score_claim(claim, weights=weights)[0] == "HIGH"
+
+    def test_score_claim_uses_a_supplied_weight_factor(self):
+        weights = default_weights()
+        weights["critic_weight_factor"] = 0.0
+        _, breakdown = score_claim(_factual(), weights=weights)
+        assert breakdown["raw_score"] == GROUNDING_WEIGHT_FACTOR
+
+    def test_a_supplied_source_quality_floor_is_applied(self):
+        weights = default_weights()
+        weights["source_quality_floor"] = 0.9
+        claim = _factual(sources=[_scored_source(0.1, 0.1)])
+        _, breakdown = score_claim(claim, sources_scored=True, weights=weights)
+        assert breakdown["source_quality_multiplier"] == 0.9
+
+    def test_a_threshold_table_in_any_order_still_tiers_highest_first(self):
+        """Sorted at use, so a caller passing one by hand cannot make a
+        tier unreachable by writing its keys in the wrong order."""
+        weights = default_weights()
+        weights["tier_thresholds"] = {"LOW": 0.3, "HIGH": 0.8, "MEDIUM": 0.55}
+        assert score_claim(_factual(), weights=weights)[0] == "HIGH"
+
+    def test_omitting_the_weights_reproduces_the_defaults_exactly(self):
+        claim = _factual(severity=0.3, flags=["a flag"])
+        assert score_claim(claim) == score_claim(claim, weights=default_weights())

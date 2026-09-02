@@ -372,6 +372,78 @@ DOMAIN_AUTHORITY_SUFFIXES: dict[str, str] = {
 # arriving without a reason is discarded rather than clamped.
 AUTHORITY_ADJUSTMENT_CAP = 0.15
 
+# --- The sources/ artifact (ROADMAP_v2 §45, SQ8) ---
+# Whether output/<run_id>/sources/ keeps the TEXT each cited page served,
+# or only its hash, size and provenance.
+#
+# On by default, because it is what makes a similarity score reproducible
+# after the run -- and the directory output_writer has created since §12
+# was described by fetch_url.py's own comment for just as long. Everything
+# written there has been through redact_output_text on entry to the
+# corpus.
+#
+# It is new data at rest, so it has a switch and PRIVACY.md says what it
+# holds. Turning it off costs the audit trail, not the scores: the corpus
+# still exists in memory for the run that computes them.
+PERSIST_SOURCE_TEXT = True
+
+# --- Scholarly authority: OpenAlex (ROADMAP_v2 §45, SQ5/SQ9) ---
+# OFF BY DEFAULT. This is the first network call in this harness made by
+# something that is not a registered tool, so it bypasses the approval
+# registry and granted_calls.json -- and an out-of-the-box run must make
+# no call the user did not ask for. With it off, a paper takes its
+# preprint-server or publisher domain class and nothing else.
+SCHOLAR_LOOKUP = False
+
+SCHOLAR_API_URL = "https://api.openalex.org"
+SCHOLAR_TIMEOUT_S = 8.0
+SCHOLAR_MAX_RETRIES = 2
+SCHOLAR_CACHE_TTL_S = 900
+
+# OpenAlex asks for a contact address to put a caller in its "polite pool"
+# (higher rate limits). EMPTY BY DEFAULT AND NEVER DERIVED: an address is
+# personal data, and sending one the user did not type -- from a git
+# config, an environment variable, anywhere -- is not a rate-limit
+# optimisation, it is an unasked-for disclosure.
+SCHOLAR_MAILTO = ""
+
+# How a paper's score is composed. Renormalised over whichever terms are
+# actually available, so a paper too young to have a citation percentile
+# is not scored as though it had a bad one.
+SCHOLAR_VENUE_WEIGHT = 0.40
+SCHOLAR_CITATION_WEIGHT = 0.40
+SCHOLAR_AUTHOR_WEIGHT = 0.20
+
+# Venue credit. A preprint scores lower than a comparable published paper
+# -- generally, not strictly, which is why it is a weight and not a gate.
+SCHOLAR_VENUE_CREDIT = {
+    "journal": 1.0,
+    "conference": 1.0,
+    "book series": 0.85,
+    "repository": 0.55,     # arXiv, bioRxiv, institutional repositories
+    "unknown": 0.6,
+}
+
+# max h-index across a paper's authors, log-saturated. 60 is a full career
+# at the top of most fields; the curve is deliberately flat above it,
+# because the difference between 60 and 90 says more about field size and
+# career length than about this paper.
+SCHOLAR_H_SATURATION = 60
+
+# Below this many works, a field-and-year cohort is too small for a
+# percentile to mean anything and the window widens instead.
+SCHOLAR_MIN_COHORT_SIZE = 200
+
+# Below this age, citation counts are noise: 72% of computer-science
+# preprints from 2024 have zero citations, so a three-week-old paper's
+# zero says nothing at all. The term is DROPPED and the remaining weights
+# renormalise, rather than being scored as low impact.
+SCHOLAR_MIN_CITATION_AGE_DAYS = 60
+
+# A retracted paper is not evidence, whatever its venue or citation count
+# -- and a heavily cited retraction is the most dangerous shape there is.
+SCHOLAR_RETRACTED_AUTHORITY = 0.05
+
 # --- Reasoning effort (ROADMAP_v2 §16; default changed batch 25, #139) ---
 # The default effort level requested when the user has not chosen one.
 #

@@ -80,7 +80,14 @@ def write_run_artifacts(run: PipelineRun) -> str:
       trace.md                Full trace log
       report.md               Final synthesis report
       report.pdf              PDF rendering (only if markdown+weasyprint installed)
-      sources/                (placeholder for future per-source artifacts)
+      sources/index.json      §45 one entry per URL this run retrieved text
+                              from: url, title, tool, retrieved_at, sha256,
+                              chars. Always written when anything was
+                              retrieved -- provenance, not content.
+      sources/<sha256>.txt    §45 the text itself, redacted, one file per
+                              document. Only when config.PERSIST_SOURCE_TEXT
+                              is on (it is by default); index.json's
+                              `persisted_text` says which.
       code/                   (placeholder for future code artifacts)
     """
     if run.run_id is None:
@@ -157,6 +164,8 @@ def write_run_artifacts(run: PipelineRun) -> str:
     if run.subagent_reviews:
         write("07_review.json", json.dumps(run.subagent_reviews, indent=2))
 
+    _write_sources(run, output_dir)
+
     # §27 AC6: which thread each pass ran in. Written unconditionally
     # (unlike the two above), because it is not a signal about how the run
     # was configured -- every run has pass threads, and an empty file here
@@ -174,6 +183,52 @@ def write_run_artifacts(run: PipelineRun) -> str:
     _try_write_pdf(run.final_report, output_dir)
 
     return output_dir
+
+
+def _write_sources(run: PipelineRun, output_dir: str) -> None:
+    """Populate sources/ with what each cited page actually served.
+
+    ROADMAP_v2 §45 (SQ8). This directory has been created and left empty
+    since §12, while `fetch_url.py`'s own comment described the artifact
+    that would fill it. Without it, `03_grounding.json` is URLs and
+    numbers: a reader cannot check a `similarity_score` against anything,
+    and neither can anyone re-running the scoring later.
+
+    ONE FILE PER DOCUMENT, named by the sha256 of its text. The hash is
+    also carried in the index, so a source's entry and its file are
+    linked, and two runs that fetched the same page produce the same
+    filename -- which makes them diffable.
+
+    `index.json` is written whatever `PERSIST_SOURCE_TEXT` says. Which
+    URLs a run retrieved, when, through which tool, and how much text they
+    gave is provenance rather than content: it is the part that says
+    whether a score COULD have been computed, and withholding it would
+    make an opted-out run indistinguishable from one that fetched nothing.
+
+    Degrades loudly, never fatally (#81): a run that produced a report
+    must not fail over an artifact directory.
+    """
+    documents = getattr(run, "source_documents", None) or []
+    if not documents:
+        return
+
+    sources_dir = os.path.join(output_dir, "sources")
+    keep_text = getattr(config, "PERSIST_SOURCE_TEXT", True)
+    try:
+        index = []
+        for document in documents:
+            entry = {k: v for k, v in document.items() if k != "text"}
+            index.append(entry)
+            if keep_text:
+                with open(os.path.join(sources_dir, f"{document['sha256']}.txt"),
+                          "w", encoding="utf-8") as f:
+                    f.write(document.get("text", ""))
+        index_payload = {"persisted_text": bool(keep_text), "sources": index}
+        with open(os.path.join(sources_dir, "index.json"), "w",
+                  encoding="utf-8") as f:
+            json.dump(index_payload, f, indent=2)
+    except Exception as e:
+        logger.warning("Source texts skipped (write failed): %s", e)
 
 
 def _write_confidence_chart(run: PipelineRun, output_dir: str) -> None:

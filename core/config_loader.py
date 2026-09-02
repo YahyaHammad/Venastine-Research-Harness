@@ -41,6 +41,15 @@ logger = logging.getLogger(__name__)
 # shipped with the harness itself, so it resolves from here, not from cwd.
 HARNESS_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+NUMBER_TYPES = (int, float)
+
+# §45 (SQ6): the closed vocabulary `confidence.grounding_weights`
+# keys against. Re-exported from base.py rather than re-typed, the
+# way payload_validation does -- a second hand-written copy of a
+# vocabulary is a second thing to keep in step.
+from core.reasoning.base import GROUNDING_STATUSES  # noqa: E402
+
+
 _FRONTMATTER_DELIM = re.compile(r"^---\s*$", re.MULTILINE)
 
 _KNOWN_SETTINGS = {
@@ -69,6 +78,16 @@ _KNOWN_SETTINGS = {
     "compaction": dict,
     "tui": dict,
     "research": dict,
+    # ROADMAP_v2 §45 (SQ6). TOP-LEVEL, not nested under `research`:
+    # _NESTED_SETTINGS supports exactly one level and both the validator
+    # and the cross-tier merge iterate it, so `research.confidence` would
+    # need the merge deepened -- the code path review finding F2 broke
+    # once. These are cost/quality knobs, not authority, so effort's merge
+    # rule applies: normal tiers, deliberately NOT an R12 by-name
+    # rejection. The two keys that ARE authority -- critic_model and
+    # embedder_model -- are rejected above.
+    "confidence": dict,
+    "source_scoring": dict,
 }
 # ROADMAP_v2 §25 (R12). The authorization MODE is persistable and the
 # grant LIST deliberately is not.
@@ -143,10 +162,41 @@ TODO_POSITIONS = ("top", "bottom", "side")
 # `compaction` was the only member until §16 added `tui`, and hardcoding
 # it in two places is what made the shallow-merge defect
 # (review finding F2) possible in the first place.
+_KNOWN_CONFIDENCE = {
+    "grounding_weight_factor": float,
+    "critic_weight_factor": float,
+    "assumption_flag_penalty": float,
+    "disagreement_penalty_factor": float,
+    "non_factual_score_cap": float,
+    "source_quality_floor": float,
+    "authority_full_credit": float,
+    "grounding_weights": dict,
+    "tier_thresholds": dict,
+}
+
+_KNOWN_SOURCE_SCORING = {
+    "similarity_floor": float,
+    "similarity_ceiling": float,
+    "authority_adjustment_cap": float,
+    "window_chars": int,
+    "max_windows": int,
+    "claim_min_chars": int,
+    "top_k": int,
+    "domain_overrides": dict,
+    "venue_weight": float,
+    "citation_weight": float,
+    "author_weight": float,
+    "h_saturation": int,
+    "min_cohort_size": int,
+    "min_citation_age_days": int,
+}
+
 _NESTED_SETTINGS = {
     "compaction": _KNOWN_COMPACTION,
     "tui": _KNOWN_TUI,
     "research": _KNOWN_RESEARCH,
+    "confidence": _KNOWN_CONFIDENCE,
+    "source_scoring": _KNOWN_SOURCE_SCORING,
 }
 
 
@@ -1211,3 +1261,265 @@ def describe_project_content(project_path: str) -> str:
         for kind, name, description in entries:
             lines.append(f"  | {kind[:-1]} {name}: {description}")
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# ---- §45 (SQ6): the scoring knobs -----------------------------------------
+# ---------------------------------------------------------------------------
+#
+# WHY THESE TWO SECTIONS RESOLVE DIFFERENTLY FROM COMPACTION, and it is a
+# deliberate amendment rather than an oversight. `effective_compaction`
+# RAISES on an incoherent value, because a bad trigger burns real model
+# calls on every turn of every conversation. A bad scoring weight costs
+# the shape of one number in one report -- and refusing to start a
+# ten-pass run over a mistyped weight is the worse failure. So a known key
+# with an out-of-range value FALLS BACK to its own default and warns; only
+# that one value is discarded, never the whole section.
+#
+# Unknown KEYS still raise, unchanged. That is a schema question rather
+# than a range one, and §14's loud-rejection rule is what makes adding a
+# setting a deliberate act.
+#
+# TOP-LEVEL SECTIONS, not `research.confidence`. `_NESTED_SETTINGS`
+# supports exactly one level of nesting and both the validator and the
+# cross-tier merge iterate it; deepening that merge is the code path
+# review finding F2 already broke once, and these need no new mechanism to
+# sit beside `compaction` and `tui`.
+
+# key -> (module attribute it defaults from, validator)
+#
+# The defaults live BESIDE THE FORMULA rather than in config.py: the
+# tunable-weights block at the top of confidence_scoring.py documents what
+# each number does and why it is that number, and a second copy here is a
+# second thing to keep in step. Imported lazily inside the resolver, the
+# same shape effective_compaction uses for `config`.
+_UNIT = ("a number between 0 and 1", lambda v: isinstance(v, NUMBER_TYPES)
+         and not isinstance(v, bool) and 0.0 <= v <= 1.0)
+_POSITIVE_INT = ("a positive whole number",
+                 lambda v: isinstance(v, int) and not isinstance(v, bool) and v > 0)
+_NON_NEGATIVE_INT = ("a whole number of 0 or more",
+                     lambda v: isinstance(v, int) and not isinstance(v, bool) and v >= 0)
+
+_CONFIDENCE_KNOBS = {
+    "grounding_weight_factor": _UNIT,
+    "critic_weight_factor": _UNIT,
+    "assumption_flag_penalty": _UNIT,
+    "disagreement_penalty_factor": _UNIT,
+    "non_factual_score_cap": _UNIT,
+    "source_quality_floor": _UNIT,
+    "authority_full_credit": _UNIT,
+}
+
+_SOURCE_SCORING_KNOBS = {
+    "similarity_floor": _UNIT,
+    "similarity_ceiling": _UNIT,
+    "authority_adjustment_cap": _UNIT,
+    "window_chars": _POSITIVE_INT,
+    "max_windows": _POSITIVE_INT,
+    "claim_min_chars": _NON_NEGATIVE_INT,
+    "top_k": _POSITIVE_INT,
+    "venue_weight": _UNIT,
+    "citation_weight": _UNIT,
+    "author_weight": _UNIT,
+    "h_saturation": _POSITIVE_INT,
+    "min_cohort_size": _POSITIVE_INT,
+    "min_citation_age_days": _NON_NEGATIVE_INT,
+}
+
+
+def _confidence_defaults() -> dict:
+    from core.reasoning import confidence_scoring as cs
+
+    return {
+        "grounding_weight_factor": cs.GROUNDING_WEIGHT_FACTOR,
+        "critic_weight_factor": cs.CRITIC_WEIGHT_FACTOR,
+        "assumption_flag_penalty": cs.ASSUMPTION_FLAG_PENALTY,
+        "disagreement_penalty_factor": cs.DISAGREEMENT_PENALTY_FACTOR,
+        "non_factual_score_cap": cs.NON_FACTUAL_SCORE_CAP,
+        "source_quality_floor": cs.SOURCE_QUALITY_FLOOR,
+        "authority_full_credit": cs.AUTHORITY_FULL_CREDIT,
+        "grounding_weights": dict(cs.GROUNDING_WEIGHTS),
+        "tier_thresholds": {name: value for value, name in cs.TIER_THRESHOLDS},
+    }
+
+
+def _source_scoring_defaults() -> dict:
+    import config
+    from core.reasoning import source_scoring as ss
+
+    return {
+        "similarity_floor": None,     # None means "use the per-model table"
+        "similarity_ceiling": None,
+        "authority_adjustment_cap": config.AUTHORITY_ADJUSTMENT_CAP,
+        "window_chars": ss.WINDOW_CHARS,
+        "max_windows": ss.MAX_WINDOWS,
+        "claim_min_chars": ss.CLAIM_MIN_CHARS,
+        "top_k": ss.TOP_K,
+        "venue_weight": config.SCHOLAR_VENUE_WEIGHT,
+        "citation_weight": config.SCHOLAR_CITATION_WEIGHT,
+        "author_weight": config.SCHOLAR_AUTHOR_WEIGHT,
+        "h_saturation": config.SCHOLAR_H_SATURATION,
+        "min_cohort_size": config.SCHOLAR_MIN_COHORT_SIZE,
+        "min_citation_age_days": config.SCHOLAR_MIN_CITATION_AGE_DAYS,
+        "domain_overrides": {},
+    }
+
+
+def _apply_scalar_knobs(values, supplied, knobs, section, warn):
+    """Overlay `supplied` onto `values`, dropping what does not validate.
+
+    PER KEY, not per section. One mistyped weight must not discard the
+    nine beside it that were right -- a user retuning six numbers and
+    fat-fingering the seventh should get six retuned numbers and one
+    sentence about the seventh, not silently get none of them.
+    """
+    for key, value in supplied.items():
+        if key not in knobs:
+            continue
+        description, is_valid = knobs[key]
+        if is_valid(value):
+            values[key] = value
+        elif warn:
+            logger.warning(
+                "%s.%s must be %s, got %r -- using the default %r for this "
+                "run.", section, key, description, value, values[key])
+
+
+def _apply_grounding_weights(values, supplied, warn):
+    """`grounding_weights` -- a dict whose KEYS are a closed vocabulary."""
+    if not isinstance(supplied, dict):
+        if warn and supplied is not None:
+            logger.warning("confidence.grounding_weights must be an object, "
+                           "got %r -- using the defaults for this run.",
+                           type(supplied).__name__)
+        return
+    merged = dict(values["grounding_weights"])
+    for status, weight in supplied.items():
+        if status not in GROUNDING_STATUSES:
+            if warn:
+                logger.warning(
+                    "confidence.grounding_weights has an unknown status %r "
+                    "-- expected one of %s. Ignored for this run.",
+                    status, ", ".join(sorted(GROUNDING_STATUSES)))
+            continue
+        if isinstance(weight, NUMBER_TYPES) and not isinstance(weight, bool) \
+                and 0.0 <= weight <= 1.0:
+            merged[status] = weight
+        elif warn:
+            logger.warning(
+                "confidence.grounding_weights[%r] must be a number between 0 "
+                "and 1, got %r -- using the default for this run.",
+                status, weight)
+    values["grounding_weights"] = merged
+
+
+def _apply_tier_thresholds(values, supplied, warn):
+    """`tier_thresholds` -- three numbers that must STAY ORDERED.
+
+    The relational check `effective_compaction` makes for warning_margin,
+    applied to the one relationship here whose breakage is not
+    self-correcting: thresholds out of order make a tier unreachable, so a
+    claim scoring 0.9 could be published LOW while the table a reader
+    consults says HIGH starts at 0.8. Out of order, the whole table falls
+    back rather than a single value -- unlike the scalars above, because
+    these three are only meaningful together.
+    """
+    if not isinstance(supplied, dict):
+        if warn and supplied is not None:
+            logger.warning("confidence.tier_thresholds must be an object, "
+                           "got %r -- using the defaults for this run.",
+                           type(supplied).__name__)
+        return
+    merged = dict(values["tier_thresholds"])
+    for name, value in supplied.items():
+        if name not in merged:
+            if warn:
+                logger.warning(
+                    "confidence.tier_thresholds has an unknown tier %r -- "
+                    "expected one of %s. Ignored for this run.",
+                    name, ", ".join(merged))
+            continue
+        if isinstance(value, NUMBER_TYPES) and not isinstance(value, bool) \
+                and 0.0 <= value <= 1.0:
+            merged[name] = value
+        elif warn:
+            logger.warning(
+                "confidence.tier_thresholds[%r] must be a number between 0 "
+                "and 1, got %r -- using the defaults for this run.",
+                name, value)
+
+    ordered = [merged.get(name) for name in ("HIGH", "MEDIUM", "LOW")]
+    if not (ordered[0] > ordered[1] > ordered[2]):
+        if warn:
+            logger.warning(
+                "confidence.tier_thresholds must descend HIGH > MEDIUM > LOW, "
+                "got %s -- using the defaults for this run. Out of order, a "
+                "tier becomes unreachable and a published tier stops matching "
+                "the table that defines it.", merged)
+        return
+    values["tier_thresholds"] = merged
+
+
+def effective_confidence(warn: bool = False) -> dict:
+    """Pass 5's constants, as they are actually in force.
+
+    config default (from confidence_scoring's own tunable block) -> user
+    settings.json -> trusted project settings.json. Nearest wins, the
+    precedence the rest of the config system uses.
+
+    RESOLVED ONCE PER RUN by the caller, never per claim: score_claim is a
+    pure function and stays one, the warnings are said once rather than
+    once per claim (`effective_compaction`'s `warn=True` gating, for its
+    reason), and a run's numbers cannot change halfway through.
+    """
+    values = _confidence_defaults()
+    supplied = get_settings().get("confidence") or {}
+    _apply_scalar_knobs(values, supplied, _CONFIDENCE_KNOBS, "confidence", warn)
+    _apply_grounding_weights(values, supplied.get("grounding_weights"), warn)
+    _apply_tier_thresholds(values, supplied.get("tier_thresholds"), warn)
+    return values
+
+
+def effective_source_scoring(warn: bool = False) -> dict:
+    """§45's scoring knobs, as they are actually in force.
+
+    `similarity_floor` / `similarity_ceiling` default to None, meaning
+    "use the per-model calibration table". A user who sets them is saying
+    their embedder's band is not what the table thinks, which outranks a
+    table that cannot know about a model shipped after this release --
+    `model_windows`' inversion, for its reason.
+    """
+    values = _source_scoring_defaults()
+    supplied = get_settings().get("source_scoring") or {}
+    _apply_scalar_knobs(values, supplied, _SOURCE_SCORING_KNOBS,
+                        "source_scoring", warn)
+
+    overrides = supplied.get("domain_overrides")
+    if isinstance(overrides, dict):
+        kept = {}
+        for host, score in overrides.items():
+            if isinstance(host, str) and host and \
+                    isinstance(score, NUMBER_TYPES) and \
+                    not isinstance(score, bool) and 0.0 <= score <= 1.0:
+                kept[host.lower().lstrip(".")] = float(score)
+            elif warn:
+                logger.warning(
+                    "source_scoring.domain_overrides[%r] must be a number "
+                    "between 0 and 1, got %r -- ignored for this run.",
+                    host, score)
+        values["domain_overrides"] = kept
+    elif overrides is not None and warn:
+        logger.warning("source_scoring.domain_overrides must be an object, "
+                       "got %r -- ignored for this run.",
+                       type(overrides).__name__)
+
+    floor = values["similarity_floor"]
+    ceiling = values["similarity_ceiling"]
+    if floor is not None and ceiling is not None and floor >= ceiling:
+        if warn:
+            logger.warning(
+                "source_scoring.similarity_floor (%s) must be below "
+                "similarity_ceiling (%s) -- falling back to this embedder's "
+                "own calibration for this run.", floor, ceiling)
+        values["similarity_floor"] = values["similarity_ceiling"] = None
+    return values

@@ -96,7 +96,48 @@ TIER_THRESHOLDS = [
 ]  # anything below the lowest threshold, or an ungrounded factual claim, is UNVERIFIED
 
 
-def source_quality(claim: Claim, scored: bool):
+# ROADMAP_v2 §45 (SQ6). The constants above are the DEFAULTS; a run may
+# carry its own, resolved once at pipeline start from settings.json by
+# core.config_loader.effective_confidence.
+#
+# THE PARAMETER DEFAULTS TO THESE, which is what keeps every existing
+# caller -- and the byte-for-byte regression tests this file is built
+# around -- scoring exactly what they always did. A retuned run is an
+# explicit act at one call site, never a silent re-reading of global
+# state inside a pure function.
+#
+# Built by a FUNCTION rather than bound at import, so a test or a tool
+# that patches one of the constants above still sees its own value here.
+def default_weights() -> dict:
+    return {
+        "grounding_weight_factor": GROUNDING_WEIGHT_FACTOR,
+        "critic_weight_factor": CRITIC_WEIGHT_FACTOR,
+        "assumption_flag_penalty": ASSUMPTION_FLAG_PENALTY,
+        "disagreement_penalty_factor": DISAGREEMENT_PENALTY_FACTOR,
+        "non_factual_score_cap": NON_FACTUAL_SCORE_CAP,
+        "source_quality_floor": SOURCE_QUALITY_FLOOR,
+        "authority_full_credit": AUTHORITY_FULL_CREDIT,
+        "grounding_weights": dict(GROUNDING_WEIGHTS),
+        "tier_thresholds": {name: value for value, name in TIER_THRESHOLDS},
+    }
+
+
+def _tier_for(raw_score: float, thresholds: dict) -> str:
+    """The tier `raw_score` earns, highest first.
+
+    SORTED HERE rather than trusting the mapping's order: the resolver
+    already refuses a table that does not descend, and sorting again means
+    a caller passing one by hand cannot make a tier unreachable by
+    writing its keys in the wrong order.
+    """
+    for name, threshold in sorted(thresholds.items(), key=lambda kv: -kv[1]):
+        if raw_score >= threshold:
+            return name
+    return "UNVERIFIED"
+
+
+def source_quality(claim: Claim, scored: bool,
+                   full_credit: float = None):
     """The best source this claim has, as authority x similarity, or None.
 
     A PRODUCT, not an average (§45, SQ3). An authoritative source that
@@ -118,6 +159,8 @@ def source_quality(claim: Claim, scored: bool):
     """
     if not scored:
         return None
+    if full_credit is None:
+        full_credit = AUTHORITY_FULL_CREDIT
     sources = claim.grounding_sources
     if not isinstance(sources, list):
         return 0.0
@@ -136,7 +179,7 @@ def source_quality(claim: Claim, scored: bool):
         # than allowed to compensate for weak relevance -- a government
         # site that does not discuss the claim is still not evidence for
         # it, which is the property the product exists to express.
-        credit = min(1.0, max(0.0, float(authority)) / AUTHORITY_FULL_CREDIT)
+        credit = min(1.0, max(0.0, float(authority)) / full_credit)
         values.append(credit * min(1.0, max(0.0, float(relevance))))
     # 0.0 rather than None for a claim with no scorable source at all:
     # scoring DID run, and it found nothing behind a claim the model
@@ -146,7 +189,8 @@ def source_quality(claim: Claim, scored: bool):
 
 
 def score_claim(claim: Claim, ensemble_n: int = 0,
-                sources_scored: bool = False) -> tuple[ConfidenceTier, dict]:
+                sources_scored: bool = False,
+                weights: dict | None = None) -> tuple[ConfidenceTier, dict]:
     """Returns (tier, score_breakdown). Pure function -- no side effects,
     easy to unit test claim-by-claim without running any pass.
 
@@ -164,6 +208,11 @@ def score_claim(claim: Claim, ensemble_n: int = 0,
     through Pass 2 -- and silently scoring it wrong is the outcome #75
     measured.
     """
+    # §45 (SQ6). Resolved weights or this module's own defaults -- and
+    # None is the default, so every caller that predates §45 scores
+    # exactly what it always did.
+    w = default_weights() if weights is None else weights
+
     # B9. base.py's Literals are ANNOTATIONS. An unrecognised status used
     # to take GROUNDING_WEIGHTS' 0.0 default AND slip past the
     # forced-UNVERIFIED rule below, which compares == "ungrounded" -- so a
@@ -187,12 +236,13 @@ def score_claim(claim: Claim, ensemble_n: int = 0,
     # §45 (SQ3). What the grounding is WORTH, not a fourth axis beside it.
     # None -- no scoring stage ran for this claim -- gives a multiplier of
     # 1.0, which is the pre-§45 arithmetic exactly.
-    quality = source_quality(claim, sources_scored)
-    quality_multiplier = 1.0 if quality is None else max(SOURCE_QUALITY_FLOOR,
-                                                         quality)
-    grounding_component = GROUNDING_WEIGHTS[status] * quality_multiplier
+    quality = source_quality(claim, sources_scored, w["authority_full_credit"])
+    quality_multiplier = (1.0 if quality is None
+                          else max(w["source_quality_floor"], quality))
+    grounding_weight = w["grounding_weights"].get(status, 0.0)
+    grounding_component = grounding_weight * quality_multiplier
     critic_component = 1.0 - claim.critic_severity
-    assumption_penalty = ASSUMPTION_FLAG_PENALTY * len(claim.assumption_flags)
+    assumption_penalty = w["assumption_flag_penalty"] * len(claim.assumption_flags)
 
     # None when ensemble mode is off, which is what makes the formula below
     # ONE formula rather than a pair that can drift -- and (B7) also when
@@ -216,7 +266,7 @@ def score_claim(claim: Claim, ensemble_n: int = 0,
         # E9: computed only where it is applied, so the breakdown records
         # what was subtracted rather than what was available (B10).
         if claim_type == "factual":
-            disagreement_penalty = DISAGREEMENT_PENALTY_FACTOR * (1.0 - consistency_score)
+            disagreement_penalty = w["disagreement_penalty_factor"] * (1.0 - consistency_score)
 
     if claim_type != "factual":
         # Cap applies to the critic component BEFORE subtracting the
@@ -231,15 +281,15 @@ def score_claim(claim: Claim, ensemble_n: int = 0,
         # RESCUE a non-factual claim from the cap; whether dissent should
         # penalise a speculative claim is a separate judgment about what
         # candidates declining to speculate means, and it was not made.
-        capped_critic = min(critic_component, NON_FACTUAL_SCORE_CAP)
+        capped_critic = min(critic_component, w["non_factual_score_cap"])
         raw_score = capped_critic - assumption_penalty
         formula = "non_factual"
     else:
         capped_critic = None
         formula = "factual"
         raw_score = (
-            (GROUNDING_WEIGHT_FACTOR * grounding_component)
-            + (CRITIC_WEIGHT_FACTOR * critic_component)
+            (w["grounding_weight_factor"] * grounding_component)
+            + (w["critic_weight_factor"] * critic_component)
             - assumption_penalty
             - disagreement_penalty
         )
@@ -263,11 +313,7 @@ def score_claim(claim: Claim, ensemble_n: int = 0,
     if claim_type == "factual" and status == "ungrounded":
         tier: ConfidenceTier = "UNVERIFIED"
     else:
-        tier = "UNVERIFIED"
-        for threshold, tier_name in TIER_THRESHOLDS:
-            if raw_score >= threshold:
-                tier = tier_name
-                break
+        tier = _tier_for(raw_score, w["tier_thresholds"])
 
     # ROADMAP_v2 §30 (B10). THE BREAKDOWN RECORDS WHAT WAS APPLIED, AND
     # NAMES THE BRANCH THAT APPLIED IT, so a reader can recompute raw_score
@@ -302,7 +348,7 @@ def score_claim(claim: Claim, ensemble_n: int = 0,
         # `grounding_component` and `disagreement_penalty` on a
         # speculative claim.
         if quality is not None:
-            breakdown["grounding_weight"] = GROUNDING_WEIGHTS[status]
+            breakdown["grounding_weight"] = grounding_weight
             breakdown["source_quality"] = round(quality, 4)
             breakdown["source_quality_multiplier"] = round(quality_multiplier, 4)
             breakdown["source_count"] = len(claim.grounding_sources) \
@@ -342,6 +388,7 @@ def run_confidence_tiering(
     run: PipelineRun, ensemble_n: int = 0,
     claims: list[Claim] | None = None,
     sources_scored: bool = False,
+    weights: dict | None = None,
 ) -> None:
     """The actual Pass 5 entry point the orchestrator calls. Mutates
     the claims in place; zero LLM calls. Pass ensemble_n > 0 to use
@@ -363,7 +410,8 @@ def run_confidence_tiering(
     """
     for claim in (run.claims if claims is None else claims):
         tier, breakdown = score_claim(claim, ensemble_n=ensemble_n,
-                                      sources_scored=sources_scored)
+                                      sources_scored=sources_scored,
+                                      weights=weights)
         claim.confidence_tier = tier
         claim.score_breakdown = breakdown
         _report_coercions(run, claim, breakdown, ensemble_n)
