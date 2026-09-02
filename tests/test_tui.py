@@ -3020,6 +3020,241 @@ async def test_every_modal_is_centred_bounded_and_styled(
             f"{name} has no background rule")
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name,make_screen,dialog_id", _modal_cases(),
+                         ids=[c[0] for c in _modal_cases()])
+async def test_every_modal_actually_draws_its_body(
+        name, make_screen, dialog_id):
+    """#112's durable half, one layer in (§46, EP1).
+
+    That test pinned where a dialog SITS. This one pins that the text
+    inside it occupies rows, because four of these did not: `permission`,
+    `signoff-empty`, `confirm` and `project-kind` all share
+    #permission-dialog, whose middle grid row was `1fr` inside a
+    `height: auto` container -- which resolves to zero. Measured against
+    HEAD in a worktree: `#permission-params` at `region.height == 0` and
+    `virtual_size.height == 0` on all four, with 10, 35, 85 and 277
+    characters of content respectively. Every approval prompt, the
+    subagent sign-off, /init's confirmation and /init's project-kind
+    question drew their titles, their buttons and none of their
+    substance.
+
+    Nothing saw it because every other assertion about these screens
+    reads `.visual._renderable.plain` -- the string the widget was
+    built from, which a widget of zero height still reports in full.
+    A consent surface is a thing a person LOOKS AT, so the assertion
+    has to be about what was drawn.
+    """
+    from textual.widgets import Label, ListView, SelectionList, Static
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        await app.push_screen(make_screen())
+        await pilot.pause()
+        await pilot.pause()
+
+        invisible = []
+        for widget in app.screen.query_one(dialog_id).query("*"):
+            if not isinstance(widget, (Static, Label, ListView,
+                                       SelectionList)):
+                continue
+            try:
+                content = widget.visual._renderable.plain
+            except Exception:  # noqa: BLE001 -- lists carry no visual
+                content = "rows"
+            if content.strip() and widget.region.height == 0:
+                invisible.append(widget.id or type(widget).__name__)
+
+    assert not invisible, (
+        f"{name}: {', '.join(invisible)} carries text and was allocated "
+        "no rows -- it is absent from the rendered modal, not merely "
+        "scrolled out of it")
+
+
+# ---------------------------------------------------------------------------
+# ---- §46 (EP1/EP3): the modal's subject must be ON SCREEN -----------------
+# ---------------------------------------------------------------------------
+#
+# These assert on the RENDERED REGION, not on the string the widget was
+# built from, and that distinction is the whole reason the defect shipped.
+# Every modal assertion in test_rationale.py reads
+# `.visual._renderable.plain` -- the text a widget was CONSTRUCTED with,
+# which a widget of zero height still reports in full. That is exactly
+# what #permission-params was, so every one of those tests was green
+# while the modal drew its title, its buttons, and none of its
+# substance. A consent surface is a thing a person LOOKS AT; a test that
+# cannot fail on what is visible is not testing consent.
+
+
+def _visible_rows(widget) -> int:
+    """How many rows of *widget* the terminal is actually showing."""
+    return widget.region.height
+
+
+@pytest.mark.asyncio
+async def test_the_command_is_visible_without_scrolling():
+    """The regression, reproducing the reported call exactly.
+
+    The command used to live only inside the JSON payload, in a block
+    that rendered at zero height (see
+    test_every_modal_actually_draws_its_body) -- so a user reported that
+    the command was visible in the transcript and nowhere on the modal
+    asking them to approve it. EP1 pins it above that block, outside the
+    scroll region, where no payload length can displace it.
+
+    This measures the one thing that matters: that a person answering
+    the prompt can SEE what they are answering about. Not that the
+    string exists somewhere in the widget tree -- that was true
+    throughout.
+    """
+    from tui.app import VenastineApp
+    from tui.screens import PermissionScreen
+
+    command = "cat /proc/self/mountinfo"
+    notice = ("HOST_READ: reads 'cat' with an argument outside the "
+              "workspace, which no container can see. Runs on the "
+              "HOST, with your own file access.")
+    reason = ("Checking the sandbox mount table to answer the user "
+              "question about whether the host workspace path is "
+              "visible from inside the container.")
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        app.push_screen(
+            PermissionScreen("shell",
+                             {"command": command, "rationale": reason},
+                             notice, reason, command),
+            lambda _a: None)
+        await pilot.pause()
+        await pilot.pause()
+
+        pinned = app.screen.query_one("#permission-command")
+        box = app.screen.query_one("#permission-command-box")
+        drawn = _plain(pinned)
+        rows = _visible_rows(box)
+        content = box.virtual_size.height
+        dialog = app.screen.query_one("#permission-dialog")
+        region = dialog.region
+        app.screen.dismiss(False)
+        await pilot.pause()
+
+    assert drawn == command, (
+        "the pinned block is not showing the command verbatim")
+    assert rows >= 1, (
+        "the command block was allocated no rows at all -- it is on the "
+        "screen only in the sense the old payload was")
+    assert content <= rows, (
+        f"the command wraps to {content} rows and only {rows} are shown, "
+        "so a reader has to scroll to see the whole of what they are "
+        "approving -- this one is short enough to fit")
+
+    # It must still fit the floor the geometry test pins, WITH the extra
+    # row -- adding the block would otherwise buy visibility here and
+    # lose the buttons off the bottom on a small terminal.
+    assert region.y + region.height <= 24, (
+        f"the dialog grew to {region.height} rows on a 24-row terminal")
+    assert region.x + region.width <= 80
+
+
+@pytest.mark.asyncio
+async def test_what_does_not_fit_the_payload_block_can_be_scrolled_to():
+    """EP3, and the half of it that is not about focus.
+
+    `Static` + `max-height` + `overflow-y: auto` reads as "clip it and
+    let them scroll", and does neither: a Static's `virtual_size`
+    follows its clamped box rather than its text, so `max_scroll_y` is
+    0 and the hidden rows are not below the fold -- they are gone.
+    Measured before the fix at nine lines of content in a seven-row
+    block with End doing nothing.
+
+    So this asserts the property that matters -- every line of the
+    payload is reachable -- rather than that a widget is focusable,
+    which was true of a block that still truncated.
+    """
+    from tui.app import VenastineApp
+    from tui.screens import PermissionScreen
+
+    notice = ("HOST_READ: reads 'cat' with an argument outside the "
+              "workspace, which no container can see. Runs on the "
+              "HOST, with your own file access.")
+    reason = ("Checking the sandbox mount table to answer the user "
+              "question about whether the host workspace path is "
+              "visible from inside the container.")
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        app.push_screen(
+            PermissionScreen("shell",
+                             {"command": "cat /proc/self/mountinfo",
+                              "rationale": reason},
+                             notice, reason, "cat /proc/self/mountinfo"),
+            lambda _a: None)
+        await pilot.pause()
+        await pilot.pause()
+        box = app.screen.query_one("#permission-params-box")
+        visible, content = box.region.height, box.virtual_size.height
+        reachable = box.max_scroll_y
+        box.focus()
+        await pilot.pause()
+        focused = app.screen.focused
+        await pilot.press("end")
+        await pilot.pause()
+        landed = box.scroll_offset.y
+        app.screen.dismiss(False)
+        await pilot.pause()
+
+    assert visible > 0, "the payload block rendered at zero height again"
+    assert content > visible, (
+        "this fixture no longer overflows, so it cannot test overflow")
+    assert visible + reachable == content, (
+        f"{content} rows of payload, {visible} shown, only {reachable} "
+        "scrollable -- the remainder is truncated, not below the fold")
+    assert focused is box, "the payload block cannot take focus"
+    assert landed == reachable, (
+        "End did not reach the bottom of the payload from the keyboard")
+
+
+@pytest.mark.asyncio
+async def test_the_consent_surface_is_not_mouse_only():
+    """The narrower half of EP3, pinned separately because it is a fact
+    about the toolkit rather than about this screen: if `Static` ever
+    becomes focusable, the reason these blocks are containers changes
+    and somebody should re-read the decision rather than simplify."""
+    from textual.containers import VerticalScroll
+    from textual.widgets import Static
+
+    assert Static.can_focus is False, (
+        "Static became focusable on this textual -- re-read EP3 before "
+        "collapsing the ScrollBox wrappers back into Statics")
+    assert VerticalScroll.can_focus is True
+
+
+@pytest.mark.asyncio
+async def test_a_tool_with_no_headline_gets_no_pinned_block():
+    """`shell` is the only tool declaring one, and every other modal --
+    web_search, the MCP tools, ConfirmScreen, ProjectKindScreen -- must
+    be untouched, including its three-row grid template."""
+    from tui.app import VenastineApp
+    from tui.screens import PermissionScreen
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        app.push_screen(
+            PermissionScreen("web_search", {"query": "x"}, None),
+            lambda _a: None)
+        await pilot.pause()
+        await pilot.pause()
+        found = app.screen.query("#permission-command")
+        dialog = app.screen.query_one("#permission-dialog")
+        has_class = dialog.has_class("with-headline")
+        app.screen.dismiss(False)
+        await pilot.pause()
+
+    assert len(found) == 0, "a headline-less tool grew a pinned block"
+    assert not has_class, (
+        "the four-row grid template was applied to a three-child dialog")
+
+
 # ---------------------------------------------------------------------------
 # ---- #113: asking about the goal must not create the thread ---------------
 # ---------------------------------------------------------------------------

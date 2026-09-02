@@ -8983,3 +8983,125 @@ the cohort counting queries.
 - Readability extraction for `fetch_url`. Tag-stripping is enough to stop markup poisoning the
   vectors.
 - Forwarding tool result bodies to the UI. The corpus is a second sink; §26's boundary is unchanged.
+
+
+## Batch 47 — §46: where a command runs, and whether anyone can see it (2026-09-02)
+
+Two defects reported from live use, one of them with a diagnosis attached that turned out to be
+wrong in a way worth recording, and one of them much larger than reported.
+
+### The report, and what it actually was
+
+A user noticed that the shell command appeared in the transcript and **not on the permission modal
+asking them to approve it** — tolerable for `ls`, not for the long commands that are exactly the
+ones a human is in the loop for.
+
+The obvious reading was an ordering problem. §42 (RA6) had put the computed notice first, then the
+agent's stated reason, then the payload — and `"command"` lives only in the payload. Measured at
+the old 56-column content width, that header block is nine or ten wrapped rows against a
+`max-height: 10`, which puts `"command"` on row eleven. It fits the symptom exactly and it is not
+what was happening.
+
+`#permission-dialog` had `grid-rows: auto 1fr auto` and `height: auto`. **A fractional row inside
+an auto-height container resolves to zero.** Measured against the previous commit in a git
+worktree: `#permission-params` at `region.height == 0`, `virtual_size.height == 0`, nine lines of
+content sitting in the renderable where nobody could see them. Not clipped and scrollable —
+absent, with nothing to scroll to.
+
+**Four consent surfaces, not one.** `ConfirmScreen`, `ProjectKindScreen` and
+`SubagentSignoffScreen`'s empty branch all reuse `#permission-dialog`. The same probe against the
+previous commit reported zero-height bodies on `permission` (85 chars), `signoff-empty` (35),
+`confirm` (10) and `project-kind` (277). Every tool approval, the subagent sign-off, `/init`'s
+confirmation and `/init`'s project-kind question had been drawing their titles, their buttons and
+none of their substance — for the whole life of that stylesheet rule.
+
+**Why nothing caught it.** Every assertion about these screens reads
+`.visual._renderable.plain` — the string the widget was *built from*, which a widget of zero height
+still reports in full. `test_the_modal_shows_the_reason_below_the_computed_notice` was green the
+entire time, carefully asserting the reading order of text nobody could read. #112 had already
+learned the general form of this lesson and pinned where a dialog *sits*;
+`test_every_modal_actually_draws_its_body` is the same idea one layer in, and it fails on any
+widget in `_modal_cases()` that carries text and was allocated no rows.
+
+### Two traps found while fixing it, both silent
+
+The first fix attempt wrapped the blocks in `VerticalScroll` with `height: auto; max-height: N` —
+the spelling that reads as "grow to fit, then scroll". It renders at **zero rows**: a scrollable
+container cannot do `height: auto`. The tests stayed green, because they read the string.
+
+The second attempt kept `Static` and gave it `max-height`. That renders, and **truncates without
+scrolling**: a `Static`'s `virtual_size` follows its clamped box rather than its content, so
+`max_scroll_y` was 0 and `End` did nothing — nine lines of payload in a seven-row block with two
+lines simply gone. Making the `Static` focusable, which was the plan of record for EP3, would have
+fixed the half that *looks* broken (a mouse-only scrollbar) and left the truncation exactly where
+it was.
+
+So: a definite height on a real scroll container, with the text on an auto-height child. The ids
+stayed on the **Statics** and the containers took `-box` siblings, so every existing assertion that
+asks what was drawn still answers.
+
+### The second defect: the model was never told where its command ran
+
+`_shell_approval_notice` has told the *human* "Runs on the HOST, with your own file access" since
+§28. `run_sandboxed` returned `stdout`, `stderr` and `return_code` — so a HOST_READ and a contained
+run were indistinguishable to the model, which is the party that then writes the user an answer
+about the output.
+
+The session that surfaced it, on Windows: the agent was asked which filesystem it was on, ran
+`pwd && ls -la` — metacharacters, so SANDBOXED, so the container, and `/workspace` was real — and
+then `cat /proc/self/mountinfo`, which is inert with an argument outside the workspace, so
+HOST_READ, so a host subprocess. `_scrubbed_env` forces a known-good `PATH` only on POSIX, and
+`ls`/`cat`/`grep` have no native Windows binary, so `cat` resolved off the host PATH. On that
+machine it resolved to a Git-for-Windows install bundled by unrelated software, and the **MSYS2
+runtime synthesises `/proc/self/mountinfo` from its own `etc/fstab`**.
+
+The model read that mount table, believed it was the container's, and reported to its user that the
+sandbox was rooted inside another product's directory, that `/tmp` was mounted read-write from the
+host's temp directory, that the entire `C:` drive was bind-mounted in, and that a device-id pair
+could fingerprint the host volume. Every one of those is false about this harness. All of them are
+lines of that fstab. Reproduced byte-for-byte, including the device-id pair.
+
+**The user's diagnosis — a container selected by image name, contaminated by other software using
+the same `python:3.13-slim` base — was ruled out and is worth recording as ruled out.** Nothing in
+the repository lists, filters, attaches to or reuses a container: no `docker exec`, no `docker ps`,
+no `--filter ancestor`. `_run_docker` always creates a fresh `docker run --rm --name
+sandbox-<uuid>`. The suspicion was reasonable and the mechanism was not there.
+
+**Bundling a first-party toolchain would not have prevented it, and that was measured rather than
+argued.** `/proc` is synthesised by the MSYS2 *runtime*, not by the binary: two different `cat.exe`
+builds on the same machine printed byte-identical mount tables. Our own MSYS `cat` would report our
+own install's fstab and mislead identically. The fix for the report is the disclosure, not the
+binary.
+
+### What changed, and the one thing that did not
+
+INERT moved into the container (EP5) because its own definition allows it — every argument resolves
+inside the workspace, which is the directory the container mounts — and because it is the tier the
+gate *auto-approves*, which makes it the one where running an unknown binary matters most.
+HOST_READ stays on the host permanently: it is defined by naming a file the container cannot see.
+
+The **approval answer is unchanged**, and that is asserted rather than assumed. Under CONTAINED,
+`auto_approved` returns `not network`; under UNCONTAINED, `not (escapes_workspace or writes or
+network)`. An INERT profile has the first two False by construction, and `INERT_COMMANDS` and
+`NETWORK_ALLOWED_COMMANDS` are disjoint — so the two agree today. A word added to either list could
+make that quietly untrue, so `test_moving_inert_into_the_container_did_not_move_the_gate` asserts
+the two containments *agree* rather than asserting today's value.
+
+Measured cost of the routing change, one `ls -la`: **0.031s → 0.626s**. The `docker info` probe
+INERT now depends on is 0.43s and `lru_cache`d, so it is paid once per process rather than per
+call.
+
+`_log_image_identity()` started inside `_run_docker` and moved out to the routing site, because
+`subprocess.run` is implemented via `Popen` and the probe was captured by every test that patches
+`Popen` to inspect the argv — `ValueError: not enough values to unpack`. `_run_docker` stays a
+function that builds an argv and opens one process.
+
+### Deliberately not done
+
+- **Resolving inert binaries from `AGENT_WORKSPACE`**, which was asked about directly. The
+  workspace is model-writable, so it would let the model plant `workspace/cat.exe`, call `cat
+  notes.txt`, be auto-approved at tier INERT and have the harness execute model-authored code on
+  the host with the user's authority — the attack `_is_inert`'s path-qualified rejection exists to
+  prevent, reached from the other side.
+- **Digest-pinning `SANDBOX_DOCKER_IMAGE`.** Logged instead (EP7). A pin nobody bumps is its own
+  failure mode, and the log turns a silent substitution into a visible one.

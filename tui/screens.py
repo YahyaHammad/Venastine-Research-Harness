@@ -46,12 +46,41 @@ import json
 
 from rich.text import Text
 from textual.app import ComposeResult
-from textual.containers import Grid, Vertical
+from textual.containers import Grid, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import (
     Button, Input, Label, ListItem, ListView, SelectionList, Static,
 )
 from textual.widgets.selection_list import Selection
+
+
+class ScrollBox(VerticalScroll):
+    """A bounded block of text whose overflow can actually be reached
+    (§46, EP3).
+
+    Two things were wrong with `Static` + `max-height` + `overflow-y`,
+    and only the first is the one that looks wrong:
+
+      * `Static.can_focus` is False on the pinned textual 1.0.0, so the
+        scrollbar such a rule produces can only be moved by a mouse.
+      * A `Static` NEVER reports content taller than its own box --
+        `virtual_size` follows the clamped box, not the text -- so
+        `max_scroll_y` was 0 and the hidden rows were not scrolled past,
+        they were GONE. Measured: nine lines of payload in a seven-row
+        block, `max_scroll_y == 0`, End does nothing. Making the Static
+        focusable would have fixed the visible half of that and left the
+        truncation exactly where it was.
+
+    So the bound belongs on a real scroll container and the text on an
+    auto-height child inside it. `height` here must be DEFINITE for the
+    same reason: a scrollable container asked for `height: auto`
+    resolves to ZERO rows -- which is a second way to render nothing at
+    all, and how `1fr` inside a `height: auto` dialog produced a
+    permission modal whose payload had no height whatsoever.
+
+    Bindings are `ScrollableContainer`'s minus the horizontal ones:
+    there is nothing to scroll sideways, because the text wraps.
+    """
 
 
 class PermissionScreen(ModalScreen[bool]):
@@ -80,15 +109,53 @@ class PermissionScreen(ModalScreen[bool]):
     is actually for is longitudinal -- a thread's worth of stated
     reasons, archived beside the calls, is a drift signal no single
     prompt can be.
+
+    THE SUBJECT OF THE QUESTION IS PINNED, OUTSIDE THE SCROLL (§46,
+    EP1). RA6 ordered three things -- the harness's notice, the agent's
+    claim, the payload -- and the command is none of them: it is what
+    all three are ABOUT. Ranked among them it came last, inside the
+    payload, which is how a user came to report that the command was
+    visible in the transcript and nowhere on the modal asking about it.
+    The payload keeps RA6's order intact below; the headline is lifted
+    out of the ranking, not moved up it.
+
+    What the investigation actually found is worse than the ordering,
+    and it is recorded here because the obvious reading of the report
+    was wrong. `#permission-params` sat in a `1fr` grid row inside a
+    `height: auto` dialog, and a fractional row in an auto-height
+    container resolves to ZERO. Measured against HEAD in a worktree:
+    `region.height == 0`, `virtual_size.height == 0`, nine lines of
+    content. The notice, the agent's stated reason and the payload were
+    not clipped and scrollable -- they were absent, from every
+    permission modal this app has ever shown, for every tool. The
+    command was merely the part somebody noticed was missing.
+
+    Nothing caught it because every assertion about this screen reads
+    `.visual._renderable.plain`, the string the widget was built from,
+    which a widget of zero height still reports in full. §46's tests
+    assert on the rendered REGION for that reason.
+
+    The headline is DISPLAY ONLY and is also inside `params`, which is
+    still rendered whole below it. That duplication is deliberate for
+    the reason the rationale's is: this screen shows the payload
+    entire, and the pinned copy is a placement, not a substitution. A
+    reader comparing the two is doing something useful.
     """
 
     BINDINGS = [("escape", "deny", "Deny")]
 
     def __init__(self, tool_name: str, params: dict, notice: str = None,
-                 rationale: str = None):
+                 rationale: str = None, headline: str = None):
         super().__init__()
         self._tool_name = tool_name
         self._params = params
+        # §46 (EP2). What this call is asking to DO -- for `shell`, the
+        # command. Resolved by the registry from whichever param the
+        # tool declared and passed in already a string, for the reason
+        # the rationale is: this module imports nothing from the rest
+        # of the project. None for every tool that declares no
+        # headline, and the pinned block simply does not render.
+        self._headline = headline
         # §42 (RA6). The agent's OWN account of why it wants this call,
         # resolved by the registry from whichever param the tool
         # declared. Passed in rather than looked up: this module
@@ -120,14 +187,42 @@ class PermissionScreen(ModalScreen[bool]):
                     f"  {reason}\n\n{rendered}")
         if self._notice:
             rendered = f"{self._notice}\n\n{rendered}"
-        yield Grid(
-            Label(Text(f"Allow {self._tool_name}?"),
-                  id="permission-title"),
+        widgets = [Label(Text(f"Allow {self._tool_name}?"),
+                         id="permission-title")]
+        if self._headline:
+            # `Text(...)` is not optional here (batch 42, RA1). This is
+            # the most attacker-influenced string on the screen -- a
+            # model-authored command shown so a person can vet it --
+            # and `Static` renders a `str` through `Text.from_markup`,
+            # so `sed -i "s/[/]//" f.txt` would raise MarkupError
+            # inside compose(), leaving the screen pushed, unrendered
+            # and its dismissal callback never fired. test_tui.py walks
+            # this file's AST and asserts the wrapping.
+            widgets.append(ScrollBox(
+                Static(Text(self._headline), id="permission-command"),
+                id="permission-command-box"))
+        # The id stays on the STATIC and the scroll container is a
+        # `-box` sibling, rather than the other way round: a stylesheet
+        # wants the bound and the overflow, which belong to the
+        # container, while every assertion in test_rationale.py and
+        # test_tui.py asks what text was DRAWN, which only the Static
+        # can answer. Moving the id outward would make
+        # `query_one("#permission-params")` return a container with no
+        # `visual` -- and reading that attribute is how batch 42's
+        # markup bug was caught.
+        widgets.append(ScrollBox(
             Static(Text(rendered), id="permission-params"),
-            Button("Allow", variant="success", id="allow"),
-            Button("Deny", variant="error", id="deny"),
-            id="permission-dialog",
-        )
+            id="permission-params-box"))
+        widgets.append(Button("Allow", variant="success", id="allow"))
+        widgets.append(Button("Deny", variant="error", id="deny"))
+        # The class carries the ROW COUNT to the stylesheet. A Grid's
+        # `grid-size`/`grid-rows` are static, and this screen composes
+        # three children or four -- `ConfirmScreen` and
+        # `ProjectKindScreen` reuse `#permission-dialog` with three and
+        # must keep the template they have, or their buttons take the
+        # `1fr` row and their body stops expanding.
+        yield Grid(*widgets, id="permission-dialog",
+                   classes="with-headline" if self._headline else "")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         self.dismiss(event.button.id == "allow")

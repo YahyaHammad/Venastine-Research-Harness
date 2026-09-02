@@ -181,6 +181,33 @@ class ToolSpec:
     # None is the correct answer for every tool but one, so a
     # declaration requirement would be noise on twenty-two of them.
     rationale_param: Optional[str] = None
+    # ROADMAP_v2 §46 (EP2). Which parameter, if any, is the SUBJECT of
+    # the approval question -- the one thing a person must read before
+    # answering. `shell` sets "command"; every other tool leaves it
+    # None and its modal is unchanged.
+    #
+    # Mechanism, not policy, in the shape rationale_param established
+    # directly above: the consumer asks the registry rather than testing
+    # for the literal name `shell`, so no tool name enters core/loop.py
+    # or tui/screens.py. Two consumers need it -- the TUI modal, which
+    # PINS it outside the scroll region, and the CLI prompt, which
+    # leads with it.
+    #
+    # DISPLAY ONLY, exactly like rationale_param, and for a different
+    # reason: this value is ALSO in `params`, which the prompt renders
+    # whole. Nothing may read it to decide anything, because the thing
+    # that decides is `classify_command`, and a second reader of the
+    # same field is how the two came to disagree in #157.
+    #
+    # Why it is not just `params["command"]` at the render site: a
+    # screen that knows a parameter name knows a tool, and the modal is
+    # shared by web_search, spawn_subagent, the MCP tools and /init's
+    # confirm. EP1 pins the SUBJECT of the question, whatever the tool
+    # says that is.
+    #
+    # NO IMPORT-TIME GUARD, for rationale_param's reason: None is the
+    # correct answer for every tool but one.
+    headline_param: Optional[str] = None
 
 
 def assert_grant_policy_declared(tools: Iterable[str], specs=None) -> None:

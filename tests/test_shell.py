@@ -389,13 +389,58 @@ class TestRunSandboxedRouting:
     def ws(self, tmp_path):
         return str(tmp_path)
 
-    def test_inert_uses_light_path(self, monkeypatch, ws):
+    def test_inert_runs_in_the_container_when_there_is_one(self, monkeypatch,
+                                                           ws):
+        """§46 (EP5). The light path was a HOST subprocess resolving its
+        binary off the host PATH -- and on Windows `ls`/`cat`/`grep`
+        have no native binary at all, so it ran whichever POSIX
+        toolchain some other product had put there. Every argument of an
+        INERT command is inside the workspace, and the workspace is what
+        the container mounts, so the tier the gate AUTO-APPROVES is the
+        one that can run in the pinned image instead."""
+        monkeypatch.setattr(config, "INERT_COMMANDS", ["ls", "cat"])
+        with patch("security.sandbox._run_docker") as mock_docker, \
+             patch("security.sandbox._log_image_identity"):
+            mock_docker.return_value = {"stdout": "ok", "stderr": "",
+                                        "return_code": 0}
+            result = run_sandboxed("ls -la", ws, docker_available=True)
+        mock_docker.assert_called_once()
+        assert mock_docker.call_args.kwargs["argv"] is True, (
+            "an inert command was handed to `bash -c`, which puts a third "
+            "tokeniser between the classifier and the executor -- the gap "
+            "#157 arrived through twice")
+        assert result["ran_on"] == "container"
+        assert result["tier"] == INERT
+
+    def test_inert_falls_back_to_the_light_path_without_docker(
+            self, monkeypatch, ws):
+        """And SAYS so. The approval answer is the same either way (see
+        containment_for), so the fallback is not a gate change -- but
+        the model is told, because "host" is what it must not assume."""
         monkeypatch.setattr(config, "INERT_COMMANDS", ["ls", "cat"])
         with patch("security.sandbox._run_inert") as mock_inert:
-            mock_inert.return_value = {"stdout": "ok", "stderr": "", "return_code": 0}
-            result = run_sandboxed("ls -la", ws)
+            mock_inert.return_value = {"stdout": "ok", "stderr": "",
+                                       "return_code": 0}
+            result = run_sandboxed("ls -la", ws, docker_available=False)
         mock_inert.assert_called_once()
         assert result["stdout"] == "ok"
+        assert result["ran_on"] == "host"
+        assert result["tier"] == INERT
+
+    def test_a_host_read_always_takes_the_light_path(self, monkeypatch, ws):
+        """It names a file outside the workspace, so there is nothing
+        else it could take -- Docker being up is irrelevant."""
+        monkeypatch.setattr(config, "INERT_COMMANDS", ["ls", "cat"])
+        with patch("security.sandbox._run_inert") as mock_inert, \
+             patch("security.sandbox._run_docker") as mock_docker:
+            mock_inert.return_value = {"stdout": "ok", "stderr": "",
+                                       "return_code": 0}
+            result = run_sandboxed("cat /etc/shadow", ws,
+                                   docker_available=True)
+        mock_inert.assert_called_once()
+        mock_docker.assert_not_called()
+        assert result["ran_on"] == "host"
+        assert result["tier"] == HOST_READ
 
     def test_non_inert_docker_available(self, monkeypatch, ws):
         monkeypatch.setattr(config, "INERT_COMMANDS", ["ls"])
@@ -746,14 +791,31 @@ class TestTheFallbackFlagsStillMeanWhatTheyMeant:
         assert containment_for(classify_command("python x.py", _tiered),
                                docker_available=False) == UNAVAILABLE
 
-    def test_an_inert_command_never_probes_docker(self, _tiered):
+    def test_a_host_read_never_probes_docker(self, _tiered):
         """An ordering the pre-§28 ladder had: its inert step returned
-        before its Docker step, so `ls` never paid for a `docker info`
-        that costs up to its 10s timeout against a wedged daemon."""
+        before its Docker step, so a light-path command never paid for a
+        `docker info` that costs up to its 10s timeout against a wedged
+        daemon.
+
+        HOST_READ keeps it, and keeps it for a REASON rather than as an
+        optimisation: it names a file outside the workspace, so no
+        container could show it and the probe's answer cannot change the
+        containment. INERT lost it in §46 (EP5) -- it runs in the
+        container now, so its containment genuinely depends on whether
+        there is one. The cost is bounded by `is_docker_available` being
+        lru_cached for the process, not by skipping the call.
+        """
         with patch("tools.builtin.shell.is_docker_available") as probe:
-            _shell_approval_check("shell", {"command": "ls -la"})
             _shell_approval_check("shell", {"command": "cat /etc/shadow"})
         probe.assert_not_called()
+
+    def test_an_inert_command_now_asks_docker_where_it_will_run(self,
+                                                                _tiered):
+        """EP5's cost, stated so it is a decision rather than a drift."""
+        with patch("tools.builtin.shell.is_docker_available") as probe:
+            probe.return_value = True
+            _shell_approval_check("shell", {"command": "ls -la"})
+        probe.assert_called()
 
 
 class TestOneClassificationTwoConsumers:
@@ -901,6 +963,179 @@ class TestTheWorkspaceIsCreated:
             assert isinstance(result["stderr"], str) and result["stderr"]
 
 
+class TestTheResultSaysWhereItRan:
+    """ROADMAP_v2 §46 (EP4).
+
+    The gate has told the HUMAN where a command runs since §28 --
+    `_shell_approval_notice` says "Runs on the HOST, with your own file
+    access" in as many words. It told the MODEL nothing: `run_sandboxed`
+    returned stdout, stderr and a return code, so a host read and a
+    contained run were indistinguishable to the party that then writes
+    the user an answer about the output.
+
+    What that cost, in a real session: an agent asked which filesystem
+    it was on ran `pwd && ls -la` (metacharacters, so the container) and
+    then `cat /proc/self/mountinfo` (inert, argument outside the
+    workspace, so the host). On Windows `cat` resolves off the host
+    PATH, which on that machine meant a third party's MSYS2 build, and
+    MSYS2 synthesises /proc from its own mount table. The model read a
+    Git installation's fstab, believed it was the container's, and told
+    its user the sandbox was rooted in another product's directory with
+    the whole C: drive bind-mounted in. Every alarming sentence was
+    false and nothing it had been given could have said so.
+    """
+
+    @pytest.fixture
+    def ws(self, tmp_path):
+        return str(tmp_path)
+
+    def test_a_contained_run_says_container(self, monkeypatch, ws):
+        monkeypatch.setattr(config, "INERT_COMMANDS", ["ls"])
+        with patch("security.sandbox._run_docker") as docker, \
+             patch("security.sandbox._log_image_identity"):
+            docker.return_value = {"stdout": "", "stderr": "",
+                                   "return_code": 0}
+            result = run_sandboxed("python x.py", ws, docker_available=True)
+        assert result["ran_on"] == "container"
+        assert result["tier"] == SANDBOXED
+
+    def test_a_host_read_says_host_and_names_the_tier(self, monkeypatch, ws):
+        """Two fields, not one. "host" alone under-explains: HOST_READ on
+        the host is the design working, while INERT on the host means
+        Docker was down."""
+        monkeypatch.setattr(config, "INERT_COMMANDS", ["cat"])
+        with patch("security.sandbox._run_inert") as inert:
+            inert.return_value = {"stdout": "root:x:0:0", "stderr": "",
+                                  "return_code": 0}
+            result = run_sandboxed("cat /etc/passwd", ws,
+                                   docker_available=True)
+        assert result["ran_on"] == "host"
+        assert result["tier"] == HOST_READ
+
+    def test_the_insecure_fallback_says_host_too(self, monkeypatch, ws):
+        monkeypatch.setattr(config, "INERT_COMMANDS", ["ls"])
+        set_posture(monkeypatch, allow_insecure_fallback=True)
+        with patch("security.sandbox._run_subprocess_fallback") as fallback:
+            fallback.return_value = {"stdout": "", "stderr": "",
+                                     "return_code": 0}
+            result = run_sandboxed("python x.py", ws, docker_available=False)
+        assert result["ran_on"] == "host"
+
+    def test_every_backend_annotates(self, monkeypatch, ws):
+        """A route added later that forgets to say where it ran is the
+        defect this class exists for, so the assertion is over ROUTES
+        rather than over the three spelled out above."""
+        monkeypatch.setattr(config, "INERT_COMMANDS", ["ls", "cat"])
+        set_posture(monkeypatch, allow_insecure_fallback=True)
+        blank = {"stdout": "", "stderr": "", "return_code": 0}
+        routes = [
+            ("ls -la", True), ("ls -la", False),
+            ("cat /etc/passwd", True), ("cat /etc/passwd", False),
+            ("python x.py", True), ("python x.py", False),
+        ]
+        for command, docker in routes:
+            with patch("security.sandbox._run_docker", return_value=dict(blank)), \
+                 patch("security.sandbox._run_inert", return_value=dict(blank)), \
+                 patch("security.sandbox._run_subprocess_fallback",
+                       return_value=dict(blank)), \
+                 patch("security.sandbox._log_image_identity"):
+                result = run_sandboxed(command, ws, docker_available=docker)
+            assert result.get("ran_on") in ("host", "container"), (
+                f"{command!r} with docker={docker} came back without "
+                "saying where it ran")
+            assert result.get("tier"), command
+
+    def test_the_schema_tells_the_model_the_rule_before_it_calls(self):
+        """A result field is after the fact. The model also has to be
+        able to AVOID the mistake, which means the schema has to say
+        that an argument outside the workspace leaves the sandbox."""
+        from tools.builtin.shell import TOOL_SCHEMA
+        text = (TOOL_SCHEMA["description"] + " " + TOOL_SCHEMA[
+            "input_schema"]["properties"]["command"]["description"]).lower()
+        assert "host" in text
+        assert "outside the workspace" in text
+        assert "ran_on" in text
+
+    def test_the_notice_names_the_binary_a_host_read_will_execute(self,
+                                                                  _tiered):
+        """§46 (EP8). "Runs on the host" understates it on Windows,
+        where ls/cat/grep have no native binary and the inert path takes
+        whatever is first on PATH -- on the machine where this was
+        found, another product's bundled cat.exe."""
+        import shutil as _shutil
+        with patch.object(_shutil, "which",
+                          return_value=r"C:\other\product\cat.exe"):
+            notice = _shell_approval_notice({"command": "cat /etc/passwd"})
+        assert r"C:\other\product\cat.exe" in notice
+        assert "HOST" in notice
+
+    def test_the_notice_says_nothing_about_a_binary_it_cannot_resolve(
+            self, _tiered):
+        import shutil as _shutil
+        with patch.object(_shutil, "which", return_value=None):
+            notice = _shell_approval_notice({"command": "cat /etc/passwd"})
+        assert "resolves to" not in notice
+
+    def test_resolving_the_binary_is_total(self, _tiered):
+        """Same requirement classify_command has, one layer down: this
+        runs inside registry.approval_needed(), which is handed the
+        model's tool input verbatim, and shutil.which raises on a
+        non-string."""
+        for command in ([], {"a": 1}, None, 42, "", "   "):
+            assert isinstance(_shell_approval_notice({"command": command}),
+                              str)
+
+
+class TestOurContainersAreIdentifiable:
+    """ROADMAP_v2 §46 (EP7).
+
+    Not the cause of anything yet, and recorded as such. But
+    SANDBOX_DOCKER_IMAGE is a TAG, and a tag is not an identity:
+    anything on the machine can build or pull a different image under
+    the same name and this harness would run inside it silently. The
+    label answers the other half -- `docker ps` could not previously
+    tell a container of ours from any other tool's, since the name is a
+    bare uuid.
+    """
+
+    def test_the_container_carries_our_label(self):
+        with patch("security.sandbox.subprocess.Popen") as popen:
+            proc = MagicMock()
+            proc.communicate.return_value = ("", "")
+            proc.returncode = 0
+            popen.return_value = proc
+            _run_docker("ls", "/tmp/ws")
+        args = popen.call_args[0][0]
+        assert "--label" in args
+        assert args[args.index("--label") + 1] == "venastine.sandbox=1"
+
+    def test_the_resolved_image_id_is_logged_once(self, caplog):
+        import security.sandbox as sandbox
+        sandbox._log_image_identity._said = False
+        sandbox._resolved_image_id.cache_clear()
+        with patch("security.sandbox.subprocess.run") as run:
+            run.return_value = MagicMock(returncode=0,
+                                         stdout="sha256:abc123\n")
+            with caplog.at_level("INFO", logger="security.sandbox"):
+                sandbox._log_image_identity()
+                sandbox._log_image_identity()
+        sandbox._log_image_identity._said = False
+        sandbox._resolved_image_id.cache_clear()
+        said = [r for r in caplog.records if "resolves to" in r.message]
+        assert len(said) == 1, "the image line is per-process, not per-run"
+        assert "sha256:abc123" in said[0].getMessage()
+
+    def test_an_unresolvable_image_does_not_stop_a_run(self):
+        """Diagnostic, so a failure here must not fail a run Docker
+        itself is about to accept."""
+        import security.sandbox as sandbox
+        sandbox._resolved_image_id.cache_clear()
+        with patch("security.sandbox.subprocess.run",
+                   side_effect=FileNotFoundError):
+            assert sandbox._resolved_image_id("python:3.13-slim") == ""
+        sandbox._resolved_image_id.cache_clear()
+
+
 class TestTheTierVocabularyStaysCoherent:
 
     def test_inert_and_network_command_lists_are_disjoint(self):
@@ -915,14 +1150,45 @@ class TestTheTierVocabularyStaysCoherent:
             "ls", "cat /etc/shadow", "python x.py", "curl https://x", "")}
         assert seen == {INERT, HOST_READ, SANDBOXED, SANDBOXED_NET, UNKNOWN}
 
-    def test_inert_and_host_read_are_both_uncontained(self, tmp_path):
-        """Naming a tier "inert" never made it contained -- the light path
-        is a HOST subprocess. Reading that tier as safe is what #157
-        was."""
-        for command in ("ls", "cat /etc/shadow"):
+    def test_a_host_read_is_uncontained_however_healthy_docker_is(
+            self, tmp_path):
+        """Naming a tier "inert" never made it contained, and #157 was
+        reading it as though it did.
+
+        HOST_READ is the half of that which cannot be fixed by routing:
+        its defining property is an argument outside the workspace, so
+        the container has nothing to show it and UNCONTAINED is the
+        truth rather than a shortfall.
+        """
+        profile = classify_command("cat /etc/shadow", str(tmp_path))
+        assert containment_for(profile, docker_available=True) == UNCONTAINED
+        assert containment_for(profile, docker_available=False) == UNCONTAINED
+
+    def test_an_inert_command_is_contained_when_there_is_a_container(
+            self, tmp_path):
+        """§46 (EP5). Every argument is inside the workspace and the
+        workspace is what the container mounts, so the tier the gate
+        auto-approves is the tier that can run in a pinned image."""
+        profile = classify_command("ls -la", str(tmp_path))
+        assert containment_for(profile, docker_available=True) == CONTAINED
+        assert containment_for(profile, docker_available=False) == UNCONTAINED
+
+    def test_moving_inert_into_the_container_did_not_move_the_gate(
+            self, tmp_path):
+        """The approval answer must be identical under either
+        containment, or EP5 would have quietly changed what gets asked
+        about as a side effect of changing where things run.
+
+        It holds because an INERT profile has escapes_workspace and
+        writes False by construction, and because INERT_COMMANDS and
+        NETWORK_ALLOWED_COMMANDS are disjoint -- which the test above
+        pins, and which is what makes `not network` and
+        `not (escapes or writes or network)` the same answer here.
+        """
+        for command in ("ls -la", "cat notes.txt", "grep x notes.txt"):
             profile = classify_command(command, str(tmp_path))
-            assert containment_for(
-                profile, docker_available=True) == UNCONTAINED
+            assert (auto_approved(profile, CONTAINED)
+                    is auto_approved(profile, UNCONTAINED)), command
 
 
 class TestShellApprovalModeIsRejectedBySettingsJson:

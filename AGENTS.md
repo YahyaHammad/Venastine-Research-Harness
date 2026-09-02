@@ -44,7 +44,7 @@ python main.py --init --research-project           # §24: skip the type questio
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 3313 tests, offline, ~25-45s by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 3343 tests, offline, ~25-45s by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -127,7 +127,7 @@ published npm version can never be replaced — only deprecated.
 Read these before changing anything non-trivial — they carry design decisions that are locked, not defaults to re-derive.
 
 - **ARCHITECTURE.md** — what's built, file-by-file contracts ("what belongs here / what does NOT"), known gotchas (§11).
-- **ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **ROADMAP_v2.md** (§13–§45, all built) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I13 from §24, J1–J14 from §23, E1–E12 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A11 from §32, W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37, O1–O8 from §38 Q1–Q6 from §39, UN1–UN6 from §40, X1–X7 from §41, RA1–RA6 from §42, RM1–RM6 from §43, WS1–WS10 from §44 and SQ1–SQ10 from §45). Section and D-numbers are stable and cross-referenced everywhere.
+- **ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **ROADMAP_v2.md** (§13–§45, all built) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I13 from §24, J1–J14 from §23, E1–E12 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A11 from §32, W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37, O1–O8 from §38 Q1–Q6 from §39, UN1–UN6 from §40, X1–X7 from §41, RA1–RA6 from §42, RM1–RM6 from §43, WS1–WS10 from §44, SQ1–SQ10 from §45 and EP1–EP8 from §46). Section and D-numbers are stable and cross-referenced everywhere.
 
 **Six namespaces use the same `LETTER+NUMBER` shape, and only the first is the
 record.** An id that resolves to two places is a cross-reference that fails
@@ -339,6 +339,28 @@ same defect as one that reflows a paragraph.
 Two things in `tui/app.py` are load-bearing and easy to break silently:
 - **`run_worker(..., exit_on_error=False)` + `on_worker_state_changed`.** Textual's default tears the whole app down on a transient worker exception.
 - **Every permission dismissal path must put a boolean on the channel.** The worker blocks inside `_run()` on `permission_channel.get()`; a dismissal carrying `None`, or one that puts nothing, hangs it forever. That is why the AC2 tests assert on the *dispatched tool*, not on the modal rendering.
+
+**A modal's LAYOUT is part of its contract, and asserting on its text is not testing it**
+(§46, EP1/EP3). This cost four consent surfaces at once. `#permission-dialog` had
+`grid-rows: auto 1fr auto` with `height: auto`, and a fractional row inside an auto-height
+container resolves to **zero** — so `#permission-params` drew at `region.height == 0` and
+`virtual_size.height == 0`, and every tool approval, the subagent sign-off, `/init`'s
+confirmation and `/init`'s project-kind question rendered their titles, their buttons and
+none of their substance. It shipped because every assertion about these screens reads
+`.visual._renderable.plain`, the string a widget was BUILT from, which a widget of zero
+height still reports in full.
+
+Three rules follow, and the first two are the ones a reasonable person gets wrong:
+
+- **`height: auto` on a scrollable container is also zero**, so a bound that should scroll
+  needs a DEFINITE height. The two spellings that read as "grow to fit, then scroll" are the
+  two that render nothing.
+- **`max-height` on a `Static` truncates without scrolling.** A Static's `virtual_size`
+  follows its clamped box rather than its content, so `max_scroll_y` is 0 and the hidden rows
+  are gone, not below the fold. Bound a `ScrollBox` and put the text in an auto-height child.
+- **Assert on the rendered REGION.** `test_every_modal_actually_draws_its_body` walks every
+  modal in `_modal_cases()` and fails any widget that carries text and was allocated no rows;
+  `test_every_modal_is_centred_bounded_and_styled` still pins the 80×24 floor beside it.
 
 ### MCP (`mcp_client/`, §17)
 
@@ -710,10 +732,44 @@ assert what the user was asked and whether it carried a deadline.
 A mutation that strands a reader **hangs** the suite rather than failing it, since two read paths now
 have no deadline. The mutation harness reports HANG as its own outcome.
 
-### The shell gate (`§28`, G1–G7)
+### The shell gate (`§28`, G1–G7; routing and disclosure amended by `§46`, EP4–EP8)
 
 Read §28's record before touching `security/sandbox.py`, `security/capability.py` or
-`_shell_approval_check`. The four things most likely to be re-derived wrongly:
+`_shell_approval_check`, and §46's before touching where a command RUNS. The four things most
+likely to be re-derived wrongly:
+
+- **INERT runs in the CONTAINER; only HOST_READ takes the host path** (EP5). This inverts what
+  §28 shipped and what the older comments in this file describe, so it is first. The argument is
+  the tier's own definition: INERT means every argument resolves inside the workspace, which is
+  the directory the container mounts, so the tier the gate AUTO-APPROVES can run against a pinned
+  image's coreutils. HOST_READ is defined by an argument the container *cannot see*, so it has
+  exactly one backend — and `auto_approved` never covers it, because `escapes_workspace` is True.
+  Docker being down falls INERT back to the host; that changes nothing about the approval answer
+  (`containment_for` explains why, and a test pins it) and is reported to the model as
+  `ran_on: "host"`.
+- **`containment_for` and `run_sandboxed` are ONE decision written twice** (EP6). Drift between
+  them is what #157 was. Change the routing in one and you change it in the other, in the same
+  commit, or a command is auto-approved as one thing and executed as another.
+- **Every result says where it ran, and `shell.run()`'s error paths must not** (EP4). `ran_on` and
+  `tier` are added at `run_sandboxed`'s routing sites. The gate had told the *human* "Runs on the
+  HOST, with your own file access" since §28 and told the *model* nothing, so a host read and a
+  contained run were indistinguishable to the party that writes the user an answer about the
+  output. An `{"error": ...}` never executed anything and annotating one would claim a run that
+  did not happen.
+- **On Windows the host path resolves its binary off the user's PATH, and this is disclosed, not
+  fixed** (EP8). `ls`, `cat` and `grep` have no native Windows binary, so whichever POSIX
+  toolchain is first on PATH is what runs — on the machine where this was found, one shipped by
+  unrelated software. `_is_inert` rejects a path-qualified binary so a planted one cannot be
+  NAMED; PATH lookup reaches the same place from the other side. After EP5 it applies to one tier
+  that always asks a human, and the notice reports the resolved absolute path. **Do not "fix" this
+  by resolving from `AGENT_WORKSPACE`** — that directory is model-writable, so it would let the
+  model plant a binary and have the harness execute it on the host under an auto-approval. §46's
+  Rejected section has the rest.
+- **`SANDBOX_DOCKER_IMAGE` is a tag, not an identity** (EP7). The resolved image ID is logged once
+  per process and containers carry `--label venastine.sandbox=1`. Digest-pinning was considered
+  and deferred.
+
+And the four from §28 itself:
 
 - **`SHELL_APPROVAL_MODE` is the gate; `ToolApprovals.shell` is the ratchet** (G3). The
   field ships `False` and that does NOT mean "never ask". It cannot be the gate:

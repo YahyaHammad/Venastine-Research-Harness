@@ -397,8 +397,8 @@ def classify_command(command: str, workspace_dir: str) -> CommandProfile:
                 writes=False,
                 network=network,
                 reason=(f"reads {stripped.split()[0]!r} with an argument "
-                        f"outside the workspace, and inert commands run on "
-                        f"the host"))
+                        f"outside the workspace, which no container "
+                        f"can see"))
         return CommandProfile(
             tier=INERT, measured=True, escapes_workspace=False,
             writes=False,
@@ -426,20 +426,45 @@ def containment_for(
     """Which containment the backend that will actually run *profile*
     provides -- the second half of what the gate needs.
 
-    This mirrors run_sandboxed()'s routing exactly and must keep doing so.
-    Note INERT and HOST_READ both map to UNCONTAINED: the inert light path
-    is a HOST subprocess, and calling it "inert" never made it contained.
-    Reading that tier as safe is what #157 was.
+    This mirrors run_sandboxed()'s routing exactly and must keep doing so
+    (§46, EP6). The two functions are one decision written twice, and
+    #157 is what it costs when they drift: a command auto-approved as
+    harmless by one and executed on the host by the other.
+
+    HOST_READ IS UNCONTAINED AND ALWAYS WILL BE. Its whole definition is
+    an argument that resolves outside the workspace, which is exactly
+    what a container cannot see -- so there is nothing to route it to.
+    `auto_approved` never covers it either (`escapes_workspace` is True),
+    so it is the tier that always asks.
+
+    INERT IS DIFFERENT SINCE §46 (EP5), and the difference is a fact
+    about its definition rather than a preference: every argument is
+    inside the workspace, and the workspace is the thing the container
+    mounts. So the tier the gate AUTO-APPROVES can be the tier that runs
+    in a pinned image, instead of running on the host against whatever
+    `ls` or `cat` happens to be first on PATH -- which on Windows, where
+    none of those binaries exists natively, is a third party's.
+
+    It falls back to the host when Docker is down, and that is not a
+    hole: the approval answer is identical either way. Under CONTAINED
+    `auto_approved` returns `not network`, under UNCONTAINED it returns
+    `not (escapes_workspace or writes or network)`, and an INERT profile
+    has the first two False by construction while
+    `INERT_COMMANDS` and `NETWORK_ALLOWED_COMMANDS` do not intersect.
+    Pinned by test_shell.py so a word added to either list cannot make
+    that quietly untrue.
 
     *docker_available* is required rather than probed here. Probing would
     put subprocess IO inside a predicate, and it would move the probe out
     from under the callers that pre-compute it for the TOCTOU thread --
     the same reason run_sandboxed takes it instead of asking.
     """
-    if profile.tier in (INERT, HOST_READ):
+    if profile.tier == HOST_READ:
         return UNCONTAINED
     if docker_available:
         return CONTAINED
+    if profile.tier == INERT:
+        return UNCONTAINED
     if posture.current().allow_insecure_fallback:
         return UNCONTAINED
     return UNAVAILABLE
@@ -528,6 +553,88 @@ def _run_inert(
 # ---------------------------------------------------------------------------
 
 
+@functools.lru_cache(maxsize=8)
+def _resolved_image_id(image: str) -> str:
+    """The image ID `docker run` will actually use for *image*, or "".
+
+    §46 (EP7). `SANDBOX_DOCKER_IMAGE` is a TAG, and a tag is not an
+    identity: anything on the machine may `docker build -t
+    python:3.13-slim .` or pull a different digest under the same name,
+    and this harness would run inside it without a word. That was the
+    shape of the contamination a user suspected when a sandboxed
+    command reported a filesystem nobody recognised -- it was not what
+    happened that time, and it is still worth being able to see.
+
+    LOGGED, NOT ENFORCED. Pinning by digest is a separate decision with
+    a maintenance cost (somebody has to bump it), while a line in
+    app.log naming the ID costs one cached subprocess per process and
+    turns a silent substitution into a visible one.
+
+    Failure is not an error here: the image ID is diagnostic, and a
+    `docker image inspect` that fails must not stop a run that Docker
+    itself is about to accept.
+    """
+    try:
+        result = subprocess.run(
+            ["docker", "image", "inspect", "--format", "{{.Id}}", image],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return ""
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def _log_image_identity() -> None:
+    """Say once per process which image the sandbox resolves to (EP7)."""
+    image = config.SANDBOX_DOCKER_IMAGE
+    resolved = _resolved_image_id(image)
+    if _log_image_identity._said:
+        return
+    _log_image_identity._said = True
+    logger.info("Sandbox image %s resolves to %s", image,
+                resolved or "an id docker would not report")
+
+
+_log_image_identity._said = False
+
+
+def _annotate(result: dict, profile: CommandProfile, ran_on: str) -> dict:
+    """Record WHERE a command ran, in the result the model reads (§46, EP4).
+
+    The gate has always told the HUMAN this -- `_shell_approval_notice`
+    says "Runs on the HOST, with your own file access" in as many words
+    -- and never told the model anything at all. `run_sandboxed`
+    returned stdout, stderr and a return code, so a HOST_READ and a
+    contained run were indistinguishable to the only party that then
+    writes the user an answer about them.
+
+    That is not hypothetical. An agent asked what filesystem it was on
+    ran `pwd && ls -la` (metacharacters, so: container) and then `cat
+    /proc/self/mountinfo` (inert, argument outside the workspace, so:
+    host). On Windows `cat` resolves off the host PATH, which on the
+    machine in question meant a third party's MSYS2 build, and MSYS2
+    SYNTHESISES /proc from its own mount table. The model read a Git
+    installation's fstab, believed it was reading the container's, and
+    reported to its user that the sandbox was rooted in another
+    product's directory and had the whole C: drive bind-mounted in.
+    Every alarming sentence in that report was false, and nothing it
+    had been given could have told it so.
+
+    `tier` travels beside `ran_on` because "host" alone under-explains:
+    HOST_READ on the host is the design working, while INERT on the
+    host means Docker was down. Two facts, so two fields.
+
+    An `{"error": ...}` from `shell.run()` is deliberately NOT annotated
+    -- those paths never executed anything, and a `ran_on` on one would
+    claim a run that never happened.
+    """
+    if not isinstance(result, dict):
+        return result
+    result["ran_on"] = ran_on
+    result["tier"] = profile.tier
+    return result
+
+
 def _venastine_readonly_mount(workspace_real: str) -> list[str]:
     """A nested read-only bind for `.venastine/`, or nothing (§28 G6).
 
@@ -582,11 +689,21 @@ def _run_docker(
     workspace_dir: str,
     _shell_binary: str = "",
     network: bool = False,
+    argv: bool = False,
 ) -> dict:
     """Run a command inside a Docker container with the workspace
     mounted as a volume. On timeout, the container is explicitly
     killed via ``docker kill`` to prevent orphaned containers from
     continuing to write to the host via the volume mount.
+
+    *argv* runs the command as a pre-split argument vector instead of
+    through ``bash -c`` (§46, EP5). Only INERT commands set it, and
+    only they may: `_is_inert` rejects every shell metacharacter, so
+    `command.split()` and `shlex.split(command)` are provably the same
+    list (Q1/Q5) and there is no shell syntax left to interpret.
+    Handing those to bash anyway would insert a third tokeniser between
+    the classifier and the executor, and the gap between two of them is
+    where #157 arrived, twice.
     """
     workspace_real = os.path.realpath(workspace_dir)
     container_name = f"sandbox-{uuid.uuid4().hex[:12]}"
@@ -594,6 +711,11 @@ def _run_docker(
     docker_args = [
         "docker", "run", "--rm",
         "--name", container_name,
+        # §46 (EP7). Ours, and findable as ours. The name is a uuid, so
+        # `docker ps` could not tell a container of ours from any other
+        # tool's -- which matters when you are trying to work out
+        # whether something on your machine is this harness.
+        "--label", "venastine.sandbox=1",
         "-v", f"{workspace_real}:/workspace",
         "-w", "/workspace",
         "--memory", f"{config.SANDBOX_MEMORY_MB}m",
@@ -615,7 +737,10 @@ def _run_docker(
 
     docker_args.extend(["-e", "PATH=/usr/bin:/bin:/usr/local/bin"])
     docker_args.append(config.SANDBOX_DOCKER_IMAGE)
-    docker_args.extend(["bash", "-c", command])
+    if argv:
+        docker_args.extend(shlex.split(command))
+    else:
+        docker_args.extend(["bash", "-c", command])
 
     proc = None
     try:
@@ -795,9 +920,12 @@ def run_sandboxed(
     if profile is None:
         profile = classify_command(command, workspace_dir)
 
-    if profile.tier in (INERT, HOST_READ):
-        logger.debug("Inert command, using light path: %s", command[:80])
-        return _run_inert(command, workspace_dir, shell_binary)
+    # HOST_READ names a file the container cannot see, so it has exactly
+    # one backend and takes it before Docker is even considered.
+    if profile.tier == HOST_READ:
+        logger.debug("Host read, using light path: %s", command[:80])
+        return _annotate(_run_inert(command, workspace_dir, shell_binary),
+                         profile, "host")
 
     # Use pre-computed Docker status if provided (fixes TOCTOU),
     # otherwise probe now.
@@ -809,13 +937,44 @@ def run_sandboxed(
         logger.debug(
             "Docker path (network=%s): %s", network, command[:80],
         )
-        return _run_docker(command, workspace_dir, shell_binary, network)
+        # HERE rather than inside _run_docker, which stays a function
+        # that builds an argv and opens one process. Putting a second
+        # subprocess in there would put it on the timeout and kill
+        # paths too, and it collides with every test that patches Popen
+        # to inspect the argv -- subprocess.run goes through Popen.
+        _log_image_identity()
+        return _annotate(
+            _run_docker(command, workspace_dir, shell_binary, network,
+                        # §46 (EP5). An inert command has no
+                        # metacharacters by construction, so it needs no
+                        # shell -- and giving it one would put a THIRD
+                        # tokeniser between the classifier and the
+                        # executor, which is the gap #157 came through
+                        # twice. argv keeps the `shell=False` semantics
+                        # the light path always had.
+                        argv=(profile.tier == INERT)),
+            profile, "container")
+
+    # §46 (EP5). Docker is down. An inert command still has somewhere to
+    # go -- the light path it used to take unconditionally -- and the
+    # approval answer is the same under either containment (see
+    # containment_for). What the model is told changes, and that is the
+    # point of saying it: `ran_on` reports "host" here.
+    if profile.tier == INERT:
+        logger.debug(
+            "Docker unavailable, inert command on the host: %s",
+            command[:80],
+        )
+        return _annotate(_run_inert(command, workspace_dir, shell_binary),
+                         profile, "host")
 
     if posture.current().allow_insecure_fallback:
         logger.warning(
             "Using INSECURE subprocess fallback: %s", command[:80],
         )
-        return _run_subprocess_fallback(command, workspace_dir, shell_binary)
+        return _annotate(
+            _run_subprocess_fallback(command, workspace_dir, shell_binary),
+            profile, "host")
 
     raise SandboxUnavailable(
         "Docker is not available and ALLOW_INSECURE_SANDBOX_FALLBACK is "

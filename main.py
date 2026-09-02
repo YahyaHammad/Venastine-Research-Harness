@@ -531,6 +531,16 @@ def build_attended_provider(honour_run_scope: bool = False,
 
     def _approval(request) -> bool:
         print(f"\n[approval] {request.payload.get('tool_name')}")
+        # §46 (EP1). The subject of the question, first. The TUI pins it
+        # because a modal has a bottom edge; a terminal does not, so
+        # here it is placement rather than rescue -- but a kind one
+        # shell renders and the other drops is D12's wired-up-but-
+        # invisible gap, the same argument that put the reason below in
+        # both. None for every tool that declares no headline.
+        headline = request.payload.get("headline")
+        if headline:
+            for line in str(headline).splitlines():
+                print(f"  $ {line}")
         if request.notice:
             print(f"  {request.notice}")
         # §42 (RA6). Same order as the modal -- the computed notice,

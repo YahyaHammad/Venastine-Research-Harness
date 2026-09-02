@@ -3754,3 +3754,83 @@ reasoning changing with it is one that gets changed back.
   vectors. Boilerplate removal is a bigger, separately-arguable change.
 - **Forwarding tool result bodies to the UI.** The corpus is a second sink. §26's boundary is not
   relaxed to build it.
+
+---
+
+## §46. Where a command runs, and whether anyone can see it
+
+**Status: BUILT** (batch 47). Two defects, both found from real use rather than from the tests, and
+both the same shape: the shell gate DECIDED correctly and then failed to tell somebody what it had
+decided. One failed to tell the user, the other failed to tell the model.
+
+**The permission modal was not drawing its body at all.** The reported symptom was narrower — a
+user noticed the shell command appeared in the transcript and nowhere on the modal asking them to
+approve it — and the obvious reading was that RA6's ordering (notice, then the agent's stated
+reason, then the payload) had pushed `"command"` below a `max-height: 10`. That reading was wrong.
+`#permission-params` sat in a `1fr` grid row inside a `height: auto` dialog, and a fractional row
+in an auto-height container resolves to **zero**. Measured against the previous commit in a
+worktree: `region.height == 0` and `virtual_size.height == 0`, with the content present in the
+widget's renderable. Not clipped and scrollable — absent, with nothing to scroll to.
+
+**Four consent surfaces, not one.** `ConfirmScreen`, `ProjectKindScreen` and
+`SubagentSignoffScreen`'s empty branch all reuse `#permission-dialog`. So every tool approval, the
+subagent sign-off, `/init`'s confirmation and `/init`'s project-kind question (277 characters of
+explanation) had been drawing their titles, their buttons, and none of their substance.
+
+**Nothing caught it because nothing looked at the screen.** Every assertion about these modals
+reads `.visual._renderable.plain` — the string the widget was built from, which a widget of zero
+height still reports in full. `test_the_modal_shows_the_reason_below_the_computed_notice` was green
+throughout, asserting the reading order of text nobody could read.
+
+**And the model was never told where its command ran.** `run_sandboxed` returned `stdout`, `stderr`
+and `return_code`; `registry.dispatch` passed them through. A HOST_READ and a contained run were
+indistinguishable to the party that then writes the user an answer about the output — while
+`_shell_approval_notice` had been telling the *human* "Runs on the HOST, with your own file access"
+since §28.
+
+What that cost, in a live session on Windows: an agent asked which filesystem it was on ran
+`pwd && ls -la` (metacharacters, so SANDBOXED, so the container) and then `cat /proc/self/mountinfo`
+(inert, argument outside the workspace, so HOST_READ, so a host subprocess). `_scrubbed_env` forces
+a known-good `PATH` only on POSIX, and `ls`/`cat`/`grep` have no native Windows binary — so `cat`
+resolved off the host PATH to an unrelated product's bundled MSYS2 build, and the MSYS2 runtime
+**synthesises** `/proc/self/mountinfo` from its own `etc/fstab`. The model read a Git-for-Windows
+installation's mount table, believed it was the container's, and reported to its user that the
+sandbox was rooted inside another product's directory, that `/tmp` was mounted read-write from the
+host's temp directory, and that the whole `C:` drive was bind-mounted in. Every alarming sentence
+was false about this harness, and nothing the model had been given could have told it so.
+
+The suspected cause — a container selected by image name and contaminated by other software using
+the same `python:3.13-slim` base — was ruled out by inspection: nothing in the repository lists,
+filters, attaches to or reuses a container. `_run_docker` always creates a fresh
+`docker run --rm --name sandbox-<uuid>`. The real cause is above, and it is worse.
+
+### Design Decisions Record — §46 (EP1–EP8)
+
+| id | decision |
+|---|---|
+| **EP1** | **The subject of an approval question is pinned, outside the scroll region, and every row of the dialog is `auto`.** RA6 ranked three things — the harness's computed notice, the agent's unverified claim, the payload — and the command is none of them: it is what all three are *about*, so it is lifted out of the ranking rather than moved up it. RA6's order survives intact below it. The `1fr` row goes with it: a fractional row inside a `height: auto` container is zero, which is not a bound but an erasure, and the same rule governed four modals. What bounds a long payload now is a definite height on a real scroll box |
+| **EP2** | **The subject travels as a resolved string via `ToolSpec.headline_param`**, mirroring `rationale_param` exactly — declared by the tool, resolved by the registry, rendered by two shells that name no parameter. `shell` sets `"command"`; every other tool leaves it `None` and its modal is unchanged. `headline_for` returns `None` rather than coercing a non-string, because `classify_command` is total precisely so the model's unvalidated input can reach the gate: coercing `['cat', '/etc/passwd']` to a string would put a fabricated command in the one place on the screen that must be verbatim. DISPLAY ONLY — the value is also in `params`, and a second reader of a field the classifier owns is how #157's two readers came to disagree |
+| **EP3** | **A bound that hides text must leave the text reachable, which needs a scroll CONTAINER and a definite height.** Two spellings read as "clip it and let them scroll" and neither does: `Static` is not focusable on the pinned textual 1.0.0, so its scrollbar is mouse-only; and worse, a `Static`'s `virtual_size` follows its clamped box rather than its content, so `max_scroll_y` was 0 and the hidden rows were gone rather than below the fold — measured at nine lines of payload in a seven-row block with `End` doing nothing. Making the Static focusable would have fixed the half that looks broken and left the truncation exactly where it was. A scrollable container asked for `height: auto` resolves to zero, so the height must be definite: the two failure modes are adjacent, and both render nothing |
+| **EP4** | **Every shell result says where it ran** — `ran_on` (`"container"` / `"host"`) and `tier` — and the schema states the routing rule before the model calls. Two fields rather than one because `"host"` alone under-explains: HOST_READ on the host is the design working, INERT on the host means Docker was down. Annotation happens at `run_sandboxed`'s routing sites, the only place that knows; `shell.run()`'s `{"error": ...}` paths are deliberately NOT annotated, because they never executed anything and a `ran_on` on one would claim a run that never happened |
+| **EP5** | **INERT runs in the container; HOST_READ cannot and always asks.** INERT means every argument resolves inside the workspace, and the workspace is what the container mounts — so the tier the gate AUTO-APPROVES is the one that can run against a pinned image's coreutils instead of against whatever POSIX toolchain is first on the host's PATH. HOST_READ is defined by an argument the container cannot see, so it has exactly one backend, and `auto_approved` never covers it anyway (`escapes_workspace` is True). The command is handed to the container as an argv rather than through `bash -c`: `_is_inert` has already rejected every metacharacter, so there is no shell syntax left to interpret, and adding one would put a third tokeniser between the classifier and the executor — the gap #157 arrived through twice. Docker being down falls back to the host, which changes nothing about the approval answer and is reported as `ran_on: "host"` |
+| **EP6** | **`containment_for` and `run_sandboxed` are one decision written twice, and EP5 changes both or neither.** The drift between them is what #157 was. The approval answer is unchanged by EP5 and that is a property to be pinned, not assumed: under CONTAINED `auto_approved` returns `not network`, under UNCONTAINED `not (escapes_workspace or writes or network)`, and an INERT profile has the first two False by construction while `INERT_COMMANDS` and `NETWORK_ALLOWED_COMMANDS` are disjoint. A word added to either list could make that quietly untrue, so a test asserts the two answers agree rather than asserting today's value |
+| **EP7** | **Our containers are labelled and the resolved image ID is logged once per process.** `SANDBOX_DOCKER_IMAGE` is a TAG, and a tag is not an identity — anything on the machine can build or pull a different image under the same name and this harness would run inside it silently. Logged rather than digest-pinned: pinning has a maintenance cost and a bump nobody makes is its own failure, while a line in `app.log` turns a silent substitution into a visible one. `--label venastine.sandbox=1` answers the other half, since a bare uuid name could not tell a container of ours from any other tool's. The probe lives at the routing site, not inside `_run_docker`, which stays a function that builds an argv and opens one process |
+| **EP8** | **The Windows host-PATH resolution is a named limit of HOST_READ, and the prompt names the binary.** `_is_inert` rejects a path-qualified binary (`./ls`) precisely so a workspace-planted one cannot be NAMED; PATH lookup reaches the same place from the other side, and the harness does not choose what is on the PATH. After EP5 this applies to one tier, which always asks a human — so the fix is disclosure, not enforcement: the notice reports the absolute path `shutil.which` resolves. Resolution is total, like everything else the gate calls, because the model's input reaches it unvalidated |
+
+### Rejected
+
+- **Resolving inert binaries from `AGENT_WORKSPACE`.** The workspace is model-writable — the
+  container mounts it `rw` and `file_ops` auto-approves writes inside it — so the model could plant
+  `workspace/cat.exe`, call `cat notes.txt`, be auto-approved at tier INERT, and have the harness
+  execute model-authored code on the host with the user's authority. That is exactly the attack
+  `_is_inert`'s path-qualified rejection exists to prevent, arrived at from the other direction.
+- **Bundling a first-party POSIX toolchain, or installing one from upstream.** It would not have
+  prevented the report that prompted it: `/proc` is synthesised by the MSYS2 *runtime*, not by the
+  binary, so our own MSYS `cat` prints the same shape of table naming our own install. Measured —
+  two different `cat.exe` builds on the same machine produced byte-identical output. And vendoring
+  GPL-3.0 coreutils would trigger a distribution obligation that `THIRD_PARTY_NOTICES.md`'s "the
+  npm channel adds no licence surface at all" currently avoids, while an installer that fetches
+  them adds a download, a checksum-pinning duty, a platform matrix and an update obligation.
+- **Digest-pinning `SANDBOX_DOCKER_IMAGE`.** See EP7. Worth revisiting; not worth coupling to this.
+- **Making `Static` focusable instead of wrapping it.** See EP3 — it fixes the visible half of the
+  problem and leaves the truncation.

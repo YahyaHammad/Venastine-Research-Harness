@@ -5,12 +5,31 @@ Shell execution tool (ROADMAP §7). Runs commands in the detected shell
 (bash on Linux/macOS, PowerShell on Windows) through the sandbox module
 (security/sandbox.py).
 
-SANDBOX MODEL:
-  Inert commands (read-only inspection from config.INERT_COMMANDS with
-  no shell metacharacters) run via a lightweight subprocess — no Docker
-  or fallback config needed. Non-inert commands go through Docker
-  (strong isolation) or the explicit subprocess fallback (weak
-  isolation, requires ALLOW_INSECURE_SANDBOX_FALLBACK=True).
+SANDBOX MODEL (ROADMAP_v2 §46 moved one tier of this):
+  Almost everything runs in Docker. The one exception is HOST_READ --
+  a read-only command from config.INERT_COMMANDS whose argument
+  resolves OUTSIDE the workspace -- which runs as a host subprocess
+  because the file it names is one no container can see. It always
+  requires approval, and the prompt names the resolved binary.
+
+  INERT (every argument inside the workspace) used to take that same
+  host path, on the argument that a read-only command needs no
+  isolation. §46 (EP5) moved it into the container: it is the tier the
+  gate AUTO-APPROVES, and on Windows `ls`/`cat`/`grep` have no native
+  binary, so the host path was resolving them off the user's PATH and
+  executing whichever POSIX toolchain some other product had installed.
+  Inside the container they are the pinned image's coreutils. It falls
+  back to the host when Docker is down, which changes nothing about the
+  approval answer (see security/sandbox.containment_for) and is
+  reported to the model as `ran_on: "host"`.
+
+  Non-inert commands go through Docker (strong isolation) or the
+  explicit subprocess fallback (weak isolation, requires
+  ALLOW_INSECURE_SANDBOX_FALLBACK=True).
+
+  EVERY result carries `ran_on` and `tier` (EP4). The human was always
+  told where a command would run; the model never was, and it is the
+  one that writes the user an answer about the output.
 
 APPROVAL MODEL (ROADMAP_v2 §28):
   config.SHELL_APPROVAL_MODE is the gate -- "always", "tiered" or
@@ -43,6 +62,7 @@ FILE ACCESS:
 from __future__ import annotations
 
 import logging
+import shutil
 
 from pydantic import BaseModel, Field
 
@@ -103,11 +123,17 @@ class ShellParams(BaseModel):
         ...,
         min_length=1,
         description=(
-            "Shell command to execute. Interpreted by the detected shell "
-            f"({_SHELL_DISPLAY}). Inert read-only commands (ls, cat, grep, "
-            "etc.) run without full sandbox isolation. All other commands "
-            "run inside a Docker container (or the explicit subprocess "
-            "fallback)."
+            "Shell command to execute. WHERE it runs depends on its "
+            "arguments, and the result tells you which happened: read "
+            "`ran_on` before drawing any conclusion about the machine "
+            "you are on. A read-only command (ls, cat, grep, etc.) "
+            "whose arguments all resolve INSIDE the workspace runs in "
+            "the container. The same command with an argument OUTSIDE "
+            "the workspace runs ON THE HOST, with the user's own file "
+            "access and the host's own PATH -- it is not sandboxed, and "
+            "what it reads is the real machine, not the container. "
+            "Everything else runs in the container, with the workspace "
+            f"mounted at /workspace. Interpreted by {_SHELL_DISPLAY}."
         ),
     )
     rationale: str = Field(
@@ -126,13 +152,15 @@ class ShellParams(BaseModel):
 TOOL_SCHEMA = {
     "name": "shell",
     "description": (
-        "Execute a shell command in a sandboxed environment. "
-        f"Shell: {_SHELL_DISPLAY}. "
-        "Read-only inspection commands (ls, cat, grep, find, etc.) run "
-        "with minimal overhead. All other commands run inside a Docker "
-        "container with the workspace mounted at /workspace, or via the "
-        "subprocess fallback if Docker is unavailable and explicitly "
-        "enabled. Output is truncated at "
+        "Execute a shell command. Commands run inside a Docker "
+        "container with the workspace mounted at /workspace -- EXCEPT "
+        "a read-only command with an argument outside the workspace, "
+        "which runs on the HOST with the user's own file access "
+        "because the container cannot see those files. The result "
+        "carries `ran_on` ('container' or 'host') and `tier`; a "
+        "command that ran on the host tells you about the user's real "
+        "machine, so do not describe its output as the sandbox's. "
+        f"Shell: {_SHELL_DISPLAY}. Output is truncated at "
         f"{config.MAX_READ_CHARS} characters."
     ),
     "input_schema": ShellParams.model_json_schema(),
@@ -169,12 +197,17 @@ def _profile_and_containment(command: str):
     with `_is_inert` consulted twice for two different questions.
     """
     profile = classify_command(command, config.WORKSPACE_DIR)
-    # Docker is probed only when the answer depends on it. An inert
-    # command is UNCONTAINED either way, and the pre-§28 ladder had this
-    # ordering too -- its inert step returned before its Docker step, so
-    # `ls` never paid for a `docker info` that costs up to its 10s
-    # timeout when the daemon is unresponsive.
-    if profile.tier in (INERT, HOST_READ):
+    # Docker is probed only when the answer depends on it. HOST_READ is
+    # UNCONTAINED whatever Docker is doing -- it names a file outside
+    # the workspace, which no container can show it -- so it still
+    # returns without paying for a `docker info` that costs up to its
+    # 10s timeout on an unresponsive daemon.
+    #
+    # INERT no longer qualifies (§46, EP5): it runs in the container
+    # when there is one, so its containment now depends on the probe.
+    # The cost is bounded rather than per-call -- `is_docker_available`
+    # is lru_cached for the process, measured at 0.43s once.
+    if profile.tier == HOST_READ:
         return profile, containment_for(profile, docker_available=False)
     return profile, containment_for(profile, is_docker_available())
 
@@ -246,14 +279,49 @@ def _shell_approval_notice(params: dict, _context=None) -> str:
     it will run. "cat /etc/shadow" does not look like a host read until
     someone tells you the inert path is a host subprocess.
     """
-    profile, containment = _profile_and_containment(
-        params.get("command", ""))
+    command = params.get("command", "")
+    profile, containment = _profile_and_containment(command)
     where = {
         "contained": "in a Docker container, workspace mounted at /workspace",
         "uncontained": "on the HOST, with your own file access",
         "unavailable": "nowhere -- no sandbox backend is available",
     }.get(containment, containment)
-    return f"{profile.tier}: {profile.reason}. Runs {where}."
+    notice = f"{profile.tier}: {profile.reason}. Runs {where}."
+    binary = _resolved_binary(command) if containment == UNCONTAINED else ""
+    if binary:
+        notice += f" Binary resolves to {binary}."
+    return notice
+
+
+def _resolved_binary(command) -> str:
+    """The absolute path the first word will actually execute as, on a
+    run that is about to happen on the HOST (§46, EP8).
+
+    Named on the prompt because "runs on the host" understates it on
+    Windows. `ls`, `cat` and `grep` have no native Windows binary, so
+    the inert path resolves them off the user's PATH -- and on the
+    machine where this was found, `cat` was
+    `...\\AppData\\Local\\hermes\\git\\usr\\bin\\cat.exe`, a POSIX
+    toolchain shipped by unrelated software. `_is_inert` rejects a
+    path-qualified binary (`./ls`) precisely so a planted one cannot be
+    NAMED; PATH lookup reaches the same place from the other side, and
+    the harness does not get to choose what is on it.
+
+    Disclosure, not enforcement: the containment argument that lets
+    this path run at all is unchanged, and HOST_READ always asks a
+    human anyway. What changes is that the human is told which
+    executable they are approving.
+
+    Total, like everything else the gate calls: `command` arrives from
+    `registry.approval_needed` as whatever the model emitted, and
+    `shutil.which` on a non-string raises.
+    """
+    if not isinstance(command, str) or not command.strip():
+        return ""
+    try:
+        return shutil.which(command.split()[0]) or ""
+    except (OSError, ValueError):
+        return ""
 
 
 # ---------------------------------------------------------------------------

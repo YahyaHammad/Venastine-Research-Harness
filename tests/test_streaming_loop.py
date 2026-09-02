@@ -339,8 +339,15 @@ def test_permission_channel_yields_request_and_dispatches_on_approval(mocker):
     # ASSERTED AS A WHOLE DICT on purpose: that is what made this test
     # notice §42 adding a key, and a key added to the approval question
     # without anybody looking is precisely the thing worth catching.
+    #
+    # `headline` is §46's (EP2), None here for the reason `rationale` is:
+    # web_search declares no `headline_param`, so there is no field to
+    # read and the modal draws no pinned block. It carries the SUBJECT of
+    # the question -- for `shell`, the command -- and exists because that
+    # was the one thing the modal did not show. This assertion is how it
+    # announced itself, which is this test doing its job.
     assert perm[0] == {"tool_name": "web_search", "params": {"query": "x"},
-                       "notice": None, "rationale": None}
+                       "notice": None, "rationale": None, "headline": None}
 
     # Approved → dispatch called once with a callback that returns True.
     assert len(dispatched) == 1

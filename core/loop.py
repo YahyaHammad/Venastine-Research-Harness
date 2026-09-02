@@ -346,7 +346,8 @@ def _denial_reason(tool_name: str, response_channel, context) -> str:
 
 
 def _obtain_approval(response_channel, tool_name: str, params: dict,
-                     notice, request_payload=None, rationale=None) -> tuple:
+                     notice, request_payload=None, rationale=None,
+                     headline=None) -> tuple:
     """Ask the human about one gated call. Returns (approved, grant).
 
     ONE route since §23. There were two -- a queue.Queue the TUI's worker
@@ -376,10 +377,17 @@ def _obtain_approval(response_channel, tool_name: str, params: dict,
     reason: the caller needs it for the LoopEvent too, and looking it
     up twice invites the two from disagreeing. DISPLAY ONLY -- it
     reaches the prompt and nothing that decides anything.
+
+    `headline` is the SUBJECT of the question (§46, EP2) -- for `shell`
+    the command itself -- and travels for exactly the same reasons,
+    resolved once by the caller and display-only. It is also already
+    inside `params`, which every prompt renders whole; what carrying it
+    separately buys is a shell's ability to place it where it cannot
+    scroll out of view, without learning a parameter name.
     """
     kind = registry.request_kind(tool_name)
     payload = {"tool_name": tool_name, "params": params,
-               "rationale": rationale}
+               "rationale": rationale, "headline": headline}
     payload.update(request_payload or {})
     answer = interaction.ask(response_channel, interaction.Request(
         kind=kind, payload=payload, notice=notice))
@@ -960,14 +968,23 @@ class RunAgentLoop:
                     # in main.py.
                     rationale = registry.rationale_for(
                         call.name, call.input)
+                    # §46 (EP2). The SUBJECT of the question, resolved
+                    # the same way and travelling the same route: for
+                    # `shell` it is the command, and a shell that shows
+                    # it must not have to know that. Every other tool
+                    # answers None and its prompt is unchanged.
+                    headline = registry.headline_for(
+                        call.name, call.input)
                     yield LoopEvent(permission_request={
                         "tool_name": call.name, "params": call.input,
                         "notice": notice,
                         "rationale": rationale,
+                        "headline": headline,
                     })
                     approved, signoff = _obtain_approval(
                         response_channel, call.name, call.input, notice,
-                        request_payload, rationale=rationale)
+                        request_payload, rationale=rationale,
+                        headline=headline)
                     if not approved:
                         result = {"error": _denial_reason(
                             call.name, response_channel, context)}

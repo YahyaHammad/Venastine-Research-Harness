@@ -96,13 +96,43 @@ ReviewScreen {
 #permission-dialog {
     grid-size: 2 3;
     grid-gutter: 1 2;
-    grid-rows: auto 1fr auto;
+    /* Every row `auto` (§46, EP1). The middle one was `1fr`, which
+       resolves to ZERO inside a `height: auto` container -- so
+       #permission-params rendered at height 0 AND virtual_size 0, and
+       the notice, the agent's stated reason and the whole payload were
+       absent from every permission modal this app has ever shown. Not
+       clipped and scrollable: absent, with nothing to scroll to.
+       Measured against HEAD in a worktree, not inferred.
+       What bounds a long payload now is a definite height on the
+       ScrollBox, which is the only spelling that both renders and
+       scrolls -- see #permission-params-box. */
+    grid-rows: auto auto auto;
     padding: 1 2;
-    width: 60;
+    /* 90% with a cap, not a fixed 60 (§46, EP1). Width is what decides
+       how many rows the notice and the reason cost, and those rows are
+       what the command and the payload have to share -- at 60 the
+       notice alone wrapped to three. Same shape as #claims-dialog and
+       for the same reason (#112): align cannot centre something wider
+       than an 80-column terminal, so the cap has to stay under it. */
+    width: 90%;
+    max-width: 96;
     height: auto;
     max-height: 20;
     border: thick $warning;
     background: $surface;
+}
+
+/* Four rows instead of three, when a tool declared a headline (EP1).
+   ConfirmScreen and ProjectKindScreen reuse #permission-dialog with
+   three children and keep the rule above. */
+#permission-dialog.with-headline {
+    grid-size: 2 4;
+    grid-rows: auto auto auto auto;
+    /* Measured at 22 rows with the row heights below, inside the 24-row
+       floor test_every_modal_is_centred_bounded_and_styled pins. Change
+       either box height and re-run that test rather than re-deriving
+       the sum. */
+    max-height: 22;
 }
 
 #permission-title {
@@ -110,12 +140,45 @@ ReviewScreen {
     text-style: bold;
 }
 
+/* The pinned subject of the question (§46, EP1), and the split
+   favours it deliberately: the payload below repeats the notice, the
+   reason and the command itself, so rows spent here buy the one thing
+   nothing else on the screen shows in full. Four is what a wrapped
+   `docker run ... bash -c "..."` needs at this width, measured; past
+   that it scrolls rather than growing, so a pathological command
+   cannot eat the modal. Deliberately not $text-muted -- this is the
+   one thing on the screen the reader must actually read. */
+#permission-command-box {
+    column-span: 2;
+    height: 4;
+}
+
+#permission-command {
+    text-style: bold;
+}
+
+/* DEFINITE heights, not auto with a max (EP3). A ScrollBox asked for
+   `height: auto` resolves to zero rows, and a Static asked for
+   `max-height` reports no content past the bound -- so the two
+   spellings that read as "grow to fit, then scroll" are the two that
+   render nothing and truncate silently. */
+#permission-params-box {
+    column-span: 2;
+    height: 9;
+}
+
 #permission-params {
     column-span: 2;
     height: auto;
-    max-height: 10;
-    overflow-y: auto;
     color: $text-muted;
+}
+
+/* Four rows go to the pinned command, so the payload keeps five. It
+   is the block that can afford them: everything in it appears
+   elsewhere on the screen already, and unlike before, what does not
+   fit can now be scrolled to. */
+#permission-dialog.with-headline #permission-params-box {
+    height: 5;
 }
 
 ThreadPickerScreen {

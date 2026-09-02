@@ -1464,7 +1464,8 @@ class VenastineApp(App):
                 request.payload.get("tool_name"),
                 request.payload.get("params") or {},
                 request.notice,
-                request.payload.get("rationale"))
+                request.payload.get("rationale"),
+                request.payload.get("headline"))
         if request.kind == interaction.REVIEW:
             return self.ask_review_blocking(
                 request.payload.get("finding") or {},
@@ -1488,7 +1489,8 @@ class VenastineApp(App):
         return None
 
     def ask_permission_blocking(self, tool_name: str, params: dict,
-                                notice, rationale=None) -> bool:
+                                notice, rationale=None,
+                                headline=None) -> bool:
         """Show the permission modal and BLOCK until answered.
 
         Called from a worker thread, never the UI thread -- both the chat
@@ -1509,7 +1511,8 @@ class VenastineApp(App):
         # screen would also leave the user answering a question whose
         # answer no longer goes anywhere.
         return self._blocking_modal(
-            PermissionScreen(tool_name, params, notice, rationale),
+            PermissionScreen(tool_name, params, notice, rationale,
+                             headline),
             on_timeout=lambda screen: self._timed_out_ask(
                 screen,
                 dismiss_with=False,

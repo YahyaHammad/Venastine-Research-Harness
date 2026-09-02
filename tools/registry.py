@@ -425,6 +425,47 @@ class ToolRegistry:
             return None
         return value.strip()
 
+    def headline_param(self, tool_name: str) -> Optional[str]:
+        """Which param is the SUBJECT of this tool's approval question,
+        or None (§46, EP2).
+
+        Mechanism, not policy, exactly like rationale_param above: the
+        consumer asks rather than testing for the literal name `shell`.
+        """
+        spec = self._tools.get(tool_name)
+        return spec.headline_param if spec is not None else None
+
+    def headline_for(self, tool_name: str, params: dict):
+        """The thing THIS call is asking permission to do, or None.
+
+        The VALUE, so no caller has to know the key -- `tui/screens.py`
+        imports nothing from this package and that stays true because
+        what travels is a string.
+
+        NOT `str()`-coerced, and that is the point rather than an
+        oversight. `classify_command` is total precisely because the
+        model's tool input reaches the approval gate unvalidated
+        (`ShellParams` does not run until `run()`), so `command` can be
+        a list, a dict or None here. A non-string coerced to
+        `"['cat', '/etc/passwd']"` would put a fabricated command in
+        the one place on the screen that must be verbatim; returning
+        None instead drops the pinned block and leaves the payload --
+        rendered whole, showing the real shape -- as the only account
+        of the call. The prompt still says what it is, because the
+        notice reports UNKNOWN for exactly this input.
+
+        Empty and whitespace-only collapse to None for
+        `rationale_for`'s reason: a key supplied with nothing in it is
+        the omission it looks like.
+        """
+        key = self.headline_param(tool_name)
+        if not key or not isinstance(params, dict):
+            return None
+        value = params.get(key)
+        if not isinstance(value, str) or not value.strip():
+            return None
+        return value.strip()
+
     def call_digest(self, tool_name: str, params) -> str:
         """The transcript's one-line summary of a tool call.
 
@@ -717,7 +758,7 @@ registry.register(ToolSpec("edit", file_ops.EDIT_TOOL_SCHEMA, file_ops.edit_run,
 # §28: approval_notice carries the capability profile into the prompt.
 # The command text is already in the params; what it does not show is
 # WHERE it runs, and "cat /etc/shadow" does not look like a host read.
-registry.register(ToolSpec("shell", shell.TOOL_SCHEMA, shell.run, approval_check=shell._shell_approval_check, approval_notice=shell._shell_approval_notice, grant_policy=GRANT_NEVER, budget=BUDGET_IO, rationale_param="rationale"))
+registry.register(ToolSpec("shell", shell.TOOL_SCHEMA, shell.run, approval_check=shell._shell_approval_check, approval_notice=shell._shell_approval_notice, grant_policy=GRANT_NEVER, budget=BUDGET_IO, rationale_param="rationale", headline_param="command"))
 registry.register(ToolSpec("load_skill", load_skill.TOOL_SCHEMA, load_skill.run, available_check=load_skill.has_skills, grant_policy=GRANT_ANYWHERE, budget=BUDGET_IO))
 registry.register(ToolSpec("pin", pin.TOOL_SCHEMA, pin.run, available_check=pin.available, grant_policy=GRANT_ANYWHERE, budget=BUDGET_IO))
 # §21/D26 restored (#89): the mirror of pin. Same gating posture (ungated,
