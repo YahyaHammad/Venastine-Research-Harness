@@ -29,6 +29,8 @@ class GeometryParams(BaseModel):
     )
     radius: Optional[str] = Field(None, description="Radius, for circle operations (required for circle_area/circle_circumference)")
     center: Optional[list[str]] = Field(None, description="Center point [x, y] for circle operations - optional, defaults to [0, 0] (origin) when omitted")
+    evaluate: bool = Field(False, description="If true, return numeric approximation (e.g. 12.566... instead of 4*pi). Default false keeps exact symbolic form.")
+    precision: int = Field(15, ge=1, le=50, description="Significant digits when evaluate is true")
 
 
 TOOL_SCHEMA = {
@@ -39,7 +41,7 @@ TOOL_SCHEMA = {
         "circumference, polygon area and perimeter, and triangle "
         "properties (area, perimeter, right/equilateral/isosceles checks). "
         "Circle operations default the center to the origin when not supplied; results are exact symbolic "
-        "expressions (e.g. 4*pi, sqrt(2)) unless evaluate is true."
+        "expressions (e.g. 4*pi, sqrt(2)) unless 'evaluate' is true, which returns a numeric approximation with 'precision' digits."
     ),
     "input_schema": GeometryParams.model_json_schema(),
 }
@@ -107,13 +109,22 @@ def run(params: dict) -> dict:
             if Point.is_collinear(*pts):
                 return {"error": "triangle_properties: degenerate triangle (collinear points) - Segment2D has no triangle properties."}
             tri = Triangle(*pts)
-            result = {
-                "area": str(tri.area),
-                "perimeter": str(tri.perimeter),
-                "is_right": tri.is_right(),
-                "is_equilateral": tri.is_equilateral(),
-                "is_isosceles": tri.is_isosceles(),
-            }
+            if parsed.evaluate:
+                result = {
+                    "area": str(tri.area.evalf(parsed.precision)),
+                    "perimeter": str(tri.perimeter.evalf(parsed.precision)),
+                    "is_right": tri.is_right(),
+                    "is_equilateral": tri.is_equilateral(),
+                    "is_isosceles": tri.is_isosceles(),
+                }
+            else:
+                result = {
+                    "area": str(tri.area),
+                    "perimeter": str(tri.perimeter),
+                    "is_right": tri.is_right(),
+                    "is_equilateral": tri.is_equilateral(),
+                    "is_isosceles": tri.is_isosceles(),
+                }
         else:
             return {"error": f"Unknown operation: {op}"}
 
@@ -123,5 +134,15 @@ def run(params: dict) -> dict:
         return {"error": f"Missing or malformed points/parameters for '{op}': {e}"}
     except Exception as e:
         return {"error": f"Computation failed: {e}"}
+
+    # Numeric-evaluate path: keep exact by default, evaluate only when asked.
+    if parsed.evaluate and not isinstance(result, (bool, dict)):
+        try:
+            if isinstance(result, list):
+                result = [r.evalf(parsed.precision) if hasattr(r, "evalf") else r for r in result]
+            elif hasattr(result, "evalf"):
+                result = result.evalf(parsed.precision)
+        except Exception:
+            pass
 
     return {"result": serialize(result), "operation": op}
