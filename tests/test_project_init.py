@@ -467,6 +467,250 @@ class TestTheDocumentSets:
 
 
 # ---------------------------------------------------------------------------
+# ---- The .venastine/ templates (§24 I14-I17) ------------------------------
+# ---------------------------------------------------------------------------
+
+class TestTheConfigTemplates:
+    """What `/init --config` writes, and the two claims it makes.
+
+    Both are easy to lose and neither is visible in a diff. The template
+    is EVERY setting that has a shipped default -- lost the moment
+    somebody adds a settings key and not a line here. And writing it
+    CHANGES NOTHING until a human edits it -- lost the moment somebody
+    adds a consumer that reads a key by presence rather than by value,
+    which six existing keys already do.
+    """
+
+    def _vocabulary(self):
+        """Every leaf setting the loader knows, as dotted paths.
+
+        Computed from `_KNOWN_SETTINGS` / `_NESTED_SETTINGS` rather than
+        from the template, or the comparison below is the template
+        against itself. Section names are containers and drop out; they
+        are not settings anyone sets.
+        """
+        nested = config_loader._NESTED_SETTINGS
+        paths = {key for key in config_loader._KNOWN_SETTINGS
+                 if key not in nested}
+        for section, keys in nested.items():
+            paths |= {"%s.%s" % (section, key) for key in keys}
+        return paths
+
+    def test_the_template_names_every_setting_the_loader_knows(self):
+        """The load-bearing one. A settings.json cannot carry a comment or
+        an inert key, so this file IS the discoverable schema -- and a
+        schema that has quietly fallen behind the loader is worse than
+        none, because the omission reads as "this one is not settable".
+
+        Adding a settings key now fails this test until the template
+        catches up or OMITTED says why not. That is the same trade
+        `_KNOWN_TUI` already takes ("adding a preference is a schema
+        change, on purpose"), moved one file along.
+        """
+        from project_init import config_files
+
+        written = config_files.leaf_paths(config_files.render_settings())
+        expected = self._vocabulary() - set(config_files.OMITTED)
+        assert written == expected, (
+            "the scaffolded settings.json and the loader's vocabulary have "
+            "diverged. Missing from the template: %s. Written but unknown "
+            "to the loader (this one is a startup error for anyone who runs "
+            "the command): %s"
+            % (sorted(expected - written) or "none",
+               sorted(written - expected) or "none"))
+
+    def test_the_template_omits_only_what_it_can_name(self):
+        """Every exclusion is a key that still exists, with a reason.
+
+        Without this, OMITTED is where a deleted setting hides forever and
+        where "I could not get this one to work" hides as policy.
+        """
+        from project_init import config_files
+
+        vocabulary = self._vocabulary()
+        for path, reason in config_files.OMITTED.items():
+            assert path in vocabulary, (
+                f"OMITTED names {path!r}, which the loader no longer knows "
+                f"-- delete the entry rather than leaving a reason for a "
+                f"key nobody can set")
+            assert len(reason) > 40, (
+                f"OMITTED[{path!r}] is {len(reason)} characters. A silent "
+                f"omission and an unexplained one cost the reader the same")
+
+    def test_the_scaffolded_settings_file_loads(self, tmp_path):
+        """Round-tripped through the loader that will actually read it.
+
+        `_validate_settings` raises on an unknown key, an unknown nested
+        key, a wrong type, and two values by name -- so a template that is
+        wrong does not degrade, it stops the harness from starting in
+        every directory it was scaffolded into. Asserting the dict looks
+        right is not the same test.
+        """
+        import json
+
+        from project_init import config_files
+
+        path = tmp_path / "settings.json"
+        path.write_text(json.dumps(config_files.render_settings(), indent=2),
+                        encoding="utf-8")
+        loaded = config_loader._read_settings_file(str(path))
+        assert loaded == config_files.render_settings()
+
+    def _observed(self, root, payload):
+        """Everything the settings decide, for a project whose
+        `.venastine/settings.json` is `payload` (None = no file at all)."""
+        import json
+        import shutil
+
+        import main
+        from core import compaction
+
+        vdir = root / ".venastine"
+        if payload is None:
+            if vdir.exists():
+                shutil.rmtree(str(vdir))
+        else:
+            vdir.mkdir(exist_ok=True)
+            (vdir / "settings.json").write_text(
+                json.dumps(payload, indent=2), encoding="utf-8")
+            workspace_trust.grant_trust(str(root))
+        config_loader.reset()
+        config_loader.initialize(str(root))
+        assert workspace_trust.is_trusted(str(root)), \
+            "the fixture is untrusted, so it would prove only that " \
+            "untrusted content does not load"
+        settings = config_loader.get_settings()
+        args = SimpleNamespace(provider=None, model=None, effort=None,
+                               attended=None, review=None)
+        return {
+            "spend_cap": config_loader.spend_cap(),
+            "compaction": config_loader.effective_compaction(),
+            "confidence": config_loader.effective_confidence(warn=True),
+            # warn=True, because a template can be inert in every VALUE
+            # it produces and still log on every launch -- which is what
+            # the None grounding-weight key did.
+            "source_scoring": config_loader.effective_source_scoring(warn=True),
+            # PRESENCE, not value -- the check that makes a written
+            # trigger_tokens outrank the window-derived one.
+            "trigger_is_configured": compaction._trigger_is_configured(),
+            "runtime": main.resolve_runtime_defaults(args, settings),
+            "effort": main.resolve_effort(args, settings),
+            "attended": main.resolve_attended(args, settings),
+            "review": main.resolve_review(args, settings),
+            "ensemble": (settings.get("ensemble_mode"),
+                         settings.get("ensemble_n")),
+        }
+
+    def test_the_scaffolded_settings_file_changes_nothing(self, tmp_path,
+                                                          caplog):
+        """The claim the word "defaults" actually makes, asserted whole.
+
+        Not key by key: the interesting failure is a key that is inert on
+        its own and not in company, and a per-key sweep would miss it.
+        Six keys were dropped from the template because this test found
+        them -- default_provider and default_model re-assert over a
+        remembered /model choice, `effort` flips `_effort_named`,
+        `compaction.trigger_tokens` disables the derived trigger, and
+        `ensemble_mode` / `research.subagent_review` are both resolved as
+        `config.py if the value is None`, so writing `false` outranks
+        config.py rather than restating it.
+        """
+        import logging
+
+        from project_init import config_files
+
+        root = tmp_path / "proj"
+        root.mkdir()
+        with caplog.at_level(logging.WARNING):
+            without = self._observed(root, None)
+            quiet = [record.getMessage() for record in caplog.records]
+            caplog.clear()
+            with_file = self._observed(root, config_files.render_settings())
+            noisy = [record.getMessage() for record in caplog.records]
+        assert noisy == quiet, (
+            "the scaffolded settings.json is inert in its values and not in "
+            "its output -- it logs %r that a project without one does not. "
+            "A scaffold that warns on every launch is a scaffold people "
+            "delete" % [line for line in noisy if line not in quiet])
+        differing = {key for key in without if without[key] != with_file[key]}
+        assert not differing, (
+            "the scaffolded settings.json is not inert: "
+            + "; ".join("%s %r -> %r" % (key, without[key], with_file[key])
+                        for key in sorted(differing))
+            + ". Either the value is no longer the default, or something "
+              "started reading that key by PRESENCE -- in which case it "
+              "belongs in config_files.OMITTED with the reason")
+
+    def test_the_scaffolded_settings_file_does_not_move_the_tui(self):
+        """The same claim for the three `tui` values, which are the only
+        ones in the template typed out rather than read from a constant.
+
+        config.py holds no TUI values on purpose, so their defaults are
+        literals inside `VenastineApp.__init__` with nothing to import.
+        Driving the real app is what makes the literals safe: a drift
+        between this file and that one fails here rather than shipping a
+        scaffold that quietly changes how the TUI starts.
+        """
+        from project_init import config_files
+        from tui.app import VenastineApp
+
+        bare = VenastineApp("ANTHROPIC", "test-model", {})
+        scaffolded = VenastineApp("ANTHROPIC", "test-model",
+                                  config_files.render_settings())
+        for attribute in ("_animations", "_show_thinking", "_todo_position",
+                          "effort", "_effort_named", "_settings_theme"):
+            assert getattr(bare, attribute) == getattr(scaffolded, attribute), (
+                f"{attribute} is {getattr(bare, attribute)!r} with no "
+                f"settings.json and {getattr(scaffolded, attribute)!r} with "
+                f"the scaffolded one")
+
+    def test_the_scaffolded_mcp_file_yields_no_servers(self, tmp_path):
+        """Through the real discovery, not by comparing the dict.
+
+        `mcp.json` validates by CONNECTION rather than by schema (§17
+        decision G), so "it parses" is not the question -- the question is
+        whether a project that ran the command starts connecting to
+        something. The answer has to be no servers, not one disabled one.
+        """
+        import json
+
+        from mcp_client import config as mcp_config
+        from project_init import config_files
+
+        root = tmp_path / "proj"
+        (root / ".venastine").mkdir(parents=True)
+        (root / ".venastine" / config_files.MCP_FILENAME).write_text(
+            json.dumps(config_files.render_mcp(), indent=2), encoding="utf-8")
+        assert mcp_config.load_server_configs(str(root), True) == {}
+
+    def test_the_shadow_report_names_only_what_it_takes_over(self):
+        """§24 I16. A project settings.json beats the user's by PRESENCE,
+        so even a file of pure defaults takes every key it names away from
+        `~/.config/venastine/settings.json`.
+
+        Differences only. A key the user set to the same value changes
+        nothing observable, and listing it trains the reader to skim the
+        ones that do.
+        """
+        from project_init import config_files
+
+        ours = config_files.render_settings()
+        user = {
+            "max_token_budget": 250000,
+            "compaction": {"strength": 5,
+                           "strategy": ours["compaction"]["strategy"]},
+            # Not in the template at all -- omitted, so nothing is taken
+            # over and it must not be reported.
+            "default_model": "claude-opus-5",
+        }
+        report = config_files.shadowed(user)
+        assert [row[0] for row in report] == ["compaction.strength",
+                                              "max_token_budget"]
+        assert ("compaction.strength", 5, ours["compaction"]["strength"]) \
+            in report
+
+
+# ---------------------------------------------------------------------------
 # ---- Discovery -------------------------------------------------------------
 # ---------------------------------------------------------------------------
 

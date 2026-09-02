@@ -760,6 +760,30 @@ _COMPACTION_DEFAULTS = {
 }
 
 
+def shipped_defaults() -> dict:
+    """Every nested knob at the value it takes when no settings.json
+    speaks. `{section: {key: default}}`, sections only -- the top-level
+    scalars are plain `config.py` constants and need no accessor.
+
+    EXISTS SO A TEMPLATE CANNOT QUOTE A STALE DEFAULT (§24 I15).
+    `/init --config` writes a settings.json of defaults, and a settings
+    file is unforgiving: `_validate_settings` raises on an unknown key, so
+    the scaffold has to be right the first time or the harness will not
+    start. Retyping these values there would be a second copy of them,
+    which is how the first one goes stale.
+
+    The two research-tuning builders live further down this file and are
+    resolved at call time, which is why this can sit beside the compaction
+    map it also reads.
+    """
+    return {
+        "compaction": {key: getattr(config, attr)
+                       for key, attr in _COMPACTION_DEFAULTS.items()},
+        "confidence": _confidence_defaults(),
+        "source_scoring": _source_scoring_defaults(),
+    }
+
+
 def effective_compaction(overrides: Optional[dict] = None,
                          warn: bool = False) -> dict:
     """The compaction values actually in force.
@@ -791,9 +815,7 @@ def effective_compaction(overrides: Optional[dict] = None,
     """
     import config
 
-    values = {
-        key: getattr(config, attr) for key, attr in _COMPACTION_DEFAULTS.items()
-    }
+    values = shipped_defaults()["compaction"]
     values.update(get_settings().get("compaction") or {})
     values.update({k: v for k, v in (overrides or {}).items() if v is not None})
 
@@ -872,6 +894,22 @@ def _read_settings_file(path: str) -> dict:
     return data
 
 
+def user_settings() -> dict:
+    """The user tier's settings.json, alone and unmerged.
+
+    `get_settings()` answers what is IN FORCE, which is the wrong question
+    for two callers. The merge below needs the user tier before the
+    project tier lands on it, and `/init --config` needs it to say which
+    of the user's own keys the file it is about to write will start
+    deciding instead (§24 I16) -- a project key wins by PRESENCE, so a
+    scaffold of pure defaults still displaces a customised user tier.
+
+    Resolved at call time, like every other path in this module.
+    """
+    return _read_settings_file(
+        os.path.join(_user_config_dir(), "settings.json"))
+
+
 def _load_merged_settings(project_path: str, trusted: bool) -> dict:
     """Resolution order: project (trusted) > user. Anything absent falls
     through to config.py defaults at the consumer.
@@ -887,7 +925,7 @@ def _load_merged_settings(project_path: str, trusted: bool) -> dict:
     added `tui` alongside `compaction`, and a second hardcoded section name
     here is exactly how the first one came to be missed.
     """
-    merged = _read_settings_file(os.path.join(_user_config_dir(), "settings.json"))
+    merged = user_settings()
     if trusted:
         project = _read_settings_file(os.path.join(
             workspace_trust.venastine_dir(project_path), "settings.json"))
