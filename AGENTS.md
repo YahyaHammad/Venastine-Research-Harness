@@ -30,7 +30,10 @@ python main.py --mode research --grant "q"        # §25: pick gated tools to au
 python main.py --mode research --attended "q"     # §25: approve every gated call as it happens
 python main.py --mode research --review "q"       # §20: review the finished run, consent to each correction
 # §21a compaction runs automatically in every shell; /compact triggers it by hand in the TUI
-# §26: /claims [run id] or ctrl+l opens a run's claims; /copy [last|report|claims|all] [--file path]
+# §26: /claims [run id] or ctrl+l opens a run's claims;
+#   /copy [last|report|claims|conversation|all] [--file path] -- batch 48
+#   adds `conversation` (the exchange, no harness lines); `all` stays the
+#   superset
 # §44: /window <tokens|off> is REMEMBERED per (provider, model) now and sets
 #   the number the compaction trigger is a share of; /trigger stays ephemeral
 python main.py --summary <thread>                  # §21c: print a thread's distilled summary
@@ -44,7 +47,7 @@ python main.py --init --research-project           # §24: skip the type questio
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 3343 tests, offline, ~25-45s by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 3349 tests, offline, ~25-45s by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -944,6 +947,26 @@ run rather than by reading the code.
 - **`Transcript._entries` serves the replay and `/copy`.** `RichLog` stores rendered
   segments, so `/theme` needs `rerender()`. Every write path must go through `_emit()`,
   or a line reaches the screen and neither the replay nor the copy.
+- **`/copy last` is READ from that log, never tracked beside it** (batch 48).
+  `_last_response` was the second buffer, updated from whichever flush site kept
+  `flush_stream()`'s return — and the one that mattered did not. `on_loop_event_message`
+  flushes at the terminal `final_response` event and discards, so `on_turn_finished`'s
+  flush found the span already closed and got `""`; the field then held a replayed
+  thread's newest answer, or nothing. **Two symptoms, one cause**: a resumed thread
+  copied the answer from before the close (in a one-exchange thread, the first message),
+  and a fresh one said `Nothing to copy` after a perfectly good answer. `last_answer()`
+  scans `_entries`; `reset()` is what clears it, which is the per-thread reset §27 AC4
+  and §43 RM2 already call.
+- **Two role sets say what `/copy conversation` is** (batch 48). `CONVERSATION_ROLES`
+  (`user`, `assistant`, `thinking`, `tool`, `tool_error`, `diff`) against `META_ROLES`
+  (`system`, `warning`, `error`, `pass`, `pass_done`, `success`) — an ALLOWLIST, so an
+  unclassified role goes missing from the copy rather than leaking a harness line into
+  it, and `tests/test_themes.py` holds both against `MESSAGE_ROLES` so nothing stays
+  unclassified. `pass`/`pass_done` are meta deliberately: a ten-pass run's boundaries
+  are progress reporting, so a research run copies as the query, the tool lines and the
+  report. **`/copy all` is unchanged** — the superset, harness lines included (#140).
+  A failed tool with no known call id now writes `tool_error` rather than `error`, which
+  is what made the split sayable: one role cannot mean both a tool and the harness.
 - **`/copy`'s clipboard route cannot be confirmed.** OSC 52 is fire-and-forget, so the
   message says what was sent, and `--file` is the route that provably worked.
 - **The claims view is `ctrl+l`.** `Input` binds `ctrl+k` to `delete_right_all` and holds

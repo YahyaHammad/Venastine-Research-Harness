@@ -32,7 +32,7 @@ import pytest
 
 from tests.conftest import run_pass, settle
 import storage
-from core.replay import last_assistant_text, replay_entries
+from core.replay import replay_entries
 
 
 # ===========================================================================
@@ -439,12 +439,6 @@ class TestWhatIsReplayed:
 
         assert replay_entries(uuid4()) == [("assistant", "a")]
 
-    def test_last_assistant_text_finds_the_most_recent_answer(self):
-        entries = [("assistant", "first"), ("user", "again?"),
-                   ("assistant", "second"), ("tool", "⟩ read")]
-
-        assert last_assistant_text(entries) == "second"
-
     def test_an_empty_thread_replays_to_nothing(self, mocker):
         mocker.patch("core.replay.archive_history", return_value=[])
 
@@ -510,7 +504,9 @@ async def test_resuming_clears_the_screen_and_replays(mocker):
     # AC4's other half: per-thread state must follow the thread.
     assert app._last_run is None
     assert app._live_claims == {}
-    assert app._last_response == "we decided on 3 of 5"
+    # /copy last is on that list too, now by reading the entry log the
+    # replay just wrote rather than a field beside it.
+    assert transcript.last_answer() == "we decided on 3 of 5"
 
 
 @pytest.mark.asyncio

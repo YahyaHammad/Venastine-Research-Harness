@@ -51,7 +51,7 @@ Venastine Research Harness/
 ├── CLAUDE.md / QWEN.md             # pointers to AGENTS.md, so a harness that auto-loads one of those names finds the context instead of a second copy of it
 ├── DEVLOG.md                       # implementation notes for built ROADMAP sections -- see §0
 │
-├── tests/                          # 3343 tests, all offline, ~25-45s depending on the machine (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
+├── tests/                          # 3349 tests, all offline, ~25-45s depending on the machine (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
 │   ├── conftest.py                 # fixtures: make_model_response, make_stream_from_response, make_stream_sequence, FakeStorage, ...
 │   ├── BREAKING_CHANGES.md         # what-breaks-it / symptom / fix per area
 │   ├── test_cli.py                 # 90 tests -- ROADMAP §1 thread_id passthrough + UUID validation + §14 parser defaults/resolution/trust flow + §29 N1-N8 the one stdin reader, N2's channel deadline, every request kind rendered, and the startup block main(argv) made reachable + #102's four declining defaults
@@ -97,7 +97,7 @@ Venastine Research Harness/
 │   ├── test_untrusted_content.py   # 26 tests -- ROADMAP_v2 §32 A8 (#72): the injection defence in one copy reaching both modes, the ten pass prompts pinned byte-identical by digest across the extraction, and the two tails naming different instruction sources for the same rule
 │   ├── test_client_effort.py       # 27 tests -- ROADMAP_v2 §16 effort levels: queried for Anthropic, table fallback, effort_for validation, cache behaviour
 │   ├── test_ensemble_guard.py      # 15 tests -- §10 revisit: refuse an ensemble roster that cannot disagree with itself
-│   ├── test_themes.py             # 233 tests -- batch 29: the roster (grid names unchanged, six standalone tinted themes), role-slot completeness for every theme, and #14's contrast floors (foreground >= 7:1, severity >= 4:1, identity >= 3.5 dark / 3.0 light) computed from the Theme objects; plus #183's restyle wiring and the /theme hint; batch 41 adds the transcript-role pins (X1/X2): pairwise distinctness over MESSAGE_ROLES, a redmean separation floor between the tool and thinking slots, and `dim` confined to the system role; plus X7's diff tint -- readable foreground on it AND a visible band against the page, since blending further satisfies the first floor by failing the feature
+│   ├── test_themes.py             # 235 tests -- batch 29: the roster (grid names unchanged, six standalone tinted themes), role-slot completeness for every theme, and #14's contrast floors (foreground >= 7:1, severity >= 4:1, identity >= 3.5 dark / 3.0 light) computed from the Theme objects; plus #183's restyle wiring and the /theme hint; batch 41 adds the transcript-role pins (X1/X2): pairwise distinctness over MESSAGE_ROLES, a redmean separation floor between the tool and thinking slots, and `dim` confined to the system role; plus X7's diff tint -- readable foreground on it AND a visible band against the page, since blending further satisfies the first floor by failing the feature
 │   ├── test_tui.py                 # 196 tests -- ROADMAP_v2 §16 AC1-AC3 (thread picker, permission round-trip, worker survives a raising tool) + §25 grant picker / attended modal + #106's two axes staying independent + /model's provider/model switch, now remembered for the next launch with its staleness key and its four fallbacks (§43 RM3/RM5) + /new redrawing the window rather than stacking two conversations (RM2) + #172's one-shot notices + §46's rendered-region assertions: every modal must DRAW its body, and the shell command is pinned where it cannot scroll away
 │   ├── test_mcp_config.py          # 42 tests -- ROADMAP_v2 §17 mcp.json discovery, tier precedence D29, unknown-key tolerance, strict flag parsing; §37 F1-F3/F5 describe disclosure + store v2
 │   ├── test_mcp_client.py          # 45 tests -- ROADMAP_v2 §17 bridge, cancel-scope task affinity, v2 field names, normalization; §37 F4-F8 teardown budget, straggler naming, catalogue cache, M17/M18/M25/M13 pins. AC6 is split in two (batch 32): a CRASHED tool asserts only the in-band error convention, because whether its text reaches the client is the server's policy and mcp 2.1.0 changed it; a DELIBERATE ToolError asserts the message survives, which both pinned versions honour
@@ -130,8 +130,8 @@ Venastine Research Harness/
 │   ├── test_memory_shells.py      # 16 tests -- ROADMAP_v2 §21b M16's CLI approval provider and M15's /memories, /forget
 │   ├── test_pipeline_events.py    # 24 tests -- ROADMAP_v2 §22 AC1-AC4: the drainer, the one trace writer (incl. review.py's and json_retry.py's lines), P1's recorded decision, the abandoned-run record, and the live TUI view
 │   ├── test_thread_refs.py       # 38 tests -- ROADMAP_v2 §21c: what summarize_thread reads and when it spends a call, the ref tier and the pass-prompt boundary it must not cross, the cap that refuses, both shells' commands, and #90's truncation-with-a-stated-cut
-│   ├── test_thread_legibility.py  # 42 tests -- ROADMAP_v2 §27: what each creation path labels its thread, what the picker is offered, the legacy classification (raw sqlite3), what a replay shows, and the per-thread state a resume must reset
-│   ├── test_research_legibility.py # 42 tests -- ROADMAP_v2 §26: a pass's tool calls escaping (P2 amended), the redacted param digest, one stage event per code stage (D2 per ROUND), the role palette, /copy, and ctrl+l vs the Input's ctrl+k
+│   ├── test_thread_legibility.py  # 41 tests -- ROADMAP_v2 §27: what each creation path labels its thread, what the picker is offered, the legacy classification (raw sqlite3), what a replay shows, and the per-thread state a resume must reset
+│   ├── test_research_legibility.py # 47 tests -- ROADMAP_v2 §26: a pass's tool calls escaping (P2 amended), the redacted param digest, one stage event per code stage (D2 per ROUND), the role palette, /copy, and ctrl+l vs the Input's ctrl+k
 │   ├── test_live_output.py         # 49 tests -- ROADMAP_v2 §38: the commit rules (a completed line drawn without a flush, a long paragraph broken at row boundaries, an open fence held), the ONE entry per streamed span that keeps /copy and /theme honest, the inline thinking block and its collapsed indicator, the app wiring for both forms, and §43's one `venastine ›` per TURN -- above the reasoning rather than after it, and re-derived identically by rerender()
 │   ├── test_interaction.py        # 92 tests -- ROADMAP_v2 §23 J2-J7: core/interaction.py's decode, the declining default per kind, CHOICE and SUBAGENT_SIGNOFF validated against the request, and the strict review decoder
 │   ├── test_question_tool.py      # 45 tests -- ROADMAP_v2 §23 slice 2: ask_user through the injected response_channel, QUESTION's three-way answer, and both shells' renderers
@@ -905,6 +905,14 @@ stores rendered segments, so a `/theme` switch cannot restyle what is on screen 
 `rerender()` replays from the entry log. Every write path must go through `_emit()`, or
 a line appears on screen and is absent from both the replay and the copy.
 
+Source of truth means READ from, not shadowed. `last_answer()` scans the log backwards
+for the newest `assistant` entry, which is what `/copy last` hands over; the app kept a
+`_last_response` field beside it until batch 48, fed by whichever flush site remembered
+to capture `flush_stream()`'s return, and the one that mattered did not — the terminal
+`final_response` event flushes first and discards, so `on_turn_finished`'s flush found
+the span closed and returned `""`. `reset()` clears the log, which is the per-thread
+reset §27 AC4 and §43 RM2 ask for.
+
 **The transcript renders as the answer arrives (§38).** Deltas used to be buffered whole
 and drawn only by `flush_stream()`, so an answer with no tool calls appeared in one lump at
 `TurnFinished`. `RichLog` appends and cannot rewrite a drawn row, so a chunk is now committed
@@ -931,6 +939,14 @@ writes OSC 52, which **cannot be confirmed**: the terminal either honours the es
 ignores it and nothing comes back. So the message says what was sent rather than
 claiming it arrived, and `--file` is the route that provably worked.
 
+**`all` and `conversation` are two targets because they answer two questions.** `all` is
+the superset — the transcript entire, plus the report and the claims that never reach it
+(#140) — so it carries the harness's own lines, which are what reconstructs what
+happened. `conversation` is the exchange without them, and the split lives in
+`tui/widgets.py` as `CONVERSATION_ROLES` / `META_ROLES` feeding `as_text(roles=...)`. An
+allowlist, so an unclassified role is absent from the copy rather than leaking into it;
+`tests/test_themes.py` fails on a role that is in neither set.
+
 **The claims view is bound to `ctrl+l`, not `ctrl+k`.** Textual's `Input` binds `ctrl+k`
 to `delete_right_all` and holds focus almost always, so a `ctrl+k` binding here would be
 shadowed — pressing it would silently delete the rest of the typed line. Verified
@@ -955,7 +971,9 @@ new id), and the picker listed far more threads than there had ever been convers
 form), and the redaction of a replayed tool call. `replay_entries(thread_id)` returns
 `(role, text)` pairs whose roles are transcript palette roles, so `tui/widgets.py` can
 style them with what it already has and `main.py` can label them "You:" / "Agent:".
-`last_assistant_text()` is beside it because AC4's state reset needs the same list.
+It had a `last_assistant_text()` beside it for AC4's state reset until batch 48, when
+`/copy last` started reading the transcript's own entry log and left it with no
+caller.
 
 *Does NOT belong here:* painting, labels, or widget calls. And not a second copy in
 either shell — D12 makes the CLI permanent, so a per-shell renderer would let the two

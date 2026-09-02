@@ -131,20 +131,6 @@ def _reasoning_text(record) -> str:
     return "\n\n".join(parts)
 
 
-def last_assistant_text(entries: List[ReplayEntry]) -> str:
-    """The most recent assistant entry's text, or "".
-
-    §27 AC4: a resumed thread must reset the per-thread state a shell keeps
-    beside its memory, and `_last_response` (what /copy last reads) is part
-    of that. Derived from the entries rather than re-read from storage, so
-    what /copy hands over is exactly what was replayed onto the screen.
-    """
-    for role, text in reversed(entries):
-        if role == "assistant":
-            return text
-    return ""
-
-
 def _tool_marker(call: dict) -> str:
     """One line for one tool call: name, then a redacted param digest.
 
