@@ -194,6 +194,54 @@ class TestTheOptionCap:
         assert str(ask_user.MAX_OPTIONS) in result["error"]
         assert "6" in result["error"]
 
+    def test_an_option_at_the_length_cap_is_accepted(self):
+        result = ask_user.run(
+            {"question": "q", "options": ["x" * ask_user.MAX_OPTION_CHARS]},
+            response_channel=_channel({"options": []}))
+        assert "result" in result
+
+    def test_an_over_long_option_is_REFUSED_not_truncated(self):
+        """Batch 49, and the same rule as the count cap directly above --
+        which is the point, because the modal had been truncating by
+        accident. An option button was `width: auto`, so a label wider
+        than the dialog was CUT at its edge: two options differing only
+        past the cut rendered as the same visible sentence, and choosing
+        between them was choosing at random. Fixing the width made long
+        options WRAP, and this keeps them short enough to wrap twice
+        rather than scroll.
+
+        Refused rather than shortened for M15's reason: an option the
+        tool trimmed is not the option the model offered, and the answer
+        would come back as though it were.
+        """
+        channel, seen = _capturing()
+        result = ask_user.run(
+            {"question": "q",
+             "options": ["a", "x" * (ask_user.MAX_OPTION_CHARS + 1)]},
+            response_channel=channel)
+        assert "error" in result
+        assert seen == [], "the question was put despite an unshowable option"
+
+    def test_the_length_error_names_the_limit_the_length_and_the_option(self):
+        """A correctable error names what to correct. The offending option
+        is quoted because a model given four options and a bare number
+        cannot tell which one to shorten."""
+        over = "unique-marker " + "y" * ask_user.MAX_OPTION_CHARS
+        result = ask_user.run(
+            {"question": "q", "options": ["a", over]},
+            response_channel=_channel({"options": []}))
+        assert str(ask_user.MAX_OPTION_CHARS) in result["error"]
+        assert str(len(over)) in result["error"]
+        assert "unique-marker" in result["error"]
+
+    def test_the_schema_states_the_length_cap(self):
+        """A limit the model is only told about by being refused costs a
+        turn every time. `MAX_OPTIONS` is in the schema text for the same
+        reason, asserted the same way."""
+        options = ask_user.TOOL_SCHEMA["input_schema"]["properties"]["options"]
+        assert str(ask_user.MAX_OPTION_CHARS) in options["description"]
+
+
 
 # ---------------------------------------------------------------------------
 # ---- Malformed input from the model ---------------------------------------

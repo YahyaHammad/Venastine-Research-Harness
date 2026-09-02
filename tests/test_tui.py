@@ -3435,6 +3435,56 @@ async def test_the_answer_box_lines_up_with_the_options():
         f"one of these two still draws a side border ({edges}), so their "
         "left edges are a column apart however their boxes line up")
 
+
+@pytest.mark.asyncio
+async def test_an_option_at_the_cap_still_fits_two_lines():
+    """Batch 49. `ask_user.MAX_OPTION_CHARS` is a claim about GEOMETRY --
+    that an option that long is two wrapped lines on the narrowest
+    terminal this project supports -- so it is measured here rather than
+    asserted from the constant, which would pass for any number at all.
+
+    Three shapes, because word length decides where the wrap falls and
+    the cap has to hold for the worst: prose, twenty-character words, and
+    an unbroken run with no break opportunity. Measured at 105
+    characters, the first and third stay at two rows and the second goes
+    to three -- which is where 100 came from.
+
+    Four options, so the scrollbar is present and each button is 58
+    columns rather than 60. That gutter is the difference between the cap
+    holding and not.
+    """
+    from textual.widgets import Button
+    from tools.builtin.ask_user import MAX_OPTION_CHARS
+
+    cap = MAX_OPTION_CHARS
+    words = " ".join(f"workspace_directory_{i}" for i in range(8))[:cap]
+    prose = ("Create the virtual environment inside the workspace directory "
+             "and leave it there after the task finishes so it is reused")[:cap]
+    options = [words, prose, "x" * cap, words]
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test(size=(80, 24)) as pilot:
+        app.push_screen(QuestionScreen("Where should the venv go?", options,
+                                       False, True), lambda _a: None)
+        await pilot.pause()
+        await pilot.pause()
+        buttons = [app.screen.query_one(f"#question-opt-{i}", Button)
+                   for i in range(len(options))]
+        rows = [b.region.height - 2 for b in buttons]
+        widths = {b.region.width for b in buttons}
+        app.screen.dismiss(None)
+        await pilot.pause()
+
+    assert all(row <= 2 for row in rows), (
+        f"an option of {cap} characters wrapped to {rows} content rows, so "
+        f"MAX_OPTION_CHARS is claiming a bound the modal does not have -- "
+        f"lower it, or widen #question-dialog")
+    assert len(widths) == 1, (
+        f"the option buttons are {sorted(widths)} columns wide. They were "
+        f"`width: auto` until batch 49, which is what made a long one "
+        f"truncate and a set of them ragged; one width is the fix and the "
+        f"same width for all of them is how it is visible")
+
 # ---------------------------------------------------------------------------
 # ---- §46 (EP1/EP3): the modal's subject must be ON SCREEN -----------------
 # ---------------------------------------------------------------------------
