@@ -57,7 +57,7 @@ Venastine Research Harness/
 ├── scripts/
 │   └── prepublish-check.mjs        # batch 35: package.json's `prepublishOnly` gate, so a non-zero exit aborts the publish. Checks the two things that fail SILENTLY and cannot be undone once a version is on the registry -- the two version numbers agreeing, and no secret in the tarball while LICENSE/NOTICE are in it
 │
-├── tests/                          # 3462 tests, all offline, ~2-3 min depending on the machine (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
+├── tests/                          # 3477 tests, all offline, ~2-3 min depending on the machine (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
 │   ├── conftest.py                 # fixtures: make_model_response, make_stream_from_response, make_stream_sequence, FakeStorage, ...
 │   ├── BREAKING_CHANGES.md         # what-breaks-it / symptom / fix per area
 │   ├── test_cli.py                 # 91 tests -- ROADMAP §1 thread_id passthrough + UUID validation + §14 parser defaults/resolution/trust flow + §29 N1-N8 the one stdin reader, N2's channel deadline, every request kind rendered, and the startup block main(argv) made reachable + #102's four declining defaults
@@ -97,6 +97,7 @@ Venastine Research Harness/
 │   ├── test_agents.py              # 47 tests -- ROADMAP_v2 §18 AC1-AC3 (intersection, depth, manager surface), dispatch injection, headless filter + warning, goal mode, catalog, D24, TUI commands, and R16's "a headless run cannot spawn at all"
 │   ├── test_catalog_advertisement.py # 19 tests -- ROADMAP_v2 §32 A1/A2 (#68): is_advertised as the one predicate schemas/headless_hidden/with_catalogs all read, every pass id driven headless, and the grant that cannot re-admit a GRANT_NEVER catalog
 │   ├── test_catalog_text.py        # 21 tests -- ROADMAP_v2 §32 A5/A6 (#131): a description cannot leave its bullet or forge a prompt section, the cap and its boundary, our own files already comply, and the trust prompt showing the NORMALISED text it is deciding about
+│   ├── test_shipped_roster.py      # 15 tests -- ROADMAP_v2 §32 A12-A15, batch 51: what the DEFAULT INSTALL ships as a SET. Every declared tool is registered (a whitelist typo silently subtracts, and nothing caught it), read-only asserted through the policy layer for what config ALLOWS and against the declaration for what it already denies, plan's superset driven through child_context, and what a stock install can actually call
 │   ├── test_spawnable.py           # 12 tests -- ROADMAP_v2 §32 A3/A4 (#69): a harness agent that omits `spawnable` is a build error naming every offender, a stranger's silence gets the safe answer, and the default install advertises no spawnable agent at all
 │   ├── test_spawn_preflight.py     # 14 tests -- ROADMAP_v2 §32 A7 (#70): one refusal_reason read by the loop, by dispatch ahead of its approval gate, and by run() as the direct-caller backstop -- plus the control that a valid spawn IS still signed off
 │   ├── test_spend_and_size.py     # 17 tests -- batch 27 (#4): the spend meter and the size instrument separated. Wrappers default to a sentinel that resolves settings.json max_token_budget (uncapped unless set; explicit None stays uncapped); turn growth/billed figures ride ModelResponse (unpriced, first call's inherited prompt excluded, compaction shrinks clamped); the TUI usage line and the CLI early-stop figures are the consumers
@@ -221,6 +222,9 @@ Venastine Research Harness/
 │       ├── grill-me.md            # built-in agent: surfaces what still needs a decision in the current thread
 │       ├── pipeline-reviewer.md   # ROADMAP_v2 §20: reviews a finished research run and proposes corrections. No spawn_subagent, no load_skill
 │       ├── compactor.md           # ROADMAP_v2 §21a: condenses an older stretch of a conversation. allowed_tools: [] -- it summarizes, it does not act
+│       ├── plan.md                # batch 51: designs an approach before the work starts. NOT spawnable -- its subject is the conversation, which a task string cannot carry. §32 A13: its whitelist is a strict SUPERSET of explore's and review's, because C6 intersects a child's tools with its parent's
+│       ├── explore.md             # batch 51: finds where something lives and how it is wired, in a codebase or the literature. SPAWNABLE -- a task string IS its whole input, which is the only question A3's field asks
+│       ├── review.md              # batch 51: reads a finished change or document against what it claims to do. SPAWNABLE. Read-only by OMISSION (§32 A15) -- no write/edit/write_project_doc/remember in the whitelist at all
 │       └── initializer.md         # ROADMAP_v2 §24: reads a project and writes its AGENTS.md (§44 moved the hub out of .venastine/). allowed_tools: [read_project_doc] -- it drafts, the shell writes
 │
 ├── project_init/                  # ROADMAP_v2 §24: /init. Namespace package, mirroring memories/
@@ -241,7 +245,17 @@ Venastine Research Harness/
 │       ├── security/cybersecurity-research.md
 │       ├── crypto/cryptography-verification.md
 │       ├── math/proof-writing.md
-│       └── research/literature-review.md
+│       ├── math/numerical-methods.md
+│       ├── math/formal-specification.md
+│       ├── research/literature-review.md
+│       ├── research/experiment-design.md
+│       ├── research/statistical-inference.md
+│       ├── research/reproducibility.md
+│       ├── research/source-evaluation.md   # batch 51: mirrors §45's own authority x relevance model deliberately, so the prose and the scorer do not teach two different things
+│       ├── research/technical-writing.md
+│       ├── software/code-review.md         # batch 51: `software/` is the first category folder added since §19 shipped
+│       ├── software/debugging.md
+│       └── software/test-design.md
 │
 ├── tui/                           # ROADMAP_v2 §16: the Textual shell. Hosts capabilities; owns none (D12 keeps the CLI first-class)
 │   ├── app.py                     # the App -- worker, LoopEvent routing, slash dispatch, permission bridge, both ravens; §18 active-agent state + goal banner

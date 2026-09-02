@@ -48,7 +48,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 3462 tests, offline, ~2-3 min by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 3477 tests, offline, ~2-3 min by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -131,7 +131,7 @@ published npm version can never be replaced — only deprecated.
 Read these before changing anything non-trivial — they carry design decisions that are locked, not defaults to re-derive.
 
 - **ARCHITECTURE.md** — what's built, file-by-file contracts ("what belongs here / what does NOT"), known gotchas (§11).
-- **ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **ROADMAP_v2.md** (§13–§46, all built) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I17 from §24, J1–J14 from §23, E1–E14 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A11 from §32, W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37, O1–O8 from §38 Q1–Q6 from §39, UN1–UN6 from §40, X1–X7 from §41, RA1–RA6 from §42, RM1–RM6 from §43, WS1–WS10 from §44, SQ1–SQ10 from §45 and EP1–EP8 from §46). Section and D-numbers are stable and cross-referenced everywhere.
+- **ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **ROADMAP_v2.md** (§13–§46, all built) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I17 from §24, J1–J14 from §23, E1–E14 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A15 from §32, W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37, O1–O8 from §38 Q1–Q6 from §39, UN1–UN6 from §40, X1–X7 from §41, RA1–RA6 from §42, RM1–RM6 from §43, WS1–WS10 from §44, SQ1–SQ10 from §45 and EP1–EP8 from §46). Section and D-numbers are stable and cross-referenced everywhere.
 
 **Six namespaces use the same `LETTER+NUMBER` shape, and only the first is the
 record.** An id that resolves to two places is a cross-reference that fails
@@ -409,6 +409,35 @@ load-bearing, and only one of them can widen anything.
   booleans rather than coerced — `bool("false")` is `True`, and these are the two fields a
   restrictive definition uses to opt out, so a coerced string would invert a deliberate choice
   silently.
+
+**Seven ship, two of them spawnable** (§32 A12, batch 51).
+
+| agent | reached by | what a spawn would have to carry |
+|---|---|---|
+| `compactor` | `core/compaction.py` | a stretch of transcript |
+| `initializer` | `project_init/generator.py` | a document manifest |
+| `pipeline-reviewer` | `core/reasoning/review.py` | a finished `PipelineRun` |
+| `grill-me` | `/grill-me`, one shot in the live thread | the thread |
+| `plan` | `/agent plan` | the conversation |
+| **`explore`** | **`spawn_subagent`**, `/agent` | — a task string IS its input |
+| **`review`** | **`spawn_subagent`**, `/agent` | — a task string IS its input |
+
+Until batch 51 the spawnable column was empty, so `agent_catalog_text()` returned `""` and
+`## Available agents` had never appeared in a prompt this harness produced — while
+`spawn_subagent` was advertised in every attended run telling the model to name an agent
+"exactly as listed in the Available agents catalog". The research passes are unaffected either
+way: `spawn_subagent` is unreachable headless (R16), so `with_catalogs` suppresses that section
+in all ten. The SKILL catalog is the opposite and deliberately so — `load_skill` is callable
+headless, so all fourteen skills ride every pass.
+
+**Two things about the new three that are decisions, not defaults.** `plan`'s whitelist is a
+strict SUPERSET of the other two (A13), because C6 intersects a child's tools with its parent's
+and a `plan` turn spawning `explore` would otherwise silently hand it an `explore` with no
+`web_search`. And `explore`/`review` name `read` and `shell` although
+`config.ToolPermissions` denies both to everything (A15) — on a stock install they are five
+callable tools and two. That is deliberate: `registry.schemas(context)` filters by the same
+predicate, so nothing uncallable is advertised, while an agent that omitted them would stay
+crippled on an install where the operator had enabled them.
 
 ### Skills (`skills/`, §19)
 
