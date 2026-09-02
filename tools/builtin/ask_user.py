@@ -41,6 +41,16 @@ logger = logging.getLogger(__name__)
 # option is an error and not a truncation.
 MAX_OPTIONS = 4
 
+#: Longest option the modal can show whole (batch 49). QuestionScreen is a
+#: fixed 66 columns and an option button 58 of them, so 100 characters is
+#: two wrapped lines for every shape measured -- prose, twenty-character
+#: words, and an unbroken run -- and 105 is three for two of them. It is a
+#: BUDGET, not a guess: the options region scrolls, so exceeding it costs
+#: legibility rather than correctness, and the number is re-derivable by
+#: the test that measures the drawn rows rather than trusting this
+#: comment.
+MAX_OPTION_CHARS = 100
+
 TOOL_SCHEMA = {
     "name": "ask_user",
     "description": (
@@ -67,7 +77,10 @@ TOOL_SCHEMA = {
                 "items": {"type": "string"},
                 "description": f"Up to {MAX_OPTIONS} concrete answers to "
                                f"choose from. Optional -- omit it to ask an "
-                               f"open question. Keep each one short.",
+                               f"open question. Each must be at most "
+                               f"{MAX_OPTION_CHARS} characters, so it can be "
+                               f"shown whole -- put the reasoning in the "
+                               f"question, not in the options.",
             },
             "multi_select": {
                 "type": "boolean",
@@ -110,6 +123,24 @@ def run(params: dict, response_channel=None) -> dict:
             "error": f"ask_user allows at most {MAX_OPTIONS} options; "
                      f"{len(options)} were given. Ask a narrower question, "
                      f"or drop the options and ask it openly.",
+        }
+
+    too_long = [o for o in options if len(o) > MAX_OPTION_CHARS]
+    if too_long:
+        # AN ERROR, NOT A TRUNCATION, for the reason directly above: an
+        # option shortened here is not the option the model offered, and
+        # the answer would come back as though it were. The modal used to
+        # truncate this way by accident -- an option wider than the dialog
+        # was CUT at its edge, so a user chose between two options whose
+        # visible halves were identical -- which is the failure this
+        # refusal exists to make impossible rather than merely unlikely.
+        longest = max(too_long, key=len)
+        return {
+            "error": f"ask_user allows at most {MAX_OPTION_CHARS} characters "
+                     f"per option so it can be read whole; one is "
+                     f"{len(longest)}. Shorten it to the choice itself and "
+                     f"put the reasoning in the question: "
+                     f"{longest[:60]!r}...",
         }
 
     if not options and params.get("allow_text", True) is False:

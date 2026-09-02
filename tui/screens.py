@@ -46,7 +46,7 @@ import json
 
 from rich.text import Text
 from textual.app import ComposeResult
-from textual.containers import Grid, Vertical, VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import (
     Button, Input, Label, ListItem, ListView, SelectionList, Static,
@@ -72,11 +72,27 @@ class ScrollBox(VerticalScroll):
         truncation exactly where it was.
 
     So the bound belongs on a real scroll container and the text on an
-    auto-height child inside it. `height` here must be DEFINITE for the
-    same reason: a scrollable container asked for `height: auto`
-    resolves to ZERO rows -- which is a second way to render nothing at
-    all, and how `1fr` inside a `height: auto` dialog produced a
-    permission modal whose payload had no height whatsoever.
+    auto-height child inside it.
+
+    THE BOUND IS `height: auto` WITH A `max-height`, NOT A DEFINITE
+    `height` (batch 49, amending EP3). §46 read the zero it measured as
+    "a scrollable container asked for `height: auto` resolves to ZERO"
+    and prescribed a definite height. The zero was EP1's `1fr` ROW.
+    Measured again with the row `auto`, all three spellings differ and
+    only one is right:
+
+        25 lines of payload, grid row `auto`
+          height: auto                 box=25, no scroll, BUTTONS OUTSIDE
+          height: 9                    box=9, 16 scrollable, BUTTONS OUT
+          height: auto; max-height: 9  box=9, 16 scrollable, buttons in
+        the same three inside a `1fr` row       box=0, all three
+
+    A definite height bounds what this box DRAWS and not what its parent
+    RESERVES, so the row kept growing with the payload and pushed the
+    Allow/Deny row past the dialog's own `max-height`, where it was
+    clipped away entirely. `auto` with a `max-height` reports the bound
+    upward, so the dialog stays inside itself -- and it still shrinks for
+    a short payload, which a definite height never did.
 
     Bindings are `ScrollableContainer`'s minus the horizontal ones:
     there is nothing to scroll sideways, because the text wraps.
@@ -213,16 +229,37 @@ class PermissionScreen(ModalScreen[bool]):
         widgets.append(ScrollBox(
             Static(Text(rendered), id="permission-params"),
             id="permission-params-box"))
-        widgets.append(Button("Allow", variant="success", id="allow"))
-        widgets.append(Button("Deny", variant="error", id="deny"))
-        # The class carries the ROW COUNT to the stylesheet. A Grid's
-        # `grid-size`/`grid-rows` are static, and this screen composes
-        # three children or four -- `ConfirmScreen` and
-        # `ProjectKindScreen` reuse `#permission-dialog` with three and
-        # must keep the template they have, or their buttons take the
-        # `1fr` row and their body stops expanding.
-        yield Grid(*widgets, id="permission-dialog",
-                   classes="with-headline" if self._headline else "")
+        # ONE bar, centred, holding both answers (batch 49). Two
+        # Buttons in a two-column Grid sat at the LEFT of their columns,
+        # so a 16-wide Deny left ~22 dead columns beside it while Allow
+        # was flush against the padding -- the dialog was centred and its
+        # contents were not. A Horizontal with `align: center middle`
+        # centres the pair as a unit and keeps both answers the same
+        # size, which the alternative (each button filling its half) does
+        # not: it would make the permissive answer a target half the
+        # width of the modal.
+        widgets.append(Horizontal(
+            Button("Allow", variant="success", id="allow"),
+            Button("Deny", variant="error", id="deny"),
+            id="permission-buttons"))
+        # A Vertical, not a Grid (batch 49). Every child spanned both
+        # columns, so the second column only ever held the Deny button --
+        # and the `with-headline` class existed solely to carry a ROW
+        # COUNT to the stylesheet, because a Grid's `grid-size` is static
+        # and this screen composes three children or four. A Vertical
+        # does not care how many there are, so the template it guarded
+        # against getting wrong is gone rather than documented.
+        yield Vertical(*widgets, id="permission-dialog")
+
+    def on_mount(self) -> None:
+        # ENTER DECLINES (batch 49). Focus lands on the first focusable
+        # widget otherwise, which is whichever ScrollBox composed first --
+        # so Enter did nothing here, and on ConfirmScreen, whose body is a
+        # plain Static, it said YES. The convenient action must not be the
+        # permissive one; that is already the recorded reason
+        # GrantPickerScreen ships every option unticked, and it applies
+        # with more force to a key a person presses without looking.
+        self.query_one("#deny", Button).focus()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         self.dismiss(event.button.id == "allow")
@@ -275,7 +312,16 @@ class GrantPickerScreen(ModalScreen[object]):
                 "cancels the run. Nothing is saved.",
                 id="grant-help"),
             SelectionList(*options, id="grant-list"),
-            Button("Run with selected", variant="success", id="grant-ok"),
+            # A bar with one button in it. NO focus call here and none on
+            # ProjectKindScreen: neither screen HAS a declining button --
+            # escape is the decline on both -- so there is nothing to
+            # focus that would make Enter safe, and focusing the
+            # affirmative one for consistency would be the exact
+            # inversion PermissionScreen.on_mount exists to prevent.
+            Horizontal(
+                Button("Run with selected", variant="success",
+                       id="grant-ok"),
+                id="grant-buttons"),
             id="grant-dialog",
         )
 
@@ -312,14 +358,16 @@ class SubagentSignoffScreen(ModalScreen[object]):
 
     def compose(self) -> ComposeResult:
         if not self._candidates:
-            yield Grid(
+            yield Vertical(
                 Label(Text(f"Run {self._agent}?"),
                       id="permission-title"),
                 Static(Text(f"{self._agent} needs no approval-gated "
                             f"tools."),
                        id="permission-params"),
-                Button("Run", variant="success", id="signoff-none"),
-                Button("Refuse", variant="error", id="signoff-refuse"),
+                Horizontal(
+                    Button("Run", variant="success", id="signoff-none"),
+                    Button("Refuse", variant="error", id="signoff-refuse"),
+                    id="permission-buttons"),
                 id="permission-dialog",
             )
             return
@@ -334,10 +382,18 @@ class SubagentSignoffScreen(ModalScreen[object]):
                 "selected is fine. Escape refuses the spawn entirely.",
                 id="grant-help"),
             SelectionList(*options, id="signoff-list"),
-            Button("Run with selected", variant="success", id="signoff-ok"),
-            Button("Refuse the spawn", variant="error", id="signoff-refuse"),
+            Horizontal(
+                Button("Run with selected", variant="success",
+                       id="signoff-ok"),
+                Button("Refuse the spawn", variant="error",
+                       id="signoff-refuse"),
+                id="grant-buttons"),
             id="grant-dialog",
         )
+
+    def on_mount(self) -> None:
+        # The refusal, on both branches -- see PermissionScreen.on_mount.
+        self.query_one("#signoff-refuse", Button).focus()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "signoff-refuse":
@@ -396,8 +452,12 @@ class QuestionScreen(ModalScreen[object]):
         self._allow_text = bool(allow_text)
 
     def compose(self) -> ComposeResult:
+        # The question is the MODEL's, so its length is the one thing
+        # this screen does not choose -- bounded and scrollable for the
+        # same reason the payload block is.
         widgets = [Label("The assistant has a question", id="question-title"),
-                   Static(Text(self._question), id="question-body")]
+                   ScrollBox(Static(Text(self._question), id="question-body"),
+                             id="question-body-box")]
 
         if self._options and self._multi:
             widgets.append(Static(
@@ -408,9 +468,19 @@ class QuestionScreen(ModalScreen[object]):
             widgets.append(
                 Button("Answer", variant="success", id="question-ok"))
         elif self._options:
-            for index, option in enumerate(self._options):
-                widgets.append(Button(option, variant="primary",
-                                      id=f"question-opt-{index}"))
+            # Bounded and scrollable, like the multi-select branch's
+            # SelectionList beside it (batch 49). Unbounded, four options
+            # of two lines each cost 16 of the dialog's 18 rows and took
+            # the Answer button and Discuss instead off the bottom with
+            # them. The Buttons are also FIXED WIDTH in the stylesheet:
+            # at `width: auto` an option wider than the dialog was
+            # CLIPPED, and the same label at `width: 100%` wraps to two
+            # centred lines instead.
+            widgets.append(ScrollBox(
+                *[Button(option, variant="primary",
+                         id=f"question-opt-{index}")
+                  for index, option in enumerate(self._options)],
+                id="question-options"))
 
         if self._allow_text:
             widgets.append(Input(
@@ -427,10 +497,31 @@ class QuestionScreen(ModalScreen[object]):
 
         # Always last, always available: the spec's escape is an answer the
         # user can give on purpose, not only a thing that happens when they
-        # close the window.
-        widgets.append(Button("Discuss instead", variant="default",
-                              id="question-defer"))
+        # close the window. In the bar rather than beside it, so it cannot
+        # be the child that falls off the bottom -- which is exactly what
+        # it was.
+        trailing = [w for w in widgets if getattr(w, "id", "") == "question-ok"]
+        for widget in trailing:
+            widgets.remove(widget)
+        widgets.append(Horizontal(
+            *trailing,
+            Button("Discuss instead", variant="default", id="question-defer"),
+            id="question-buttons"))
         yield Vertical(*widgets, id="question-dialog")
+
+    def on_mount(self) -> None:
+        # The first OPTION, which is where focus landed before the options
+        # gained a ScrollBox around them -- a scroll container is focusable
+        # and would otherwise take it. NOT the declining button: this
+        # screen authorises nothing, so there is no permissive answer for
+        # Enter to give, and the whole point of it is that the model does
+        # not know which option is right.
+        for candidate in ("#question-opt-0", "#question-list",
+                          "#question-text", "#question-defer"):
+            found = self.query(candidate)
+            if found:
+                found.first().focus()
+                return
 
     def _typed(self) -> str:
         if not self._allow_text:
@@ -454,7 +545,19 @@ class QuestionScreen(ModalScreen[object]):
         if button_id.startswith("question-opt-"):
             index = int(button_id.rsplit("-", 1)[1])
             chosen = [self._options[index]]
-        elif self._options and self._multi:
+        self._answer(chosen)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        # Enter in the text box answers (batch 49). Textual posts this and
+        # nothing handled it, so the one affordance whose entire purpose
+        # is being typed into had no way to send what was typed -- and the
+        # Answer button it needed instead was the child clipped off the
+        # bottom. Through `_answer`, not a second dismissal: one shape of
+        # answer, one place that builds it.
+        self._answer([])
+
+    def _answer(self, chosen: list) -> None:
+        if self._options and self._multi:
             chosen = list(
                 self.query_one("#question-list", SelectionList).selected)
         self.dismiss({"options": chosen, "text": self._typed()})
@@ -514,15 +617,31 @@ class ReviewScreen(ModalScreen[object]):
             # here; the parsing never was.
             Label(Text(f"{kind} correction to {target}  [{severity}]"),
                   id="review-title"),
-            Static(Text(body), id="review-body"),
+            ScrollBox(Static(Text(body), id="review-body"),
+                      id="review-body-box"),
             Input(placeholder="Note for the reviewer (used by Refine)",
                   id="review-note"),
-            Button("Accept", variant="success", id="review-accept"),
-            Button("Refine", variant="primary", id="review-refine"),
-            Button("Reject", variant="error", id="review-reject"),
-            Button("Reject the rest", variant="error", id="review-reject-all"),
+            # FOUR buttons in ONE row (batch 49). Stacked they cost 12 of
+            # the 18 rows a dialog has on an 80x24 terminal, so the body
+            # and the note pushed three of the four decisions off the
+            # bottom -- Refine, Reject and Reject the rest, which is to
+            # say every answer except Accept. Measured at 65 columns of
+            # buttons in 70, so they fit the floor as a row.
+            Horizontal(
+                Button("Accept", variant="success", id="review-accept"),
+                Button("Refine", variant="primary", id="review-refine"),
+                Button("Reject", variant="error", id="review-reject"),
+                Button("Reject the rest", variant="error",
+                       id="review-reject-all"),
+                id="review-buttons"),
             id="review-dialog",
         )
+
+    def on_mount(self) -> None:
+        # The declining answer, like every other consent surface here --
+        # see PermissionScreen.on_mount. `reject` and not `reject_all`:
+        # both decline, and only one of them declines everything else too.
+        self.query_one("#review-reject", Button).focus()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         decisions = {
@@ -584,8 +703,15 @@ class ClaimsScreen(ModalScreen[None]):
             header += "  — run in progress, metadata incomplete"
         yield Vertical(
             Label(Text(header), id="claims-title"),
-            Static(Text(_render_claims(self._claims)),
-                   id="claims-body"),
+            # A ScrollBox, not a `max-height` Static (batch 49). EP3's
+            # second rule was right about this one: a Static's
+            # virtual_size follows its clamped box, so a run with more
+            # claims than fit had the remainder GONE rather than below
+            # the fold, on the one screen whose entire purpose is showing
+            # all of them.
+            ScrollBox(Static(Text(_render_claims(self._claims)),
+                             id="claims-body"),
+                      id="claims-body-box"),
             id="claims-dialog",
         )
 
@@ -679,13 +805,27 @@ class ConfirmScreen(ModalScreen[bool]):
         self._confirm_label = confirm_label
 
     def compose(self) -> ComposeResult:
-        yield Grid(
+        yield Vertical(
             Label(Text(self._title), id="permission-title"),
-            Static(Text(self._body), id="permission-params"),
-            Button(self._confirm_label, variant="success", id="allow"),
-            Button("No", variant="error", id="deny"),
+            # The body is a DIFF (/init's file list), so it is the one
+            # here most able to outgrow the dialog -- 30 files measured at
+            # 36 rows of content in a 16-row box, which took both buttons
+            # off the bottom with it. Bounded and scrollable like the
+            # payload block, for the same reason.
+            ScrollBox(Static(Text(self._body), id="permission-params"),
+                      id="permission-params-box"),
+            Horizontal(
+                Button(self._confirm_label, variant="success", id="allow"),
+                Button("No", variant="error", id="deny"),
+                id="permission-buttons"),
             id="permission-dialog",
         )
+
+    def on_mount(self) -> None:
+        # See PermissionScreen.on_mount. This screen is where Enter
+        # actually said yes: its body was a plain Static, so the
+        # affirmative button was the first focusable widget on it.
+        self.query_one("#deny", Button).focus()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         self.dismiss(event.button.id == "allow")
@@ -724,10 +864,10 @@ class ProjectKindScreen(ModalScreen[object]):
                            f"{self._reason}. Change it if that is wrong.")
         else:
             explanation = "Which kind of project is this?"
-        yield Grid(
+        yield Vertical(
             Label("Set up documentation for which kind of project?",
                   id="permission-title"),
-            Static(
+            ScrollBox(Static(
                 Text(
                     f"{explanation}\n\n"
                     "software — ARCHITECTURE, ROADMAP, DEVLOG, "
@@ -737,8 +877,11 @@ class ProjectKindScreen(ModalScreen[object]):
                     "SOURCES, FINDINGS, LIMITATIONS, EXPERIMENT_LOG, "
                     "OPEN_QUESTIONS, DOCUMENTATION_STANDARDS"),
                 id="permission-params"),
-            Button("Software", variant="success", id="kind-software"),
-            Button("Research", variant="primary", id="kind-research"),
+                id="permission-params-box"),
+            Horizontal(
+                Button("Software", variant="success", id="kind-software"),
+                Button("Research", variant="primary", id="kind-research"),
+                id="permission-buttons"),
             id="permission-dialog",
         )
 
