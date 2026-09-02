@@ -454,6 +454,39 @@ already know it exists.
 
 ---
 
+## 13. `spawn_subagent` has no `available_check` where `load_skill` does (open, noted batch 51)
+
+`load_skill` declares `available_check=load_skill.has_skills`, and its
+docstring gives the reason in full: with no skills discovered "the system
+prompt carries no catalog, so this tool's only possible answer is 'Unknown
+skill'. Advertising it anyway is the same defect shape as the fetch_url one
+§15 exists to fix: a schema the model can see, choose, and never get value
+from." `pin`, `unpin` and `remember` each carry one for the same kind of
+reason.
+
+`spawn_subagent` does not, and its schema tells the model to supply an
+"Agent name exactly as listed in the Available agents catalog." Until batch
+51 that catalog was empty on every default install, so for the whole life of
+the project an attended run advertised a tool whose only possible answer was
+`Unknown agent`. Nothing failed; the model could choose it, and the turn
+spent a step learning it could not.
+
+**Why it is not fixed here.** Batch 51 shipped two spawnable agents, so the
+default install now has a catalog and the live instance of the problem is
+gone. What remains is the asymmetry: a user whose agents are all
+non-spawnable — or who deletes ours — is back in the original state, and the
+declaration that would say so is one keyword argument. Adding it changes what
+a run advertises, which is a behaviour change rather than a roster addition,
+and it belongs to whoever is next in `tools/registry.py` rather than to a
+batch about agent files.
+
+**The check itself is already written**, twice: `agent_catalog_text()` returns
+`""` in exactly this condition, and `with_catalogs` already tests it before
+appending. An `available_check` reading the same function — the way
+`has_skills` reads `skill_catalog_text` rather than a parallel check — would
+keep "advertised" and "catalogued" from drifting apart, which is the property
+that comment is really about.
+
 ## Accepted risks noted in the review, deliberately not "fixed"
 
 - `07_review.json` absent on zero-finding reviewed runs — presence-implies-

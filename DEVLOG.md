@@ -9472,3 +9472,158 @@ asserted Enter sent anything. 11 of 11 killed after.
 - `tests/test_tui.py` (+72), `tests/test_question_tool.py` (+5).
 - `ROADMAP_v2.md` (§46 EP1 and EP3, amended), `AGENTS.md`, `ARCHITECTURE.md`,
   `README.md`, `tests/BREAKING_CHANGES.md`.
+
+## Batch 51 — the catalog that was empty, and the docs that were sure of themselves (2026-09-02)
+
+Two pieces of work with one thing in common: in both, the thing that was written down
+had stopped matching the thing that was true, and nothing anywhere compared them.
+
+### A section 176 lines long, five bullets of which were about its subject
+
+`AGENTS.md`'s `### Skills (§19)` ran from `/model` persistence through the theme
+store, the transcript's stream-commit rules and §46's modal-layout material to batch
+49's amendment of it. All of that is the TUI. `### The TUI`, directly above, was six
+lines. Someone opening this file to learn about the shell read six lines and moved on,
+and the 166 lines they wanted were filed under a heading that gave no reason to look.
+
+Moved verbatim — TUI 6 → 174, Skills 176 → 8 — because the owner's instruction was to
+prune only where completely safe, and a measurement said there was nothing safe to
+delete: no sentence appears twice in that file, and none appears verbatim in
+`ARCHITECTURE.md` either. The bloat was not duplication. It was filing.
+
+### And a section that did not exist
+
+The word `spawnable` appeared **nowhere** in `AGENTS.md`. Omitting the field is a hard
+build error for any harness-tier agent — `assert_spawnable_declared` raises at
+discovery, naming every offender — and the document an agent is told to read before
+making a non-trivial change had never mentioned it, along with C6's intersection and
+the `use_project_context` / `use_memory` pair.
+
+The one thing in that new section that is not a restatement: **`max_steps` is the only
+frontmatter field that can WIDEN anything.** Both call sites are `agent.max_steps or
+config.MAX_ITERATIONS` (`tui/app.py:930`, `agents/subagent_tool.py:191`) with no clamp,
+so `max_steps: 200` gets 200 against a ceiling of 50. README said the opposite — "may
+narrow a run's step budget, never widen it" — and the sentence was plausible precisely
+because every OTHER field in a definition can only tighten.
+
+### Two claims that measurement settled
+
+The decision-family map claimed `E1–E12`. The record defines **E13 and E14**, and
+`AGENTS.md` cites both, three hundred lines below the map that says they do not exist.
+`test_docs_consistency.py` pins that every id the map CLAIMS is in the record and that
+every family in the record is named; it does not pin that a claimed RANGE covers its
+family, which is how two locked decisions came to sit outside their own index. The same
+sentence said ROADMAP_v2 covers §13–§45 and then listed EP1–EP8 from §46.
+
+`ARCHITECTURE.md`'s file tree — this document's map of the codebase — omitted **eight
+production files and two directories**: `core/session.py`,
+`core/reasoning/payload_validation.py`, `tools/isolation.py`, `ask_user.py`,
+`remember.py`, `todo.py`, `bin/` and `scripts/`. `AGENTS.md` gives `bin/venastine.mjs`
+a 63-line section; the tree had never heard of it. The first pass at this reported six,
+because a substring check matched `todo.py` inside `test_todo.py` — so it was redone by
+extracting every `├──` entry and diffing against the real directories, which is the
+only version of the check that can be trusted.
+
+Suite timing, stated in three places, said ~25-45s. Measured: **163s**.
+
+### The day §32 wrote a test for
+
+`agent_catalog_text()` returned `""` for this project's entire life. So the string
+`## Available agents` had never appeared in any system prompt this harness produced —
+while `spawn_subagent` was registered, allowed by default, advertised in every attended
+run, and telling the model to name an agent "exactly as listed in the Available agents
+catalog". `test_spawnable.py` asserted that zero deliberately and said why: "it is
+written down here so the day somebody ships a spawnable agent, this test is what tells
+them the situation changed."
+
+Three agents. `plan` is not spawnable, because its subject is the conversation and a
+spawn would hand it a task string — grill-me's shape, for grill-me's reason. `explore`
+and `review` are, because a task string IS their whole input, which is the only question
+A3's field asks. Measured after: 496 characters, naming two.
+
+Ten skills, under `software/` (new), `research/` and `math/`. `source-evaluation`
+mirrors §45's own authority × relevance model deliberately, so the prose and the scorer
+do not teach two different things; `test-design` carries the doctrine this repository
+runs on. Skill catalog measured 610 → 2093 characters. It rides all ten research passes
+because `load_skill` is callable headless; the AGENT catalog does not, because
+`spawn_subagent` is not (R16), so pipeline prompts are unchanged.
+
+### What the control test found
+
+The plan for this batch said `explore` and `review` would get `read` and `shell`. They
+do declare both. **`config.ToolPermissions` ships `read`, `write`, `edit` and `shell` as
+`False`**, and D14 makes the global check unconditional — so on a stock install
+`explore` can call `read_project_doc`, `web_search`, `fetch_url`, `arxiv_search` and
+`load_skill`, and `review` can call two of those. README states this twice. The
+permission table in the plan did not, and the only reason it surfaced is that the
+read-only assertion was written with a control beside it.
+
+Declaring them anyway is right, and it is D24 read the other way round:
+`registry.schemas(context)` filters by the same predicate, so nothing uncallable is ever
+advertised to the agent — while an agent that OMITTED them would stay crippled on an
+install where the operator had turned them on. The whitelist is the agent's intent; the
+global switch is the operator's.
+
+The same fact made half of one assertion vacuous. `is_tool_allowed("write", ctx)` is
+`False` whatever a whitelist says, so a test asserting it would pass for a roster that
+declared `write`. Split: the policy layer for the three writing tools config allows, the
+declaration for the two it denies. In the file whose subject is permissions, a test that
+cannot come out the other way is worth less than no test.
+
+### Measured, not assumed
+
+- A spawn of `explore` or `review` under `plan` **loses nothing** — driven through
+  `child_context()`, which is what a spawn actually receives. That is A13: C6 intersects
+  a child's tools with its parent's, so a `plan` missing `web_search` would silently
+  hand back an `explore` that cannot search, which is A4's failure arriving through the
+  permission axis.
+- Approving a spawn of either grants **nothing**. `shell` carries an `approval_check`,
+  so R2 excludes it from every grant path by name; the sign-off notice reads "needs no
+  approval-gated tools", and each non-inert command still reaches the person who
+  allowed the spawn.
+- Discovery emits **zero warnings** across all 21 shipped definitions.
+
+### The one gap fifteen mutations found
+
+Fourteen killed, and the per-row detail is the reason that N/N total is not the
+thing to read. `plan-stops-reading-the-project` — flipping `use_project_context`
+back to `false`, the default every earlier agent uses — left the whole suite
+**green**.
+
+A14 is a decision with a written reason and nothing checked it. The agent still
+runs, still answers, and answers without the project's own conventions in front
+of it: the third instance in this batch of degraded-rather-than-broken with the
+caller unable to tell, after A4 (the input axis) and A13 (the permission axis).
+
+Closed through the assembled prompt rather than the frontmatter, because
+`system_prompt_for` is what a run receives and `context_for_agent` is the
+function that could stop honouring the flag. The control asserts `compactor`
+still does NOT get the file — a `context_for_agent` that returned the context
+unconditionally would satisfy every other assertion and would put a project's
+AGENTS.md into every compaction at its own token cost. Verified against the
+mutation by hand: with the flag false, `plan` fails and the other two pass.
+
+### The typo nothing caught
+
+`allowed_tools` is a whitelist that narrows, so a misspelled entry does not warn, does
+not fail and does not grant — it silently subtracts the tool its author meant to
+include, and the agent goes on working with a capability missing. Same shape as A4, one
+axis over. `tests/test_shipped_roster.py` now checks every declared name against the
+registry, for agents and for skills.
+
+### Files
+
+- `agents/builtin/plan.md`, `explore.md`, `review.md` — new.
+- `skills/builtin/software/{code-review,debugging,test-design}.md`,
+  `research/{experiment-design,statistical-inference,reproducibility,source-evaluation,technical-writing}.md`,
+  `math/{numerical-methods,formal-specification}.md` — new.
+- `tests/test_shipped_roster.py` (+15) — new; `tests/test_spawnable.py` (the zero became
+  a roster), `tests/test_config_loader.py` (a docstring that had been counting to one
+  since there were four).
+- `AGENTS.md` (restructured, the Agents section, the map, the roster),
+  `ARCHITECTURE.md` (eight files, two directories, thirteen definitions, one test file),
+  `README.md` (`max_steps`, the roster, what read-only buys on a stock install),
+  `ROADMAP_v2.md` (§32 amended in place, A1–A11 → A1–A15), `tests/BREAKING_CHANGES.md`,
+  `TECHNICAL_DEBT.md`.
+
+Count 3462 -> 3483.

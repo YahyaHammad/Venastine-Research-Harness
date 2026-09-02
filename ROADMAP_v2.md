@@ -2424,7 +2424,7 @@ whose allowed_tools excludes one of those was invited to call a tool it does not
 reasoning is not specific to the context axis. It was fixed for `ToolContext` and left open for the
 headless filter — which is the axis the pipeline **always** runs on.
 
-### Design Decisions Record — §32 (A1–A11)
+### Design Decisions Record — §32 (A1–A15)
 
 | id | decision |
 |---|---|
@@ -2439,6 +2439,10 @@ headless filter — which is the axis the pipeline **always** runs on.
 | **A9** | **`is_advertised` is a predicate, not a membership test against `schemas()`.** Both sides need the answer; only one is in a position to enumerate |
 | **A10** | **A pre-flight refusal is RETURNED, not raised.** `ToolCallDenied` means policy blocked you, which is a different fact the model should be able to tell apart |
 | **A11** | **The "our own files comply" check is a test, not a runtime assert.** H1's shape would abort startup on a USER's machine for a mistake in OUR repository |
+| **A12** | **Three agents added (batch 51), and only `explore` and `review` are spawnable.** A4's field had only ever excluded: every agent §32 shipped with needs an input a task string cannot carry, so `agent_catalog_text()` returned `""` for this project's whole life and the string `## Available agents` had never appeared in a prompt this harness produced — while `spawn_subagent` was registered, advertised in every attended run, and told the model to name an agent "exactly as listed in the Available agents catalog". `explore` and `review` take a task string as their entire input, which is the only question the field asks. `plan` does not: its subject is the conversation, so it takes `/agent`'s route, which is grill-me's shape for grill-me's reason |
+| **A13** | **`plan`'s whitelist is a strict SUPERSET of every agent it can spawn**, and this is load-bearing rather than tidy. C6 intersects a child's `allowed_tools` with its parent's, so a `plan` turn spawning `explore` would otherwise hand it an `explore` with no `web_search` — A4's failure (degraded, and the parent cannot tell) arriving through the PERMISSION axis instead of the input axis. Pinned by a test driven through `child_context()` rather than by a comment beside the frontmatter, because the composition is what a spawn actually receives |
+| **A14** | **`use_project_context: true` on all three**, where every agent before them set it false. Those four each had a reason — the compactor summarises a transcript, the initializer is WRITING the file, the pipeline-reviewer reviews a research run, grill-me reads the live thread. These three read a codebase in order to answer a question about it, which is what a project's root `AGENTS.md` exists for. It stays opt-in per agent, so nothing else changes |
+| **A15** | **Read-only by OMISSION, and the global switch stays the operator's.** `explore` and `review` name no `write`, `edit`, `write_project_doc` or `remember`: absent from the whitelist rather than present and gated, so there is no configuration in which one becomes reachable. They DO name `read` and `shell`, which `config.ToolPermissions` denies to everything and D14 denies unconditionally — so on a stock install `explore` is five callable tools and `review` is two. Declaring them anyway is D24 read the other way round: `registry.schemas(context)` filters by the same predicate, so nothing uncallable is ever advertised, while an agent that OMITTED them would stay crippled on an install where the operator had turned them on. The whitelist is the agent's intent; the global switch is the operator's |
 
 ### What the batch actually moved
 
@@ -2548,6 +2552,15 @@ written for it, rather than assumed inert and left.
   and did not get to apply.
 
 ### Deliberately not in §32
+
+**Rejected in batch 51.** A `/plan` slash command, on grill-me's model: a one-shot turn in the
+current thread. `/grill-me` earns its command by being a fixed question with no arguments, where
+`plan` is an ordinary agent the session switches to — so a command would be a second route to one
+thing, and `/agent plan` already reaches it. Rejected too: `ask_user` for the two spawnable agents.
+A spawned agent raising its own question modal underneath a sign-off the human already answered is
+a second question they did not agree to be asked, and `plan` — which runs with a human at the
+keyboard — keeps it.
+
 
 **A non-advertised agent can still be spawned by name.** `spawnable` decides what the model is
 **told** exists, not what it may call — the field's own comment says so, and C6 still caps the

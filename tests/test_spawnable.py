@@ -5,11 +5,15 @@ ROADMAP_v2 §32 (A3, A4) -- an agent says whether spawn_subagent can
 actually feed it, and the catalog stops advertising the ones it cannot.
 
 #69. `spawn_subagent` passes exactly one thing: `params["task"]`, as the
-first message of a FRESH thread. All four shipped agents need something
-else -- a transcript, a thread, a manifest, a finished PipelineRun -- and
-each already has a real caller that supplies it. The catalog advertised
-them as a fifth route that cannot carry them, and `AgentDef` had no field
-to say so.
+first message of a FRESH thread. Every agent §32 shipped with needs
+something else -- a transcript, a thread, a manifest, a finished
+PipelineRun -- and each already has a real caller that supplies it. The
+catalog advertised them as a fifth route that cannot carry them, and
+`AgentDef` had no field to say so.
+
+Batch 51 added the first two agents for which a task string IS the whole
+input (`explore`, `review`), so the field now discriminates in both
+directions rather than only excluding.
 
 The failure this prevents is not a crash. A spawned `grill-me` is told
 "read the thread so far" in a thread whose only message is the task
@@ -209,20 +213,39 @@ class TestWhatTheDefaultInstallActuallyAdvertises:
             assert agent.spawnable is not None, (
                 f"{name} does not declare spawnable")
 
-    def test_none_of_the_four_shipped_agents_is_spawnable(self, real_harness_tier):
+    def test_exactly_two_shipped_agents_are_spawnable(self, real_harness_tier):
         """A4 stated as a test rather than only in the record.
 
-        D6's model-initiated half therefore advertises NOTHING in the
-        default install. That is the honest state -- each of the four has
-        a real caller that supplies what it needs, and none of those
-        inputs can arrive as a task string -- and it is written down here
-        so the day somebody ships a spawnable agent, this test is what
-        tells them the situation changed.
+        THIS TEST USED TO ASSERT THE OPPOSITE. It required the spawnable
+        set to be EMPTY and `agent_catalog_text()` to be `""` -- so the
+        string "## Available agents" had never appeared in any system
+        prompt this harness produced -- and it said, in as many words,
+        that "the day somebody ships a spawnable agent, this test is what
+        tells them the situation changed". Batch 51 is that day, so the
+        assertion is a roster instead of a zero. It is not weaker: it
+        still fails for any agent added without a decision about the
+        field, which is the whole point of A3.
+
+        The five that stay false each have a real caller supplying an
+        input a task string cannot carry -- a stretch of transcript
+        (compactor), a live thread (grill-me, plan), a document manifest
+        (initializer), a finished PipelineRun (pipeline-reviewer). The
+        two that are true take a task string as their entire input,
+        which is exactly the question A3's field asks.
         """
         config_loader.initialize(str(real_harness_tier))
 
-        spawnable = [n for n, a in config_loader.get_agents().items()
-                     if a.spawnable]
+        agents = config_loader.get_agents()
+        spawnable = sorted(n for n, a in agents.items() if a.spawnable)
 
-        assert spawnable == []
-        assert system_prompts.agent_catalog_text() == ""
+        assert spawnable == ["explore", "review"]
+
+        catalog = system_prompts.agent_catalog_text()
+        assert "## Available agents" in catalog
+        for name in spawnable:
+            assert f"- {name}:" in catalog, (
+                f"{name} is spawnable and is not being advertised")
+        for name in sorted(set(agents) - set(spawnable)):
+            assert f"- {name}:" not in catalog, (
+                f"{name} is advertised as a spawn route that cannot carry "
+                f"its input, which is #69 exactly")
