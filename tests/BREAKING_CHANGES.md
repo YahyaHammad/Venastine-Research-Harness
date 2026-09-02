@@ -2954,6 +2954,27 @@ Count 2786 -> 2815.
 | `on_mount`'s banner line moved into `_write_session_banner()` | A test patching or asserting the banner write at mount | Same text, one producer, now called by `/new` as well. Two copies of a status line are two copies that can disagree |
 
 
+## Batch 49 — the decision is the part that falls off (2026-09-02)
+
+| Change | What breaks | Symptom / fix |
+|---|---|---|
+| Every bounded `ScrollBox` is `height: auto; max-height: N`, never `height: N` | Nothing — it is the fix | A definite height bounds what the box DRAWS and not what its parent RESERVES, so the grid row or vertical stack kept growing with the content and the dialog's last children — its buttons — were clipped off the bottom. **Do not "restore" a definite height**: `test_a_bounded_box_reserves_its_bound_not_its_content` fails on both boxes, and it is parametrised because a definite height on the *command* box survived the first mutation pass (it wastes rows without pushing anything out, which is the invisible half) |
+| §46 EP3's "a scrollable container asked for `height: auto` resolves to zero" is WRONG | Any reasoning that starts from it | Measured false. The zero was EP1's `1fr` ROW and the box had been measured inside one. With the row `auto`: `height: auto` draws the content, `height: N` draws N and reports the content height upward anyway, `height: auto; max-height: N` draws N and reports N. EP3's `Static` half is unchanged and still true |
+| `#permission-dialog` is a `Vertical`, not a `Grid` | A test constructing or querying a `Grid`, or asserting `grid-size`/`grid-rows`/`column-span` | Every child carried `column-span: 2`, so the second column held nothing but the Deny button. `PermissionScreen`, `ConfirmScreen`, `ProjectKindScreen` and `SubagentSignoffScreen`'s empty branch all compose it |
+| The `with-headline` class is GONE | `dialog.has_class("with-headline")` — one test asserted it | It existed only to carry a ROW COUNT to the stylesheet, because a Grid's `grid-size` is static and the screen composes three children or four. A Vertical does not care. What that class was FOR is now asserted directly: a tool declaring no headline is not charged the rows one costs |
+| Buttons live in `Horizontal` bars: `#permission-buttons`, `#grant-buttons`, `#review-buttons`, `#question-buttons` | A test asserting a Button is a direct child of the dialog | The bar is one child, so the dialog's arithmetic stops depending on how many answers there are. Centred, not stretched — `test_the_decision_bar_is_centred_in_its_dialog` pins the gaps either side rather than the CSS |
+| `ReviewScreen`'s four buttons are one ROW, not a stack | A test asserting their vertical order | Stacked they cost 12 of the 18 rows a dialog has at 80×24, so three of the four decisions were off the bottom — every answer except Accept |
+| `#claims-body`, `#review-body` and `#question-body` are Statics inside `-box` ScrollBoxes | A test querying those ids for sizing | Same split §46 made for `#permission-params`: the id stays on the Static so `.visual._renderable.plain` still answers what was drawn; sizing assertions go to the `-box` |
+| `#grant-list` and `#signoff-list` cap at 8 rows, not 14 | Nothing | #112 bounded the list and nothing bounded the SUM, so the confirm button was still off the bottom with twenty tools offered |
+| `#permission-params-box` caps at 7 rows (was a definite 9, or 5 with a headline) | Nothing | One template now serves both shapes, so the taller one sets the budget. Everything past row 7 scrolls, and on the shell modal every line of it also appears above |
+| Consent screens open focused on the DECLINING button | A test pressing Enter on a freshly-opened modal and expecting approval | `ConfirmScreen` opened focused on its affirmative button, so Enter said yes. `PermissionScreen`/`ConfirmScreen` → `#deny`, `SubagentSignoffScreen` → `#signoff-refuse`, `ReviewScreen` → `#review-reject`. `GrantPickerScreen` and `ProjectKindScreen` have no declining button and are asserted only not to open on an answer |
+| `Button:focus` no longer resolves to `reverse` | A test asserting the focus text-style | `reverse` inverts the LABEL alone, so a focused green Allow drew its word green-on-white. Bold plus `background-tint: $foreground 25%` tints the whole button. Asserted on the RESOLVED style, because the rule has to win against a DEFAULT_CSS nested `&:focus` |
+| `QuestionScreen` handles `Input.Submitted` | Nothing | Enter in "…or write your own answer" did nothing at all. It routes through `_answer`, the same helper `on_button_pressed` uses, so there is one answer shape |
+| `ask_user` refuses an option over `MAX_OPTION_CHARS` (100) | A test passing a long option | An error, never a trim — M15, the same rule as the count cap beside it. 100 is measured: at 58 columns prose, twenty-character words and an unbroken run all wrap to two lines, and 105 makes two of the three wrap to three |
+| `#question-options Button` is `width: 100%` | A test measuring an option button's width | At `width: auto` an option wider than the dialog was CUT at its edge — two options differing only past the cut rendered identically. The fixture must use options of DIFFERENT lengths or the assertion cannot fail: equal-length labels give equal auto widths |
+
+Count 3349 -> 3426.
+
 ## Batch 48 — /copy: the last response that was never the last (2026-09-02)
 
 | Change | What breaks | Symptom / fix |

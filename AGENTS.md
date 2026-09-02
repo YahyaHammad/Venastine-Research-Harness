@@ -47,7 +47,7 @@ python main.py --init --research-project           # §24: skip the type questio
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 3349 tests, offline, ~25-45s by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 3426 tests, offline, ~25-45s by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -355,15 +355,35 @@ height still reports in full.
 
 Three rules follow, and the first two are the ones a reasonable person gets wrong:
 
-- **`height: auto` on a scrollable container is also zero**, so a bound that should scroll
-  needs a DEFINITE height. The two spellings that read as "grow to fit, then scroll" are the
-  two that render nothing.
+- **A bound the PARENT cannot see is not a bound** (batch 49, amending EP3). The sentence
+  that used to be here — "`height: auto` on a scrollable container is also zero, so a bound
+  that should scroll needs a DEFINITE height" — is false, and it is what caused the next
+  defect. The zero was EP1's `1fr` ROW; the box had been measured inside one. Measured again
+  with the row `auto`: `height: auto` draws the content, `height: N` draws N **and reports
+  the content height upward anyway**, and `height: auto; max-height: N` draws N and reports
+  N. So a grid row or a vertical stack sized itself to the full payload, the dialog hit its
+  `max-height`, and the LAST children — the buttons, always — were clipped off. Nine of
+  fourteen modal shapes lost at least one, `shell`'s approval losing both. Bound a scroll box
+  with `height: auto; max-height: N`, which also shrinks for a short payload.
 - **`max-height` on a `Static` truncates without scrolling.** A Static's `virtual_size`
   follows its clamped box rather than its content, so `max_scroll_y` is 0 and the hidden rows
   are gone, not below the fold. Bound a `ScrollBox` and put the text in an auto-height child.
 - **Assert on the rendered REGION.** `test_every_modal_actually_draws_its_body` walks every
   modal in `_modal_cases()` and fails any widget that carries text and was allocated no rows;
   `test_every_modal_is_centred_bounded_and_styled` still pins the 80×24 floor beside it.
+- **And assert on the BUTTONS, which neither of those can see** (batch 49). One pins where
+  the dialog sits and the other that its body drew rows; a modal can satisfy both while
+  showing no way to answer it. `test_every_modal_keeps_its_decision_on_screen` requires every
+  decision button inside its dialog and every option button at least reachable in its scroll
+  box. It runs over a case table that now includes content long enough to OVERFLOW — the old
+  one was every screen at its smallest ("Body text.", one claim, two short options), which is
+  why three parametrised tests were green while nine shapes were broken. A domain too small
+  to fail is the same trap batch 15's citation check hit from the other side.
+- **The consent surfaces open focused on the DECLINING button** (batch 49), because focus is
+  what Enter fires and `ConfirmScreen` opened on its affirmative one. `GrantPickerScreen` and
+  `ProjectKindScreen` have no declining button — escape declines on both — so they must at
+  least not open on an answer. `Button:focus` also drops textual's `reverse`, which inverts
+  the label alone and reads as a highlighted selection rather than as a cursor.
 
 ### MCP (`mcp_client/`, §17)
 

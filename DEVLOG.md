@@ -9214,3 +9214,147 @@ restores to HEAD, not to a stash.
   `tests/test_tui.py`, `tests/test_thread_legibility.py` (-1).
 - `ROADMAP_v2.md` (§26 L5, amended), `AGENTS.md`, `ARCHITECTURE.md`, `README.md`,
   `tests/BREAKING_CHANGES.md`.
+
+## Batch 49 — the decision is the part that falls off (2026-09-02)
+
+Two reports, five days after #190 shipped §46: the shell approval modal has no Allow
+and no Deny, just an empty band where they were; and the `ask_user` modal is wrong
+four ways. Measured, they are one defect and four looks, and the one defect is on
+nine screens rather than one.
+
+### A bound the parent cannot see is not a bound
+
+§46 bounded the payload with a definite `height` on a `ScrollBox`. That bounds what
+the box DRAWS. It does not bound what the box REPORTS to whatever is laying it out —
+a grid row or a vertical stack still sizes itself to the child's full content — so
+the row grew with the payload, the dialog hit its `max-height`, and the children at
+the end were clipped off. The children at the end are always the buttons.
+
+Measured on the real screens at 80×24 and 120×35, nine of fourteen realistic shapes
+lost at least one:
+
+```
+PermissionScreen("shell", …)   dialog=(4,1,72,22)  content=(7,3,66,18)
+                               virtual=25 rows  →  allow at y=25, deny at y=25
+```
+
+`shell` and any payload over about five lines lost both. `/init`'s confirmation and
+its project-kind question lost both. The grant picker lost its only confirm button.
+The subagent sign-off lost both. The review modal lost Refine, Reject and Reject the
+rest — every answer except Accept. The question modal lost Answer and Discuss
+instead. Two were reported; the rest are paths nobody had walked since #190.
+
+**The empty band was the surplus.** The row reserved the payload's full height and
+the box drew seven rows of it, so what the user saw between the payload and the
+bottom border was rows the layout had already spent.
+
+### The recorded rule that caused it
+
+§46 EP3 says a scrollable container asked for `height: auto` resolves to zero, so the
+height must be definite. The first half is false and the second follows from it. The
+zero was EP1's `1fr` ROW, and the box had been measured inside one — a reasonable
+mis-attribution, since both were true at once and only one of them was the cause.
+
+Measured again with the row `auto`, the three spellings are three different things:
+
+```
+25 lines of payload, grid row `auto`
+  height: auto                  box=25 rows, no scroll, BUTTONS OUTSIDE
+  height: 9                     box=9, 16 scrollable, BUTTONS OUTSIDE
+  height: auto; max-height: 9   box=9, 16 scrollable, buttons inside
+the same three inside a `1fr` row        box=0, all three
+```
+
+So the fix is a CSS spelling, not a mechanism. The first design for this batch
+overrode `ScrollBox.get_content_height` to return `min(content, declared height)`;
+it works, and it is a toolkit-internal override standing in for a property the
+toolkit already has. `auto` with a `max-height` also keeps what the definite height
+threw away: a two-line payload draws two rows and the dialog shrinks to it
+(`web_search` measures 14 rows, `shell` 20), where a definite height reserved nine
+rows for a two-line payload every time.
+
+**Docking the bar was the other candidate and was rejected** — immune to content
+length by construction, and it renders every dialog at its cap whatever it holds.
+
+### The grid was doing nothing
+
+`#permission-dialog` was a two-column grid in which every child carried
+`column-span: 2`, so the second column only ever held the Deny button. That is also
+where the reported asymmetry came from: a grid places a widget at the LEFT of its
+cell, so a 16-wide Allow sat flush against the padding while a 16-wide Deny left ~22
+dead columns beside it. The dialog was centred; its contents were not.
+
+It is a `Vertical` now, and the two answers are one centred `Horizontal`. The
+`with-headline` class goes with the grid: it existed only to tell the stylesheet
+whether the screen had composed three children or four, because `grid-size` is
+static. A Vertical does not need telling, so the template somebody had to keep in
+sync is deleted rather than documented — and `test_a_tool_with_no_headline_gets_no_pinned_block`
+now asserts what that class was FOR (a headline-less tool is not charged the rows
+one costs) instead of asserting the class's absence.
+
+### The other four looks
+
+**Options truncated instead of wrapping.** Textual's `Button` defaults to
+`width: auto`, so an option was as wide as its unwrapped label — measured at 119
+columns inside a 60-column dialog, cut at the edge. Two options differing only past
+the cut rendered as the same sentence. At `width: 100%` the same label wraps to two
+centred lines, which also fixes the ragged right edges, because both symptoms were
+the one default.
+
+**So the length cap is a budget, not a correction.** `MAX_OPTION_CHARS = 100`,
+refused rather than trimmed for M15's reason — an option the tool shortened is not
+the option the model offered, and the answer comes back as though it were. 100 is
+measured: at 58 columns (the button's width once the options region shows its
+scrollbar) prose, twenty-character words and an unbroken run all wrap to two lines,
+and at 105 two of the three wrap to three.
+
+**The answer box did not line up.** Textual's `Input` takes a `tall` border on four
+sides and a `Button` on two, so at the same `x` their left edges are drawn a column
+apart. The Input gives up its side edges rather than the buttons taking two they do
+not want.
+
+**Allow looked highlighted.** `Button:focus` sets `text-style:
+$button-focus-text-style` and this theme resolves that to `reverse`, which inverts
+the label and nothing else. Bold plus `background-tint: $foreground 25%` tints the
+whole button. The screenshot showing it predates #190 — its payload is absent, which
+is exactly the §46 bug — but tabbing reproduces it, and `ConfirmScreen` still opened
+focused on its affirmative button, which meant **Enter said yes** to writing a set of
+files. Focus now starts on the declining answer on every consent surface that has
+one.
+
+**And a fifth nobody reported:** `Input.Submitted` had no handler, so Enter in
+"…or write your own answer" did nothing. With the Answer button clipped off the
+bottom, a typed answer's only route was Tab.
+
+### Why nothing caught any of it
+
+`_modal_cases()` is every screen at its smallest — "Body text.", one claim, two short
+options. All of them fit, so `test_every_modal_is_centred_bounded_and_styled` and
+`test_every_modal_actually_draws_its_body` were green throughout: **the domain was
+too small to fail**, which is batch 15's trap through the other door. And neither
+test could see a button in any case: one pins where the dialog sits, the other that
+its body drew rows, and a modal satisfies both while showing no way to answer it.
+
+`test_every_modal_keeps_its_decision_on_screen` is the missing one. Every decision
+button inside its dialog; every option button at least REACHABLE in its scroll box,
+because conflating those two would forbid the scrolling that makes four long options
+fit. It runs over the old table plus nine overflowing cases, at three terminal sizes.
+
+The mutation pass found four more gaps and all four were fixtures rather than
+assertions: a definite height on the command box wasted rows without pushing anything
+out; `width: auto` restored on the option buttons survived because the fixture gave
+all four options the SAME length, so four auto-width buttons were four buttons of
+equal width and an assertion that they agreed could not fail; nothing at all asserted
+the Allow/Deny pair was centred, which is half of what was reported; and nothing
+asserted Enter sent anything. 11 of 11 killed after.
+
+### Files
+
+- `tui/screens.py` — the dialogs, the bars, the bounded bodies, `on_mount` focus,
+  `on_input_submitted`/`_answer`.
+- `tui/app.tcss` — `auto` + `max-height` throughout, the grid deleted, the bar rules,
+  `Button:focus`, the Input's side borders.
+- `tools/builtin/ask_user.py` — `MAX_OPTION_CHARS`.
+- `tests/test_tui.py` (+72), `tests/test_question_tool.py` (+5).
+- `ROADMAP_v2.md` (§46 EP1 and EP3, amended), `AGENTS.md`, `ARCHITECTURE.md`,
+  `README.md`, `tests/BREAKING_CHANGES.md`.
