@@ -9297,6 +9297,20 @@ comparison, and without the re-grant the command would cost the user a trust pro
 for a file they had just authored. An untrusted project is still not laundered into a
 trusted one (I6), and is told so.
 
+### The gap the mutation pass found
+
+Sixteen mutations, sixteen killed -- and the per-row detail is where the finding was.
+Putting `default_provider` back into the template died only to the vocabulary check,
+which means it died for having an undocumented key rather than for the defect. The
+inertness sweep genuinely cannot see it: `resolve_runtime_defaults` collapses a missing
+key to the same constant the template would have written, so the merged value is
+identical either way and the whole difference lives in `_startup_pair`, comparing the RAW
+key against what settings.json said when the choice was made. Anyone adding the pair *on
+purpose*, template line and OMITTED entry together, would have passed every behavioural
+test in the file. Closed with one that remembers a `/model` choice and requires it to
+survive the scaffold -- verified against the mutation, which drops the session back onto
+the configured provider.
+
 ### Smaller things
 
 `/init`'s parser is a token loop now, modelled on `_split_research_flags`, so the flags
@@ -9313,7 +9327,7 @@ And the CLI init fixture builds its args off the real parser. The hand-made
 flag was added, failing four tests with an `AttributeError` that said nothing about
 what any of them was for.
 
-Count 3426 -> 3461.
+Count 3426 -> 3462.
 
 ## Batch 49 — the decision is the part that falls off (2026-09-02)
 

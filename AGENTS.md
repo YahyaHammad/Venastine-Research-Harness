@@ -48,7 +48,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 3461 tests, offline, ~25-45s by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 3462 tests, offline, ~25-45s by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure

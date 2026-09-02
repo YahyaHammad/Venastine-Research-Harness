@@ -2969,7 +2969,7 @@ Count 2786 -> 2815.
 | `json_store.write_json_atomic` takes `trailing_newline: bool = False` | Nothing — every existing store writes the same bytes | On for the two scaffolded files only: they are the first written through it that a human is meant to edit and commit, and a committed file with no final newline carries git's marker in every diff of it |
 | An existing `.venastine/settings.json` or `mcp.json` is never overwritten, per file | Nothing | I12 applied to the file it was written for. A project with a settings.json and no mcp.json still gets the mcp.json, and the run reports what it left alone |
 
-Count 3426 -> 3461.
+Count 3426 -> 3462.
 
 ## Batch 49 — the decision is the part that falls off (2026-09-02)
 

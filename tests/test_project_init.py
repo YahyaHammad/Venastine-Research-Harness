@@ -664,6 +664,52 @@ class TestTheConfigTemplates:
                 f"settings.json and {getattr(scaffolded, attribute)!r} with "
                 f"the scaffolded one")
 
+    def test_it_does_not_discard_a_model_chosen_with_slash_model(
+            self, monkeypatch):
+        """The behavioural reason `default_provider` and `default_model`
+        are omitted -- and the one thing the sweep above cannot see.
+
+        `resolve_runtime_defaults` collapses a missing key to the same
+        constant the template would write, so the merged value is
+        identical either way. The whole difference is in `_startup_pair`,
+        which compares the RAW key against what settings.json said when
+        the choice was made, and its docstring is explicit: "edit either,
+        ADD either, or remove either and the file re-asserts itself". A
+        scaffold naming the pair -- even at the value already in force --
+        would silently drop the model the user picked with /model, in
+        that project only, with nothing on screen to explain it.
+
+        Found by a mutation that put `default_provider` back and died
+        only to the vocabulary check, which would not have caught anyone
+        adding it on purpose.
+        """
+        import credentials
+
+        from project_init import config_files
+        from tui import preferences
+        from tui.app import VenastineApp
+
+        chosen = ("OPENROUTER", "some/other-model")
+        monkeypatch.setattr(credentials, "load_provider_data",
+                            lambda: {chosen[0]: {"api_key": "k"}})
+        assert preferences.remember_model(chosen[0], chosen[1], None, None), \
+            "the preference store did not accept the fixture, so a restore "\
+            "cannot be observed either way"
+
+        bare = VenastineApp("ANTHROPIC", "test-model", {})
+        assert (bare.provider_name, bare.model) == chosen, (
+            "the remembered pair is not restored even with no settings.json, "
+            "so this fixture cannot tell the two cases apart")
+
+        scaffolded = VenastineApp("ANTHROPIC", "test-model",
+                                  config_files.render_settings())
+        assert (scaffolded.provider_name, scaffolded.model) == chosen, (
+            "the scaffolded settings.json discarded a model chosen with "
+            "/model. Something put default_provider or default_model back "
+            "into the template -- they are the staleness key, and adding "
+            "either re-asserts the file")
+        assert scaffolded._model_restored is True
+
     def test_the_scaffolded_mcp_file_yields_no_servers(self, tmp_path):
         """Through the real discovery, not by comparing the dict.
 
