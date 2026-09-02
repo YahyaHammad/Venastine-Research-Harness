@@ -48,22 +48,38 @@ def run(params: dict) -> dict:
         op = parsed.operation
 
         if op == "gcd":
+            if parsed.a is None or parsed.b is None:
+                return {"error": "gcd requires 'a' and 'b' (both integers)."}
             result = sympy.gcd(parsed.a, parsed.b)
         elif op == "lcm":
+            if parsed.a is None or parsed.b is None:
+                return {"error": "lcm requires 'a' and 'b' (both integers)."}
             result = sympy.lcm(parsed.a, parsed.b)
         elif op == "is_prime":
+            if parsed.n is None:
+                return {"error": "is_prime requires 'n' (integer)."}
             result = sympy.isprime(parsed.n)
         elif op == "prime_factors":
+            if parsed.n is None:
+                return {"error": "prime_factors requires 'n' (integer)."}
             result = sympy.factorint(parsed.n)  # {prime: exponent}
         elif op == "next_prime":
+            if parsed.n is None:
+                return {"error": "next_prime requires 'n' (integer)."}
             result = sympy.nextprime(parsed.n)
         elif op == "factorial":
+            if parsed.n is None:
+                return {"error": "factorial requires 'n' (integer)."}
             result = sympy.factorial(parsed.n)
         elif op == "permutations":
             # nPr = n! / (n-r)! -- computed directly rather than relying
             # on a less-common sympy function name.
+            if parsed.n is None or parsed.r is None:
+                return {"error": "permutations requires 'n' and 'r' (integers)."}
             result = sympy.factorial(parsed.n) / sympy.factorial(parsed.n - parsed.r)
         elif op == "combinations":
+            if parsed.n is None or parsed.r is None:
+                return {"error": "combinations requires 'n' and 'r' (integers)."}
             result = sympy.binomial(parsed.n, parsed.r)
         elif op == "modular_exponent":
             # H5. `pow(b, e, None)` is PLAIN exponentiation, and modulus
@@ -78,10 +94,18 @@ def run(params: dict) -> dict:
             # the unbounded path rather than close it. The tool's name is
             # its contract, and H2's clock is a backstop for the runaway
             # rather than a licence to keep offering it.
+            if parsed.base is None or parsed.exponent is None:
+                return {"error": "modular_exponent requires 'base', 'exponent' and 'modulus' (all integers)."}
             if parsed.modulus is None:
                 return {"error": "modular_exponent requires a modulus. Without one this is plain exponentiation, which can produce a number too large to compute or return. Supply modulus, or ask for a smaller exponent."}
+            if parsed.modulus == 0:
+                return {"error": "modular_exponent requires a non-zero modulus (modulus cannot be 0)."}
             result = pow(parsed.base, parsed.exponent, parsed.modulus)
         elif op == "mod_inverse":
+            if parsed.base is None or parsed.modulus is None:
+                return {"error": "mod_inverse requires 'base' and 'modulus' (integers)."}
+            if parsed.modulus == 0:
+                return {"error": "mod_inverse requires a non-zero modulus (modulus cannot be 0)."}
             result = sympy.mod_inverse(parsed.base, parsed.modulus)
         else:
             return {"error": f"Unknown operation: {op}"}
