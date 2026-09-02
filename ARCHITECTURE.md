@@ -51,7 +51,13 @@ Venastine Research Harness/
 ├── CLAUDE.md / QWEN.md             # pointers to AGENTS.md, so a harness that auto-loads one of those names finds the context instead of a second copy of it
 ├── DEVLOG.md                       # implementation notes for built ROADMAP sections -- see §0
 │
-├── tests/                          # 3462 tests, all offline, ~25-45s depending on the machine (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
+├── bin/                            # batch 35: the npm channel's entry point. The package ships as a FOLDER OF SOURCE -- no bundle, no binary
+│   └── venastine.mjs               # the only thing npm can execute: find a Python >=3.11, make sure the dependencies exist, spawn <root>/main.py with the user's argv, cwd and stdio. Must NEVER set PYTHONPATH or AGENT_WORKSPACE -- test-pinned, because isolation.py builds its child's PYTHONPATH from the parent's resolved sys.path and WORKSPACE_DIR is a permission boundary
+│
+├── scripts/
+│   └── prepublish-check.mjs        # batch 35: package.json's `prepublishOnly` gate, so a non-zero exit aborts the publish. Checks the two things that fail SILENTLY and cannot be undone once a version is on the registry -- the two version numbers agreeing, and no secret in the tarball while LICENSE/NOTICE are in it
+│
+├── tests/                          # 3462 tests, all offline, ~2-3 min depending on the machine (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
 │   ├── conftest.py                 # fixtures: make_model_response, make_stream_from_response, make_stream_sequence, FakeStorage, ...
 │   ├── BREAKING_CHANGES.md         # what-breaks-it / symptom / fix per area
 │   ├── test_cli.py                 # 91 tests -- ROADMAP §1 thread_id passthrough + UUID validation + §14 parser defaults/resolution/trust flow + §29 N1-N8 the one stdin reader, N2's channel deadline, every request kind rendered, and the startup block main(argv) made reachable + #102's four declining defaults
@@ -150,6 +156,7 @@ Venastine Research Harness/
 │   ├── workspace_trust.py         # ROADMAP_v2 §14 (D17): trust store keyed by resolved path + content hash; is_trusted/grant_trust; sorted-walk deterministic hash with path-in-hash
 │   ├── config_loader.py           # ROADMAP_v2 §14: three-tier .md discovery (harness/project/user), line-anchored frontmatter parse, settings.json merge with loud unknown-key rejection, root AGENTS.md opt-in (§44), frontmatter-only skill catalog
 │   ├── pipeline_models.py          # §45 SQ7: the remembered /critic and /embedder pairs. In core/ because the pipeline reads them and D12 forbids core importing the shell
+│   ├── session.py                 # ROADMAP_v2 §21's revisit (batch 31), halved in batch 44: the EPHEMERAL /trigger override, bound to a (provider, model) pair. NOTHING here reaches disk -- that is the whole point -- and resolving the number is compaction.thresholds()' job
 │   ├── model_windows.py           # ROADMAP_v2 §44 (WS6): the remembered context window per (provider, model), user-tier, outranking both the provider query and MODEL_CONTEXT_WINDOWS. Its own module because core/compaction.py reads it and D12 forbids core importing the shell
 │   ├── memory.py                  # ConversationMemory -- in-run message list, provider-NEUTRAL shape, backed by storage.py + resume-shape fix. §21a: assembles the DERIVED view (checkpoint summary + pinned rows + tail) and owns pin_last's ordinal-to-id mapping
 │   ├── compaction.py              # ROADMAP_v2 §21a: when to compact (M1 working-set trigger, M6 pipeline backstop), what may be folded (M4/M5's three floors), and the compactor agent run + ratio retry. Owns the re-entrancy guard. §21c adds summarize_thread() -- a whole-thread DESCRIPTION that folds nothing
@@ -164,6 +171,7 @@ Venastine Research Harness/
 │       ├── confidence_scoring.py  # Pass 5 -- deterministic scoring, ZERO LLM calls
 │       ├── orchestrator.py        # sequences all 10 passes + D0/D1/D2 + _run_pass_with_json_retry + §5 per-pass checkpoints + §11 critic-model routing + §25 authorization passthrough + §20's _review_stage. §22: a GENERATOR (stream_deep_research_pipeline) with run_pipeline_to_completion draining it for the unchanged public entry point
 │       ├── review.py              # ROADMAP_v2 §20: the post-pipeline review -- propose (run_review) / consent (walk_consent) / correct (apply), three functions so the mutating one has no model in it
+│       ├── payload_validation.py  # ROADMAP_v2 §30 (B1): ONE shape boundary for the ten passes. §3's retry corrects a response that does not PARSE; nothing checked that what parsed was the SHAPE the pass promised, so the same defect stood in six places at once (#76)
 │       ├── json_retry.py          # ROADMAP §3's malformed-JSON recovery, shared by the ten passes and §20's reviewer. Takes an ALREADY-OBTAINED response; each caller starts its own first attempt
 │       ├── pipeline_storage.py    # ROADMAP §5: PipelineRunRecord table + create/update/load_pipeline_run. §27: pass_threads_json + classify_legacy_pass_threads (raw SQL, the ensure_columns seam)
 │       ├── output_writer.py       # ROADMAP §12: write_run_artifacts -- human-browsable /output/<run_id>/ directory. §45: finally populates sources/
@@ -252,6 +260,7 @@ Venastine Research Harness/
 └── tools/
     ├── base.py                    # ToolSpec -- the bundle every tool gets registered as (+ §15 available_check)
     ├── context.py                 # §15: ToolContext -- per-run tool restrictions (allowed_tools / approval_overrides / subagent_depth). Data only; leaf module, no project imports
+    ├── isolation.py               # ROADMAP_v2 §31 (H2/H3): a wall clock for tool calls that can actually STOP the work. A PROCESS, not a thread -- a thread cannot be cancelled in CPython, so a watchdog would report a timeout that did not happen while the core stayed busy
     ├── registry.py                # the ONLY file that imports both security.permissions AND every tool module. §15: context-aware schemas/approval_needed/dispatch, runtime unregister, D24 import-time check
     └── builtin/
         ├── _math_common.py        # shared safe-expression-parsing foundation for the 6 math tools
@@ -261,6 +270,7 @@ Venastine Research Harness/
         ├── get_time.py            # current UTC time
         ├── load_skill.py          # ROADMAP_v2 §14: view a skill's full body on request (progressive disclosure; view-only, activation is §19)
         ├── pin.py                 # ROADMAP_v2 §21a/D26: mark recent turns compaction-exempt. Ungated (thread-scoped, reversible) and ordinal (last_n turns), so MessageLog.id stays out of the neutral shape
+        ├── remember.py            # ROADMAP_v2 §21b: write a durable fact that outlives this conversation. APPROVAL-GATED (D26) where `pin` is not, and GRANT_NEVER in both grant paths (M17/#67) -- a memory outlives the thread and silently shapes conversations the user has not started yet
         ├── arxiv.py               # arXiv paper search
         ├── symbolic_math.py       # algebra, calculus, trig, arithmetic (SymPy)
         ├── linear_algebra.py      # matrices, vectors, low-order tensors (SymPy)
@@ -268,6 +278,8 @@ Venastine Research Harness/
         ├── discrete_math.py       # number theory, combinatorics
         ├── logic.py                # propositional logic (NOT full proof-writing -- see its docstring)
         ├── geometry.py             # points, lines, circles, polygons, triangles
+        ├── ask_user.py             # ROADMAP_v2 §23 slice 2: the question tool -- up to 4 options, multi-select, a written answer, and a "chat about this" escape. Asks through the INJECTED response_channel, not the approval bridge, so core/loop.py is untouched by it
+        ├── todo.py                 # ROADMAP_v2 §23 slice 2: a model-maintained checklist, persisted per thread in extra_data (J14). WHOLE-LIST write (J13) -- one call replaces the list, so no item is ever addressed by name or index
         ├── file_ops.py             # ROADMAP §6: read/write/edit with path-dependent approval + markitdown (OPTIONAL since #144 -- lazy import, missing extra named in the error)
         ├── project_docs.py         # ROADMAP_v2 §24: read_project_doc / write_project_doc -- scoped so /init needs neither `read` nor `write`, which are unoverridably denied. §34 added five build manifests by EXACT NAME at the project ROOT only (#94); is_readable_doc() is the public form the manifest listing derives from
         └── shell.py                # ROADMAP §7: shell execution via sandbox module
@@ -511,7 +523,7 @@ Three things about it are load-bearing:
 
 **The per-file test counts in the tree above are no longer hand-maintained in the sense that matters: they are still typed by hand, but since audit #121 nothing keeps them wrong for longer than one run.** Eleven were stale when the audit measured them and **eighteen** two fix batches later, because each number is only ever read one at a time, next to the file it describes — nothing anywhere added them up. `test_docs_consistency.py` now does, against the collected session, in **both** directions: a wrong count fails, a collected file with no entry fails, and an entry naming a file that no longer exists fails. That last one is its own class — five live pointers survived the rename of `test_compaction_e2e.py` to `test_storage_e2e.py` (#91), and a deselected file is indistinguishable from a deleted one when you only look at the session.
 
-**What belongs here:** tests that run offline (~25-45s depending on the machine, +~5s on the first run for the matplotlib font cache — this figure used to be stated twice in this file with two different values, which is why it now names a range instead of a number), with zero network access and zero real API keys. Stubs in root `conftest.py` catch import-time module resolution; fixtures in `tests/conftest.py` provide `ModelResponse` construction and storage mocking; individual test files cover production code's behavior.
+**What belongs here:** tests that run offline (~2-3 min depending on the machine, +~5s on the first run for the matplotlib font cache — this figure used to be stated twice in this file with two different values, which is why it now names a range instead of a number), with zero network access and zero real API keys. Stubs in root `conftest.py` catch import-time module resolution; fixtures in `tests/conftest.py` provide `ModelResponse` construction and storage mocking; individual test files cover production code's behavior.
 
 **What does NOT belong here:** any test that requires a real API key, any test that makes an outbound HTTP call, any test that depends on a specific file on disk (unless the fixture creates and cleans it). If you need to test a provider's real wire format, write an integration test in a separate directory (`tests_integration/` or similar) that is excluded by `pytest.ini`'s `testpaths`.
 

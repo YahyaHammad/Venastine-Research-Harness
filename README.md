@@ -513,7 +513,7 @@ Agent frontmatter fields:
 | `approval_overrides` | mapping | `{}` | Can only ever *add* prompts, never remove one |
 | `use_project_context` | bool | `false` | Inject the project's root `AGENTS.md` into the system prompt |
 | `use_memory` | bool | `true` | Inject durable memories (plain chat counts as opted in) |
-| `max_steps` | int ≥ 1 | caller's ceiling | May narrow a run's step budget, never widen it; an invalid value is repaired to the default with a warning naming what it read |
+| `max_steps` | int ≥ 1 | caller's ceiling | **Replaces** the caller's ceiling rather than narrowing it — a value above `MAX_ITERATIONS` raises it, making this the one frontmatter field that can widen anything; an invalid value is repaired to the default with a warning naming what it read |
 | `spawnable` | bool | `false` for your files | Whether `spawn_subagent` may feed this agent |
 
 Skill frontmatter fields: `name` (required), `description`, and `additional_tools` — a list of tool names stating what the skill's methodology *depends on*. It grants nothing: activation proceeds and tells you what is missing under the current agent.
@@ -698,7 +698,7 @@ Three things can end a turn or pass early:
 | Stop reason | When |
 |---|---|
 | `complete` | The model answered without calling another tool |
-| `max_steps_reached` | Step ceiling hit — 50 by default; an agent's own `max_steps` narrows it |
+| `max_steps_reached` | Step ceiling hit — 50 by default; an agent's own `max_steps` replaces that number, in either direction |
 | `token_budget_exceeded` | Only when `max_token_budget` is configured: cumulative billed spend crossed it |
 
 The CLI names the figures behind an early stop — billed this turn, and the thread's measured context size — rather than a bare reason, because "budget exceeded" invites exactly the misreading that there is a size problem.

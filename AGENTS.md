@@ -48,7 +48,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 3462 tests, offline, ~25-45s by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 3462 tests, offline, ~2-3 min by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -131,7 +131,7 @@ published npm version can never be replaced — only deprecated.
 Read these before changing anything non-trivial — they carry design decisions that are locked, not defaults to re-derive.
 
 - **ARCHITECTURE.md** — what's built, file-by-file contracts ("what belongs here / what does NOT"), known gotchas (§11).
-- **ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **ROADMAP_v2.md** (§13–§45, all built) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I17 from §24, J1–J14 from §23, E1–E12 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A11 from §32, W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37, O1–O8 from §38 Q1–Q6 from §39, UN1–UN6 from §40, X1–X7 from §41, RA1–RA6 from §42, RM1–RM6 from §43, WS1–WS10 from §44, SQ1–SQ10 from §45 and EP1–EP8 from §46). Section and D-numbers are stable and cross-referenced everywhere.
+- **ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **ROADMAP_v2.md** (§13–§46, all built) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I17 from §24, J1–J14 from §23, E1–E14 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A11 from §32, W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37, O1–O8 from §38 Q1–Q6 from §39, UN1–UN6 from §40, X1–X7 from §41, RA1–RA6 from §42, RM1–RM6 from §43, WS1–WS10 from §44, SQ1–SQ10 from §45 and EP1–EP8 from §46). Section and D-numbers are stable and cross-referenced everywhere.
 
 **Six namespaces use the same `LETTER+NUMBER` shape, and only the first is the
 record.** An id that resolves to two places is a cross-reference that fails
@@ -209,14 +209,6 @@ Three stop conditions, all in `_run()`: no tool calls (`complete`), `max_steps` 
 A **shell**, not a feature home. D12 makes the CLI a permanent fallback, so anything implemented in `tui/` is invisible to the CLI *and* the research pipeline — which is why the question tool, todo list, goal mode, `/init`, session summaries and cross-thread referencing are all specified in §18/§21/§23/§24 instead. `tui/commands.py` is a registry other sections register into.
 
 §19 follows the same split: `skills/manager.py` holds **no session state** (K3), so the TUI owning `active_skills` is a call-site fact rather than a design one. §25 is the cautionary tale — the pipeline could not reach a whole capability, and undoing that was a section of work.
-
-### Skills (`skills/`, §19)
-
-- **Activation pins the body into the system prompt** (K1). `load_skill` already returns any body on request, so activation is not about *reading* one — a tool result scrolls away and is subject to §21 compaction; an activated skill governs the session.
-- **`additional_tools` is a declaration of need, never a grant** (K2). It cannot be a grant: `allowed_tools` is a whitelist that narrows and D14 forbids widening, so there is no configuration in which it adds anything. `SkillManager.missing_tools()` reports, and activation proceeds anyway.
-- **Category folders; category is metadata, not identity** (K4). `_discover` recurses for skills and stays flat for agents. The name stays global, so `load_skill`, `/skill` and D18's collision rule are untouched by where a file sits — and two same-named skills in different categories still collide.
-- **Active bodies are appended outside `with_catalogs()`** (K6) — see the progressive-disclosure note in ARCHITECTURE §4. This is the one cross-shell leak the design can have.
-- **Schemas need no mid-loop refresh** (K7, settling ROADMAP_v2's Rev. 3 verification item). Activation happens between turns, and `_run()` recomputes `registry.schemas()` at the top of every call.
 
 `/model [[PROVIDER] name]` switches provider/model for the session and is **remembered for the next launch** beside `settings.json`, never in it (§43, RM3 — see the paragraph below). It refuses while `_busy`, re-runs the mount-time effort validation because effort is per-model, and warns rather than refuses on an empty `API_KEY` so a local OpenAI-compatible endpoint stays usable. `/effort` and `/thinking` still persist nothing. `/window` DOES persist, since §44 — but to
 `core/model_windows.py`, not here, because `core/compaction.py` reads it and D12 forbids core
@@ -385,6 +377,46 @@ Three rules follow, and the first two are the ones a reasonable person gets wron
   `ProjectKindScreen` have no declining button — escape declines on both — so they must at
   least not open on an answer. `Button:focus` also drops textual's `reverse`, which inverts
   the label alone and reads as a highlighted selection rather than as a cursor.
+
+### Agents (`agents/`, §18/§32)
+
+An agent is a `.md` file with YAML frontmatter: a system prompt body plus a tool policy. `/agent
+<name>` makes one active for the rest of the session, `spawn_subagent` delegates one task to one,
+and `agents/manager.py` composes the scope for both. Four things a definition may say are
+load-bearing, and only one of them can widen anything.
+
+- **`spawnable` is mandatory at the harness tier** (§32 A3). `assert_spawnable_declared` raises at
+  discovery, naming every offender, if one of our own files omits it; a user's or a project's file
+  that omits it reads as `false`, because a stranger's silence must get the safe answer. It decides
+  what the model is TOLD exists and nothing else — `agent_catalog_text()` lists only spawnable
+  agents, `/agent` lists them all, and C6 still caps what any of them may do.
+- **It answers a question about the INPUT, not about trust** (§32 A4, #69). `spawn_subagent` passes
+  exactly one thing: `params["task"]`, as the first message of a FRESH thread. An agent whose body
+  opens "read the thread so far" cannot be fed that way, and spawning it does not fail — it returns
+  a confident answer about the task description, and the parent has no way to tell. Degraded rather
+  than broken is what makes it worth suppressing.
+- **A child's tools are its own ∩ the parent's, never a union** (C6), and `approval_overrides` union
+  the same way (decision S2). §18's spec sketch built the child's overrides from the agent definition
+  alone, which drops the parent's and reopens the escalation C6 exists to prevent, one field over.
+  Only `True` entries carry, so unioning can only tighten.
+- **`max_steps` is the one frontmatter field that REPLACES rather than narrows.** Both call sites
+  are `agent.max_steps or config.MAX_ITERATIONS` (`tui/app.py`, `agents/subagent_tool.py`) with no
+  clamp, so a declaration above the ceiling RAISES it. Every other field in a definition can only
+  tighten, which is exactly why this one is written down. An unusable value is repaired to `None`
+  with a warning naming what it read (#45); a valid large one is honoured.
+- **`use_project_context` opts into the project's root `AGENTS.md`** (§44 moved that file out of
+  `.venastine/`); **`use_memory` defaults to `True`** and is §21b's opt-out. Both are VALIDATED as
+  booleans rather than coerced — `bool("false")` is `True`, and these are the two fields a
+  restrictive definition uses to opt out, so a coerced string would invert a deliberate choice
+  silently.
+
+### Skills (`skills/`, §19)
+
+- **Activation pins the body into the system prompt** (K1). `load_skill` already returns any body on request, so activation is not about *reading* one — a tool result scrolls away and is subject to §21 compaction; an activated skill governs the session.
+- **`additional_tools` is a declaration of need, never a grant** (K2). It cannot be a grant: `allowed_tools` is a whitelist that narrows and D14 forbids widening, so there is no configuration in which it adds anything. `SkillManager.missing_tools()` reports, and activation proceeds anyway.
+- **Category folders; category is metadata, not identity** (K4). `_discover` recurses for skills and stays flat for agents. The name stays global, so `load_skill`, `/skill` and D18's collision rule are untouched by where a file sits — and two same-named skills in different categories still collide.
+- **Active bodies are appended outside `with_catalogs()`** (K6) — see the progressive-disclosure note in ARCHITECTURE §4. This is the one cross-shell leak the design can have.
+- **Schemas need no mid-loop refresh** (K7, settling ROADMAP_v2's Rev. 3 verification item). Activation happens between turns, and `_run()` recomputes `registry.schemas()` at the top of every call.
 
 ### MCP (`mcp_client/`, §17)
 
