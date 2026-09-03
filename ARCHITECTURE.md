@@ -57,7 +57,7 @@ Venastine Research Harness/
 ├── scripts/
 │   └── prepublish-check.mjs        # batch 35: package.json's `prepublishOnly` gate, so a non-zero exit aborts the publish. Checks the two things that fail SILENTLY and cannot be undone once a version is on the registry -- the two version numbers agreeing, and no secret in the tarball while LICENSE/NOTICE are in it
 │
-├── tests/                          # 3510 tests, all offline, ~2-3 min depending on the machine (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
+├── tests/                          # 3517 tests, all offline, ~2-3 min depending on the machine (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
 │   ├── conftest.py                 # fixtures: make_model_response, make_stream_from_response, make_stream_sequence, FakeStorage, ...
 │   ├── BREAKING_CHANGES.md         # what-breaks-it / symptom / fix per area
 │   ├── test_cli.py                 # 91 tests -- ROADMAP §1 thread_id passthrough + UUID validation + §14 parser defaults/resolution/trust flow + §29 N1-N8 the one stdin reader, N2's channel deadline, every request kind rendered, and the startup block main(argv) made reachable + #102's four declining defaults
@@ -139,7 +139,7 @@ Venastine Research Harness/
 │   ├── test_thread_refs.py       # 38 tests -- ROADMAP_v2 §21c: what summarize_thread reads and when it spends a call, the ref tier and the pass-prompt boundary it must not cross, the cap that refuses, both shells' commands, and #90's truncation-with-a-stated-cut
 │   ├── test_thread_legibility.py  # 41 tests -- ROADMAP_v2 §27: what each creation path labels its thread, what the picker is offered, the legacy classification (raw sqlite3), what a replay shows, and the per-thread state a resume must reset
 │   ├── test_research_legibility.py # 47 tests -- ROADMAP_v2 §26: a pass's tool calls escaping (P2 amended), the redacted param digest, one stage event per code stage (D2 per ROUND), the role palette, /copy, and ctrl+l vs the Input's ctrl+k
-│   ├── test_live_output.py         # 49 tests -- ROADMAP_v2 §38: the commit rules (a completed line drawn without a flush, a long paragraph broken at row boundaries, an open fence held), the ONE entry per streamed span that keeps /copy and /theme honest, the inline thinking block and its collapsed indicator, the app wiring for both forms, and §43's one `venastine ›` per TURN -- above the reasoning rather than after it, and re-derived identically by rerender()
+│   ├── test_live_output.py         # 56 tests -- ROADMAP_v2 §38: the commit rules (a completed line drawn without a flush, a long paragraph broken at row boundaries, an open fence held), the ONE entry per streamed span that keeps /copy and /theme honest, the inline thinking block and its collapsed indicator, the app wiring for both forms, and §43's one `venastine ›` per TURN -- above the reasoning rather than after it, above a tool call that OPENS the turn (the MCP shape), never above the pipeline's own `pipeline_tool` lines, and re-derived identically by rerender()
 │   ├── test_interaction.py        # 92 tests -- ROADMAP_v2 §23 J2-J7: core/interaction.py's decode, the declining default per kind, CHOICE and SUBAGENT_SIGNOFF validated against the request, and the strict review decoder
 │   ├── test_question_tool.py      # 50 tests -- ROADMAP_v2 §23 slice 2: ask_user through the injected response_channel, QUESTION's three-way answer, and both shells' renderers; batch 49 adds the per-option length cap (refused, never trimmed) and Enter in the answer box
 │   ├── test_todo.py               # 60 tests -- ROADMAP_v2 §23 slice 2: todo_write's whole-list write (J13), the notice forwarded and stripped (J10), and the panel reading its content from thread state; batch 41 adds TestTheMarkerVocabulary (X3) -- the shared ☐/▸/☑/☒/· constants, pinned by codepoint and measured one cell wide under Rich
@@ -972,7 +972,11 @@ the superset — the transcript entire, plus the report and the claims that neve
 happened. `conversation` is the exchange without them, and the split lives in
 `tui/widgets.py` as `CONVERSATION_ROLES` / `META_ROLES` feeding `as_text(roles=...)`. An
 allowlist, so an unclassified role is absent from the copy rather than leaking into it;
-`tests/test_themes.py` fails on a role that is in neither set.
+`tests/test_themes.py` fails on a role that is in neither set. Classification is about
+COPY, not about the §43 label: a research run's tool lines are `pipeline_tool` —
+CONVERSATION, so batch 48's "the query, the tool lines and the report" copy shape is
+unchanged — while only `tool` is a label OPENER, because the run's `venastine ›` belongs
+to the report and not to the first call inside it.
 
 **The claims view is bound to `ctrl+l`, not `ctrl+k`.** Textual's `Input` binds `ctrl+k`
 to `delete_right_all` and holds focus almost always, so a `ctrl+k` binding here would be
