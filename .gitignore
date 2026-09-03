@@ -8,6 +8,8 @@ providers.json
 .qwen/
 .zcode/
 output/
+CLAUDE-SECURITY-*/
+.pytest_cache/
 
 # Build residue. pyproject.toml (#144) is metadata-only -- nothing here is
 # meant to be built or installed -- but any `pip install`, metadata read or
