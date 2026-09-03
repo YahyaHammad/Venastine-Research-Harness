@@ -3091,3 +3091,26 @@ SPLIT as much as the guard, so each half has its own failure signature.
 | Monkeypatching one of `file_ops.WORKSPACE_ROOT` / `config.WORKSPACE_DIR` without the other in a new test | The `workspace` fixture sets BOTH (`WORKSPACE_ROOT` is captured at import and cannot follow a rebind — the reason sandbox's `_within` re-derives its own root); the shell tests set `config.WORKSPACE_DIR` because `classify_command` takes the directory as an argument. A half-patch makes the guard and the handler answer different workspaces | Use the fixtures; do not re-derive the pair |
 
 Count 3483 -> 3510.
+
+---
+
+## The turn label opens above a tool call — `test_live_output.py` / `test_themes.py`
+
+§43 RM1, amended: `_render_entry`'s `tool` branch now calls `_open_label()`, and the research
+pipeline's tool lines carry their own role (`pipeline_tool`) so the amendment cannot reach
+them. The opener set and the `/copy` classification are orthogonal concerns: `pipeline_tool`
+is CONVERSATION (batch 48's copy shape is unchanged) and NOT an opener (the run's label
+belongs to the report). `tool_error` and `diff` stay exempt — pinned, not forgotten.
+
+### What breaks it
+
+| Change | Symptom | Fix |
+|---|---|---|
+| Removing `_open_label()` from `_render_entry`'s `tool` branch | Every test in `TestTheToolLineOpensTheTurn` fails: a turn whose first output is a tool call (the normal MCP shape) draws the call under `you ›` and the label above the prose that followed | Restore the call. The guard inside `_open_label` keeps the mid-turn half of §43 true — `test_a_tool_line_does_not_re_open_a_label` still passes with the branch present |
+| "Fixing" the mid-turn shape by clearing `_label_in_force` at a tool line | `test_one_label_across_tool_batches` and the §43 tests fail: the label re-opens after every batch — the exact defect §43 retired | One label per TURN. A tool line inside the turn is part of what the label already announced |
+| Reverting the research `write_role` in `on_pipeline_event_message` from `pipeline_tool` to `tool` | `test_a_pipeline_tool_line_never_opens_the_label` fails: a research run's label moves from the report to the run's first tool call — a rendering change nobody decided | Keep the role split. The run is the harness working; the report is the model answering |
+| Rendering `pipeline_tool` through the `else` branch (deleting the dedicated branch) | `test_a_pipeline_tool_line_renders_with_the_tool_style` fails: `_style("pipeline_tool")` has no palette entry, so the line goes out UNSTYLED — and nothing else notices, because the text is identical either way | Keep the alias branch (`self._style("tool")`). Adding `pipeline_tool` to `role_styles` instead would put an identical style string beside `tool` in MESSAGE_ROLES and fail the pairwise-distinctness pin in `test_themes.py` |
+| Classifying `pipeline_tool` as META "for consistency" | `/copy conversation` for a research run loses the tool lines — batch 48 documented the copy as "the query, the tool lines and the report" | `pipeline_tool` is CONVERSATION. The label opener and the copy filter are different questions; do not merge them |
+| Adding `pipeline_tool` to `MESSAGE_ROLES` | `test_the_message_roles_are_pairwise_distinct` fails wherever `tool` and `pipeline_tool` share the aliased style | It lives in `ENTRY_ROLES` beside `assistant` and `diff` — reachable, classified, and skipped by the colour checks |
+
+Count 3510 -> 3517.

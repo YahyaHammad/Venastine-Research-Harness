@@ -48,7 +48,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 3510 tests, offline, ~2-3 min by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 3517 tests, offline, ~2-3 min by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -328,11 +328,17 @@ reasoning visible and left the label where it had always been — drawn by
 `_write_stream_chunk` when the first committable chunk of ANSWER text arrived — so on the
 shape §38 itself made normal the whole thinking block rendered above it, under `you ›`, and
 read as the user having done the thinking. `_open_label()` now draws it once above the
-turn's first model output, reasoning included; a tool line, a diff or a notice inside the
-turn does not re-open one, and the next `you ›` retires it. Placement is a pure function of
-the role sequence in `_entries`, which is what lets `rerender()` re-derive it after a
-`/theme` instead of remembering where the labels went — a replay that moves a label is the
-same defect as one that reflows a paragraph.
+turn's first model output, reasoning, text or a tool call included; a tool line, a diff or
+a notice inside the turn does not re-open one, and the next `you ›` retires it. The tool
+call half is not decoration on the shape MCP made normal: a call made before any prose IS
+the turn's first output, and the pre-amendment opener set left such a turn unlabelled
+until the prose followed, so the call read as if the user had made it. The research
+pipeline's tool lines carry their own role (`pipeline_tool`, styled as `tool` by alias and
+classified CONVERSATION so `/copy` is unchanged) precisely so they cannot open one — the
+run's label belongs to the report. Placement is a pure function of the role sequence in
+`_entries`, which is what lets `rerender()` re-derive it after a `/theme` instead of
+remembering where the labels went — a replay that moves a label is the same defect as one
+that reflows a paragraph.
 
 Two things in `tui/app.py` are load-bearing and easy to break silently:
 - **`run_worker(..., exit_on_error=False)` + `on_worker_state_changed`.** Textual's default tears the whole app down on a transient worker exception.

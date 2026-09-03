@@ -9627,3 +9627,79 @@ registry, for agents and for skills.
   `TECHNICAL_DEBT.md`.
 
 Count 3462 -> 3483.
+
+## Batch 52 — the label below the tool call that opened the turn (2026-09-03)
+
+### The reported symptom
+
+`venastine ›` appeared AFTER an MCP tool call instead of before it — but only when the call
+was the first thing the turn contained; with reasoning or text ahead of it there was one
+label and no duplicate. (The first report also described a mid-turn duplicate. Re-testing
+against the code settled it as the turn-start shape seen twice: three sweeps of every
+producer and clearer of `_label_in_force` found no path that could draw a second label
+inside one turn, and the §43 guard holds.)
+
+### Why it was there
+
+§43 moved the label to the TURN but kept the opener set at {reasoning, text}:
+`_open_label()` was called from the two span-openers and `_render_entry`'s
+`assistant`/`thinking` branches, and every other role — `tool` included — fell into the
+exempt `else`. That was correct while a tool call could only ever be INSIDE a turn, which
+is the only shape §43's own tests drew: `test_a_tool_line_does_not_re_open_a_label` thinks
+and speaks before it calls a tool. The shape MCP made normal is the other one — the model
+calls the server's tool before saying anything, because the answer depends on the result —
+and on that shape the call rendered under `you ›` while the label opened below it, above
+the prose that eventually followed, so the call read as if the user had made it. RM1's own
+sentence ("above the model's first output of the turn") already described the fixed
+behaviour; the code just did not include tool calls in "output".
+
+### What changed
+
+`_render_entry` gained a `tool` branch that calls `_open_label()` before the styled write;
+the guard inside keeps a tool line INSIDE the turn a no-op, so the other half of the §43
+sentence holds verbatim. `tool_error` and `diff` stay exempt, pinned by
+`test_a_bare_tool_error_line_does_not_open_the_label`, with the reasons in `_open_label`'s
+docstring: a failure line is the tool's outcome rather than the model speaking, and a diff
+always has its call line above it.
+
+The research pipeline's tool lines could not be allowed to open the label — a run's label
+belongs to the report — and the role was shared, so `on_pipeline_event_message` now writes
+`pipeline_tool`. The role renders with `tool`'s style through an explicit alias branch (the
+`else` styles by the role's own name, and the palette has no `pipeline_tool` entry —
+without the branch the line would have gone out unstyled) and classifies as CONVERSATION,
+which is batch 48's own call read in the other direction: the copy is "the query, the tool
+lines and the report", so the label opener and the copy filter had to stay different
+questions. It lives in `ENTRY_ROLES`, not `MESSAGE_ROLES` — naming it there would make the
+pairwise-distinctness check flag two roles sharing one style string on purpose.
+
+### Owner decisions
+
+- The fix is chat-scoped by ROLE, not by mode: the widget does not know chat from
+  research, and an opener keyed on anything but the role sequence would break the
+  `rerender()` property. A distinct role is the one discriminator that lives IN the entry.
+- `tool_error` stays exempt rather than joining the openers: a label above a failure line
+  would present the tool's outcome as the model speaking, and in the one shape where it
+  can lead a turn (a lost call id, so no call line above it) the model's next prose is
+  what deserves the label.
+- `/copy conversation` for research runs is unchanged. META-classifying `pipeline_tool`
+  would have silently reversed a documented batch 48 decision.
+
+### Mutation
+
+Removing `_open_label()` from the `tool` branch turns every test in
+`TestTheToolLineOpensTheTurn` red. Rendering `pipeline_tool` through the `else` turns only
+the style test red — the text is identical either way, which is why the style test exists.
+
+### Files
+
+- `tui/widgets.py` — the `tool` opener, the `pipeline_tool` alias branch, `CONVERSATION_ROLES`,
+  the `_open_label` and class docstrings.
+- `tui/app.py` — `on_pipeline_event_message`'s tool line writes `pipeline_tool`.
+- `tests/test_live_output.py` (+7) — `TestTheToolLineOpensTheTurn`,
+  `TestThePipelineToolLine`, the `_recording_objects` harness;
+  `tests/test_themes.py` — `ENTRY_ROLES`.
+- `AGENTS.md` (the §43/RM1 paragraph), `ARCHITECTURE.md` (the `/copy` classification note,
+  the tree), `ROADMAP_v2.md` (RM1 amended in place), `README.md`,
+  `tests/BREAKING_CHANGES.md`.
+
+Count 3510 -> 3517.

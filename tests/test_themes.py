@@ -196,8 +196,11 @@ def test_every_message_role_is_actually_reachable():
 #: the colour checks skip it; `diff` paints a background and has its own
 #: pair of floors below; `assistant_label` is the other direction -- a
 #: label drawn beside an entry rather than an entry that can be copied.
+#: `pipeline_tool` renders with `tool`'s style by alias, so naming it in
+#: MESSAGE_ROLES would make the distinctness check flag two roles that
+#: share one style string on purpose.
 ENTRY_ROLES = sorted((set(MESSAGE_ROLES) - {"assistant_label"})
-                     | {"assistant", "diff"})
+                     | {"assistant", "diff", "pipeline_tool"})
 
 
 def test_every_transcript_role_is_classified_as_conversation_or_harness():

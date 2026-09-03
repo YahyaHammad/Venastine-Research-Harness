@@ -50,6 +50,16 @@ def _recording_transcript():
     return transcript, written
 
 
+def _recording_objects():
+    """The same harness keeping the Rich objects instead of their text,
+    for the one assertion a string cannot carry: which STYLE a row went
+    out with."""
+    transcript = Transcript()
+    written = []
+    transcript.write = lambda content, *a, **kw: written.append(content)
+    return transcript, written
+
+
 # ===========================================================================
 # ---- The commit rules (O7) ------------------------------------------------
 # ===========================================================================
@@ -437,6 +447,162 @@ class TestTheLabelOpensTheTurn:
         transcript.reset()
 
         assert transcript._label_in_force is False
+
+
+class TestTheToolLineOpensTheTurn:
+    """RM1, amended: a tool call is model output too. On a turn that
+    OPENS with one -- the normal MCP shape, a call made before any
+    prose -- the §43 opener set (reasoning, text) left the call under
+    `you ›` with `venastine ›` below it, above the prose that
+    eventually followed, so the call read as if the user had made it.
+    The mid-turn half of the rule is unchanged and stays pinned by
+    test_a_tool_line_does_not_re_open_a_label above."""
+
+    def test_a_tool_line_first_in_the_turn_opens_the_label_above_itself(self):
+        transcript, written = _recording_transcript()
+
+        transcript.write_user("list my open pull requests")
+        transcript.write_role(
+            "tool", '▸ mcp__github__list_prs  {"state": "open"}')
+        transcript.thinking_delta("two need review\n")
+        transcript.stream_delta("Here are the open pulls.\n")
+        transcript.flush_stream()
+
+        assert len(_labels(written)) == 1
+        label = _labels(written)[0]
+        tool_row = next(i for i, row in enumerate(written)
+                        if "▸ mcp__github__list_prs" in row)
+        user = next(i for i, row in enumerate(written) if "you ›" in row)
+        assert user < label < tool_row, (
+            "the turn's first output was a tool call and the label "
+            "did not open above it")
+
+    def test_one_label_across_tool_batches(self):
+        """A turn that calls, answers, calls again and answers once more
+        is still ONE turn: the guard keeps every span after the first
+        label from re-opening it."""
+        transcript, written = _recording_transcript()
+
+        transcript.write_user("check ci then file an issue")
+        transcript.write_role("tool", "▸ mcp__ci__last_run  {}")
+        transcript.thinking_delta("the run is red\n")
+        transcript.stream_delta("CI is failing; filing an issue.\n")
+        transcript.write_role(
+            "tool", '▸ mcp__github__create_issue  {"title": "ci red"}')
+        transcript.stream_delta("Filed as #7.\n")
+        transcript.flush_stream()
+
+        assert len(_labels(written)) == 1
+        label = _labels(written)[0]
+        first_call = next(i for i, row in enumerate(written)
+                          if "▸ mcp__ci__last_run" in row)
+        assert label < first_call
+
+    def test_a_tool_first_turn_is_labelled_without_thinking(self):
+        """The shape with show_thinking off: the app never forwards
+        thinking deltas, so the tool call is the first thing the widget
+        sees of the turn at all."""
+        transcript, written = _recording_transcript()
+
+        transcript.write_user("what changed upstream")
+        transcript.write_role("tool", "▸ fetch_url  https://example.com/relnotes")
+        transcript.stream_delta("Three changes landed.\n")
+        transcript.flush_stream()
+
+        assert len(_labels(written)) == 1
+        label = _labels(written)[0]
+        tool_row = next(i for i, row in enumerate(written)
+                        if "▸ fetch_url" in row)
+        assert label < tool_row
+
+    def test_a_bare_tool_error_line_does_not_open_the_label(self):
+        """`tool_error` stays exempt: a failure line is the tool's
+        outcome rather than the model speaking, and in the one shape
+        where it can lead a turn -- a lost call id, so no call line
+        above it -- the model's next prose is what deserves the
+        label."""
+        transcript, written = _recording_transcript()
+
+        transcript.write_user("run the migration")
+        transcript.write_role(
+            "tool_error", "  ✗ mcp__db__migrate  connection refused")
+        transcript.stream_delta(
+            "The database was unreachable; I stopped there.\n")
+        transcript.flush_stream()
+
+        assert len(_labels(written)) == 1
+        label = _labels(written)[0]
+        error_row = next(i for i, row in enumerate(written)
+                         if "✗ mcp__db__migrate" in row)
+        assert label > error_row, (
+            "the failure line opened the label; the answer that "
+            "follows is the model speaking, not the error")
+
+    def test_rerender_places_the_tool_first_label_where_the_live_render_did(self):
+        """The §43 property over the amended opener set: the replay must
+        put the label above the tool line exactly where the live render
+        did."""
+        transcript, written = _recording_transcript()
+        transcript.clear = lambda: None
+
+        transcript.write_user("what changed upstream")
+        transcript.write_role("tool", "▸ fetch_url  https://example.com/relnotes")
+        transcript.stream_delta("Three changes landed.\n")
+        transcript.flush_stream()
+        live_roles = [role for role, _ in transcript._entries]
+
+        written.clear()
+        transcript.rerender()
+
+        assert [role for role, _ in transcript._entries] == live_roles
+        assert len(_labels(written)) == 1
+        label = _labels(written)[0]
+        tool_row = next(i for i, row in enumerate(written)
+                        if "▸ fetch_url" in row)
+        user = next(i for i, row in enumerate(written) if "you ›" in row)
+        assert user < label < tool_row
+
+
+class TestThePipelineToolLine:
+    """The research pipeline's tool lines carry their own role so the
+    amendment above cannot reach them: the run's label belongs to the
+    report, and batch 48's copy shape survives the rename."""
+
+    def test_a_pipeline_tool_line_never_opens_the_label(self):
+        transcript, written = _recording_transcript()
+
+        transcript.write_user("/research quantum error correction")
+        transcript.write_role("pass", "→ Pass 1 (scope)")
+        transcript.write_role(
+            "pipeline_tool", '  ▸ web_search  "quantum error correction"')
+        transcript.write_role("pass_done", "← Pass 1 (scope)")
+        transcript.write_answer(
+            "Error correction advanced on three fronts.\n")
+
+        assert len(_labels(written)) == 1
+        label = _labels(written)[0]
+        tool_row = next(i for i, row in enumerate(written)
+                        if "▸ web_search" in row)
+        report = next(i for i, row in enumerate(written)
+                      if "Error correction advanced" in row)
+        assert tool_row < label, (
+            "the pipeline tool call opened the label; the run's label "
+            "belongs to the report")
+        assert label < report
+
+    def test_a_pipeline_tool_line_renders_with_the_tool_style(self):
+        """The alias is the whole point of the dedicated branch: the
+        else-branch styles by the role's own name, and `pipeline_tool`
+        has no palette entry of its own -- without the branch the line
+        would go out unstyled. A marker palette makes the difference
+        visible outside a running app."""
+        transcript, written = _recording_objects()
+        transcript._styles = lambda: {"tool": "bold cyan"}
+
+        transcript.write_role("pipeline_tool", "  ▸ web_search  q")
+
+        row = next(r for r in written if "▸ web_search" in r.plain)
+        assert row.style == "bold cyan"
 
 
 # ===========================================================================
