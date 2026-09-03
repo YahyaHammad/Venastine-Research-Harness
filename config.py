@@ -1122,7 +1122,7 @@ class ToolApprovals:
     # It stays declared because D24 requires every registered tool to have
     # a field in both dataclasses, and because the ratchet needs somewhere
     # to live. Do not delete it and do not read it as the gate.
-    shell: bool = False
+    shell: bool = True
     load_skill: bool = False
     # Approving a spawn is the §18 subagent sign-off: it authorises the
     # child's whole approval-gated tool set for the rest of the turn, so
