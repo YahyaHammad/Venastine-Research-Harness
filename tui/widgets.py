@@ -112,12 +112,17 @@ MARK_STAGE = "·"
 # MESSAGE_ROLES, so a new role has to be classified rather than land in
 # one target or the other by accident.
 CONVERSATION_ROLES = frozenset({
-    "user", "assistant", "thinking", "tool", "tool_error", "diff"})
+    "user", "assistant", "thinking", "tool", "tool_error", "diff",
+    "pipeline_tool"})
 
 # `pass` and `pass_done` are here rather than above deliberately: a
 # ten-pass run's boundaries are progress reporting about the harness,
 # not the exchange, so a research run copies as the query, the tool
-# lines and the report.
+# lines and the report. `pipeline_tool` is that same call made in the
+# other direction: it is the research tool line's own role -- distinct
+# from `tool` so it cannot open the turn's label the way a chat tool
+# call now can -- and it classifies as CONVERSATION so batch 48's copy
+# shape survives the rename unchanged.
 META_ROLES = frozenset({
     "system", "warning", "error", "pass", "pass_done", "success"})
 
@@ -691,12 +696,12 @@ class Transcript(RichLog):
 
     §43 moves that label. It belongs to the TURN, not to an answer span:
     one "venastine ›" above the model's first output of the turn,
-    whether that output is reasoning or text, retired by the next
-    "you ›". See _open_label for why, and note the property that makes
-    it safe -- placement is a pure function of the role sequence in
-    `_entries`, so rerender() reproduces it rather than approximating
-    it. A re-render that moves a label is the same defect as one that
-    reflows a paragraph.
+    whether that output is reasoning, text or a tool call, retired by
+    the next "you ›". See _open_label for why, and note the property
+    that makes it safe -- placement is a pure function of the role
+    sequence in `_entries`, so rerender() reproduces it rather than
+    approximating it. A re-render that moves a label is the same defect
+    as one that reflows a paragraph.
     """
 
     def __init__(self, **kwargs):
@@ -777,6 +782,23 @@ class Transcript(RichLog):
             self._render_blocks(text[:-1] if text.endswith("\n") else text)
         elif role == "diff":
             self._render_diff(text)
+        elif role == "tool":
+            # §43 RM1, as amended: a tool call is model output too, and on
+            # a turn that OPENS with one -- the normal MCP shape, a call
+            # made before any prose -- it is the turn's first output.
+            # Without this the call rendered under `you ›` and the label
+            # opened below it, above the prose that eventually followed.
+            # The guard inside _open_label keeps the other half of the
+            # §43 sentence true: a tool line INSIDE the turn, after
+            # reasoning or text has already opened the label, is a no-op.
+            self._open_label()
+            self.write(Text(f"     {text}", self._style("tool")))
+        elif role == "pipeline_tool":
+            # The research pipeline's tool lines. Same kind of line and
+            # the same style, deliberately NOT an opener: the run's label
+            # belongs to the report, and a pipeline call is the harness
+            # working, not the model answering (§43 RM1, owner decision).
+            self.write(Text(f"     {text}", self._style("tool")))
         elif role == "thinking":
             # §38. The furniture is OWNED by the renderer, not stored in
             # the entry: `_entries` keeps the model's raw reasoning, so
@@ -800,14 +822,24 @@ class Transcript(RichLog):
         so the transcript read as if the user had done the thinking and
         the model had answered without any.
 
-        It is now the TURN's, opened by whichever of reasoning or text
-        comes first and retired only by the next `you ›`. A tool line, a
-        diff or a system notice inside the turn does NOT re-open one:
-        they are part of the turn the label already announced. The cost,
-        accepted rather than fixed: an answer resuming after a tool line
-        starts directly under it, where the suppressed label used to
-        supply a blank row. A separator drawn instead would be a second
-        thing the live path and rerender() must agree about.
+        It is now the TURN's, opened by whichever of reasoning, text or a
+        tool call comes first and retired only by the next `you ›`. A
+        tool line, a diff or a system notice INSIDE the turn does not
+        re-open one -- they are part of the turn the label already
+        announced, and the guard below is what keeps that sentence true
+        now that a tool line can open the label too. It has to be able
+        to: a call made before any prose (the normal MCP shape) is the
+        turn's first output, and §43's original wording left such a turn
+        unlabelled until the prose followed, so the call read as if the
+        user had made it. `tool_error` stays exempt on purpose -- a
+        failure line is the tool's outcome rather than the model
+        speaking, and the call line above it already carries the label.
+        The research pipeline's tool lines never open one (they are
+        `pipeline_tool`; the run's label belongs to the report). The
+        cost, accepted rather than fixed: an answer resuming after a
+        tool line starts directly under it, where the suppressed label
+        used to supply a blank row. A separator drawn instead would be a
+        second thing the live path and rerender() must agree about.
         """
         if self._label_in_force:
             return

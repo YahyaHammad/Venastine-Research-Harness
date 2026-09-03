@@ -1800,8 +1800,14 @@ class VenastineApp(App):
         elif event.kind == "tool_call":
             # §26, the thing §22 P2 made invisible. Indented under its
             # pass, so a run reads as a tree rather than a flat log.
+            # pipeline_tool, not tool: it renders identically (the widget
+            # aliases the style) and copies identically (still
+            # CONVERSATION), but must not open the turn's label the way a
+            # chat tool call now can -- the run's label belongs to the
+            # report (§43 RM1).
             detail = f"  {event.text}" if event.text else ""
-            self._transcript.write_role("tool", f"  ▸ {event.tool}{detail}")
+            self._transcript.write_role(
+                "pipeline_tool", f"  ▸ {event.tool}{detail}")
             panel.tool_called(event.pass_id)
         elif event.kind == "tool_result":
             # Only failures. A line per successful call doubles the volume
