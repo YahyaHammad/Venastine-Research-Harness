@@ -1,24 +1,21 @@
-# Batch 35 -- the npm channel, BUILT BUT NOT ARMED.
+# Batch 35 -- the npm channel. BUILT AND ARMED (2026-09-04): the tag trigger
+# below went live by deliberate edit, which is the act this file used to hold
+# back. What remains on the maintainer, in order:
 #
-# This workflow can publish @yahyahammad/venastine to the npm registry. It is
-# deliberately incapable of doing so today, and turning it on takes three
-# separate deliberate acts, not one:
+#   1. PUBLIC REPOSITORY. Publishing to npm makes this source public
+#      regardless of the GitHub repository's visibility, and --provenance
+#      needs a public repo, so the repository goes public first.
+#   2. NPM_TOKEN. The repository secret that authenticates publishing.
+#      Without it the run reports that the channel is unarmed and
+#      downgrades itself to a dry run rather than failing red -- so arming
+#      the trigger while the secret is still missing is safe, and every tag
+#      push before the secret exists is a full rehearsal of the release.
 #
-#   1. TRIGGER. `workflow_dispatch` only. There is no push trigger and no tag
-#      trigger -- the tag form is written out below, commented, so that
-#      enabling it is an edit somebody makes on purpose. No commit, merge or
-#      tag can start this run.
-#   2. INPUT. The `dry_run` input defaults to TRUE, so the default dispatch
-#      packs and validates and uploads nothing.
-#   3. SECRET. Publishing authenticates with NODE_AUTH_TOKEN, from an
-#      NPM_TOKEN repository secret that does not exist yet. Without it the
-#      run reports that the channel is unarmed and downgrades itself to a dry
-#      run rather than failing red.
-#
-# WHY THE CARE: publishing to npm makes this source public regardless of the
-# GitHub repository's visibility, and a published npm version can never be
-# replaced -- only deprecated. The npm channel therefore cannot open before
-# the repository does, and these three brakes are what enforce that ordering.
+# The dry_run INPUT still defaults to TRUE on workflow_dispatch, so the
+# default manual run packs and validates and uploads nothing; a real publish
+# by hand unchecks the box. A TAG PUSH carries no input and means it: with
+# NPM_TOKEN set it publishes for real, and a published npm version can never
+# be replaced -- only deprecated.
 #
 # NOTE ON PROVENANCE: `npm publish --provenance` attests the tarball to this
 # repository and commit, which is the answer to "how do I know the npm folder
@@ -37,13 +34,13 @@ on:
         default: true
         required: true
 
-# DO NOT UNCOMMENT until the repository is public and NPM_TOKEN is set.
-# Uncommenting this is what turns a manual, supervised release into an
-# automatic one.
-#
-#   push:
-#     tags:
-#       - "v*"
+  # ARMED 2026-09-04. A pushed `v*` tag runs this workflow without a
+  # dry_run input: with NPM_TOKEN set it publishes, without the secret it
+  # rehearses. Tag the release commit (`git tag v0.1.0 && git push origin
+  # v0.1.0`) only when both preconditions above hold.
+  push:
+    tags:
+      - "v*"
 
 # Least privilege. `id-token: write` exists only so provenance can be minted;
 # nothing here writes to the repository.

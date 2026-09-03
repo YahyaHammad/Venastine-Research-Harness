@@ -121,10 +121,14 @@ Apache-2.0 §4(d) and oblige shipping their `LICENSE`/`NOTICE` files as received
 distribution under §4 where running from a checkout was not, which is why `LICENSE` and `NOTICE` are
 in the allowlist — npm auto-includes the first and **not** the second.
 
-**The publish workflow is built and unarmed.** `.github/workflows/publish.yml` has no push or tag
-trigger, defaults `dry_run` to true, and cannot authenticate without an `NPM_TOKEN` secret that does
-not exist. Publishing makes the source public regardless of the repository's visibility, and a
-published npm version can never be replaced — only deprecated.
+**The publish workflow is armed (2026-09-04).** `.github/workflows/publish.yml` runs on
+`workflow_dispatch` and on pushed `v*` tags. `dry_run` still defaults to true on a manual
+dispatch, and until the `NPM_TOKEN` repository secret exists every run — tags included —
+downgrades itself to a dry run, so arming the trigger while the secret is missing only
+produces rehearsals. A tag push carries no input: with the secret set it publishes for real.
+Publishing makes the source public regardless of the repository's visibility, and a
+published npm version can never be replaced — only deprecated, so the repository goes
+public and the secret is added deliberately, in that order.
 
 ## Documentation map
 
