@@ -6,6 +6,7 @@ logs/
 *.db
 providers.json
 .qwen/
+.zcode/
 output/
 
 # Build residue. pyproject.toml (#144) is metadata-only -- nothing here is

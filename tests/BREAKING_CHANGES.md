@@ -3070,3 +3070,24 @@ depends on. So a Pass 3a fixture missing `similarity_score`, or carrying `"sourc
 with a message about trace ordering. When a payload fixture and a prompt disagree, fix the fixture.
 
 Count 3271 -> 3313.
+
+---
+
+## Protected-segment guard (`.venastine/`) — `test_file_ops.py` / `test_shell.py`
+
+`security/protected_paths.PROTECTED_SEGMENTS` is ONE list with three consumers: the file tools'
+`refusal_check` and three handlers (hard deny), and `shell._shell_approval_check` (always ask).
+`project_docs._DENIED_SEGMENTS` unions it rather than re-spelling the segment. The tests pin the
+SPLIT as much as the guard, so each half has its own failure signature.
+
+### What breaks it
+
+| Change | Symptom | Fix |
+|---|---|---|
+| Dropping `refusal_check=file_ops._protected_refusal` from a ToolSpec | **Nothing red at first** — the handler backstop refuses anyway and `dispatch()` returns the same `{"error": ...}`, so `test_dispatch_refuses_without_asking_anyone` stays green. `test_the_registry_knows_the_refusal_pre_approval` is what goes red: it reads `registry.refusal_reason()` directly, because with the backstop in place the wiring half is invisible to a behavior test. The cost of dropping it: a human is prompted for a call the tool would refuse, and a headless denial loses the real reason | Restore the kwarg on the registration at `tools/registry.py` |
+| Moving the protected-segment check in `_shell_approval_check` below the `auto_approve_fallback` branch | `test_the_fallback_opt_in_no_longer_covers_a_protected_write` goes red: `touch .venastine/notes.txt` with Docker down and both fallback flags set auto-approves again | The check must precede the fallback branch. The `UNAVAILABLE` short-circuit moved above it is a no-op (the two containment answers are disjoint) and is what lets the check sit before both |
+| Making the shell side DENY instead of ask, or "fixing" the deny into `_file_approval_check` | `test_the_approval_layer_is_unchanged_the_deny_is_not_its_job` (file tools) and `test_the_routing_is_unchanged_it_still_classifies_inert` (shell) go red. An approval OR-gate has no answer that DENIES; and a shell deny is a lie a glob prefix (`cat .ven*/x`) walks past — on the INERT tier there is no shell to expand it, so the deny that misses reads as a pass | The file tools deny via `refusal_check` + handlers; the shell only ever ASKS, which is what leaves the full command text in front of a human |
+| Teaching `_command_touches_protected` to split tokens on more than the first `=` | No test fails immediately — that is the point of G2. The generative totality corpus (`TestTheGateAnswersForEveryString`) is the nearest guard: `\;` and non-string commands go through the gate, and a helper that parses more syntax eventually raises inside it (Q3's original bug, one layer down) | Keep the check to raw tokens, the one `=` split, and the realpath — the same vocabulary `_escapes_workspace` permits itself |
+| Monkeypatching one of `file_ops.WORKSPACE_ROOT` / `config.WORKSPACE_DIR` without the other in a new test | The `workspace` fixture sets BOTH (`WORKSPACE_ROOT` is captured at import and cannot follow a rebind — the reason sandbox's `_within` re-derives its own root); the shell tests set `config.WORKSPACE_DIR` because `classify_command` takes the directory as an argument. A half-patch makes the guard and the handler answer different workspaces | Use the fixtures; do not re-derive the pair |
+
+Count 3483 -> 3510.

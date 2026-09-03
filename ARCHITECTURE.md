@@ -57,7 +57,7 @@ Venastine Research Harness/
 ├── scripts/
 │   └── prepublish-check.mjs        # batch 35: package.json's `prepublishOnly` gate, so a non-zero exit aborts the publish. Checks the two things that fail SILENTLY and cannot be undone once a version is on the registry -- the two version numbers agreeing, and no secret in the tarball while LICENSE/NOTICE are in it
 │
-├── tests/                          # 3483 tests, all offline, ~2-3 min depending on the machine (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
+├── tests/                          # 3510 tests, all offline, ~2-3 min depending on the machine (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
 │   ├── conftest.py                 # fixtures: make_model_response, make_stream_from_response, make_stream_sequence, FakeStorage, ...
 │   ├── BREAKING_CHANGES.md         # what-breaks-it / symptom / fix per area
 │   ├── test_cli.py                 # 91 tests -- ROADMAP §1 thread_id passthrough + UUID validation + §14 parser defaults/resolution/trust flow + §29 N1-N8 the one stdin reader, N2's channel deadline, every request kind rendered, and the startup block main(argv) made reachable + #102's four declining defaults
@@ -88,8 +88,8 @@ Venastine Research Harness/
 │   ├── test_json_retry.py          # 16 tests -- ROADMAP §3 malformed-JSON recovery (incl. crux test)
 │   ├── test_payload_validation.py  # 59 tests -- ROADMAP_v2 §30 the pass payload boundary: the spec table, the three properties, the id cross-check and its partial-match control
 │   ├── test_pipeline_storage.py    # 12 tests -- ROADMAP §5 create/update/load_pipeline_run + inner-failure caplog
-│   ├── test_file_ops.py            # 40 tests -- ROADMAP §6 path resolution, approval, read/write/edit, registry
-│   ├── test_shell.py               # 200 tests -- ROADMAP §7 sandbox routing, inert/network classification, approval, backend internals; §28 the capability classifier, the three modes, the .venastine mount; batch 37 the quoting bypass and the protected-path workspace guard; batch 39 the escaping bypass, the generative tokeniser-agreement corpus and the compound-command network flag; §46 INERT routed into the container and HOST_READ left on the host, the approval answer proven unchanged across both containments, `ran_on`/`tier` on every backend, and the container label
+│   ├── test_file_ops.py            # 59 tests -- ROADMAP §6 path resolution, approval, read/write/edit, registry
+│   ├── test_shell.py               # 208 tests -- ROADMAP §7 sandbox routing, inert/network classification, approval, backend internals; §28 the capability classifier, the three modes, the .venastine mount; batch 37 the quoting bypass and the protected-path workspace guard; batch 39 the escaping bypass, the generative tokeniser-agreement corpus and the compound-command network flag; §46 INERT routed into the container and HOST_READ left on the host, the approval answer proven unchanged across both containments, `ran_on`/`tier` on every backend, and the container label
 │   ├── test_posture.py             # 29 tests -- batch 40 (UN1-UN6): the posture is frozen, config/env mutation cannot move it, apply_cli's ordering guard, and every route a session has (settings.json, env, slash command, writing config.py) proved not to reach it
 │   ├── test_policy_enforcement.py  # 101 tests -- ROADMAP §8 secret redaction, domain blocking (#48 normalisation + suffix match), is_url_permitted's address guard (#54), output policy, registry integration
 │   ├── test_critic_routing.py      # 2 tests -- ROADMAP §11 critic-model routing (3a/3b/6c to critic, rest to main)
@@ -294,9 +294,9 @@ Venastine Research Harness/
         ├── geometry.py             # points, lines, circles, polygons, triangles
         ├── ask_user.py             # ROADMAP_v2 §23 slice 2: the question tool -- up to 4 options, multi-select, a written answer, and a "chat about this" escape. Asks through the INJECTED response_channel, not the approval bridge, so core/loop.py is untouched by it
         ├── todo.py                 # ROADMAP_v2 §23 slice 2: a model-maintained checklist, persisted per thread in extra_data (J14). WHOLE-LIST write (J13) -- one call replaces the list, so no item is ever addressed by name or index
-        ├── file_ops.py             # ROADMAP §6: read/write/edit with path-dependent approval + markitdown (OPTIONAL since #144 -- lazy import, missing extra named in the error)
-        ├── project_docs.py         # ROADMAP_v2 §24: read_project_doc / write_project_doc -- scoped so /init needs neither `read` nor `write`, which are unoverridably denied. §34 added five build manifests by EXACT NAME at the project ROOT only (#94); is_readable_doc() is the public form the manifest listing derives from
-        └── shell.py                # ROADMAP §7: shell execution via sandbox module
+        ├── file_ops.py             # ROADMAP §6: read/write/edit with path-dependent approval + markitdown (OPTIONAL since #144 -- lazy import, missing extra named in the error). The ONE hard deny: any path resolving into a PROTECTED_SEGMENTS directory (`.venastine/`) is refused pre-approval (refusal_check) and re-tested in every handler
+        ├── project_docs.py         # ROADMAP_v2 §24: read_project_doc / write_project_doc -- scoped so /init needs neither `read` nor `write`, which are unoverridably denied. §34 added five build manifests by EXACT NAME at the project ROOT only (#94); is_readable_doc() is the public form the manifest listing derives from; its _DENIED_SEGMENTS unions security/protected_paths.PROTECTED_SEGMENTS rather than re-spelling `.venastine`
+        └── shell.py                # ROADMAP §7: shell execution via sandbox module. A command whose tokens name a protected segment always asks (below the mode gate, above the fallback opt-in and the capability rule)
 ```
 
 ## 4. File-by-file contracts — what belongs where, and what does NOT
@@ -1517,10 +1517,10 @@ Validated by **shape only** — provider names and API keys are not checked (E6)
 | `discrete_math` | `discrete_math.py` | Working | Number theory + combinatorics via SymPy |
 | `logic` | `logic.py` | Working | Propositional logic ONLY — see its docstring for scope limits |
 | `geometry` | `geometry.py` | Working | Points/lines/circles/polygons/triangles via SymPy |
-| `file_ops` | `file_ops.py` | Working | read/write/edit with path-dependent approval, markitdown for rich formats (an *optional* extra since #144 — `_read_rich` names `pip install -e ".[documents]"` when it is absent), line/char pagination. **Both `read` and `write` are denied by a global that nothing can flip at runtime — see §11** |
+| `file_ops` | `file_ops.py` | Working | read/write/edit with path-dependent approval, markitdown for rich formats (an *optional* extra since #144 — `_read_rich` names `pip install -e ".[documents]"` when it is absent), line/char pagination. **Both `read` and `write` are denied by a global that nothing can flip at runtime — see §11**. Any path resolving into `PROTECTED_SEGMENTS` (`.venastine/`) is hard-refused — `refusal_check` pre-approval, handlers as backstop — whatever the approval booleans say |
 | `read_project_doc` | `project_docs.py` | Working | ROADMAP_v2 §24: project documentation only, confined by realpath, no approval |
 | `write_project_doc` | `project_docs.py` | Working | ROADMAP_v2 §24: a document NAME from a fixed allowlist, no path parameter, approval-gated. `grant_policy=GRANT_SIGNOFF_ONLY` (R13) — the only tool in the gap between the two grant paths: a human may pre-grant it for one turn about one named agent, an unattended pipeline run may not (#133) |
-| `shell` | `shell.py` | Working | Shell execution via sandbox module; inert fast-path; Docker default, subprocess fallback |
+| `shell` | `shell.py` | Working | Shell execution via sandbox module; inert fast-path; Docker default, subprocess fallback. A command whose tokens name a protected segment (`PROTECTED_SEGMENTS`) always requires approval under `tiered` — approval-side only, the routing is unchanged |
 
 **Every registered tool declares `ToolSpec.grant_policy`** (R13): `GRANT_ANYWHERE`, `GRANT_SIGNOFF_ONLY` or `GRANT_NEVER`, answering *may approving this NAME, before any call exists, stand in for consent?* — a different question from `registry.grantable()`, which is mechanical (*does this tool decide from its params?*). Both grant paths check both. `spawn_subagent` and `remember` are `NEVER`, `write_project_doc` is `SIGNOFF_ONLY`, the four param-dependent tools are `NEVER`, everything else is `ANYWHERE`. Declared even on ungated tools on purpose: whether a tool is gated is *config*-dependent, so a policy inferred from today's gating would be answered by whoever edited `settings.json`. `assert_grant_policy_declared()` raises at import for an undeclared **or misspelled** value, in the same shape and for the same reason as D24's permission check.
 
