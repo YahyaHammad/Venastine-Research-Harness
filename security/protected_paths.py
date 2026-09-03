@@ -43,6 +43,17 @@ the same job for a `.venastine/` nested in the workspace and whose
 docstring already named this gap: "does not cover ... the harness's own
 `agents/builtin` when the workspace is the harness repo."
 
+THE PROTECTED SEGMENT at the bottom of this file is the module's second
+job, added because everything above answered only half the question. The
+trees and ro-mounts stop a SANDBOXED command from writing what it should
+not; nothing stopped the agent's own read/write/edit tools from reaching
+the same material once AGENT_WORKSPACE was pointed at the project --
+workspace membership is the only rule those tools apply, so `.venastine/`
+was an auto-approved path the moment it sat inside one. PROTECTED_SEGMENTS
+is the one list every consumer reads (the file tools' refusal_check and
+handlers, and shell.py's approval check), so the segment cannot drift
+between them.
+
 KNOWN LIMITS, stated because a half-understood control is worse than
 none. This covers WRITES on the DOCKER path. It does not cover reads, and
 it does not cover the subprocess fallback, which mounts nothing and has
@@ -54,6 +65,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 
 import config
 import credentials
@@ -244,3 +256,54 @@ def readonly_mounts(workspace_real: str) -> list[str]:
         rel = os.path.relpath(protected, workspace_real).replace(os.sep, "/")
         args.extend(["-v", f"{protected}:/workspace/{rel}:ro"])
     return args
+
+
+# ===========================================================================
+# ---- Protected path segments ----------------------------------------------
+# ===========================================================================
+
+# Path components the agent's own tools may never touch, wherever they sit
+# in a RESOLVED path. `.venastine/` holds settings.json and mcp.json --
+# which names commands the harness spawns at startup -- and, under skills/
+# and agents/, content that is injected into system prompts. The trees
+# above answer what a SANDBOXED command may write; this answers what the
+# agent's read/write/edit tools may reach at all, which workspace
+# membership alone does not: with AGENT_WORKSPACE pointed at the project,
+# `.venastine/` is inside the workspace and file_ops'
+# `_file_approval_check` auto-approves it.
+#
+# ONE LIST, THREE CONSUMERS -- the same discipline as the local-secret
+# exclusion lists, which exist because three copies of one fact drift.
+# tools/builtin/file_ops.py refuses any path carrying one of these
+# segments (refusal_check AND the three handlers); tools/builtin/shell.py
+# forces a prompt for any command whose tokens name one; and
+# project_docs.py unions this set into its own wider denylist rather than
+# re-spelling the segment.
+#
+# KNOWN LIMITS, in the house style. The file tools DENY; the shell only
+# ever ASKS, because a token check that learned shell syntax would be a
+# parser whose bugs auto-approve (G2), and an approval prompt leaves the
+# whole command text in front of a human instead. The auto-approved INERT
+# tier executes argv with no shell (§46 EP5), so its tokens ARE its
+# arguments and a token check is sound there; every tier that could
+# expand a glob or a variable into the segment is asked about anyway.
+# MCP servers exposing their own file tools are a separate surface this
+# list does not reach, and the user-tier `~/.config/venastine` stays
+# where it always was -- outside a default workspace it is prompt-gated
+# by the workspace boundary, not denied.
+PROTECTED_SEGMENTS = frozenset({".venastine"})
+
+
+def protected_segment(resolved_path: str) -> str | None:
+    """The protected segment *resolved_path* carries, or None.
+
+    Callers pass a realpath'd path (file_ops' ``resolve_path``, the
+    sandbox's ``_within``), so `..` travel and symlinks are already
+    collapsed: a link pointing at `.venastine/settings.json` arrives
+    here as the real thing, and on Windows so does a case-spelled one.
+    Split on both separators because a raw shell token may carry either.
+    """
+    for part in re.split(r"[\\/]", resolved_path):
+        if part in PROTECTED_SEGMENTS:
+            return part
+    return None

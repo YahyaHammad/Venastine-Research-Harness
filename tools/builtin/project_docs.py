@@ -69,6 +69,7 @@ from typing import Optional
 
 import config
 from core import config_loader, workspace_trust
+from security import protected_paths
 
 logger = logging.getLogger(__name__)
 
@@ -91,10 +92,14 @@ _ROOT_ONLY_FILENAMES = frozenset({
 # settings.json; providers.json is where API keys live. check_output_policy
 # would redact a leaked key from the result, but a backstop is not a reason
 # to hand it the chance.
-_DENIED_SEGMENTS = frozenset({
-    ".git", ".venastine", "node_modules", ".venv", "venv",
-    "__pycache__", ".pytest_cache",
-})
+#
+# `.venastine` is spelled ONCE, in security.protected_paths.PROTECTED_SEGMENTS
+# -- the same segment the file tools hard-refuse and the shell's approval
+# check always asks about -- and unioned in here rather than re-spelled, so
+# the one fact cannot drift between its three consumers.
+_DENIED_SEGMENTS = (protected_paths.PROTECTED_SEGMENTS
+                    | {".git", "node_modules", ".venv", "venv",
+                       "__pycache__", ".pytest_cache"})
 _DENIED_FILENAMES = frozenset({"providers.json"})
 
 #: Re-exported so callers name one constant. The name lives in

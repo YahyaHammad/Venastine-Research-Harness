@@ -427,3 +427,107 @@ class TestEditRejectsAnOversizedFileBeforeOpeningIt:
         assert "error" not in result, result
         with open(full, encoding="utf-8") as f:
             assert f.read() == "hello there"
+
+
+# ===========================================================================
+# ---- Protected segments: `.venastine/` is the one hard deny ---------------
+# ===========================================================================
+
+class TestProtectedSegmentDenial:
+    """PROTECTED_SEGMENTS (security/protected_paths.py): read/write/edit
+    refuse any path resolving into `.venastine/`, wherever it sits and
+    whatever the approval booleans say.
+
+    WHY THIS NEEDS ITS OWN LAYER. `_file_approval_check` answers one
+    question -- workspace membership -- and approval ORs can only
+    tighten: there is no configuration in which it DENIES. With
+    AGENT_WORKSPACE pointed at the project, `.venastine/` sits inside
+    the workspace and every call against it auto-approves, so the deny
+    has to live in the refusal_check (pre-approval, prompt-suppressing)
+    and the handlers (the enforcement).
+    """
+
+    TOOLS = {
+        "read": lambda path: {"path": path},
+        "write": lambda path: {"path": path, "content": "{}"},
+        "edit": lambda path: {"path": path, "old_text": "a", "new_text": "b"},
+    }
+
+    @pytest.mark.parametrize("tool", ["read", "write", "edit"])
+    @pytest.mark.parametrize("rel_path", [
+        ".venastine/settings.json",
+        ".venastine/mcp.json",
+        "deep/nested/.venastine/x.txt",
+        "sub/../.venastine/settings.json",
+    ])
+    def test_a_venastine_path_is_refused(self, workspace, tool, rel_path):
+        result = getattr(file_ops, f"{tool}_run")(self.TOOLS[tool](rel_path))
+        assert "error" in result, result
+        assert ".venastine" in result["error"]
+
+    def test_an_absolute_path_inside_the_workspace_is_refused(self, workspace):
+        absolute = os.path.join(workspace, ".venastine", "settings.json")
+        result = file_ops.read_run({"path": absolute})
+        assert "error" in result and ".venastine" in result["error"]
+
+    def test_a_refused_write_conjures_nothing(self, workspace):
+        """The refusal must precede the makedirs, or denying the write
+        still creates the directory it exists to protect."""
+        result = file_ops.write_run(
+            {"path": ".venastine/settings.json", "content": "{}"})
+        assert "error" in result
+        assert not os.path.exists(os.path.join(workspace, ".venastine"))
+
+    def test_a_symlink_pointing_into_venastine_is_refused(self, workspace):
+        target = os.path.join(workspace, ".venastine")
+        os.makedirs(target)
+        with open(os.path.join(target, "settings.json"), "w",
+                  encoding="utf-8") as f:
+            f.write("{}")
+        link = os.path.join(workspace, "alias")
+        try:
+            os.symlink(target, link)
+        except OSError:
+            pytest.skip("symlink privileges unavailable for this user")
+        result = file_ops.read_run({"path": "alias/settings.json"})
+        assert "error" in result and ".venastine" in result["error"]
+
+    def test_the_refusal_check_answers_pre_approval(self, workspace):
+        assert ".venastine" in file_ops._protected_refusal(
+            {"path": ".venastine/settings.json"}, None)
+        assert file_ops._protected_refusal({"path": "notes.txt"}, None) is None
+
+    def test_the_approval_layer_is_unchanged_the_deny_is_not_its_job(
+            self, workspace):
+        """approval_needed ORs and can only tighten -- there is no answer
+        it can give that DENIES. Pin that this layer still answers
+        workspace membership only, so nobody 'fixes' the deny in here and
+        wonders why the calls still dispatch."""
+        assert file_ops._file_approval_check(
+            "read", {"path": ".venastine/settings.json"}) is False
+
+    def test_dispatch_refuses_without_asking_anyone(self, workspace, monkeypatch):
+        from tools.registry import registry
+        monkeypatch.setattr(config, "ToolPermissions", lambda: type("P", (), {"read": True, "write": True, "edit": True})())
+        monkeypatch.setattr(config, "ToolApprovals", lambda: type("A", (), {"read": False, "write": False, "edit": False})())
+        asked = []
+        result = registry.dispatch(
+            "read", {"path": ".venastine/settings.json"},
+            approval_callback=lambda name, params: asked.append(name))
+        assert "error" in result and ".venastine" in result["error"]
+        assert asked == []          # the loop suppresses the prompt too
+        assert not os.path.exists(os.path.join(workspace, ".venastine"))
+
+    def test_the_registry_knows_the_refusal_pre_approval(self, workspace):
+        """The wiring half, separate from the logic half above: with the
+        handler backstop still in place, dropping refusal_check from a
+        ToolSpec would change nothing a dispatch test could see -- the
+        handler refuses anyway and the result dict looks identical. This
+        reads the registry's own pre-approval answer instead."""
+        from tools.registry import registry
+        for tool in ("read", "write", "edit"):
+            reason = registry.refusal_reason(
+                tool, {"path": ".venastine/settings.json"})
+            assert reason is not None and ".venastine" in reason
+            assert registry.refusal_reason(
+                tool, {"path": "notes.txt"}) is None

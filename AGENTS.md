@@ -48,7 +48,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 3483 tests, offline, ~2-3 min by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 3510 tests, offline, ~2-3 min by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -203,6 +203,8 @@ Three stop conditions, all in `_run()`: no tool calls (`complete`), `max_steps` 
 **Approval single source of truth:** `ToolRegistry.approval_needed(name, params, context)` — the tool's own `approval_check` **OR'd with** the config/context lookup (§15; it used to *replace* it, which made agent overrides inert for `read`/`write`/`edit`/`shell`). Both `dispatch()` and `_run()`'s permission bridge call it, so they cannot diverge. `_run()` checks reachability (`registry.is_allowed`) *before* asking, so a context-excluded tool reports the context denial instead of prompting and then being denied anyway. A tool already in `run_info.granted_tools` skips the prompt entirely — that is §18's per-turn subagent sign-off, keyed off `ToolSpec.grant_scope`, so no tool name appears in the loop. §15's spec sketch inlines this into `dispatch()` because it predates §13 — don't follow it there.
 
 **Permissions are "stricter wins" (§15/D14).** Allow/deny ANDs across global config and every active `ToolContext` (`tools/context.py`); the global check runs first and unconditionally, so no agent or skill can re-enable a globally disabled tool. Approval ORs across all layers, making `approval_overrides` a one-way ratchet — a `False` entry is indistinguishable from an absent one, and that asymmetry is the design, not a gap. `_run()` takes a `context`, not an `allowed_tools` list, and performs no membership check of its own. `registry.schemas(context)` advertises only what is actually callable.
+
+**`.venastine/` is the one path the file tools HARD-deny, and the one the shell always asks about.** `PROTECTED_SEGMENTS` (`security/protected_paths.py`) is one list with three consumers, because three copies of one segment drift. `read`/`write`/`edit` refuse any path resolving into the segment — via a `refusal_check` (§32 A7: pre-approval, so nobody is asked a question the tool would refuse) **and** re-tested in all three handlers, `write_run`'s before its `makedirs` so a refused write cannot conjure the directory. `_shell_approval_check` returns True for any command whose tokens name the segment, placed BEFORE the fallback opt-in and the capability rule but AFTER the mode gate — `SHELL_APPROVAL_MODE = "never"` stays the opt-out it always was (G3). The shell side is an always-ASK trigger and never a deny, because a token check that learned shell syntax would be a parser whose bugs auto-approve (G2); it is sound on the auto-approved INERT tier because EP5 executes argv with no shell, so the tokens ARE the arguments. The approval layer is deliberately untouched — approval ORs can only tighten, and there is no answer in it that DENIES, which is why the deny does not live in `_file_approval_check`. `project_docs._DENIED_SEGMENTS` unions the same list rather than re-spelling the segment.
 
 ### The TUI (`tui/`, §16)
 

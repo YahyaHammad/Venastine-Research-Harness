@@ -62,6 +62,8 @@ FILE ACCESS:
 from __future__ import annotations
 
 import logging
+import os
+import re
 import shutil
 
 from pydantic import BaseModel, Field
@@ -69,6 +71,7 @@ from pydantic import BaseModel, Field
 import config
 from security import capability, posture
 from security.capability import UNAVAILABLE, UNCONTAINED, auto_approved
+from security.protected_paths import PROTECTED_SEGMENTS, protected_segment
 from security.sandbox import (
     HOST_READ,
     INERT,
@@ -212,6 +215,54 @@ def _profile_and_containment(command: str):
     return profile, containment_for(profile, is_docker_available())
 
 
+def _command_touches_protected(command: str) -> str | None:
+    """The protected segment a command's tokens name, or None.
+
+    Raw whitespace-split tokens, per Q1/Q5: for an INERT command
+    ``command.split()`` IS the executed argument list, and EP5 runs that
+    tier as argv with NO shell -- so there is no glob or variable
+    expansion between this check and what executes, and a token check is
+    sound exactly where it matters. A token counts when the segment
+    appears as a component of its TEXT -- or of the tail after its first
+    ``=``, the one split _escapes_workspace permits itself (hole 1:
+    ``--path=.venastine/settings.json`` reads whole as one component
+    glued to a flag) -- or of its realpath against WORKSPACE_DIR, which
+    catches `..` travel, an absolute path from anywhere, and a
+    case-spelling Windows realpath normalises.
+
+    Totality is the approval gate's, and this runs inside it (Q3): a
+    non-string command answers None, and a token whose realpath cannot
+    RESOLVE answers None for that token -- the tier machinery fails
+    closed on exactly those values, so an unresolvable reference is
+    already on a path that asks. What this deliberately does NOT do is
+    parse. A token like ``.ven*/settings.json`` carries no literal
+    segment and reaches no answer here (G2 -- a classifier that learned
+    shell syntax would be a parser whose bugs auto-approve). That is why
+    the consumer is an always-ASK trigger and never a deny: what slips
+    past a token check still lands in front of a human with the full
+    command text.
+    """
+    if not isinstance(command, str):
+        return None
+    for token in command.split():
+        candidates = [token]
+        if "=" in token:
+            candidates.append(token.split("=", 1)[1])
+        for candidate in candidates:
+            for part in re.split(r"[\\/]", candidate):
+                if part in PROTECTED_SEGMENTS:
+                    return part
+            try:
+                resolved = os.path.realpath(
+                    os.path.join(config.WORKSPACE_DIR, candidate))
+            except (OSError, ValueError):
+                continue
+            segment = protected_segment(resolved)
+            if segment is not None:
+                return segment
+    return None
+
+
 def _shell_approval_check(tool_name: str, params: dict) -> bool:
     """Whether this shell call needs a human to say yes (ROADMAP_v2 §28).
 
@@ -221,11 +272,22 @@ def _shell_approval_check(tool_name: str, params: dict) -> bool:
          whatever the mode says, so a config or an agent override can
          still only tighten (D14).
       2. The mode answers outright unless it is "tiered".
-      3. AUTO_APPROVE_SANDBOX_FALLBACK is applied HERE, visibly, rather
+      3. A command naming a protected path segment
+         (security.protected_paths.PROTECTED_SEGMENTS) always asks --
+         before the fallback opt-in and the capability rule can answer
+         for it. The file tools DENY such a path outright; the shell
+         only asks, because a command is free text and the token check
+         refuses to parse it (G2), so what slips past the check still
+         meets a human. Behind step 2 deliberately: mode "never" is a
+         documented opt-out of ALL approval, and it already answers
+         "auto-approve" for a host read of /etc/shadow.
+      4. AUTO_APPROVE_SANDBOX_FALLBACK is applied HERE, visibly, rather
          than passed into the generic rule to be honoured out of sight.
          It is the user's own opt-in to an isolation level the harness
-         has already told them is weak.
-      4. Otherwise the capability rule decides.
+         has already told them is weak -- and it sits BELOW the
+         protected-segment check, so one opt-in cannot cover the
+         directory the ro-mount exists to keep commands out of.
+      5. Otherwise the capability rule decides.
 
     The return is `not auto_approved(...)` -- this function answers "must
     someone be asked", the rule answers "is this covered". Two names for
@@ -245,8 +307,27 @@ def _shell_approval_check(tool_name: str, params: dict) -> bool:
     if mode == capability.NEVER:
         return False
 
-    profile, containment = _profile_and_containment(
-        params.get("command", ""))
+    command = params.get("command", "")
+    profile, containment = _profile_and_containment(command)
+
+    # No backend can run this, so there is nothing to approve. NOT the
+    # same as auto_approved() answering False, which means ASK -- the two
+    # polarities meet here and only here. run_sandboxed still raises
+    # SandboxUnavailable with the instructions; asking first would spend
+    # a human decision on an outcome that is already fixed, which is the
+    # burn-a-turn class, and it is what the pre-§28 check did too.
+    #
+    # Read above the fallback branch, which it can never co-occur with --
+    # UNCONTAINED and UNAVAILABLE are different answers -- so moving it
+    # changes nothing there and lets the protected-segment check sit
+    # before both.
+    if containment == UNAVAILABLE:
+        return False
+
+    # Step 3: a protected segment always asks, whatever the sandbox says.
+    segment = _command_touches_protected(command)
+    if segment is not None:
+        return True
 
     # The pre-§28 steps 4 and 5, preserved exactly. For a non-inert tier,
     # UNCONTAINED can only mean "Docker is down AND the insecure fallback
@@ -256,15 +337,6 @@ def _shell_approval_check(tool_name: str, params: dict) -> bool:
     if (profile.tier not in (INERT, HOST_READ)
             and containment == UNCONTAINED
             and active.auto_approve_fallback):
-        return False
-
-    # No backend can run this, so there is nothing to approve. NOT the
-    # same as auto_approved() answering False, which means ASK -- the two
-    # polarities meet here and only here. run_sandboxed still raises
-    # SandboxUnavailable with the instructions; asking first would spend
-    # a human decision on an outcome that is already fixed, which is the
-    # burn-a-turn class, and it is what the pre-§28 check did too.
-    if containment == UNAVAILABLE:
         return False
 
     return not auto_approved(profile, containment)
@@ -290,6 +362,12 @@ def _shell_approval_notice(params: dict, _context=None) -> str:
     binary = _resolved_binary(command) if containment == UNCONTAINED else ""
     if binary:
         notice += f" Binary resolves to {binary}."
+    segment = _command_touches_protected(command)
+    if segment is not None:
+        # Why an INERT read is prompting at all: the tier alone would
+        # look like a false positive to the person answering.
+        notice += (f" It names {segment}/, a protected path that always "
+                   "requires approval.")
     return notice
 
 

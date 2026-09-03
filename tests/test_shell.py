@@ -1961,3 +1961,79 @@ class TestTheGateAnswersForEveryString:
         assert _within(_tiered, os.path.join("sub", "notes.txt")) is True
         assert _within(_tiered, os.path.join("..", "escape.txt")) is False
         assert classify_command("cat notes.txt", _tiered).tier == INERT
+
+
+# ===========================================================================
+# ---- Protected segments: a command naming `.venastine/` always asks -------
+# ===========================================================================
+
+class TestProtectedSegmentsAlwaysAsk:
+    """security/protected_paths.PROTECTED_SEGMENTS, read from the shell
+    side: a command whose tokens name `.venastine/` always requires
+    approval under tiered mode, whatever the sandbox classifies it as.
+
+    The file tools DENY such a path outright (test_file_ops.py); the
+    shell ASKS, because a command is free text and the token check
+    refuses to parse it (G2) -- what slips past a token check still
+    lands in front of a human with the full command text. The
+    auto-approved INERT tier executes argv with NO shell (EP5), so its
+    tokens ARE its arguments and the check is sound exactly there.
+    """
+
+    def test_an_inert_read_of_venastine_is_asked_about(self, _tiered):
+        assert _asks("ls .venastine") is True
+        assert _asks("cat .venastine/settings.json") is True
+
+    def test_a_nested_and_a_traversal_reference_are_caught(self, _tiered):
+        assert _asks("cat deep/nested/.venastine/mcp.json") is True
+        assert _asks("cat sub/../.venastine/settings.json") is True
+
+    def test_a_flag_assigned_reference_is_caught(self, _tiered):
+        # The text check reads components of the RAW token, so a value
+        # glued to a flag is caught the way --file=/etc/x is (hole 1).
+        assert _asks("grep --path=.venastine/settings.json x") is True
+
+    def test_an_untouched_command_is_unaffected(self, _tiered):
+        assert _asks("cat notes.txt") is False
+        assert _asks("ls -la") is False
+
+    def test_the_routing_is_unchanged_it_still_classifies_inert(self, _tiered):
+        """EP6: approval and execution are one decision written twice --
+        but this control is approval-side ONLY. When approved, the
+        command still runs contained, where the read-only bind of
+        `.venastine/` (§28 G6) is the write backstop."""
+        profile = classify_command("cat .venastine/settings.json", _tiered)
+        assert profile.tier == INERT
+        assert containment_for(profile, docker_available=True) == CONTAINED
+
+    def test_the_fallback_opt_in_no_longer_covers_a_protected_write(
+            self, monkeypatch, tmp_path):
+        """A write is a non-inert tier; with Docker down and the insecure
+        fallback opted into, it auto-approved before this check existed.
+        One opt-in must not answer for the directory the ro-mount exists
+        to keep commands out of."""
+        set_posture(monkeypatch, shell_approval_mode="tiered",
+                    allow_insecure_fallback=True, auto_approve_fallback=True)
+        monkeypatch.setattr(config, "ToolApprovals",
+                            lambda: type("A", (), {"shell": False})())
+        monkeypatch.setattr(config, "WORKSPACE_DIR", str(tmp_path))
+        assert _asks("touch .venastine/notes.txt", docker=False) is True
+        # The control: the same opt-in still covers an ordinary write.
+        assert _asks("touch notes.txt", docker=False) is False
+
+    def test_mode_never_still_answers_outright(self, monkeypatch, tmp_path):
+        """The documented bypass, pinned rather than hidden: mode "never"
+        is an opt-out of ALL approval and already auto-approves a host
+        read of /etc/shadow. G3: the mode is the gate."""
+        set_posture(monkeypatch, shell_approval_mode="never")
+        monkeypatch.setattr(config, "ToolApprovals",
+                            lambda: type("A", (), {"shell": False})())
+        monkeypatch.setattr(config, "WORKSPACE_DIR", str(tmp_path))
+        assert _asks("cat .venastine/settings.json") is False
+
+    def test_the_notice_says_why_an_inert_command_is_prompting(self, _tiered):
+        notice = _shell_approval_notice(
+            {"command": "cat .venastine/settings.json"})
+        assert ".venastine" in notice
+        plain = _shell_approval_notice({"command": "cat notes.txt"})
+        assert ".venastine" not in plain

@@ -16,6 +16,12 @@ SECURITY MODEL (ROADMAP §6, deviated per user decision):
   resolved via os.path.realpath before any check, so a path that looks
   inside the workspace but resolves outside it is treated as outside.
 
+  PROTECTED SEGMENTS (security/protected_paths.py) are the one hard
+  deny, and the exception to both rules above: any path -- inside or
+  outside the workspace -- that resolves into `.venastine/` is refused
+  by the refusal_check before approval and re-tested in all three
+  handlers, whatever the ToolApprovals booleans say.
+
 READ TOOL PAGINATION (deviated from ROADMAP §6):
   The read tool accepts offset (lines to skip) and count (lines to
   read). count is clamped to config.MAX_READ_LINES with a note in the
@@ -40,6 +46,8 @@ from typing import Optional
 from pydantic import BaseModel, Field
 
 import config
+
+from security.protected_paths import protected_segment
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +97,51 @@ def _file_approval_check(tool_name: str, params: dict) -> bool:
         return True
     approvals = config.ToolApprovals()
     return getattr(approvals, tool_name, False)
+
+
+# ===========================================================================
+# ---- Protected segments (.venastine/) -------------------------------------
+# ===========================================================================
+
+def _protected_path_error(user_path: str) -> Optional[str]:
+    """Why *user_path* must be refused outright, or None.
+
+    Shared by the refusal_check and all three handlers so the decision
+    and its wording cannot drift between the pre-approval answer and the
+    backstop. resolve_path BEFORE the segment test, so `..` travel and a
+    symlink are caught the same way _is_within_workspace catches them.
+
+    Unconditional on workspace membership, like project_docs'
+    `_is_readable_doc`: the segment is denied wherever the path lands,
+    because `.venastine/` holds mcp.json -- which names commands the
+    harness spawns at startup -- and skills/ and agents/ content that is
+    injected into system prompts. Workspace membership is the wrong
+    question here: with AGENT_WORKSPACE pointed at the project the
+    directory is INSIDE the workspace and _file_approval_check would
+    auto-approve every call against it.
+    """
+    segment = protected_segment(resolve_path(user_path))
+    if segment is None:
+        return None
+    return (
+        f"Refused: the path resolves into '{segment}/', which holds this "
+        "harness's own configuration and trust-gated content (settings.json, "
+        "mcp.json, skills, agents). It is denied however the file tools are "
+        "called."
+    )
+
+
+def _protected_refusal(params: dict, _context=None) -> Optional[str]:
+    """ToolSpec.refusal_check for read / write / edit (§32 A7's shape).
+
+    dispatch() consults this BEFORE the approval gate and returns the
+    reason as the result, and core/loop.py suppresses the prompt for a
+    refused call -- nobody is asked a question whose answer cannot
+    change the outcome. NOT the enforcement (base.py's own words): the
+    three handlers re-test below, so a caller that reaches them
+    directly is refused too.
+    """
+    return _protected_path_error(params.get("path", ""))
 
 
 # ===========================================================================
@@ -181,6 +234,9 @@ def _truncate_lines(
 
 def read_run(params: dict) -> dict:
     parsed = ReadFileParams(**params)
+    refused = _protected_path_error(parsed.path)
+    if refused is not None:
+        return {"error": refused}
     resolved = resolve_path(parsed.path)
 
     if not os.path.exists(resolved):
@@ -248,6 +304,12 @@ WRITE_TOOL_SCHEMA = {
 def write_run(params: dict) -> dict:
     parsed = WriteFileParams(**params)
 
+    # BEFORE the makedirs below: a refused write must not conjure the
+    # protected directory into existence on its way to being refused.
+    refused = _protected_path_error(parsed.path)
+    if refused is not None:
+        return {"error": refused}
+
     content_bytes = parsed.content.encode("utf-8")
     if len(content_bytes) > config.MAX_FILE_SIZE_BYTES:
         return {
@@ -293,6 +355,9 @@ EDIT_TOOL_SCHEMA = {
 
 def edit_run(params: dict) -> dict:
     parsed = EditFileParams(**params)
+    refused = _protected_path_error(parsed.path)
+    if refused is not None:
+        return {"error": refused}
     resolved = resolve_path(parsed.path)
 
     if not os.path.isfile(resolved):
