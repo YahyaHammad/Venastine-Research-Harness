@@ -1,3 +1,5 @@
+![Venastine Research Harness Screenshot](Venastine_Research_Harness_Demo_Photo.png)
+
 # Venastine Research Harness
 
 An agentic harness built from scratch — no LangChain, no agent framework — with two modes that share the same machinery:
