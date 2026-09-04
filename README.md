@@ -24,6 +24,12 @@ npm install -g @yahyahammad/venastine
 venastine
 ```
 
+For the full TUI experience you can use:
+```bash
+venastine --tui 
+```
+
+
 **npm handles the setup for you.** It delivers the harness as a folder of source — there is no bundled binary — and Python still runs it, so the only prerequisite you provide is an interpreter on PATH. Everything after that happens on first launch: the launcher finds a suitable Python, tells you which one and what it is about to install, and builds an isolated environment with the pinned dependencies once you agree. It asks every time it would install something, never installs during `npm install` itself, and refuses rather than proceeding when there is no terminal to ask in.
 
 Two things differ from a clone, both to make a command you run from anywhere behave sensibly:
