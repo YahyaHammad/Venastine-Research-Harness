@@ -9847,3 +9847,136 @@ mid-mark, mid-row and mid-table.
   `README.md`, `tests/BREAKING_CHANGES.md`.
 
 Count 3517 -> 3595.
+
+
+## Batch 54 — the prompt box that could only ever show its own tail (2026-09-06)
+
+### The reported symptom
+
+A prompt longer than the input box scrolled sideways. The user could see roughly the last
+seventy columns of what they had typed and nothing before them, with no way to read a
+paragraph back before sending it. Asked for: a box that wraps and grows to three or four
+lines while being typed, and returns to one line on submit so the transcript keeps its rows
+for the answer.
+
+### Why it was there
+
+`tui/app.py` composed `textual.widgets.Input`, and an `Input` is single-line by
+construction — `height: 3` in its own `DEFAULT_CSS`, one text row between two borders, no
+wrap, horizontal scroll. There is no setting that changes that. `TextArea` is the only
+multi-line widget in the pinned textual, so the fix was a swap.
+
+The layout needed nothing at all, which is worth recording because it was the one part
+expected to be work: `#prompt` was already `dock: bottom` and `#transcript` already
+`height: 1fr`, so a taller prompt takes rows from the transcript and gives them back with
+no second rule. `#thinking-indicator` and `#todo-panel` between them were already
+`height: auto`. The sheet had the pattern.
+
+### What measuring changed
+
+Everything below was run headless against the installed textual 1.0.0 rather than read from
+its documentation — D22's rule, and it moved three decisions.
+
+**`enter` does not reach a binding without `priority=True`.** `TextArea._on_key` maps
+`enter` to a newline insert and calls `event.stop()` / `event.prevent_default()`, which
+beats an ordinary binding. Measured both ways: with the flag, submitted and the text
+untouched; without it, `'hi\n'` inserted and no submit. The flag reads like caution and is
+the opposite — without it no turn in this shell would ever start.
+
+**`shift+enter` cannot be the newline key.** This was the plan's assumption and it is
+wrong on the platform the project is developed on. Textual enables the kitty keyboard
+protocol in `drivers/linux_driver.py` and `linux_inline_driver.py` and nowhere else, so on
+the Windows driver a terminal sends a bare CR for that chord and `XTermParser` yields plain
+`enter` — the box would submit the half-written message. Fed a kitty `\x1b[13;2u` the parser
+*does* yield `shift+enter`, so binding it costs one line and works where a terminal supplies
+it.
+
+**`alt+enter` is the obvious third guess and is a dead end.** Fed `ESC CR`, `XTermParser`
+yields *no key at all* — the ESC opens a sequence that never completes — and a second
+`ESC CR` behind it degrades to `escape`, `enter`. Written down because it is what the next
+person will reach for after reading the paragraph above.
+
+**`ctrl+j` is what carries the feature.** Byte 0x0a parses to its own key, is bound by
+neither `Input`, `TextArea`, `App` nor `Footer`, and is exactly what iTerm2, VS Code and
+Windows Terminal emit once configured to send a newline for shift+enter — so the two
+bindings are one affordance for anyone who has done that setup.
+
+**`TextArea` has no placeholder.** No parameter, no attribute. A `render_line` override was
+prototyped and works, but the border title carries it without overriding a method whose
+contract is the cursor, and it stays legible once the box has text in it. Measured: it
+renders left-aligned in the top border and ellipsises to `Message, or…` at width 18.
+
+### The false green, and it was in this batch's own test
+
+The mutation pass turned `soft_wrap` off and **nothing went red**. The test asserted that a
+long line made the box taller than one row, and that was satisfied — because a `TextArea`
+that does not wrap grows a **horizontal scrollbar**, which is a row. Measured on a
+54-column box: wrapped, a 186-character line is 4 rows at `max_scroll_x == 0`; unwrapped it
+is 2 rows at `max_scroll_x == 133`.
+
+So the test passed while the text was still scrolling sideways — the entire defect the batch
+exists to remove — and its own failure message said "it is still scrolling sideways" about a
+condition it could not see. `max_scroll_x` is what tells the two apart, and the row count is
+now pinned exactly and sized to land below the cap, so "wrapped" also cannot be confused with
+"hit `max-height`".
+
+This is the same shape as batch 15's citation check and batch 49's too-small case table: a
+domain in which the bug cannot express itself. Twice now the mutation pass has been the only
+thing that found it.
+
+### The bug that came free
+
+`Input.Submitted` BUBBLES past a modal's own handler to the app's — measured, the screen
+handler runs and then the app's does. The prompt handled that message, so Enter in
+`ReviewScreen`'s note box (a screen with no submit handler of its own) reached
+`on_input_submitted`, cleared the reviewer's note, and dispatched the text as a slash command
+if it began with one. Giving `PromptInput` its own message type ends that by construction.
+Confirmed by mutation: restoring an `Input.Submitted` handler makes the new test fail with
+`/help` dispatching from inside the modal and `_cmd_help` then raising `NoMatches` on
+`#transcript`, because a modal was on top.
+
+### Owner decisions
+
+- **`ctrl+j` and `shift+enter` both bound.** That the second silently does nothing on
+  Windows Terminal is accepted; it is why the first exists, and it costs one line to work
+  under WSL and on kitty/ghostty/WezTerm.
+- **Four text rows** (`max-height: 6`), then it scrolls. At the 80×24 floor a fully extended
+  prompt leaves the transcript 18 rows.
+- **The border title carries the placeholder**, rather than a `render_line` overlay.
+
+### Deliberately not done
+
+The two modal `Input`s stay single-line. Prompt history recall is not added — `TextArea` now
+owns up/down, so it would need a design rather than a binding, and no such feature existed
+before. And `ctrl+c` was already shadowed before this batch: `Input` and `TextArea` both bind
+it to `copy` with no `check_action` gate, and measured, an app-level `ctrl+c → quit` fires
+under neither while the box has focus. README promises it does. That is a separate defect and
+it is left standing rather than folded in.
+
+### Files
+
+- `tui/widgets.py` — new: `PromptInput` (the `Submitted` message, the `value` alias,
+  `action_submit`, `action_newline`, the bindings).
+- `tui/app.py` — the composed widget, the focus call, and `on_input_submitted` renamed to
+  `on_prompt_input_submitted` over an unchanged body; the §26 `ctrl+l` comment amended to
+  say both widgets bind `ctrl+k`.
+- `tui/app.tcss` — `#prompt` gains `height: auto`, `max-height: 6`, an explicit `padding`
+  and `border-title-color`.
+- `tests/test_tui.py` (+10) — `TestThePromptBoxGrowsWithWhatIsTyped`,
+  `TestEnterSubmitsAndCtrlJDoesNot`, and the review-note bubbling pin. **No existing test
+  changed**, which the `value` alias is what bought.
+- `AGENTS.md`, `ARCHITECTURE.md` (§4.16), `README.md`, `tests/BREAKING_CHANGES.md`.
+
+### Mutation
+
+Five mutations, five kills, one survivor found and fixed:
+
+| mutation | result |
+|---|---|
+| `priority=True` dropped from the `enter` binding | 3 tests red |
+| `soft_wrap=False` | **survived** — see the false green above; red after the test was strengthened |
+| `height: auto` / `max-height` removed from `#prompt` | 6 tests red |
+| `max-height` widened to 20 | 2 tests red |
+| app handles `Input.Submitted` again | the review-note test red, reproducing the original bug in the traceback |
+
+Count 3595 -> 3605.

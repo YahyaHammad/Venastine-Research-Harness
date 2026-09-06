@@ -48,7 +48,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 3595 tests, offline, ~2-3 min by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 3605 tests, offline, ~2-3 min by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -368,6 +368,58 @@ contrast.** `role_styles`
   UNSTYLED segment, so the background stops at the last character of the source line. The wrap is
   ours for the same reason -- Rich's soft wrap returns rows of 78, 75, 78 and 66 cells and the
   tint stops wherever the text broke.
+
+**The prompt box is a `TextArea`, and `priority=True` is what makes it one** (batch 54).
+`PromptInput` (`tui/widgets.py`) wraps and grows to four rows as the user types, then
+collapses on submit. It replaced a plain `Input`, which is single-line by construction —
+`height: 3`, no wrap, horizontal scroll — so a paragraph showed its last ~70 columns and
+nothing before them. `TextArea` is the only multi-line widget in the pinned textual, so
+this is a swap rather than a setting; the layout needed nothing, because `#prompt` was
+already `dock: bottom` over a `1fr` transcript.
+
+Four things are decisions rather than defaults, all measured against the installed 1.0.0
+(D22) rather than read from docs.
+
+- **`priority=True` on the `enter` binding is load-bearing and reads like caution.**
+  `TextArea._on_key` maps `enter` to a newline insert and calls `event.stop()` /
+  `event.prevent_default()`, which beats an ordinary binding — measured both ways: without
+  the flag `enter` inserts and never submits, so no turn in this shell would ever start.
+  Dropping it fails three tests in `TestEnterSubmitsAndCtrlJDoesNot` and
+  `TestThePromptBoxGrowsWithWhatIsTyped`.
+- **`ctrl+j` carries the newline; `shift+enter` is a courtesy that is unreachable here.**
+  Textual enables the kitty keyboard protocol in its LINUX drivers alone
+  (`drivers/linux_driver.py`, `linux_inline_driver.py`), so on the Windows driver a
+  terminal sends a bare CR for shift+enter and the parser yields plain `enter` — the box
+  would submit. `ctrl+j` is byte 0x0a, parses to its own key, is bound by neither `Input`,
+  `TextArea`, `App` nor `Footer`, and is exactly what iTerm2 / VS Code / Windows Terminal
+  emit once configured to send a newline on shift+enter. **`alt+enter` is the obvious third
+  guess and is a dead end**: fed `ESC CR` the parser yields no key at all, and a second one
+  behind it degrades to `escape`, `enter`.
+- **`value` is an alias over `.text`, and it is why this batch edited no tests.** Roughly
+  sixty sites across five files say `app.query_one("#prompt").value = …`; none queries it
+  by class. A one-line property is cheaper than sixty edits made to land a rendering
+  change — see `tests/BREAKING_CHANGES.md` for what deleting it looks like.
+- **`PromptInput.Submitted` is its own message type, and that fixed a live bug.**
+  `Input.Submitted` BUBBLES past a modal's own handler to the app's (measured: the screen
+  handler runs and then the app's), so `enter` in `ReviewScreen`'s note box — a screen with
+  no submit handler at all — reached the prompt's, cleared the note, and dispatched the text
+  as a slash command if it began with one. A distinct type ends that by construction.
+
+`tab_behavior` stays at its `"focus"` default deliberately: under `"indent"`,
+`TextArea._on_key` also swallows `escape`. `ctrl+k` is still bound by the prompt (both
+widgets bind it), so §26's `ctrl+l` note above is unchanged. `ctrl+c` was ALREADY shadowed
+before this batch and still is — `Input` and `TextArea` both bind it to `copy` with no
+`check_action` gate, and measured, an app-level `ctrl+c → quit` fires under neither while
+the box has focus. That is a separate defect from this one; `README.md` still promises it.
+
+**A prompt that "got taller" is not a prompt that wrapped** (batch 54). A `TextArea` with
+`soft_wrap` off grows a HORIZONTAL SCROLLBAR, so a 186-character line drew *two* rows at
+`max_scroll_x == 133` — one text row and one bar — against four rows at `max_scroll_x == 0`
+wrapped. The first draft of `test_a_long_line_wraps_with_no_newline_in_it` asserted only
+that the box got taller and passed with wrapping switched off, which is the whole defect the
+batch exists to remove. `max_scroll_x` is the assertion that tells them apart, and the row
+count is pinned EXACTLY and below the cap, so "wrapped" cannot be confused with "hit
+`max-height`".
 
 **Thinking has two forms and one closing path** (§38, O6/O8). `tui.show_thinking` (default
 `True`, defaulted in `tui/app.py` beside `animations` rather than in `config.py`) renders

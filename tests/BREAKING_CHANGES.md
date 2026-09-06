@@ -3148,3 +3148,51 @@ and only `TestAStreamedAnswerRendersLikeAWrittenOne` can see it. Add the case th
 add the construct.
 
 Count 3517 -> 3595.
+
+
+---
+
+## Batch 54 — the prompt box that grows
+
+`tui/widgets.py`'s `PromptInput` is a `TextArea` subclass wearing an `Input`'s clothes. Two
+of those clothes are load-bearing for this suite specifically, and one of them is why this
+batch edited no existing test.
+
+**`value` is the seam.** Roughly sixty call sites across `test_tui.py`,
+`test_research_legibility.py`, `test_pipeline_models.py`, `test_themes.py` and
+`test_diff_view.py` say `app.query_one("#prompt").value = "…"` and then
+`await pilot.press("enter")`. A `TextArea` calls that attribute `text`. The property alias
+is the only reason those sites still work, and it is the kind of one-line adapter this file
+exists to protect: nothing about it looks necessary from the widget's side.
+
+| Change | Symptom | Fix |
+|---|---|---|
+| Deleting the `value` property from `PromptInput` | ~60 tests across five files fail at once with `AttributeError: 'PromptInput' object has no attribute 'value'`, on `#prompt` rather than on anything the tests are about — an afternoon of chasing a rendering change through files that test permissions, themes and diffs | Keep the alias. Renaming sixty sites to `.text` is a bigger edit than the batch it would serve, and every one of those files is about something else |
+| Dropping `priority=True` from the `enter` binding | `test_enter_submits_rather_than_inserting`, `test_a_multi_line_prompt_reaches_the_turn_intact` and `test_it_collapses_when_the_turn_is_sent` fail. `TextArea._on_key` maps `enter` to a newline insert and calls `event.stop()` / `event.prevent_default()`, which beats an ordinary binding — so Enter inserts a line break and no turn ever starts | Keep the flag. It reads like caution and is the opposite; measured both ways against the pinned textual 1.0.0 (D22) |
+| Turning `soft_wrap` off | `test_a_long_line_wraps_with_no_newline_in_it` fails on `max_scroll_x` — and would NOT have failed on the row count, which is the trap below | Keep it on. Wrapping is the feature; `ctrl+j` is for a break the user wants |
+| Removing `height: auto` / `max-height: 6` from `#prompt` | Six cases in `TestThePromptBoxGrowsWithWhatIsTyped` fail: `TextArea`'s own `DEFAULT_CSS` is `height: 1fr`, so the box fills the column and the transcript is squeezed to nothing | The pair is the growth. `auto` alone is unbounded; `max-height` alone reserves its cap whether or not anything is typed |
+| Widening `max-height` past 6 | `test_it_stops_at_four_rows_and_scrolls` and `test_a_full_prompt_leaves_the_transcript_drawing_at_80x24` fail | 6 is the border plus four text rows, chosen against the 24-row floor |
+| Letting the app handle `Input.Submitted` again (renaming the handler back) | `test_enter_in_the_review_note_does_not_reach_the_prompt_handler` fails, and the traceback shows the whole original bug: `/help` dispatched from ReviewScreen's note box, then `_cmd_help` raising `NoMatches` on `#transcript` because a modal was on top | `PromptInput.Submitted` is its own type. `Input.Submitted` bubbles past a modal's handler to the app's — measured, both run |
+
+### The trap: "it got taller" is not "it wrapped"
+
+A `TextArea` with `soft_wrap` off grows a **horizontal scrollbar**, which is a row. Measured
+on a 54-column box: wrapped, a 186-character line is 4 rows at `max_scroll_x == 0`;
+unwrapped it is **2 rows** at `max_scroll_x == 133` — one text row and one bar. So an
+assertion that the box grew past one row passes with wrapping switched off, while the
+sentence is still 133 columns off to the right, which is the entire defect the batch exists
+to remove. The first draft of `test_a_long_line_wraps_with_no_newline_in_it` asserted
+exactly that and survived the mutation.
+
+`max_scroll_x == 0` is the assertion that separates them. The row count is pinned EXACTLY
+and sized to land BELOW the cap, so "wrapped" also cannot be confused with "hit
+`max-height`" — a test that cannot tell those apart is testing the stylesheet.
+
+### Standing: `shift+enter` is deliberately untested
+
+A pilot can synthesise the key, so a test would pass everywhere and pin Textual's dispatch
+rather than the thing in doubt — whether a terminal ever sends it. Textual enables the kitty
+keyboard protocol in its Linux drivers alone, so on the Windows driver `shift+enter` arrives
+as a bare CR and reads as `enter`. `ctrl+j` is what the feature rests on and is what is
+pinned. Do not "fix the coverage gap" by adding the shift+enter case; add a by-hand check to
+the batch instead.
