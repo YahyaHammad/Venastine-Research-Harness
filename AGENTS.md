@@ -48,7 +48,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 3517 tests, offline, ~2-3 min by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 3595 tests, offline, ~2-3 min by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -285,11 +285,64 @@ and it is what makes a single long paragraph stream instead of arriving whole.
 An open ``` fence is held until it closes, checked against `_stream_text + chunk` rather than
 the whole buffer: a block whose closing fence has no newline after it yet puts the last
 newline *inside* the fence, so an otherwise-committable prefix would render an unterminated
-opener as plain text and leave `_split_fences` counting from the wrong place for the rest of
-the answer. **`_entries` still holds ONE entry per span, updated in place** — §26's "every
+opener as plain text and leave the block splitter counting from the wrong place for the rest
+of the answer. **`_entries` still holds ONE entry per span, updated in place** — §26's "every
 write path goes through `_emit()`" obligation kept by a different route, because appending per
 chunk splits a copied answer across `as_text()`'s joins and draws a `venastine ›` label per
 fragment.
+
+**That fence hold is a CAP over four constructs now, and the reason was never about fences**
+(batch 53). `RichLog` appends and cannot rewrite a drawn row, so *anything* committed in
+halves renders as its own source and can never be put right — which is one sentence about a
+fence, a table, a heading and an unclosed `**`. `markdown.safe_commit_limit(committed,
+pending)` returns the offset past which drawing would split one of them, and `_commit_ready`
+cuts there. A cap is strictly better than the rejection it replaces: a paragraph sharing a
+buffer with a fence used to wait for the fence to close, and now streams. §38's two pins still
+say what they always said, because in both of them the fence starts the buffer and the cap is
+therefore 0.
+
+- **A table is held from its header row and released by a line that is not a row** — or by
+  `flush_stream`, since a table has no terminator. That is the same trade the fence hold
+  already makes.
+- **A line carrying a `|` cannot be classified until the line under it is seen**, so it is
+  held for one line. `_delimiter_possible` is what bounds that: one character outside a
+  delimiter row's four-character alphabet settles the line above as prose, so an ordinary
+  sentence releases on its first letter rather than on its newline.
+- **Detection is GFM-strict — a delimiter row is REQUIRED**, and that is a decision rather
+  than tidiness. A false table is not a cosmetic slip: the cap would hold the stream waiting
+  for one that is never coming, so a shell pipeline or a `|` in prose would stall the answer.
+- **Only the LAST line is capped for a heading or an open mark.** On a line that has ended, an
+  unmatched `**` is literal on both paths, so holding it would be waiting for something that
+  already happened.
+
+**And the width rule measures RENDERED cells, which is the half that is useless alone** (batch
+53). `**bold**` draws four cells narrower than it is written, so a cut taken in source columns
+lands where Rich would not have wrapped — and the streamed rows then differ from the ones
+`rerender()` draws from the same text, which is exactly the divergence
+`TestAStreamedAnswerRendersLikeAWrittenOne` exists to catch (it has caught three already). The
+cap is what makes the measurement well-defined, because no cut is ever offered while a mark is
+still open and its drawn width therefore still unknown. `_split_committable`'s `marks=` is
+**off by default**, and the default is the right answer for `thinking_delta`: reasoning renders
+as prose, marks and all, so measuring it as anything else would describe a rendering that does
+not happen.
+
+**Tables, headings and the two inline marks render; nothing else does** (batch 53). Lists,
+block quotes and links are still verbatim — deferred rather than rejected, and `tui/markdown.py`
+is the seam. `rich.markdown.Markdown` is the obvious next reach and is the one thing that must
+not be reached for casually: it re-flows text itself, which is precisely what the cell
+measurement above exists to keep under our control, and it takes over the fence handling §26
+and §38 pinned. Textual's own `Markdown` is a **Widget, not a renderable**, so it cannot go
+inside a `RichLog` at all — adopting it means replacing the transcript, not extending it.
+`rich.table.Table` *is* a renderable, which is why a table could be added by the route `Syntax`
+already takes.
+
+**Every table cell is a `Text`, header cells included**, and both halves of why were measured
+rather than assumed. A bare `str` handed to a `Table` is markup-parsed by the console that
+renders it, and the `RichLog`'s own `markup=False` does not reach inside a renderable: `[bold]x`
+renders as `x` — swallowed, nothing raised — and `a[/]b` raises `MarkupError`, which is batch
+42's RA1 arriving in the middle of an answer instead of in a modal. `[1, 2]` survives, so the
+rule has to be about the TYPE and not about scanning for brackets; the shapes that fail are not
+the ones a reader expects to be dangerous.
 
 **The transcript's own vocabulary is three things now** (§41, X1-X7).
 

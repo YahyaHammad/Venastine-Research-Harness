@@ -3114,3 +3114,37 @@ belongs to the report). `tool_error` and `diff` stay exempt — pinned, not forg
 | Adding `pipeline_tool` to `MESSAGE_ROLES` | `test_the_message_roles_are_pairwise_distinct` fails wherever `tool` and `pipeline_tool` share the aliased style | It lives in `ENTRY_ROLES` beside `assistant` and `diff` — reachable, classified, and skipped by the colour checks |
 
 Count 3510 -> 3517.
+
+## Batch 53 — the transcript renders a table
+
+`tui/markdown.py` is new and owns the grammar; `tui/widgets.py` owns the painting. The rule
+worth carrying out of this batch is that **the cap and the cell measurement are one design**:
+either alone is wrong, and each is invisible to the tests that cover the other.
+
+### What breaks it
+
+| Change | Symptom | Fix |
+|---|---|---|
+| Committing a chunk without `markdown.safe_commit_limit` | `TestATableIsHeldAndDrawnWhole` fails: table rows reach the screen as their own pipes and the grid can never be drawn, because `RichLog` appends and cannot rewrite a drawn row | Keep the cap. It is §38's open-fence hold generalised — the reason was never about fences, it is about anything committed in halves |
+| Turning the cap back into a rejection (`if construct_open: return`) | Nothing fails, and that is the point: the prose ABOVE a table or fence stops streaming and waits for the construct to close. §38 shipped this way; the cap is the improvement | A cap is one number, so the paragraph before the construct still commits. Only the construct itself is held |
+| Assigning `open_at = start` instead of `_hold(open_at, start)` | Two consecutive pipe lines: the second reports its own offset, so the first commits as prose and the delimiter arriving next has nothing to attach to. `test_a_partial_delimiter_under_it_keeps_holding` fails | Take the MINIMUM. A construct opening later cannot license drawing through one still open before it |
+| Moving the table-termination check below the `FENCE` branch | A fence opener is a non-row line, so it ends a table — but the fence branch returns first, the table's hold is never cleared, and the fence reports a LATER offset than the table it swallowed | Settle `in_table` first. The order is the fix; a comment says so at the branch |
+| Clearing the cap on a closing fence whose line has no newline yet | §38's `test_a_prefix_that_would_reopen_the_fence_is_held` fails: the last newline is INSIDE the block, so the committable prefix draws an unterminated opener | The fence is closed for the scan; the CAP stays where the opener put it until that line ends |
+| `_split_committable` measuring source characters when `marks=True` | `TestAStreamedAnswerRendersLikeAWrittenOne` fails on the inline-mark cases: `**bold**` draws four cells narrower than it is written, so the cut lands where Rich would not have wrapped and a `/theme` reflows the transcript it was only meant to recolour | Measure rendered cells. This is the fourth divergence that test has caught; its docstring lists the first three |
+| Defaulting `marks=True` | `thinking_delta` starts measuring reasoning as if its marks were rendered, which they are not — a bar-prefixed span is prose, `**` included | Off by default. The two callers want different answers and the parameter is how they say so |
+| Dropping the "unclosed mark" clause from the cap | Rendered-cell measurement becomes undefined: a `**` that has not closed yet has no known drawn width, so the cut is taken against a guess | The cap is what makes the measurement well-defined. They are one design, not two features |
+| Passing table cells as `str` instead of `Text` | Measured against the pinned Rich: `[bold]x` renders as `x` — swallowed, nothing raised — and `a[/]b` raises `MarkupError`, which is batch 42's RA1 arriving mid-answer instead of in a modal. `test_a_cell_that_looks_like_console_markup_survives_verbatim` fails | Every cell is a `Text`, header cells included. `[1, 2]` survives, so the rule is about the TYPE — the shapes that fail are not the ones a reader expects to be dangerous |
+| Making a block kind something other than a tuple | The newline trimming in `_render_blocks` silently skips it, and a replay grows a blank row per table — invisible to anything reading `_entries` | `CodeBlock` and `TableBlock` are tuple subclasses so `isinstance(block, tuple)` keeps meaning "occupies its own rows" for both at once |
+| Relaxing table detection (dropping the delimiter-row requirement) | Not a rendering defect — a STALL. A shell pipeline or a `\|` in prose becomes a table, and the cap holds the stream waiting for a terminator that never arrives | GFM-strict. Most of `test_markdown_render.py` is the tables that are NOT there, for this reason |
+| Storing the rendered grid in `_entries` | `/copy` hands back box-drawing characters instead of the pipes the model wrote, and a `/theme` replays a table decorated once instead of re-deriving it | `_entries` holds the source. Same rule as the thinking bar (§38) and the diff block (§41) |
+| Adding the five new palette roles to `MESSAGE_ROLES` | `test_the_message_roles_are_pairwise_distinct` fails (`md_heading` and `table_header` share a string on purpose), and `test_dim_is_the_system_role_alone` starts asking about a role with no hue | They are marks INSIDE an entry, not kinds of line — the `diff_*` precedent. `EXPECTED_ROLE_KEYS` is where they belong |
+| Reaching for `rich.markdown.Markdown` to "finish the job" | It re-flows text itself, which is what the cell measurement exists to keep under our control, and it takes over the fence handling §26 and §38 pinned | Deferred deliberately. `tui/markdown.py`'s block splitter and `inline_spans` are the seam a later batch extends |
+
+### Standing: a new construct needs a clause in the cap
+
+A construct added to `split_blocks` and not to `safe_commit_limit` renders correctly on
+replay and split on the wire — green in every test that reads `_entries`, wrong on screen,
+and only `TestAStreamedAnswerRendersLikeAWrittenOne` can see it. Add the case there when you
+add the construct.
+
+Count 3517 -> 3595.

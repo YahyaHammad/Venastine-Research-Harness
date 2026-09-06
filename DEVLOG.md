@@ -9703,3 +9703,147 @@ the style test red — the text is identical either way, which is why the style 
   `tests/BREAKING_CHANGES.md`.
 
 Count 3510 -> 3517.
+
+## Batch 53 — the table that was only ever its own pipes (2026-09-06)
+
+### The reported symptom
+
+A markdown table in a model answer rendered as plain text: `| Domain | Skills |` and the
+`|---|---|` under it, verbatim, in a transcript that had been highlighting code blocks since
+§26. Reported with a screenshot of a live session.
+
+### Why it was there
+
+`Transcript._render_blocks` handled exactly one construct, and `_split_fences`' own docstring
+said so without anyone reading it as a bug report: *"Deliberately small: this is a renderer,
+not a markdown parser. An unterminated fence is treated as running to the end of the text."*
+So the table was not a special case that had been missed — headings, `**strong**` and inline
+backticks were raw for the identical reason, and the screenshot showed all four.
+
+### The proposal, and the two things measuring it changed
+
+The reported fix was to detect table markers, cache the deltas while one is in flight, and
+draw it whole once the markers stop. That is the right shape and it is not a new mechanism:
+§38 already held a chunk while a ``` fence was open, for a reason that was never about
+fences — `RichLog` appends and cannot rewrite a drawn row, so anything committed in halves
+renders as its own source and can never be put right.
+
+Two premises did not survive being checked against the code.
+
+**The stream is not committed line by line.** `_split_committable` has a second rule: past
+the last newline, a tail longer than one rendered row is committed *at its last space*. A
+table row wider than the transcript would have been cut mid-row before any newline arrived,
+so gating on newlines alone would have shipped a half-drawn table on exactly the wide tables
+that motivated the report.
+
+**Textual's `Markdown` is a Widget, not a renderable**, so it cannot go inside a `RichLog`:
+adopting it means replacing the transcript, not extending it. `rich.table.Table` *is* a
+renderable and `RichLog.write` takes any renderable — the route `Syntax` has taken since §26.
+So the choice was never "Textual's built-in or hand-rolled unicode"; there was a third option
+with no new machinery in it.
+
+### What changed
+
+`tui/markdown.py`, new and PURE (`tui/diffs.py`'s rule, since `widgets.py` imports it): the
+block splitter, the inline tokeniser, and `safe_commit_limit`. Inside the package on purpose
+— a root-level `markdown.py` is the `logging.py` incident again.
+
+`safe_commit_limit(committed, pending)` turns §38's single rejection into a **cap**: the
+offset past which drawing would split an open fence, a table, a heading, or an unclosed
+`**` / `` ` ``. A cap is strictly better than the rejection it replaces — a paragraph sharing
+a buffer with a fence used to wait for the fence to close and now streams — and §38's two
+pins still say what they always said, because in both of them the fence starts the buffer and
+the cap is therefore 0.
+
+`_split_committable` grew `marks=`, measuring the width rule in **rendered cells**. This is
+the half that is easy to skip and cannot be: `**bold**` draws four cells narrower than it is
+written, so a source-column cut lands where Rich would not have wrapped, and the streamed
+rows then differ from the ones `rerender()` draws from the same text. The cap is what makes
+the measurement well-defined, since no cut is offered while a mark is still open and its
+drawn width therefore still unknown. It is **off by default**, which is the right answer for
+`thinking_delta`: reasoning renders as prose, marks and all.
+
+`_render_blocks` gained a table branch and routes plain text through `inline_spans`. Both
+block kinds are tuple subclasses, so `isinstance(block, tuple)` still asks §26's question —
+"does this occupy its own rows" — and the newline trimming around a renderable stayed one
+rule rather than becoming two.
+
+### What the tests found that reasoning had not
+
+Three defects, each caught by a test written before it was known to be needed.
+
+- `display_len` read `_spans` directly, so it counted a heading's `#` — a width the terminal
+  never draws. It goes through `inline_spans` now, which is where the marker is stripped.
+- A construct opening later could push the cap **past** an earlier unresolved one. Two
+  consecutive pipe lines are both undecidable headers, and the second reported its own offset
+  as the limit — so the first would have committed as prose and the delimiter arriving next
+  would have had nothing to attach to. `_hold` takes the minimum now, and the table's
+  termination check moved above the fence branch so a fence opener cannot clear a table's
+  hold by never reaching it.
+- A closing fence with no newline after it reported as resolved, which is §38's own
+  `test_a_prefix_that_would_reopen_the_fence_is_held` from the other side. The fence is
+  closed for the scan; the cap stays where the opener put it until that line ends.
+
+Two more came from rendering the screenshot's own answer through the app rather than from any
+test, and neither was visible at the parse level.
+
+- A paragraph after a table butted straight against the bottom border, while the same
+  paragraph after a fence had a blank line above it. `text.split(FENCE)` leaves the newline
+  after a closing ``` in the FOLLOWING plain run, so `_render_blocks` finds two there and
+  keeps one — but a table consumed its own last row's terminator, so one was left and the
+  trimming took it. `_split_tables` hands it back, which puts both constructs on one rule
+  instead of two that happen to agree most of the time. Pinned on DRAWN ROWS, because both
+  block lists looked reasonable read on their own.
+- `pad_edge=False` rendered `|Domain   | Skills` with no edge padding, where the design that
+  was chosen has it. Rich's default is what that preview was made from.
+
+And one claim in the plan was wrong in the writing. The `Text`-not-`str` rule for table cells
+was justified as "a `[` raises `MarkupError`". Measured against the pinned Rich, `[1, 2]`
+renders fine; what actually happens is `[bold]x` rendering as `x` — **swallowed, with nothing
+raised** — and `a[/]b` raising. Both matter, the silent one arguably more, and the first test
+written for it demonstrated neither. The rule has to be about the TYPE rather than about
+scanning for brackets, because the shapes that fail are not the ones a reader expects to be
+dangerous.
+
+### Owner decisions
+
+- **Tables, headings and the two inline marks; full markdown deferred, not rejected.** Lists,
+  block quotes and links stay verbatim. `rich.markdown.Markdown` re-flows text itself, which
+  is precisely what the cell measurement exists to keep under our control, and it takes over
+  the fence handling §26 and §38 pinned.
+- **A full box grid** (`rich.box.SQUARE`) over the rule-only presets. The transcript already
+  draws box characters for a thinking span, so the vocabulary was established.
+- **GFM-strict detection — a delimiter row is required.** A false table is not a cosmetic
+  slip: the cap would hold the stream waiting for one that never arrives, so a shell
+  pipeline or a `|` in prose would stall the answer. Which is why most of
+  `test_markdown_render.py` is the tables that are NOT there.
+- **`assistant` entries only.** Thinking spans keep their bar-prefixed plain lines: reasoning
+  is quoted prose, and a table inside a `│ ` bar has no clean rendering.
+- **`assistant` staying plain foreground is narrowed, deliberately.** That rule is about the
+  BODY, whose length is why tinting it costs more contrast than it buys. A heading and a bold
+  run are marks the model asked for, on a few cells at a time.
+
+### Mutation
+
+Replacing the `Text` cells with the raw strings (`table.add_row(*row)`) raises `MarkupError`
+inside `test_a_cell_that_looks_like_console_markup_survives_verbatim` — verified by making
+the change and watching it go red, then reverting. The streamed-vs-written equality cases are
+the pin for the width rule: they stream five characters at a time, so a boundary lands
+mid-mark, mid-row and mid-table.
+
+### Files
+
+- `tui/markdown.py` — new: `split_blocks`, `inline_spans`, `display_len`, `width_split`,
+  `safe_commit_limit`.
+- `tui/widgets.py` — the cap in `_commit_ready`, `marks=` in `_split_committable`, the table
+  and inline branches in `_render_blocks`, `_inline_text`, `_render_table`, `TABLE_BOX`;
+  `_split_fences` and `_fence_is_open` removed (the grammar has one home now).
+- `tui/themes.py` — `md_heading`, `md_strong`, `md_code`, `table_border`, `table_header`.
+- `tests/test_markdown_render.py` (new, 66) — the grammar as a pure function.
+  `tests/test_live_output.py` (+11) — `TestATableIsHeldAndDrawnWhole` and five cases in
+  `TestAStreamedAnswerRendersLikeAWrittenOne`. `tests/test_themes.py` —
+  `EXPECTED_ROLE_KEYS`.
+- `AGENTS.md` (the §38/O7 paragraph), `ARCHITECTURE.md` (§4.16, the tree, the counts),
+  `README.md`, `tests/BREAKING_CHANGES.md`.
+
+Count 3517 -> 3595.
