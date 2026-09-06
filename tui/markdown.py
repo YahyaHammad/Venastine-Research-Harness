@@ -175,6 +175,15 @@ def _split_tables(text: str):
     `"".join(the plain parts) + the tables' own source` is the input back --
     which is what lets the caller's blank-line trimming treat a table
     exactly as it treats a fence.
+
+    THE LAST ROW'S NEWLINE IS LEFT BEHIND, and that is what makes "exactly"
+    true rather than approximately. `text.split(FENCE)` puts the newline
+    after a closing ``` into the FOLLOWING plain run, so the trimming finds
+    two there and keeps one -- a fence draws a blank line after it. A table
+    that swallowed its own terminator left only one newline behind, the
+    trimming took it, and the paragraph after a table butted straight up
+    against the bottom border while the same paragraph after a fence did
+    not. Handing the newline back puts both constructs on one rule.
     """
     lines = text.splitlines(keepends=True)
     out, plain, index = [], [], 0
@@ -188,6 +197,8 @@ def _split_tables(text: str):
             out.append("".join(plain))
             plain = []
         out.append(table)
+        if lines[index + consumed - 1].endswith("\n"):
+            plain.append("\n")
         index += consumed
     if plain:
         out.append("".join(plain))

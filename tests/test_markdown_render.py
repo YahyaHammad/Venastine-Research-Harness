@@ -45,7 +45,10 @@ class TestBlockSplitting:
         assert _kinds("Intro\n\n" + TABLE + "\nAfter.\n") == \
             ["str", "TableBlock", "str"]
         assert blocks[0] == "Intro\n\n"
-        assert blocks[2] == "\nAfter.\n"
+        # Two newlines, not one: the table hands its last row's terminator
+        # back to the plain run so the renderer's trimming leaves a blank
+        # line after a table exactly as it does after a fence.
+        assert blocks[2] == "\n\nAfter.\n"
 
     def test_the_plain_runs_keep_their_own_newlines(self):
         """`Transcript._render_blocks` trims one newline either side of a
@@ -154,7 +157,7 @@ class TestTableContents:
         blocks = md.split_blocks(TABLE + "\nprose after\n")
 
         assert _kinds(TABLE + "\nprose after\n") == ["TableBlock", "str"]
-        assert blocks[1] == "\nprose after\n"
+        assert blocks[1] == "\n\nprose after\n"
 
     def test_a_table_with_a_header_and_no_rows_is_still_a_table(self):
         """Mid-stream this is every table for a moment, and at

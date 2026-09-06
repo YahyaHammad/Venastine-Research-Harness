@@ -291,6 +291,42 @@ class TestATableIsHeldAndDrawnWhole:
         assert assistant[0] == self.TABLE + "\nAfter.\n"
         assert "| Domain | Skills |" in transcript.as_text()
 
+    @pytest.mark.asyncio
+    async def test_a_table_is_spaced_like_a_fence(self):
+        """One rule for the two renderable blocks, asserted on drawn rows.
+
+        `text.split("```")` puts the newline after a closing fence into the
+        FOLLOWING plain run, so the trimming in `_render_blocks` finds two
+        there and keeps one -- a fence draws a blank line after it. A table
+        that consumed its own last newline left one behind, the trimming
+        took it, and the paragraph after a table butted straight up against
+        the bottom border while the same paragraph after a fence did not.
+
+        Rendered rather than parsed, because the parse was where the
+        asymmetry hid: both block lists looked reasonable on their own.
+        """
+        from tui.app import VenastineApp
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(60, 30)) as pilot:
+            transcript = app._transcript
+
+            def rows(text):
+                transcript.clear()
+                transcript._entries.clear()
+                transcript.write_answer(text)
+                return [strip.text.rstrip() for strip in transcript.lines]
+
+            fence = rows("before:\n\n```py\nx = 1\n```\n\nafter.\n")
+            table = rows("before:\n\n| a | b |\n|---|---|\n| 1 | 2 |\n"
+                         "\nafter.\n")
+            await pilot.pause()
+
+        assert fence[-2] == "" and fence[-1] == "after."
+        assert table[-2] == "" and table[-1] == "after.", (
+            "a table and a fence space their following paragraph "
+            f"differently: {table[-3:]!r} against {fence[-3:]!r}")
+
     def test_a_cell_that_looks_like_console_markup_survives_verbatim(self):
         """Cells are `Text`, and both halves of why were measured against
         the pinned Rich rather than assumed.

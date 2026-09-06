@@ -1003,8 +1003,7 @@ class Transcript(RichLog):
         styles = self._styles()
         table = Table(box=TABLE_BOX,
                       border_style=styles.get("table_border") or None,
-                      header_style=styles.get("table_header") or None,
-                      pad_edge=False)
+                      header_style=styles.get("table_header") or None)
         for header, align in zip(block.headers, block.aligns):
             table.add_column(self._inline_text(header), justify=align)
         for row in block.rows:
