@@ -17,9 +17,29 @@
     padding: 0 1;
 }
 
+/* Batch 54. `height: auto` with a `max-height` -- batch 49's shape, for
+   batch 49's reason. A definite height would reserve four rows whether or
+   not anything is typed, and this box's whole point is that it is one row
+   until it isn't; auto also means the transcript gets those rows back the
+   moment a turn is submitted. The cap is what stops a pasted essay from
+   eating the transcript: 6 is the border plus four text rows, so a fully
+   extended prompt still leaves 18 of the 24-row floor above it, and past
+   four rows the box scrolls instead of growing.
+
+   `padding: 0 1` is stated rather than inherited. TextArea's own default
+   is `0 1` and the Input this replaced was `0 2`; naming it is what keeps
+   the typed text's left edge where a reader already has it. */
 #prompt {
     dock: bottom;
     border: solid $primary;
+    height: auto;
+    max-height: 6;
+    padding: 0 1;
+    /* The placeholder, which a TextArea has no other way to carry. Muted
+       is already this sheet's vocabulary for a hint (#usage-line,
+       #todo-panel, #research-progress), so it reads as one rather than
+       as a heading. */
+    border-title-color: $text-muted;
 }
 
 #raven {

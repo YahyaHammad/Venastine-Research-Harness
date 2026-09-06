@@ -9,8 +9,10 @@ from rich import box
 from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
+from textual.binding import Binding
+from textual.message import Message
 from textual.reactive import reactive
-from textual.widgets import RichLog, Static
+from textual.widgets import RichLog, Static, TextArea
 
 from prompts.system_prompts import pass_label
 
@@ -642,6 +644,104 @@ class ResearchProgress(Static):
         if self._retries:
             body.append(f"{self._retries} revision(s)\n")
         self.update(body)
+
+
+class PromptInput(TextArea):
+    """The box the user types into. Wraps, and grows to four rows.
+
+    It was a plain `Input` until batch 54, and an `Input` is single-line by
+    construction -- `height: 3` in its own DEFAULT_CSS, one text row, no
+    wrap, horizontal scroll. A prompt longer than the box showed its last
+    ~70 columns and nothing before them, so a paragraph could not be read
+    back before it was sent. `TextArea` is the only multi-line widget in
+    the pinned textual, so this is a swap rather than a setting.
+
+    The GROWING is `soft_wrap` plus `height: auto` in app.tcss, and those
+    two are the feature: a long line wraps and the box gets taller on its
+    own, with no key pressed. `ctrl+j` is for a break the user WANTS.
+
+    Three things here are load-bearing.
+
+    `value`. `TextArea` calls it `text`, and roughly sixty test sites plus
+    the app's own submit handler say `.value`. An alias is a one-line
+    adapter; renaming them would have been sixty edits across five files
+    to make a rendering change, and every one of those files is about
+    something else. It is a property over `text`, not a second store --
+    two writers of one string is the shape §22 spent a section removing.
+
+    `priority=True` on enter. `TextArea._on_key` maps enter to a newline
+    insert and calls `event.stop()` / `event.prevent_default()`, which
+    beats an ordinary binding: measured on the pinned textual 1.0.0 (D22,
+    both ways -- without the flag enter inserts and never submits). It
+    reads like caution and is the opposite.
+
+    `ctrl+j` is what carries the newline; `shift+enter` is a courtesy.
+    Textual turns the kitty keyboard protocol on in its LINUX drivers
+    alone (`drivers/linux_driver.py`, `linux_inline_driver.py`), and
+    without it a terminal sends a bare CR for shift+enter and the parser
+    yields plain `enter` -- so on Windows that binding is unreachable and
+    the box would submit instead. `ctrl+j` is byte 0x0a, parses to its own
+    key, is bound by neither Input, TextArea, App nor Footer, and is
+    exactly what iTerm2 / VS Code / Windows Terminal emit once configured
+    to send a newline on shift+enter. `alt+enter` is the obvious third
+    guess and is a dead end: fed `ESC CR` the parser yields no key at all,
+    and a second one behind it degrades to `escape`, `enter`.
+
+    `tab_behavior` stays at its "focus" default, deliberately. Under
+    "indent" `TextArea._on_key` also swallows `escape` (it focuses the
+    next widget), and tab/escape behaving as they did under `Input` is
+    worth more here than tab-indenting a chat message.
+
+    The placeholder is the border TITLE because `TextArea` has no
+    placeholder at all -- no parameter, no attribute. Taking it as a
+    `placeholder=` keyword anyway keeps the call site in app.py reading
+    as it always did.
+    """
+
+    BINDINGS = [
+        Binding("enter", "submit", "Submit", show=False, priority=True),
+        Binding("ctrl+j", "newline", "Newline", show=False),
+        Binding("shift+enter", "newline", "Newline", show=False),
+    ]
+
+    class Submitted(Message):
+        """Posted when enter is pressed. `Input.Submitted`'s shape.
+
+        A distinct message type rather than reusing `Input.Submitted`, and
+        that is a fix as much as a necessity: `Input.Submitted` BUBBLES
+        past a modal's own handler to the app's (measured -- the screen
+        handler runs and then the app's), so enter in ReviewScreen's note
+        box reached the prompt's submit handler, which cleared the note
+        and dispatched it as a slash command if it began with one.
+        """
+
+        def __init__(self, prompt: "PromptInput", value: str) -> None:
+            self.prompt = prompt
+            self.value = value
+            super().__init__()
+
+        @property
+        def control(self) -> "PromptInput":
+            return self.prompt
+
+    def __init__(self, placeholder: str = "", **kwargs) -> None:
+        super().__init__(soft_wrap=True, show_line_numbers=False, **kwargs)
+        self.placeholder = placeholder
+        self.border_title = placeholder
+
+    @property
+    def value(self) -> str:
+        return self.text
+
+    @value.setter
+    def value(self, new_value: str) -> None:
+        self.text = new_value
+
+    def action_submit(self) -> None:
+        self.post_message(self.Submitted(self, self.text))
+
+    def action_newline(self) -> None:
+        self.insert("\n")
 
 
 class Transcript(RichLog):

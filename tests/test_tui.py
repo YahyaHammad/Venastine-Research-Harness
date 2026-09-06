@@ -4679,3 +4679,304 @@ def test_every_renderable_built_from_a_non_literal_is_wrapped():
         f"Textual sends a `str` through Text.from_markup; `markup=False` "
         f"does NOT prevent it on textual 1.0.0 (the flag is stored and "
         f"never read by the `visual` property). Wrap the value.")
+
+
+# --- batch 54: the prompt box that grows ------------------------------------
+
+
+class TestThePromptBoxGrowsWithWhatIsTyped:
+    """Batch 54. The box wraps and grows to four rows, then collapses.
+
+    Asserted on MEASURED REGIONS rather than on the widget's own
+    attributes, which is batch 49's rule and it earns its keep twice
+    here. `#prompt` is `height: auto` inside a docked slot and
+    `#transcript` is the `1fr` that pays for it, so a rule that grew the
+    box without the transcript yielding -- or a `max-height` that
+    reserved its cap whether or not anything was typed -- would satisfy
+    every assertion about `.text` and none about the screen.
+
+    The pair is therefore asserted TOGETHER wherever it can be. A prompt
+    at four rows above a transcript still at its full height is not a
+    layout, it is an overlap, and only one of those two numbers can see
+    it.
+    """
+
+    @pytest.mark.asyncio
+    async def test_it_is_one_row_at_mount(self):
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            prompt = app.query_one("#prompt")
+            assert prompt.size.height == 1, (
+                f"an empty prompt drew {prompt.size.height} rows; the box is "
+                f"supposed to cost exactly what an Input did until something "
+                f"is typed into it")
+
+    @pytest.mark.asyncio
+    async def test_a_second_line_costs_the_transcript_a_row(self):
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            prompt = app.query_one("#prompt")
+            transcript = app.query_one("#transcript")
+            before = transcript.size.height
+
+            prompt.value = "first line\nsecond line"
+            await pilot.pause()
+            await pilot.pause()
+
+            assert prompt.size.height == 2, (
+                f"two logical lines drew {prompt.size.height} rows")
+            assert transcript.size.height == before - 1, (
+                f"the prompt grew a row and the transcript kept "
+                f"{transcript.size.height} of its {before}; one of them is "
+                f"drawing over the other")
+
+    @pytest.mark.asyncio
+    async def test_a_long_line_wraps_with_no_newline_in_it(self):
+        """The case that prompted the batch, and the one an "insert a
+        newline" test cannot reach.
+
+        Nothing here presses a key. `soft_wrap` plus `height: auto` is
+        the whole feature -- ctrl+j exists for a break the user WANTS,
+        not for the paragraph that simply ran past the edge of the box.
+        A regression that left ctrl+j working and soft_wrap off would be
+        green on every other case in this class.
+
+        `max_scroll_x` is the assertion that does the work, and the first
+        draft of this test did not have it. "The box got taller" was
+        satisfied at TWO rows with soft_wrap OFF, because a TextArea that
+        does not wrap grows a HORIZONTAL SCROLLBAR -- one text row, one
+        bar, and a row count that reads as progress while the sentence is
+        still 133 columns off to the right, which is the exact defect
+        this batch exists to remove. Measured both ways before it was
+        written down: wrapped is 4 rows at scroll_x 0, unwrapped is 2
+        rows at scroll_x 133. Only the second number tells them apart.
+
+        Four rows would also collide with the cap, so the line here is
+        sized to wrap to THREE and the count is exact -- a test that
+        cannot distinguish "wrapped" from "hit max-height" is testing the
+        stylesheet rather than the wrap.
+        """
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            prompt = app.query_one("#prompt")
+            transcript = app.query_one("#transcript")
+            before = transcript.size.height
+
+            typed = "summarise the design decisions " * 4
+            assert "\n" not in typed
+            prompt.value = typed
+            await pilot.pause()
+            await pilot.pause()
+
+            assert prompt.max_scroll_x == 0, (
+                f"the prompt can be scrolled {prompt.max_scroll_x} columns "
+                f"sideways, so the line did not wrap -- it ran off the edge "
+                f"of a box {prompt.size.width} columns wide, which is the "
+                f"thing this batch is for")
+            assert prompt.size.height == 3, (
+                f"a {len(typed)}-character line with no newline in it drew "
+                f"{prompt.size.height} rows in a box {prompt.size.width} "
+                f"columns wide; it should have wrapped to 3")
+            assert transcript.size.height == before - 2, (
+                f"the prompt took two rows and the transcript kept "
+                f"{transcript.size.height} of its {before}")
+
+    @pytest.mark.asyncio
+    async def test_it_stops_at_four_rows_and_scrolls(self):
+        """The cap, and that what is past it is BELOW THE FOLD rather
+        than gone -- batch 49's Static-vs-ScrollBox distinction, arriving
+        on the one widget the user types into."""
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            prompt = app.query_one("#prompt")
+
+            prompt.value = "\n".join(f"line {n}" for n in range(9))
+            await pilot.pause()
+            await pilot.pause()
+
+            assert prompt.size.height == 4, (
+                f"nine lines drew {prompt.size.height} rows; max-height: 6 is "
+                f"the border plus four")
+            assert prompt.max_scroll_y > 0, (
+                "the box capped at four rows and cannot be scrolled, so the "
+                "lines past the fourth are unreachable rather than below it")
+
+    @pytest.mark.asyncio
+    async def test_it_collapses_when_the_turn_is_sent(self, mocker):
+        """The second half of the ask. A box that grew and stayed grown
+        would spend the transcript's rows on an empty prompt for the
+        whole of the answer it is waiting for."""
+        mocker.patch.object(VenastineApp, "run_agent_turn")
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            prompt = app.query_one("#prompt")
+            transcript = app.query_one("#transcript")
+            full = transcript.size.height
+
+            prompt.value = "one\ntwo\nthree"
+            await pilot.pause()
+            await pilot.pause()
+            assert prompt.size.height == 3
+            await pilot.press("enter")
+            await pilot.pause()
+            await pilot.pause()
+
+            assert prompt.size.height == 1, (
+                f"the box stayed at {prompt.size.height} rows after submitting")
+            assert transcript.size.height == full, (
+                f"the transcript got back {transcript.size.height} of the "
+                f"{full} rows the prompt had borrowed")
+
+    @pytest.mark.asyncio
+    async def test_a_full_prompt_leaves_the_transcript_drawing_at_80x24(self):
+        """The floor #112 pins for every modal, applied to the one piece
+        of furniture that can change size while the user watches."""
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            prompt = app.query_one("#prompt")
+            transcript = app.query_one("#transcript")
+
+            prompt.value = "\n".join(f"line {n}" for n in range(9))
+            await pilot.pause()
+            await pilot.pause()
+
+            assert transcript.size.height >= 10, (
+                f"a fully extended prompt left the transcript "
+                f"{transcript.size.height} rows on an 80x24 terminal")
+            assert prompt.region.y + prompt.region.height <= 24, (
+                f"the prompt drew past the bottom of the screen: "
+                f"{prompt.region}")
+
+
+class TestEnterSubmitsAndCtrlJDoesNot:
+    """Batch 54's two keys, and the flag that makes the first one work.
+
+    `priority=True` on the enter binding is the load-bearing detail of
+    this batch and it reads like caution, which is exactly why it needs a
+    test that goes red when someone tidies it away. `TextArea._on_key`
+    maps enter to a newline insert and calls `event.stop()` and
+    `event.prevent_default()` -- measured on the pinned textual 1.0.0
+    (D22), that beats an ordinary binding, so without the flag every
+    Enter in this shell would insert a line break and no turn would ever
+    start.
+
+    `shift+enter` gets no test of its own, deliberately. A pilot can
+    synthesise the key, so such a test would pass everywhere and pin
+    Textual's dispatch rather than the thing actually in doubt -- whether
+    a terminal ever sends it. Textual enables the kitty keyboard protocol
+    in its LINUX drivers alone, so on Windows shift+enter arrives as a
+    bare CR and reads as `enter`. That is why ctrl+j is the binding the
+    feature rests on, and it is the one pinned here.
+    """
+
+    @pytest.mark.asyncio
+    async def test_enter_submits_rather_than_inserting(self, mocker):
+        turn = mocker.patch.object(VenastineApp, "run_agent_turn")
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            prompt = app.query_one("#prompt")
+            prompt.value = "hello"
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+            await pilot.pause()
+
+            assert turn.called, (
+                "enter started no turn -- TextArea._on_key swallowed it, "
+                "which is what priority=True on the binding exists to stop")
+            assert prompt.value == "", (
+                f"enter left {prompt.value!r} in the box; it inserted rather "
+                f"than submitted")
+        assert turn.call_args[0][0] == "hello"
+
+    @pytest.mark.asyncio
+    async def test_ctrl_j_inserts_rather_than_submitting(self, mocker):
+        turn = mocker.patch.object(VenastineApp, "run_agent_turn")
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            prompt = app.query_one("#prompt")
+            prompt.focus()
+            await pilot.pause()
+            await pilot.press("a")
+            await pilot.press("ctrl+j")
+            await pilot.press("b")
+            await pilot.pause()
+            await pilot.pause()
+
+            assert prompt.value == "a\nb", (
+                f"ctrl+j did not break the line: {prompt.value!r}")
+            assert not turn.called, "ctrl+j started a turn"
+
+    @pytest.mark.asyncio
+    async def test_a_multi_line_prompt_reaches_the_turn_intact(self, mocker):
+        """`.strip()` in the submit handler takes the ends and must not
+        take the middle -- a prompt collapsed to one line on the way to
+        the model would make the whole batch cosmetic."""
+        turn = mocker.patch.object(VenastineApp, "run_agent_turn")
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.query_one("#prompt").value = "  summarise this:\n- one\n- two  "
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+            await pilot.pause()
+
+        assert turn.call_args[0][0] == "summarise this:\n- one\n- two", (
+            f"the newlines did not survive submission: "
+            f"{turn.call_args[0][0]!r}")
+
+
+@pytest.mark.asyncio
+async def test_enter_in_the_review_note_does_not_reach_the_prompt_handler():
+    """Batch 54, and it is a fix that came free rather than a new rule.
+
+    `Input.Submitted` BUBBLES past a modal's own handler to the app's --
+    measured, the screen handler runs and then the app's does. The prompt
+    handled that message until this batch, so Enter in ReviewScreen's note
+    box (a screen with no submit handler of its own) reached it, cleared
+    the note, and dispatched the text as a slash command if it began with
+    one. A distinct message type ends that by construction, and this is
+    what stops the app from handling `Input.Submitted` again.
+    """
+    from textual.widgets import Input
+
+    from tui.screens import ReviewScreen
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        # Captured BEFORE the modal goes up: #104's rule -- query_one
+        # searches the ACTIVE screen, and the modal has no transcript.
+        transcript = app.query_one("#transcript")
+        results = []
+        await app.push_screen(
+            ReviewScreen({"kind": "text", "reason": "Overstates.",
+                          "proposed": "Soften."}, 1, 3),
+            results.append)
+        assert await settle(
+            pilot, lambda: isinstance(app.screen, ReviewScreen))
+
+        note = app.screen.query_one("#review-note", Input)
+        note.value = "/help is not a command I meant to run"
+        note.focus()
+        await pilot.pause()
+        await pilot.press("enter")
+        await pump(pilot)
+
+        assert note.value == "/help is not a command I meant to run", (
+            f"the app's submit handler cleared the reviewer's note: "
+            f"{note.value!r}")
+        assert "Try /help." not in transcript.as_text(), (
+            "the note was dispatched as a slash command")

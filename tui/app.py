@@ -39,7 +39,7 @@ from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
 from textual.message import Message
-from textual.widgets import Footer, Header, Input
+from textual.widgets import Footer, Header
 from textual.worker import Worker, WorkerState
 
 import config
@@ -78,8 +78,9 @@ from tui.screens import (
 )
 from security import posture
 from tui.widgets import (
-    CONVERSATION_ROLES, EffortRaven, GoalBanner, PostureBadge, RavenPanel,
-    ResearchProgress, ThinkingIndicator, TodoPanel, Transcript, UsageLine,
+    CONVERSATION_ROLES, EffortRaven, GoalBanner, PostureBadge, PromptInput,
+    RavenPanel, ResearchProgress, ThinkingIndicator, TodoPanel, Transcript,
+    UsageLine,
 )
 
 logger = logging.getLogger(__name__)
@@ -287,11 +288,12 @@ class VenastineApp(App):
     BINDINGS = [
         ("ctrl+c", "quit", "Quit"),
         ("ctrl+t", "pick_thread", "Threads"),
-        # §26. ctrl+l, NOT ctrl+k: Textual's Input binds ctrl+k to
-        # delete_right_all and the input holds focus almost always, so a
+        # §26. ctrl+l, NOT ctrl+k: the prompt binds ctrl+k to a
+        # delete-to-end-of-line and it holds focus almost always, so a
         # ctrl+k binding here would be shadowed -- pressing it would
-        # silently delete the rest of the typed line instead. ctrl+l is
-        # bound by neither Input, App nor Footer on the pinned textual
+        # silently delete the rest of the typed line instead. Still true
+        # after batch 54 swapped Input for TextArea: BOTH bind ctrl+k,
+        # and neither binds ctrl+l, which App and Footer also leave free
         # (D22: verified against the installed version, not assumed).
         ("ctrl+l", "show_claims", "Claims"),
     ]
@@ -453,7 +455,10 @@ class VenastineApp(App):
                                         id="thinking-indicator")
                 if self._todo_position == "bottom":
                     yield TodoPanel(id="todo-panel")
-                yield Input(placeholder="Message, or /help", id="prompt")
+                # Batch 54. Wraps and grows to four rows as it is typed,
+                # then collapses on submit -- see PromptInput for why this
+                # is a TextArea and what `priority=True` buys on enter.
+                yield PromptInput(placeholder="Message, or /help", id="prompt")
             with Vertical(id="sidebar"):
                 yield RavenPanel(animations=self._animations, id="raven")
                 yield EffortRaven(id="effort-raven")
@@ -497,7 +502,7 @@ class VenastineApp(App):
         for warning in self._startup_warnings:
             self._transcript.write_error(warning)
         self._transcript.write_system("Type /help for commands.")
-        self.query_one("#prompt", Input).focus()
+        self.query_one("#prompt", PromptInput).focus()
         if self.effort and self._effort_named:
             # A persisted effort level was trusted as-is and sent on every
             # turn, unlike the sibling tui.theme three lines up which gets
@@ -872,10 +877,10 @@ class VenastineApp(App):
 
     # -- input ---------------------------------------------------------------
 
-    def on_input_submitted(self, event: Input.Submitted) -> None:
+    def on_prompt_input_submitted(self, event: PromptInput.Submitted) -> None:
         text = event.value.strip()
         if not text:
-            event.input.value = ""
+            event.prompt.value = ""
             return
         # Clear AFTER the busy check, not before. /research holds _busy
         # for a whole ten-pass pipeline, so a follow-up typed during one
@@ -883,7 +888,7 @@ class VenastineApp(App):
         if not text.startswith("/") and self._busy:
             self._transcript.write_error("Still working — wait for this turn to finish.")
             return
-        event.input.value = ""
+        event.prompt.value = ""
         if text.startswith("/"):
             if not commands.dispatch(self, text):
                 name = text[1:].split(" ")[0]
