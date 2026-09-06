@@ -307,6 +307,35 @@ def role_styles(theme: Theme) -> dict[str, str]:
         # which is what keeps it out of the identity roles the same
         # batch just separated -- a path is not a speaker.
         "diff_header": f"bold {theme.foreground}",
+        # Batch 53's markdown marks. These are marks INSIDE an entry rather
+        # than kinds of line, which is why they sit outside MESSAGE_ROLES
+        # exactly as the diff roles above do: the pairwise-distinctness and
+        # separation floors ask whether two LINES can be told apart, and a
+        # bold word never sits on the line below a tool call.
+        #
+        # This does narrow `assistant`'s "stays plain foreground
+        # DELIBERATELY" a few lines up, and the narrowing is the decision:
+        # that rule is about the BODY, whose length is the reason tinting it
+        # costs more contrast than it buys. A heading and a bold run are
+        # marks the model asked for, on a few cells at a time.
+        #
+        # A heading takes weight and no hue, `diff_header`'s reasoning --
+        # a section title is not a speaker either. Strong takes the
+        # attribute alone, because the one thing `**` means is emphasis
+        # within body text and a colour would make it a different KIND of
+        # line. Inline code borrows `secondary`, the transcript's quieter
+        # slot, so an identifier reads as set apart from the prose without
+        # competing with the accent a tool call uses.
+        "md_heading": f"bold {theme.foreground}",
+        "md_strong": "bold",
+        "md_code": theme.secondary,
+        # The table's own furniture. The border recedes for
+        # `diff_context`'s reason -- it is there to place the cells, not to
+        # be read -- and the header row is the heading rule applied inside
+        # the grid, so a table and a `##` above it agree about what a title
+        # looks like.
+        "table_border": theme.secondary,
+        "table_header": f"bold {theme.foreground}",
     }
 
 

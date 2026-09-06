@@ -5,14 +5,16 @@ ROADMAP_v2 §16 widgets. Presentation only -- nothing here imports core/
 or reaches into harness state; tui/app.py feeds them.
 """
 
+from rich import box
 from rich.syntax import Syntax
+from rich.table import Table
 from rich.text import Text
 from textual.reactive import reactive
 from textual.widgets import RichLog, Static
 
 from prompts.system_prompts import pass_label
 
-from tui import diffs, ravens, themes
+from tui import diffs, markdown, ravens, themes
 
 # Animation cadence. Slow enough to read, and paused outright while tokens
 # are streaming -- a redraw loop competing with token deltas is the one
@@ -68,6 +70,14 @@ _DIFF_MARKS = {
     diffs.ADDED: "+",
     diffs.ELIDED: " ",
 }
+
+# Batch 53. The table's box, and the owner's choice among rich.box's
+# presets. A full grid rather than one of the rule-only forms: the
+# transcript already draws box characters for a thinking span (╭ │ ╰), so
+# the vocabulary is established, and a table is the one construct here
+# whose whole point is that a reader can follow a row across several
+# columns without losing the line.
+TABLE_BOX = box.SQUARE
 
 # Batch 41 (X3). The checklist vocabulary, in ONE place because two
 # panels render it and they were already spelling it differently: the
@@ -908,14 +918,21 @@ class Transcript(RichLog):
         answer grew a blank row per code block, and a /theme mid-session
         reflowed a transcript it was only meant to recolour.
         """
-        blocks = _split_fences(text)
+        blocks = markdown.split_blocks(text)
         for index, block in enumerate(blocks):
-            if isinstance(block, tuple):
-                language, code = block
-                self.write(Syntax(code, language or "text",
+            # Batch 53. `isinstance(block, tuple)` still asks exactly the
+            # question §26 asked -- "does this block occupy its own rows"
+            # -- because both block kinds are tuple subclasses. That is
+            # what keeps the trimming below ONE rule for the two of them
+            # rather than a second branch to be kept in step.
+            if isinstance(block, markdown.CodeBlock):
+                self.write(Syntax(block.code, block.language or "text",
                                   theme=self._syntax_theme(),
                                   word_wrap=True,
                                   indent_guides=False))
+                continue
+            if isinstance(block, markdown.TableBlock):
+                self._render_table(block)
                 continue
             body = block
             if index and isinstance(blocks[index - 1], tuple) \
@@ -924,7 +941,79 @@ class Transcript(RichLog):
             if index + 1 < len(blocks) and isinstance(blocks[index + 1], tuple) \
                     and body.endswith("\n"):
                 body = body[:-1]
-            self.write(Text(body, self._style("assistant")))
+            self.write(self._inline_text(body))
+
+    def _inline_text(self, body: str) -> Text:
+        """A plain stretch of an answer, with its inline marks painted.
+
+        The marks are the RENDERER's, exactly as the thinking bar and the
+        diff's gutter are: `_entries` keeps the markdown the model wrote,
+        so `/copy` hands back `**bold**` and a replay under a new theme
+        re-derives the weight rather than replaying something decorated
+        once.
+
+        Line by line, because a heading is a property of its line and
+        `inline_spans` is where that is decided. The newlines are put back
+        here so the block still reaches Rich as one `Text` and wraps as one
+        flow -- which is what `markdown.width_split` is measuring against.
+        """
+        styles = self._styles()
+        base = styles.get("assistant", "")
+        out = Text(style=base)
+        for index, line in enumerate(body.split("\n")):
+            if index:
+                out.append("\n")
+            for span, role in markdown.inline_spans(line):
+                out.append(span, styles.get(role) if role else None)
+        return out
+
+    def _render_table(self, block) -> None:
+        """One markdown table (batch 53).
+
+        A `rich.table.Table` rather than characters we lay out ourselves,
+        for the reason `Syntax` is a `Syntax`: `RichLog.write` takes any
+        renderable, so the alignment, the column widths and the wrapping
+        inside a cell are Rich's problem and stay right at any terminal
+        size. Textual's own `Markdown` cannot be used here -- it is a
+        Widget, not a renderable, so reaching for it means replacing the
+        transcript rather than rendering into it.
+
+        EVERY CELL IS A `Text`, header cells included. A bare `str` handed
+        to a Table is parsed for console markup by the console that renders
+        it, and the RichLog's own `markup=False` does not reach inside a
+        renderable. Measured against the pinned Rich, both halves bite:
+
+          - `[bold]x` renders as `x`. The tag is SWALLOWED, silently, and
+            a cell describing a style, a Textual selector or a log line
+            loses part of itself with nothing raised.
+          - `a[/]b` raises `MarkupError`, which is batch 42's RA1 -- the
+            failure where a modal was pushed, never drew, and left a
+            worker waiting on a dismissal that could not come. Here it
+            would take down the turn that was answering.
+
+        `[1, 2]` survives, which is why the rule has to be about the TYPE
+        rather than about scanning for brackets: the shapes that fail are
+        not the ones a reader expects to be dangerous.
+
+        Written with an explicit `width=` when the widget can be measured,
+        following the diff's discipline: it is the same number the text
+        pre-wrap uses, so a table and the paragraph above it break at one
+        width rather than two.
+        """
+        styles = self._styles()
+        table = Table(box=TABLE_BOX,
+                      border_style=styles.get("table_border") or None,
+                      header_style=styles.get("table_header") or None,
+                      pad_edge=False)
+        for header, align in zip(block.headers, block.aligns):
+            table.add_column(self._inline_text(header), justify=align)
+        for row in block.rows:
+            table.add_row(*(self._inline_text(cell) for cell in row))
+        width = self._wrap_width()
+        if width:
+            self.write(table, width=width)
+        else:
+            self.write(table)
 
     def write_user(self, text: str) -> None:
         self.flush_stream()
@@ -985,12 +1074,8 @@ class Transcript(RichLog):
         return width if width >= MIN_WRAP_WIDTH else 0
 
     @staticmethod
-    def _fence_is_open(text: str) -> bool:
-        """An odd number of ``` means a code fence is still open."""
-        return text.count("```") % 2 == 1
-
-    @staticmethod
-    def _split_committable(pending: str, width: int) -> tuple[str, str]:
+    def _split_committable(pending: str, width: int,
+                           *, marks: bool = False) -> tuple[str, str]:
         """Split `pending` into (commit now, keep buffered).
 
         The two rules from the class docstring. The over-long-token branch
@@ -998,11 +1083,25 @@ class Transcript(RichLog):
         space in it (a URL) would otherwise be held until a newline
         arrived, so it is cut at the row boundary -- which is what Rich's
         own wrapping does with a word too long for the line.
+
+        `marks` measures the width rule in RENDERED cells rather than in
+        source characters (batch 53), which is what an answer carrying
+        `**bold**` needs: the mark is four cells narrower drawn than
+        written, so a source-column cut lands where Rich would not have
+        wrapped and the streamed rows stop matching the ones rerender()
+        draws from the same text. OFF by default, and the default is the
+        answer for `thinking_delta`: reasoning is rendered as prose, marks
+        and all, so measuring it as anything else would be describing a
+        rendering that does not happen.
         """
         cut = pending.rfind("\n")
         if cut != -1:
             return pending[:cut + 1], pending[cut + 1:]
-        if width and len(pending) > width:
+        if not width:
+            return "", pending
+        if marks:
+            return markdown.width_split(pending, width)
+        if len(pending) > width:
             space = pending.rfind(" ", 0, width + 1)
             if space > 0:
                 return pending[:space + 1], pending[space + 1:]
@@ -1019,13 +1118,28 @@ class Transcript(RichLog):
         Loops because one delta can make several rows committable at once
         -- a paragraph arriving in one chunk, or a buffer that has been
         held back behind a closing fence.
+
+        §38 held the whole chunk while a ``` fence was open. Batch 53 turns
+        that single rejection into `markdown.safe_commit_limit`, a CAP over
+        four constructs -- an open fence, a table, a heading, an unclosed
+        inline mark -- because the reason was never about fences: RichLog
+        appends and cannot rewrite a drawn row, so anything committed in
+        halves renders as its own source and can never be put right.
+
+        A cap is strictly better than the rejection it replaces: a
+        paragraph sharing a buffer with a fence used to wait for the fence
+        to close, and now streams. Where the construct starts the buffer,
+        the cap is 0 and nothing commits -- which is what keeps §38's two
+        fence pins saying what they always said.
         """
         width = self._wrap_width()
         while True:
-            chunk, rest = self._split_committable(self._pending, width)
-            if not chunk or self._fence_is_open(self._stream_text + chunk):
+            limit = markdown.safe_commit_limit(self._stream_text, self._pending)
+            chunk, rest = self._split_committable(
+                self._pending[:limit], width, marks=True)
+            if not chunk:
                 return
-            self._pending = rest
+            self._pending = rest + self._pending[limit:]
             self._write_stream_chunk(chunk)
 
     def _write_stream_chunk(self, chunk: str) -> None:
@@ -1250,22 +1364,3 @@ class Transcript(RichLog):
             label = labels.get(role)
             out.append(f"{label}: {text}" if label else text)
         return "\n\n".join(out)
-
-
-def _split_fences(text: str):
-    """Split markdown into plain strings and (language, code) tuples.
-
-    Deliberately small: this is a renderer, not a markdown parser. An
-    unterminated fence is treated as running to the end of the text, which
-    is the common case mid-stream.
-    """
-    out = []
-    parts = text.split("```")
-    for i, part in enumerate(parts):
-        if i % 2 == 0:
-            if part:
-                out.append(part)
-        else:
-            language, _, code = part.partition("\n")
-            out.append((language.strip() or None, code))
-    return out

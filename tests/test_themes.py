@@ -48,6 +48,15 @@ EXPECTED_ROLE_KEYS = {
     "UNVERIFIED_COVERAGE",
     # Batch 41 (X7). The only roles that set a BACKGROUND.
     "diff_add", "diff_del", "diff_context", "diff_header",
+    # Batch 53. Marks INSIDE an entry rather than kinds of line, which is
+    # why they are here and not in MESSAGE_ROLES below: the distinctness
+    # and separation floors ask whether two lines can be told apart, and a
+    # bold word never sits on the line under a tool call. `md_strong` is
+    # the one role in this table that is an attribute with no colour, and
+    # it is deliberate -- `**` means emphasis within body text, so a hue
+    # would make it a different kind of line rather than a stressed word.
+    "md_heading", "md_strong", "md_code",
+    "table_border", "table_header",
 }
 
 

@@ -219,6 +219,117 @@ class TestAnOpenFenceIsHeld:
             "the prefix looks right and is not")
 
 
+class TestATableIsHeldAndDrawnWhole:
+    """Batch 53. §38's fence hold, generalised: RichLog appends and cannot
+    rewrite a drawn row, so a table committed row by row would render as
+    its own pipes and could never be put right.
+
+    The grammar itself is tested in tests/test_markdown_render.py. What is
+    here is what the WIDGET does with it -- which rows reach the screen and
+    when, and that the entry log still holds the markdown the model wrote.
+    """
+
+    TABLE = ("| Domain | Skills |\n"
+             "|---|---|\n"
+             "| math | proof-writing |\n")
+
+    def test_nothing_commits_while_a_table_is_open(self):
+        transcript, written = _recording_transcript()
+
+        transcript.stream_delta("Here:\n")
+        written.clear()
+        transcript.stream_delta(self.TABLE)
+
+        assert written == [], (
+            "a table row reached the screen before the table ended -- "
+            "RichLog cannot rewrite it, so the grid can never be drawn")
+
+    def test_the_prose_before_it_streams_anyway(self):
+        """What the CAP buys over §38's rejection. The paragraph above a
+        table has finished arriving and has nothing to do with it."""
+        transcript, written = _recording_transcript()
+
+        transcript.stream_delta("Here:\n" + self.TABLE)
+
+        assert any("Here:" in row for row in written)
+        assert not any("Domain" in row for row in written)
+
+    def test_a_non_table_line_releases_it_as_a_grid(self):
+        from rich.table import Table
+
+        transcript, written = _recording_objects()
+        transcript.stream_delta(self.TABLE + "\nAfter.\n")
+
+        tables = [row for row in written if isinstance(row, Table)]
+        assert len(tables) == 1, "the table did not render as a rich Table"
+        assert tables[0].row_count == 1
+
+    def test_a_table_open_at_the_flush_still_draws(self):
+        """A table has no terminator, so a turn that ends on one is the
+        normal way of finishing the last table in an answer -- not an
+        edge case."""
+        from rich.table import Table
+
+        transcript, written = _recording_objects()
+        transcript.stream_delta(self.TABLE)
+        transcript.flush_stream()
+
+        assert any(isinstance(row, Table) for row in written)
+
+    def test_the_entry_keeps_the_markdown_not_the_grid(self):
+        """The rule the thinking bar and the diff block already follow:
+        `_entries` holds what the model wrote, so /copy hands back pipes a
+        reader can paste somewhere else and a /theme replay re-derives the
+        box rather than replaying one drawn once."""
+        transcript, _ = _recording_transcript()
+        transcript.stream_delta(self.TABLE + "\nAfter.\n")
+        transcript.flush_stream()
+
+        assistant = [text for role, text in transcript._entries
+                     if role == "assistant"]
+        assert len(assistant) == 1
+        assert assistant[0] == self.TABLE + "\nAfter.\n"
+        assert "| Domain | Skills |" in transcript.as_text()
+
+    def test_a_cell_that_looks_like_console_markup_survives_verbatim(self):
+        """Cells are `Text`, and both halves of why were measured against
+        the pinned Rich rather than assumed.
+
+        A bare `str` cell is parsed for console markup by the console that
+        renders it, and the RichLog's own `markup=False` does not reach
+        inside a renderable. `[bold]x` then renders as `x` -- swallowed,
+        with nothing raised -- and `a[/]b` raises `MarkupError`, which is
+        batch 42's RA1 arriving in the middle of an answer instead of in a
+        modal. `[1, 2]` survives either way, which is why the rule is
+        about the TYPE and not about scanning for brackets.
+
+        Rendered for real through a Console: asserting that a Table object
+        was built proves nothing about what markup does to it, since the
+        parsing happens at render time.
+        """
+        import io
+
+        from rich.console import Console
+        from rich.table import Table
+
+        transcript, written = _recording_objects()
+        transcript.stream_delta(
+            "| Selector | Note |\n"
+            "|---|---|\n"
+            "| [bold]x | swallowed if this cell were a str |\n"
+            "| a[/]b | MarkupError if this cell were a str |\n"
+            "\ndone\n")
+
+        table = next(row for row in written if isinstance(row, Table))
+        buffer = io.StringIO()
+        Console(file=buffer, width=120).print(table)
+        drawn = buffer.getvalue()
+
+        assert "[bold]x" in drawn, \
+            "the markup tag was swallowed -- this cell reached Rich as a str"
+        assert "a[/]b" in drawn
+
+
 class TestTheSplitRuleItself:
 
     @pytest.mark.parametrize("pending,width,expected", [
@@ -748,6 +859,38 @@ class TestAStreamedAnswerRendersLikeAWrittenOne:
             "    self._pending += delta\n"
             "```\n\n"
             "That is the whole of it.\n"),
+        # Batch 53. The four constructs the commit cap holds, each in the
+        # shape that made the batch necessary. A table is the reported
+        # defect; the inline marks are the reason the width rule had to
+        # start measuring RENDERED cells, since `**bold**` is four cells
+        # narrower drawn than written and a source-column cut therefore
+        # lands where Rich would not have wrapped.
+        "a table": (
+            "The skills, by domain:\n\n"
+            "| Domain | Skills |\n"
+            "|---|---|\n"
+            "| math | `proof-writing`, `numerical-methods` |\n"
+            "| software | `code-review`, `debugging` |\n"
+            "\n"
+            "Loaded with `load_skill`.\n"),
+        "a table with alignment": (
+            "| Pass | Calls | Cost |\n"
+            "|:--|:-:|--:|\n"
+            "| 1 | 4 | 12k |\n"
+            "| 3b | 0 | 0 |\n"),
+        "a heading": (
+            "# Harness showcase\n\n"
+            "Three layers, mapped first.\n\n"
+            "## Live demo\n\n"
+            "The Gaussian integral is the canonical test.\n"),
+        "inline marks in a long paragraph": (
+            "The **transcript** buffers every delta until a boundary "
+            "arrives, and `stream_delta` is where anyone chasing streaming "
+            "latency should look first -- the **answer** is the two rules "
+            "in the class docstring, not the `flush_stream` call.\n"),
+        "a mark spanning a wrap boundary": (
+            "one two three four five six seven eight nine ten **eleven "
+            "twelve thirteen** fourteen fifteen sixteen seventeen.\n"),
     }
 
     @staticmethod
