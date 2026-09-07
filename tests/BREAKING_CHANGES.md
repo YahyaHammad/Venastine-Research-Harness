@@ -3343,3 +3343,63 @@ only what is DRAWN, in a widget nobody thinks to query, while the keys keep work
 guard over `names()` alone would wave `/unsafe` through as an alias of something
 harmless-looking. The positive half (`assert "exit" in names`) is there for the usual reason: if
 aliases ever stop reaching that set, the negative assertion would be checking nothing.
+
+
+## Batch 58 — lists, links, and the flag that says where a chunk sits
+
+**`line_start=False` is not a nicety; it is the fix for a shipped bug.** `_render_blocks` and
+`_inline_text` take it, and it means *this chunk begins in the middle of a line*. Remove it and
+a streamed fragment whose wrap boundary falls immediately before a `# ` token renders as a
+heading and **swallows the hash** — reproduced at a prefix of exactly 77 characters, invisible
+to any assertion that reads `_entries`, and put back by a `/theme` replay. It is derived from
+`self._stream_text.endswith("\n")` rather than remembered, which is why it costs no state.
+
+**A list item is held by the cap, like a fence and a table.** Its wrapped rows are padded to
+the marker's own text column, so a fragment committed without its marker can never be indented
+afterwards. If you find yourself removing that hold to make streaming smoother, the thing you
+will break is `TestAStreamedAnswerRendersLikeAWrittenOne`, not the appearance of a bullet.
+
+**`HOLD_LIMIT` is enforced in TWO places and only works as a pair.** `commit_span` gives up on
+a line-scoped hold past the limit; `list_item()`, `heading()` and the mark scan refuse the same
+line at the same limit. Enforce it in the cap alone and the released chunk renders as a list
+item while the replay renders it as prose. Enforce it in the grammar alone and the stall comes
+back.
+
+**A fence and a table are exempt from the ceiling, deliberately.** Both must be drawn whole to
+be drawn correctly. Their bound is `flush_stream`.
+
+**`safe_commit_limit` is now `commit_span(...)[0]`.** One scan, two answers. A second function
+reading the buffer separately is the shape this module's own docstring warns about.
+
+**Aliases for the indent rule: `verbatim()` is asked in three places and nowhere else.**
+`_scan` (so every inline caller inherits it), `_is_row` (so `_read_table` and the cap agree
+about where a table stops) and `list_item`. `_HEADING` never needed it — it is anchored at
+column 0. **Fences are exempt** and that is TECHNICAL_DEBT.md entry 14.
+
+**The URL span's TEXT is the target.** That is the security rule as a data shape, not an
+implementation convenience: there is no separate destination field, so there is nowhere for one
+to differ from what the reader sees. If you add a `[label](url)` construct that renders the
+label, you have removed the only thing standing between a rogue model and an arbitrary
+destination behind a friendly name.
+
+| Change | Symptom if you break it | Fix |
+|---|---|---|
+| `line_start` reaches `_inline_text` | a mid-paragraph `# ` renders as a heading, eating the hash | derived from `_stream_text`, passed through `_write_stream_chunk` |
+| `forced` reaches the renderer as `line_start=False` | a bullet past 1000 characters streams indented and replays flat | `commit_span`'s second value |
+| the limit is refused by the grammar too | the same divergence, from the other side | `list_item`/`heading` return None past `HOLD_LIMIT` |
+| the item body wraps at `width - indent` | the continuation row is one column too wide and Rich re-wraps it to column 0 | the indent is the content column, used for both the wrap and the padding |
+| `clickable` is re-asked in `open_url` | a style outliving its text opens something the reader never saw | check at the point of ACTION, not at render |
+| the URL is metadata, not an `@click` action | a URL containing a quote injects into a parsed action string | a plain key we read in `on_click` |
+| ctrl is required | reading the transcript launches a browser | `event.ctrl` |
+| `.isascii()` on a URL | a homograph URL is armed, and "visible equals target" is a lie | ASCII-only arming; it still renders |
+| `_em_edge`'s space rule | `a * b` opens a mark that never closes and the cap holds the paragraph | an opener needs a non-space after it |
+| `_em_edge`'s wedge rule | `2*3*4` and `x*y*z` italicise, as full GFM does | refuse an asterisk between two word characters |
+
+### The trap: a bug that only the drawn row can see
+
+Batch 57's was a mutation right about everything except the footer. This one is the same class
+one layer down and it was **already shipped**: the `#`-eating fragment passes every assertion
+about `_entries`, every assertion about `safe_commit_limit`, and every test that renders the
+answer whole. It is visible only in the equality between a streamed answer and a written one —
+which is why that test is parametrised over shapes rather than written once, and why the new
+case is pinned at the prefix length that reproduces it rather than at a shape that might.

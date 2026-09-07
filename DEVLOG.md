@@ -10358,3 +10358,198 @@ against any red.
 | the command-shadows-an-alias guard removed | 1 red |
 
 Count 3648 -> 3665.
+
+
+## Batch 58 — the rest of the grammar, and the line a fragment forgot it was in (2026-09-07)
+
+### What was asked
+
+Batch 53 left a note: lists, block quotes and links are *"still verbatim — deferred rather than
+rejected, and `tui/markdown.py` is the seam."* The owner asked what was worth doing, with one
+constraint stated up front — **rich, but not cluttered or incoherent** — and the discussion
+curated the answer rather than completing GFM.
+
+### What the code actually did
+
+Rendered at 84 columns against the real widget, a wrapped list item was the defect:
+
+```
+- the buffer holds every delta until a boundary arrives, which is why a plain
+answer showed nothing at all until the turn ended
+- the capture
+```
+
+The second row returns to column 0, so it reads as a new paragraph — structure dissolving
+exactly when items are long, which is the common case, and the same path a research report
+takes (`tui/app.py:2037` sends `run.final_report` to `write_answer`).
+
+Two more, both found by measuring and both **shipped bugs** rather than gaps:
+
+- **A streamed fragment could open a construct mid-paragraph.** With a prefix of exactly 77
+  characters the wrap boundary falls immediately before a `# ` token, the committed fragment
+  reads as the start of a line, and the heading rule **eats the hash** — which a `/theme`
+  replay then puts back. Lists would have multiplied it: a `- ` token mid-sentence is far more
+  common than a lone hash.
+- **Inline marks were parsed inside indented code.** `    x = a ** b ** c` drew ` b ` in bold
+  and lost four characters that were never markup.
+
+### The one mechanism, and what it costs
+
+Lists need a hanging indent; `Text` has none and `Padding` indents the first row too, so the
+wrap is ours — the third construct to need that, after the diff gutter and the thinking bar.
+Which means a list item joins the commit cap: **held from its marker to its newline**, because
+a fragment committed without its marker can never be indented afterwards.
+
+`markdown.wrap_display` is that wrap, and it is ONE pass over ONE points list rather than
+`width_split` in a loop — the loop rescans from the start of the remainder each time, which is
+quadratic on a long line and paid again on every `/theme`. `_cut_points` is now shared by the
+wrap and the streaming cut, so the two cannot disagree about where a row ends.
+
+### `line_start`, which is the fix and the prerequisite at once
+
+`_render_blocks` and `_inline_text` take `line_start`, and `False` means *this chunk begins in
+the middle of a line*, so nothing that depends on where a line starts may fire on its first
+line. It is derived from `self._stream_text.endswith("\n")` — state that already existed.
+
+That single flag closes the `#`-eating bug and is also what makes the hold limit possible, so
+it earned its way in twice.
+
+### The ceiling
+
+Three of the cap's five constructs wait on a newline no model is obliged to send. `HOLD_LIMIT`
+(1000 characters) bounds them: past it the cap gives up and `commit_span` returns `forced`,
+which reaches the renderer as `line_start=False`.
+
+**The half that makes it correct rather than merely safe:** `list_item()` and `heading()` refuse
+the same line at the same limit, and a mark whose closer is farther away than the limit is
+literal. So past the ceiling the line is prose on BOTH paths, and the released rows are the
+replayed rows — verified by an equality case with a 1387-character bullet.
+
+A fence and a table are **exempt and stay exempt**. Half a fence inverts the fence parity of
+everything after it; half a table is two stacked grids. Both must be drawn whole to be drawn
+correctly, and `flush_stream` is their bound. That is a narrower guarantee than the other three
+get, and saying so is better than pretending the ceiling is universal.
+
+### Links, and the rule that made them simple
+
+The owner's constraint decided the design: *the link should never be hidden behind a word in
+brackets, because it means the agent can hide any link behind any name.* So `[text](url)` is
+**not a construct at all**. A bare `http(s)://` URL is detected wherever it appears — which
+catches the one inside the parentheses for free — and only the URL is marked. There is no label
+to hide a target behind, because the span's TEXT is the target.
+
+Measured rather than assumed, three times over:
+
+- Style **metadata** survives `RichLog`'s strip cache into the compositor: a 21-character URL
+  arms exactly 21 cells, none bleeding into the text either side.
+- A simulated ctrl+click on those cells delivers the URL to a handler; one column off delivers
+  nothing.
+- Textual dispatches on `style.meta["@click"]`, **not** on Rich's `link`. So OSC 8 would be
+  opened by the TERMINAL, which is the one route we could not gate — and it was left off, since
+  a terminal that honours it would double-open.
+
+The URL travels in a plain metadata key we read ourselves rather than in Textual's `@click`
+action string, and that is not stylistic: an action string is PARSED, so building one out of
+model output would be an injection grammar fed by the model.
+
+Ctrl+click rather than a click, `http`/`https` only, and **ASCII only** — "the visible text is
+the target" is no defence when the visible form is a homograph, so `https://аpple.com` with a
+Cyrillic а renders, copies, and is not armed. The check is re-asked in `open_url` at the point
+of action, because a style in a `RichLog` outlives the text that made it.
+
+### Emphasis, narrowed rather than reversed
+
+Batch 53 refused `*emphasis*` because `a * b * c` is arithmetic and `__init__` is a dunder. Run
+against a real CommonMark parser, half of that was measured to be wrong and half exactly right:
+
+| written | full GFM | here |
+|---|---|---|
+| `call __init__ on it` | **init** in bold | literal |
+| `2*3*4`, `x*y*z` | emphasised | literal |
+| `a * b * c`, `5 * 3 = 15` | literal | literal |
+| `_private_method`, `snake_case_name` | literal | literal |
+| `the *point*` | emphasised | emphasised |
+
+So the asterisk is refused when **wedged between two word characters**, and underscores are not
+recognised at all — no flanking rule saves `__init__`, and it is everywhere in this domain. The
+second half of `_em_edge` (an opener needs a non-space after it) is about STREAMING rather than
+rendering: without it `a * b` opens a mark that never closes and the cap holds the rest of the
+paragraph waiting for a closer that is not coming.
+
+`~~strike~~` has no collisions at all and is the `**` branch again.
+
+### The indent rule
+
+A line indented four or more columns — or carrying a tab in its indent — is drawn exactly as
+written: no list marker, no table row, no inline marks. Stateless, which is the decision: GFM
+tells indented code from a nested list item by the surrounding list context, and tracking that
+would put state across the commit boundary, which is where this widget has broken before.
+
+The price is stated rather than hidden and has its own test: an item nested with **four** spaces
+renders flat; two-space nesting renders. Fences are exempt, and that exemption is `TECHNICAL_DEBT.md`
+entry 14 rather than a silence.
+
+### Owner decisions
+
+- **Lists render; block quotes and horizontal rules do not.** A quote's best reading is a bar
+  down the left, and the thinking span already draws one — two bar-prefixed blocks a few rows
+  apart would risk a quoted source reading as the model's own reasoning. A `---` stays three
+  hyphens: drawing a rule is inventing furniture nobody typed.
+- **Markers keep the character the model wrote**, in the quieter colour. No glyph substitution,
+  for the reason the URL stays visible.
+- **Headings keep rendering identically at every level.** A ladder that reads as arbitrary is
+  worse than no ladder, and there is only one text size in a terminal.
+- **Reasoning stays plain prose**, parsed for nothing. Unchanged, now pinned.
+- **Task-list glyphs, setext headings, indented code as a highlighted block, nested marks
+  composing, bare autolinks** — all still out.
+
+### Files
+
+- `tui/markdown.py` — `verbatim`, `heading`, `list_item`, `wrap_display`, `_cut_points`,
+  `clickable`, `_trim_url`, `_url`, `_em`, `_em_edge`, `_paired`, `commit_span`; `HOLD_LIMIT`,
+  `CODE_INDENT` and four roles. `safe_commit_limit` is now a one-line wrapper over
+  `commit_span`, so batch 53's pins are untouched.
+- `tui/widgets.py` — `line_start` through `_render_blocks`/`_inline_text`, the list layout,
+  `_append_spans`, `on_click`, `open_url`; `_split_committable` gained `block`.
+- `tui/themes.py` — `md_em`, `md_strike`, `md_link`, `md_bullet`.
+- `tui/app.py`, `tui/app.tcss`, `PromptInput` — **unchanged**.
+- `tests/test_markdown_render.py` (+82), `tests/test_live_output.py` (+28),
+  `tests/test_themes.py` (the four role keys).
+- `TECHNICAL_DEBT.md` gains four entries: the fence exemption, the resize freeze, tool lines
+  not being URL-aware, and block quotes.
+
+### Mutation
+
+Fifteen mutations. Thirteen killed on the first pass; the other two are the reason the pass was
+worth running.
+
+**One survived**, and it was a genuine hole in the tests rather than a harmless mutation:
+dropping `forced` on the way to the renderer leaves the released fragment drawn as a list item
+while the replay draws prose — and the ROWS still read the same, because the fragment is one row
+wide either way. Only the marker's STYLE differs. Three tests were added over the drawn
+segments, and they kill it twice.
+
+**One went red against the wrong test.** Wrapping the item body at the full width breaks
+`test_an_ordered_item_hangs_under_its_own_number` rather than the bullet test named for it: a
+three-column marker crosses a word boundary that a two-column marker does not. The named test
+was corrected to the one that actually catches it, which is the whole point of naming it.
+
+| mutation | result |
+|---|---|
+| `CODE_INDENT` raised past four | 9 red |
+| `_is_row` stops asking about the indent | 1 red |
+| the `line_start` guard removed from the renderer | 1 red — the `#`-eating bug, back |
+| the `HOLD_LIMIT` release removed | 3 red |
+| `forced` never reaches the renderer | SURVIVED, then 2 red once the styles were pinned |
+| a list item no longer holds the stream | 6 red |
+| the emphasis wedge check removed | 3 red |
+| the emphasis flanking check removed | 3 red |
+| the URL punctuation trim removed | 6 red |
+| a non-ASCII URL is armed | 5 red |
+| the scheme check removed | 8 red |
+| the ctrl check removed from the click | 1 red |
+| the continuation indent dropped | 2 red |
+| the item body wraps at the full width | 1 red — under a different name than predicted |
+| the marker takes no style | 1 red |
+
+Count 3665 -> 3778.

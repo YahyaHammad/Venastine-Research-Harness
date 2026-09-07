@@ -48,7 +48,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 3665 tests, offline, ~2-3 min by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 3778 tests, offline, ~2-3 min by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -291,12 +291,12 @@ write path goes through `_emit()`" obligation kept by a different route, because
 chunk splits a copied answer across `as_text()`'s joins and draws a `venastine ›` label per
 fragment.
 
-**That fence hold is a CAP over four constructs now, and the reason was never about fences**
-(batch 53). `RichLog` appends and cannot rewrite a drawn row, so *anything* committed in
-halves renders as its own source and can never be put right — which is one sentence about a
-fence, a table, a heading and an unclosed `**`. `markdown.safe_commit_limit(committed,
-pending)` returns the offset past which drawing would split one of them, and `_commit_ready`
-cuts there. A cap is strictly better than the rejection it replaces: a paragraph sharing a
+**That fence hold is a CAP over FIVE constructs now, and the reason was never about fences**
+(batch 53, extended by 58). `RichLog` appends and cannot rewrite a drawn row, so *anything*
+committed in halves renders as its own source and can never be put right — which is one
+sentence about a fence, a table, a heading, a list item and an unclosed `**`.
+`markdown.commit_span(committed, pending)` returns the offset past which drawing would split
+one of them, and `_commit_ready` cuts there. A cap is strictly better than the rejection it replaces: a paragraph sharing a
 buffer with a fence used to wait for the fence to close, and now streams. §38's two pins still
 say what they always said, because in both of them the fence starts the buffer and the cap is
 therefore 0.
@@ -326,15 +326,80 @@ still open and its drawn width therefore still unknown. `_split_committable`'s `
 as prose, marks and all, so measuring it as anything else would describe a rendering that does
 not happen.
 
-**Tables, headings and the two inline marks render; nothing else does** (batch 53). Lists,
-block quotes and links are still verbatim — deferred rather than rejected, and `tui/markdown.py`
-is the seam. `rich.markdown.Markdown` is the obvious next reach and is the one thing that must
-not be reached for casually: it re-flows text itself, which is precisely what the cell
+**`rich.markdown.Markdown` is the obvious next reach and is the one thing that must not be
+reached for casually** (batch 53): it re-flows text itself, which is precisely what the cell
 measurement above exists to keep under our control, and it takes over the fence handling §26
 and §38 pinned. Textual's own `Markdown` is a **Widget, not a renderable**, so it cannot go
 inside a `RichLog` at all — adopting it means replacing the transcript, not extending it.
 `rich.table.Table` *is* a renderable, which is why a table could be added by the route `Syntax`
 already takes.
+
+**Lists, links and two more inline marks render; block quotes and rules still do not** (batch
+58). `tui/markdown.py` grew the rest of the grammar it was going to grow, curated rather than
+completed. What renders now: a table, a heading, `**strong**`, `` `code` ``, `*emphasis*`,
+`~~strike~~`, a list item with a hanging indent, and a bare URL. What does not, deliberately:
+block quotes (a bar down the left collides with the thinking span's own bar — `TECHNICAL_DEBT.md`
+17), horizontal rules (drawing one is inventing furniture nobody typed), heading LEVELS (`#` and
+`######` still draw identically, because a ladder that reads as arbitrary is worse than none),
+setext headings, indented code as a *highlighted* block, nested marks composing, and anything at
+all inside a reasoning span. `rich.markdown.Markdown` is still the thing not to reach for, for
+the reasons above.
+
+**A list item is the third construct this widget wraps itself**, after the diff gutter and the
+thinking bar, and for the same reason: every rendered row needs a prefix. Rich has no hanging
+indent — `Text` has none and `Padding` indents the first row too — so the item's body is
+pre-wrapped by `markdown.wrap_display` at the width left after the marker, and continuation rows
+are padded to the column the marker's own text starts at. That is why a list item joins the
+commit cap: a fragment committed without its marker could never be indented afterwards.
+`wrap_display` is ONE pass over ONE `_cut_points` list, shared with `width_split` — calling
+`width_split` in a loop rescans from the start of the remainder each time, which is quadratic on
+a long line and paid again on every `/theme`.
+
+**`line_start=False` says a chunk begins mid-line, and it fixed a shipped bug.** With a prefix of
+exactly 77 characters the wrap boundary falls immediately before a `# ` token; the committed
+fragment read as the start of a line, rendered as a heading and **ate the hash**, which a
+`/theme` replay then put back. Invisible to every assertion over `_entries` and over
+`safe_commit_limit` — only the streamed-versus-written row equality can see it. The flag is
+derived from `self._stream_text.endswith("\n")`, so it costs no state, and it is what the
+HOLD_LIMIT release rides on too.
+
+**`HOLD_LIMIT` is enforced in two places and only works as a pair** (1000 characters).
+`commit_span` abandons a line-scoped hold past it and returns `forced`, which reaches the
+renderer as `line_start=False`; `list_item()`, `heading()` and the mark scan refuse the same line
+at the same limit. Enforce it in the cap alone and the released chunk draws as a list item while
+the replay draws prose. Enforce it in the grammar alone and a model that never sends a newline
+holds the screen. **A fence and a table are exempt and stay exempt** — both must be drawn whole
+to be drawn correctly, and `flush_stream` is their bound. `safe_commit_limit` is now
+`commit_span(...)[0]`: one scan, two answers.
+
+**A line indented four columns or more is drawn exactly as written** — no list marker, no table
+row, no inline marks. It closes a batch-53 leak (`    x = a ** b ** c` drew ` b ` in bold and
+lost four characters that were never markup) and it is STATELESS on purpose: GFM tells indented
+code from a nested list item by the surrounding list context, and tracking that would put state
+across the commit boundary. The price, named and tested: an item nested with four spaces renders
+flat, two-space nesting renders. `verbatim()` is asked in exactly three places — `_scan`,
+`_is_row`, `list_item` — and **fences are exempt**, which is `TECHNICAL_DEBT.md` 14 rather than a
+silence.
+
+**A URL is its own label, and that is the security rule as a data shape.** `[text](url)` is not a
+construct: a bare `http(s)://` URL is detected wherever it appears — catching the one inside the
+parentheses for free — and only the URL is marked, so there is no name to hide a destination
+behind. The span's TEXT *is* the target, so there is nowhere for a target to differ from what the
+reader sees. Ctrl+click opens it (never a plain click), `http`/`https` only, and **ASCII only**:
+"visible equals target" is no defence against a homograph, so a non-ASCII URL renders, copies and
+stays unarmed. The URL rides in a plain style METADATA key read by `on_click` — never textual's
+`@click` action string, which is PARSED, so building one from model output would be an injection
+grammar fed by the model. `clickable()` is re-asked in `open_url` because a style in a `RichLog`
+outlives the text that made it. Textual dispatches on `style.meta`, not on Rich's `link`; OSC 8
+was left off, since a terminal that honours it would double-open what we already handle.
+
+**`*emphasis*` is narrowed, not reversed, and underscores stay refused.** Measured against a real
+CommonMark parser: full GFM renders `call __init__ on it` as a bold `init`, and `2*3*4` and
+`x*y*z` with emphasis. So an asterisk WEDGED between two word characters is refused, and `_`/`__`
+are not recognised at all — no flanking rule saves `__init__` and it is everywhere in this
+domain. The other half of `_em_edge` (an opener needs a non-space after it) is about STREAMING:
+without it `a * b` opens a mark that never closes and the cap holds the rest of the paragraph.
+`~~strike~~` has no collisions and is the `**` branch again.
 
 **Every table cell is a `Text`, header cells included**, and both halves of why were measured
 rather than assumed. A bare `str` handed to a `Table` is markup-parsed by the console that

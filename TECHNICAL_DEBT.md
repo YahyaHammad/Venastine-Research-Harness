@@ -487,6 +487,77 @@ appending. An `available_check` reading the same function — the way
 keep "advertised" and "catalogued" from drifting apart, which is the property
 that comment is really about.
 
+
+## 14. The indent-verbatim rule does not cover fences (open, deferred batch 58)
+
+Batch 58 made a line indented four or more columns render **verbatim**: no list marker, no
+table row, no inline marks, so a four-space code sample in an answer is drawn as it was
+written. `tui/markdown.verbatim` is the rule and `_scan`, `_is_row` and `list_item` are the
+three places that ask it. It applies to the **line-level** constructs only. A fence is exempt,
+and deliberately.
+
+Fence splitting is not a line rule. `split_blocks` splits the whole text on ``` before anything
+looks at a line — which is what keeps a table inside a fence as source code — and §26 and §38
+both pin that ordering: the open-fence hold in `safe_commit_limit` counts fences in the text
+COMMITTED SO FAR rather than in the line being classified. "Indented means verbatim" cannot
+reach it without moving the fence split into the line scan.
+
+The visible consequence: an indented ``` inside an indented code sample opens a real code block
+instead of drawing three backticks. That is also the RIGHT answer whenever the indentation is a
+list rather than a code sample — a fenced block inside a bullet is common and should keep its
+highlighting — so the two cases want opposite behaviour, and telling them apart needs the list
+context this batch chose not to track (see the `verbatim` docstring for why: it would put state
+across the commit boundary).
+
+**Revisit if** someone reports a code sample that swallowed the rest of an answer. The fix is a
+list-context state machine in `split_blocks`, which is the same machinery the indent rule
+declined to add.
+
+## 15. Nothing re-renders on resize, so a pre-wrapped construct freezes (open, noted batch 58)
+
+`Transcript` pre-wraps three things rather than letting Rich soft-wrap them, because each needs
+a prefix on every rendered row: the diff gutter (§41), the thinking bar (§38) and, since batch
+58, a list item's hanging indent. There is no `on_resize` handler, so those rows keep the width
+they were drawn at while paragraphs and tables — which Rich wraps — reflow. Widen the terminal
+mid-session and the transcript is wrapped at two widths.
+
+Pre-dates batch 58 by two constructs; lists made it a third rather than a new problem.
+
+The fix is small and its risk is not: `on_resize` → `rerender()` re-lays the whole transcript,
+loses the scroll position, and fires per event while a window edge is dragged, so it needs
+debouncing and a scroll-anchor. **Revisit** if resizing mid-session becomes a normal thing to
+do, or alongside any work that touches `rerender()` anyway.
+
+## 16. A URL in a tool line is not clickable (open, noted batch 58)
+
+Batch 58 arms bare `http(s)://` URLs in an assistant body for ctrl+click. Tool lines are not
+armed: `write_role("tool", …)` reaches a plain `Text` and never goes through
+`markdown.inline_spans`, so `▸ fetch_url https://…` — the place a URL most obviously appears —
+is inert while the same URL in prose is not.
+
+Deliberate for now. Tool lines are harness-generated furniture rather than model prose, and
+routing them through a text scanner is a different decision from rendering an answer. The
+inconsistency is real and small: the URL is visible and `/copy` returns it either way.
+
+**Revisit if** the asymmetry is reported, or when a tool line next needs to carry any styled
+span at all. The mechanism is already there — `_append_spans` with `block=False`.
+
+## 17. Block quotes render as written (open, deferred batch 58)
+
+`> quoted text` gets no treatment: the marker is drawn and a wrapped row returns to column 0,
+which is the same defect batch 58 fixed for list items.
+
+Deferred by owner decision rather than by cost. The reading that works best is a bar down the
+left — and the transcript already draws one of those for a **thinking span** (`│ `, bracketed
+by `╭`/`╰`). Two bar-prefixed blocks a few rows apart, distinguished only by glyph and colour,
+risks a quoted source reading as the model's own reasoning, which is a worse failure than a
+quote that wraps flat. The conservative alternative — keep the `>` and hang the indent under it
+— was judged too weak a signal to be worth the machinery it needs (a fifth entry in the commit
+cap, a palette role, and a hold).
+
+**Revisit if** models in use start quoting heavily, or if the thinking span's own furniture
+changes enough that the collision goes away.
+
 ## Accepted risks noted in the review, deliberately not "fixed"
 
 - `07_review.json` absent on zero-finding reviewed runs — presence-implies-
