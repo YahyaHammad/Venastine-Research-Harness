@@ -10140,3 +10140,104 @@ Seven mutations, seven kills — but only after the second round:
 | `in` instead of `startswith` | 2 red — and the first draft of the prefix test did NOT catch it, because `/co` gives the identical pair either way |
 
 Count 3605 -> 3636.
+
+
+## Batch 56 — a list that said twenty-six and showed four (2026-09-07)
+
+### The reported symptom
+
+Batch 55's panel navigated the wrong list. A bare `/` matches all twenty-six commands, draws
+four, and pressing down on the fourth wrapped back to the first — so twenty-two commands were
+unreachable by keyboard, on a panel whose own border title said there were twenty-six.
+
+Asked for: past the last visible entry, drop the top entry (or two) and bring in the next one
+(or two), still inside the same row budget. The user's own framing named the "omit 1, display
+2" case before it was measured.
+
+### Why it was there
+
+`_selected` was an index into `_groups` — the window — rather than into `_matches`, and
+`_budget` sliced `self._matches[:SUGGEST_MAX_ENTRIES]` from the head with no start offset to
+move. So `% len(self._groups)` was wrapping at the edge of what had been drawn, which is a
+different boundary from the edge of what had matched, and nothing in the panel could tell them
+apart.
+
+The fix keeps the split batch 55 already documents and pushes it one step: `move()` decides
+what is SELECTED, `_budget()` decides what is VISIBLE, because only `_budget` knows the width.
+`_first` is derived on every measurement rather than maintained alongside the selection.
+
+### What measuring changed
+
+**The window changes SIZE as it slides, and that is the whole design.** Entries are one or two
+rows, so keeping the selection visible under an eight-row budget gives four entries over seven
+rows at the top of the list, four over eight one step later, and five over seven in the middle.
+The user's "omit 1 and display 2" guess turns out to be a specific position rather than a
+special case: `/compact` is two rows and `/embedder` plus `/forget` are two rows between them,
+so the step that needs `/embedder` on screen drops one entry and gains two. It is the row budget
+refilling, not a rule.
+
+**A plain `refresh()` leaves the extra row clipped.** Measured: with `_groups` holding eight
+rows, the widget's content height stayed at seven — no exception, no visible error, an entry
+simply missing. `move()`'s `refresh(layout=True)` is load-bearing the moment a window can
+resize, and was merely correct before.
+
+**A resize outside app.py's handler unpins the transcript — again.** This is batch 55's finding
+arriving a second time and worse. Measured: after `/` through the real key path the transcript
+is pinned; after a bare seven-to-eight-row change it is not. Batch 55 only had to survive the
+panel OPENING, once. A sliding window resizes on most arrow presses, so the drift would
+accumulate as the reader scrolled. The re-pin became `_change_suggestions(panel, apply)` and
+the arrows post `SuggestionsMoved` so they land inside it.
+
+**Two things that did not need handling.** The window never shrinks at the tail: minimal
+scrolling only advances `_first` far enough to keep the selection visible, so it never reaches
+a position with fewer entries left than fit, and the last match is still shown in a full five
+entries over eight rows. And `test_the_highlight_wraps_at_both_ends` carried over untouched,
+because `/c`'s four matches all fit and its boundary was never the false one.
+
+### Owner decisions
+
+- **Wrapping stays, at the real boundary.** Down on the twenty-sixth goes to the first with the
+  window back at the top; up on the first goes to the twenty-sixth with the window at the tail.
+  The shipped behaviour with the false edge removed, rather than a new behaviour.
+- **The title gains a range only when the list can scroll.** `1-4 of 26` where there is
+  somewhere to be, `4 of 4` and `1 of 1` where everything already fits. Every case shipped in
+  batch 55 reads exactly as it did.
+- **The five-entry cap stays** beside the eight-row cap, though measured it is the binding one
+  in fourteen of the twenty-six window positions against the row cap's seven. Kept because a
+  glanceable panel was the original ask; the cost is slightly more scrolling.
+
+### Deliberately not done
+
+`pageup`/`pagedown`/`home`/`end` — the arrows are the whole navigation, as specified. Mouse and
+scroll-wheel selection. Argument completion. And `ctrl+c` is still shadowed by the focused
+input, unchanged since batch 54.
+
+### Files
+
+- `tui/widgets.py` — `SlashSuggest` gains `_first`, `_fill()` and `visible`; `_budget()` derives
+  the window; `move()` wraps over the matches and refreshes with `layout=True`; `render()`
+  highlights at `_selected - _first`. `PromptInput` gains `SuggestionsMoved`, and its two
+  cursor actions post it instead of calling `move()`.
+- `tui/app.py` — `_change_suggestions(panel, apply)` extracted from batch 55's handler, with a
+  second handler for the moves.
+- `tui/app.tcss` — **unchanged**: the window is still bounded by `SUGGEST_MAX_ROWS`.
+- `tests/test_tui.py` (+12), three of batch 55's adjusted for the new accessor and title.
+- `AGENTS.md`, `ARCHITECTURE.md`, `README.md`, `tests/BREAKING_CHANGES.md`.
+
+### Mutation
+
+Seven mutations, seven kills, first pass — batch 55's lesson applied up front rather than after
+a survivor: the budget invariant is swept over every selection at four widths with no pilot,
+because a pilot only walks the positions its keystrokes reach.
+
+| mutation | result |
+|---|---|
+| `move` wraps over `_groups` again | 7 red |
+| `_budget` recomputes the window from the top | 1 red — the list jitters for a selection it was already showing |
+| `_budget` never scrolls back up (no `min`) | 2 red |
+| `move` refreshes without `layout=True` | 1 red — the drawn rows outnumber the measured ones |
+| the arrows call `move()` directly again | 1 red — the transcript creeps |
+| the title drops the range | 2 red |
+| `render` highlights without subtracting `_first` | 1 red — `chosen` stays right while the wrong row lights up |
+
+Count 3636 -> 3648.

@@ -3256,3 +3256,43 @@ It looks like it can — `truncate(n, overflow="ellipsis")` is right there. It i
 wrapped line, because the overflow is in the lines that were DROPPED and the line that was
 kept is shorter than the width. Crop, then append. A test asserting `endswith("…")` is what
 holds it.
+
+
+## Batch 56 — the suggestion window slides
+
+**`panel.visible`, never `panel._matches[:panel.shown]`.** The second spelling was correct for
+exactly one batch, because the window always started at zero. It no longer does, and it fails
+*silently* in the direction that matters: on an unscrolled list the two agree, so a test written
+the old way passes at the top and lies everywhere else. `test_the_row_budget_drops_the_entry_
+that_would_not_fit` was rewritten to use `visible` for this reason and not because it was
+failing.
+
+**`_selected` is an index into the MATCHES, not into the window.** `_first` is where the window
+starts, and it is derived on every measurement rather than stored beside the selection. If you
+find yourself wanting to set `_first` from outside `_budget`, that is the signal that the two
+have been allowed to disagree.
+
+| Change | Symptom if you break it | Fix |
+|---|---|---|
+| `move()` wraps over `len(self._matches)` | the list cycles at the fourth entry and twenty-two commands are unreachable | wrap over the matches, not `_groups` |
+| `move()` uses `refresh(layout=True)` | an entry is missing with no error — the widget stays measured at its old height and the extra row is clipped | `layout=True` is required once a window can resize |
+| the arrows post `SuggestionsMoved` | the conversation creeps upward as you scroll the list | the move must run inside `app.py`'s pin |
+| `first = min(self._first, self._selected)` | drop the `min` and arrowing up strands you at the bottom; use `0` and the list jitters for a selection it was already showing | keep both halves |
+| `render()` highlights `_selected - _first` | the wrong row lights up once the list scrolls, while `chosen` keeps returning the right command | subtract the window start |
+
+### The trap: a test that agrees with the bug at position zero
+
+Everything about this window is correct while `_first == 0`, which is where every test starts
+and where a hand-check naturally looks. `test_the_window_stays_inside_its_budget_at_every_
+position` is the answer — a bare widget, no pilot, the selection walked through all twenty-six
+at four widths, carrying `_first` between steps so the MINIMAL-scroll property is pinned too
+(a window that jumped further than it needed to would satisfy every other clause). It is the
+same instrument batch 55 had to add after a pilot test survived its own mutation; here it was
+written first.
+
+### Standing: `test_the_transcript_stays_pinned_while_the_window_scrolls` asserts it saw a resize
+
+The last line of that test is `assert len(heights) > 1`. It is not decoration: the pin only has
+anything to prove on a keypress that changes the panel's height, and if the entry line-counts
+ever shift so that scrolling no longer resizes, the test would keep passing while testing
+nothing. Do not delete it as a redundant assertion — it is what keeps the other one honest.

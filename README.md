@@ -600,7 +600,7 @@ Keys: **ctrl+c** quit · **ctrl+t** thread picker · **ctrl+l** claims view · *
 
 The prompt box wraps and grows to four lines as you type, then drops back to one when you send, so a long question can be read back before it goes. A line that runs past the edge wraps on its own — `ctrl+j` is for a break you actually want. `shift+enter` does the same where your terminal can send it, which in practice means kitty, ghostty, WezTerm, or any terminal configured to emit a newline for that chord; elsewhere it arrives as a plain Enter and sends the message, so `ctrl+j` is the one to reach for.
 
-Type `/` and the commands appear above the prompt — name, description and flags, narrowing as you type and coming back if you delete. Arrow up and down to move the highlight; **enter** or **tab** fills the command in **without sending it**, so you can still add arguments, and a second **enter** runs it. **escape** puts the list away. The list is the same one `/help` prints, so nothing can go stale, and the panel's title says how many of the matches fit on screen.
+Type `/` and the commands appear above the prompt — name, description and flags, narrowing as you type and coming back if you delete. Arrow up and down to move the highlight — the list scrolls, so every matching command is reachable, not just the ones on screen; **enter** or **tab** fills the command in **without sending it**, so you can still add arguments, and a second **enter** runs it. **escape** puts the list away. The list is the same one `/help` prints, so nothing can go stale, and the panel's title says how many of the matches fit on screen.
 
 Three behaviours worth knowing: an unknown slash command is an error, never a chat turn — a mistyped command cannot silently burn a request. `/effort` and `/thinking` persist nothing, so make those stick through settings.json or launch flags; `/theme`, `/model`, `/critic` and `/embedder` are the exceptions — they are remembered for the next launch, in files of their own beside settings.json rather than by rewriting it. And the commands that spend money or swap models mid-session (`/compact`, `/summary`, `/research`, `/init`, `/model`, `/critic`, `/embedder`, `/grill-me`) refuse while a turn is still running rather than acting underneath it.
 
@@ -862,7 +862,7 @@ classifier is described under *Security model* above. If you have a fork or a lo
 note that `ToolApprovals.shell` now ships `False` and `SHELL_APPROVAL_MODE` is the gate — see
 `tests/BREAKING_CHANGES.md` §24.
 
-Run the test suite with `pytest` — 3636 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
+Run the test suite with `pytest` — 3648 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
 
 ## Documentation
 

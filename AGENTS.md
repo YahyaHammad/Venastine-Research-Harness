@@ -48,7 +48,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 3636 tests, offline, ~2-3 min by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 3648 tests, offline, ~2-3 min by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -472,6 +472,43 @@ stripped back to `"/copy"`, so the panel stayed open over a line that had alread
 its arguments, and `enter` would have completed `/copy` on top of itself rather than sending.
 Once a space is typed there is nothing left to complete, whichever end of the token it is on.
 The leading half stays tolerant, because `dispatch` tolerates it and `"  /help"` genuinely runs.
+
+**The suggestion window is DERIVED from the selection, never stored beside it** (batch 56).
+Batch 55 wrapped the highlight at the last *drawn* entry, so a bare `/` matched twenty-six
+commands, showed four, and left twenty-two unreachable by keyboard under a title that said
+twenty-six. The fix keeps the same split one step further: `move()` picks a command out of all
+the matches and `_budget()` scrolls the window the least it can to keep that command visible,
+because where the window has to sit is a function of the WIDTH and only `_budget` knows it.
+`_first` is therefore recomputed on every measurement rather than maintained — two numbers that
+must agree are the shape §22 spent a section removing. `visible` is the accessor for what is on
+screen; `_matches[:shown]` silently assumes a window starting at zero and stopped being true
+here.
+
+Minimal in both directions: `first = min(self._first, self._selected)` and then advance while
+the selection falls outside. Drop the `min` and a reader who arrows back up is stranded at the
+bottom of a list they scrolled into; recompute from zero instead of from where the window
+already is and the list jitters under them, scrolling for a selection it was already showing.
+Both are pinned.
+
+**A panel that changes SIZE cannot refresh itself, and cannot move itself** (batch 56, and this
+is the half that is easy to get wrong). The window slides by whole entries of one or two rows,
+so the panel is four entries over seven rows at the top of the list, four over eight one step
+later, five over seven in the middle — measured. Two consequences, neither optional:
+
+- `move()` must `refresh(layout=True)`. Measured: with eight rows queued after a plain
+  `refresh()`, the widget stayed *measured* at seven and the extra row was clipped where
+  nothing could see it — no exception, no visible error, just a missing entry.
+- `move()` must be reached through `app.py`, not called from the prompt. A resize takes rows
+  from the transcript, and textual does not re-pin a scroll on shrink; measured, a
+  seven-to-eight-row step unpins it exactly as opening the panel does. Batch 55's re-pin
+  therefore became `_change_suggestions(panel, apply)`, and the arrow keys post
+  `SuggestionsMoved` so they land inside it. Called directly, the conversation creeps upward on
+  most keypresses and no test about suggestions would notice.
+
+**The title carries a range only when the list can scroll** (batch 56): `1-4 of 26` when there
+is somewhere to be, and `4 of 4` / `1 of 1` when everything already fits. A range on a list
+with nowhere to go is noise, and the rule keeps every case shipped in batch 55 reading exactly
+as it did.
 
 **Thinking has two forms and one closing path** (§38, O6/O8). `tui.show_thinking` (default
 `True`, defaulted in `tui/app.py` beside `animations` rather than in `config.py`) renders
