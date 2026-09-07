@@ -3296,3 +3296,50 @@ The last line of that test is `assert len(heights) > 1`. It is not decoration: t
 anything to prove on a keypress that changes the panel's height, and if the entry line-counts
 ever shift so that scrolling no longer resizes, the test would keep passing while testing
 nothing. Do not delete it as a redundant assertion — it is what keeps the other one honest.
+
+
+## Batch 57 — the quit gesture, and aliases that are not commands
+
+**`check_action` returns `False` for the inactive ctrl+c binding, and `None` breaks it
+invisibly.** `Screen.active_bindings` skips a binding only on `is False`; `None` leaves it in
+the map marked disabled, and the map is keyed by KEY, so the first-listed binding keeps the slot
+either way. The DISPATCH is unaffected — `_check_bindings` walks past a refused action to the
+next binding for the same key — so every behavioural test still passes while the footer shows
+one label forever. `test_the_footer_says_what_a_second_press_will_do` asserts on the drawn
+`FooterKey` row for exactly this reason; reading `app.active_bindings["ctrl+c"].binding` would
+agree with the bug.
+
+**`priority=True` on both ctrl+c bindings is what makes the key work at all**, and
+`_copy_selection()` is what keeps it usable. `Input` and `TextArea` bind ctrl+c to `copy` and a
+non-priority app binding loses to the focused widget; `ModalScreen` blocks non-priority app
+bindings outright. The flag reaches past both — and pre-empts the widget's copy completely
+(measured: the clipboard stayed empty), which is why the app copies the focused widget's
+selection itself. Remove that branch and ctrl+c stops copying anywhere in the app.
+
+**Aliases are not commands, and three lists say so.** `all()`, `names()` and `matching("/")`
+are canonical. If you are reaching for `_aliases` to make something appear in a listing, check
+first whether the listing is a MENU — a bare slash is, and it names each thing once.
+
+| Change | Symptom if you break it | Fix |
+|---|---|---|
+| `check_action` returns `False`, not `None` | the footer label never changes, while every keypress does the right thing | `False` is "disabled and hidden"; `None` is "disabled and still in the map" |
+| `arm_quit` calls `refresh_bindings()` | armed state moves, footer does not | the `Footer` recomposes off the screen's bindings signal and nothing else raises it |
+| a press over a selection copies and returns | ctrl+c stops copying, or copying quits the app | the branch is first in BOTH actions |
+| `_disarm_quit` is scheduled | the arm never expires, so a ctrl+c now and another one an hour later quits | `set_timer(QUIT_CONFIRM_S, ...)` |
+| an alias row carries the ALIAS as its `name` | enter over `/exit` fills in `/quit`, silently correcting what was typed | `_alias_row` builds a `SlashCommand` named for the alias |
+| `matching()` returns early on an empty prefix | a bare slash lists 28 things, and every window position batch 56 measured moves | aliases join the sort only once a prefix is typed |
+
+### The trap: a mutation that is right about everything except the screen
+
+The `None`-for-`False` mutation is the shape worth remembering, because it is the third distinct
+false-green this TUI work has produced and the first that is *invisible to behaviour*: batch 49's
+was a case table with nothing in range, batch 54's an assertion that could not tell two states
+apart, batch 55's a test whose inputs never reached the state. This one is a bug that changes
+only what is DRAWN, in a widget nobody thinks to query, while the keys keep working perfectly.
+
+### Standing: `test_no_slash_command_touches_the_posture` now reads aliases too
+
+`names()` is canonical by design, and an alias reaches `dispatch` exactly as a name does. A
+guard over `names()` alone would wave `/unsafe` through as an alias of something
+harmless-looking. The positive half (`assert "exit" in names`) is there for the usual reason: if
+aliases ever stop reaching that set, the negative assertion would be checking nothing.

@@ -48,7 +48,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 3648 tests, offline, ~2-3 min by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 3665 tests, offline, ~2-3 min by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -408,9 +408,9 @@ Four things are decisions rather than defaults, all measured against the install
 `tab_behavior` stays at its `"focus"` default deliberately: under `"indent"`,
 `TextArea._on_key` also swallows `escape`. `ctrl+k` is still bound by the prompt (both
 widgets bind it), so §26's `ctrl+l` note above is unchanged. `ctrl+c` was ALREADY shadowed
-before this batch and still is — `Input` and `TextArea` both bind it to `copy` with no
-`check_action` gate, and measured, an app-level `ctrl+c → quit` fires under neither while
-the box has focus. That is a separate defect from this one; `README.md` still promises it.
+before this batch — `Input` and `TextArea` both bind it to `copy`, and measured, an app-level
+`ctrl+c → quit` fired under neither while the box had focus. Batch 57 is what fixed that; see
+**ctrl+c is one key with two bindings** below.
 
 **A prompt that "got taller" is not a prompt that wrapped** (batch 54). A `TextArea` with
 `soft_wrap` off grows a HORIZONTAL SCROLLBAR, so a 186-character line drew *two* rows at
@@ -509,6 +509,45 @@ later, five over seven in the middle — measured. Two consequences, neither opt
 is somewhere to be, and `4 of 4` / `1 of 1` when everything already fits. A range on a list
 with nowhere to go is noise, and the rule keeps every case shipped in batch 55 reading exactly
 as it did.
+
+**ctrl+c is one key with two bindings, and `check_action` picks which is live** (batch 57).
+A `Binding`'s description is fixed at class definition, so relabelling the footer entry —
+`Quit` at rest, `Press again to quit` while armed — is not a matter of editing anything: it
+is two bindings on `ctrl+c` with different descriptions and different actions, and
+`check_action` enabling exactly one. **It must return `False`, never `None`.**
+`Screen.active_bindings` skips a binding only on `is False`; `None` leaves it in the map
+marked disabled, and the map is keyed by KEY, so the first-listed binding keeps the slot
+either way. Under `None` the DISPATCH is still correct — `_check_bindings` walks past a
+refused action to the next binding for the same key — and the footer shows the wrong label
+for the rest of the session. Measured, and the whole reason the footer test asserts on the
+drawn row rather than on the binding object, where the bug cannot be seen.
+`refresh_bindings()` is what repaints; the `Footer` recomposes off the screen's bindings
+signal and nothing else in the gesture raises it.
+
+**`priority=True` is what makes `ctrl+c` reachable at all, and it is why the APP does the
+copy** (batch 57). The key meant four different things depending on focus: `copy` in the
+prompt (and nothing whatsoever there without a selection), an immediate quit one `tab` away,
+nothing at all under a modal — `ModalScreen` blocks non-priority app bindings — and `copy`
+again in a modal's `Input`. Only a priority binding reaches past all four. Measured, it also
+pre-empts `TextArea.copy` completely: the clipboard stayed empty. So `_copy_selection()`
+hands the copy back, and the rule the gesture rests on is **ctrl+c copies when there is
+something to copy and starts a quit when there is not** — a press that copies never arms and
+never quits, in either state, so no sequence of copies can end the session. `ctrl+q` is
+textual's own priority binding and already quit from everywhere, modals included; it is
+untouched and now documented.
+
+**An alias is a field on the command, and the LISTS stay canonical** (batch 57).
+`SlashCommand.aliases` plus a second index in the registry; `get()` falls back to it so
+`dispatch` needed no change. `all()` and `names()` are canonical, and `matching()` returns
+alias rows **only once a prefix is typed** — a bare slash is the MENU, which names each thing
+once, and `/ex` is a guess, whose answer is whether it works. So `matching("/") == all()`
+still holds exactly, and no window position batch 56 measured moves. Registering `/exit` and
+`/bye` outright instead would have put `bye` second in that menu, ahead of `/claims`. An
+alias row is a synthesized `SlashCommand` carrying the alias as its NAME, which is what makes
+completion fill in what was being typed rather than correcting it to `/quit` — and the panel
+needs to know nothing about aliases at all. Collisions raise at registration in both
+directions, because `get()` prefers real names: the alias would otherwise just stop working,
+silently.
 
 **Thinking has two forms and one closing path** (§38, O6/O8). `tui.show_thinking` (default
 `True`, defaulted in `tui/app.py` beside `animations` rather than in `config.py`) renders

@@ -10241,3 +10241,120 @@ because a pilot only walks the positions its keystrokes reach.
 | `render` highlights without subtracting `_first` | 1 red — `chosen` stays right while the wrong row lights up |
 
 Count 3636 -> 3648.
+
+
+## Batch 57 — one key that meant four things, and a quit with three names (2026-09-07)
+
+### The reported symptom
+
+`README.md` promised **ctrl+c** quits. Asked: why does that depend on what has focus, make it
+two presses so that copying a typed prompt cannot end the session, and let `/exit` and `/bye`
+work as well as `/quit`.
+
+### What it actually did
+
+Four things, measured, and the count is the finding — the question assumed two:
+
+| focus | ctrl+c |
+|---|---|
+| the prompt, which is where focus sits almost always | `TextArea.copy` — copies a selection, and **nothing whatsoever** without one |
+| any other main-screen widget, one `tab` away | quits immediately, no confirmation |
+| under any modal | **nothing at all** — `ModalScreen` blocks non-priority app bindings |
+| a modal's `Input` | copies |
+
+Two things that were not wrong. The FOOTER was the honest one: `TextArea`'s ctrl+c is
+`show=False`, so while the prompt has focus the footer shows only `ctrl+t`/`ctrl+l`, and "Quit"
+*appears* when you tab away — the advertisement tracked the behaviour exactly. And there was
+already a working single-press quit nobody knew about: `ctrl+q`, textual's own priority system
+binding, which quits from everywhere including under modals. It is now documented rather than
+changed.
+
+### What measuring changed
+
+**`priority=True` is the only way in, and it takes the copy with it.** Only a priority binding
+reaches past a focused text widget *and* past a modal's block on app bindings. Measured, it also
+pre-empts `TextArea.copy` completely — the clipboard stayed empty — so the app performs the copy
+itself. That is not a workaround bolted on; it is what makes the gesture coherent: **ctrl+c
+copies when there is something to copy and starts a quit when there is not**, in either state,
+so no sequence of copies can end the session. `PromptInput` — the most loaded class in
+`widgets.py` — needed no change at all.
+
+**A footer label cannot be edited, so the key carries two bindings.** A `Binding`'s description
+is fixed at class definition. Relabelling is textual's dynamic-actions path: two bindings on
+`ctrl+c`, different descriptions, different actions, `check_action` enabling exactly one, and
+`refresh_bindings()` to repaint.
+
+**And `check_action` must return `False`, never `None`.** `Screen.active_bindings` skips a
+binding only on `is False`; `None` leaves it in the map marked disabled, and the map is keyed by
+KEY, so the first-listed binding keeps the slot regardless. Under `None` the DISPATCH is still
+correct — `_check_bindings` walks past a refused action to the next binding for the same key —
+and the footer shows the wrong label permanently. Found by prototyping rather than by reading:
+the first attempt dispatched perfectly and displayed "Press again to quit" before anything had
+been pressed.
+
+**The label is the short one, for a measured reason.** `Press ctrl+c again to quit` truncates to
+`Press ctrl+c again to` at 40 columns, dropping the only word that matters; `Press again to
+quit` survives every width, and the `^c` badge sits immediately to its left. The owner rejected
+"Quit again", which reads as repeating a previous quit.
+
+**Aliases as a FIELD keep the menu still.** Registering `/exit` and `/bye` as commands is free
+mechanically and costs elsewhere: `bye` sorts second in a bare `/`, ahead of `/claims`, and
+`/exit` lands between `/embedder` and `/forget` — exactly the position batch 56's "drop one, gain
+two" test measures. `SlashCommand.aliases` plus a second index leaves `all()` and `names()`
+canonical, so `matching("/") == all()` still holds exactly and no window position moves.
+
+### Owner decisions
+
+- **A press that copies never arms and never quits**, armed or not. The cost is that "ctrl+c
+  twice always quits" is not literally true — with a selection live you clear it first — and the
+  gain is that the protection is unconditional.
+- **The same behaviour under modals.** Quitting from under a permission prompt is already a
+  supported dismissal path: `exit()` releases the blocked worker's channel (§4.14), and there is
+  now a test that presses the keys rather than calling `exit()`.
+- **The footer is the only notice.** No toast, no transcript line — nothing lands in the
+  conversation, so `/copy all` is unaffected and a brushed key leaves no trace.
+- **Aliases surface only once a prefix is typed.** A bare slash is the MENU, and a menu names
+  each thing once; `/ex` is a guess, and the answer to a guess is whether it works.
+- **`/quit` stays immediate**, and so does `ctrl+q`. A typed command is already deliberate.
+
+### Deliberately not done
+
+Aliases for any other command — the field is there when one is wanted. The CLI shell's own
+ctrl+c, which is a `KeyboardInterrupt` path in a shell with no slash commands. And `#105`
+remains as it was: neither quit route checks `_busy`, and `exit()` still narrates what became of
+a running turn.
+
+### Files
+
+- `tui/app.py` — two `ctrl+c` bindings, `check_action`, `_copy_selection`, `action_arm_quit`,
+  `action_confirm_quit`, `_disarm_quit`, `QUIT_CONFIRM_S`; `_cmd_help` names a row's aliases;
+  `/quit` gains `aliases=("exit", "bye")` and a summary that reads as one.
+- `tui/commands.py` — `SlashCommand.aliases`, the `_aliases` index, collision guards in
+  `register()`, the fallback in `get()`, and `_alias_row()` behind `matching()`.
+- `tui/widgets.py`, `tui/app.tcss` — **unchanged**, both.
+- `tests/test_tui.py` (+17), `tests/test_posture.py` (the no-posture-command guard now reads
+  alias names too — they reach `dispatch` exactly as names do).
+- `AGENTS.md`, `ARCHITECTURE.md`, `README.md` (the keys line, and a `/quit` row the command
+  table never had), `tests/BREAKING_CHANGES.md`.
+
+### Mutation
+
+Twelve mutations, twelve kills, first pass — each verified against the NAMED test rather than
+against any red.
+
+| mutation | result |
+|---|---|
+| `check_action` returns `None` instead of `False` | 2 red — the footer label, and only it |
+| `priority=True` dropped from both bindings | 8 red |
+| the copy branch removed from `arm_quit` | 1 red |
+| the copy branch removed from `confirm_quit` | 1 red |
+| the first press quits outright | 5 red |
+| the disarm timer is never set | 2 red |
+| `arm_quit` does not `refresh_bindings()` | 1 red — the state moves and the screen does not |
+| `get()` without the alias fallback | 2 red |
+| a bare slash offers the aliases too | 1 red |
+| an alias row carries the canonical name | 2 red — completion corrects `/exit` to `/quit` |
+| the alias-shadows-a-command guard removed | 1 red |
+| the command-shadows-an-alias guard removed | 1 red |
+
+Count 3648 -> 3665.

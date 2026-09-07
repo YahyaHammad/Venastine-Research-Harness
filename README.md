@@ -595,8 +595,9 @@ The first connection to a **user-level** server asks once, showing the resolved 
 | `/summary` | Distil this conversation and show it. Describes; does **not** fold — that is `/compact` |
 | `/ref [--list\|--clear]` | Pick another conversation and attach its summary to this one as standing context; `--list` and `--clear` manage attachments |
 | `/init [--software\|--research] [--config]` | Scaffold the project documentation set; `--config` adds `.venastine/settings.json` and `mcp.json` with default values, and on its own is the whole command |
+| `/quit` | Leave the harness, on one invocation — a typed command is already deliberate. `/exit` and `/bye` are the same command under other names; type toward either and the suggestion list says so |
 
-Keys: **ctrl+c** quit · **ctrl+t** thread picker · **ctrl+l** claims view · **ctrl+j** (or **shift+enter**) newline in the prompt · **up/down** and **enter**/**tab** to pick a slash command, **escape** to dismiss the list.
+Keys: **ctrl+c** twice quits — the first press arms it and the footer changes to say so, and it goes back to `Quit` after a couple of seconds; a **ctrl+c** over selected text copies instead and arms nothing, so nothing you copy can end the session. **ctrl+q** quits on a single press, from anywhere, including under a dialog · **ctrl+t** thread picker · **ctrl+l** claims view · **ctrl+j** (or **shift+enter**) newline in the prompt · **up/down** and **enter**/**tab** to pick a slash command, **escape** to dismiss the list.
 
 The prompt box wraps and grows to four lines as you type, then drops back to one when you send, so a long question can be read back before it goes. A line that runs past the edge wraps on its own — `ctrl+j` is for a break you actually want. `shift+enter` does the same where your terminal can send it, which in practice means kitty, ghostty, WezTerm, or any terminal configured to emit a newline for that chord; elsewhere it arrives as a plain Enter and sends the message, so `ctrl+j` is the one to reach for.
 
@@ -862,7 +863,7 @@ classifier is described under *Security model* above. If you have a fork or a lo
 note that `ToolApprovals.shell` now ships `False` and `SHELL_APPROVAL_MODE` is the gate — see
 `tests/BREAKING_CHANGES.md` §24.
 
-Run the test suite with `pytest` — 3648 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
+Run the test suite with `pytest` — 3665 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
 
 ## Documentation
 
