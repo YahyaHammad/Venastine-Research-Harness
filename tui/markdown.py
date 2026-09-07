@@ -7,9 +7,15 @@ The transcript used to render exactly one construct -- a ``` fence, through
 `rich.syntax.Syntax` -- and hand everything else to `Text` unchanged. So a
 table arrived as its own pipes, and `_split_fences`' docstring said why:
 "deliberately small: this is a renderer, not a markdown parser." This module
-is the parser that sentence declined to write, kept to the three constructs
-a reader actually loses by not having: a TABLE, a HEADING, and the two inline
-marks (`**strong**`, `` `code` ``).
+is the parser that sentence declined to write, kept to the constructs a
+reader actually loses by not having: a TABLE, a HEADING, the inline marks
+(`**strong**`, `` `code` ``, and batch 58's `*emphasis*` and `~~strike~~`), a
+LIST ITEM, and a bare URL.
+
+CURATED rather than complete, and the omissions are decisions with reasons
+recorded in AGENTS.md: no block quotes (a bar down the left collides with the
+thinking span's own bar), no horizontal rules, no heading LEVELS, no setext
+headings, nothing inside a reasoning span.
 
 PURE. No I/O, no `core/` import, no harness state -- `tui/diffs.py`'s rule,
 because `tui/widgets.py` imports this the same way. Parsing lives here;
@@ -21,18 +27,23 @@ INSIDE the `tui` package on purpose. A root-level `markdown.py` would sit on
 and the reason `mcp_client/` is not called `mcp/`. Nothing here shadows
 `rich.markdown`, which is imported absolutely and by nobody in this project.
 
-THREE THINGS THIS OWNS, and the third is the one that is easy to miss.
+WHAT THIS OWNS, and the last one is the one that is easy to miss.
 
   - `split_blocks` -- plain text, fenced code, tables.
+  - `verbatim` / `heading` / `list_item` -- what one LINE is.
   - `inline_spans` -- one line as `(text, role)` pairs.
-  - `safe_commit_limit` -- how far a streamed answer may be drawn RIGHT NOW.
+  - `wrap_display` -- the rows a list item's body will occupy.
+  - `commit_span` -- how far a streamed answer may be drawn RIGHT NOW, and
+    whether the cap gave up. `safe_commit_limit` is its first value.
 
 That third one is the whole reason the first two are safe. `Transcript`
 commits a streamed answer at boundaries it computes itself, and RichLog
 cannot rewrite a row it has drawn -- so a construct must never be committed
 in halves. §38 shipped one instance of that rule (an open fence is held);
 this generalises it to a CAP: the offset past which committing would split
-something. Four constructs answer to it, listed at the function.
+something. FIVE constructs answer to it, listed at the function, and batch 58
+put a ceiling on the three of them that are waiting for a newline no model is
+obliged to send.
 
 MEASUREMENT IS THE OTHER HALF, and the two are useless apart. `**bold**`
 renders four cells shorter than its source, so a cut taken in SOURCE columns
@@ -64,6 +75,32 @@ FENCE = "```"
 HEADING = "md_heading"
 STRONG = "md_strong"
 CODE = "md_code"
+#: Batch 58. `LINK` is the one role whose span TEXT carries information: a
+#: link span is always the URL itself, so the renderer needs no second
+#: channel to know what a click should open. That is the security rule
+#: spelled as a data shape -- there is no label to hide a target behind.
+EM = "md_em"
+STRIKE = "md_strike"
+LINK = "md_link"
+BULLET = "md_bullet"
+
+#: The ceiling on a hold (batch 58). `safe_commit_limit` holds a construct
+#: rather than commit it in halves, and three of those holds are waiting on
+#: a newline that a model is under no obligation to send. Past this many
+#: characters the construct stops being one -- on BOTH paths, which is what
+#: keeps the streamed rows equal to the replayed ones -- and the stream is
+#: released. A fence and a table are exempt and say why at the function.
+#:
+#: Characters rather than rows, deliberately: a rule measured in rows would
+#: depend on the terminal, so a resize or a `/theme` could re-classify a
+#: line and `rerender()` would draw something the live path never drew.
+HOLD_LIMIT = 1000
+
+#: Indented at or past this, a line is drawn exactly as it was written.
+#: Markdown's own code-block indent, used here only as a NO-PARSE zone --
+#: this module does not render indented code as a block, it declines to
+#: read anything into one. Fences are exempt; see TECHNICAL_DEBT.md.
+CODE_INDENT = 4
 
 #: ATX headings only, and the space is REQUIRED -- `#hashtag` is not a
 #: heading, and `###` alone is not one either. Closing hashes are left
@@ -80,6 +117,92 @@ _DELIMITER_CELL = re.compile(r"^:?-+:?$")
 #: outside this set settles it, which is what keeps a paragraph following
 #: a pipe in prose from being held until its own newline arrives.
 _DELIMITER_CHARS = set("|-: \t")
+
+#: A list item's opener: bullet or ordered, then ONE to FOUR spaces. The
+#: upper bound is GFM's -- past four the content is an indented block
+#: rather than the item's text -- and it also stops a stray `- ` in a
+#: column of ASCII art from claiming a hanging indent it cannot fill.
+#: The leading run is unbounded here because `verbatim()` is what rules
+#: out an indented line, so CODE_INDENT stays the single spelling of that.
+_LIST = re.compile(r"^( *)([-*+]|\d{1,9}[.)])( {1,4})(?! )(.*)$")
+
+#: A bare URL, and the only thing in this grammar that becomes clickable.
+#: Ends at whitespace or at a character that cannot appear in one without
+#: being escaped -- the brackets of a markdown link are NOT excluded, so
+#: `[docs](https://x/a)` yields the URL and leaves the label as prose.
+_URL = re.compile(r"https?://[^\s<>\"'`\\]+")
+
+#: Trailing characters trimmed off a detected URL: sentence punctuation
+#: and the marks that sit beside one in prose. A closing bracket is
+#: handled separately, by BALANCE, so `https://x/a_(b)` keeps its own.
+_URL_TRIM = ".,;:!?*_~'\""
+
+#: Bracket pairs whose closer is trimmed only when it was never opened.
+_URL_PAIRS = {")": "(", "]": "[", "}": "{"}
+
+
+# ---------------------------------------------------------------------------
+# ---- Lines ----------------------------------------------------------------
+# ---------------------------------------------------------------------------
+
+def verbatim(line: str) -> bool:
+    """Is this line drawn exactly as it was written (batch 58)?
+
+    Four columns of indent, or any tab in the indent, and NOTHING is read
+    into the line: not a list marker, not a table row, not an inline mark.
+    A reported defect rather than a tidy-up -- `x = a ** b ** c` indented
+    inside an answer rendered with ` b ` in bold, because batch 53 parsed
+    marks on every line regardless of where it sat.
+
+    Stateless on purpose. GFM decides this with the surrounding list
+    context; tracking that would put state across the commit boundary,
+    which is where this widget has broken before. The price is named
+    rather than hidden: an item nested with FOUR spaces renders flat, and
+    one nested with two renders as a nested item.
+
+    A heading was never exposed -- `_HEADING` is anchored at column 0 --
+    and a FENCE is deliberately still exempt. See TECHNICAL_DEBT.md.
+    """
+    indent = line[:len(line) - len(line.lstrip())]
+    return "\t" in indent or len(indent) >= CODE_INDENT
+
+
+def heading(line: str):
+    """The end of this line's ATX marker, or None if it has none.
+
+    One reading for the renderer and the cap, so a heading held by one
+    cannot be drawn as prose by the other. The HOLD_LIMIT guard is half
+    of that agreement: a `#` line longer than the limit is not a heading
+    on either path, so the released chunk and the replay draw the same
+    hashes.
+    """
+    if len(line) > HOLD_LIMIT or verbatim(line):
+        return None
+    match = _HEADING.match(line)
+    return match.end() if match else None
+
+
+def list_item(line: str):
+    """`(prefix, body, indent)` for a list item, or None.
+
+    `prefix` is everything before the text -- indent, marker and the gap
+    -- and `indent` is the column the text starts at, which is where the
+    item's own wrapped rows are padded to. One number for both, because a
+    hanging indent that did not line up with the marker's own text would
+    be furniture rather than structure.
+
+    Refused past HOLD_LIMIT for `heading`'s reason, and it is the half
+    that makes the stall bounded: a marker with no newline behind it is
+    held only until the limit, and past it the line is prose on BOTH
+    paths rather than a list item on one of them.
+    """
+    if verbatim(line) or len(line) > HOLD_LIMIT:
+        return None
+    match = _LIST.match(line)
+    if match is None:
+        return None
+    prefix = line[:match.end(3)]
+    return prefix, match.group(4), len(prefix)
 
 
 # ---------------------------------------------------------------------------
@@ -246,8 +369,13 @@ def _is_row(text: str) -> bool:
 
     A blank line ends a table, which is GFM's rule and also the only thing
     that keeps a table from swallowing the paragraph after it.
+
+    An INDENTED line is not a row (batch 58), which is what keeps a shell
+    pipeline inside a four-space code sample from being drawn as a grid.
+    Here rather than at the two callers, so `_read_table` and the cap
+    cannot disagree about where a table stops.
     """
-    return bool(text.strip()) and "|" in text
+    return bool(text.strip()) and "|" in text and not verbatim(text)
 
 
 def _cells(text: str):
@@ -326,18 +454,32 @@ def _delimiter_possible(prefix: str) -> bool:
 # ---- Inline marks ---------------------------------------------------------
 # ---------------------------------------------------------------------------
 
-def inline_spans(line: str):
+def inline_spans(line: str, *, block: bool = True):
     """One line as `(text, role)` pairs; role is "" for unmarked text.
 
     Deliberately smaller than GFM, and each omission is a decision:
 
-      - `__strong__` is NOT recognised. `__init__` in prose would render as
-        a bold `init`, and a renderer that quietly edits Python identifiers
-        is worse than one that shows two underscores.
-      - `*emphasis*` is not either, for the same class of reason: `a * b * c`
-        is arithmetic far more often than it is italics.
+      - `__strong__` is NOT recognised, and batch 58 did not reverse it.
+        Measured against a real CommonMark parser, `call __init__ on it`
+        renders a bold `init` under the full rules, anywhere in the line,
+        and no flanking rule saves it. `_x_` goes with it: an underscore
+        that cannot be trusted at two is not trusted at one either.
+      - `*emphasis*` IS recognised as of batch 58, but only where the
+        asterisk is not wedged between two word characters. That is what
+        keeps `2*3*4` arithmetic and `x*y*z` a filename -- both of which
+        full GFM italicises -- while `the *point*` renders.
       - a code span is delimited by single backticks and cannot span a line,
         which is what every model this harness talks to actually emits.
+      - a URL is its own span and carries no label. `[docs](https://x)`
+        draws every character it was written with; only the URL is marked.
+
+    `block=False` says this text is a FRAGMENT of a line rather than a
+    line -- the tail of a streamed paragraph, or a table cell. Nothing
+    that depends on where a line STARTS may fire there: not a heading,
+    not the indent rule. It is the fix for a shipped defect where a wrap
+    boundary falling just before a `# ` token made the committed fragment
+    render as a heading and swallow the hash, which a `/theme` replay then
+    put back.
 
     A heading contributes its role to the line's UNMARKED spans and leaves
     marked ones alone, so `# The **why**` keeps the strong mark visible
@@ -345,19 +487,148 @@ def inline_spans(line: str):
     """
     base = ""
     body = line
-    match = _HEADING.match(line)
-    if match:
-        body = line[match.end():]
-        base = HEADING
-    return [(text, role or base) for text, role, _s, _e in _spans(body)]
+    end = heading(line) if block else None
+    if end is not None:
+        body, base = line[end:], HEADING
+    return [(text, role or base)
+            for text, role, _s, _e in _spans(body, block=block)]
 
 
-def _spans(text: str):
+def _spans(text: str, *, block: bool = True):
     """`(text, role, source start, source end)` for one line."""
-    return _scan(text)[0]
+    return _scan(text, block=block)[0]
 
 
-def _scan(text: str):
+def _wordish(char: str) -> bool:
+    return bool(char) and (char.isalnum() or char == "_")
+
+
+def _em_edge(text: str, index: int, *, opening: bool) -> bool:
+    """May the `*` at `index` be that end of an emphasis span?
+
+    Two rules, and each answers one of batch 53's two objections.
+
+    WEDGED between two word characters, it is arithmetic or a filename
+    and never italics -- measured against a real CommonMark parser, full
+    GFM renders `2*3*4` and `x*y*z` with emphasis and this declines to.
+
+    And an opener must be followed by a non-space, a closer preceded by
+    one, which is GFM's own flanking rule and the half that matters for
+    STREAMING: without it `a * b * c` would open a mark that never
+    closes, and the cap would hold the rest of the paragraph waiting for
+    a closer that is not coming.
+    """
+    before = text[index - 1] if index else ""
+    after = text[index + 1] if index + 1 < len(text) else ""
+    if _wordish(before) and _wordish(after):
+        return False
+    edge = after if opening else before
+    return bool(edge) and not edge.isspace()
+
+
+def _paired(text: str, index: int, token: str, role: str):
+    """`(span, opened)` for a `**`/`~~`/`` ` `` mark starting at `index`.
+
+    `span` when it closes on this line; `opened` ONLY when nothing closes
+    it at all, because that is the one case the cap can usefully hold --
+    an empty mark (`****`) is literal and finished, and so is a closer
+    further away than HOLD_LIMIT, which is the rule that keeps the
+    released stream and the replay drawing the same asterisks.
+    """
+    size = len(token)
+    close = text.find(token, index + size)
+    if close == -1:
+        return None, True
+    if close > index + size and close - index <= HOLD_LIMIT:
+        return (text[index + size:close], role, index, close + size), False
+    return None, False
+
+
+def _em(text: str, index: int):
+    """`(span, opened)` for a `*emphasis*` span starting at `index`.
+
+    A loop rather than a `find`, because a candidate closer can be
+    refused: `a *b*c` has an asterisk that cannot close, so the mark is
+    still OPEN and the cap must keep holding -- the closer may be the one
+    that has not arrived yet. Committing it as literal and bolding it on
+    the replay is exactly the divergence the hold exists to prevent.
+    """
+    if not _em_edge(text, index, opening=True):
+        return None, False
+    at = index + 1
+    while True:
+        close = text.find("*", at)
+        if close == -1:
+            return None, True
+        if close > index + 1 and _em_edge(text, close, opening=False):
+            if close - index > HOLD_LIMIT:
+                return None, False
+            return (text[index + 1:close], EM, index, close + 1), False
+        at = close + 1
+
+
+def clickable(url) -> bool:
+    """May this URL be armed for a click (batch 58)?
+
+    ASCII ONLY, and that is the security half rather than a tidiness
+    one. The design rule is that the visible text IS the target, so
+    nothing can hide a destination behind a friendly label -- and a
+    homograph is precisely the case where the visible form lies. A URL
+    with non-ASCII in it still renders and is still copied by `/copy`; it
+    simply is not armed.
+
+    http and https only: the click ends in the platform's URL handler,
+    and a `file://` or a registered custom scheme is not something a
+    model gets to reach through a transcript.
+    """
+    if not isinstance(url, str) or not url.isascii():
+        return False
+    if any(ord(char) < 32 or ord(char) == 127 for char in url):
+        return False
+    return url.startswith("http://") or url.startswith("https://")
+
+
+def _trim_url(url: str) -> str:
+    """A detected URL without the prose punctuation stuck to its end.
+
+    Balanced brackets survive -- `https://x/a_(b)` keeps its own -- and
+    an unbalanced one does not, which is what makes the URL inside
+    `[docs](https://x/a)` come out as the URL rather than with the
+    markdown link's closing parenthesis welded on.
+    """
+    while url:
+        last = url[-1]
+        if last in _URL_TRIM:
+            url = url[:-1]
+            continue
+        opener = _URL_PAIRS.get(last)
+        if opener is not None and url.count(last) > url.count(opener):
+            url = url[:-1]
+            continue
+        break
+    return url
+
+
+def _url(text: str, index: int):
+    """`(span, opened)` for a bare URL starting at `index`.
+
+    Never opens: a URL has no closing delimiter, so there is nothing to
+    wait for and nothing to hold. A URL that cannot be armed returns no
+    span at all and falls through to the literal path, which is how a
+    non-ASCII one stays visible without becoming clickable.
+    """
+    if index and text[index - 1].isalnum():
+        return None, False
+    match = _URL.match(text, index)
+    if match is None:
+        return None, False
+    url = _trim_url(match.group(0))
+    if not clickable(url):
+        return None, False
+    return (url, LINK, index, index + len(url)), False
+
+
+def _scan(text: str, *, block: bool = True):
     """`(spans, first unclosed mark)` for one line, in ONE walk.
 
     The two answers come from the same pass because they are the same
@@ -375,7 +646,15 @@ def _scan(text: str):
     renders as itself, but mid-stream it is the first half of a `**` that
     has not finished arriving -- and the hard-cut branch of `width_split` is
     able to sever exactly there, on a row with no spaces in it.
+
+    An INDENTED line is one unmarked span and nothing else (batch 58) --
+    `verbatim`'s rule, applied HERE so that every caller inherits it:
+    `inline_spans` draws it as written, `display_len` measures the
+    characters it will really draw, and `width_split` cuts on them.
     """
+    if block and verbatim(text):
+        return ([(text, "", 0, len(text))] if text else []), None
+
     out, buffer, start, index = [], [], 0, 0
     open_at = None
     length = len(text)
@@ -387,38 +666,39 @@ def _scan(text: str):
 
     while index < length:
         char = text[index]
-        if char == "`":
-            close = text.find("`", index + 1)
-            if close > index + 1:
-                flush(index)
-                out.append((text[index + 1:close], CODE, index, close + 1))
-                index = close + 1
-                continue
-            if close == -1 and open_at is None:
-                open_at = index
+        span = None
+        opened = False
+        if char == "h":
+            span, opened = _url(text, index)
+        elif char == "`":
+            span, opened = _paired(text, index, "`", CODE)
+        elif text.startswith("~~", index):
+            span, opened = _paired(text, index, "~~", STRIKE)
         elif text.startswith("**", index):
-            close = text.find("**", index + 2)
-            if close > index + 2:
-                flush(index)
-                out.append((text[index + 2:close], STRONG, index, close + 2))
-                index = close + 2
-                continue
-            if close == -1 and open_at is None:
-                open_at = index
+            span, opened = _paired(text, index, "**", STRONG)
+        elif char == "*":
+            span, opened = _em(text, index)
+        if span is not None:
+            flush(index)
+            out.append(span)
+            index = span[3]
+            continue
+        if opened and open_at is None:
+            open_at = index
         if not buffer:
             start = index
         buffer.append(char)
         index += 1
 
-    # A trailing RUN of `*` or `` ` `` that survived as literal text is the
-    # first half of a mark that has not finished arriving -- `**`, or the
-    # ``` of a fence. Neither is a mark in this grammar and both render as
+    # A trailing RUN of `*`, `~` or `` ` `` that survived as literal text is
+    # the first half of a mark that has not finished arriving -- `**`, or
+    # the ``` of a fence. None is a mark in this grammar and all render as
     # themselves, but the hard-cut branch of `width_split` can sever exactly
     # there, on a row with no spaces in it, and a fence severed at its second
     # backtick opens a block the replay never sees.
     if buffer:
         tail = "".join(buffer)
-        run = len(tail) - len(tail.rstrip("`*"))
+        run = len(tail) - len(tail.rstrip("`*~"))
         if run and (open_at is None or length - run < open_at):
             open_at = length - run
     flush(length)
@@ -442,7 +722,31 @@ def display_len(text: str) -> int:
     return total
 
 
-def width_split(line: str, width: int):
+def _cut_points(spans):
+    """`(source index, cells drawn before it)` for every position a row may
+    break at, in increasing order.
+
+    A mark offers its two ends and nothing between them: a cut INSIDE one
+    would leave the delimiters unbalanced on both sides of the break.
+    Unmarked text offers every position inside it. One reading, shared by
+    the streaming cut and the wrap, so the two cannot disagree about where
+    a row ends.
+    """
+    points, cells = [], 0
+    for text, role, source, end in spans:
+        if role:
+            points.append((source, cells))
+            cells += cell_len(text)
+            points.append((end, cells))
+            continue
+        for offset, char in enumerate(text):
+            points.append((source + offset, cells))
+            cells += cell_len(char)
+        points.append((end, cells))
+    return points
+
+
+def width_split(line: str, width: int, *, block: bool = True):
     """`(commit now, keep buffered)` for one unterminated line.
 
     `Transcript._split_committable`'s width rule, measured in RENDERED cells
@@ -459,27 +763,18 @@ def width_split(line: str, width: int):
     `**...**` longer than a row with no spaces in it -- commits nothing and
     waits for the newline, which is the cap's answer applied to the one
     shape the cap itself cannot see.
+
+    `block` is `inline_spans`' -- False when the text is the tail of a line
+    already partly drawn, where the indent rule must not fire because those
+    leading spaces are not an indent.
     """
-    spans = _spans(line)
+    spans = _spans(line, block=block)
     if not spans:
         return "", line
     if sum(cell_len(text) for text, _r, _s, _e in spans) <= width:
         return "", line
 
-    # (source index, cells before it), in increasing order. A mark offers
-    # its two ends; unmarked text offers every position inside it.
-    points, cells = [], 0
-    for text, role, source, end in spans:
-        if role:
-            points.append((source, cells))
-            cells += cell_len(text)
-            points.append((end, cells))
-            continue
-        for offset, char in enumerate(text):
-            points.append((source + offset, cells))
-            cells += cell_len(char)
-        points.append((end, cells))
-
+    points = _cut_points(spans)
     space = None
     for index, before in points:
         if before > width:
@@ -499,43 +794,84 @@ def width_split(line: str, width: int):
     return line[:hard], line[hard:]
 
 
+def wrap_display(line: str, width: int, *, block: bool = False):
+    """The rows `line` occupies when drawn at `width` cells.
+
+    `width_split`'s rule applied until the text runs out, but in ONE pass
+    over ONE points list rather than by calling it in a loop -- which
+    would rescan from the start of the remainder each time and go
+    quadratic on a long line, once per render and again on every `/theme`.
+
+    `block` defaults to False because the only caller wraps a list item's
+    BODY, which is a fragment of its line: the marker has already been
+    taken off the front, so nothing about where the line started applies
+    to it any more.
+
+    A span wider than the row survives whole -- a URL, mostly -- and Rich
+    soft-wraps it afterwards. That is the same answer `width_split` gives
+    the same shape, and it is identical on both paths because both reach
+    it through here.
+    """
+    if width <= 0 or not line:
+        return [line]
+    points = _cut_points(_spans(line, block=block))
+    if not points:
+        return [line]
+
+    rows, start, base, space = [], 0, 0, None
+    for index, cells in points:
+        if cells - base > width:
+            cut = space if space is not None else None
+            if cut is None and index > start:
+                cut = (index, cells)
+            if cut is not None:
+                rows.append(line[start:cut[0]])
+                start, base, space = cut[0], cut[1], None
+        if index < len(line) and line[index] == " ":
+            space = (index + 1, cells + 1)
+    rows.append(line[start:])
+    return rows
+
+
 # ---------------------------------------------------------------------------
 # ---- The commit cap -------------------------------------------------------
 # ---------------------------------------------------------------------------
 
-def safe_commit_limit(committed: str, pending: str) -> int:
-    """How much of `pending` may be drawn now, as an index into it.
+def _opens_line_construct(line: str) -> bool:
+    """Does this line start a heading or a list item, LENGTH ASIDE?
 
-    §38 held a streamed chunk while a ``` fence was open, for a reason that
-    was never only about fences: RichLog appends and cannot rewrite a drawn
-    row, so a construct committed in halves renders as its own source and
-    can never be put right. This is that rule as a CAP over four constructs
-    rather than a single rejection.
-
-    | construct            | held from         | released by                  |
-    |----------------------|-------------------|------------------------------|
-    | open ``` fence       | the opening fence | the closing fence            |
-    | table                | the header row    | a non-row line, or the flush |
-    | heading              | the `#`           | that line's newline          |
-    | unclosed `**` / `` ` ``| the mark          | its closer, or the newline   |
-
-    A CAP rather than a rejection is strictly better than what it replaces:
-    a paragraph sitting in the same buffer as a fence used to wait for the
-    fence to close, and now streams. It is also backward compatible with
-    §38's two pins, where the fence starts at index 0 and the cap is
-    therefore 0.
-
-    A TABLE HAS NO TERMINATOR, so one is held until the model writes a line
-    that is not a row, or until the turn ends -- the same trade the fence
-    hold already makes, and the reason `flush_stream` renders what it has.
-
-    Only the LAST line can be capped for a heading or an unclosed mark: on a
-    line that has ended, an unmatched `**` is literal text and renders that
-    way on both paths, so holding it would be waiting for something that
-    already happened.
+    The cap's half of `heading` and `list_item`, sharing their patterns
+    but not their HOLD_LIMIT guard -- because the limit is the thing this
+    function's caller ENFORCES. The renderer asks "is this one", and past
+    the limit the answer is no; the cap asks "should I still be waiting",
+    and it has to hold first in order to give up afterwards.
     """
-    open_at = 0 if committed.count(FENCE) % 2 == 1 else None
-    fence_open = open_at is not None
+    return not verbatim(line) and bool(_HEADING.match(line)
+                                       or _LIST.match(line))
+
+
+def commit_span(committed: str, pending: str):
+    """`(limit, forced)` -- how much may be drawn, and whether the cap gave up.
+
+    `safe_commit_limit` below is this function's first value and carries
+    the documentation for the cap itself. `forced` is true when a
+    LINE-SCOPED hold was abandoned because it passed HOLD_LIMIT, and it
+    means one thing to the caller: draw this chunk as though it were the
+    middle of a line, because that is what it is. The line it opened is
+    no longer a heading or a list item on either path -- `heading` and
+    `list_item` refuse it at the same limit -- so the released rows and
+    the replayed ones are the same rows.
+
+    A FENCE and a TABLE are never forced. Both must be drawn whole to be
+    drawn correctly: half a fence inverts the fence parity of everything
+    after it, and half a table is two stacked grids. Their holds end at
+    the closing fence, at the first line that is not a row, or at
+    `flush_stream` when the turn does. That is a narrower guarantee than
+    the line-scoped constructs get, and it is the honest one.
+    """
+    block_at = 0 if committed.count(FENCE) % 2 == 1 else None
+    fence_open = block_at is not None
+    line_at = None
     lines = pending.splitlines(keepends=True)
     in_table = False
     offset = 0
@@ -556,42 +892,96 @@ def safe_commit_limit(committed: str, pending: str) -> int:
                 # opener as plain text. The fence is closed for the scan's
                 # purposes; the CAP stays where the opener put it.
                 if complete:
-                    open_at = None
+                    block_at = None
             continue
 
         # A table ends at the first line that is not a row, and a fence
         # opener is one -- so this is settled BEFORE the fence branch. The
         # other order clears the table's hold by never reaching it, and
-        # then the fence's own `open_at` reports a later offset than the
-        # table it silently swallowed.
+        # then the fence's own hold reports a later offset than the table
+        # it silently swallowed.
         if in_table:
             if _is_row(line):
                 continue
-            in_table, open_at = False, None
+            in_table, block_at = False, None
 
         if FENCE in line:
-            fence_open, open_at = True, _hold(open_at, start)
+            fence_open, block_at = True, _hold(block_at, start)
             continue
 
         if _is_row(line):
             verdict = _table_verdict(lines, index, line)
             if verdict is None:            # cannot tell yet
-                open_at = _hold(open_at, start)
+                block_at = _hold(block_at, start)
                 continue
             if verdict:
-                in_table, open_at = True, _hold(open_at, start)
+                in_table, block_at = True, _hold(block_at, start)
                 continue
             # settled as prose: fall through and treat it as a normal line
 
         if not complete:
-            if _HEADING.match(line):
-                open_at = _hold(open_at, start)
+            if verbatim(line):
+                continue
+            if _opens_line_construct(line):
+                line_at = _hold(line_at, start)
                 continue
             mark = _first_open_mark(line)
             if mark is not None:
-                open_at = _hold(open_at, start + mark)
+                line_at = _hold(line_at, start + mark)
 
-    return len(pending) if open_at is None else open_at
+    # A block hold always sits at or before a line hold -- the branches
+    # that set one `continue` past the branch that sets the other -- so
+    # it wins outright rather than by comparison.
+    if block_at is not None:
+        return block_at, False
+    if line_at is None:
+        return len(pending), False
+    if len(pending) - line_at > HOLD_LIMIT:
+        return len(pending), True
+    return line_at, False
+
+
+def safe_commit_limit(committed: str, pending: str) -> int:
+    """How much of `pending` may be drawn now, as an index into it.
+
+    §38 held a streamed chunk while a ``` fence was open, for a reason that
+    was never only about fences: RichLog appends and cannot rewrite a drawn
+    row, so a construct committed in halves renders as its own source and
+    can never be put right. This is that rule as a CAP over four constructs
+    rather than a single rejection.
+
+    | construct            | held from         | released by                  |
+    |----------------------|-------------------|------------------------------|
+    | open ``` fence       | the opening fence | the closing fence            |
+    | table                | the header row    | a non-row line, or the flush |
+    | heading              | the `#`           | that line's newline          |
+    | list item            | the marker        | that line's newline          |
+    | unclosed `**` / `` ` ``| the mark          | its closer, or the newline   |
+
+    A LIST ITEM joined that table in batch 58, for the reason the others
+    are in it: its wrapped rows are padded to the marker's own text
+    column, and a fragment committed without the marker can never be
+    indented afterwards.
+
+    The bottom three are ALSO bounded by HOLD_LIMIT. See `commit_span`,
+    which is this function plus the flag saying the bound was reached.
+
+    A CAP rather than a rejection is strictly better than what it replaces:
+    a paragraph sitting in the same buffer as a fence used to wait for the
+    fence to close, and now streams. It is also backward compatible with
+    §38's two pins, where the fence starts at index 0 and the cap is
+    therefore 0.
+
+    A TABLE HAS NO TERMINATOR, so one is held until the model writes a line
+    that is not a row, or until the turn ends -- the same trade the fence
+    hold already makes, and the reason `flush_stream` renders what it has.
+
+    Only the LAST line can be capped for a heading or an unclosed mark: on a
+    line that has ended, an unmatched `**` is literal text and renders that
+    way on both paths, so holding it would be waiting for something that
+    already happened.
+    """
+    return commit_span(committed, pending)[0]
 
 
 def _hold(open_at, start):

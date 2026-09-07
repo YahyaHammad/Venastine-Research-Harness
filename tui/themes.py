@@ -329,6 +329,22 @@ def role_styles(theme: Theme) -> dict[str, str]:
         "md_heading": f"bold {theme.foreground}",
         "md_strong": "bold",
         "md_code": theme.secondary,
+        # Batch 58's three additions, and the shape of the first two is
+        # `md_strong`'s: an inline mark says something about the WORDS it
+        # covers, so it takes the attribute and no hue -- a colour would
+        # make it a different kind of line rather than a stressed one.
+        "md_em": "italic",
+        "md_strike": "strike",
+        # A link takes UNDERLINE and no hue either, and here the reason is
+        # the palette rather than the principle: `accent` is already the
+        # assistant's own label and every tool call, and `secondary` is
+        # reasoning and inline code. Underline is the one link convention
+        # every terminal shares, and it costs no slot to say it.
+        "md_link": "underline",
+        # A list marker recedes for `diff_context`'s reason -- it is there
+        # to place the text, not to be read -- so the eye lands on the
+        # first word rather than on the hyphen the model happened to type.
+        "md_bullet": theme.secondary,
         # The table's own furniture. The border recedes for
         # `diff_context`'s reason -- it is there to place the cells, not to
         # be read -- and the header row is the heading rule applied inside

@@ -5,8 +5,11 @@ ROADMAP_v2 §16 widgets. Presentation only -- nothing here imports core/
 or reaches into harness state; tui/app.py feeds them.
 """
 
+import webbrowser
+
 from rich import box
 from rich.console import Console
+from rich.style import Style
 from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
@@ -1455,10 +1458,19 @@ class Transcript(RichLog):
             return
         self.write(Text(text.ljust(total), style), width=total)
 
-    def _render_blocks(self, text: str) -> None:
+    def _render_blocks(self, text: str, *, line_start: bool = True) -> None:
         """The assistant body: fenced code highlighted, everything else
         plain. Shared by a replayed entry and a committed stream chunk, so
         the two cannot render the same text differently.
+
+        `line_start=False` says this chunk begins in the MIDDLE of a line,
+        so nothing that depends on where a line starts may fire on its
+        first line. Two callers want it and both were bugs without it: a
+        streamed fragment whose wrap boundary fell just before a `# `
+        token rendered as a heading and swallowed the hash, which a
+        `/theme` replay then put back; and a chunk the cap released
+        because HOLD_LIMIT expired, which is a line the cap gave up on
+        rather than a construct.
 
         The newline trimming around a fence is what makes that sharing
         exact rather than approximate. A `Syntax` renderable occupies its own
@@ -1493,31 +1505,83 @@ class Transcript(RichLog):
             if index + 1 < len(blocks) and isinstance(blocks[index + 1], tuple) \
                     and body.endswith("\n"):
                 body = body[:-1]
-            self.write(self._inline_text(body))
+            # Only the FIRST block can begin mid-line; everything after a
+            # renderable block starts where that block ended.
+            self.write(self._inline_text(
+                body, line_start=line_start and index == 0))
 
-    def _inline_text(self, body: str) -> Text:
+    def _inline_text(self, body: str, *, line_start: bool = True) -> Text:
         """A plain stretch of an answer, with its inline marks painted.
 
         The marks are the RENDERER's, exactly as the thinking bar and the
         diff's gutter are: `_entries` keeps the markdown the model wrote,
-        so `/copy` hands back `**bold**` and a replay under a new theme
-        re-derives the weight rather than replaying something decorated
-        once.
+        so `/copy` hands back `**bold**`, `- ` and the brackets of a link,
+        and a replay under a new theme re-derives the weight rather than
+        replaying something decorated once.
 
-        Line by line, because a heading is a property of its line and
-        `inline_spans` is where that is decided. The newlines are put back
-        here so the block still reaches Rich as one `Text` and wraps as one
-        flow -- which is what `markdown.width_split` is measuring against.
+        Line by line, because a heading, a list item and the indent rule
+        are all properties of a LINE and `tui/markdown.py` is where that
+        is decided. The newlines are put back here so the block still
+        reaches Rich as one `Text` and wraps as one flow -- which is what
+        `markdown.width_split` is measuring against.
+
+        A LIST ITEM is the one line this widget wraps itself (batch 58).
+        Rich has no hanging indent -- `Text` has none and `Padding`
+        indents the first row too -- so the item's body is pre-wrapped
+        through `markdown.wrap_display` at the width left after its
+        marker, and every row after the first is padded to the column the
+        marker's own text starts at. It is the same reason `_render_diff`
+        and the thinking bar pre-wrap, and it is why the cap holds an item
+        until its newline: a fragment committed without its marker could
+        never be indented afterwards.
+
+        With no measurable width -- unmounted, or built bare in the suite
+        -- nothing is pre-wrapped and the item draws flat, which is
+        `_write_padded`'s guard rule applied to the same geometry.
         """
         styles = self._styles()
         base = styles.get("assistant", "")
         out = Text(style=base)
+        width = self._wrap_width()
         for index, line in enumerate(body.split("\n")):
             if index:
                 out.append("\n")
-            for span, role in markdown.inline_spans(line):
-                out.append(span, styles.get(role) if role else None)
+            block = line_start or index > 0
+            item = markdown.list_item(line) if block else None
+            if item is None:
+                self._append_spans(out, line, styles, block=block)
+                continue
+            prefix, content, indent = item
+            out.append(prefix, styles.get(markdown.BULLET) or None)
+            rows = markdown.wrap_display(content, width - indent) \
+                if width > indent else [content]
+            for row_index, row in enumerate(rows):
+                if row_index:
+                    out.append("\n" + " " * indent)
+                self._append_spans(out, row, styles, block=False)
         return out
+
+    def _append_spans(self, out: Text, line: str, styles: dict, *,
+                      block: bool) -> None:
+        """One line's spans, appended to `out` in their palette roles.
+
+        A LINK span is the one that carries more than a style. Its text is
+        the URL -- the grammar guarantees that, which is the whole security
+        rule: there is no label to hide a target behind, so the only thing
+        a click can open is the thing the reader is looking at. The URL
+        rides along as style METADATA, which `on_click` reads back.
+
+        Metadata rather than textual's `@click` action string, and the
+        difference is not stylistic: an action string is PARSED, so
+        building one out of model output would be an injection grammar fed
+        by the model. A plain key is data all the way through.
+        """
+        for span, role in markdown.inline_spans(line, block=block):
+            if role == markdown.LINK:
+                out.append(span, Style.parse(styles.get(role) or "")
+                           + Style(meta={"url": span}))
+                continue
+            out.append(span, styles.get(role) if role else None)
 
     def _render_table(self, block) -> None:
         """One markdown table (batch 53).
@@ -1547,6 +1611,11 @@ class Transcript(RichLog):
         rather than about scanning for brackets: the shapes that fail are
         not the ones a reader expects to be dangerous.
 
+        Cells are rendered with `line_start=False` (batch 58). A cell is a
+        fragment rather than a line, so a cell reading `- 3` is a minus
+        three and not a bullet, and one indented four spaces is a padded
+        column rather than a code sample.
+
         Written with an explicit `width=` when the widget can be measured,
         following the diff's discipline: it is the same number the text
         pre-wrap uses, so a table and the paragraph above it break at one
@@ -1557,14 +1626,71 @@ class Transcript(RichLog):
                       border_style=styles.get("table_border") or None,
                       header_style=styles.get("table_header") or None)
         for header, align in zip(block.headers, block.aligns):
-            table.add_column(self._inline_text(header), justify=align)
+            table.add_column(
+                self._inline_text(header, line_start=False), justify=align)
         for row in block.rows:
-            table.add_row(*(self._inline_text(cell) for cell in row))
+            table.add_row(*(self._inline_text(cell, line_start=False)
+                             for cell in row))
         width = self._wrap_width()
         if width:
             self.write(table, width=width)
         else:
             self.write(table)
+
+    # -- links (batch 58) ---------------------------------------------------
+
+    def on_click(self, event) -> None:
+        """CTRL+click a URL to open it.
+
+        Ctrl rather than a bare click, which is the terminal's own
+        convention for a link and also the reason a click while reading
+        cannot launch a browser by accident.
+
+        The target is read back out of the style METADATA the span was
+        drawn with, so what opens is what was underlined, which is what
+        the reader saw. `markdown.clickable` is re-asked here rather than
+        trusted from render time: the styles in a `RichLog` outlive the
+        text that produced them, and a check at the point of ACTION is
+        the one that governs.
+
+        Textual dispatches this by position, so a click one column off the
+        URL carries no metadata and does nothing.
+        """
+        if not getattr(event, "ctrl", False):
+            return
+        style = getattr(event, "style", None)
+        url = (getattr(style, "meta", None) or {}).get("url")
+        if url:
+            self.open_url(url)
+
+    def open_url(self, url) -> None:
+        """Hand `url` to the platform's browser, off the UI thread.
+
+        A thread worker for the reason every other outward call in this
+        app uses one: `webbrowser.open` can block while a cold browser
+        starts, and the UI thread is drawing a live stream.
+
+        SILENT on success -- the browser appearing is the confirmation,
+        and a transcript line would call `flush_stream()` and close a
+        live answer span in the middle of a turn. A failure is a toast,
+        which is the vocabulary `tui/app.py` already uses for a turn that
+        did not survive.
+        """
+        if not markdown.clickable(url):
+            return
+
+        def work() -> None:
+            try:
+                opened = webbrowser.open(url)
+            except Exception:  # noqa: BLE001 -- reported, never fatal
+                opened = False
+            if not opened:
+                self.app.call_from_thread(
+                    self.app.notify,
+                    f"Could not open {url}", severity="warning")
+
+        self.run_worker(work, thread=True, exit_on_error=False,
+                        name="open-url")
 
     def write_user(self, text: str) -> None:
         self.flush_stream()
@@ -1626,7 +1752,8 @@ class Transcript(RichLog):
 
     @staticmethod
     def _split_committable(pending: str, width: int,
-                           *, marks: bool = False) -> tuple[str, str]:
+                           *, marks: bool = False,
+                           block: bool = True) -> tuple[str, str]:
         """Split `pending` into (commit now, keep buffered).
 
         The two rules from the class docstring. The over-long-token branch
@@ -1644,6 +1771,12 @@ class Transcript(RichLog):
         answer for `thinking_delta`: reasoning is rendered as prose, marks
         and all, so measuring it as anything else would be describing a
         rendering that does not happen.
+
+        `block` is `markdown.inline_spans`' and travels with `marks`: when
+        the pending text is the tail of a line already partly drawn, its
+        leading spaces are not an indent, so the indent rule must not
+        decide the measurement here when it will not decide the drawing
+        there.
         """
         cut = pending.rfind("\n")
         if cut != -1:
@@ -1651,7 +1784,7 @@ class Transcript(RichLog):
         if not width:
             return "", pending
         if marks:
-            return markdown.width_split(pending, width)
+            return markdown.width_split(pending, width, block=block)
         if len(pending) > width:
             space = pending.rfind(" ", 0, width + 1)
             if space > 0:
@@ -1682,18 +1815,31 @@ class Transcript(RichLog):
         to close, and now streams. Where the construct starts the buffer,
         the cap is 0 and nothing commits -- which is what keeps §38's two
         fence pins saying what they always said.
+
+        Batch 58 adds the fifth construct (a list item) and the ceiling.
+        `commit_span`'s second value says the cap gave up on a line-scoped
+        hold because HOLD_LIMIT expired, and it reaches the renderer as
+        `line_start=False`: the line is no longer a heading or a list item
+        on EITHER path, so the rows it is drawn in are the rows the replay
+        will draw. Without that a model could hold the screen indefinitely
+        by never sending a newline.
         """
         width = self._wrap_width()
         while True:
-            limit = markdown.safe_commit_limit(self._stream_text, self._pending)
+            limit, forced = markdown.commit_span(
+                self._stream_text, self._pending)
+            mid_line = bool(self._stream_text) \
+                and not self._stream_text.endswith("\n")
             chunk, rest = self._split_committable(
-                self._pending[:limit], width, marks=True)
+                self._pending[:limit], width, marks=True,
+                block=not mid_line)
             if not chunk:
                 return
             self._pending = rest + self._pending[limit:]
-            self._write_stream_chunk(chunk)
+            self._write_stream_chunk(chunk, line_start=not (mid_line or forced))
 
-    def _write_stream_chunk(self, chunk: str) -> None:
+    def _write_stream_chunk(self, chunk: str, *,
+                            line_start: bool = True) -> None:
         if not self._stream_open:
             self.end_thinking()
             self._open_label()
@@ -1708,7 +1854,7 @@ class Transcript(RichLog):
         # still has to draw one.
         body = chunk[:-1] if chunk.endswith("\n") else chunk
         if body:
-            self._render_blocks(body)
+            self._render_blocks(body, line_start=line_start)
         else:
             self.write(Text("", self._style("assistant")))
 
@@ -1744,9 +1890,14 @@ class Transcript(RichLog):
             self._emit("assistant", residual)
             return residual
         if residual:
+            # Read BEFORE the append, for _commit_ready's reason: the
+            # flush draws the tail of a line the stream may already have
+            # drawn part of, and that tail is not the start of one.
+            line_start = not self._stream_text \
+                or self._stream_text.endswith("\n")
             self._stream_text += residual
             self._entries[-1] = ("assistant", self._stream_text)
-            self._render_blocks(residual)
+            self._render_blocks(residual, line_start=line_start)
         text = self._stream_text
         self._stream_open = False
         self._stream_text = ""

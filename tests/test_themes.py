@@ -56,6 +56,13 @@ EXPECTED_ROLE_KEYS = {
     # it is deliberate -- `**` means emphasis within body text, so a hue
     # would make it a different kind of line rather than a stressed word.
     "md_heading", "md_strong", "md_code",
+    # Batch 58. Same argument, one step further: `md_em` and `md_strike`
+    # are attributes with no colour for `md_strong`'s reason, `md_link`
+    # takes underline because the two hue slots are spoken for (`accent`
+    # is the assistant label and every tool line, `secondary` is
+    # reasoning and inline code), and `md_bullet` recedes because a
+    # marker places the text rather than being read.
+    "md_em", "md_strike", "md_link", "md_bullet",
     "table_border", "table_header",
 }
 
