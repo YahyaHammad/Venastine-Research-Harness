@@ -9980,3 +9980,163 @@ Five mutations, five kills, one survivor found and fixed:
 | app handles `Input.Submitted` again | the review-note test red, reproducing the original bug in the traceback |
 
 Count 3595 -> 3605.
+
+
+## Batch 55 — twenty-six commands nobody could see (2026-09-07)
+
+### The reported symptom
+
+There is no way to discover a slash command from the prompt. `on_mount` writes "Type /help for
+commands." once, it scrolls away with the first turn, and after that the only route to the list
+is remembering that `/help` exists. Twenty-six commands, four modules registering into the
+registry, and a shell that told you about them once.
+
+Asked for: while a slash command is being typed, a panel above the prompt listing the matching
+commands as `/name ● description  [flags]`, at most two lines each, at most five, updating on
+every keystroke and deletion, arrow keys to move a highlight, Enter to complete WITHOUT sending.
+Reading the same registry `/help` reads, so the two cannot drift.
+
+### What it is, and what it is not
+
+Not a fourth screen. The thread picker is a `ModalScreen`, which is what made "a fourth panel"
+the natural way to describe this, but the suggestions belong in `#main` beside the transcript —
+`ThinkingIndicator`'s shape, `height: auto` and `display = False` until there is something to
+say. `#prompt` is `dock: bottom`, so the last widget in the flow lands directly above it and the
+panel "opens upwards" with no layer, no offset and no focus to juggle. #104's
+query-searches-the-active-screen trap does not arise, because there is no second screen.
+
+The matching lives in `tui/commands.py` next to the registry, the fitting lives in the widget,
+and app.py introduces the two. That split is not tidiness: **how many entries fit is a function
+of the rendered width**, and only the thing that draws knows it. Split the selection from the
+budget and the prompt can highlight a sixth entry the panel had no room for — an invisible
+selection that Enter would then complete.
+
+### What measuring changed
+
+**`prompt.value = "…"` posts `TextArea.Changed` exactly as a keystroke does.** This is the
+finding the batch turns on. With Enter always completing (the owner decision below), a panel
+driven straight off `Changed` would open in the ~73 `query_one("#prompt").value = "/…"` sites
+across four test files and turn each one's single `press("enter")` into a completion instead of
+a dispatch. Every bare assignment in the suite — `/help`, `/copy`, `/theme`, `/model`,
+`/claims`, `/grill-me` — is an exact command name, so all of them would have gone from "run
+this" to "type it again".
+
+The line to draw is not a test accommodation: **assignment is the API, typing is the user**, and
+textual draws the same line itself — `_replace_via_keyboard`'s docstring says "a replacement
+performed using a keyboard (as opposed to the API)". That method was the obvious seam and is the
+wrong one: measured, backspace and `ctrl+w` do not go through it, and a panel that ignored
+deletions fails the requirement outright. `load_text` is the seam instead — the single public
+funnel behind both `.text =` and `.value =` — and it is public rather than private, which the
+other candidate was not.
+
+**Opening the panel scrolls the transcript away from its newest line.** Measured: the transcript
+sat at `scroll_y=41, max_scroll_y=41`, pinned to the bottom; showing a twelve-row panel left it
+at `scroll_y=41, max_scroll_y=53`. Textual does not re-pin a scroll on shrink, so the last twelve
+lines of the conversation left the screen the moment a slash was typed and came back only when
+the panel closed. Whether the reader WAS at the bottom is knowable only before the relayout,
+which is why app.py captures it there and restores it after — and why someone who had
+deliberately scrolled up is left where they were.
+
+**A `Static` re-wraps rows you already wrapped.** The first draft wrapped each entry to
+`width - 2` and then drew continuation lines under a four-space gutter, so a two-line entry
+rendered as THREE rows: the height arithmetic was wrong by one per entry, and the truncation
+ellipsis landed on a row that had then been dropped. Both gutters have to fit inside the wrap
+width, and the outer `Text` carries `no_wrap` / `overflow="crop"` so a miscalculation clips
+where it can be seen rather than reflowing where it cannot. The pin is a test that no rendered
+row is wider than the panel — asserted in CELLS, not characters.
+
+**And that pin, written through the pilot, was blind to the defect it was written for.** The
+mutation pass is what said so: wrapping at `width - 2` SURVIVED a test that drives the real
+app, types `/`, and measures every drawn row. At 80 columns only `/research` has a
+continuation line long enough to overflow, and a bare slash shows four entries that do not
+include it — so the test was correct, ran the real thing, and could not observe the bug.
+The replacement is a sweep with no pilot at all: every registered command, four widths,
+instant. Same shape as batch 54's own false green and batch 49's too-small case table, with a
+new wrinkle worth naming — there the assertion could not distinguish the states, here the
+INPUTS never reached the state. Driving the real app is not the same as exercising it.
+
+**`Text.truncate()` on a wrapped line does nothing.** Same family, found in the same render: the
+overflow is in the lines that were DROPPED, not in the line that was kept, so the kept line is
+shorter than the width and truncate is a no-op. A line that reads as complete when it is not is
+worse than one that is visibly short, so the ellipsis is appended deliberately.
+
+**`up`/`down` are ordinary bindings on `TextArea`, not `_on_key` interceptions.** Unlike
+`enter` — batch 54's `priority=True` — they can be claimed by overriding the ACTIONS, which is
+better than re-binding the keys: `super()` is still there to hand them back the moment the panel
+is closed. That matters because batch 54 made this box multi-line, and a prompt four rows tall
+that cannot move its own cursor would be a regression no test about suggestions would notice.
+`select=True` (shift+up) is excluded — that is a text selection and stays one.
+
+**`tab` and `escape` can be spent conditionally.** A `tab` binding on the prompt beats textual's
+focus-move, and `check_action` returning `None` — not `False` — declines the key and lets the
+press carry on to the focus system. False would DISABLE it. Both keys behave exactly as they did
+before this batch whenever the panel is closed.
+
+### The bug this batch found in its own predicate
+
+`matching()` first read the line as `text.strip()` and rejected internal whitespace, which is
+the same reading `on_prompt_input_submitted` gives it. It is the wrong reading here, and the
+smoke test caught it: a TRAILING space survives nothing — `strip()` removes it — so `"/copy "`
+read as `"/copy"` and the panel stayed open over a line that had already moved on to its
+arguments. Enter at that point would have completed `/copy` on top of itself rather than
+sending. `lstrip()` and then "no whitespace at all", because once a space is typed there is
+nothing left to complete, whichever end of the token it is on. The leading half stays tolerant,
+since `dispatch` tolerates it and `"  /help"` genuinely runs.
+
+### Owner decisions
+
+- **Enter always completes** while the panel is open, so a fully typed `/help` takes two
+  presses. The alternative — submit when the typed token already equals the highlighted name —
+  is more convenient and was rejected: it is a coin flip from the user's side and stops being
+  well defined the day two commands share a prefix.
+- **The cap is on ROWS, not entries.** At most 5 entries and at most 8 rows, whichever binds
+  first, stopping at the first entry that would overflow rather than skipping it — a list that
+  skipped would no longer be alphabetical and the order would read as arbitrary. At 80 columns
+  most entries wrap to two rows, so the row cap is usually the one that bites: a bare `/` offers
+  twenty-six and shows four.
+- **The border title carries the count**, `4 of 26 · /help for all`, which costs no rows.
+  Shown-of-MATCHED rather than shown-of-all: "4 of 26" under a typed `/c` would claim
+  twenty-two candidates that do not exist. Both numbers are counted, never written down.
+- **Tab completes** while the panel is open and moves focus when it is not.
+- **Escape hides it and latches**, until the line stops being a bare slash token. A dismissal
+  that the next keystroke undoes is not a dismissal.
+- **Completion inserts a trailing space**, which is doing two jobs: `matching()` is empty once
+  the line has whitespace in it, so the panel closes on its own, and deleting that one character
+  is what brings it back.
+- **`/name ● summary  usage`**, in that order. The reverse pushes the DESCRIPTION off the entry
+  for `/research` and `/copy`, and the description is the half the panel exists for.
+
+### Deliberately not done
+
+Mouse selection — the panel stays keyboard-only. Argument completion (`/theme` offering theme
+names): the panel completes the command and gets out of the way. And `ctrl+c` is still shadowed
+by the focused input, as batch 54 recorded; still a separate defect, still not folded in.
+
+### Files
+
+- `tui/commands.py` — `CommandRegistry.matching()`, beside `all()` and `dispatch()`.
+- `tui/widgets.py` — new: `SlashSuggest` (the row budget, the selection, the two-line entry,
+  the counted title); `PromptInput` gains `suggest`, the `load_text` seam,
+  `on_text_area_changed`, `SuggestionsChanged`, `check_action`, and four actions.
+- `tui/app.py` — the composed panel, the one-time wiring in `on_mount`, and
+  `on_prompt_input_suggestions_changed` (which is where the transcript re-pin lives, because it
+  is the one place that can see both widgets).
+- `tui/app.tcss` — `#slash-suggest`.
+- `tests/test_tui.py` (+31).
+- `AGENTS.md`, `ARCHITECTURE.md`, `README.md`, `tests/BREAKING_CHANGES.md`.
+
+### Mutation
+
+Seven mutations, seven kills — but only after the second round:
+
+| mutation | result |
+|---|---|
+| the `load_text` override dropped | `test_assigning_the_value_does_not_open_it` red |
+| wrap at `width - 2` instead of `width - 4` | **survived** — see the pilot's blind spot above; red once the sweep replaced it |
+| the appended ellipsis omitted | 1 red |
+| budget by entry count instead of rows | 3 red |
+| the arrows always drive the panel | `test_the_arrows_still_move_the_cursor_with_no_panel` red |
+| the transcript re-pin skipped | 1 red |
+| `in` instead of `startswith` | 2 red — and the first draft of the prefix test did NOT catch it, because `/co` gives the identical pair either way |
+
+Count 3605 -> 3636.

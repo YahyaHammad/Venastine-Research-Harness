@@ -48,7 +48,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 3605 tests, offline, ~2-3 min by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 3636 tests, offline, ~2-3 min by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -420,6 +420,58 @@ that the box got taller and passed with wrapping switched off, which is the whol
 batch exists to remove. `max_scroll_x` is the assertion that tells them apart, and the row
 count is pinned EXACTLY and below the cap, so "wrapped" cannot be confused with "hit
 `max-height`".
+
+**Assignment is the API, typing is the user, and `load_text` is where they part** (batch 55).
+This is the seam the whole suggestion panel hangs off, and it is not obvious: setting
+`prompt.value` posts `TextArea.Changed` *exactly* as a keystroke does (measured). Since `enter`
+always completes while the panel is open, a panel driven straight off `Changed` would open in
+the ~73 `query_one("#prompt").value = "/..."` sites across four test files and turn each one's
+single `press("enter")` into a completion instead of a dispatch — every bare assignment in the
+suite is an exact command name. Textual draws the same line itself: `_replace_via_keyboard`'s
+docstring says "as opposed to the API". That method is the obvious seam and the WRONG one —
+measured, backspace does not go through it, and a panel that ignores deletions fails the
+feature outright. `PromptInput.load_text` is the right one: public, and the single funnel
+behind both `.text =` and `.value =`. Delete the override and `test_assigning_the_value_does_
+not_open_it` goes red first, before the four files that follow.
+
+**The suggestion panel owns the highlight because it owns the width** (batch 55). How many
+entries fit is a function of the rendered width — at 80 columns the main column is 54, most
+entries wrap to two rows, and a bare `/` therefore shows four of twenty-six under an eight-row
+budget. Split the selection from the budget and the prompt can highlight a sixth entry the
+panel had no room for: an invisible selection that `enter` would then complete. `SlashSuggest`
+exposes `chosen`, `move()` and `shown`, and that is the whole interface. The budget stops at
+the first entry that would overflow rather than skipping it, so the list stays contiguous and
+alphabetical, and the border title counts what was DRAWN against what MATCHED (`4 of 4` under
+`/c`, not `4 of 26`, which would claim candidates that do not exist).
+
+**`up`/`down` are ordinary bindings on `TextArea`; `enter` is not** (batch 55). `enter` needs
+batch 54's `priority=True` because `TextArea._on_key` intercepts it. The arrows do not: they
+are plain `BINDINGS`, so a subclass claims them by overriding `action_cursor_up` /
+`action_cursor_down` — which is strictly better than re-binding the keys, because `super()` is
+still there to hand them back the moment the panel is closed. Batch 54 made this box
+multi-line, so a prompt four rows tall that cannot move its own cursor is the regression this
+shape prevents. `select=True` (shift+up) is excluded: that is a text selection and stays one.
+`tab` and `escape` are gated by `check_action` returning **`None`, not `False`** — `False`
+disables the binding, `None` declines it and lets the press carry on to the focus system.
+
+**Two rendering traps, and both were found by drawing rather than by reasoning** (batch 55).
+A `Static` RE-WRAPS a row you already wrapped: entries wrapped to `width - 2` and then drawn
+under a four-space continuation gutter rendered as THREE rows, so the height was wrong by one
+per entry. Both gutters must fit inside the wrap width, and the outer `Text` carries
+`no_wrap` / `overflow="crop"` so a miscalculation clips visibly instead of reflowing
+invisibly. And `Text.truncate()` on a WRAPPED line does nothing — the overflow is in the lines
+that were dropped, not in the line that was kept — so the ellipsis is appended deliberately.
+The pin for the first is swept over every registered command WITHOUT a pilot, and that detail
+is the lesson: the pilot version of that test **survived the mutation it was written for**,
+because only `/research` overflows at 80 columns and a bare slash does not show it.
+
+**A trailing space is invisible to `strip()`, and that is why `matching()` lstrips** (batch
+55). The predicate first read the line the way `on_prompt_input_submitted` does — `strip()`,
+then reject internal whitespace — which is right for dispatch and wrong here: `"/copy "`
+stripped back to `"/copy"`, so the panel stayed open over a line that had already moved on to
+its arguments, and `enter` would have completed `/copy` on top of itself rather than sending.
+Once a space is typed there is nothing left to complete, whichever end of the token it is on.
+The leading half stays tolerant, because `dispatch` tolerates it and `"  /help"` genuinely runs.
 
 **Thinking has two forms and one closing path** (§38, O6/O8). `tui.show_thinking` (default
 `True`, defaulted in `tui/app.py` beside `animations` rather than in `config.py`) renders

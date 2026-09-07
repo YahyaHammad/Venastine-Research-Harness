@@ -3196,3 +3196,63 @@ keyboard protocol in its Linux drivers alone, so on the Windows driver `shift+en
 as a bare CR and reads as `enter`. `ctrl+j` is what the feature rests on and is what is
 pinned. Do not "fix the coverage gap" by adding the shift+enter case; add a by-hand check to
 the batch instead.
+
+
+## Batch 55 — the slash-command suggestion panel
+
+**`PromptInput.load_text` is a seam, and it is holding up ~73 test sites that never mention
+suggestions.** Setting `prompt.value` posts `TextArea.Changed` exactly as typing does. The
+panel is driven off that message, and `enter` COMPLETES while the panel is open — so if
+assignment were allowed to open it, every
+
+```python
+app.query_one("#prompt").value = "/help"
+await pilot.press("enter")
+```
+
+in `test_tui.py`, `test_themes.py`, `test_pipeline_models.py` and
+`test_research_legibility.py` would fill the box in again instead of dispatching. Every bare
+assignment in the suite is an exact command name, so all of them would fail, and none of them
+would fail in a way that named the cause.
+
+```python
+def load_text(self, text: str) -> None:
+    self._api_edit = True          # <- this line
+    super().load_text(text)
+```
+
+Delete those two lines and `test_assigning_the_value_does_not_open_it` goes red first — it
+exists to be the failure you read instead of the four files you would otherwise bisect.
+`_replace_via_keyboard` is the seam textual advertises for this ("as opposed to the API") and
+is the wrong one here: backspace does not go through it, so a panel hung off it would ignore
+deletions.
+
+| Change | Symptom if you break it | Fix |
+|---|---|---|
+| `load_text` marks the API edit | dozens of unrelated slash-command tests re-type instead of dispatching | restore the override |
+| `matching()` `lstrip`s and rejects any space | `/copy ` keeps the panel open; enter completes over itself and never sends | keep it `lstrip`, not `strip` |
+| the wrap width subtracts `SUGGEST_CONT` | a two-line entry draws three rows; heights drift by one per entry | both gutters go INSIDE the wrap width |
+| the ellipsis is appended after a crop | a cut entry reads as complete | `truncate()` alone cannot do it — see below |
+| the budget counts ROWS | five two-line entries at the 24-row floor leave the transcript five lines | keep `used + len(lines) > SUGGEST_MAX_ROWS` |
+| `check_action` returns `None` | tab stops moving focus when there is nothing to complete | `None` declines, `False` disables |
+| app.py re-pins the transcript | the newest twelve lines vanish the moment a slash is typed | capture `pinned` BEFORE the relayout |
+
+### The trap: a pilot test can be blind to the thing it was written for
+
+`test_no_rendered_row_is_wider_than_the_panel` drives the real app, types `/`, and checks
+every drawn row against the panel width. It **survived** the mutation that wraps at
+`width - 2` instead of `width - 4` — the exact defect it was written for. At 80 columns only
+`/research` has a continuation line long enough to overflow, and a bare slash shows four
+entries that do not include it.
+
+`test_no_command_renders_a_row_wider_than_the_panel` is what kills it: no pilot, every
+registered command, four widths. If you add a command whose flags are long, that sweep already
+covers it. Do not replace the sweep with the pilot case because "the pilot one is more
+realistic" — realism is what made it blind.
+
+### Standing: `Text.truncate()` cannot produce the ellipsis
+
+It looks like it can — `truncate(n, overflow="ellipsis")` is right there. It is a no-op on a
+wrapped line, because the overflow is in the lines that were DROPPED and the line that was
+kept is shorter than the width. Crop, then append. A test asserting `endswith("…")` is what
+holds it.
