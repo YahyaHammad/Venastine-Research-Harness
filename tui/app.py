@@ -889,14 +889,8 @@ class VenastineApp(App):
 
     # -- input ---------------------------------------------------------------
 
-    def on_prompt_input_suggestions_changed(
-            self, event: PromptInput.SuggestionsChanged) -> None:
-        """Re-render the slash panel, and keep the transcript where it was.
-
-        The panel comes off the event rather than out of a query: the
-        prompt was handed it at mount, and #104's rule would otherwise
-        make this raise the moment a modal is on top (a slash command that
-        pushes a screen clears `.value`, which posts one of these).
+    def _change_suggestions(self, panel, apply) -> None:
+        """Change the slash panel, and keep the transcript where it was.
 
         The re-pin is the part that is not obvious. Measured: a panel
         opening under the transcript takes rows from it and textual does
@@ -907,8 +901,12 @@ class VenastineApp(App):
         only BEFORE the relayout, which is why it is captured here and
         restored after, and why a reader who had deliberately scrolled up
         is left where they were.
+
+        Batch 56 is why this is a helper rather than a handler body: the
+        panel's window slides, so ARROW KEYS resize it too -- measured, a
+        seven-to-eight-row step unpins the transcript exactly as opening
+        it does, and that one would repeat on most keypresses.
         """
-        panel = event.prompt.suggest
         if panel is None:
             return
         try:
@@ -916,9 +914,27 @@ class VenastineApp(App):
             pinned = transcript.scroll_offset.y >= transcript.max_scroll_y
         except NoMatches:                      # a modal is on top (#104)
             transcript, pinned = None, False
-        panel.offer(event.matches)
+        apply()
         if pinned:
             self.call_after_refresh(transcript.scroll_end, animate=False)
+
+    def on_prompt_input_suggestions_changed(
+            self, event: PromptInput.SuggestionsChanged) -> None:
+        """The typed line changed, so the offered commands did.
+
+        The panel comes off the event rather than out of a query: the
+        prompt was handed it at mount, and #104's rule would otherwise
+        make this raise the moment a modal is on top (a slash command that
+        pushes a screen clears `.value`, which posts one of these).
+        """
+        panel = event.prompt.suggest
+        self._change_suggestions(panel, lambda: panel.offer(event.matches))
+
+    def on_prompt_input_suggestions_moved(
+            self, event: PromptInput.SuggestionsMoved) -> None:
+        """An arrow key, moving the highlight and possibly the window."""
+        panel = event.prompt.suggest
+        self._change_suggestions(panel, lambda: panel.move(event.delta))
 
     def on_prompt_input_submitted(self, event: PromptInput.Submitted) -> None:
         text = event.value.strip()

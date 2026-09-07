@@ -691,6 +691,24 @@ class SlashSuggest(Static):
     arbitrary. At 80 columns most entries wrap to two rows, so the row cap
     is usually the one that bites: `/` shows four.
 
+    **The window SLIDES** (batch 56). `_first` is where it starts and it is
+    derived, never stored beside the selection: `move()` picks a command
+    out of all the matches and `_budget()` scrolls the window the least
+    it can to keep that command on screen. Batch 55 wrapped at the last
+    DRAWN entry instead, which left twenty-two of twenty-six commands
+    unreachable by keyboard under a panel whose own title said twenty-six.
+
+    Because entries are one or two rows, a step down drops one entry from
+    the top and gains one at the bottom -- or drops one and gains two. That
+    is not a rule; it is the row budget refilling, and it is why the window
+    changes SIZE as well as contents while it scrolls (measured: four
+    entries over seven rows at the top of the list, four over eight one
+    step later, five over seven in the middle). Two things follow, and
+    neither is optional: `move()` refreshes with `layout=True`, and it is
+    reached through app.py rather than called directly -- a panel that
+    resizes takes rows from the transcript, and the scroll position that
+    has to survive that is only knowable before the relayout.
+
     **A Static RE-WRAPS what you already wrapped.** The first draft wrapped
     each entry to `width - 2` and then drew continuation lines under a
     four-space gutter, so a two-line entry rendered as THREE rows, the
@@ -720,7 +738,10 @@ class SlashSuggest(Static):
         # empty box is worse than the thing it advertises.
         self.display = False
         self._matches: list = []
+        # An index into _matches, NOT into the window: the window slides to
+        # follow it (batch 56), and _first is where the window starts.
         self._selected = 0
+        self._first = 0
         self._width = 0
         # Per entry, the rendered lines. Computed in get_content_height,
         # where the width arrives before the first paint.
@@ -736,28 +757,56 @@ class SlashSuggest(Static):
         """
         self._matches = list(matches)
         self._selected = 0
+        self._first = 0
         self._groups = []
         self.display = bool(self._matches)
         self.refresh(layout=True)
 
     def move(self, delta: int) -> None:
-        """Move the highlight, wrapping at both ends."""
+        """Move the highlight over ALL the matches, wrapping at the ends.
+
+        Over the matches, not over what is on screen (batch 56). Wrapping
+        at the last DRAWN entry left twenty-two of twenty-six commands
+        unreachable by keyboard under a bare slash, on a panel whose own
+        title said there were twenty-six.
+
+        This sets the selection and nothing else. Where the window has to
+        move so the selection is visible is `_budget`'s answer, because it
+        is a function of the WIDTH -- which is the same split the class
+        docstring already turns on.
+
+        `layout=True` is load-bearing rather than tidy. A sliding window
+        changes SIZE as well as contents (measured: four entries over seven
+        rows at the top of the list, four over eight one step later, five
+        over seven in the middle), and a plain `refresh()` leaves the
+        widget measured at its old height with the extra row silently
+        clipped.
+        """
         self._ensure()
-        if not self._groups:
+        if not self._matches:
             return
-        self._selected = (self._selected + delta) % len(self._groups)
-        self.refresh()
+        self._selected = (self._selected + delta) % len(self._matches)
+        self._groups = []
+        self.refresh(layout=True)
 
     @property
     def chosen(self):
-        """The highlighted command, or None when nothing is offered.
+        """The highlighted command, or None when nothing is offered."""
+        self._ensure()
+        if not self.display or not self._matches:
+            return None
+        return self._matches[min(self._selected, len(self._matches) - 1)]
 
-        Only ever one of the entries that FIT -- see the class docstring.
+    @property
+    def visible(self) -> list:
+        """The commands actually on screen, in order.
+
+        The honest accessor, and it exists because the obvious spelling --
+        `_matches[:shown]` -- quietly assumes a window that starts at zero,
+        which stopped being true the moment the list could scroll.
         """
         self._ensure()
-        if not self.display or not self._groups:
-            return None
-        return self._matches[min(self._selected, len(self._groups) - 1)]
+        return self._matches[self._first:self._first + len(self._groups)]
 
     @property
     def shown(self) -> int:
@@ -768,9 +817,10 @@ class SlashSuggest(Static):
     def _ensure(self) -> None:
         """Measure now if a layout pass has not happened yet.
 
-        `offer()` clears the groups and the next layout recomputes them, but
-        a key pressed in between -- or a test that offers and asks in one
-        breath -- would otherwise see an empty list and no selection.
+        `offer()` and `move()` clear the groups and the next layout
+        recomputes them, but a key pressed in between -- or a test that
+        offers and asks in one breath -- would otherwise see an empty list
+        and no selection.
         """
         if not self._groups and self._matches and self._width:
             self._budget(self._width)
@@ -797,33 +847,72 @@ class SlashSuggest(Static):
             lines[-1].append(SUGGEST_ELLIPSIS)
         return lines
 
+    def _fill(self, first: int, inner: int) -> list:
+        """The entries that fit starting at `first`, under both caps."""
+        groups, used = [], 0
+        for command in self._matches[first:first + SUGGEST_MAX_ENTRIES]:
+            lines = self._entry(command, inner)
+            if used + len(lines) > SUGGEST_MAX_ROWS:
+                break
+            groups.append(lines)
+            used += len(lines)
+        return groups
+
     def _budget(self, width: int) -> None:
-        """Which entries fit, and the title that says how many.
+        """Where the window sits, what fits in it, and the title.
+
+        The window is DERIVED from the selection rather than stored beside
+        it, so the two cannot disagree: `move()` says which command is
+        chosen and this says which commands can be seen.
+
+        Scrolling is minimal in both directions -- the window advances only
+        far enough to keep the selection visible, and jumps straight to it
+        going the other way. Because the entries are one or two rows, that
+        is what makes a step down drop one entry and gain one, or drop one
+        and gain TWO: it is the row budget refilling, not a rule of its own.
+
+        The loop terminates because `first` only rises and a single entry
+        is at most SUGGEST_MAX_LINES rows, so `first == self._selected`
+        always yields a window containing the selection. The empty guard is
+        what keeps that true -- with no matches `_fill` returns nothing and
+        the condition could never be met.
 
         No minimum width: a terminal too narrow to read is still bounded
         here, because the two-line cap holds whatever the wrap does, so the
         panel degrades to something short rather than to something
         unbounded. MIN_WRAP_WIDTH's posture, one line up the same street.
         """
-        inner = max(1, width - len(SUGGEST_CONT))
-        groups, used = [], 0
-        for command in self._matches[:SUGGEST_MAX_ENTRIES]:
-            lines = self._entry(command, inner)
-            if used + len(lines) > SUGGEST_MAX_ROWS:
-                break
-            groups.append(lines)
-            used += len(lines)
-        self._groups = groups
         self._width = width
-        if self._selected >= len(groups):
+        if not self._matches:
+            self._groups = []
+            self._first = 0
+            return
+        inner = max(1, width - len(SUGGEST_CONT))
+        if self._selected >= len(self._matches):
             self._selected = 0
+        first = min(self._first, self._selected)
+        while True:
+            groups = self._fill(first, inner)
+            if self._selected < first + len(groups):
+                break
+            first += 1
+        self._first = first
+        self._groups = groups
         # #30/M14: a capped list that does not say it is capped reads as
         # "this is everything". Shown-of-MATCHED rather than shown-of-all,
         # because "4 of 26" under a typed `/c` would claim twenty-two
         # candidates that do not exist. Both numbers are counted, never
         # written down -- register a twenty-seventh command and the bare
         # `/` title says 27 with no edit here.
-        title = f"{len(groups)} of {len(self._matches)} · /help for all"
+        #
+        # The RANGE appears only once the list can scroll (batch 56). On a
+        # list that fits entirely there is nowhere to be, so "1-1 of 1"
+        # would be noise where "1 of 1" is a fact.
+        if len(groups) == len(self._matches):
+            span = str(len(groups))
+        else:
+            span = f"{first + 1}-{first + len(groups)}"
+        title = f"{span} of {len(self._matches)} · /help for all"
         if self.border_title != title:
             self.border_title = title
 
@@ -848,7 +937,7 @@ class SlashSuggest(Static):
                 # Padded to the full width so the highlight is a BAR rather
                 # than a stripe the length of the text.
                 row.pad_right(max(0, width - row.cell_len))
-                if index == self._selected:
+                if index == self._selected - self._first:
                     row.stylize(SUGGEST_HIGHLIGHT)
                 rows.append(row)
         body = Text(no_wrap=True, overflow="crop")
@@ -983,6 +1072,26 @@ class PromptInput(TextArea):
         def control(self) -> "PromptInput":
             return self.prompt
 
+    class SuggestionsMoved(Message):
+        """The arrow keys, asking the panel to move its highlight.
+
+        A message rather than a direct `suggest.move()` call, and batch 56
+        is what made that necessary: the window SLIDES now, so a move can
+        change the panel's HEIGHT, and a panel that changes height takes
+        rows from the transcript. Whether the reader was at the bottom is
+        knowable only before that relayout, so the move has to happen
+        inside app.py's pin -- the same one `SuggestionsChanged` uses.
+        """
+
+        def __init__(self, prompt: "PromptInput", delta: int) -> None:
+            self.prompt = prompt
+            self.delta = delta
+            super().__init__()
+
+        @property
+        def control(self) -> "PromptInput":
+            return self.prompt
+
     def __init__(self, placeholder: str = "", **kwargs) -> None:
         super().__init__(soft_wrap=True, show_line_numbers=False, **kwargs)
         self.placeholder = placeholder
@@ -1076,13 +1185,13 @@ class PromptInput(TextArea):
         # keys have to go back to moving the CURSOR the moment the panel
         # is closed.
         if not select and self._panel_open():
-            self.suggest.move(-1)
+            self.post_message(self.SuggestionsMoved(self, -1))
             return
         super().action_cursor_up(select)
 
     def action_cursor_down(self, select: bool = False) -> None:
         if not select and self._panel_open():
-            self.suggest.move(1)
+            self.post_message(self.SuggestionsMoved(self, 1))
             return
         super().action_cursor_down(select)
 

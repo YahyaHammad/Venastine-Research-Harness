@@ -38,7 +38,8 @@ from tests.conftest import (make_model_response, make_stream_sequence,
                             pump, settle)
 from tui.app import VenastineApp
 from tui.commands import registry as commands
-from tui.widgets import SUGGEST_MAX_LINES, SlashSuggest
+from tui.widgets import (SUGGEST_HIGHLIGHT, SUGGEST_MAX_ENTRIES,
+                         SUGGEST_MAX_LINES, SUGGEST_MAX_ROWS, SlashSuggest)
 from tui.screens import (
     PermissionScreen, QuestionScreen, ScrollBox,
 )
@@ -5324,7 +5325,7 @@ class TestThePanelFitsTheRowsItHas:
             assert panel.size.height <= 8, (
                 f"the panel drew {panel.size.height} content rows past a "
                 f"budget of 8")
-            names = [c.name for c in panel._matches[:panel.shown]]
+            names = [c.name for c in panel.visible]
             assert names == ["agent", "claims", "compact", "copy"], (
                 f"the visible entries are {names}; an entry that did not "
                 f"fit must end the list, not be skipped over")
@@ -5345,8 +5346,10 @@ class TestThePanelFitsTheRowsItHas:
 
             await pilot.press("slash")
             assert await settle(pilot, lambda: panel.display)
+            # A RANGE since batch 56, because the window slides -- see
+            # TestTheWindowSlidesOverTheMatches for the position cases.
             assert panel.border_title.startswith(
-                f"4 of {len(commands.all())} "), (
+                f"1-4 of {len(commands.all())} "), (
                 f"the title reads {panel.border_title!r}; it has to say "
                 f"how many of the matches are being shown")
 
@@ -5594,3 +5597,288 @@ async def test_the_panel_opening_does_not_scroll_the_transcript_away():
             f"the transcript is parked {transcript.max_scroll_y - transcript.scroll_offset.y} "
             f"rows above its end, so the newest lines of the conversation "
             f"scrolled out of view when the panel opened")
+
+# --- batch 56: the window slides instead of wrapping early ------------------
+
+
+def _highlighted_rows(panel) -> list[str]:
+    """The rows the panel drew under SUGGEST_HIGHLIGHT.
+
+    Both rows of a two-line entry carry the style, so this is what can see
+    WHICH entry is highlighted rather than merely that one is.
+    """
+    body = panel.render()
+    rows = body.plain.split("\n")
+    starts, position = [], 0
+    for row in rows:
+        starts.append(position)
+        position += len(row) + 1
+    found = []
+    for span in body.spans:
+        if span.style != SUGGEST_HIGHLIGHT:
+            continue
+        for index, start in enumerate(starts):
+            if start < span.end and span.start < start + len(rows[index]):
+                if rows[index] not in found:
+                    found.append(rows[index])
+    return found
+
+
+class TestTheWindowSlidesOverTheMatches:
+    """Batch 56. Arrowing past the last DRAWN entry scrolls the list.
+
+    Batch 55 wrapped there instead, so a bare slash offered twenty-six
+    commands, drew four, and made the other twenty-two unreachable by
+    keyboard under a title that said twenty-six.
+
+    The window is derived rather than stored: `move()` picks a command out
+    of all the matches and `_budget()` scrolls the least it can to keep it
+    on screen. Everything below is measured against that, at 80 columns,
+    where the entries are one or two rows each.
+    """
+
+    @pytest.mark.asyncio
+    async def test_going_past_the_last_visible_entry_scrolls(self):
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            panel = app.query_one("#slash-suggest")
+            await pilot.press("slash")
+            assert await settle(pilot, lambda: panel.display)
+            assert [c.name for c in panel.visible] == [
+                "agent", "claims", "compact", "copy"]
+
+            for _ in range(4):
+                await pilot.press("down")
+            assert await settle(pilot, lambda: panel.chosen.name == "critic")
+
+            assert [c.name for c in panel.visible] == [
+                "claims", "compact", "copy", "critic"], (
+                f"the window is {[c.name for c in panel.visible]}; a fourth "
+                f"down should have dropped /agent off the top and brought "
+                f"/critic in at the bottom, not cycled back to the start")
+
+    @pytest.mark.asyncio
+    async def test_the_window_can_drop_one_and_gain_two(self):
+        """The case that falls out of the ROW budget rather than a rule.
+
+        `/compact` is two rows; `/embedder` and `/forget` are two rows
+        between them. So the step that needs `/embedder` on screen drops
+        one entry and gains TWO, and the panel goes from four entries to
+        five without either cap moving.
+        """
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            panel = app.query_one("#slash-suggest")
+            await pilot.press("slash")
+            assert await settle(pilot, lambda: panel.display)
+
+            for _ in range(6):
+                await pilot.press("down")
+            assert await settle(pilot, lambda: panel.chosen.name == "embedder")
+
+            assert [c.name for c in panel.visible] == [
+                "copy", "critic", "effort", "embedder", "forget"], (
+                f"the window is {[c.name for c in panel.visible]}")
+            assert panel.shown == 5
+            assert panel.size.height <= 8, (
+                f"the window grew to {panel.size.height} rows; gaining two "
+                f"entries must still respect the budget")
+
+    @pytest.mark.asyncio
+    async def test_scrolling_back_up_walks_the_window_home(self):
+        """The up direction is its own path -- `min(_first, _selected)` --
+        and a window that only ever advanced would strand the reader at
+        the bottom of a list they had scrolled into."""
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            panel = app.query_one("#slash-suggest")
+            await pilot.press("slash")
+            assert await settle(pilot, lambda: panel.display)
+
+            for _ in range(6):
+                await pilot.press("down")
+            assert await settle(pilot, lambda: panel.chosen.name == "embedder")
+            scrolled = [c.name for c in panel.visible]
+
+            # One up, still inside the window: the SELECTION moves and the
+            # window does not. A budget that recomputed from the top rather
+            # than from where the window already is would scroll here for
+            # no reason, and the list would jitter under the reader.
+            await pilot.press("up")
+            assert await settle(pilot, lambda: panel.chosen.name == "effort")
+            assert [c.name for c in panel.visible] == scrolled, (
+                f"the window moved to {[c.name for c in panel.visible]} for "
+                f"a selection it was already showing")
+
+            for _ in range(5):
+                await pilot.press("up")
+            assert await settle(pilot, lambda: panel.chosen.name == "agent")
+
+            assert [c.name for c in panel.visible] == [
+                "agent", "claims", "compact", "copy"], (
+                f"the window came home to {[c.name for c in panel.visible]}")
+
+    @pytest.mark.asyncio
+    async def test_the_wrap_is_over_every_match_not_the_visible_ones(self):
+        """Wrapping is kept; the boundary moves to the real end of the list."""
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            panel = app.query_one("#slash-suggest")
+            await pilot.press("slash")
+            assert await settle(pilot, lambda: panel.display)
+
+            await pilot.press("up")
+            assert await settle(pilot, lambda: panel.chosen.name == "window"), (
+                "up from the first entry wrapped to the last DRAWN command "
+                "rather than to the last one that matched")
+            assert [c.name for c in panel.visible][-1] == "window"
+
+            await pilot.press("down")
+            assert await settle(pilot, lambda: panel.chosen.name == "agent")
+            assert [c.name for c in panel.visible][0] == "agent", (
+                "wrapping forward left the window at the tail")
+
+    @pytest.mark.asyncio
+    async def test_the_drawn_highlight_follows_the_scrolled_window(self):
+        """The row that is REVERSED, not the index that was stored.
+
+        `render()` walks the window, so the highlight is at
+        `_selected - _first`; forget the subtraction and the wrong entry
+        lights up the moment the list scrolls, while `chosen` keeps
+        returning the right one and every other assertion here passes.
+        """
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            panel = app.query_one("#slash-suggest")
+            await pilot.press("slash")
+            assert await settle(pilot, lambda: panel.display)
+            for _ in range(6):
+                await pilot.press("down")
+            assert await settle(pilot, lambda: panel.chosen.name == "embedder")
+
+            rows = _highlighted_rows(panel)
+            assert rows, "nothing was drawn highlighted"
+            assert "/embedder" in rows[0], (
+                f"the highlighted rows are {[r.strip() for r in rows]}, but "
+                f"the chosen command is /embedder")
+
+    @pytest.mark.asyncio
+    async def test_the_title_says_where_the_window_is(self):
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            panel = app.query_one("#slash-suggest")
+            await pilot.press("slash")
+            assert await settle(pilot, lambda: panel.display)
+            assert panel.border_title.startswith(
+                f"1-4 of {len(commands.all())} ")
+
+            for _ in range(4):
+                await pilot.press("down")
+            assert await settle(pilot, lambda: panel.chosen.name == "critic")
+            assert panel.border_title.startswith(
+                f"2-5 of {len(commands.all())} "), (
+                f"the title reads {panel.border_title!r}; once the window "
+                f"has moved, a count alone cannot say where it is")
+
+    @pytest.mark.asyncio
+    async def test_a_list_that_fits_keeps_its_plain_count(self):
+        """No range where there is nowhere to be. `1-1 of 1` is noise."""
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            panel = app.query_one("#slash-suggest")
+
+            await pilot.press("slash", "c")
+            assert await settle(pilot, lambda: panel.shown == 4)
+            assert panel.border_title.startswith("4 of 4 "), (
+                f"the title reads {panel.border_title!r}; all four matches "
+                f"are on screen, so there is no window to place")
+
+    @pytest.mark.asyncio
+    async def test_the_transcript_stays_pinned_while_the_window_scrolls(self):
+        """The re-pin's second and harder case.
+
+        Opening the panel takes rows once. SCROLLING it takes and gives
+        back a row on most keypresses -- measured, the window is four
+        entries over seven rows at the top of the list, four over eight one
+        step later, five over seven in the middle -- and each of those
+        resizes unpins the transcript unless the move goes through app.py's
+        capture. Nothing about the panel can see that; only the handler
+        that holds both widgets can.
+        """
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            panel = app.query_one("#slash-suggest")
+            transcript = app.query_one("#transcript")
+            for index in range(60):
+                transcript.write_system(f"line {index:02d}")
+            await pilot.pause()
+
+            await pilot.press("slash")
+            assert await settle(pilot, lambda: panel.display)
+            heights = {panel.size.height}
+            for _ in range(8):
+                await pilot.press("down")
+                await pump(pilot, 4)
+                heights.add(panel.size.height)
+                drawn = len(panel.render().plain.split("\n"))
+                assert drawn == panel.size.height, (
+                    f"the panel drew {drawn} rows while "
+                    f"measured at {panel.size.height}; a window that changes "
+                    f"SIZE has to refresh with layout=True or the extra row "
+                    f"is clipped where nobody can see it")
+                assert (transcript.scroll_offset.y
+                        >= transcript.max_scroll_y), (
+                    f"scrolling the suggestions parked the transcript "
+                    f"{transcript.max_scroll_y - transcript.scroll_offset.y} "
+                    f"rows above its end")
+            assert len(heights) > 1, (
+                f"the panel never changed height ({heights}), so this test "
+                f"never exercised the resize it exists for")
+
+    @pytest.mark.parametrize("width", [40, 54, 70, 100])
+    def test_the_window_stays_inside_its_budget_at_every_position(self, width):
+        """Every selection, four widths, no pilot.
+
+        Batch 55's lesson applied up front rather than after a mutation
+        survived: a pilot walks the positions its keystrokes reach, and
+        the invariant is about all of them. This walks the selection the
+        way a held-down arrow key would, carrying `_first` between steps,
+        so it also pins that the scroll is MINIMAL -- a window that jumped
+        further than it had to would still satisfy every clause below
+        except the last.
+        """
+        panel = SlashSuggest()
+        panel._matches = commands.all()
+        seen_starts = []
+        for selected in range(len(panel._matches)):
+            panel._selected = selected
+            panel._budget(width)
+            rows = panel.render().plain.split("\n")
+
+            assert len(rows) <= SUGGEST_MAX_ROWS, (
+                f"selection {selected} at width {width} drew {len(rows)} "
+                f"rows past a budget of {SUGGEST_MAX_ROWS}")
+            assert panel.shown <= SUGGEST_MAX_ENTRIES, (
+                f"selection {selected} at width {width} showed "
+                f"{panel.shown} entries")
+            assert panel._first <= selected < panel._first + panel.shown, (
+                f"selection {selected} at width {width} sits outside the "
+                f"window [{panel._first}, {panel._first + panel.shown}); the "
+                f"highlight would be invisible and enter would complete a "
+                f"command nobody can see")
+            for row in rows:
+                assert cell_len(row) == width
+            seen_starts.append(panel._first)
+
+        assert seen_starts == sorted(seen_starts), (
+            f"the window start went backwards while the selection only went "
+            f"forwards: {seen_starts}")
+        assert seen_starts[0] == 0, "the window did not start at the top"
