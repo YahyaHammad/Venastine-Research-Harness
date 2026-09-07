@@ -36,6 +36,7 @@ from pathlib import Path
 from uuid import UUID
 
 from textual.app import App, ComposeResult
+from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
 from textual.message import Message
@@ -98,6 +99,13 @@ DIFFED_TOOLS = ("write", "edit")
 #: `write` renders as an all-new block, `edit` as its own old/new text
 #: without line numbers.
 DIFF_SNAPSHOT_MAX_BYTES = 512_000
+
+#: How long a first ctrl+c stays armed (batch 57). Short enough that
+#: "twice in quick succession" is the only way through it, and it is also
+#: how long the footer says so -- the label reverts on this timer, so the
+#: window is something the screen shows rather than something the user has
+#: to guess at.
+QUIT_CONFIRM_S = 2.0
 
 
 class LoopEventMessage(Message):
@@ -286,7 +294,24 @@ class VenastineApp(App):
     TITLE = "Venastine Research Harness"
 
     BINDINGS = [
-        ("ctrl+c", "quit", "Quit"),
+        # Batch 57. TWO bindings on one key, and `check_action` decides
+        # which is live -- textual's dynamic-actions path, and the only
+        # way to relabel a footer entry, since a Binding's description is
+        # fixed at class definition. The armed one is listed FIRST so it
+        # claims the slot the moment it is enabled (`active_bindings` is a
+        # dict keyed by KEY, first writer wins).
+        #
+        # `priority=True` on both, and it is what makes ctrl+c work at
+        # all: `Input` and `TextArea` bind ctrl+c to `copy`, the prompt
+        # holds focus almost always, and an ordinary app binding loses to
+        # the focused widget -- measured, `("ctrl+c", "quit")` fired under
+        # NEITHER text box. It also loses under a modal, which blocks
+        # non-priority app bindings outright. The cost of the flag is that
+        # it takes the copy away too, which is why `_copy_selection` gives
+        # it back; see `action_arm_quit`.
+        Binding("ctrl+c", "confirm_quit", "Press again to quit",
+                priority=True),
+        Binding("ctrl+c", "arm_quit", "Quit", priority=True),
         ("ctrl+t", "pick_thread", "Threads"),
         # §26. ctrl+l, NOT ctrl+k: the prompt binds ctrl+k to a
         # delete-to-end-of-line and it holds focus almost always, so a
@@ -306,6 +331,12 @@ class VenastineApp(App):
     # test files use for exactly this callback logic -- reads False
     # instead of raising.
     _shutting_down = False
+
+    # Batch 57's quit gesture. CLASS attributes for `_shutting_down`'s
+    # reason, and read by `check_action`, which textual calls while the
+    # footer is composing -- before anything of ours has run.
+    _quit_armed = False
+    _quit_timer = None
 
     def __init__(self, provider_name: str = DEFAULT_PROVIDER,
                  model: str = None, settings: dict | None = None,
@@ -1456,6 +1487,84 @@ class VenastineApp(App):
                 "system",
                 f"  {path}: the change is entirely inside redacted content")
 
+    # -- quitting (batch 57) -------------------------------------------------
+    #
+    # ctrl+c used to mean four different things depending on what had
+    # focus: it copied in the prompt (and did NOTHING there without a
+    # selection), quit outright one `tab` away, and did nothing at all
+    # under a modal, which blocks non-priority app bindings. README
+    # promised it quit. It now means one thing everywhere, and that one
+    # thing takes two presses, so selecting a typed prompt and copying it
+    # cannot end the session by accident.
+
+    def check_action(self, action: str, parameters) -> bool | None:
+        """Which of the two ctrl+c bindings is live.
+
+        `False`, never `None`, and that is not a style choice.
+        `Screen.active_bindings` skips a binding only on `is False`; a
+        `None` leaves it in the map marked disabled, and the map is keyed
+        by KEY -- so the first ctrl+c binding keeps the slot regardless.
+        Under `None` the DISPATCH is still correct (`_check_bindings`
+        walks past a refused action to the next binding for the same key)
+        and the FOOTER shows the wrong label permanently. Measured, and it
+        is why the footer test asserts on the drawn row rather than on the
+        binding object, where the bug is invisible.
+        """
+        if action == "confirm_quit":
+            return self._quit_armed
+        if action == "arm_quit":
+            return not self._quit_armed
+        return True
+
+    def _copy_selection(self) -> bool:
+        """Copy the focused widget's selection; True if there was one.
+
+        This is what `priority=True` takes away and has to hand back. Both
+        `Input` and `TextArea` bind ctrl+c to `copy`, and a priority app
+        binding pre-empts them completely -- measured, the clipboard
+        stayed empty. So the app performs the copy itself, and the rule
+        the whole gesture rests on is: **ctrl+c copies when there is
+        something to copy, and starts a quit when there is not.** A press
+        that copies never arms and never quits, armed or not -- so no
+        sequence of copies can end the session.
+        """
+        selection = getattr(self.focused, "selected_text", "")
+        if not selection:
+            return False
+        self.copy_to_clipboard(selection)
+        return True
+
+    def action_arm_quit(self) -> None:
+        """First ctrl+c: say what a second one does, and mean it for
+        `QUIT_CONFIRM_S`."""
+        if self._copy_selection():
+            return
+        self._quit_armed = True
+        self._quit_timer = self.set_timer(QUIT_CONFIRM_S, self._disarm_quit)
+        # Without this the state changes and the footer does not: the
+        # Footer recomposes off the screen's bindings signal, which
+        # nothing else here raises.
+        self.refresh_bindings()
+
+    def action_confirm_quit(self) -> None:
+        """Second ctrl+c, inside the window."""
+        if self._copy_selection():
+            return
+        if self._quit_timer is not None:
+            self._quit_timer.stop()
+            self._quit_timer = None
+        self.exit()
+
+    def _disarm_quit(self) -> None:
+        """The window closed with one press in it. The label goes back."""
+        # A quit that came from somewhere else (/quit, ctrl+q) can leave
+        # this timer pending; refreshing bindings without a screen raises.
+        if self._shutting_down:
+            return
+        self._quit_armed = False
+        self._quit_timer = None
+        self.refresh_bindings()
+
     def _release_permission_channel(self) -> None:
         """Unblock a worker parked on permission_channel.get(), denying.
 
@@ -2163,7 +2272,12 @@ def _cmd_help(app: VenastineApp, args: str) -> None:
     app._transcript.write_system("Commands:")
     for command in commands.all():
         usage = f" {command.usage}" if command.usage else ""
-        app._transcript.write_system(f"  /{command.name}{usage} — {command.summary}")
+        # `all()` is canonical, so an alias has exactly one place to be
+        # named: on the row of the command it belongs to (batch 57).
+        also = (f" (also {', '.join('/' + a for a in command.aliases)})"
+                if command.aliases else "")
+        app._transcript.write_system(
+            f"  /{command.name}{usage} — {command.summary}{also}")
     # §26. Worth saying plainly: the pinned textual has no text selection,
     # so someone trying to select with the mouse gets nothing and has no
     # way to know why. Most terminals let shift+drag bypass the app's
@@ -3467,7 +3581,8 @@ def register_builtin_commands() -> None:
         SlashCommand("resume", "resume a thread by id, even an old one",
                      _cmd_resume, "<thread-id>"),
         SlashCommand("new", "start a new thread", _cmd_new),
-        SlashCommand("quit", "exit", _cmd_quit),
+        SlashCommand("quit", "exit the harness", _cmd_quit,
+                     aliases=("exit", "bye")),
     ):
         commands.register(command)
 

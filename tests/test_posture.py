@@ -254,9 +254,17 @@ class TestNothingReachableChangesIt:
         from tui.commands import registry as command_registry
         register_builtin_commands()
         names = set(command_registry.names())
+        # Batch 57. ALIASES too: they reach `dispatch` exactly as names do
+        # and are deliberately absent from names(), so a guard reading
+        # names() alone would wave `/unsafe` through as an alias of
+        # something harmless-looking.
+        names |= set(command_registry._aliases)
         # Positive half first: without it, an empty registry would satisfy
         # the negative assertion below and this would test nothing.
         assert "help" in names and "theme" in names
+        assert "exit" in names, (
+            "no alias reached this set, so the alias half of the guard is "
+            "asserting against nothing")
         assert not (names & {"unsafe", "posture", "approval", "sandbox",
                              "yolo", "insecure"})
 

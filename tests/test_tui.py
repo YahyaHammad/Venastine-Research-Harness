@@ -5882,3 +5882,340 @@ class TestTheWindowSlidesOverTheMatches:
             f"the window start went backwards while the selection only went "
             f"forwards: {seen_starts}")
         assert seen_starts[0] == 0, "the window did not start at the top"
+
+
+# --- batch 57: ctrl+c means one thing everywhere ----------------------------
+#
+# It used to mean four, depending on focus: copy in the prompt (and
+# NOTHING there without a selection), quit outright one tab away, nothing
+# at all under a modal, copy again in a modal's Input. README promised it
+# quit. It now takes two presses everywhere, and a press over a selection
+# is a copy in either state -- so selecting a typed prompt to copy it
+# cannot end the session by accident.
+
+
+def _quit_key_row(app) -> str:
+    """The ctrl+c entry AS THE FOOTER DREW IT.
+
+    On the drawn row rather than on the binding, and that is the whole
+    reason this helper exists: `check_action` returning None instead of
+    False leaves the DISPATCH correct -- textual walks past a refused
+    action to the next binding for the same key -- while
+    `Screen.active_bindings`, which is keyed by key, keeps the first
+    binding and its stale label forever. A test that read the binding
+    object would pass against the one bug this can see.
+    """
+    from textual.widgets._footer import FooterKey
+
+    for key in app.query(FooterKey):
+        if key.key == "ctrl+c":
+            rows = key.render_lines(key.region.reset_offset)
+            return "".join(seg.text for seg in rows[0]).strip() if rows else ""
+    return ""
+
+
+class TestTheQuitGesture:
+    """Batch 57. Two presses to quit, and a copy is never one of them."""
+
+    @pytest.mark.asyncio
+    async def test_ctrl_c_reaches_the_app_while_the_prompt_has_focus(self):
+        """The defect itself. `("ctrl+c", "quit")` was an ordinary app
+        binding and `TextArea` binds ctrl+c to `copy`, so with the prompt
+        focused -- which is where focus sits almost always -- the key did
+        nothing at all when there was no selection to copy."""
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            assert app.focused is app.query_one("#prompt"), \
+                "focus did not start in the prompt; this proves nothing"
+
+            await pilot.press("ctrl+c")
+            await pilot.pause()
+
+            assert app._quit_armed, (
+                "ctrl+c did not reach the app with the prompt focused — the "
+                "prompt's own copy binding shadowed it, which is the defect")
+            assert not app._shutting_down, "the first press quit outright"
+
+    @pytest.mark.asyncio
+    async def test_a_second_press_inside_the_window_quits(self):
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await pilot.press("ctrl+c")
+            await pilot.pause()
+            await pilot.press("ctrl+c")
+            await pilot.pause()
+
+            assert app._shutting_down, "two presses did not quit"
+
+    @pytest.mark.asyncio
+    async def test_a_press_after_the_window_arms_again_instead(self, mocker):
+        """The window is what makes it a gesture rather than a latch: a
+        ctrl+c now and another one minutes later is two accidents, not a
+        decision."""
+        mocker.patch("tui.app.QUIT_CONFIRM_S", 0.05)
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await pilot.press("ctrl+c")
+            assert await settle(pilot, lambda: not app._quit_armed), \
+                "the window never closed"
+
+            # Widened before the late press, or the arm it is supposed to
+            # leave behind expires inside the assertion that looks for it.
+            mocker.patch("tui.app.QUIT_CONFIRM_S", 30)
+            await pilot.press("ctrl+c")
+            await pilot.pause()
+
+            assert not app._shutting_down, (
+                "a press after the window closed quit outright rather than "
+                "arming again")
+            assert app._quit_armed, "the late press armed nothing"
+
+    @pytest.mark.asyncio
+    async def test_a_press_over_a_selection_copies_and_does_not_arm(self):
+        """The case the two presses exist for. `priority=True` is what
+        makes ctrl+c reach the app at all, and it pre-empts the prompt's
+        own copy completely -- measured, the clipboard stayed empty. So
+        the app does the copy, and doing it is the whole answer: nothing
+        is armed and nothing is asked."""
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            prompt = app.query_one("#prompt")
+            prompt.value = "a question worth keeping"
+            prompt.focus()
+            await pilot.pause()
+            prompt.select_all()
+            await pilot.pause()
+
+            await pilot.press("ctrl+c")
+            await pilot.pause()
+
+            assert app._clipboard == "a question worth keeping", (
+                "ctrl+c over a selection did not copy — the priority binding "
+                "took the key and gave nothing back")
+            assert not app._quit_armed, "copying armed the quit"
+            assert not app._shutting_down
+
+    @pytest.mark.asyncio
+    async def test_a_press_over_a_selection_while_armed_still_only_copies(
+            self):
+        """The other half of the same rule, and the one that makes it a
+        rule rather than a first-press special case: no sequence of copies
+        can end the session, however the gesture is standing."""
+        from textual.widgets.text_area import Selection
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            prompt = app.query_one("#prompt")
+            prompt.value = "keep me"
+            prompt.focus()
+            await pilot.pause()
+            prompt.selection = Selection.cursor(prompt.document.end)
+            await pilot.pause()
+
+            await pilot.press("ctrl+c")
+            await pilot.pause()
+            assert app._quit_armed, "the first press did not arm"
+
+            prompt.select_all()
+            await pilot.pause()
+            await pilot.press("ctrl+c")
+            await pilot.pause()
+
+            assert not app._shutting_down, (
+                "a copy was accepted as the second half of the quit gesture")
+            assert app._clipboard == "keep me", "the copy did not happen"
+
+    @pytest.mark.asyncio
+    async def test_the_footer_says_what_a_second_press_will_do(self):
+        """The armed state has exactly one visible consequence, so it is
+        asserted where a person would read it."""
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await pilot.pause()
+            assert _quit_key_row(app) == "^c Quit", (
+                f"the footer reads {_quit_key_row(app)!r} at rest")
+
+            await pilot.press("ctrl+c")
+            await pilot.pause()
+            await pilot.pause()
+
+            assert _quit_key_row(app) == "^c Press again to quit", (
+                f"the footer reads {_quit_key_row(app)!r} while armed; if it "
+                f"still says 'Quit', check_action is returning None where it "
+                f"must return False")
+
+    @pytest.mark.asyncio
+    async def test_the_footer_goes_back_when_the_window_closes(self, mocker):
+        """A label that armed and never disarmed would be a lie for the
+        rest of the session."""
+        mocker.patch("tui.app.QUIT_CONFIRM_S", 0.05)
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await pilot.press("ctrl+c")
+            assert await settle(
+                pilot, lambda: _quit_key_row(app) == "^c Quit"), (
+                f"the footer stayed at {_quit_key_row(app)!r} after the "
+                f"window closed")
+
+    @pytest.mark.asyncio
+    async def test_ctrl_c_arms_and_quits_from_under_a_modal(self, mocker):
+        """`ModalScreen` blocks non-priority app bindings, so ctrl+c did
+        nothing at all here — the one place a person most wants a way
+        out. `priority=True` is what reaches past it."""
+        mocker.patch("tui.app.storage.list_threads",
+                     return_value=_one_thread(uuid4()))
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.press("ctrl+t")
+            assert await settle(
+                pilot, lambda: isinstance(app.screen, ThreadPickerScreen))
+
+            await pilot.press("ctrl+c")
+            await pilot.pause()
+            assert app._quit_armed, "ctrl+c did not reach the app under a modal"
+
+            await pilot.press("ctrl+c")
+            await pilot.pause()
+            assert app._shutting_down, "two presses under a modal did not quit"
+
+    @pytest.mark.asyncio
+    async def test_quitting_by_gesture_releases_a_blocked_worker(
+            self, _mocked_loop, monkeypatch):
+        """ARCHITECTURE §4.14: every dismissal must put a boolean on the
+        channel. Quitting was already a dismissal path; batch 57 adds a
+        second KEY that reaches it, and it has to funnel through `exit()`
+        like the first."""
+        _mocked_loop.patch("core.loop.registry.approval_needed",
+                           return_value=True)
+        _mocked_loop.patch("core.loop.registry.dispatch")
+        monkeypatch.setattr("tui.app.queue.Queue", _RecordingQueue)
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            app.query_one("#prompt").value = "do a thing"
+            await pilot.press("enter")
+            assert await settle(
+                pilot, lambda: isinstance(app.screen, PermissionScreen))
+
+            channel = app._permission_channel
+            assert channel is not None and channel.puts == []
+
+            await pilot.press("ctrl+c")
+            await pilot.pause()
+            await pilot.press("ctrl+c")
+            await pilot.pause()
+
+            assert channel.puts == [False], (
+                "quitting by ctrl+c left the worker blocked on the "
+                "permission channel")
+
+    @pytest.mark.asyncio
+    async def test_the_command_still_quits_on_one_invocation(self):
+        """Typing a command is already deliberate; only the key needed
+        confirming."""
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            app.query_one("#prompt").value = "/quit"
+            await pilot.press("enter")
+            await pilot.pause()
+
+            assert app._shutting_down, "/quit stopped quitting"
+
+
+class TestTheCommandAliases:
+    """Batch 57. `/exit` and `/bye` are `/quit`, and the LISTS stay
+    canonical: one row per command in `/help`, and a bare slash still
+    offers the menu it always did."""
+
+    def test_an_alias_dispatches_to_the_command_it_names(self):
+        assert commands.get("exit") is commands.get("quit")
+        assert commands.get("bye") is commands.get("quit")
+
+    def test_an_alias_is_matched_case_insensitively(self):
+        """`dispatch` lowercases, so `/BYE` runs; `matching` had better
+        offer it while it is being typed."""
+        assert [c.name for c in commands.matching("/BY")] == ["bye"]
+
+    def test_the_aliases_are_not_commands(self):
+        """The lists are the canonical ones, and a bare slash is the
+        MENU: it is what someone who does not know the commands presses,
+        and a menu names each thing once."""
+        names = commands.names()
+        assert "quit" in names
+        assert not ({"exit", "bye"} & set(names))
+        assert not ({"exit", "bye"} & {c.name for c in commands.all()})
+        assert commands.matching("/") == commands.all(), (
+            "a bare slash stopped listing exactly the registered commands")
+
+    @pytest.mark.asyncio
+    async def test_typing_toward_an_alias_offers_it_and_completes_it(self):
+        """A guess is not browsing: the answer to `/ex` is whether it
+        works. The row carries the ALIAS as its name, so completion fills
+        in what was being typed rather than correcting it to `/quit`."""
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            panel = app.query_one("#slash-suggest")
+            prompt = app.query_one("#prompt")
+
+            await pilot.press("slash", "e", "x")
+            assert await settle(pilot, lambda: panel.display)
+            assert [c.name for c in panel.visible] == ["exit"]
+
+            await pilot.press("enter")
+            await pilot.pause()
+
+            assert prompt.value == "/exit ", (
+                f"enter completed {prompt.value!r}; an alias row must "
+                f"complete the name it drew")
+            assert not panel.display, "the panel stayed open after completing"
+
+    def test_the_alias_row_says_what_it_is_an_alias_of(self):
+        """Offered without that, `/bye` reads as a command of its own,
+        and `/help` -- which does not list it -- looks incomplete."""
+        row, = commands.matching("/bye")
+        assert "alias of /quit" in row.summary, (
+            f"the offered row reads {row.summary!r}")
+
+    @pytest.mark.asyncio
+    async def test_help_names_the_aliases_on_the_commands_own_row(self):
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            app.query_one("#prompt").value = "/help"
+            await pilot.press("enter")
+            await pilot.pause()
+
+            rows = [line for line in
+                    app.query_one("#transcript").as_text().splitlines()
+                    if "/quit" in line]
+            assert rows, "/help printed no row for /quit"
+            assert "/exit" in rows[0] and "/bye" in rows[0], (
+                f"the quit row is {rows[0].strip()!r}; an alias that is "
+                f"named nowhere is one nobody finds")
+
+    def test_an_alias_that_would_shadow_something_is_refused(self):
+        """Both directions, because both resolve SILENTLY otherwise:
+        `get` prefers real names, so the alias would simply stop working
+        and nothing would say why."""
+        from tui.commands import SlashCommand
+
+        with pytest.raises(ValueError, match="already a command"):
+            commands.register(SlashCommand(
+                "zzz-shadowing-alias", "x", lambda app, args: None,
+                aliases=("help",)))
+        with pytest.raises(ValueError, match="already an alias"):
+            commands.register(SlashCommand(
+                "exit", "x", lambda app, args: None))
+
+        assert "zzz-shadowing-alias" not in commands.names(), \
+            "the refused registration was written anyway"
+        assert commands.get("exit") is commands.get("quit"), \
+            "the refused registration displaced the alias"
