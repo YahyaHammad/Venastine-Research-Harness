@@ -32,9 +32,13 @@ from types import SimpleNamespace
 import pytest
 
 import config
+from rich.cells import cell_len
+
 from tests.conftest import (make_model_response, make_stream_sequence,
                             pump, settle)
 from tui.app import VenastineApp
+from tui.commands import registry as commands
+from tui.widgets import SUGGEST_MAX_LINES, SlashSuggest
 from tui.screens import (
     PermissionScreen, QuestionScreen, ScrollBox,
 )
@@ -4980,3 +4984,613 @@ async def test_enter_in_the_review_note_does_not_reach_the_prompt_handler():
             f"{note.value!r}")
         assert "Try /help." not in transcript.as_text(), (
             "the note was dispatched as a slash command")
+
+# --- batch 55: the slash-command suggestion panel ---------------------------
+
+
+def _panel_rows(panel) -> list[str]:
+    """The panel's content as drawn, one string per row.
+
+    `render()` rather than `render_lines()` deliberately: the compositor
+    CROPS to the region, so a row that is too wide comes back the right
+    width and the defect this pins is invisible. What is wanted is the row
+    the widget produced, before anything trimmed it.
+    """
+    return panel.render().plain.split("\n")
+
+
+class TestMatchingIsTheListHelpReads:
+    """Batch 55. The panel's source, and the anti-drift guarantee.
+
+    `/help` iterates `registry.all()`; so does `matching()`. There is no
+    second list to fall out of date, and these pin that there is not --
+    the failure this prevents is a panel that offers a command the shell
+    no longer has, or misses one four other modules registered.
+    """
+
+    def test_a_prefix_offers_the_commands_that_start_with_it(self):
+        names = [c.name for c in commands.matching("/co")]
+        assert names == ["compact", "copy"], (
+            f"/co offered {names}; prefix matching on the NAME is what a "
+            f"user typing a command is doing")
+
+    def test_it_is_a_prefix_and_not_a_substring(self):
+        # `in` instead of `startswith` reads the same on most prefixes --
+        # /co gives the identical pair -- so it needs a letter where the
+        # two diverge. `research` CONTAINS a c and starts with an r.
+        names = [c.name for c in commands.matching("/c")]
+        assert "research" not in names, (
+            f"/c offered {names}; a command that merely contains the "
+            f"letters is not one the user is part-way through typing")
+
+    def test_a_bare_slash_offers_everything_help_lists(self):
+        assert commands.matching("/") == commands.all(), (
+            "a bare slash and /help disagree about what commands exist, "
+            "which is the one thing reading a single registry was for")
+
+    def test_a_space_ends_it_at_either_end(self):
+        assert commands.matching("/copy last") == []
+        assert commands.matching("/copy ") == [], (
+            "a TRAILING space left the panel open over a line that had "
+            "already moved on to its arguments -- `strip()` cannot see it, "
+            "which is why the predicate lstrips and then rejects any space")
+        assert commands.matching("/help\nand more") == []
+
+    def test_leading_space_is_tolerated_because_dispatch_tolerates_it(self):
+        # on_prompt_input_submitted strips before testing startswith("/"),
+        # so "  /help" RUNS. A panel that refused to offer it would be
+        # disagreeing with the shell about what the line is.
+        assert [c.name for c in commands.matching("  /hel")] == ["help"]
+
+    def test_it_matches_the_case_dispatch_matches(self):
+        # CommandRegistry.dispatch lowercases the name, so /HELP runs.
+        assert [c.name for c in commands.matching("/HEL")] == ["help"]
+
+    def test_it_offers_nothing_for_a_line_that_is_not_a_command(self):
+        assert commands.matching("") == []
+        assert commands.matching("summarise this for me") == []
+        assert commands.matching("/definitelynotacommand") == []
+
+
+class TestThePanelOpensOnWhatIsTyped:
+    """Batch 55. When it appears, when it does not, and where.
+
+    Measured on REGIONS, batch 49's rule: `#slash-suggest` is `height:
+    auto` in the same flow the transcript's `1fr` pays for, so a panel
+    that appeared without the transcript yielding would be drawing over
+    the conversation and no assertion about `display` could see it.
+    """
+
+    @pytest.mark.asyncio
+    async def test_it_is_absent_until_a_slash_is_typed(self):
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            panel = app.query_one("#slash-suggest")
+            assert not panel.display
+            assert panel.region.height == 0, (
+                f"the panel cost {panel.region.height} rows with nothing "
+                f"typed; a session that never types a slash must not pay "
+                f"for this at all")
+
+    @pytest.mark.asyncio
+    async def test_typing_a_slash_opens_it_above_the_prompt(self):
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            panel = app.query_one("#slash-suggest")
+            prompt = app.query_one("#prompt")
+            transcript = app.query_one("#transcript")
+            before = transcript.region.height
+
+            await pilot.press("slash")
+            assert await settle(pilot, lambda: panel.display)
+
+            assert panel.region.bottom <= prompt.region.y, (
+                f"the panel ends at row {panel.region.bottom} and the prompt "
+                f"starts at row {prompt.region.y}; it is supposed to open "
+                f"UPWARDS, which is what docking the prompt buys")
+            assert transcript.region.height == before - panel.region.height, (
+                f"the panel took {panel.region.height} rows and the "
+                f"transcript kept {transcript.region.height} of its "
+                f"{before}; one of them is drawing over the other")
+
+    @pytest.mark.asyncio
+    async def test_it_narrows_as_the_command_is_typed(self):
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            panel = app.query_one("#slash-suggest")
+
+            await pilot.press("slash", "c")
+            assert await settle(pilot, lambda: panel.shown == 4)
+            names = [c.name for c in panel._matches]
+            assert names == ["claims", "compact", "copy", "critic"]
+
+            await pilot.press("o")
+            assert await settle(
+                pilot, lambda: [c.name for c in panel._matches] ==
+                ["compact", "copy"])
+
+    @pytest.mark.asyncio
+    async def test_a_space_closes_it_and_a_backspace_brings_it_back(self):
+        """The user's own requirement, and both halves are load-bearing.
+
+        Completion inserts a trailing space, so the closing half is also
+        what makes an accepted command get out of the way; the reopening
+        half is what makes a mis-selected one recoverable without clearing
+        the line.
+        """
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            panel = app.query_one("#slash-suggest")
+
+            await pilot.press("slash", "c")
+            assert await settle(pilot, lambda: panel.display)
+
+            await pilot.press("space")
+            assert await settle(pilot, lambda: not panel.display)
+
+            await pilot.press("backspace")
+            assert await settle(pilot, lambda: panel.display), (
+                "deleting the space did not bring the panel back, so a "
+                "mis-typed command cannot be corrected against the list")
+
+    @pytest.mark.asyncio
+    async def test_assigning_the_value_does_not_open_it(self):
+        """The pin that protects ~73 existing test sites.
+
+        `prompt.value = "/help"` posts `TextArea.Changed` exactly as a
+        keystroke does -- measured -- so a panel driven straight off that
+        message would open here, and `enter` would then COMPLETE instead
+        of dispatching. Every bare assignment in the suite is an exact
+        command name, so all of them would have gone from "run this" to
+        "type it again".
+
+        Assignment is the API, typing is the user. `load_text` is the
+        seam; delete the override and this goes red first, before the
+        four files that would follow.
+        """
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            panel = app.query_one("#slash-suggest")
+            prompt = app.query_one("#prompt")
+
+            prompt.value = "/hel"
+            await pump(pilot)
+            assert not panel.display, (
+                "assigning .value opened the suggestion panel; every "
+                "`query_one('#prompt').value = '/...'` in this suite would "
+                "now complete on enter instead of dispatching")
+
+            await pilot.press("enter")
+            await pump(pilot)
+            assert prompt.value == "", (
+                f"enter did not submit the assigned line; it left "
+                f"{prompt.value!r} in the box")
+            assert "Unknown command /hel" in (
+                app.query_one("#transcript").as_text())
+
+    @pytest.mark.asyncio
+    async def test_a_command_registered_anywhere_reaches_the_panel(self):
+        """§18/§19/§21b/§24 register into the same registry, and the panel
+        must see theirs without knowing they exist."""
+        from tui.commands import SlashCommand
+
+        commands.register(SlashCommand(
+            "zzz-registered-late", "a command added at runtime",
+            lambda app, args: None))
+        try:
+            app = VenastineApp("ANTHROPIC", "test-model", {})
+            async with app.run_test(size=(80, 24)) as pilot:
+                await pilot.pause()
+                panel = app.query_one("#slash-suggest")
+                await pilot.press("slash", "z")
+                assert await settle(pilot, lambda: panel.display)
+                assert [c.name for c in panel._matches] == \
+                    ["zzz-registered-late"]
+        finally:
+            # No unregister on the registry (nothing needs one in
+            # production), so the test undoes its own write.
+            commands._commands.pop("zzz-registered-late", None)
+
+
+class TestThePanelFitsTheRowsItHas:
+    """Batch 55. The row budget, the two-line cap, and the arithmetic.
+
+    Every assertion here is about the DRAWN rows rather than the widget's
+    idea of them, because the defect that motivated the class was exactly
+    a disagreement between the two: entries wrapped to `width - 2` and
+    then drawn under a four-space gutter came out one row taller than
+    they had been measured to be.
+    """
+
+    @pytest.mark.asyncio
+    async def test_no_rendered_row_is_wider_than_the_panel(self):
+        """A Static RE-WRAPS a row you already wrapped.
+
+        The first draft wrapped each entry to `width - 2` and drew
+        continuation lines under a four-space gutter, so a two-line entry
+        rendered as THREE rows: the height was wrong by one per entry and
+        the truncation ellipsis landed on a row that had then been
+        dropped. Both gutters have to fit inside the wrap width.
+
+        Asserted on `cell_len`, not `len`: the separator is a wide-ish
+        glyph and Rich wraps by cells.
+        """
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            panel = app.query_one("#slash-suggest")
+            await pilot.press("slash")
+            assert await settle(pilot, lambda: panel.display)
+
+            width = panel.size.width
+            rows = _panel_rows(panel)
+            for row in rows:
+                assert cell_len(row) <= width, (
+                    f"a row is {cell_len(row)} cells wide in a panel "
+                    f"{width} cells wide, so the Static will wrap it and "
+                    f"the two-line cap becomes three: {row!r}")
+            assert len(rows) == panel.size.height, (
+                f"the panel measured {panel.size.height} rows and drew "
+                f"{len(rows)}; the budget and the render disagree")
+
+    @pytest.mark.parametrize("width", [40, 54, 70, 100])
+    def test_no_command_renders_a_row_wider_than_the_panel(self, width):
+        """Every command, at four widths, with no pilot at all.
+
+        The pilot version of this could not see the defect it was written
+        for, and that is worth recording: at 80 columns only `/research`
+        has a continuation line long enough to overflow, and a bare slash
+        shows four entries that do not include it. Measured -- the
+        mutation that wraps at `width - 2` SURVIVED the pilot test and
+        dies here.
+
+        Every row is padded to the full width so the highlight is a bar,
+        so a correct row measures exactly `width`; anything more is a row
+        the Static would have re-wrapped before `no_wrap` was added, and
+        would clip after it. Widths are realistic ones: below about
+        twelve columns the gutters no longer fit and the panel has bigger
+        problems than this invariant.
+        """
+        for command in commands.all():
+            panel = SlashSuggest()
+            panel._matches = [command]
+            panel._budget(width)
+            rows = panel.render().plain.split("\n")
+            assert len(rows) <= SUGGEST_MAX_LINES, (
+                f"/{command.name} drew {len(rows)} rows at width {width}; "
+                f"the cap is {SUGGEST_MAX_LINES}")
+            for row in rows:
+                assert cell_len(row) == width, (
+                    f"/{command.name} drew a {cell_len(row)}-cell row in a "
+                    f"{width}-cell panel: {row!r}. Both gutters have to fit "
+                    f"INSIDE the wrap width, or the two-line cap becomes "
+                    f"three and the height arithmetic is wrong per entry")
+
+    @pytest.mark.asyncio
+    async def test_an_entry_too_long_for_two_lines_ends_in_an_ellipsis(self):
+        """/research is the one command whose description and flags do not
+        fit two rows at 80 columns, and the ellipsis is what says so.
+
+        `Text.truncate()` alone does NOT produce it: the overflow is in
+        the lines that were dropped, not in the line that was kept, so
+        the kept line is shorter than the width and truncate is a no-op.
+        The marker has to be appended deliberately.
+        """
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            panel = app.query_one("#slash-suggest")
+            await pilot.press("slash", "r", "e", "s", "e")
+            assert await settle(
+                pilot, lambda: [c.name for c in panel._matches] == ["research"])
+
+            rows = _panel_rows(panel)
+            assert len(rows) == 2, (
+                f"/research drew {len(rows)} rows; the cap is two")
+            assert rows[-1].rstrip().endswith("…"), (
+                f"the entry was cut and does not say so: {rows[-1]!r}. A "
+                f"line that reads as complete when it is not is worse than "
+                f"one that is visibly short")
+            assert "run the deep-research pipeline" in rows[0], (
+                "the DESCRIPTION was what got truncated; it is the half "
+                "this panel exists for, so the flags go after it")
+
+    @pytest.mark.asyncio
+    async def test_the_row_budget_drops_the_entry_that_would_not_fit(self):
+        """The cap is on ROWS, not on entries.
+
+        At 80 columns most entries wrap to two rows, so five of them would
+        be ten and the row cap is the one that bites: a bare slash offers
+        twenty-six and draws four. The fifth is DROPPED rather than
+        squeezed, and dropped from the END rather than skipped, so the
+        list stays contiguous and alphabetical.
+        """
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            panel = app.query_one("#slash-suggest")
+            await pilot.press("slash")
+            assert await settle(pilot, lambda: panel.display)
+
+            assert len(panel._matches) == len(commands.all())
+            assert panel.shown == 4, (
+                f"the panel showed {panel.shown} entries; four is what "
+                f"eight rows holds when the second, third and fourth wrap")
+            assert panel.size.height <= 8, (
+                f"the panel drew {panel.size.height} content rows past a "
+                f"budget of 8")
+            names = [c.name for c in panel._matches[:panel.shown]]
+            assert names == ["agent", "claims", "compact", "copy"], (
+                f"the visible entries are {names}; an entry that did not "
+                f"fit must end the list, not be skipped over")
+
+    @pytest.mark.asyncio
+    async def test_the_title_counts_what_was_drawn_and_what_matched(self):
+        """#30/M14: a capped list that does not say it is capped reads as
+        "this is everything".
+
+        Shown-of-MATCHED, and both are counted rather than written down --
+        a twenty-seventh command changes the bare-slash title with no edit
+        anywhere.
+        """
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            panel = app.query_one("#slash-suggest")
+
+            await pilot.press("slash")
+            assert await settle(pilot, lambda: panel.display)
+            assert panel.border_title.startswith(
+                f"4 of {len(commands.all())} "), (
+                f"the title reads {panel.border_title!r}; it has to say "
+                f"how many of the matches are being shown")
+
+            await pilot.press("c")
+            assert await settle(pilot, lambda: panel.shown == 4)
+            assert panel.border_title.startswith("4 of 4 "), (
+                f"the title reads {panel.border_title!r}; four commands "
+                f"start with c and all four are on screen, so claiming "
+                f"twenty-six candidates would be a lie about the filter")
+
+    @pytest.mark.asyncio
+    async def test_the_transcript_survives_the_panel_at_the_floor(self):
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            panel = app.query_one("#slash-suggest")
+            transcript = app.query_one("#transcript")
+            await pilot.press("slash")
+            assert await settle(pilot, lambda: panel.display)
+
+            assert panel.region.height <= 10, (
+                f"the panel took {panel.region.height} rows; the stylesheet "
+                f"caps it at 10 and the widget is supposed to budget itself "
+                f"below that, so a clip here means the budget is wrong")
+            assert transcript.size.height >= 1, (
+                "the panel squeezed the transcript out of existence at the "
+                "80x24 floor")
+
+
+class TestTheKeysWhileThePanelIsOpen:
+    """Batch 55. Enter, the arrows, tab and escape -- and what each of
+    them still does the moment the panel is not there.
+
+    The second half is the half that regresses: batch 54 made this box
+    multi-line, so an override that claimed the arrow keys unconditionally
+    would take cursor movement away from a four-row prompt and no test
+    about suggestions would notice.
+    """
+
+    @pytest.mark.asyncio
+    async def test_enter_completes_and_does_not_submit(self):
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            panel = app.query_one("#slash-suggest")
+            prompt = app.query_one("#prompt")
+            transcript = app.query_one("#transcript")
+
+            await pilot.press("slash", "c", "o", "m")
+            assert await settle(pilot, lambda: panel.display)
+            before = transcript.as_text()
+            await pilot.press("enter")
+            assert await settle(pilot, lambda: not panel.display)
+
+            assert prompt.value == "/compact ", (
+                f"enter left {prompt.value!r} in the box; it is supposed to "
+                f"complete the highlighted command and stop, so flags can "
+                f"still be typed")
+            assert transcript.as_text() == before, (
+                "the command RAN on the first enter; completing and sending "
+                "in one press is the thing this batch is not doing")
+            assert prompt.cursor_location == (0, len("/compact ")), (
+                f"the cursor is at {prompt.cursor_location}; load_text "
+                f"leaves it at the start of the document, which would put "
+                f"the next typed argument in FRONT of the command")
+
+    @pytest.mark.asyncio
+    async def test_a_second_enter_sends_it(self):
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            panel = app.query_one("#slash-suggest")
+            prompt = app.query_one("#prompt")
+
+            await pilot.press("slash", "h", "e")
+            assert await settle(pilot, lambda: panel.display)
+            await pilot.press("enter")
+            assert await settle(pilot, lambda: not panel.display)
+            await pilot.press("enter")
+            assert await settle(pilot, lambda: prompt.value == "")
+
+            assert "Commands:" in app.query_one("#transcript").as_text(), (
+                "the second enter did not dispatch the completed command")
+
+    @pytest.mark.asyncio
+    async def test_the_arrows_move_the_highlight_and_not_the_cursor(self):
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            panel = app.query_one("#slash-suggest")
+            prompt = app.query_one("#prompt")
+
+            await pilot.press("slash", "c")
+            assert await settle(pilot, lambda: panel.display)
+            where = prompt.cursor_location
+            assert panel.chosen.name == "claims"
+
+            await pilot.press("down")
+            assert await settle(pilot, lambda: panel.chosen.name == "compact")
+            await pilot.press("down")
+            assert await settle(pilot, lambda: panel.chosen.name == "copy")
+            await pilot.press("up")
+            assert await settle(pilot, lambda: panel.chosen.name == "compact")
+
+            assert prompt.cursor_location == where, (
+                f"the caret moved to {prompt.cursor_location} while the "
+                f"panel was being navigated")
+
+    @pytest.mark.asyncio
+    async def test_the_highlight_wraps_at_both_ends(self):
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            panel = app.query_one("#slash-suggest")
+            await pilot.press("slash", "c")
+            assert await settle(pilot, lambda: panel.display)
+
+            await pilot.press("up")
+            assert await settle(pilot, lambda: panel.chosen.name == "critic"), (
+                "up from the first entry did not wrap to the last")
+            await pilot.press("down")
+            assert await settle(pilot, lambda: panel.chosen.name == "claims")
+
+    @pytest.mark.asyncio
+    async def test_the_arrows_still_move_the_cursor_with_no_panel(self):
+        """Batch 54's four-row prompt, still navigable.
+
+        A `PromptInput` claims `up`/`down` by overriding the ACTIONS, not
+        by re-binding the keys, and the override has to hand them straight
+        back the moment there is nothing to navigate. This is what goes
+        red if it does not.
+        """
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            panel = app.query_one("#slash-suggest")
+            prompt = app.query_one("#prompt")
+
+            prompt.value = "first line\nsecond line"
+            await pump(pilot)
+            assert not panel.display
+            prompt.move_cursor((1, 3))
+            await pilot.pause()
+
+            await pilot.press("up")
+            await pilot.pause()
+            assert prompt.cursor_location == (0, 3), (
+                f"up left the caret at {prompt.cursor_location}; batch 54's "
+                f"multi-line prompt lost its cursor movement")
+
+    @pytest.mark.asyncio
+    async def test_tab_completes_while_it_is_open(self):
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            panel = app.query_one("#slash-suggest")
+            prompt = app.query_one("#prompt")
+
+            await pilot.press("slash", "n")
+            assert await settle(pilot, lambda: panel.display)
+            await pilot.press("tab")
+            assert await settle(pilot, lambda: prompt.value == "/new ")
+            assert app.focused is prompt, (
+                "tab moved focus as well as completing")
+
+    @pytest.mark.asyncio
+    async def test_tab_still_moves_focus_with_no_panel(self):
+        """`check_action` returns None rather than False.
+
+        False DISABLES the binding; None declines it and lets the press
+        carry on to the focus system, which is what tab has always done in
+        this box.
+        """
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            prompt = app.query_one("#prompt")
+            prompt.focus()
+            await pilot.pause()
+
+            await pilot.press("tab")
+            await pump(pilot)
+            assert app.focused is not prompt, (
+                "tab was swallowed with no suggestions open; it is supposed "
+                "to move focus exactly as it did before batch 55")
+
+    @pytest.mark.asyncio
+    async def test_escape_hides_it_and_the_next_keystroke_leaves_it_hidden(self):
+        """A dismissal that one more character undoes is not a dismissal.
+
+        The latch is spent when the line stops being a bare slash token --
+        typing a space here -- so a deliberate `/` afterwards offers
+        again.
+        """
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            panel = app.query_one("#slash-suggest")
+
+            await pilot.press("slash", "c")
+            assert await settle(pilot, lambda: panel.display)
+            await pilot.press("escape")
+            assert await settle(pilot, lambda: not panel.display)
+
+            await pilot.press("o")
+            await pump(pilot)
+            assert not panel.display, (
+                "one keystroke brought the dismissed panel back, so escape "
+                "buys nothing")
+
+            await pilot.press("space")
+            await pump(pilot)
+            await pilot.press("backspace")
+            assert await settle(pilot, lambda: panel.display), (
+                "the latch outlived the line it was dismissing")
+
+
+@pytest.mark.asyncio
+async def test_the_panel_opening_does_not_scroll_the_transcript_away():
+    """Measured, and it is the defect a naive implementation ships.
+
+    A panel opening under the transcript takes rows from it, and textual
+    does NOT re-pin the scroll on shrink: `scroll_y` stayed at 41 while
+    `max_scroll_y` grew 41 -> 53, so the newest twelve lines of the
+    conversation left the screen the moment a slash was typed and came
+    back only when the panel closed. Whether the reader was at the bottom
+    is knowable only BEFORE the relayout, which is why app.py captures it
+    there.
+    """
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        panel = app.query_one("#slash-suggest")
+        transcript = app.query_one("#transcript")
+        for index in range(60):
+            transcript.write_system(f"line {index:02d}")
+        await pilot.pause()
+        assert transcript.scroll_offset.y >= transcript.max_scroll_y
+
+        await pilot.press("slash")
+        assert await settle(pilot, lambda: panel.display)
+        await pilot.pause()
+
+        assert transcript.scroll_offset.y >= transcript.max_scroll_y, (
+            f"the transcript is parked {transcript.max_scroll_y - transcript.scroll_offset.y} "
+            f"rows above its end, so the newest lines of the conversation "
+            f"scrolled out of view when the panel opened")

@@ -79,8 +79,8 @@ from tui.screens import (
 from security import posture
 from tui.widgets import (
     CONVERSATION_ROLES, EffortRaven, GoalBanner, PostureBadge, PromptInput,
-    RavenPanel, ResearchProgress, ThinkingIndicator, TodoPanel, Transcript,
-    UsageLine,
+    RavenPanel, ResearchProgress, SlashSuggest, ThinkingIndicator, TodoPanel,
+    Transcript, UsageLine,
 )
 
 logger = logging.getLogger(__name__)
@@ -455,6 +455,12 @@ class VenastineApp(App):
                                         id="thinking-indicator")
                 if self._todo_position == "bottom":
                     yield TodoPanel(id="todo-panel")
+                # Batch 55. LAST before the prompt, and that is the whole
+                # placement: #prompt is dock: bottom, so the last widget in
+                # the flow lands directly above it and the panel opens
+                # upwards without a layer, an offset or a screen. Hidden
+                # until a slash is typed, ThinkingIndicator-style.
+                yield SlashSuggest(id="slash-suggest")
                 # Batch 54. Wraps and grows to four rows as it is typed,
                 # then collapses on submit -- see PromptInput for why this
                 # is a TextArea and what `priority=True` buys on enter.
@@ -502,7 +508,13 @@ class VenastineApp(App):
         for warning in self._startup_warnings:
             self._transcript.write_error(warning)
         self._transcript.write_system("Type /help for commands.")
-        self.query_one("#prompt", PromptInput).focus()
+        prompt = self.query_one("#prompt", PromptInput)
+        # Batch 55. Handed over once, here, rather than looked up per
+        # keystroke: app.py stays the thing that introduces two widgets to
+        # each other, and a PromptInput built bare (which the suite does)
+        # keeps `suggest = None` and behaves exactly as it did in batch 54.
+        prompt.suggest = self.query_one("#slash-suggest", SlashSuggest)
+        prompt.focus()
         if self.effort and self._effort_named:
             # A persisted effort level was trusted as-is and sent on every
             # turn, unlike the sibling tui.theme three lines up which gets
@@ -876,6 +888,37 @@ class VenastineApp(App):
             pass
 
     # -- input ---------------------------------------------------------------
+
+    def on_prompt_input_suggestions_changed(
+            self, event: PromptInput.SuggestionsChanged) -> None:
+        """Re-render the slash panel, and keep the transcript where it was.
+
+        The panel comes off the event rather than out of a query: the
+        prompt was handed it at mount, and #104's rule would otherwise
+        make this raise the moment a modal is on top (a slash command that
+        pushes a screen clears `.value`, which posts one of these).
+
+        The re-pin is the part that is not obvious. Measured: a panel
+        opening under the transcript takes rows from it and textual does
+        NOT re-pin the scroll -- `scroll_y` stayed at 41 while
+        `max_scroll_y` grew 41 -> 53, so the newest twelve lines of the
+        conversation scrolled silently out of view and came back only when
+        the panel closed. Whether the reader was at the bottom is knowable
+        only BEFORE the relayout, which is why it is captured here and
+        restored after, and why a reader who had deliberately scrolled up
+        is left where they were.
+        """
+        panel = event.prompt.suggest
+        if panel is None:
+            return
+        try:
+            transcript = self._transcript
+            pinned = transcript.scroll_offset.y >= transcript.max_scroll_y
+        except NoMatches:                      # a modal is on top (#104)
+            transcript, pinned = None, False
+        panel.offer(event.matches)
+        if pinned:
+            self.call_after_refresh(transcript.scroll_end, animate=False)
 
     def on_prompt_input_submitted(self, event: PromptInput.Submitted) -> None:
         text = event.value.strip()

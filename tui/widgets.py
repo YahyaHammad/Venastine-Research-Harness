@@ -6,6 +6,7 @@ or reaches into harness state; tui/app.py feeds them.
 """
 
 from rich import box
+from rich.console import Console
 from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
@@ -17,6 +18,7 @@ from textual.widgets import RichLog, Static, TextArea
 from prompts.system_prompts import pass_label
 
 from tui import diffs, markdown, ravens, themes
+from tui.commands import registry as commands
 
 # Animation cadence. Slow enough to read, and paused outright while tokens
 # are streaming -- a redraw loop competing with token deltas is the one
@@ -37,6 +39,20 @@ THINKING_INDENT = "  "
 # has bigger problems than streaming cadence, and an unmeasurable width
 # (a bare-built test widget, a widget before mount) reads as 0.
 MIN_WRAP_WIDTH = 20
+
+# Batch 55, the slash-command suggestion panel. The two caps are a pair:
+# five entries is the list a reader takes in at a glance, eight rows is
+# what leaves the transcript readable at the 24-row floor, and at 80
+# columns most entries wrap to two rows so the ROW cap is usually the one
+# that bites. See SlashSuggest for why the gutters are inside the wrap.
+SUGGEST_SEP = " ● "
+SUGGEST_ELLIPSIS = "…"
+SUGGEST_LEAD = "  "
+SUGGEST_CONT = "    "
+SUGGEST_MAX_ENTRIES = 5
+SUGGEST_MAX_ROWS = 8
+SUGGEST_MAX_LINES = 2
+SUGGEST_HIGHLIGHT = "reverse"
 
 # §41. The inline diff's furniture, owned by the renderer for the same
 # reason the thinking bar is: `_entries` keeps the canonical block, so
@@ -646,8 +662,206 @@ class ResearchProgress(Static):
         self.update(body)
 
 
+class SlashSuggest(Static):
+    """The commands you could be typing, above the prompt (batch 55).
+
+    Twenty-six slash commands were reachable only by remembering that
+    `/help` exists -- the mount banner says so once and then scrolls away.
+    This lists the ones whose name starts with what has been typed, and
+    `tui/commands.py`'s `matching()` is what it lists, so the panel and
+    `/help` read one registry and cannot drift.
+
+    A widget in `#main`, NOT a screen. `#prompt` is `dock: bottom`, so a
+    sibling yielded after the transcript lands directly above it -- the
+    ThinkingIndicator/TodoPanel shape, hidden until it has something to
+    say, `height: auto` so it costs nothing while hidden.
+
+    Three things here are load-bearing.
+
+    **It owns the selection, not the prompt.** How many entries fit is a
+    function of the RENDERED WIDTH, and only the thing that draws knows
+    that. Split the two and the prompt can highlight a sixth entry the
+    panel had no room for -- an invisible selection that `enter` would
+    then complete. `chosen` and `move()` are the whole interface.
+
+    **The budget is on ROWS.** At most SUGGEST_MAX_ENTRIES entries and at
+    most SUGGEST_MAX_ROWS rows, whichever binds first, stopping at the
+    first entry that would overflow rather than skipping it -- a list that
+    skipped would no longer be alphabetical and the order would read as
+    arbitrary. At 80 columns most entries wrap to two rows, so the row cap
+    is usually the one that bites: `/` shows four.
+
+    **A Static RE-WRAPS what you already wrapped.** The first draft wrapped
+    each entry to `width - 2` and then drew continuation lines under a
+    four-space gutter, so a two-line entry rendered as THREE rows, the
+    height arithmetic was wrong by one per entry, and the ellipsis ended up
+    on a row that had already been dropped. Both gutters have to fit inside
+    the wrap width, and the outer Text carries `no_wrap` / `overflow="crop"`
+    so that a miscalculation clips where it can be seen instead of
+    reflowing where it cannot. The pin is a test that no rendered row is
+    wider than the panel.
+
+    A related trap in the same family: `Text.truncate()` on a WRAPPED line
+    does nothing. The overflow is in the lines that were dropped, not in
+    the line that was kept, so the line reads as complete when it is not --
+    the ellipsis has to be appended deliberately.
+
+    The highlight is `reverse` rather than a palette role. TodoPanel's
+    caution applies (only the theme-invariant roles are safe across all
+    fourteen themes) and reverse is invariant by construction: it swaps
+    whatever the theme already chose, so it adds no colour for
+    tests/test_themes.py's contrast floors to fail to measure.
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        # EXPLICIT, TodoPanel's reason: nothing sets a list until the user
+        # types a slash, which on many sessions is never, and a visible
+        # empty box is worse than the thing it advertises.
+        self.display = False
+        self._matches: list = []
+        self._selected = 0
+        self._width = 0
+        # Per entry, the rendered lines. Computed in get_content_height,
+        # where the width arrives before the first paint.
+        self._groups: list = []
+
+    # -- what the prompt drives ---------------------------------------------
+
+    def offer(self, matches: list) -> None:
+        """Replace the list, hiding the panel when it is empty.
+
+        `refresh(layout=True)`, not `update()`: the render is a function of
+        the width, so the panel has to be re-MEASURED, not just repainted.
+        """
+        self._matches = list(matches)
+        self._selected = 0
+        self._groups = []
+        self.display = bool(self._matches)
+        self.refresh(layout=True)
+
+    def move(self, delta: int) -> None:
+        """Move the highlight, wrapping at both ends."""
+        self._ensure()
+        if not self._groups:
+            return
+        self._selected = (self._selected + delta) % len(self._groups)
+        self.refresh()
+
+    @property
+    def chosen(self):
+        """The highlighted command, or None when nothing is offered.
+
+        Only ever one of the entries that FIT -- see the class docstring.
+        """
+        self._ensure()
+        if not self.display or not self._groups:
+            return None
+        return self._matches[min(self._selected, len(self._groups) - 1)]
+
+    @property
+    def shown(self) -> int:
+        """How many entries the last measurement had room for."""
+        self._ensure()
+        return len(self._groups)
+
+    def _ensure(self) -> None:
+        """Measure now if a layout pass has not happened yet.
+
+        `offer()` clears the groups and the next layout recomputes them, but
+        a key pressed in between -- or a test that offers and asks in one
+        breath -- would otherwise see an empty list and no selection.
+        """
+        if not self._groups and self._matches and self._width:
+            self._budget(self._width)
+
+    # -- measuring -----------------------------------------------------------
+
+    def _entry(self, command, inner: int) -> list:
+        """One command's rendered lines, at most SUGGEST_MAX_LINES of them.
+
+        `/name SEP summary  usage`, in that order: the reverse order pushes
+        the DESCRIPTION off the entry for the two commands whose flags are
+        long, and the description is the half this panel exists for. The
+        flags are what truncates.
+        """
+        body = "/" + command.name + SUGGEST_SEP + command.summary
+        if command.usage:
+            body += "  " + command.usage
+        lines = list(Text(body).wrap(Console(width=inner), inner, no_wrap=False))
+        if len(lines) > SUGGEST_MAX_LINES:
+            lines = lines[:SUGGEST_MAX_LINES]
+            # crop THEN append: truncate(overflow="ellipsis") is a no-op
+            # here, because this line is not the one that overflowed.
+            lines[-1].truncate(max(0, inner - 1), overflow="crop")
+            lines[-1].append(SUGGEST_ELLIPSIS)
+        return lines
+
+    def _budget(self, width: int) -> None:
+        """Which entries fit, and the title that says how many.
+
+        No minimum width: a terminal too narrow to read is still bounded
+        here, because the two-line cap holds whatever the wrap does, so the
+        panel degrades to something short rather than to something
+        unbounded. MIN_WRAP_WIDTH's posture, one line up the same street.
+        """
+        inner = max(1, width - len(SUGGEST_CONT))
+        groups, used = [], 0
+        for command in self._matches[:SUGGEST_MAX_ENTRIES]:
+            lines = self._entry(command, inner)
+            if used + len(lines) > SUGGEST_MAX_ROWS:
+                break
+            groups.append(lines)
+            used += len(lines)
+        self._groups = groups
+        self._width = width
+        if self._selected >= len(groups):
+            self._selected = 0
+        # #30/M14: a capped list that does not say it is capped reads as
+        # "this is everything". Shown-of-MATCHED rather than shown-of-all,
+        # because "4 of 26" under a typed `/c` would claim twenty-two
+        # candidates that do not exist. Both numbers are counted, never
+        # written down -- register a twenty-seventh command and the bare
+        # `/` title says 27 with no edit here.
+        title = f"{len(groups)} of {len(self._matches)} · /help for all"
+        if self.border_title != title:
+            self.border_title = title
+
+    def get_content_height(self, container, viewport, width: int) -> int:
+        # Textual hands the width here BEFORE the first paint, which is the
+        # only place it is knowable while the panel is still hidden.
+        self._budget(width)
+        return sum(len(group) for group in self._groups)
+
+    # -- drawing -------------------------------------------------------------
+
+    def render(self):
+        width = self.size.width or self._width
+        if width and (width != self._width or not self._groups):
+            self._budget(width)
+        rows = []
+        for index, group in enumerate(self._groups):
+            for offset, line in enumerate(group):
+                gutter = SUGGEST_LEAD if offset == 0 else SUGGEST_CONT
+                row = Text(gutter, no_wrap=True, overflow="crop")
+                row.append_text(line)
+                # Padded to the full width so the highlight is a BAR rather
+                # than a stripe the length of the text.
+                row.pad_right(max(0, width - row.cell_len))
+                if index == self._selected:
+                    row.stylize(SUGGEST_HIGHLIGHT)
+                rows.append(row)
+        body = Text(no_wrap=True, overflow="crop")
+        for position, row in enumerate(rows):
+            if position:
+                body.append("\n")
+            body.append_text(row)
+        return body
+
+
 class PromptInput(TextArea):
-    """The box the user types into. Wraps, and grows to four rows.
+    """The box the user types into. Wraps, grows to four rows, and since
+    batch 55 offers the slash commands while one is being typed.
 
     It was a plain `Input` until batch 54, and an `Input` is single-line by
     construction -- `height: 3` in its own DEFAULT_CSS, one text row, no
@@ -660,7 +874,7 @@ class PromptInput(TextArea):
     two are the feature: a long line wraps and the box gets taller on its
     own, with no key pressed. `ctrl+j` is for a break the user WANTS.
 
-    Three things here are load-bearing.
+    Four things here are load-bearing.
 
     `value`. `TextArea` calls it `text`, and roughly sixty test sites plus
     the app's own submit handler say `.value`. An alias is a one-line
@@ -687,10 +901,26 @@ class PromptInput(TextArea):
     guess and is a dead end: fed `ESC CR` the parser yields no key at all,
     and a second one behind it degrades to `escape`, `enter`.
 
+    **`load_text` is where typing is told apart from assignment** (batch
+    55), and it is the seam the whole suggestion panel hangs off. Setting
+    `.value` posts `TextArea.Changed` exactly as a keystroke does --
+    measured -- so a panel driven straight off that message would open in
+    the ~73 `query_one("#prompt").value = "/..."` sites across four test
+    files and turn each one's single `press("enter")` into a COMPLETION
+    instead of a dispatch. The line to draw is not a test accommodation:
+    assignment is the API, typing is the user, and textual draws the same
+    line itself -- `_replace_via_keyboard`'s docstring says "as opposed to
+    the API". That method covers inserts only (backspace does not go
+    through it, measured), and this panel must react to deletions, so the
+    seam is `load_text` instead: the single public funnel behind both
+    `.text =` and `.value =`.
+
     `tab_behavior` stays at its "focus" default, deliberately. Under
     "indent" `TextArea._on_key` also swallows `escape` (it focuses the
     next widget), and tab/escape behaving as they did under `Input` is
-    worth more here than tab-indenting a chat message.
+    worth more here than tab-indenting a chat message. Batch 55 spends
+    both keys, but only while the panel is open: `check_action` hands them
+    back to the focus system and to nobody the rest of the time.
 
     The placeholder is the border TITLE because `TextArea` has no
     placeholder at all -- no parameter, no attribute. Taking it as a
@@ -702,7 +932,18 @@ class PromptInput(TextArea):
         Binding("enter", "submit", "Submit", show=False, priority=True),
         Binding("ctrl+j", "newline", "Newline", show=False),
         Binding("shift+enter", "newline", "Newline", show=False),
+        # Both gated by check_action, so with no panel open they are the
+        # keys they have always been: tab moves focus, escape reaches
+        # whoever wants it.
+        Binding("tab", "complete", "Complete", show=False),
+        Binding("escape", "dismiss_suggestions", "Dismiss", show=False),
     ]
+
+    # CLASS attributes, not set in __init__: `load_text` runs during
+    # TextArea.__init__, before any assignment of ours could have happened.
+    suggest = None          # the SlashSuggest panel; app.py hands it over
+    _api_edit = False       # the next Changed came from .value, not a key
+    _dismissed = False      # escape latched the panel shut
 
     class Submitted(Message):
         """Posted when enter is pressed. `Input.Submitted`'s shape.
@@ -724,6 +965,24 @@ class PromptInput(TextArea):
         def control(self) -> "PromptInput":
             return self.prompt
 
+    class SuggestionsChanged(Message):
+        """The command list to offer, after a keystroke (batch 55).
+
+        A message rather than the prompt writing to the panel directly, so
+        app.py stays the one place that touches both this and the
+        transcript -- which it has to, because a panel opening SHRINKS the
+        transcript and textual does not re-pin a scroll on shrink.
+        """
+
+        def __init__(self, prompt: "PromptInput", matches: list) -> None:
+            self.prompt = prompt
+            self.matches = matches
+            super().__init__()
+
+        @property
+        def control(self) -> "PromptInput":
+            return self.prompt
+
     def __init__(self, placeholder: str = "", **kwargs) -> None:
         super().__init__(soft_wrap=True, show_line_numbers=False, **kwargs)
         self.placeholder = placeholder
@@ -737,11 +996,95 @@ class PromptInput(TextArea):
     def value(self, new_value: str) -> None:
         self.text = new_value
 
+    # -- the suggestion panel -----------------------------------------------
+
+    def load_text(self, text: str) -> None:
+        # See the docstring: this is the API half of the API/keyboard
+        # split, and `.value =` reaches it through `.text =`.
+        self._api_edit = True
+        super().load_text(text)
+
+    def on_text_area_changed(self, event: TextArea.Changed) -> None:
+        if self._api_edit:
+            # Assignment is not typing. It also CLOSES the panel, which is
+            # what makes `event.prompt.value = ""` on submit tidy up.
+            self._api_edit = False
+            self._dismissed = False
+            self.post_message(self.SuggestionsChanged(self, []))
+            return
+        matches = commands.matching(self.text)
+        if not matches:
+            # Nothing to dismiss any more, so the latch is spent. This is
+            # what lets a dismissed panel come back: type a space (or clear
+            # the line) and the next bare slash token offers again.
+            self._dismissed = False
+        self.post_message(
+            self.SuggestionsChanged(self, [] if self._dismissed else matches))
+
+    def _panel_open(self) -> bool:
+        return self.suggest is not None and self.suggest.display
+
+    def _complete(self) -> bool:
+        """Put the highlighted command in the box. True if one was taken."""
+        if not self._panel_open():
+            return False
+        command = self.suggest.chosen
+        if command is None:
+            return False
+        # The TRAILING SPACE is doing two jobs: `matching()` is empty once
+        # the line has whitespace in it, so the panel closes on its own,
+        # and deleting that one character is what brings it back.
+        self.value = "/" + command.name + " "
+        # load_text leaves the cursor at the START of the document, which
+        # would have the next typed argument land in front of the command.
+        self.move_cursor(self.document.end)
+        return True
+
+    def check_action(self, action: str, parameters) -> bool | None:
+        # None, not False: False would DISABLE the key, where None declines
+        # it and lets the press carry on to the focus system (tab) or to
+        # nobody (escape) -- which is what both did before batch 55.
+        if action in ("complete", "dismiss_suggestions"):
+            return True if self._panel_open() else None
+        return True
+
+    # -- actions -------------------------------------------------------------
+
     def action_submit(self) -> None:
+        # Enter ALWAYS completes while the panel is open, so a fully typed
+        # /help takes two presses. The alternative -- submit when the typed
+        # token already equals the highlighted name -- is a coin flip from
+        # the user's side and stops being well defined the day two commands
+        # share a prefix.
+        if self._complete():
+            return
         self.post_message(self.Submitted(self, self.text))
 
     def action_newline(self) -> None:
         self.insert("\n")
+
+    def action_complete(self) -> None:
+        self._complete()
+
+    def action_dismiss_suggestions(self) -> None:
+        self._dismissed = True
+        self.post_message(self.SuggestionsChanged(self, []))
+
+    def action_cursor_up(self, select: bool = False) -> None:
+        # `select` is shift+up, which is a text selection and stays one.
+        # Everything else: batch 54 made this box multi-line, so the arrow
+        # keys have to go back to moving the CURSOR the moment the panel
+        # is closed.
+        if not select and self._panel_open():
+            self.suggest.move(-1)
+            return
+        super().action_cursor_up(select)
+
+    def action_cursor_down(self, select: bool = False) -> None:
+        if not select and self._panel_open():
+            self.suggest.move(1)
+            return
+        super().action_cursor_down(select)
 
 
 class Transcript(RichLog):

@@ -17,6 +17,28 @@
     padding: 0 1;
 }
 
+/* Batch 55, the slash-command suggestions. Directly above the prompt
+   because it is the last child in #main's flow and #prompt is docked out
+   of that flow -- so it opens UPWARDS with no layer and no offset.
+
+   `height: auto` with a `max-height` again, and the cap is arithmetic:
+   SUGGEST_MAX_ROWS is 8, plus two border rows is 10, which at the 24-row
+   floor leaves the transcript nine rows while the panel is up. The widget
+   budgets itself to those 8 rows, so the cap is a backstop rather than a
+   clip -- if it ever clips, the budget is wrong.
+
+   No `overflow-y`. A panel that scrolled would be a second thing to
+   navigate inside a thing being navigated. */
+#slash-suggest {
+    height: auto;
+    max-height: 10;
+    border: solid $primary;
+    padding: 0 1;
+    /* The count, `4 of 26 - /help for all`. Muted for #prompt's reason:
+       it is a hint about the list, not a heading over it. */
+    border-title-color: $text-muted;
+}
+
 /* Batch 54. `height: auto` with a `max-height` -- batch 49's shape, for
    batch 49's reason. A definite height would reserve four rows whether or
    not anything is typed, and this box's whole point is that it is one row

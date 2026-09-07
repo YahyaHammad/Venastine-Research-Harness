@@ -41,6 +41,33 @@ class CommandRegistry:
     def all(self) -> list[SlashCommand]:
         return [self._commands[n] for n in self.names()]
 
+    def matching(self, text: str) -> list[SlashCommand]:
+        """Commands whose name starts with the token in `text`.
+
+        The suggestion panel's source, and it reads `all()` so the panel and
+        `/help` cannot disagree about what exists -- register a command
+        anywhere and both change, which is the whole reason the matching
+        lives here rather than in the widget.
+
+        Empty unless `text` is a BARE slash token: leading whitespace
+        allowed (`dispatch` tolerates it, so `"  /help"` runs and had
+        better offer), a leading `/`, and NO whitespace after that.
+
+        `lstrip`, not `strip`, and the difference is a bug this had: a
+        TRAILING space survives `strip()`, so `"/copy "` read as `"/copy"`
+        and the panel stayed open over a line that had already moved on to
+        its arguments. Once a space is typed there is nothing left to
+        complete, whichever end of the token it is on.
+
+        Lowercased for the same reason `dispatch` lowercases: `/HELP` runs,
+        so `/HEL` had better offer it.
+        """
+        token = text.lstrip()
+        if not token.startswith("/") or any(c.isspace() for c in token):
+            return []
+        prefix = token[1:].lower()
+        return [c for c in self.all() if c.name.startswith(prefix)]
+
     def dispatch(self, app, raw: str) -> bool:
         """Run the command in `raw` (a line starting with '/').
 
