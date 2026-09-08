@@ -3415,10 +3415,12 @@ shows a spawn from that path.
 **Why nothing catches it:** `activity=None` is a fully supported value on every signature — it
 is what the CLI and the pipeline pass — so a dropped argument is indistinguishable from a shell
 that is not watching. `tests/test_agent_activity.py::TestSpawnSubagentReportsItself` covers the
-`spawn_subagent` route specifically; the two `dispatch` sites in `core/loop.py` are pinned by
-`test_loop_tool_dispatch.py`'s `assert_called_once_with`, which names `activity=None`
-explicitly. **That assertion is the only thing standing between a dropped kwarg and silence.**
-If you widen `dispatch()` again, add the name there too.
+`spawn_subagent` route specifically; the `dispatch` site in `core/loop.py` (there were two when
+this was written -- batch 60 merged them) is pinned by `test_loop_tool_dispatch.py`'s
+`assert_called_once_with`, which names `activity=None` explicitly. **That assertion is the only
+thing standing between a dropped kwarg and silence.** If you widen `dispatch()` again, add the
+name there too -- in `test_loop_tool_dispatch.py` (three sites) and `test_e2e.py` (one), all of
+which spell the call out in full.
 
 ### Dropping `activity=activity` from `subagent_tool.run()`'s inner call
 
@@ -3478,3 +3480,54 @@ drawn entirely off screen.
 **Fix:** `test_what_does_not_fit_can_be_scrolled_to` fails. Note its sibling
 `test_a_full_sidebar_overflows_the_24_row_floor` is a PREMISE guard — it passes either way, and
 exists so the fixture cannot quietly stop overflowing.
+
+### A second `registry.dispatch()` call site in `_run()`
+
+**Symptom:** an approval the user already gave is refused with "requires approval and was not
+given" and no prompt — the second spawn of one agent in a turn, a subagent using a tool it was
+ticked for, a `--grant-tools` name in an unattended run.
+
+**Fix:** `test_grants.py::test_the_loops_authorization_cannot_outlive_one_tool_call` fails on
+the call-site count, and `TestAnAnsweredCallActuallyRuns` fails on the outcome. This is the same
+defect returning: two sites that must agree about authorization, where the one an answered call reaches
+is the one that forgets to say so. Keep it at one.
+
+### Dropping `signoff=` from that dispatch call
+
+**Symptom:** nothing visible. The second child of one sign-off runs with NOTHING granted while
+the first got the ticked set, so it re-prompts for tools the user already authorised.
+
+**Fix:** `test_the_second_spawn_is_handed_the_remembered_signoff` fails. It spies on `dispatch`
+with `wraps=` rather than replacing it, because the claim is about the arguments AND the gate
+has to stay live.
+
+### Turning `authorized_call` back into a boolean
+
+**Symptom:** none, today — and that is the entire point. Hoisting a bool out of `for call in
+response.tool_calls:` would let one approval cover every later call in the turn, and it survives
+every behavioural test, because the three other reasons `needs_approval` is turned off are each
+short-circuited inside `dispatch()` before its gate.
+
+**Fix:** `test_the_loops_authorization_cannot_outlive_one_tool_call` fails — it reads the source,
+which is the only place the difference is visible. The ID also makes the mistake fail CLOSED: a
+hoisted variable holds the previous call's id, so the comparison fails and the call is denied.
+
+### Making `approval_callback` unconditional at that call site
+
+**Symptom:** none today, for the same reason as above — and a silent "approve everything" the
+moment a fourth reason to skip the prompt is added.
+
+**Fix:** the same structural test fails on `isinstance(callback, ast.IfExp)`. NOTE for anyone
+mutation-testing this line: replacing only the inner expression leaves `approval_callback=(`
+unbalanced, and a collection error scores as a kill while measuring nothing. Mutate the whole
+keyword argument.
+
+### A gated tool test that does not raise `ToolPermissions`
+
+**Symptom:** a non-widening test passes without ever reaching the approval gate.
+
+**Fix:** nothing fails, which is why this is written down. `shell` and `write` are disabled in
+the shipped config, so `is_tool_allowed()` refuses them first and the result is
+`"... is disabled by policy"` rather than an approval outcome. `test_grants._raise_policy` exists
+for this; the first draft of `TestAnAnswerCoversOneCallOnly` was green against a gate it never
+touched.
