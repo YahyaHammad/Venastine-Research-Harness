@@ -3403,3 +3403,78 @@ about `_entries`, every assertion about `safe_commit_limit`, and every test that
 answer whole. It is visible only in the equality between a streamed answer and a written one —
 which is why that test is parametrised over shapes rather than written once, and why the new
 case is pinned at the prefix length that reproduces it rather than at a shape that might.
+
+
+## Batch 59 — the agent activity channel and the scrolling sidebar
+
+### Dropping `activity` from a `registry.dispatch()` call site
+
+**Symptom:** nothing fails. The suite stays green and the sidebar's agent panel simply never
+shows a spawn from that path.
+
+**Why nothing catches it:** `activity=None` is a fully supported value on every signature — it
+is what the CLI and the pipeline pass — so a dropped argument is indistinguishable from a shell
+that is not watching. `tests/test_agent_activity.py::TestSpawnSubagentReportsItself` covers the
+`spawn_subagent` route specifically; the two `dispatch` sites in `core/loop.py` are pinned by
+`test_loop_tool_dispatch.py`'s `assert_called_once_with`, which names `activity=None`
+explicitly. **That assertion is the only thing standing between a dropped kwarg and silence.**
+If you widen `dispatch()` again, add the name there too.
+
+### Dropping `activity=activity` from `subagent_tool.run()`'s inner call
+
+**Symptom:** depth-1 spawns still draw; depth 2 disappears.
+
+**Fix:** `tests/test_agent_activity.py::test_the_sink_is_passed_DOWN_so_the_grandchild_can_report`
+fails. It asserts on the kwarg the child run receives rather than on a rendered row, because a
+depth-2 row needs two nested runs to observe and the argument is the actual contract.
+
+### Replacing `agent_activity.span()`'s context manager with an enter/exit pair
+
+**Symptom:** the panel is correct until a subagent raises, then keeps a row forever.
+
+**Fix:** three tests go red — `test_a_raising_run_still_exits`,
+`test_a_spawn_that_raises_still_closes_its_span`, and
+`test_a_sink_that_raises_does_not_take_down_the_run`. Do not "simplify" the `finally`; it is the
+reason the module exists as more than a dataclass.
+
+### Adding a name to `_INJECTABLE_PARAMS` and forgetting `dispatch()`'s `available` map
+
+**Symptom:** `KeyError` at the first dispatch of any tool declaring it.
+
+That is deliberate (the map's own comment): an explicit map fails loudly where a ternary
+mis-injected silently. Both places, always.
+
+### Six `fake_dispatch` stubs now take `**_run_scoped`
+
+They enumerated every kwarg, so each new injectable name broke them all at once — which is the
+coupling `tools/registry.py`'s comment says `dispatch()` should not have. If you write a new
+dispatch stub, take `**_run_scoped` rather than spelling the list.
+
+### `app._activity` on a bare-built `VenastineApp`
+
+**Symptom:** `AttributeError: '_Bare' object has no attribute '_activity'` from
+`run_agent_turn` or `run_one_shot`.
+
+Tests in `test_skills.py` and `test_catalog_advertisement.py` build an app with
+`_Bare.__new__(_Bare)` and set the attributes the path needs. A new attribute read by a run site
+belongs in those stubs. The stub apps in `memories/tui_commands.py`'s tests are handled the
+other way — those call sites use `getattr(app, "_activity", None)`, because a `/summary` must
+not depend on a sidebar widget existing.
+
+### Restoring `max-height` on `#todo-panel` or `#research-progress`
+
+**Symptom:** rows vanish with no scrollbar anywhere able to reach them.
+
+**Fix:** `test_tui.py::TestTheSidebarScrolls::test_no_sidebar_panel_caps_itself_into_a_silent_clip`
+fails. A `Static` never reports content taller than its own box, so a `max-height` on one is a
+CLIP, not a bound — EP3, twice. Asserted through the style rather than by drawing, because the
+symptom is invisible: the rows do not overflow, they cease to exist.
+
+### Removing `overflow-y: auto` from `#sidebar`
+
+**Symptom:** on a 24-row terminal with a checklist and a research run up, the research panel is
+drawn entirely off screen.
+
+**Fix:** `test_what_does_not_fit_can_be_scrolled_to` fails. Note its sibling
+`test_a_full_sidebar_overflows_the_24_row_floor` is a PREMISE guard — it passes either way, and
+exists so the fixture cannot quietly stop overflowing.

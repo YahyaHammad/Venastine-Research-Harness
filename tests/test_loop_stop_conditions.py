@@ -90,7 +90,13 @@ def test_stop_condition_2_max_steps_call_count_equals_max_steps(mocker):
 
     def fake_dispatch(name, params, context=None, approval_callback=None,
                       parent_run=None, response_channel=None,
-                      memory=None):
+                      memory=None,
+                      # Batch 59: run-scoped values this stub does not care
+                      # about. Spelling every injectable name out made a
+                      # handful of tests break each time one was added,
+                      # which is the coupling registry.py's own comment
+                      # says dispatch() should not have.
+                      **_run_scoped):
         dispatch_calls["n"] += 1
         return {"result": "ok"}
 

@@ -52,6 +52,7 @@ from memories.tui_commands import register_memory_commands
 from project_init.tui_commands import register_init_commands
 from skills.tui_commands import register_skill_commands
 from core import config_loader
+from core.agent_activity import AgentActivity
 from core.approval import RunAuthorization
 from core.client import api_initialization, effort_levels_for_model
 from core.loop import (
@@ -79,6 +80,7 @@ from tui.screens import (
 )
 from security import posture
 from tui.widgets import (
+    AgentPanel,
     CONVERSATION_ROLES, EffortRaven, GoalBanner, PostureBadge, PromptInput,
     RavenPanel, ResearchProgress, SlashSuggest, ThinkingIndicator, TodoPanel,
     Transcript, UsageLine,
@@ -287,6 +289,59 @@ class OneShotFinished(Message):
         super().__init__()
 
 
+class AgentStackChanged(Message):
+    """The set of running agent-shaped runs changed (batch 59).
+
+    Carries the WHOLE stack rather than a delta. The sink runs on the
+    worker thread and the handler on the UI thread, so a message per
+    push/pop would have the panel reassembling an order it did not
+    observe; a snapshot cannot disagree with itself.
+    """
+
+    def __init__(self, stack) -> None:
+        super().__init__()
+        self.stack = list(stack)
+
+
+class TuiActivity(AgentActivity):
+    """core/agent_activity.py's sink, wired to the sidebar.
+
+    CALLED ON THE WORKER THREAD -- spawn_subagent opens its span inside
+    registry.dispatch(), which is inside the loop generator this app
+    drains in run_worker(thread=True). So this touches no widget and
+    posts instead, exactly as _consume does; post_message is the
+    thread-safe half of the API and `self._stack` below is read and
+    written only here, under the worker's own serialisation.
+
+    The stack is kept HERE rather than on the app because the enter/exit
+    pairing is this object's business: the app holds what it was last
+    told to draw, which is a different question and one the UI thread
+    owns.
+    """
+
+    def __init__(self, app) -> None:
+        self._app = app
+        self._stack: list = []
+
+    def enter(self, span) -> None:
+        self._stack.append((span.name, span.depth))
+        self._post()
+
+    def exit(self, span) -> None:
+        # Remove the LAST matching entry, not the first: two spans can
+        # legitimately share a name and a depth across one turn (a goal
+        # turn spawning `explore` twice), and popping the wrong one would
+        # leave the panel one row off for the rest of the run.
+        entry = (span.name, span.depth)
+        for i in range(len(self._stack) - 1, -1, -1):
+            if self._stack[i] == entry:
+                del self._stack[i]
+                break
+        self._post()
+
+    def _post(self) -> None:
+        self._app.post_message(AgentStackChanged(self._stack))
+
 class VenastineApp(App):
     """Chat + research shell."""
 
@@ -461,6 +516,12 @@ class VenastineApp(App):
         # that clear it; a per-turn map that outlives its turn is a
         # leak on an app that stays open for hours.
         self._file_calls: dict = {}
+        # Batch 59. The sidebar's view of who is running. `_agent_stack` is
+        # what the panel was last told to draw and is touched ONLY on the
+        # UI thread, in on_agent_stack_changed; the sink that feeds it
+        # keeps its own copy on the worker side. One writer each.
+        self._agent_stack: list = []
+        self._activity = TuiActivity(self)
 
     # -- layout --------------------------------------------------------------
 
@@ -504,6 +565,12 @@ class VenastineApp(App):
                 # transcript where it would scroll away.
                 yield PostureBadge(posture.current().unsafe_reasons(),
                                    id="posture-badge")
+                # Batch 59. Under the posture badge, which §40 put above
+                # the ravens' siblings and wants kept in view; above the
+                # usage line, so "who is working" sits with the ravens
+                # rather than among the figures. Hidden until there is an
+                # agent or a spawn, PostureBadge-style.
+                yield AgentPanel(id="agent-panel")
                 # #4: billed-since-resume and current context size, one
                 # line. Hidden until a turn produces figures.
                 yield UsageLine(id="usage-line")
@@ -531,6 +598,7 @@ class VenastineApp(App):
         self.query_one("#effort-raven", EffortRaven).effort = self.effort
         self.refresh_goal_banner()
         self.refresh_todo_panel()
+        self.refresh_agent_panel()
         self.refresh_status()
         self._write_session_banner()
         # #138. Beside the status line it qualifies, before anything the
@@ -1073,6 +1141,12 @@ class VenastineApp(App):
             config_loader.spend_cap(),
             effort=self.effort,
             response_channel=self.response_channel(),
+            # Batch 59. Rides beside the response channel because it is the
+            # same kind of thing: an out-of-band object handed down to a
+            # run that happens inside a tool call, where a LoopEvent cannot
+            # reach. This is the route by which a spawn -- and a spawn
+            # inside that spawn -- becomes a row in the sidebar.
+            activity=self._activity,
         )
         self.run_worker(
             lambda: self._consume(generator),
@@ -1165,6 +1239,10 @@ class VenastineApp(App):
                     provider_name=provider,
                     effort=self.effort,
                     authorization=authorization,
+                    # continue_conversation drains its own loop, so this
+                    # channel is the ONLY way a subagent spawned inside a
+                    # /grill-me turn is visible at all.
+                    activity=self._activity,
                 )
                 text = response.text
                 notices = list(getattr(response, "notices", ()) or ())
@@ -1262,6 +1340,33 @@ class VenastineApp(App):
             self._memory.billed_tokens, self._memory.last_input_tokens,
             ceiling, overridden)
 
+    def on_agent_stack_changed(self, message: AgentStackChanged) -> None:
+        """The sink spoke. Runs on the UI thread."""
+        self._agent_stack = message.stack
+        self.refresh_agent_panel()
+
+    def refresh_agent_panel(self) -> None:
+        """Redraw the panel from the two facts that make it up: the
+        session's active agent (an /agent switch) and the spans open right
+        now. ONE function, called from both writers -- the sink's handler
+        above and /agent -- so the panel cannot be shown a stack without
+        its root, or a root without its stack.
+
+        `query`, not `query_one`: the sink posts from a worker thread, so
+        an exit landing while the app is being torn down would raise
+        NoMatches out of a message handler on a DOM that no longer has the
+        widget. Measured -- a turn whose spans close as the app closes,
+        which is exactly what an interrupted run looks like. The same
+        shape as removing the log handler in on_unmount: a message can
+        outlive the thing it is about.
+        """
+        panel = self.query("#agent-panel").first(AgentPanel) \
+            if self.query("#agent-panel") else None
+        if panel is None:
+            return
+        name = self.active_agent.name if self.active_agent else None
+        panel.show(name, self._agent_stack)
+
     def restyle_sidebar(self) -> None:
         """Re-render the Rich-styled sidebar widgets after a /theme
         (#183).
@@ -1277,6 +1382,10 @@ class VenastineApp(App):
         self.refresh_goal_banner()
         self.refresh_todo_panel()
         self.query_one("#research-progress", ResearchProgress).restyle()
+        # Batch 59. A Rich-styled sidebar widget like the two above it, so
+        # it needs the same poke -- tcss reaches the panel's box and not
+        # the styles inside its Text.
+        self.query_one("#agent-panel", AgentPanel).restyle()
 
     def on_loop_event_message(self, message: LoopEventMessage) -> None:
         event = message.event
@@ -3145,7 +3254,11 @@ def _cmd_compact(app: VenastineApp, args: str) -> None:
         from core import compaction
         try:
             outcome = compaction.compact(
-                memory, app.model, app.provider_name, overrides=overrides)
+                memory, app.model, app.provider_name, overrides=overrides,
+                # Batch 59. A manual /compact runs the compactor agent in
+                # its own worker with nothing above it, so its span is the
+                # root of the stack rather than one level down.
+                activity=getattr(app, "_activity", None), depth=0)
         except Exception as e:  # noqa: BLE001 — same containment as the loop's
             app.call_from_thread(
                 app._transcript.write_error, f"Compaction failed: {e}")

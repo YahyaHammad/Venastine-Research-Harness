@@ -68,6 +68,13 @@ _INJECTABLE_PARAMS = (
     # comment above anticipated a third name arriving without touching
     # dispatch() again; this is it.
     "memory",
+    # Batch 59: the core/agent_activity.py sink, for spawn_subagent. A
+    # shell watching the agent stack has to learn about a run that
+    # happens INSIDE a tool call, which is the one place a LoopEvent
+    # cannot reach -- see that module for why. Injected rather than
+    # threaded through params because it is a run-scoped value, exactly
+    # like response_channel beside it.
+    "activity",
 )
 
 
@@ -573,6 +580,7 @@ class ToolRegistry:
         response_channel=None,
         signoff=None,
         memory=None,
+        activity=None,
     ) -> dict:
         # Unknown-tool guard: ValueError, deliberately NOT ToolCallDenied.
         # The two exception types separate "you misnamed it" from "policy
@@ -645,6 +653,7 @@ class ToolRegistry:
             "response_channel": response_channel,
             "signoff": signoff,
             "memory": memory,
+            "activity": activity,
         }
         injected = {p: available[p] for p in self._injectable.get(tool_name, ())}
         try:

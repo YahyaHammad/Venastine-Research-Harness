@@ -443,7 +443,20 @@ def _already_said(notices, kind: str) -> bool:
         n["kind"] == kind for n in notices)
 
 
-def _maybe_compact(memory, model, provider_name, notices, mode):
+def _compactor_depth(context) -> int:
+    """Where a compaction started from THIS loop sits in the agent stack.
+
+    One below whoever is running: a compactor spawned from a subagent at
+    depth 1 is at 2, exactly as a subagent spawned from there would be.
+    Derived from the ToolContext rather than passed down, because
+    subagent_depth is already the number C3 bounds and a second count of
+    the same thing is the shape §22 spent a section removing.
+    """
+    return (context.subagent_depth if context is not None else 0) + 1
+
+
+def _maybe_compact(memory, model, provider_name, notices, mode,
+                   activity=None, depth: int = 1):
     """Evaluate §21's trigger and act on it. A generator, so the caller
     yields from it and the notice reaches a live UI as it happens.
 
@@ -532,7 +545,12 @@ def _maybe_compact(memory, model, provider_name, notices, mode):
         # every turn that is nowhere near the threshold.
         outcome = compaction.compact(
             memory, model, provider_name,
-            current_turn_start=memory.completed_turns())
+            current_turn_start=memory.completed_turns(),
+            # Batch 59. The compactor is an agent-shaped run nested inside
+            # THIS turn, so it is drawn one level below whatever is running
+            # -- which is the depth the caller computed from its context,
+            # not a constant. `activity` is None everywhere but the TUI.
+            activity=activity, depth=depth)
     except Exception as e:  # noqa: BLE001 -- contained on purpose, see above
         logger.exception("Compaction failed; continuing uncompacted.")
         notice = {
@@ -615,6 +633,7 @@ class RunAgentLoop:
         granted_tools: Optional[set] = None,
         grant_budget=None,
         compaction_mode: Optional[str] = None,
+        activity=None,
     ):
         """Generator yielding LoopEvent objects as the loop progresses.
 
@@ -770,7 +789,8 @@ class RunAgentLoop:
             memory, model, provider_name, notices,
             compaction_mode
             if compaction_mode is not None
-            else _derived_compaction_mode(memory))
+            else _derived_compaction_mode(memory),
+            activity=activity, depth=_compactor_depth(context))
 
         response = None
         for _ in range(max_steps):
@@ -1011,6 +1031,7 @@ class RunAgentLoop:
                                 response_channel=response_channel,
                                 signoff=signoff,
                                 memory=memory,
+                                activity=activity,
                             )
                         except ToolCallDenied as e:
                             result = {"error": str(e)}
@@ -1033,7 +1054,8 @@ class RunAgentLoop:
                             call.name, call.input, context=context,
                             parent_run=run_info,
                             response_channel=response_channel,
-                            memory=memory)
+                            memory=memory,
+                            activity=activity)
                     except ToolCallDenied as e:
                         result = {"error": str(e)}
 
@@ -1099,7 +1121,8 @@ class RunAgentLoop:
                 memory, model, provider_name, notices,
                 compaction_mode
                 if compaction_mode is not None
-                else _derived_compaction_mode(memory))
+                else _derived_compaction_mode(memory),
+                activity=activity, depth=_compactor_depth(context))
 
         # max_steps exhausted without an earlier return
         response.stop_reason = "max_steps_reached"
@@ -1123,6 +1146,7 @@ class RunAgentLoop:
         granted_tools: Optional[set] = None,
         authorization=None,
         thread_kind: str = THREAD_KIND_CHAT,
+        activity=None,
     ) -> ModelResponse:
         """Regular conversation — full tool set, default system prompt,
         one continuous thread. Pass thread_id to resume an existing
@@ -1219,7 +1243,8 @@ class RunAgentLoop:
             provider_name, model, context,
             max_steps, _resolve_spend_cap(max_total_tokens),
             temperature=temperature, effort=effort,
-            response_channel=response_channel, **auth_kwargs,
+            response_channel=response_channel, activity=activity,
+            **auth_kwargs,
         ))
         response.thread_id = memory.thread_id
         return response
@@ -1236,6 +1261,7 @@ class RunAgentLoop:
         effort: Optional[str] = None,
         context: Optional[ToolContext] = None,
         authorization=None,
+        activity=None,
     ):
         """One research pass, as a generator of LoopEvents, RETURNING the
         ModelResponse (ROADMAP_v2 §26).
@@ -1291,6 +1317,7 @@ class RunAgentLoop:
             # near the model's real context window, because the
             # alternative there is a hard provider error mid-pipeline.
             compaction_mode="backstop",
+            activity=activity,
             **_authorization_kwargs(authorization),
         ):
             if event.final_response is not None:
@@ -1320,6 +1347,7 @@ class RunAgentLoop:
         effort: Optional[str] = None,
         context: Optional[ToolContext] = None,
         authorization=None,
+        activity=None,
     ) -> ModelResponse:
         """
         Sends a follow-up message into an EXISTING conversation thread and
@@ -1346,7 +1374,7 @@ class RunAgentLoop:
         response = run_to_completion(RunAgentLoop._run(
             memory, system_prompt, provider_name, model, context,
             max_steps, _resolve_spend_cap(max_total_tokens),
-            temperature=temperature, effort=effort,
+            temperature=temperature, effort=effort, activity=activity,
             **_authorization_kwargs(authorization),
         ))
         response.thread_id = thread_id

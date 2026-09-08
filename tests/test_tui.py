@@ -6219,3 +6219,127 @@ class TestTheCommandAliases:
             "the refused registration was written anyway"
         assert commands.get("exit") is commands.get("quit"), \
             "the refused registration displaced the alias"
+
+
+# ---- batch 59: the sidebar scrolls -----------------------------------------
+#
+# EP3's trap, one layer out. `Static` + `max-height` + `overflow-y: auto`
+# clips rather than scrolls, and #sidebar was a plain Vertical
+# (`overflow: hidden hidden`) on top of that -- so with a todo list and a
+# research run both up, the live research view was drawn entirely off screen
+# with nothing saying so.
+
+
+def _fill_sidebar(app):
+    """A sidebar with everything in it: ravens, usage, a full checklist and
+    a research run. This is the shape the clipping needed -- one panel alone
+    fits on a 24-row terminal, which is why nothing caught it."""
+    from tui.widgets import ResearchProgress, TodoPanel
+
+    research = app.query_one("#research-progress", ResearchProgress)
+    research.start_run()
+    for i in range(8):
+        research.pass_started(f"Pass {i}")
+        research.pass_completed(f"Pass {i}", ok=True)
+    for i in range(9):
+        research.claim_extracted()
+        research.claim_tiered(f"c{i}", "unverified_coverage")
+    app.query_one("#todo-panel", TodoPanel).todos = [
+        {"content": f"todo item {i}", "status": "pending"} for i in range(12)]
+    app.query_one("#usage-line").display = True
+
+
+class TestTheSidebarScrolls:
+    """§16's sidebar, batch 59. Three separate failures, one cause."""
+
+    @pytest.mark.asyncio
+    async def test_a_full_sidebar_overflows_the_24_row_floor(self):
+        """The premise. If this ever stops being true the two tests below
+        are measuring nothing -- the same guard
+        test_what_does_not_fit_the_payload_block_can_be_scrolled_to makes
+        about its own fixture."""
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(80, 24)) as pilot:
+            _fill_sidebar(app)
+            await pilot.pause()
+            await pilot.pause()
+            sidebar = app.query_one("#sidebar")
+            wanted = sum(c.outer_size.height for c in sidebar.children
+                         if c.display)
+            have = sidebar.content_region.height
+
+        assert wanted > have, (
+            f"the sidebar's children want {wanted} rows and it has {have}; "
+            "this fixture no longer overflows, so it cannot test overflow")
+
+    @pytest.mark.asyncio
+    async def test_what_does_not_fit_can_be_scrolled_to(self):
+        """The property that matters, stated the way EP3 learned to state
+        it: not "a scrollbar exists" but "every row is reachable".
+
+        Measured before the fix: `allow_vertical_scroll` False and
+        `max_scroll_y` 11 -- eleven rows the container had already computed
+        and clipped anyway, with #research-progress entirely off screen."""
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(80, 24)) as pilot:
+            _fill_sidebar(app)
+            await pilot.pause()
+            await pilot.pause()
+            sidebar = app.query_one("#sidebar")
+            research = app.query_one("#research-progress")
+
+            scrollable = sidebar.allow_vertical_scroll
+            reachable = sidebar.max_scroll_y
+            visible = sidebar.content_region.height
+            content = sidebar.virtual_size.height
+
+            sidebar.scroll_end(animate=False)
+            await pilot.pause()
+            await pilot.pause()
+            landed = sidebar.scroll_offset.y
+            # The bottom panel is in view once we have scrolled to the end.
+            bottom = sidebar.content_region.y + sidebar.content_region.height
+            research_top = research.region.y
+
+        assert scrollable, (
+            "#sidebar does not scroll; a Vertical is `overflow: hidden "
+            "hidden`, so whatever does not fit is gone rather than below "
+            "the fold")
+        assert visible + reachable == content, (
+            f"{content} rows of sidebar, {visible} shown, only {reachable} "
+            "scrollable -- the remainder is truncated, not below the fold")
+        assert landed == reachable, "scrolling to the end did not reach it"
+        assert research_top < bottom, (
+            "the research panel is still off screen at the bottom of the "
+            "sidebar's own scroll")
+
+    @pytest.mark.asyncio
+    async def test_no_sidebar_panel_caps_itself_into_a_silent_clip(self):
+        """EP3's rule, applied to the two panels that still broke it.
+
+        A `Static` never reports content taller than its own box --
+        `virtual_size` follows the clamped box, not the text -- so a
+        `max-height` on one is a CLIP whose hidden rows no scrollbar
+        anywhere can reach. Both panels carried one, and #research-progress
+        was measured losing a row to it.
+
+        Asserted through the STYLE rather than by drawing, because the
+        symptom is invisible: the rows do not overflow, they cease to
+        exist."""
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(80, 24)) as pilot:
+            _fill_sidebar(app)
+            await pilot.pause()
+            offenders = []
+            for panel_id in ("#todo-panel", "#research-progress"):
+                panel = app.query_one(panel_id)
+                if panel.styles.max_height is not None:
+                    offenders.append(
+                        f"{panel_id} has max-height "
+                        f"{panel.styles.max_height} and cannot scroll "
+                        f"(allow_vertical_scroll="
+                        f"{panel.allow_vertical_scroll})")
+
+        assert not offenders, (
+            "a Static bounded by max-height clips rather than scrolls "
+            "(EP3): " + "; ".join(offenders))

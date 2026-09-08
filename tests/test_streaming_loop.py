@@ -307,7 +307,13 @@ def test_permission_channel_yields_request_and_dispatches_on_approval(mocker):
     dispatched = []
     def fake_dispatch(name, params, context=None, approval_callback=None,
                       parent_run=None, response_channel=None, signoff=None,
-                      memory=None):
+                      memory=None,
+                      # Batch 59: run-scoped values this stub does not
+                      # care about. Spelling every injectable name here
+                      # made four tests break each time one was added,
+                      # which is the coupling registry.py's own comment
+                      # says dispatch() should not have.
+                      **_run_scoped):
         dispatched.append((name, approval_callback))
         return {"ok": True}
     mocker.patch.object(registry, "dispatch", side_effect=fake_dispatch)

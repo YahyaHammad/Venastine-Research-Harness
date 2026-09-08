@@ -48,7 +48,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 3790 tests, offline, ~2-3 min by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 3819 tests, offline, ~2-3 min by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -434,6 +434,29 @@ contrast.** `role_styles`
   ours for the same reason -- Rich's soft wrap returns rows of 78, 75, 78 and 66 cells and the
   tint stops wherever the text broke.
 
+**The sidebar SCROLLS, and two panels used to clip instead** (batch 59). Textual's `Vertical`
+is `overflow: hidden hidden`, so `#sidebar` silently dropped whatever did not fit: measured at
+the 24-row floor with a checklist and a research run both live, `max_scroll_y` was 11 — rows the
+container had computed and clipped anyway — and `#research-progress` was drawn ENTIRELY off
+screen with its header on the last visible row. It is `overflow-y: auto` with
+`scrollbar-size-vertical: 1` now.
+
+- **`overflow-y` on the container, NOT a swap to `VerticalScroll`.** That class is
+  `can_focus=True` and binds up/down/home/end/pageup/pagedown, so it would add a tab stop and
+  take the arrows batch 55 gave the suggestion panel. The named trade: the sidebar scrolls by
+  wheel, not by keyboard. EP3's "a consent surface must not be mouse-only" does not reach here —
+  nothing is decided in the sidebar.
+- **`Static` + `max-height` + `overflow-y: auto` CLIPS, it does not scroll**, and this was EP3's
+  trap a second time. A `Static`'s `virtual_size` follows its clamped box rather than its text,
+  so `allow_vertical_scroll` is False and the rows past the bound are gone, not below the fold.
+  §46 hit it in a permission modal and answered with `ScrollBox`; `#todo-panel` and
+  `#research-progress` still carried the pairing, and `ResearchProgress.ROWS`' comment claimed
+  the panel scrolled. Both caps are gone; the widgets' own `ROWS` windows are the bound.
+- **The usable width is 19, not 20** — `border-left: solid` takes a column on top of
+  `padding: 1` — and **18 while the scrollbar is up**. Every "22 columns" comment in
+  `tui/widgets.py` is about the box, not the budget. `AgentPanel.WIDTH` lays out against 18,
+  since a row that fits the narrow case fits the wide one.
+
 **The prompt box is a `TextArea`, and `priority=True` is what makes it one** (batch 54).
 `PromptInput` (`tui/widgets.py`) wraps and grows to four rows as the user types, then
 collapses on submit. It replaced a plain `Input`, which is single-line by construction —
@@ -748,6 +771,38 @@ and a `plan` turn spawning `explore` would otherwise silently hand it an `explor
 callable tools and two. That is deliberate: `registry.schemas(context)` filters by the same
 predicate, so nothing uncallable is advertised, while an agent that omitted them would stay
 crippled on an install where the operator had enabled them.
+
+**ONE AGENT RUNS AT A TIME. What nests is a STACK, and the panel that draws it carries
+LIFECYCLE ONLY** (batch 59). Measured rather than assumed, because the question comes up
+whenever someone reaches for concurrency: `core/loop.py` dispatches tool calls in a plain
+`for` loop, `spawn_subagent` BLOCKS on the child run, every TUI worker path is `_busy`-guarded,
+and even ensemble Pass 1 is a loop with a comment saying why. So the maximum simultaneously-live
+set is root + 2 subagents (`SUBAGENT_MAX_DEPTH`), each frame suspended inside the one below it.
+Two `spawn_subagent` blocks in one model turn run one *after* the other.
+
+`core/agent_activity.py` is how a shell sees that stack while it exists. Four things about it
+are decisions:
+
+- **It is not a `LoopEvent`, and that is structural.** A generator cannot yield from inside a
+  nested call: `spawn_subagent`'s handler runs inside `registry.dispatch()`, inside `_run()`'s
+  `for call in response.tool_calls:` body, where there is no yield point. And
+  `run_agent_conversation` drains its own `_run()` through `run_to_completion()`, so a child's
+  events never reach the parent's stream. The channel therefore rides `response_channel`'s
+  route — an out-of-band object is what crosses a boundary a generator cannot.
+- **It carries a NAME and a DEPTH, never content.** §18/D6 returns the subagent's distilled
+  answer on the "don't share raw history" principle; forwarding the child's stream would undo
+  that one field over. Anything richer than lifecycle is the thing D6 declines to give.
+- **`span()` is a context manager, and the `finally` is the point.** The exit has to run when
+  the child RAISES — `core/events.py` is explicit that exceptions propagate rather than becoming
+  events — or a row describing a finished run stays on screen for the session. Sink failures are
+  contained both ways: display machinery must not fail the run it describes.
+- **`activity=activity` on the child's `run_agent_conversation` is what makes depth 2 visible.**
+  Drop that one argument and the panel reports exactly what `tool_call_start` already implied.
+  Depth comes from `ToolContext.subagent_depth`, never a second count.
+
+**The tempting wrong source is the sign-off.** A depth-2 `SUBAGENT_SIGNOFF` request does reach
+the TUI naming the grandchild, and there is no matching completion signal — a row pushed from it
+would never clear.
 
 ### Skills (`skills/`, §19)
 

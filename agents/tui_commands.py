@@ -33,6 +33,7 @@ def _cmd_agent(app, args: str) -> None:
         app.active_agent = None
         app._transcript.write_system("Active agent cleared â€” default harness.")
         _note_skills_under_new_context(app)
+        _refresh_agent_panel(app)
         return
     agent = manager.get(args)
     if agent is None:
@@ -45,6 +46,20 @@ def _cmd_agent(app, args: str) -> None:
     app._transcript.write_system(
         f"Active agent: {agent.name} â€” {agent.description}")
     _note_skills_under_new_context(app)
+    _refresh_agent_panel(app)
+
+
+def _refresh_agent_panel(app) -> None:
+    """Batch 59: the panel's root row IS the active agent, so a
+    switch has to repaint it.
+
+    getattr rather than a direct call because this module is driven
+    against stub apps in tests/test_agents.py that carry a transcript
+    and nothing else -- and /agent must not start depending on a
+    sidebar widget to do its actual job."""
+    refresh = getattr(app, "refresh_agent_panel", None)
+    if refresh is not None:
+        refresh()
 
 
 def _note_skills_under_new_context(app) -> None:

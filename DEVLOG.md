@@ -10553,3 +10553,112 @@ was corrected to the one that actually catches it, which is the whole point of n
 | the marker takes no style | 1 red |
 
 Count 3665 -> 3778.
+
+
+## Batch 59 — a sidebar that hid what it drew, and a stack nobody could see (2026-09-08)
+
+Two things, and they arrived from opposite ends of the same question: *can this harness have
+two agents running at once?*
+
+**It cannot, and that is measured rather than assumed.** `core/loop.py:833` dispatches tool
+calls in a plain `for` loop; `spawn_subagent` BLOCKS on the child run; every TUI worker path is
+`_busy`-guarded; even ensemble Pass 1 is a loop with a comment saying so. What exists instead is
+a STACK — a chat turn at depth 0 spawning at 1 spawning at 2 (`SUBAGENT_MAX_DEPTH`), each frame
+suspended inside the one below it. So the panel this batch adds indents. A flat list would claim
+a concurrency this harness does not have.
+
+### The sidebar was clipping, silently
+
+Found on the way to placing the panel, and worth landing on its own. Textual's `Vertical` is
+`overflow: hidden hidden`, so `#sidebar` dropped whatever did not fit. Measured at the 24-row
+floor with a checklist and a research run both live: `max_scroll_y` was **11** — eleven rows the
+container had already computed and then clipped anyway — `#todo-panel` lost three, and
+`#research-progress` was **entirely off screen**, its header drawn on the last visible row with
+its whole body gone.
+
+**And both sidebar panels were EP3's trap a second time.** `Static` + `max-height` +
+`overflow-y: auto` reads as "clip it and let them scroll" and does neither: a `Static`'s
+`virtual_size` follows its clamped box rather than its text, so `allow_vertical_scroll` is False
+and the rows past the bound are not below the fold, they are gone. §46 found this in a
+permission modal and fixed it with `ScrollBox`; the same pairing was still shipped on
+`#todo-panel` and `#research-progress`, and `ResearchProgress.ROWS`' comment asserted
+"#research-progress scrolls" — which it never did.
+
+- `#sidebar` gains `overflow-y: auto` and `scrollbar-size-vertical: 1`. Measured: **19 usable
+  columns when everything fits, 18 while the bar is up**, against 17 at textual's default 2.
+- **`overflow-y` on the container, not a swap to `VerticalScroll`.** That class is
+  `can_focus=True` and binds up/down/home/end/pageup/pagedown — it would add a tab stop and take
+  the arrows batch 55 gave the suggestion panel. The trade, named rather than discovered later:
+  the sidebar scrolls by wheel and not by keyboard. EP3's sibling rule (a consent surface must
+  not be mouse-only) does not reach here — no decision is made in the sidebar.
+- Both panels lose their `max-height` and their inert `overflow-y`. `TodoPanel.ROWS` and
+  `ResearchProgress.ROWS` stay as the real bound, which is the half of those comments that was
+  always true.
+
+**The usable width is 19, not 20**, and that correction matters for anything laid out against
+it: `border-left: solid` takes a column on top of `padding: 1`. Every "22 columns" comment in
+`tui/widgets.py` is about the box, not the budget.
+
+### The activity channel
+
+A shell could already infer a depth-1 spawn from `tool_call_start`. Everything under it was
+invisible, and not by accident: `run_agent_conversation` drains its own `_run()` through
+`run_to_completion()`, so a child's events are consumed internally.
+
+**Not a `LoopEvent`, and the reason is structural rather than stylistic.** A generator cannot
+yield from inside a nested call — `spawn_subagent`'s handler runs inside `registry.dispatch()`,
+inside `_run()`'s `for call in response.tool_calls:` body, where there is no yield point at all.
+So the channel rides the route `response_channel` already rides, for the same reason: an
+out-of-band object is what crosses a boundary a generator cannot.
+
+**It carries LIFECYCLE ONLY — a name and a depth, in and out.** Never the child's text, tools or
+events. §18/D6 returns the subagent's distilled answer on the pipeline's "don't share raw
+history" principle, and forwarding the child's stream would break that outright, one field over.
+
+- **`core/agent_activity.py`** — `AgentSpan`, the `AgentActivity` sink, `NULL`, and
+  `span(activity, name, depth)` over an OPTIONAL sink so every call site is one unconditional
+  `with`. A context manager rather than a pair of calls because the exit has to run when the
+  child RAISES; otherwise a row describing a finished run stays on screen for the session. Sink
+  failures are contained both ways — display machinery must not fail the run it describes.
+- **`"activity"` joins `_INJECTABLE_PARAMS`**, which is the extension route `tools/registry.py`'s
+  own comment anticipates.
+- **`agents/subagent_tool.py` passes the sink DOWN** into the child's `run_agent_conversation`.
+  That one argument is what closes the recursion; without it the panel reports exactly what the
+  TUI knew before this batch.
+- The compactor gets a span too, at `_compactor_depth(context)` — derived from
+  `ToolContext.subagent_depth` rather than counted again, and ONE span over the retry loop,
+  because a row per attempt would draw the retries as a stack of compactors.
+
+### The trap that was not taken
+
+A depth-2 sign-off *does* reach the TUI as a `SUBAGENT_SIGNOFF` request naming the grandchild,
+and pushing that name onto the panel is the obvious cheap win. There is no corresponding
+completion signal, so the row would never clear. A panel that lies is worse than no panel.
+
+### Files
+
+- `core/agent_activity.py` (new), `tools/registry.py`, `core/loop.py`
+  (`_compactor_depth`, `_maybe_compact`, `_run` and the three public entry points),
+  `core/compaction.py`, `agents/subagent_tool.py`, `agents/tui_commands.py`.
+- `tui/widgets.py` — `AgentPanel`, and the two ROWS comments corrected.
+- `tui/app.py` — `TuiActivity`, `AgentStackChanged`, `refresh_agent_panel`, the compose slot
+  under `#posture-badge`, `restyle_sidebar`, and the four run sites.
+- `tui/app.tcss` — `#sidebar`, `#agent-panel`, `#todo-panel`, `#research-progress`.
+- `tests/test_agent_activity.py` (+26), `tests/test_tui.py` (+3).
+- Six test stubs enumerated every `dispatch` kwarg and broke on the new one; they take
+  `**_run_scoped` now, which is the coupling `registry.py` says `dispatch()` should not have.
+
+### Mutation
+
+Four mutations on the channel, all killed, each by the test written for it and none by a
+collection error: dropping the pass-down (the grandchild goes blind), replacing the context
+manager with a bare enter/exit pair (the raise cases), opening the span at the parent's depth,
+and moving the refusal check after the span (a row for a run that never started).
+
+### Not done
+
+Research mode. `stream_deep_research_mode` takes `activity` now, but the orchestrator does not
+thread it through `_run_pass` yet — a wider blast radius for a narrow case, since R16 makes
+`spawn_subagent` unreachable headless and only `--attended`/`--grant` runs can spawn at all.
+`core/reasoning/review.py`'s reviewer and `project_init/generator.py`'s initializer get their
+one-line spans in the same follow-on.

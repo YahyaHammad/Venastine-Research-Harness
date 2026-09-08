@@ -445,7 +445,9 @@ class TodoPanel(Static):
 
     # A window, for ResearchProgress's reason: a Static does not scroll
     # itself to the bottom, so an unbounded list would push the newest item
-    # out of view -- the opposite of the problem being solved.
+    # out of view -- the opposite of the problem being solved. The window is
+    # the ONLY bound since batch 59; the `max-height` beside it in the
+    # stylesheet was clipping, not scrolling.
     ROWS = 12
 
     todos = reactive(None, always_update=True)
@@ -495,6 +497,121 @@ class TodoPanel(Static):
         self.update(body)
 
 
+class AgentPanel(Static):
+    """Who is running, and how deep (batch 59).
+
+    A STACK, NEVER A LIST OF PEERS, and that is a fact about the harness
+    rather than a rendering choice. core/loop.py dispatches tool calls in
+    a plain `for` loop and spawn_subagent BLOCKS on the child run, so
+    there is never a second agent alongside the first -- what there is is
+    a chain, each frame suspended inside the one below it, bounded by
+    config.SUBAGENT_MAX_DEPTH. Indentation is the honest drawing of that;
+    a flat list would claim a concurrency this harness does not have.
+
+    Fed from core/agent_activity.py through app.py, never polled -- the
+    same split TodoPanel keeps: the sink says when, and this widget holds
+    no authoritative copy of anything.
+
+    Hidden when it has nothing to say, GoalBanner-style: the sidebar is
+    twenty columns wide and its rows are contested, so `default` with an
+    empty stack costs nothing rather than a permanent row saying so.
+    """
+
+    # 22-column box, less a border column and a padding column each side.
+    # MEASURED, not derived from the `width: 22` in the stylesheet: the
+    # border is easy to forget and the answer is 19, dropping to 18 while
+    # the sidebar's scrollbar is up. The narrow case is the one to lay out
+    # against, since a row that fits 18 fits 19.
+    WIDTH = 18
+
+    # Two spaces per level, so depth 2 costs four columns of the eighteen.
+    INDENT = 2
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._agent = None
+        self._stack: list = []
+        # Explicit, for TodoPanel's reason: a widget that renders nothing
+        # yet must not be a visible empty box before its first update.
+        self.display = False
+
+    def _styles(self) -> dict:
+        try:
+            app = self.app
+        except Exception:  # noqa: BLE001 -- see Transcript._styles
+            return {}
+        return themes.styles_for(app)
+
+    def show(self, agent_name, stack) -> None:
+        """Draw the active agent and the spans currently open under it.
+
+        `agent_name` is None when no /agent switch is active. `stack` is a
+        list of (name, depth), outermost first.
+        """
+        self._agent = agent_name
+        self._stack = list(stack)
+        self._redraw()
+
+    def restyle(self) -> None:
+        """Re-render under the current theme (#183), like ResearchProgress."""
+        self._redraw()
+
+    @classmethod
+    def _fit(cls, text: str, width: int) -> str:
+        """Truncate to `width` cells, with an ellipsis when it bites.
+
+        Appended by hand rather than through `Text.truncate()`, which
+        batch 55 measured doing nothing on a wrapped line -- and the rows
+        here are `no_wrap`, so an overlong one would be cropped invisibly
+        instead. `pipeline-reviewer` is seventeen characters and reaches
+        this at every depth below the root.
+        """
+        if width <= 0:
+            return ""
+        if len(text) <= width:
+            return text
+        if width == 1:
+            return "\u2026"
+        return text[:width - 1] + "\u2026"
+
+    def _redraw(self) -> None:
+        if self._agent is None and not self._stack:
+            self.display = False
+            self.update("")
+            return
+
+        styles = self._styles()
+        body = Text()
+        body.append("agent\n\n")
+        # The root row is drawn whenever anything is: the indented rows
+        # below hang off it, and a spawn under no /agent switch would
+        # otherwise start at column two with nothing above it.
+        # `assistant_label`, not a raw "accent" key -- role_styles has no
+        # such role, so that lookup would silently return "" and /theme
+        # would never reach this row. Bold accent is the IDENTITY role,
+        # which is exactly what "which agent is answering" is; the spans
+        # below take plain `tool` accent, so the root reads as the heavier
+        # of the two without introducing a second hue.
+        body.append(
+            self._fit(self._agent or "default", self.WIDTH) + "\n",
+            styles.get("assistant_label", ""))
+        for name, depth in self._stack:
+            # `max(depth, 1)` so a span that somehow reports depth 0 still
+            # reads as nested rather than colliding with the root row --
+            # two rows at column zero would say two agents are running,
+            # which is the one thing this panel must never claim.
+            pad = " " * (self.INDENT * max(depth, 1))
+            room = self.WIDTH - len(pad) - 2      # the marker and its space
+            body.append(f"{pad}{MARK_RUNNING} {self._fit(name, room)}\n",
+                        styles.get("tool", ""))
+        # `no_wrap` / crop for batch 55's reason: a row this widget already
+        # sized must not be re-wrapped by the Static underneath it, and a
+        # miscalculation should clip visibly rather than reflow invisibly.
+        body.no_wrap = True
+        body.overflow = "crop"
+        self.display = True
+        self.update(body)
+
 class ResearchProgress(Static):
     """Live state of a /research run (ROADMAP_v2 §22).
 
@@ -524,10 +641,15 @@ class ResearchProgress(Static):
 
     # §26. Code stages roughly double the row count, so the §22 window of 8
     # would push Pass 0 off before the run reached its own claims. Still a
-    # WINDOW rather than the whole list: #research-progress scrolls, but a
-    # Static does not scroll itself to the bottom, so an unbounded list
-    # would leave the newest row out of view -- the opposite of the
-    # problem being fixed.
+    # WINDOW rather than the whole list: a Static does not scroll itself to
+    # the bottom, so an unbounded list would leave the newest row out of
+    # view -- the opposite of the problem being fixed.
+    #
+    # This used to say "#research-progress scrolls", and it never did
+    # (batch 59). The panel carried `max-height` + `overflow-y: auto`,
+    # which on a Static clips rather than scrolls -- EP3's trap, measured
+    # here at one lost row. The SIDEBAR scrolls now; this window is what
+    # keeps the newest row near the top of what it reveals.
     ROWS = 16
 
     def __init__(self, **kwargs):
