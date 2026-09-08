@@ -266,11 +266,30 @@ class TableBlock(tuple):
         return self[2]
 
 
+def _is_fence_line(line: str) -> bool:
+    """Does this line open or close a fenced block?
+
+    A fence starts the LINE (after whitespace). A ``` mentioned mid-line
+    (`Use ```python to start`) is prose mentioning a fence, not a block.
+    Any indent counts -- fences are deliberately exempt from `verbatim()`,
+    so an indented fence still opens (confirmed, not GFM-strict).
+    """
+    return line.lstrip(" \t").startswith(FENCE)
+
+
+def _fence_line_count(text: str) -> int:
+    """How many fence-lines `text` holds. `commit_span`'s parity check,
+    kept beside the splitter so the two cannot drift into substring
+    counting on one path and line counting on the other."""
+    return sum(1 for raw in text.splitlines()
+               if _is_fence_line(raw))
+
+
 def split_blocks(text: str):
     """Split markdown into plain strings, `CodeBlock`s and `TableBlock`s.
 
     §26's `_split_fences` with a second pass inside its plain parts, and the
-    fence half is unchanged on purpose -- an unterminated fence still runs to
+    fence half keeps its contract -- an unterminated fence still runs to
     the end of the text (the common case mid-stream), and the plain parts
     still carry their own newlines so the caller's trimming around a
     renderable block keeps working on the reconstructed text.
@@ -278,16 +297,35 @@ def split_blocks(text: str):
     Tables are looked for only OUTSIDE fences, which is why this is nested
     rather than a scan over lines: a pipe table inside a ``` block is source
     code, and highlighting it as one is the whole point of the fence.
+
+    Fences are LINE constructs (`_is_fence_line`): a ``` mid-line is prose.
     """
-    out = []
-    parts = text.split(FENCE)
-    for index, part in enumerate(parts):
-        if index % 2 == 0:
-            if part:
-                out.extend(_split_tables(part))
-        else:
-            language, _, code = part.partition("\n")
-            out.append(CodeBlock(language.strip() or None, code))
+    out, plain, language, code = [], [], None, None
+    in_code = False
+    for raw in text.splitlines(keepends=True):
+        line = _strip_eol(raw)
+        if _is_fence_line(line):
+            if not in_code:
+                if plain:
+                    out.extend(_split_tables("".join(plain)))
+                    plain = []
+                language = line.lstrip(" \t")[len(FENCE):].strip() or None
+                code = []
+                in_code = True
+            else:
+                out.append(CodeBlock(language, "".join(code)))
+                language, code, in_code = None, None, False
+                if raw.endswith("\n"):
+                    # The old `text.split(FENCE)` left the closing line's
+                    # newline in the FOLLOWING plain run, and the
+                    # renderer's blank-line trimming depends on it.
+                    plain.append("\n")
+            continue
+        (code if in_code else plain).append(raw)
+    if in_code:
+        out.append(CodeBlock(language, "".join(code)))
+    elif plain:
+        out.extend(_split_tables("".join(plain)))
     return out
 
 
@@ -378,19 +416,41 @@ def _is_row(text: str) -> bool:
     return bool(text.strip()) and "|" in text and not verbatim(text)
 
 
+def _trailing_backslashes(text: str) -> int:
+    """Count of trailing backslashes in `text`. The parity decides whether
+    a final pipe is escaped (odd) or a delimiter (even)."""
+    count = 0
+    for char in reversed(text):
+        if char != "\\":
+            break
+        count += 1
+    return count
+
+
 def _cells(text: str):
     """One row's cells. Outer pipes are optional (GFM allows a table with
     none at all), and `\\|` inside a cell is a literal pipe rather than a
-    boundary -- unescaped here so the cell carries what the model meant."""
+    boundary -- unescaped here so the cell carries what the model meant.
+
+    Backslash parity, left to right: a double backslash is a literal
+    backslash (checked first), so double-backslash-pipe is that backslash
+    followed by a DELIMITER, while triple-backslash-pipe is a backslash
+    followed by an escaped pipe and stays one cell.
+    """
     body = text.strip()
     if body.startswith("|"):
         body = body[1:]
-    if body.endswith("|") and not body.endswith("\\|"):
+    if body.endswith("|") and _trailing_backslashes(body[:-1]) % 2 == 0:
         body = body[:-1]
     cells, current, index = [], [], 0
     while index < len(body):
         char = body[index]
-        if char == "\\" and index + 1 < len(body) and body[index + 1] == "|":
+        nxt = body[index + 1] if index + 1 < len(body) else ""
+        if char == "\\" and nxt == "\\":
+            current.append("\\")
+            index += 2
+            continue
+        if char == "\\" and nxt == "|":
             current.append("|")
             index += 2
             continue
@@ -794,6 +854,40 @@ def width_split(line: str, width: int, *, block: bool = True):
     return line[:hard], line[hard:]
 
 
+def plain_split(line: str, width: int):
+    """`(commit now, keep buffered)` for thinking text, measured in cells.
+
+    `Transcript._split_committable`'s `marks=False` branch, which is the
+    thinking path. Reasoning renders as prose, marks and all, so parsing
+    marks here would describe a rendering that does not happen -- but the
+    old branch measured `len()` characters, and a double-width glyph is
+    one character and two cells, so thinking held a row Rich had already
+    wrapped. Same shape as `width_split` (last space that fits, else a
+    hard cut at the width Rich would use), over plain characters rather
+    than mark spans. A character is atomic: the cut never lands inside
+    one, so a glyph wider than the row survives whole for Rich to wrap.
+    """
+    if sum(cell_len(char) for char in line) <= width:
+        return "", line
+    cells, space_at = 0, -1
+    for index, char in enumerate(line):
+        if char == " " and cells <= width:
+            space_at = index
+        cells += cell_len(char)
+        if cells > width:
+            break
+    else:
+        return "", line
+    if space_at > 0:
+        return line[:space_at + 1], line[space_at + 1:]
+    cells = 0
+    for index, char in enumerate(line):
+        if cells + cell_len(char) > width:
+            return (line[:index], line[index:]) if index > 0 else ("", line)
+        cells += cell_len(char)
+    return "", line
+
+
 def wrap_display(line: str, width: int, *, block: bool = False):
     """The rows `line` occupies when drawn at `width` cells.
 
@@ -869,7 +963,7 @@ def commit_span(committed: str, pending: str):
     `flush_stream` when the turn does. That is a narrower guarantee than
     the line-scoped constructs get, and it is the honest one.
     """
-    block_at = 0 if committed.count(FENCE) % 2 == 1 else None
+    block_at = 0 if _fence_line_count(committed) % 2 == 1 else None
     fence_open = block_at is not None
     line_at = None
     lines = pending.splitlines(keepends=True)
@@ -883,7 +977,7 @@ def commit_span(committed: str, pending: str):
         line = _strip_eol(raw)
 
         if fence_open:
-            if FENCE in line:
+            if _is_fence_line(line):
                 fence_open = False
                 # ONLY once that line has ended. §38's own pin is this
                 # case: a block whose closing fence has no newline after
@@ -905,7 +999,7 @@ def commit_span(committed: str, pending: str):
                 continue
             in_table, block_at = False, None
 
-        if FENCE in line:
+        if _is_fence_line(line):
             fence_open, block_at = True, _hold(block_at, start)
             continue
 

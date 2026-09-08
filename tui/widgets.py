@@ -1785,12 +1785,7 @@ class Transcript(RichLog):
             return "", pending
         if marks:
             return markdown.width_split(pending, width, block=block)
-        if len(pending) > width:
-            space = pending.rfind(" ", 0, width + 1)
-            if space > 0:
-                return pending[:space + 1], pending[space + 1:]
-            return pending[:width], pending[width:]
-        return "", pending
+        return markdown.plain_split(pending, width)
 
     def stream_delta(self, delta: str) -> None:
         self._pending += delta

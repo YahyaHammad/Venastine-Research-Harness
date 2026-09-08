@@ -69,6 +69,12 @@ class CommandRegistry:
         if owner is not None and owner != command.name:
             raise ValueError(
                 f"/{command.name} is already an alias of /{owner}")
+        old = self._commands.get(command.name)
+        if old is not None:
+            for alias in old.aliases:
+                if alias not in command.aliases \
+                        and self._aliases.get(alias) == command.name:
+                    del self._aliases[alias]
         self._commands[command.name] = command
         for alias in command.aliases:
             self._aliases[alias] = command.name
