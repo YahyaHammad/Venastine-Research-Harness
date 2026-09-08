@@ -10675,3 +10675,133 @@ thread it through `_run_pass` yet — a wider blast radius for a narrow case, si
 `spawn_subagent` unreachable headless and only `--attended`/`--grant` runs can spawn at all.
 `core/reasoning/review.py`'s reviewer and `project_init/generator.py`'s initializer get their
 one-line spans in the same follow-on.
+
+## Batch 60 — the answer that never reached the gate (2026-09-08)
+
+Reported from the TUI: spawning the same subagent twice in one turn showed the approval modal
+for the first and auto-rejected the second with no modal at all. Two *different* subagents were
+fine.
+
+**Backend, and reproduced with no TUI in the picture.** `core/loop.py` decided a gated call was
+already authorized — by §23's subject-keyed memo or by a §25 grant — and then called
+`dispatch()` without saying so. `dispatch()` re-checks approval itself, correctly: it is a public
+entry point and the fail-closed backstop. It found no `approval_callback` and raised
+`ToolCallDenied`.
+
+```
+explore then explore -- modals: 1 ['explore']
+   s1 -> {'result': 'child done', ...}
+   s2 -> {'error': 'spawn_subagent requires approval and was not given'}
+```
+
+`approval_callback` had appeared exactly ONCE in this file since §18 landed it on 2026-08-04
+(`4598d77`), inside the approved branch. The fall-through branch never had it. Four weeks, not a
+regression from the batch before.
+
+### One line, three broken things
+
+The report was the mildest of them.
+
+**The §18 sign-off was INVERTED.** `grill-me` is the one shipped agent with a gated candidate:
+
+```
+write_project_doc  signed-off-for=['write_project_doc']  re-asked=0 -> {'error': '... was not given'}
+write_project_doc  signed-off-for=[]                     re-asked=1 -> {'result': 'HANDLER RAN'}
+```
+
+Ticking the box made the tool unusable; leaving it unticked made it work, because an unticked
+tool still reached a human. A feature whose whole promise is "the child may use these without
+asking again" denied exactly the tools it named.
+
+**And §25's pre-flight grant never worked at all**, on the only population it has.
+`core/reasoning/authorization.py` offers `--grant-tools` the grantable + `GRANT_ANYWHERE` names,
+which among gated tools is the `mcp__*` set — and `registry.grant_policy` makes those
+`GRANT_ANYWHERE` precisely because R1 argues the tool's own description is the whole of informed
+consent for them. Every one of them was refused in a run with nobody to ask.
+
+`remember` was untouched throughout: `GRANT_NEVER` with no subject, so R13's guard stops the memo
+before this branch and it prompts, correctly.
+
+### Why 3820 tests did not see it
+
+They mock `core.loop.registry.dispatch`. **The gate under test lives inside the mock.** They
+count `permission_request` events and never ask whether the call that skipped the prompt actually
+ran — `test_s1_signoff_is_remembered_per_agent_not_per_tool_name` asserts "the same agent twice
+in one turn must be asked about once" and is satisfied by a second call that was silently
+refused.
+
+Everything added here drives the real `dispatch` and stubs the tool's HANDLER instead. Two traps
+came with that, both of which bit: `shell` and `write` are disabled in the shipped config and die
+at `is_tool_allowed()` long before the gate — the first draft of the non-widening cases was green
+against a gate it never touched — and `subagent_tool.run` builds the child's system prompt, which
+walks into the memories subsystem and therefore storage.
+
+### The fix, and the question it had to answer first
+
+Two `dispatch()` call sites, identical but for the arguments carrying authorization, and the one
+an answered call reached was the one that omitted them. So: **one call site**, passing
+`approval_callback` and `signoff` from the loop's own decision. Two sites that must agree is the
+defect; one site cannot disagree with itself.
+
+`signoff` was the quieter half. The fall-through dropped it too, so even with the denial fixed
+the second child of one sign-off would have run with nothing granted while the first got the
+ticked set — two children of one answer with different authority.
+
+**The question, asked before any of it shipped: does this sign off things that must stay per
+call — `shell`, `write`, `edit`?** It does not, and the reasons are structural rather than
+careful: `registry.grantable()` is False for any tool deciding approval from its PARAMS, and all
+four declare an `approval_check`; and `spawn_subagent` is the ONLY tool declaring
+`grant_scope="run"`, which is the only thing `remember_signoff` records. Measured across the
+whole surface — shell twice in a turn, an approved spawn followed by a shell call, hand-built
+grants naming all three, a path outside the workspace twice, `--attended`'s `honour_run_scope`,
+and the sign-off's three routes (never offered for any agent including an unrestricted child,
+and a forced answer intersected away by `interaction.decode`). All of it is now
+`TestAnAnswerCoversOneCallOnly` rather than a script that ran once.
+
+### An ID, not a flag
+
+The first version used `authorized = False` per call, with a comment saying the indentation was
+the security property. So it was mutated: hoisted out of `for call in response.tool_calls:`,
+which is exactly the widening the batch must not permit.
+
+**It survived the entire suite.** Not because scope does not matter, but because nothing can
+currently reach that dispatch call gated and un-authorized — the three other reasons
+`needs_approval` is turned off are each short-circuited INSIDE `dispatch()` before its gate
+(`is_allowed` raises, `refusal_check` returns, a `parse_error` never gets there). Correct, and
+undefended.
+
+So the flag became the call's own id:
+
+```python
+approval_callback=(
+    (lambda n, p: True) if authorized_call == call.id else None),
+```
+
+Hoisted, it holds the PREVIOUS call's id, the comparison fails, and the call is **denied** — the
+mistake fails closed instead of failing open. It rests on ids being distinct within a response,
+which is not a new assumption: `add_tool_result` pairs every `tool_result` to its `tool_use` by
+that same id (M4/D20), and a thread whose ids collide is already unresumable.
+
+That still leaves one mutation no behaviour can catch — deleting the guard outright. Pinned by
+reading the source, in the shape `test_rationale.py` already uses when it asserts on what a
+function RECEIVES rather than on what it decides. Both mutations now die there; the false-RED
+trap showed up on the way, since replacing only the inner expression leaves
+`approval_callback=(` unbalanced and a collection error scores as a kill while measuring
+nothing.
+
+### The notice
+
+A gated call proceeding with no modal is the intended behaviour (§25 R11 — re-asking about the
+same tool seconds later is noise) and was also exactly what the bug looked like. Silence was
+indistinguishable from the defect, so a reuse now says so, on the existing notice route that the
+CLI and the TUI both already render.
+
+Deliberately NOT in `_ONCE_PER_RUN_NOTICES`: that list is for a standing condition re-emitted on
+every step, and this fires only when a call actually reuses an answer — the same reading that
+lets a compaction that HAPPENED repeat once per compaction. Once per run would go quiet again
+from the third spawn onward, which is the silence that started this.
+
+Two texts, discriminated by the `answered_by_name` local the loop already computes. A memo is
+something the user answered minutes ago in this turn; a grant is something they decided before
+the run existed, possibly on a command line. Telling them they "answered earlier" would describe
+a moment that never happened.

@@ -20,15 +20,23 @@ stubbed model, because the claim is about what the LOOP does with a grant
 ignores it entirely.
 """
 
+import ast
+import collections
+import inspect
 import queue
 
 import pytest
+
+import config
+import core.loop
 
 from core.approval import GrantBudget, RunAuthorization
 from core.interaction import ResponseChannel
 from core.client import StreamToken
 from core.loop import RunAgentLoop
 from core.reasoning.authorization import candidates
+from agents.manager import manager
+from core import config_loader, interaction
 from tools.base import GRANT_SIGNOFF_ONLY, ToolSpec
 from tools.context import RunInfo, ToolContext
 from tools.registry import registry
@@ -632,3 +640,489 @@ class TestGrantPolicyReachesEveryPlaceThatAsks:
         assert remembered
         assert subset == set()
         assert subset is not None
+# ===========================================================================
+# ---- Batch 60: an answer the loop honours must REACH dispatch -----------
+# ===========================================================================
+#
+# The defect these were written for: core/loop.py decided a gated call was
+# already authorized -- by the §23 memo or by a §25 grant -- and then called
+# dispatch() without saying so. dispatch re-checks approval on its own (it
+# is the fail-closed backstop and must), found no approval_callback, and
+# raised ToolCallDenied. Every call the loop waved through was denied, with
+# no prompt: a second spawn of one agent in a turn, a subagent using a tool
+# it was ticked for at the sign-off, and any --grant-tools name in an
+# unattended run.
+#
+# WHY EVERY TEST ABOVE STAYED GREEN THROUGH IT, which is the reusable
+# lesson: they mock `core.loop.registry.dispatch`, so the gate under test
+# lives inside the mock. They count permission_request events and never ask
+# whether the call that skipped the prompt actually ran --
+# test_s1_signoff_is_remembered_per_agent_not_per_tool_name asserts "the
+# same agent twice in one turn must be asked about once" and is satisfied
+# by a second call that was silently refused.
+#
+# So everything below drives the REAL dispatch and stubs the tool's
+# HANDLER instead. That is the only arrangement in which the approval gate
+# is the thing being measured.
+
+
+_Turn = collections.namedtuple("_Turn", "asked results notices prompts")
+
+
+def _stub_handler(mocker, *tool_names):
+    """Replace the HANDLERS, never registry.dispatch.
+
+    The distinction is the entire point of this section: dispatch owns the
+    approval gate, so mocking it removes what is on trial. Stubbing the
+    handler removes only the side effect -- nothing writes a file or runs a
+    command -- and leaves every gate between the loop and the handler live.
+    """
+    for name in tool_names:
+        mocker.patch.object(registry._tools[name], "handler",
+                            lambda p, **kw: {"result": "RAN"})
+
+
+def _raise_policy(mocker, *tool_names):
+    """Make `tool_names` callable, and make `shell` gated.
+
+    NOT a convenience. `shell` and `write` are disabled in the shipped
+    config, and a disabled tool is refused by is_tool_allowed() long before
+    the approval gate -- so a non-widening test written without this passes
+    while proving nothing at all, which is what the first draft of these
+    cases did. The configuration the claim is about is one where the tool IS
+    callable and the gate is the only thing left standing.
+
+    ToolApprovals.shell is the RATCHET (see tools/builtin/shell.py): True
+    forces "always ask" whatever the posture says, so the case does not
+    depend on which sandbox happens to be available on the machine running
+    the suite.
+    """
+    real_perms, real_approvals = config.ToolPermissions, config.ToolApprovals
+
+    def _perms():
+        p = real_perms()
+        for name in tool_names:
+            setattr(p, name, True)
+        return p
+
+    def _approvals():
+        a = real_approvals()
+        if "shell" in tool_names:
+            a.shell = True
+        return a
+
+    mocker.patch("config.ToolPermissions", _perms)
+    mocker.patch("config.ToolApprovals", _approvals)
+
+
+def _drive_real(mocker, calls, answers, *, granted=(), channel=True,
+                honour_run_scope=True, spawn=False, context=None,
+                max_steps=2):
+    """One turn through the real dispatch. `calls` is [(name, params), ...].
+
+    Returns the requests that reached the human, the tool results, the
+    notices and the permission_request events -- the four things every
+    claim below is about.
+    """
+    uses = make_model_response(text="", tool_calls=[
+        {"id": f"c{i}", "name": name, "input": params}
+        for i, (name, params) in enumerate(calls)])
+    seq = [uses, make_model_response(text="done")]
+
+    def _stream(*a, **kw):
+        yield StreamToken(final_response=(
+            seq.pop(0) if seq else make_model_response(text="x")))
+
+    mocker.patch("core.loop.api_initialization", return_value=object())
+    mocker.patch("core.loop.effort_for", return_value=None)
+    mocker.patch("core.loop.call_model_stream", side_effect=_stream)
+    if spawn:
+        # The CHILD run, not the spawn tool: subagent_tool.run still
+        # executes, so the sign-off it was handed and the depth it computes
+        # are real. Only the recursive model call is stubbed.
+        mocker.patch.object(RunAgentLoop, "run_agent_conversation",
+                            return_value=make_model_response(text="child"))
+        # And the memories the child's system prompt would carry. Nothing
+        # to do with authorization -- it is on the path only because
+        # system_prompt_for() builds the whole prompt -- but it reaches
+        # storage, which this suite replaces with a double that has no
+        # queryable columns. Stubbed at `visible` so prompt_fragment's own
+        # opt-in and cap logic still runs.
+        mocker.patch("memories.manager.manager.visible", return_value=[])
+
+    asked, pending = [], list(answers)
+
+    def _ask(request):
+        asked.append(request)
+        return pending.pop(0) if pending else None
+
+    ch = (ResponseChannel(ask=_ask, honour_run_scope=honour_run_scope)
+          if channel else None)
+
+    events = list(RunAgentLoop._run(
+        memory=_Mem(), system_prompt="s", provider_name="ANTHROPIC",
+        model="m", context=context, max_steps=max_steps,
+        response_channel=ch, granted_tools=set(granted)))
+
+    return _Turn(
+        asked=asked,
+        results=[e.tool_result["result"] for e in events
+                 if e.tool_result is not None],
+        notices=[e.notice for e in events if e.notice is not None],
+        prompts=[e for e in events if e.permission_request is not None])
+
+
+def _ran(result):
+    return "error" not in result
+
+
+SHELL_CMD = "rm -rf /tmp/nothing-here"
+
+
+class TestAnAnsweredCallActuallyRuns:
+    """The repair. Each of these was RED before batch 60, and each was red
+    for the same one line."""
+
+    def test_a_second_spawn_of_the_same_agent_runs_rather_than_being_denied(
+            self, mocker, real_harness_tier):
+        """THE REPORTED BUG. Approving the first spawn of `explore` memoised
+        the answer under (spawn_subagent, "explore"), the loop correctly
+        skipped the second prompt -- and then dispatch denied the call.
+
+        Real agents, because the whole path has to be real: an unknown name
+        is refused by refusal_check before the gate, which is the case the
+        memo tests above patch around and is not this one.
+        """
+        config_loader.initialize(str(real_harness_tier))
+
+        turn = _drive_real(
+            mocker,
+            [("spawn_subagent", {"agent_name": "explore", "task": "a"}),
+             ("spawn_subagent", {"agent_name": "explore", "task": "b"})],
+            [set()], spawn=True)
+
+        assert len(turn.asked) == 1, (
+            "the same agent twice in one turn is one question (§25 R11)")
+        assert [_ran(r) for r in turn.results] == [True, True], (
+            f"both spawns must run; got {turn.results}")
+
+    def test_a_signed_off_child_may_use_the_tool_it_was_ticked_for(
+            self, mocker):
+        """§18's sign-off was INVERTED, which is worse than broken: the
+        child was handed the subset as granted_tools, the loop skipped the
+        prompt on the strength of it, and dispatch refused the call. Ticking
+        the box made the tool unusable while leaving it unticked made it
+        work, because an unticked tool still reached a human.
+        """
+        _stub_handler(mocker, "write_project_doc")
+
+        turn = _drive_real(
+            mocker, [("write_project_doc", {"doc": "AGENTS.md",
+                                            "content": "x"})],
+            [], granted={"write_project_doc"})
+
+        assert turn.asked == [], "a signed-off tool must not be re-asked"
+        assert _ran(turn.results[0]), (
+            f"the ticked tool must actually run; got {turn.results[0]}")
+
+    def test_a_pre_granted_tool_runs_in_an_unattended_run(
+            self, mocker, gated_pair):
+        """§25's whole mechanism, on the population it was designed for.
+        The --grant-tools picker offers grantable + GRANT_ANYWHERE names,
+        which among gated tools is the mcp__* set -- and every one of them
+        was refused with "requires approval and was not given" in a run with
+        nobody to ask.
+        """
+        turn = _drive_real(mocker, [("mcp__t__plain", {})], [],
+                           granted={"mcp__t__plain"}, channel=False)
+
+        assert turn.asked == []
+        assert _ran(turn.results[0]), (
+            f"a granted tool must run unattended; got {turn.results[0]}")
+
+    def test_an_ungranted_gated_call_on_the_same_path_is_still_denied(
+            self, mocker, gated_pair):
+        """The control, and the reason the fix is a CONDITIONAL callback
+        rather than an unconditional one. Same tool, same path, no grant."""
+        turn = _drive_real(mocker, [("mcp__t__plain", {})], [], channel=False)
+
+        assert not _ran(turn.results[0]), (
+            "an ungranted gated call must still be denied with nobody to ask")
+
+    def test_reusing_a_memo_says_so_and_says_it_was_this_turn(
+            self, mocker, real_harness_tier):
+        """A gated call proceeding with NO modal is the intended behaviour,
+        and it is also exactly what the bug looked like. The notice is what
+        makes the two distinguishable from the outside."""
+        config_loader.initialize(str(real_harness_tier))
+
+        turn = _drive_real(
+            mocker,
+            [("spawn_subagent", {"agent_name": "explore", "task": "a"}),
+             ("spawn_subagent", {"agent_name": "explore", "task": "b"})],
+            [set()], spawn=True)
+
+        reused = [n for n in turn.notices if n["kind"] == "approval_reused"]
+        assert len(reused) == 1, (
+            "one notice per reuse -- not once per run, which would go quiet "
+            "again from the third spawn onward")
+        assert "explore" in reused[0]["text"]
+        assert "earlier in this turn" in reused[0]["text"], (
+            "a memo is something the user answered minutes ago in this turn")
+
+    def test_reusing_a_name_grant_says_it_predates_the_run(
+            self, mocker, gated_pair):
+        """The other half of the discriminator. A grant was decided before
+        the run existed, possibly on a command line, so telling the user
+        they "answered earlier in this turn" would describe a moment that
+        never happened."""
+        turn = _drive_real(mocker, [("mcp__t__plain", {})], [],
+                           granted={"mcp__t__plain"}, channel=False)
+
+        reused = [n for n in turn.notices if n["kind"] == "approval_reused"]
+        assert len(reused) == 1
+        assert "before this run started" in reused[0]["text"]
+
+    def test_the_second_spawn_is_handed_the_remembered_signoff(
+            self, mocker, real_harness_tier):
+        """The quieter half of the defect, invisible to a result-only
+        assertion. The fall-through dispatch dropped `signoff` as well as
+        the callback, so even with the denial fixed the second child would
+        run with NOTHING granted while the first got the ticked set -- two
+        children of one sign-off with different authority.
+
+        A spy rather than a mock: dispatch still runs, so the gate is still
+        the live one and this only reads what it was called with.
+        """
+        config_loader.initialize(str(real_harness_tier))
+        spy = mocker.patch.object(registry, "dispatch",
+                                  wraps=registry.dispatch)
+
+        _drive_real(
+            mocker,
+            [("spawn_subagent", {"agent_name": "grill-me", "task": "a"}),
+             ("spawn_subagent", {"agent_name": "grill-me", "task": "b"})],
+            [{"write_project_doc"}], spawn=True)
+
+        passed = [c.kwargs.get("signoff") for c in spy.call_args_list]
+        assert passed == [{"write_project_doc"}, {"write_project_doc"}], (
+            f"both children get the subset the user ticked; got {passed}")
+
+
+class TestAnAnswerCoversOneCallOnly:
+    """The non-widening properties, which are the reason the repair above is
+    safe to make at all.
+
+    An approval must cover the call it was given for and nothing else. The
+    two structural facts that enforce it, neither of which batch 60 touches:
+    registry.grantable() is False for any tool deciding approval from its
+    PARAMS (shell, write, edit, read all declare an approval_check), and
+    spawn_subagent is the ONLY tool declaring grant_scope "run", which is
+    the only thing remember_signoff records.
+    """
+
+    def test_shell_is_asked_about_once_per_call(self, mocker):
+        _raise_policy(mocker, "shell")
+        _stub_handler(mocker, "shell")
+
+        turn = _drive_real(mocker, [("shell", {"command": SHELL_CMD})] * 2,
+                           [True, True])
+
+        assert len(turn.asked) == 2, (
+            "shell has no run scope; every call is its own question")
+
+    def test_declining_the_second_shell_call_denies_it(self, mocker):
+        """The half that matters. Two prompts with both answers honoured is
+        the claim -- counting prompts alone would pass against a loop that
+        asked twice and then ran the call regardless."""
+        _raise_policy(mocker, "shell")
+        _stub_handler(mocker, "shell")
+
+        turn = _drive_real(mocker, [("shell", {"command": SHELL_CMD})] * 2,
+                           [True, False])
+
+        assert [_ran(r) for r in turn.results] == [True, False]
+
+    def test_an_approved_spawn_does_not_cover_a_shell_call_in_the_same_turn(
+            self, mocker, real_harness_tier):
+        """THE LEAK TEST, and the reason the loop's authorization is a call
+        ID rather than a boolean.
+
+        spawn_subagent is the one tool whose answer survives the call it was
+        given for. If that survival were expressed as a flag hoisted out of
+        `for call in response.tool_calls:`, one yes would cover every later
+        call in the turn -- shell included.
+        """
+        config_loader.initialize(str(real_harness_tier))
+        _raise_policy(mocker, "shell")
+        _stub_handler(mocker, "shell")
+
+        turn = _drive_real(
+            mocker,
+            [("spawn_subagent", {"agent_name": "explore", "task": "a"}),
+             ("shell", {"command": SHELL_CMD})],
+            [set(), False], spawn=True)
+
+        assert len(turn.asked) == 2, (
+            "the spawn's sign-off must not answer for the shell call")
+        assert [_ran(r) for r in turn.results] == [True, False], (
+            f"the declined shell call must be denied; got {turn.results}")
+
+    def test_a_name_grant_for_shell_is_ignored(self, mocker):
+        """R2, re-checked rather than trusted. A hand-built or stale RunInfo
+        naming `shell` must not widen anything, because the loop asks
+        grantable() at the point of use instead of believing the set."""
+        _raise_policy(mocker, "shell")
+        _stub_handler(mocker, "shell")
+
+        turn = _drive_real(mocker, [("shell", {"command": SHELL_CMD})],
+                           [False], granted={"shell", "write", "edit"})
+
+        assert len(turn.asked) == 1, "a granted shell call is still asked"
+        assert not _ran(turn.results[0])
+
+    def test_write_outside_the_workspace_is_asked_per_call(
+            self, mocker, tmp_path):
+        """The param-dependent gate, which is what makes `write` ungrantable
+        in the first place: the path is the question, and the answer to one
+        path is not an answer about the next."""
+        _raise_policy(mocker, "write")
+        _stub_handler(mocker, "write")
+        outside = str(tmp_path / "outside.txt")
+
+        turn = _drive_real(
+            mocker,
+            [("write", {"path": outside, "content": "x"}),
+             ("write", {"path": outside, "content": "y"})],
+            [True, False])
+
+        assert len(turn.asked) == 2, (
+            "a path outside the workspace is gated, and gated per call")
+        assert [_ran(r) for r in turn.results] == [True, False]
+
+    def test_a_granted_shell_call_is_denied_with_nobody_to_ask(self, mocker):
+        """V6: the inability to ask is not permission to proceed. The grant
+        does not apply (R2), so this falls back to asking, and there is
+        nobody there."""
+        _raise_policy(mocker, "shell")
+        _stub_handler(mocker, "shell")
+
+        turn = _drive_real(mocker, [("shell", {"command": SHELL_CMD})], [],
+                           granted={"shell"}, channel=False)
+
+        assert not _ran(turn.results[0])
+
+    def test_attended_mode_defeats_run_scope_for_the_same_agent(
+            self, mocker, real_harness_tier):
+        """R11's escape hatch, on the one tool that has a run scope at all.
+        A channel whose whole purpose is per-call supervision sets
+        honour_run_scope False, and one yes must not cover later calls
+        there -- so the memo is never written and the second spawn asks."""
+        config_loader.initialize(str(real_harness_tier))
+
+        turn = _drive_real(
+            mocker,
+            [("spawn_subagent", {"agent_name": "explore", "task": "a"}),
+             ("spawn_subagent", {"agent_name": "explore", "task": "b"})],
+            [set(), None], spawn=True, honour_run_scope=False)
+
+        assert len(turn.asked) == 2, (
+            "attended mode asks per call even for a run-scoped tool")
+        assert [_ran(r) for r in turn.results] == [True, False]
+
+    def test_the_signoff_never_offers_a_param_gated_tool(
+            self, real_harness_tier):
+        """Upstream of the loop entirely: candidate_approvals() filters by
+        grantable(), so shell/write/edit can never appear in the modal the
+        user ticks. Checked against every shipped agent AND against a child
+        with no tool restriction at all, which is the widest case the
+        filter ever sees."""
+        config_loader.initialize(str(real_harness_tier))
+        param_gated = {"shell", "write", "edit", "read"}
+
+        for name in config_loader.get_agents():
+            child = manager.child_context(manager.get(name), ToolContext())
+            offered = set(manager.candidate_approvals(child))
+            assert not offered & param_gated, (
+                f"{name} was offered {sorted(offered & param_gated)}")
+
+        wide = manager.child_context(manager.get("explore"), ToolContext())
+        wide.allowed_tools = None
+        assert not set(manager.candidate_approvals(wide)) & param_gated
+
+    def test_a_signoff_answer_naming_shell_grants_nothing(self):
+        """The other end of the same rule. A shell (or a compromised one)
+        answering with a tool nobody offered must not thereby grant it --
+        decode intersects the answer with the candidates, so what was shown
+        and what is granted are the same list."""
+        request = interaction.Request(
+            kind=interaction.SUBAGENT_SIGNOFF,
+            payload={"subject": "explore",
+                     "candidates": ["write_project_doc"]})
+
+        assert interaction.decode(request, ["shell"]) == set()
+        assert interaction.decode(
+            request, ["shell", "write", "edit"]) == set()
+        assert interaction.decode(
+            request, ["write_project_doc", "shell"]) == {"write_project_doc"}
+
+
+def test_the_loops_authorization_cannot_outlive_one_tool_call():
+    """Read the source, because no behaviour can see this.
+
+    Two mutations matter here and NEITHER changes an observable outcome
+    today: hoisting the authorization out of `for call in
+    response.tool_calls:`, and replacing the guarded callback with a bare
+    `lambda n, p: True`. Both survive the entire suite, because nothing can
+    currently reach that dispatch call gated and un-authorized -- the three
+    other reasons `needs_approval` is turned off are each short-circuited
+    INSIDE dispatch before its gate. The scope is correct and undefended,
+    which is precisely the state a fourth reason added later would turn
+    into a silent "approve everything".
+
+    The call ID makes the first mutation FAIL CLOSED rather than open; this
+    makes both of them fail LOUDLY. Structural on purpose, in the shape
+    test_rationale.py already uses when it asserts on what a function
+    receives rather than on what it decides.
+    """
+    tree = ast.parse(inspect.getsource(core.loop))
+    run = next(n for n in ast.walk(tree)
+               if isinstance(n, ast.FunctionDef) and n.name == "_run")
+
+    per_call = next(
+        (n for n in ast.walk(run)
+         if isinstance(n, ast.For)
+         and ast.unparse(n.iter) == "response.tool_calls"), None)
+    assert per_call is not None, "the per-call loop was renamed or removed"
+
+    inside = {id(n) for n in ast.walk(per_call)}
+    stores = [n for n in ast.walk(run)
+              if isinstance(n, ast.Name) and n.id == "authorized_call"
+              and isinstance(n.ctx, ast.Store)]
+    assert len(stores) == 3, (
+        f"expected the declaration plus two authorizing branches, "
+        f"found {len(stores)}")
+    assert all(id(n) in inside for n in stores), (
+        "an assignment to authorized_call escaped the per-call loop; one "
+        "approval would then cover every later call in the same turn")
+
+    calls = [n for n in ast.walk(run)
+             if isinstance(n, ast.Call)
+             and isinstance(n.func, ast.Attribute)
+             and n.func.attr == "dispatch"]
+    assert len(calls) == 1, (
+        f"the loop must have exactly ONE dispatch call site -- two that "
+        f"must agree about authorization is the defect batch 60 fixed; "
+        f"found {len(calls)}")
+
+    callback = {k.arg: k.value for k in calls[0].keywords}.get(
+        "approval_callback")
+    assert callback is not None, (
+        "dispatch must be told whether this call was authorized")
+    assert isinstance(callback, ast.IfExp), (
+        "approval_callback must be CONDITIONAL; an unconditional callable "
+        "approves every call reaching this line")
+    guard = ast.unparse(callback.test)
+    assert "authorized_call" in guard and "call.id" in guard, (
+        f"the guard must identify THIS call, not merely test a flag; "
+        f"found {guard!r}")

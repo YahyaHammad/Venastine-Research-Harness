@@ -97,7 +97,8 @@ def test_single_tool_call_dispatches_and_feeds_result_to_memory(mocker):
     assert memory.tool_results == [("t1", {"echoed": {"query": "x"}})]
     dispatch_mock.assert_called_once_with(
         "web_search", {"query": "x"}, context=None, parent_run=ANY,
-        response_channel=None, memory=ANY, activity=None)
+        approval_callback=None, response_channel=None, signoff=None,
+        memory=ANY, activity=None)
 
 
 # ---------------------------------------------------------------------------
@@ -280,7 +281,8 @@ def test_context_none_passes_every_tool_through_to_dispatch(mocker):
 
     dispatch_mock.assert_called_once_with(
         "arbitrary_tool_name", {"x": 1}, context=None, parent_run=ANY,
-        response_channel=None, memory=ANY, activity=None)
+        approval_callback=None, response_channel=None, signoff=None,
+        memory=ANY, activity=None)
 
 
 def test_context_is_forwarded_to_dispatch_and_approval_needed(mocker):
@@ -317,4 +319,5 @@ def test_context_is_forwarded_to_dispatch_and_approval_needed(mocker):
         assert call.args == ("get_time", {}, context)
     dispatch_mock.assert_called_once_with(
         "get_time", {}, context=context, parent_run=ANY,
-        response_channel=None, memory=ANY, activity=None)
+        approval_callback=None, response_channel=None, signoff=None,
+        memory=ANY, activity=None)
