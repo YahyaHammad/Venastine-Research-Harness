@@ -57,6 +57,25 @@ SUGGEST_MAX_ROWS = 8
 SUGGEST_MAX_LINES = 2
 SUGGEST_HIGHLIGHT = "reverse"
 
+# Batch 62, the keys the panel spends while it is open. Four of them
+# change meaning here and none was written anywhere in the TUI: the
+# arrows move the highlight, tab and enter BOTH complete, escape
+# dismisses. `enter` is the one that costs something -- it completes
+# rather than sends, so a fully typed /help takes two presses, and the
+# first changes nothing a reader can see except a trailing space.
+#
+# `tab/enter` is one item because they are one action: action_submit
+# and action_complete both call _complete(). The separator is the
+# title's, so the two labels on this box read as one voice.
+#
+# NO SQUARE BRACKETS. `_BorderTitle.__set__` runs the value through
+# `render_str`, so a `[` is markup -- and the getter hands back
+# `.markup`, which re-escapes it, so the change-guard below would
+# never compare equal and every paint would schedule another.
+SUGGEST_HINT_SEP = " · "
+SUGGEST_HINT_MOVE = "↑↓ move"
+SUGGEST_HINT_REST = ("tab/enter complete", "esc dismiss")
+
 # §41. The inline diff's furniture, owned by the renderer for the same
 # reason the thinking bar is: `_entries` keeps the canonical block, so
 # /copy hands back a diff rather than a decorated string and a replay
@@ -849,6 +868,25 @@ class SlashSuggest(Static):
     the line that was kept, so the line reads as complete when it is not --
     the ellipsis has to be appended deliberately.
 
+    **The bottom border says which keys this spends** (batch 62). Four
+    keys change meaning while the panel is open and none of them was
+    written anywhere. Not the TITLE, which the count already holds --
+    at 80 columns the label budget is 52 cells, the count is 25 and the
+    hint is 42, so they cannot share the row. And not the FOOTER:
+    `Screen.active_bindings` drops a binding only on `check_action`
+    returning `is False`, and `tab`/`escape` must return `None` here so
+    they still reach the focus system with the panel shut -- a shown
+    binding would therefore sit in the footer greyed and permanent.
+
+    The hint shortens by STATE first and by width second, and the state
+    half is the title's own rule applied to a control: with one match
+    `move()` wraps to the command it is already on, so `↑↓ move` would
+    advertise a key that does nothing. Parts then drop from the LEFT
+    while the rest overflows, rather than being truncated -- an
+    ellipsised `esc dism…` is furniture, not help. What survives the
+    narrowest terminal is therefore how to get rid of the panel, which
+    is the useful key at a width where the entries are unreadable.
+
     The highlight is `reverse` rather than a palette role. TodoPanel's
     caution applies (only the theme-invariant roles are safe across all
     fourteen themes) and reverse is invariant by construction: it swaps
@@ -1040,6 +1078,34 @@ class SlashSuggest(Static):
         title = f"{span} of {len(self._matches)} · /help for all"
         if self.border_title != title:
             self.border_title = title
+        # Batch 62. The same honesty rule one row down, applied to a
+        # control instead of to a count: `↑↓ move` is a claim about a
+        # key, and with one match that key does nothing.
+        #
+        # `width - 2` is the border label's budget, MEASURED rather than
+        # reasoned: textual truncates a label at the outer width minus
+        # six, and `border: solid` plus `padding: 0 1` makes the outer
+        # width four more than the one handed here. Change either in
+        # app.tcss and this constant is wrong -- which is why the pilot
+        # test asserts the drawn row carries no ellipsis.
+        #
+        # cell_len, not len: the arrows are East-Asian AMBIGUOUS width,
+        # exactly like the SUGGEST_SEP this panel already ships.
+        parts = list(SUGGEST_HINT_REST)
+        if len(self._matches) > 1:
+            parts.insert(0, SUGGEST_HINT_MOVE)
+        while parts and Text(
+                SUGGEST_HINT_SEP.join(parts)).cell_len > width - 2:
+            parts.pop(0)
+        hint = SUGGEST_HINT_SEP.join(parts) or None
+        # Guarded for the title's reason, and it is not tidiness:
+        # `_BorderTitle.__set__` calls `refresh()` and this runs from
+        # `render()`, so an unguarded assignment schedules a paint from
+        # inside a paint. It converges because the second pass compares
+        # equal -- `border_subtitle` hands back markup, and neither
+        # string carries any.
+        if self.border_subtitle != hint:
+            self.border_subtitle = hint
 
     def get_content_height(self, container, viewport, width: int) -> int:
         # Textual hands the width here BEFORE the first paint, which is the

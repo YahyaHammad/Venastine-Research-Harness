@@ -59,6 +59,15 @@
     /* The count, `4 of 26 - /help for all`. Muted for #prompt's reason:
        it is a hint about the list, not a heading over it. */
     border-title-color: $text-muted;
+    /* Batch 62's key hints, on the bottom border. STATED, and measured
+       rather than assumed: an unstyled subtitle renders in $primary --
+       the border's own green -- so without this the hint would be
+       brighter than the count above it on the same box, and the less
+       important of the two labels would be the louder one. No
+       `border-subtitle-align`: textual already defaults a subtitle to
+       the right, which is the corner #prompt's meter uses one box
+       down, so titles sit left and status sits right throughout. */
+    border-subtitle-color: $text-muted;
 }
 
 /* Batch 54. `height: auto` with a `max-height` -- batch 49's shape, for

@@ -3579,3 +3579,43 @@ instant". Batch 61.
 **Fix:** add the entry with its count, update the file's own count if it grew, and bump the
 total in README.md, AGENTS.md and ARCHITECTURE.md together. Both checks skip on a filtered
 invocation, so a targeted run is green and the full suite is not.
+
+
+### `#slash-suggest` with no `border-subtitle-color`
+
+**Symptom:** `test_the_hint_and_the_count_are_the_same_weight` fails with two different
+colours.
+
+**Fix:** restore the rule in `app.tcss`. A border SUBTITLE with no rule renders in `$primary` —
+the border's own colour — while the title beside it is `$text-muted`, so the key hint becomes
+the loudest thing on a box whose own count is deliberately quiet. Measured, not assumed.
+Batch 62.
+
+### The suggestion panel's border labels assigned unguarded
+
+**Symptom:** `test_measuring_twice_does_not_ask_for_a_third_paint` fails with a paint count.
+
+**Fix:** keep the `if self.border_title != title:` / `if self.border_subtitle != hint:`
+guards. `_BorderTitle.__set__` calls `refresh()` and `_budget` runs from `render()`, so an
+unguarded assignment schedules a paint from inside a paint on every paint. It converges only
+because the second measurement compares equal. Batch 62.
+
+### `check_action` returning `False` for `tab` / `escape` to reach the footer
+
+**Symptom:** tab stops moving focus once the suggestion panel is shut; `escape` reaches
+nobody.
+
+**Fix:** it must stay `None`. `Screen.active_bindings` skips a binding only on `is False`, so
+`False` is what a footer entry needs — and it is also what DISABLES the key everywhere else.
+Batch 55 chose `None` so both keys keep their life outside the panel; batch 57 needed `False`
+for the opposite reason on a key that has none. The hint lives on the panel's own border
+because of this, not by preference.
+
+### A width sweep taken at round numbers instead of at the drop boundaries
+
+**Symptom:** nothing fails — `test_the_hint_never_overflows_the_border` passes over a budget
+that is wrong by two.
+
+**Fix:** sweep 44/43, 34/33 and 13/12, the widths at which a hint part drops. At 80, 54, 44,
+38, 30 and 20 a two-cell error in the budget changes no output at all, so the mutation that
+removes the border and padding from the arithmetic survives a sweep over those. Batch 62.

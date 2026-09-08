@@ -10933,3 +10933,86 @@ Three mutations, each removing one thing the feature is made of, all killed:
 
 Every mutated source is `ast.parse`d before it runs — a mutation that breaks the file at
 import scores as a kill while measuring nothing, which is the false-RED trap batch 60 hit.
+
+
+## Batch 62 — the keys the panel never mentioned (2026-09-08)
+
+**Reported:** the suggestion panel's keys are written nowhere — "↑↓ navigate, enter
+completes-then-sends, esc dismisses, tab completes — none of it is written anywhere in the
+TUI."
+
+All four are accurate, and one of them is the reason this is worth doing. `action_submit`
+calls `_complete()` and returns, so `enter` **completes rather than sends** and a fully typed
+`/help` takes two presses. That was deliberate in batch 55 ("the alternative is a coin flip
+from the user's side, and stops being well defined the day two commands share a prefix") and
+it is invisible: the first press changes nothing on screen except a trailing space.
+
+### Where it could not go
+
+The **border title** is taken, and by something batch 56 made load-bearing: `1-4 of 26 ·
+/help for all` is a derived claim about where the sliding window sits. Measured at five
+widths, a border label is truncated at the outer width minus six — with `border: solid` and
+`padding: 0 1` that is 52 cells at 80 columns, against a 25-cell count and a 42-cell hint.
+They cannot share the row.
+
+The **footer** is the interesting refusal, because it looks free. `PromptInput` already binds
+`tab` and `escape`; flipping `show=True` would seem to put them in the footer for nothing. It
+does not: `Screen.active_bindings` skips a binding only on `check_action` returning
+`is False`, and `None` leaves it in the map marked *disabled*. Batch 55 requires `None` there
+precisely so `tab` still reaches the focus system when the panel is shut — so the entries
+would sit in the footer greyed and permanent. This is batch 57's finding from the other side:
+that batch needed `False` to relabel a footer entry, this one cannot use `False` without
+taking a key away from the rest of the app.
+
+So: the **bottom border of the panel itself**. Zero rows, one owner, and it disappears with
+the thing it describes.
+
+### The state rule, which is the title's rule
+
+`↑↓ move` is a claim about a key. With one match `move()` computes `(0 + 1) % 1 == 0` and
+nothing happens, so the claim is false — the same way `1-1 of 1` was false about a window
+with nowhere to be. The hint drops the arrows there, and the test asserts **both halves**:
+that the string is gone, and that `move(1)` really does leave `chosen` where it was. A test
+of the string alone would still pass on the day `move()` started wrapping somewhere.
+
+The width rule drops whole parts from the left rather than letting textual ellipsise. An
+`esc dism…` is furniture, not help. The named consequence: what survives the narrowest
+terminal is how to get rid of the panel — at 46 columns the *title* is cut to `1-4 of 26 ·
+/help…` and the hint reads `esc dismiss` whole, which is the right way round.
+
+### Two things that were measured rather than assumed
+
+**A border label's budget is `width - 2` here**, where `width` is what `_budget` is handed.
+That 2 is `border: solid` plus `padding: 0 1` minus textual's own reservation for corners and
+blanks. It is a coupling to `app.tcss` that no type checker sees, so the pilot test asserts
+the drawn row carries **no ellipsis** at 80 columns — move the padding and that fails.
+
+**An unstyled border subtitle renders in `$primary`.** Measured: `#3dd968` against the title's
+`#9da09d`. Without `border-subtitle-color: $text-muted` the hint would be the brightest thing
+on a box whose own count is deliberately quiet. Nothing else fails if that rule is deleted,
+which is why there is a test reading both border rows' styles off the compositor.
+
+The same asymmetry is shipping on `#prompt` since batch 61 — the turn meter draws in
+`$primary` while its placeholder title is muted — and it stays, deliberately: that figure
+exists to be findable during a silence, and muting it would work against the reassurance it
+was added for.
+
+### Verification
+
+Four mutations, each removing one thing this is made of, all killed:
+
+| mutation | killed by |
+|---|---|
+| the arrows offered whatever the match count | the single-match test |
+| the label budget forgetting the border and the padding | the width sweep, at 43, 33 and 12 |
+| the `border-subtitle-color` rule deleted | the two-labels-one-weight test |
+| the subtitle assigned unguarded | the second-measurement test |
+
+The width sweep is at the widths where a part **drops** — 44/43, 34/33, 13/12 — rather than at
+round ones, and that is what makes the second mutation die: at 80, 54, 44, 38, 30 and 20 the
+budget error changes nothing, and a sweep over those alone reports a survivor.
+
+The mutation harness needed two fixes of its own before it could be believed: a parametrized
+id is `name[param]`, so an exact-name match never hits, and a multi-line anchor built with
+`\n` matches nothing in a CRLF file. Both presented as SURVIVED and SKIPPED against code that
+was correct.

@@ -48,7 +48,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 3892 tests, offline, ~2-3 min by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 3906 tests, offline, ~2-3 min by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -651,6 +651,38 @@ later, five over seven in the middle — measured. Two consequences, neither opt
 is somewhere to be, and `4 of 4` / `1 of 1` when everything already fits. A range on a list
 with nowhere to go is noise, and the rule keeps every case shipped in batch 55 reading exactly
 as it did.
+
+**The bottom border says which keys the panel spends** (batch 62). Four keys change meaning
+while the suggestion panel is open — the arrows move the highlight, `tab` and `enter` both
+complete, `escape` dismisses — and none of them was written anywhere in the TUI. `enter` is the
+one that costs something: it completes rather than sends, so a fully typed `/help` takes two
+presses and the first changes nothing a reader can see except a trailing space.
+
+Three placements were measured and two are closed. Not the border TITLE, which the count holds:
+at 80 columns the label budget is 52 cells, the count is 25 and the hint is 42. **Not the
+FOOTER, and that one is worth recording** — `Screen.active_bindings` drops a binding only on
+`check_action` returning `is False`, and batch 55 needs `None` for `tab`/`escape` so they still
+reach the focus system with the panel shut, so `show=True` would park two greyed entries in the
+footer permanently. It is batch 57's asymmetry from the other side: `False` and `None` differ,
+and which one is right depends on whether the key has a life outside the panel.
+
+The hint shortens by STATE first and by width second. The state half is the title's own rule
+applied to a control: with one match `move()` wraps to the command it is already on, so
+`↑↓ move` would advertise a key that does nothing — the same claim the title stopped making
+when it dropped the range from `1 of 1`. The width half drops whole parts from the LEFT rather
+than truncating, because an ellipsised `esc dism…` is furniture and not help; what survives the
+narrowest terminal is therefore how to get rid of the panel, which is the useful key at a width
+where the entries are unreadable anyway.
+
+Two numbers in that are measured rather than reasoned. **A border label is truncated at the
+widget's outer width minus six**, so with `border: solid` and `padding: 0 1` the budget is two
+cells narrower than the width `_budget` is handed — change either in `app.tcss` and the
+arithmetic is wrong, which is why the pilot test asserts the drawn row carries no ellipsis. And
+**an unstyled border SUBTITLE renders in `$primary`, not `$text-muted`**: without a rule the
+hint would be brighter than the count on the same box, and the less important of the two labels
+would be the louder one. `border-subtitle-align` needs no rule — textual already defaults a
+subtitle to the right, which is where `#prompt`'s meter sits one box down, so titles read left
+and status reads right throughout.
 
 **ctrl+c is one key with two bindings, and `check_action` picks which is live** (batch 57).
 A `Binding`'s description is fixed at class definition, so relabelling the footer entry —

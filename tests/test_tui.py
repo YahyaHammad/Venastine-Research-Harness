@@ -39,9 +39,10 @@ from tests.conftest import (make_model_response, make_stream_sequence,
                             pump, settle)
 from tui.app import LoopEventMessage, VenastineApp
 from tui.commands import registry as commands
-from tui.widgets import (SUGGEST_HIGHLIGHT, SUGGEST_MAX_ENTRIES,
-                         SUGGEST_MAX_LINES, SUGGEST_MAX_ROWS, PromptInput,
-                         SlashSuggest)
+from tui.widgets import (SUGGEST_HIGHLIGHT, SUGGEST_HINT_MOVE,
+                         SUGGEST_HINT_REST, SUGGEST_HINT_SEP,
+                         SUGGEST_MAX_ENTRIES, SUGGEST_MAX_LINES,
+                         SUGGEST_MAX_ROWS, PromptInput, SlashSuggest)
 from tui.screens import (
     ConfirmScreen, PermissionScreen, QuestionScreen, ScrollBox,
 )
@@ -5624,6 +5625,177 @@ def _highlighted_rows(panel) -> list[str]:
                 if rows[index] not in found:
                     found.append(rows[index])
     return found
+
+
+def _border_rows(app, panel):
+    """The panel's drawn top and bottom border rows.
+
+    Off the COMPOSITOR rather than off `border_subtitle`, which is
+    batch 57's lesson: the attribute can be right while the row is
+    stale or clipped, and only one of those is what a reader sees.
+    """
+    strips = app.screen._compositor.render_strips()
+    top = panel.region.y
+    bottom = panel.region.y + panel.region.height - 1
+    return strips[top].text, strips[bottom].text
+
+
+class TestThePanelSaysWhichKeysItSpends:
+    """Batch 62. Four keys change meaning while the panel is open, and
+    none of them was written anywhere in the TUI.
+
+    The hint rides the bottom border because the top one is taken: at 80
+    columns the label budget is 52 cells, the count is 25 and the hint is
+    42. The footer cannot carry it either -- `Screen.active_bindings`
+    drops a binding only on `check_action` returning `is False`, and
+    batch 55 needs `None` there so tab still reaches the focus system
+    with the panel shut.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_panel_says_which_keys_it_spends(self):
+        """All three parts, on the DRAWN row, un-ellipsised.
+
+        The no-ellipsis half is not decoration. `_budget` measures the
+        label against `width - 2`, and that 2 is the difference between
+        the width textual hands the widget and the width it truncates a
+        border label at -- which is a function of `#slash-suggest`'s
+        border and padding in app.tcss. Change either and the arithmetic
+        is wrong; an ellipsis on the drawn row is how that surfaces.
+        """
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            panel = app.query_one("#slash-suggest")
+            await pilot.press("slash")
+            assert await settle(pilot, lambda: panel.display)
+
+            _, bottom = _border_rows(app, panel)
+            for part in (SUGGEST_HINT_MOVE,) + SUGGEST_HINT_REST:
+                assert part in bottom, (
+                    f"the drawn bottom border is {bottom!r}; it has to "
+                    f"say {part!r}, because nothing else in the TUI "
+                    f"does")
+            assert "…" not in bottom, (
+                f"the hint was truncated at 80 columns: {bottom!r}. "
+                f"_budget measures against `width - 2`, and that 2 "
+                f"comes from #slash-suggest's border and padding -- if "
+                f"either moved, the budget is now wrong")
+
+    @pytest.mark.asyncio
+    async def test_a_single_match_does_not_offer_an_arrow_that_cannot_move(
+            self):
+        """With one match the arrows do nothing, so the hint drops them.
+
+        The title's own rule (batch 56: a range on a list with nowhere to
+        go is noise) applied to a control instead of to a count. Both
+        halves are asserted -- the string AND the fact it claims -- because
+        a test of the string alone would still pass on the day `move()`
+        started wrapping somewhere.
+        """
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            panel = app.query_one("#slash-suggest")
+            await pilot.press("slash", "r", "e", "s", "e", "a")
+            assert await settle(pilot, lambda: len(panel._matches) == 1)
+
+            _, bottom = _border_rows(app, panel)
+            assert SUGGEST_HINT_MOVE not in bottom, (
+                f"the drawn bottom border is {bottom!r}; with one match "
+                f"the arrows move nothing, so offering them is a claim "
+                f"about a key that does not act")
+            for part in SUGGEST_HINT_REST:
+                assert part in bottom, (
+                    f"{part!r} still works with one match and is gone "
+                    f"from {bottom!r}")
+
+            before = panel.chosen
+            panel.move(1)
+            assert panel.chosen is before, (
+                f"move() changed the selection with one match, so the "
+                f"hint is now wrong to omit the arrows")
+
+    @pytest.mark.parametrize(
+        "width", [80, 54, 44, 43, 38, 34, 33, 20, 13, 12])
+    def test_the_hint_never_overflows_the_border(self, width):
+        """Swept with no pilot, for batch 55's reason.
+
+        A border label is truncated at `width - 2` cells here, so a hint
+        one cell over renders as `esc dism…` -- furniture rather than
+        help. Parts drop from the left until what is left fits, possibly
+        to nothing, and every value must therefore be a whole number of
+        parts joined by the separator.
+
+        `cell_len`, not `len`: the arrows are East-Asian ambiguous width,
+        like the separator this panel already ships.
+        """
+        panel = SlashSuggest()
+        panel._matches = list(commands.all())
+        panel._budget(width)
+        hint = panel.border_subtitle or ""
+
+        assert cell_len(hint) <= width - 2, (
+            f"the hint is {cell_len(hint)} cells at width {width}, and "
+            f"textual truncates a border label at {width - 2}: {hint!r}")
+        assert "…" not in hint, (
+            f"{hint!r} was cut mid-part; parts drop whole or not at all")
+        if hint:
+            parts = hint.split(SUGGEST_HINT_SEP)
+            allowed = (SUGGEST_HINT_MOVE,) + SUGGEST_HINT_REST
+            assert all(part in allowed for part in parts), (
+                f"{hint!r} split into {parts!r}, which is not a run of "
+                f"whole hint parts")
+
+    @pytest.mark.asyncio
+    async def test_the_hint_and_the_count_are_the_same_weight(self):
+        """Both labels on one box render in the same colour.
+
+        Measured before it was written: a border subtitle with no rule
+        renders in $primary -- the border's own green -- while the title
+        renders in $text-muted. Nothing else fails if
+        `border-subtitle-color` is dropped from app.tcss; the hint simply
+        becomes the loudest thing on a box whose own count is quiet.
+        """
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            panel = app.query_one("#slash-suggest")
+            await pilot.press("slash")
+            assert await settle(pilot, lambda: panel.display)
+
+            compositor = app.screen._compositor
+            top = panel.region.y
+            bottom = panel.region.y + panel.region.height - 1
+            title = compositor.get_style_at(panel.region.x + 3, top)
+            subtitle = compositor.get_style_at(
+                panel.region.x + panel.region.width - 6, bottom)
+            assert subtitle.color == title.color, (
+                f"the count draws in {title.color!r} and the hint in "
+                f"{subtitle.color!r}; an unstyled subtitle takes the "
+                f"border colour, so app.tcss has to say otherwise")
+
+    def test_measuring_twice_does_not_ask_for_a_third_paint(self):
+        """The change-guards, and they are not tidiness.
+
+        `_BorderTitle.__set__` calls `refresh()`, and `_budget` runs from
+        `render()` -- so an unguarded assignment schedules a paint from
+        inside a paint, on every paint. It converges only because the
+        second measurement compares equal, which is what this asserts.
+        Covers the title as well, which has carried the guard since batch
+        56 and never had a pin for it.
+        """
+        panel = SlashSuggest()
+        panel._matches = list(commands.all())
+        panel._budget(54)
+
+        painted = []
+        panel.refresh = lambda *a, **k: painted.append(1)
+        panel._budget(54)
+        assert not painted, (
+            f"a second measurement at the same width asked for "
+            f"{len(painted)} more paint(s); the border labels are "
+            f"assigned unguarded, so every render schedules another")
 
 
 class TestTheWindowSlidesOverTheMatches:
