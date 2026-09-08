@@ -10655,6 +10655,19 @@ collection error: dropping the pass-down (the grandchild goes blind), replacing 
 manager with a bare enter/exit pair (the raise cases), opening the span at the parent's depth,
 and moving the refusal check after the span (a row for a run that never started).
 
+### One more thing the batch found
+
+`agents/tui_commands.py` had been decoded as cp1252 and re-encoded as UTF-8 at some point, so it
+literally CONTAINED the mojibake -- `Â§` on six lines where `§` belonged and `â€”` on three, two
+of which are strings the user reads (`/agent`'s confirmation and the busy refusal). Every sibling
+command module spells `§` correctly, so the file disagreed with the codebase around it and
+nothing said so: it imports, the tests pass, and the strings simply render wrong.
+
+Repaired by the inverse round trip, and `test_docs_consistency.py` grew the guard --
+`line.encode('cp1252').decode('utf-8')` succeeding AND differing is both the detector and the
+repair, which is why it needs no vocabulary of dashes and quotes to keep current. The guard was
+verified by re-mangling the file and watching it go red, then restoring byte-for-byte.
+
 ### Not done
 
 Research mode. `stream_deep_research_mode` takes `activity` now, but the orchestrator does not
