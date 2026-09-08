@@ -48,7 +48,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 3837 tests, offline, ~2-3 min by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 3892 tests, offline, ~2-3 min by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -458,6 +458,58 @@ screen with its header on the last visible row. It is `overflow-y: auto` with
   `padding: 1` — and **18 while the scrollbar is up**. Every "22 columns" comment in
   `tui/widgets.py` is about the box, not the budget. `AgentPanel.WIDTH` lays out against 18,
   since a row that fits the narrow case fits the wide one.
+
+**Three live figures ride the prompt's BORDER SUBTITLE, and the silence they fill was
+built on purpose** (batch 61). `commit_span` holds a table from its header row, and a table
+-- like an open fence -- is EXEMPT from `HOLD_LIMIT`, so the gap has no upper bound; beside
+that, `on_loop_event_message` pauses the raven on every token delta, because a redraw loop
+competing with deltas is the one place animation costs responsiveness. Both are right, and
+together they leave the screen most static when the harness is busiest. The meter refills
+that spot; it does not reverse the pause.
+
+- **The subtitle, because `border_title` is already the placeholder** a `TextArea` has no
+  other way to carry, and because it costs ZERO ROWS against the 24-row floor. `RichLog`
+  cannot rewrite a drawn row, so the live half could never have lived in the transcript --
+  only the finished figure goes there, under the answer, in the `system` role that is
+  already in `META_ROLES` so `/copy conversation` keeps excluding it.
+- **`_busy` is a PROPERTY now, and that is the whole leak prevention.** It is written at
+  eleven sites with FOUR distinct turn exits (`on_turn_finished`, `on_one_shot_finished`,
+  `on_research_finished`, and `_cmd_compact`'s worker `finally`), so a clock started at one
+  and stopped at another leaks -- batch 60's defect one layer up. The setter is the funnel;
+  `test_the_busy_flag_is_the_only_way_to_move_the_clock` reads the source and fails if
+  `_busy_state` is ever assigned outside it, because no behaviour can see the fifth exit
+  that forgets. A property rather than a rename for batch 54's reason: 89 references across
+  11 test files, all plain reads and assignments.
+- **The rate is an ESTIMATE and says so with a tilde.** `StreamToken` carries no incremental
+  usage and only THREE of the nineteen configured providers set `supports_stream_usage`, so
+  an exact live figure would read `0 tok/s` forever on the other sixteen -- D21's own
+  failure mode, correct-looking output, one layer up. The estimate also keeps MOVING during
+  a table hold, because the deltas arrive whether or not the renderer draws them. The
+  completion line carries the exact count from `turn_output_tokens` and makes NO TOKEN CLAIM
+  where the provider reports none; a zero there would say the model wrote nothing.
+- **`turn_output_tokens` is a THIRD instrument, not a convenience.** `turn_billed_tokens` is
+  a spend meter (the prompt is counted again every step) and `turn_new_tokens` a size meter
+  (it adds the input deltas a tool-using turn brings in). Divide either by a duration and
+  the result looks like tok/s and is not -- which is TECHNICAL_DEBT item 9's misreading
+  exactly.
+- **Updates are EVENT-DRIVEN first and timed second**, which is what makes
+  `tui.animations: false` cheap to honour: a token delta arrives per chunk even while the cap
+  withholds, so the figures stay live through the hold with or without the tick. The
+  `set_interval` timer -- `ANIMATION_INTERVAL`, created paused, resumed only while `_busy` --
+  covers only a long tool call and pre-first-token latency. The named price of pausing it
+  when idle: uptime is refreshed at each turn boundary and on each loop event, so a session
+  left alone shows the uptime it had when the last turn ended.
+- **The modal pause is read off `len(screen_stack)`, not off a screen event.** Measured:
+  `on_screen_suspend` does not reach the App, but the stack depth moves 1 -> 2 -> 1
+  reliably, so every modal counts including ones added later. `_blocking_modal` -- where all
+  four asks already funnel -- also calls `set_blocked` DIRECTLY, never through
+  `call_from_thread`: a quitting app has no message pump left, and marshalling there parks
+  the worker forever and breaks the shutdown release (caught by
+  `test_quitting_during_an_attended_research_prompt_releases_the_worker`).
+- **`from time import monotonic`, never `import time`.** `mocker.patch("tui.app.time.monotonic")`
+  resolves to the GLOBAL time module and freezes it for textual's event loop and conftest's
+  `settle` as well -- measured, the suite hangs rather than fails. The module-local name is a
+  patch point that reaches nothing else, and it is why `tui/meters.py` can stay clockless.
 
 **The prompt box is a `TextArea`, and `priority=True` is what makes it one** (batch 54).
 `PromptInput` (`tui/widgets.py`) wraps and grows to four rows as the user types, then

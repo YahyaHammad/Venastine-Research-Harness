@@ -10805,3 +10805,131 @@ Two texts, discriminated by the `answered_by_name` local the loop already comput
 something the user answered minutes ago in this turn; a grant is something they decided before
 the run existed, possibly on a command line. Telling them they "answered earlier" would describe
 a moment that never happened.
+
+
+## Batch 61 — three figures for a silence the harness built itself (2026-09-08)
+
+**Reported:** when a turn ends nothing says so. And there are stretches mid-turn where the
+screen sits completely still while the model is streaming hard — "the harness is receiving
+table rows, every token delta gets cached until the table is complete" — so a pause is
+indistinguishable from a finished answer.
+
+### The measurement
+
+Both halves are things this project decided on purpose, which is why neither showed up as a
+bug.
+
+`markdown.commit_span` holds a table **from its header row** until a line arrives that is not
+a row, or until `flush_stream` at the end of the turn. A table and an open fence are the two
+constructs **exempt from `HOLD_LIMIT`**, the 1000-character ceiling that bounds every other
+hold — AGENTS.md says it outright: *"A TABLE HAS NO TERMINATOR"*, and calls the narrower
+guarantee "the honest one". So the gap has no upper bound at all.
+
+Beside it, `on_loop_event_message` calls `self._raven.pause_animation()` on every
+`token_delta`: *"a redraw loop competing with deltas is the one place animation costs
+responsiveness."* Also right. Together they mean the one moving thing on screen stops exactly
+when the harness is busiest. **This batch refills the spot the raven was vacated from. It does
+not reverse that decision** — the raven still pauses, and the new tick is a change-guarded
+one-line repaint rather than an ASCII redraw.
+
+### The provider question, which changed a decision
+
+The plan was an exact tokens-per-second from provider usage — the user's reasoning was sound:
+a figure sourced differently from the sidebar's `ctx` could drift from it. The condition
+attached to it ("if the provider usage is always there") turned out to be false, and the repo
+had already written down why.
+
+`StreamToken` carries `text_delta`, `thinking_delta`, `final_response` and no usage. Usage
+arrives once per model call, and only where the provider is marked `supports_stream_usage` —
+D21: OpenAI-compatible streaming returns none unless `stream_options` is sent, and Mistral
+rejects that parameter with HTTP 422, so it is a per-provider capability. Measured against the
+local `providers.json`: **3 of 19** (OPENAI, QWEN_TOKEN_PLAN, ANTHROPIC). On the other sixteen
+an exact live rate reads `0 tok/s` forever — D21's own failure mode, correct-looking output,
+one layer up in the UI.
+
+The drift concern also dissolves under measurement: `update_usage` returns early on
+`not (billed or ctx)`, so on those sixteen providers the sidebar usage line is **hidden
+entirely**. There is no `ctx` figure there to drift from.
+
+So the live figure is an estimate from characters, marked with a tilde, and the exact count
+goes in the completion line. The estimate is not a compromise — it is the requirement. It
+keeps moving during a table hold, because the deltas *are* arriving; it is the renderer that
+is withholding.
+
+### A third instrument
+
+Neither existing per-turn field means "tokens the model generated". `turn_billed_tokens` is a
+spend meter — the prompt is counted again on every step. `turn_new_tokens` is a size meter —
+output plus the positive input deltas, so a tool-using turn's tool results land in it.
+Dividing either by a duration produces a number that looks like tok/s and is not, which is
+TECHNICAL_DEBT item 9's misreading exactly, and the reason `UsageLine`'s docstring opens with
+*"TWO DIFFERENT INSTRUMENTS, labelled so nobody repeats it."* So `turn_output_tokens` is a
+third field, one accumulator beside the two that already ride every response.
+
+### `_busy` is a property now
+
+The leak this prevents is batch 60's defect one layer up. `_busy` is written at **eleven**
+sites with **four** distinct turn exits — `on_turn_finished`, `on_one_shot_finished`,
+`on_research_finished`, and `_cmd_compact`'s worker `finally` via `call_from_thread`. A clock
+started in one place and stopped in another will leak; the only question is when.
+
+A property makes the setter the single funnel and edits nothing else — batch 54's
+`PromptInput.value` lesson, and not hypothetically: **89 references across 11 test files**, all
+plain reads and assignments, nothing patched. `/research` and `/compact` get the live elapsed
+figure for free as a result.
+
+The setter owns the *clock*; the transcript line stays at the exits. Putting the line in the
+setter too would print `took 0.0s` under `run_agent_turn`'s and `run_one_shot`'s early-return
+error branches, which set `_busy` and immediately clear it. `stop()` returns **None** rather
+than `0.0` for the same distinction — the caller has to tell "nothing ran" from "it was
+instant", and one of those gets a line.
+
+`test_the_busy_flag_is_the_only_way_to_move_the_clock` reads the source and fails if
+`_busy_state` is assigned outside the setter. Source-level for batch 60's reason: no behaviour
+can see the fifth exit that forgets, until it is added.
+
+### Two things the tests found rather than the reasoning
+
+**`call_from_thread` in a `finally` deadlocks a quitting app.** The first version marshalled
+`set_blocked` onto the UI thread out of habit.
+`test_quitting_during_an_attended_research_prompt_releases_the_worker` went red: `app.exit()`
+tears down the message pump, and a worker parked in `call_from_thread` afterwards never
+returns — so the shutdown release that test exists to protect stopped working. The marshalling
+was never needed; the meter touches no widget. Called directly it is also correct under the
+race, because `set_blocked` is idempotent by construction: whichever of the worker and the
+tick observes the transition first wins, and the second call is a no-op. That idempotence is
+what lets two routes drive one piece of state instead of being two mechanisms that must agree.
+
+**`import time` is the wrong seam, and it hung the suite rather than failing it.**
+`mocker.patch("tui.app.time.monotonic", ...)` resolves `tui.app.time` to the *global* time
+module and patches `monotonic` on it — freezing the clock for textual's event loop and for
+conftest's `settle` timeout as well, so the run never came back. `from time import monotonic`
+binds the name in the module's own namespace, and `tui.app.monotonic` is a patch point that
+reaches nothing else.
+
+That seam is also what keeps `tui/meters.py` pure. It is `tui/markdown.py`'s and
+`tui/diffs.py`'s rule with one addition — **no clock either**: every method takes `now` as a
+parameter, so `app.py` is the only file that reads a real one and all 42 tests in
+`test_meters.py` are arithmetic rather than a pilot racing a live timer.
+
+### Where they sit
+
+`#prompt`'s **border subtitle** — verified by rendering onto a bordered bottom-docked
+`TextArea` in a headless `run_test` and reading it back off the compositor, since
+`border_title` is already the placeholder a `TextArea` has no other way to carry. It costs
+**zero rows**, which matters against the 24-row floor `app.tcss` is written to; the sidebar
+alternative was measured at **19 usable columns, 18 with the scrollbar up** (batch 59) and
+would have needed three.
+
+### Verification
+
+Three mutations, each removing one thing the feature is made of, all killed:
+
+| mutation | killed by |
+|---|---|
+| no `_refresh_meter()` on a loop event | the table-hold test and the throughput test |
+| characters never counted | the throughput test |
+| the `_busy` setter stops driving the meter | three, including the completion line |
+
+Every mutated source is `ast.parse`d before it runs — a mutation that breaks the file at
+import scores as a kill while measuring nothing, which is the false-RED trap batch 60 hit.

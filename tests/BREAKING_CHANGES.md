@@ -3531,3 +3531,51 @@ the shipped config, so `is_tool_allowed()` refuses them first and the result is
 `"... is disabled by policy"` rather than an approval outcome. `test_grants._raise_policy` exists
 for this; the first draft of `TestAnAnswerCoversOneCallOnly` was green against a gate it never
 touched.
+
+
+### `tui/app.py` imports `time` instead of `from time import monotonic`
+
+**Symptom:** `tests/test_tui.py` HANGS rather than failing — the run never returns and has to
+be killed.
+
+**Fix:** restore `from time import monotonic`. `mocker.patch("tui.app.time.monotonic", ...)`
+resolves `tui.app.time` to the global `time` module, so a frozen clock in one test freezes it
+for textual's event loop and for `conftest.settle`'s timeout too. The module-local name is a
+patch point that reaches nothing else. Batch 61.
+
+### `_busy_state` assigned anywhere but the property setter
+
+**Symptom:** `test_the_busy_flag_is_the_only_way_to_move_the_clock` fails with a site count.
+
+**Fix:** route it through `_busy`. `_busy` is written at eleven sites with four distinct turn
+exits, and the property setter is the only thing that starts and stops the turn clock — a new
+exit assigning the backing field directly leaves the clock running forever, and no behavioural
+test can see it. Batch 61, and batch 60's shape one layer up.
+
+### `set_blocked` marshalled through `call_from_thread`
+
+**Symptom:** `test_quitting_during_an_attended_research_prompt_releases_the_worker` fails with
+"exit() left the worker blocked on approval".
+
+**Fix:** call it directly. `_blocking_modal` runs on a worker thread, and a quitting app has no
+message pump left to marshal into, so the worker parks forever. The meter touches no widget;
+`set_blocked` is idempotent, which is what makes the direct call correct under the race with
+the tick's own screen-stack read. Batch 61.
+
+### `TurnMeter.stop` returning `0.0` instead of `None` for an idle meter
+
+**Symptom:** `test_nothing_is_said_when_no_turn_was_running` fails; a `took 0.0s` line appears
+under "Could not start the turn".
+
+**Fix:** keep the `None`. `_busy` is cleared on paths where no turn ever ran — a starter's
+early-return error branch — and the caller has to tell "nothing was running" from "it was
+instant". Batch 61.
+
+### A new test file with no entry in ARCHITECTURE.md's tree
+
+**Symptom:** `test_the_tree_states_a_correct_count_for_every_collected_test_file` fails with
+`no entry in the tree`, and `test_the_documented_count_is_the_real_one` fails on the aggregate.
+
+**Fix:** add the entry with its count, update the file's own count if it grew, and bump the
+total in README.md, AGENTS.md and ARCHITECTURE.md together. Both checks skip on a filtered
+invocation, so a targeted run is green and the full suite is not.

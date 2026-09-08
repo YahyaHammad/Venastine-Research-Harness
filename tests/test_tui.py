@@ -34,14 +34,16 @@ import pytest
 import config
 from rich.cells import cell_len
 
+from core.events import LoopEvent
 from tests.conftest import (make_model_response, make_stream_sequence,
                             pump, settle)
-from tui.app import VenastineApp
+from tui.app import LoopEventMessage, VenastineApp
 from tui.commands import registry as commands
 from tui.widgets import (SUGGEST_HIGHLIGHT, SUGGEST_MAX_ENTRIES,
-                         SUGGEST_MAX_LINES, SUGGEST_MAX_ROWS, SlashSuggest)
+                         SUGGEST_MAX_LINES, SUGGEST_MAX_ROWS, PromptInput,
+                         SlashSuggest)
 from tui.screens import (
-    PermissionScreen, QuestionScreen, ScrollBox,
+    ConfirmScreen, PermissionScreen, QuestionScreen, ScrollBox,
 )
 
 
@@ -6343,3 +6345,336 @@ class TestTheSidebarScrolls:
         assert not offenders, (
             "a Static bounded by max-height clips rather than scrolls "
             "(EP3): " + "; ".join(offenders))
+
+
+# ---------------------------------------------------------------------------
+# ---- Batch 61: the turn meter reaches the screen --------------------------
+# ---------------------------------------------------------------------------
+#
+# tui/meters.py is tested directly in tests/test_meters.py -- arithmetic,
+# no pilot, no clock. What is here is the WIRING, and the first test is the
+# whole reason the batch exists: the figures have to keep moving while the
+# commit cap is withholding a table, because that is the silence the user
+# reported. A test driving ordinary prose passes with that defect fully
+# intact.
+
+
+class _Clock:
+    """A monotonic clock the test drives. `tui/app.py` is the only file
+    that reads a real one, which is what makes this a one-line patch."""
+
+    def __init__(self, now=1000.0):
+        self.now = now
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += seconds
+        return self.now
+
+
+def _subtitle(app):
+    return app.query_one("#prompt", PromptInput).border_subtitle
+
+
+TABLE_DELTAS = ["| Domain | Skills |\n", "|---|---|\n",
+                "| math | proof-writing |\n", "| code | refactoring |\n",
+                "| prose | editing |\n"]
+
+
+@pytest.mark.asyncio
+async def test_the_figures_move_while_a_table_is_being_withheld(mocker):
+    """THE test for this batch.
+
+    `commit_span` holds a table from its header row, and a table is exempt
+    from HOLD_LIMIT -- so the gap has no upper bound and the screen can sit
+    still for as long as the model keeps writing rows. Both halves are
+    asserted together, because either alone passes with the bug in place:
+    nothing new reaches the transcript, AND the border figures still change.
+    """
+    clock = _Clock()
+    mocker.patch("tui.app.monotonic", clock)
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test(size=(84, 24)) as pilot:
+        app._busy = True
+        await pilot.pause()
+
+        drawn_before = len(app._transcript._entries)
+        seen = []
+        for delta in TABLE_DELTAS:
+            clock.advance(1.0)
+            app.post_message(LoopEventMessage(LoopEvent(token_delta=delta)))
+            await pilot.pause()
+            seen.append(_subtitle(app))
+
+        assert len(app._transcript._entries) == drawn_before, \
+            "a table row reached the transcript -- this test is not " \
+            "exercising the hold it was written for"
+        assert len(set(seen)) > 1, \
+            "the figures froze while the table was being withheld, which " \
+            "is the exact silence this batch exists to fill"
+        assert all("s" in text for text in seen)
+
+
+@pytest.mark.asyncio
+async def test_the_throughput_figure_counts_what_is_being_withheld(mocker):
+    """The deltas ARRIVE during a hold; it is the renderer that waits. A
+    rate fed from drawn rows would read zero for the whole table."""
+    clock = _Clock()
+    mocker.patch("tui.app.monotonic", clock)
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test(size=(84, 24)) as pilot:
+        app._busy = True
+        for delta in TABLE_DELTAS:
+            clock.advance(0.5)
+            app.post_message(LoopEventMessage(LoopEvent(token_delta=delta)))
+        await pilot.pause()
+
+        assert "tok/s" in _subtitle(app), \
+            "no throughput figure during a table hold"
+
+
+@pytest.mark.asyncio
+async def test_the_prompt_border_shows_uptime_before_any_turn(mocker):
+    """Uptime is the half that says the shell is alive when nothing is
+    running -- and the border TITLE stays the placeholder, which is why
+    the subtitle was free to take."""
+    clock = _Clock()
+    mocker.patch("tui.app.monotonic", clock)
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test(size=(84, 24)) as pilot:
+        clock.advance(300.0)
+        app._refresh_meter()
+        await pilot.pause()
+
+        assert _subtitle(app) == "up 5m"
+        assert app.query_one("#prompt", PromptInput).border_title == \
+            "Message, or /help"
+
+
+@pytest.mark.asyncio
+async def test_a_modal_does_not_count_toward_the_turn(mocker):
+    """Read off the SCREEN STACK, so every modal counts including ones
+    added after this batch -- textual's on_screen_suspend does not reach
+    the App (measured), but the stack depth does."""
+    clock = _Clock()
+    mocker.patch("tui.app.monotonic", clock)
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test(size=(84, 24)) as pilot:
+        app._busy = True
+        clock.advance(2.0)
+        app._refresh_meter()
+
+        app.push_screen(ConfirmScreen("Title", "Body", "Yes"))
+        await pilot.pause()
+        app._refresh_meter()
+        clock.advance(30.0)          # thirty seconds reading the modal
+        app._refresh_meter()
+        app.pop_screen()
+        await pilot.pause()
+        # Observed HERE rather than after the advance below. The pause is
+        # not a tick -- the 0.4s timer has not come round in test time --
+        # so the refresh that sees the stack back at one is this call, and
+        # writing the assertion the other way round measures how long the
+        # test waited rather than what the meter does.
+        app._refresh_meter()
+        clock.advance(1.0)
+        app._refresh_meter()
+
+        assert app._meter.elapsed(clock.now) == pytest.approx(3.0, abs=0.01), \
+            "time spent waiting on a human was counted against the model"
+
+
+# -- the four exits ---------------------------------------------------------
+
+def test_the_busy_flag_is_the_only_way_to_move_the_clock():
+    """Batch 60's shape, one layer up: `_busy` is written at eleven sites
+    with FOUR distinct turn exits, and a clock started at one and stopped
+    at another leaks. The property is the funnel -- so what has to be
+    pinned is that nothing writes the backing field around it.
+
+    Source-level, because no behaviour can see the difference until the
+    fifth exit is added and forgets to call the meter.
+    """
+    import ast
+    import inspect
+
+    import tui.app
+
+    tree = ast.parse(inspect.getsource(tui.app))
+    stores = [node for node in ast.walk(tree)
+              if isinstance(node, ast.Attribute)
+              and node.attr == "_busy_state"
+              and isinstance(node.ctx, ast.Store)]
+    assert len(stores) == 2, (
+        "_busy_state is written at %d sites; it may be assigned only in "
+        "__init__ and in the property setter, or a turn exit can stop the "
+        "clock without the meter hearing about it" % len(stores))
+
+    setters = [node for node in ast.walk(tree)
+               if isinstance(node, ast.FunctionDef) and node.name == "_busy"]
+    assert len(setters) == 2, "expected the _busy getter and setter"
+
+
+@pytest.mark.asyncio
+async def test_setting_busy_starts_and_stops_the_clock(mocker):
+    """The behavioural half of the test above. All four exits clear
+    `_busy`, so proving the setter proves the four."""
+    clock = _Clock()
+    mocker.patch("tui.app.monotonic", clock)
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test(size=(84, 24)) as pilot:
+        assert app._meter.running is False
+        app._busy = True
+        assert app._meter.running is True
+        clock.advance(12.0)
+        app._busy = False
+        await pilot.pause()
+
+        assert app._meter.running is False
+        assert app._last_turn_elapsed == pytest.approx(12.0)
+
+
+@pytest.mark.asyncio
+async def test_a_repeated_busy_assignment_does_not_restart_the_clock(mocker):
+    """`_busy = True` is assigned twice on at least one path."""
+    clock = _Clock()
+    mocker.patch("tui.app.monotonic", clock)
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test(size=(84, 24)) as pilot:
+        app._busy = True
+        clock.advance(5.0)
+        app._busy = True
+        clock.advance(5.0)
+        app._busy = False
+        await pilot.pause()
+
+        assert app._last_turn_elapsed == pytest.approx(10.0)
+
+
+# -- the line that says it is done ------------------------------------------
+
+@pytest.mark.asyncio
+async def test_a_finished_turn_says_how_long_it_took(mocker, _mocked_loop):
+    """The reported problem in one assertion: when the turn ends, the
+    transcript says so."""
+    clock = _Clock()
+    mocker.patch("tui.app.monotonic", clock)
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test(size=(84, 24)) as pilot:
+        app.query_one("#prompt").value = "hello"
+        await pilot.press("enter")
+        assert await settle(pilot, lambda: app._busy is False), \
+            "the turn never finished"
+
+        lines = [text for role, text in app._transcript._entries
+                 if role == "system" and text.startswith("took ")]
+        assert lines, "nothing in the transcript says the turn ended"
+
+
+@pytest.mark.asyncio
+async def test_the_completion_line_makes_no_token_claim_without_usage(mocker):
+    """Sixteen of the nineteen configured providers report no usage on a
+    streaming call (D21). Printing `0 tokens out` there would say the
+    model wrote nothing."""
+    clock = _Clock()
+    mocker.patch("tui.app.monotonic", clock)
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test(size=(84, 24)) as pilot:
+        app._busy = True
+        clock.advance(3.0)
+        app._busy = False
+        app._write_turn_time()
+        await pilot.pause()
+
+        line = [t for r, t in app._transcript._entries if r == "system"][-1]
+        assert line == "took 3.0s"
+        assert "token" not in line
+
+
+@pytest.mark.asyncio
+async def test_the_exact_count_comes_from_the_output_instrument(mocker):
+    """NOT turn_billed_tokens (a spend meter, which counts the prompt
+    again every step) and NOT turn_new_tokens (a size meter, which adds
+    the input deltas a tool-using turn brings in)."""
+    clock = _Clock()
+    mocker.patch("tui.app.monotonic", clock)
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test(size=(84, 24)) as pilot:
+        response = make_model_response(text="done")
+        response.turn_billed_tokens = 99999
+        response.turn_new_tokens = 5000
+        response.turn_output_tokens = 400
+
+        app._busy = True
+        app.post_message(LoopEventMessage(
+            LoopEvent(final_response=response, stop_reason="complete")))
+        await pilot.pause()
+        clock.advance(10.0)
+        app._busy = False
+        app._write_turn_time()
+        await pilot.pause()
+
+        line = [t for r, t in app._transcript._entries if r == "system"][-1]
+        assert line == "took 10.0s · 400 tokens out · 40 tok/s", line
+
+
+@pytest.mark.asyncio
+async def test_nothing_is_said_when_no_turn_was_running(mocker):
+    """`_busy` is cleared on paths where it was never set -- a starter's
+    early-return error branch. A `took 0.0s` line under an error message
+    is noise."""
+    clock = _Clock()
+    mocker.patch("tui.app.monotonic", clock)
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test(size=(84, 24)) as pilot:
+        before = len(app._transcript._entries)
+        app._write_turn_time()
+        await pilot.pause()
+
+        assert len(app._transcript._entries) == before
+
+
+# -- the animations setting -------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_animations_off_creates_no_ticking_timer(mocker):
+    """RavenPanel's rule. The figures still update on every loop event --
+    which is what keeps them live through a table hold either way -- so
+    what the setting actually costs is movement during the two silences a
+    delta cannot cover: a long tool call, and pre-first-token latency."""
+    clock = _Clock()
+    mocker.patch("tui.app.monotonic", clock)
+    app = VenastineApp("ANTHROPIC", "test-model",
+                       {"tui": {"animations": False}})
+    async with app.run_test(size=(84, 24)) as pilot:
+        assert app._meter_timer is None
+
+        app._busy = True
+        clock.advance(1.0)
+        app.post_message(LoopEventMessage(
+            LoopEvent(token_delta="| a | b |\n")))
+        await pilot.pause()
+
+        assert _subtitle(app), "the figures need an event route as well"
+
+
+@pytest.mark.asyncio
+async def test_the_tick_runs_only_while_a_turn_does(mocker):
+    """A 0.4s tick against an idle shell is the redraw loop
+    RavenPanel.pause_animation exists to avoid."""
+    clock = _Clock()
+    mocker.patch("tui.app.monotonic", clock)
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test(size=(84, 24)) as pilot:
+        assert app._meter_timer is not None
+        assert app._meter_timer._active.is_set() is False
+
+        app._busy = True
+        await pilot.pause()
+        assert app._meter_timer._active.is_set() is True
+
+        app._busy = False
+        await pilot.pause()
+        assert app._meter_timer._active.is_set() is False

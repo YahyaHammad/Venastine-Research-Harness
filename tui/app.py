@@ -32,6 +32,7 @@ import json
 import logging
 import os
 import queue
+from time import monotonic
 from pathlib import Path
 from uuid import UUID
 
@@ -71,7 +72,7 @@ from safety.policy_enforcement import (
 
 from tools.builtin import file_ops
 from tools.registry import registry as tool_registry
-from tui import diffs, preferences, ravens, themes
+from tui import diffs, meters, preferences, ravens, themes
 from tui.commands import SlashCommand, registry as commands
 from tui.screens import (
     ClaimsScreen, ConfirmScreen, GrantPickerScreen, PermissionScreen,
@@ -80,7 +81,7 @@ from tui.screens import (
 )
 from security import posture
 from tui.widgets import (
-    AgentPanel,
+    AgentPanel, ANIMATION_INTERVAL,
     CONVERSATION_ROLES, EffortRaven, GoalBanner, PostureBadge, PromptInput,
     RavenPanel, ResearchProgress, SlashSuggest, ThinkingIndicator, TodoPanel,
     Transcript, UsageLine,
@@ -393,6 +394,20 @@ class VenastineApp(App):
     _quit_armed = False
     _quit_timer = None
 
+    # Batch 61. CLASS-level defaults, so an app built with __new__ and
+    # no __init__ -- four tests do exactly that, to exercise one method
+    # against a handful of injected attributes -- can assign `_busy`
+    # without an AttributeError. Transcript._styles' rule applied to
+    # state instead of to styling: a bare object degrades to doing
+    # nothing, because there is no screen to paint and no clock worth
+    # keeping.
+    _busy_state = False
+    _meter = None
+    _meter_timer = None
+    _meter_last = None
+    _last_turn_elapsed = None
+    _turn_output_tokens = None
+
     def __init__(self, provider_name: str = DEFAULT_PROVIDER,
                  model: str = None, settings: dict | None = None,
                  cli_pinned: bool = False):
@@ -483,6 +498,24 @@ class VenastineApp(App):
 
         self._memory: ConversationMemory | None = None
         self._permission_channel: queue.Queue | None = None
+        # Batch 61. BEFORE the `_busy` assignment below, which is a
+        # property setter now and drives this object.
+        self._meter = meters.TurnMeter()
+        self._meter_timer = None
+        self._meter_last = None
+        #: The last finished turn's active seconds, stashed by the
+        #: setter for the exit handler that writes the line. The
+        #: setter owns the CLOCK; saying so in the transcript stays
+        #: at the exits, because `_busy` is also cleared on paths
+        #: where no turn ever ran.
+        self._last_turn_elapsed = None
+        #: The finished turn's OUTPUT tokens, off the terminal
+        #: response. None where the provider reports no usage, which
+        #: is sixteen of the nineteen configured ones -- and None is
+        #: why the completion line can decline to claim a count
+        #: instead of printing a zero.
+        self._turn_output_tokens = None
+        self._busy_state = False
         self._busy = False
         # §18 session-scoped active agent (/agent switch). None = default
         # harness. Applies to subsequent turns until switched or cleared.
@@ -600,6 +633,18 @@ class VenastineApp(App):
         self.refresh_todo_panel()
         self.refresh_agent_panel()
         self.refresh_status()
+        # Batch 61. HERE and not in __init__: "up" means the shell
+        # has been on screen, not that an object was constructed.
+        self._meter.begin_session(monotonic())
+        if self._animations:
+            # RavenPanel's cadence, spelled once and imported. Created
+            # PAUSED (ThinkingIndicator's shape) and resumed only while
+            # a turn runs -- `tui.animations: false` therefore costs
+            # exactly the two silences a token delta cannot cover: a
+            # long tool call, and pre-first-token latency.
+            self._meter_timer = self.set_interval(
+                ANIMATION_INTERVAL, self._refresh_meter, pause=True)
+        self._refresh_meter()
         self._write_session_banner()
         # #138. Beside the status line it qualifies, before anything the
         # user might type. write_error, matching /model: an unknown
@@ -778,6 +823,135 @@ class VenastineApp(App):
             f"{self.provider_name} | {self.model}{remembered} "
             f"| theme {self._theme_name}"
         )
+
+    # -- the turn meter (batch 61) ------------------------------------------
+
+    @property
+    def _busy(self) -> bool:
+        return self._busy_state
+
+    @_busy.setter
+    def _busy(self, value) -> None:
+        """The one funnel a turn clock can hang off.
+
+        A PROPERTY rather than a rename, and the arithmetic is the
+        argument: `_busy` is written at eleven sites with four distinct
+        turn exits (on_turn_finished, on_one_shot_finished,
+        on_research_finished, and _cmd_compact's worker `finally` via
+        call_from_thread), and read by 89 references across 11 test
+        files. A clock started at one of those and stopped at another
+        WILL leak -- that is the defect batch 60 removed from
+        core/loop.py, one layer up. Batch 54 made the same trade for
+        the same reason: a one-line property is cheaper than sixty
+        edits made to land a rendering change.
+
+        Guarded like Transcript._styles: this runs during __init__ and
+        in bare-built apps across the suite, where there is no screen
+        to query and no timer to move.
+        """
+        value = bool(value)
+        was = self._busy_state
+        self._busy_state = value
+        if self._meter is None:
+            # A bare-built app (see the class defaults above): the flag
+            # is the whole contract there.
+            return
+        if value == was:
+            # Idempotent. `_busy = True` is assigned twice on at least
+            # one path, and the second must not restart the clock.
+            return
+        now = monotonic()
+        if value:
+            self._meter.start(now)
+        else:
+            self._last_turn_elapsed = self._meter.stop(now)
+        self._sync_meter_timer()
+        self._refresh_meter()
+
+    def _sync_meter_timer(self) -> None:
+        """Tick only while a turn is running (ThinkingIndicator's rule).
+
+        A 0.4s tick against an idle shell is exactly the redraw loop
+        RavenPanel.pause_animation exists to avoid. The price, named
+        rather than discovered: uptime is refreshed at every turn
+        boundary and on every loop event, so a session left idle shows
+        the uptime it had when the last turn ended until the next one
+        starts."""
+        if self._meter_timer is None:
+            return
+        if self._busy_state:
+            self._meter_timer.resume()
+        else:
+            self._meter_timer.pause()
+
+    def _refresh_meter(self) -> None:
+        """Paint the live figures onto the prompt's bottom border.
+
+        THE BORDER SUBTITLE, which costs zero rows -- and #prompt's
+        border TITLE is already taken by the TextArea placeholder,
+        which a TextArea has no other way to carry. RichLog cannot
+        rewrite a drawn row, so the live half could never have lived
+        in the transcript; this is the nearest surface to the input
+        box that redraws.
+
+        EVENT-DRIVEN FIRST, timed second. on_loop_event_message calls
+        this once per token delta, and those keep arriving while the
+        commit cap withholds a table -- it is the renderer that is
+        holding, not the stream -- so the figures stay live through
+        the silence whether or not the timer is running. The
+        change-guard is what makes that nearly free (UsageLine's
+        shape): a repaint happens only when the rendered string is
+        actually different.
+
+        The modal pause is read off the SCREEN STACK rather than
+        hooked into the four push_screen sites, so every modal counts
+        including ones added after this batch. Measured: textual's
+        on_screen_suspend does not reach the App, but the stack depth
+        moves 1 -> 2 -> 1 reliably.
+        """
+        if self._meter is None:
+            return
+        now = monotonic()
+        try:
+            blocked = len(self.screen_stack) > 1
+        except Exception:  # noqa: BLE001 -- no screen yet; nothing is blocking
+            blocked = False
+        self._meter.set_blocked(blocked, now)
+        text = self._meter.subtitle(now)
+        if text == self._meter_last:
+            return
+        self._meter_last = text
+        try:
+            self.query_one('#prompt', PromptInput).border_subtitle = text or ''
+        except Exception:  # noqa: BLE001 -- unmounted; nothing to paint
+            pass
+
+    def _write_turn_time(self) -> None:
+        """Say the turn is over, under the answer it belongs to.
+
+        `system` -- the harness talking about itself -- which is
+        already in META_ROLES, so /copy conversation keeps excluding
+        it. A new role would have to be classified in both role sets,
+        and tests/test_themes.py holds both halves against
+        MESSAGE_ROLES.
+
+        The exact token count is the provider's own, and where a
+        provider reports none NO TOKEN CLAIM IS MADE -- a zero would
+        say the model wrote nothing on sixteen of the nineteen
+        configured providers (D21: OpenAI-compatible streaming reports
+        no usage unless stream_options is sent, which Mistral rejects
+        outright)."""
+        if self._meter is None:
+            return
+        elapsed = self._last_turn_elapsed
+        self._last_turn_elapsed = None
+        if elapsed is None:
+            # `_busy` was cleared without a turn having run.
+            return
+        self._transcript.write_role(
+            'system',
+            self._meter.completion(elapsed, self._turn_output_tokens))
+        self._turn_output_tokens = None
 
     def refresh_status(self) -> None:
         """Keep the header showing which provider/model turns will use.
@@ -1280,6 +1454,7 @@ class VenastineApp(App):
 
     def on_one_shot_finished(self, message: OneShotFinished) -> None:
         self._busy = False
+        self._write_turn_time()
         self._raven.resume_animation()
         self._raven.state = ravens.IDLE
         if message.error is not None:
@@ -1392,6 +1567,13 @@ class VenastineApp(App):
         transcript = self._transcript
 
         self.refresh_usage_line()
+        # Batch 61. Counted whether or not the renderer draws it: the
+        # commit cap withholds a table from its header row with no
+        # HOLD_LIMIT to bound it, and a figure that stopped there
+        # would go still during the one silence it exists to cover.
+        if event.token_delta:
+            self._meter.add_output_chars(len(event.token_delta))
+        self._refresh_meter()
 
         if event.thinking_delta:
             # §38. Same mascot handling as a token delta -- reasoning is
@@ -1486,6 +1668,14 @@ class VenastineApp(App):
 
         if event.final_response is not None:
             self._end_thinking()
+            # Batch 61's third instrument. NOT turn_billed_tokens (a
+            # spend meter, which counts the prompt again every step)
+            # and NOT turn_new_tokens (a size meter, which adds the
+            # input deltas a tool-using turn brings in). Dividing
+            # either by a duration yields a number that looks like
+            # tok/s and is not.
+            self._turn_output_tokens = getattr(
+                event.final_response, 'turn_output_tokens', None)
             transcript.flush_stream()
             if event.stop_reason and event.stop_reason != "complete":
                 transcript.write_system(f"[stopped early: {event.stop_reason}]")
@@ -1854,6 +2044,23 @@ class VenastineApp(App):
         """
         channel: queue.Queue = queue.Queue()
         self._permission_channel = channel
+        # Batch 61. The turn clock stops while a human is being waited
+        # on -- this is their time, not the harness's, and counting it
+        # would make a 30-second decision read as a slow model and
+        # collapse the throughput figure to nothing. The tick reads the
+        # screen stack for the general case; this call is what makes
+        # the pause exact when `tui.animations: false` leaves no tick
+        # to notice the transition. set_blocked is idempotent, so the
+        # two routes are one piece of state.
+        #
+        # DIRECT, never call_from_thread: this runs on a worker, and
+        # a quitting app has no message pump left to marshal into --
+        # measured, that parks the worker forever and breaks the
+        # shutdown release this method exists to keep working
+        # (test_quitting_during_an_attended_research_prompt_releases_
+        # the_worker). The meter touches no widget, so there is
+        # nothing to marshal.
+        self._meter.set_blocked(True, monotonic())
         self.call_from_thread(
             self.push_screen, screen, lambda answer: channel.put(answer))
         try:
@@ -1863,6 +2070,7 @@ class VenastineApp(App):
             return None
         finally:
             self._permission_channel = None
+            self._meter.set_blocked(False, monotonic())
 
     def ask_choice_blocking(self, payload: dict):
         """Pick one of a set of offered options. Blocks; returns whatever
@@ -2043,6 +2251,9 @@ class VenastineApp(App):
         # record now (Transcript.last_answer), so there is no second buffer
         # to keep in step and no flush site that has to remember to.
         self._transcript.flush_stream()
+        # Batch 61. AFTER the flush, so the line lands under the
+        # answer rather than inside it.
+        self._write_turn_time()
         self._raven.resume_animation()
         self._raven.state = ravens.IDLE
         if message.error is not None:
@@ -2124,6 +2335,7 @@ class VenastineApp(App):
 
     def on_research_finished(self, message: ResearchFinished) -> None:
         self._busy = False
+        self._write_turn_time()
         self._raven.state = ravens.IDLE
         if getattr(message, "abandoned", False):
             # #105. A deliberate quit is not a pipeline failure: say what
