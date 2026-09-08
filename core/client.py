@@ -140,8 +140,19 @@ class ModelResponse:
     # and mid-turn compaction shrinks clamped away. This is the figure
     # anything reasoning about SIZE reads; the spend meter must never be
     # read that way again (TECHNICAL_DEBT item 9, closed batch 27).
+    # turn_output_tokens: what the MODEL WROTE this turn -- output tokens
+    # and nothing else, summed across every step. Batch 61, and it is a
+    # THIRD instrument rather than a convenience: the two above are a
+    # SPEND meter and a SIZE meter, and a generation RATE can be derived
+    # from neither. turn_billed_tokens counts the prompt again on every
+    # step; turn_new_tokens adds the positive input deltas, so a
+    # tool-using turn's tool results land in it and it overstates what was
+    # generated. Dividing either by a duration produces a number that
+    # looks like tok/s and is not, which is exactly the misreading
+    # TECHNICAL_DEBT item 9 was closed for.
     turn_billed_tokens: Optional[int] = None
     turn_new_tokens: Optional[int] = None
+    turn_output_tokens: Optional[int] = None
     # Batch 44 (§44). The turn's reasoning, as the PROVIDER'S OWN BLOCKS
     # rather than as the text §38 streams for display:
     #

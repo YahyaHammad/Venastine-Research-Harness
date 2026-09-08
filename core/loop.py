@@ -774,6 +774,10 @@ class RunAgentLoop:
         turn_baseline_input: Optional[int] = None
         turn_prev_input = 0
         turn_new_tokens = 0
+        # Batch 61, the third instrument. Output ALONE -- see the field's
+        # comment on ModelResponse for why neither of the two above can
+        # stand in for it once a duration is divided into the result.
+        turn_output_tokens = 0
         # §25 audit trail. Attached to the response object below rather
         # than at each of the three return points, so a stop condition
         # added later cannot forget to carry it -- the list is shared by
@@ -821,10 +825,12 @@ class RunAgentLoop:
             else:
                 turn_new_tokens += max(0, usage_in - turn_prev_input)
             turn_new_tokens += usage_out
+            turn_output_tokens += usage_out
             turn_prev_input = usage_in
             memory.record_billed(usage_in + usage_out)
             response.turn_billed_tokens = total_tokens_used
             response.turn_new_tokens = turn_new_tokens
+            response.turn_output_tokens = turn_output_tokens
 
             # D20: persist EVERY assistant turn BEFORE any branching.
             memory.add_assistant_message(response)
