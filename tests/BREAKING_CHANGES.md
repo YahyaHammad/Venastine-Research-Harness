@@ -3619,3 +3619,44 @@ that is wrong by two.
 **Fix:** sweep 44/43, 34/33 and 13/12, the widths at which a hint part drops. At 80, 54, 44,
 38, 30 and 20 a two-cell error in the budget changes no output at all, so the mutation that
 removes the border and padding from the arithmetic survives a sweep over those. Batch 62.
+
+
+### `remember()` without `refresh_bindings()`
+
+**Symptom:** `test_the_footer_entries_are_grey_until_there_is_history` fails on the second half —
+the entry is still dim after a prompt has been submitted.
+
+**Fix:** raise the bindings signal. The `Footer` recomposes off it and nothing in a submit does, so
+the bindings are correct, the keys work, and the footer row is grey for the rest of the session. Only
+the drawn cell can see it. Batch 63, and `action_arm_quit` carries the same comment for the same
+reason. Guard it on the empty-to-non-empty transition: a history never empties, so that is the only
+moment the answer changes.
+
+### `check_action` returning `False` for the recall actions
+
+**Symptom:** the two footer entries VANISH on a fresh session and the row reflows when the first
+prompt is sent.
+
+**Fix:** return `None`. `Screen.active_bindings` skips a binding only on `is False`; `None` keeps it
+marked disabled, which is a greyed entry rather than a missing one — and the press is declined
+either way. Batch 57 needs `False` on ctrl+c for the opposite reason: two bindings share that key
+and a refused one must give up its slot. Batch 63.
+
+### A history mover that ignores its `current` argument
+
+**Symptom:** `test_an_edit_is_handed_back_rather_than_walked_past` fails, and by hand: recall a
+prompt, edit it, press ctrl+up — the edit is gone with no way back.
+
+**Fix:** keep the comparison in `_is_browsing`. The parameter is not a convenience; it is how typing
+is detected without watching the keyboard, and dropping it turns the feature into the thing it was
+built to prevent. Batch 63.
+
+### Prompt recall bound to `ctrl+p`
+
+**Symptom:** ctrl+p stops opening the command palette; `/theme` still works but the palette's own
+theme list no longer reaches `watch_theme`.
+
+**Fix:** it is textual's `COMMAND_PALETTE_BINDING`, bound `priority=True`, and this project enables
+the palette deliberately. Do not relocate it to `ctrl+shift+p` either — that chord is
+indistinguishable from `ctrl+p` without the kitty protocol, which textual enables in its Linux
+drivers alone, so the palette would simply be gone on Windows. Batch 63.

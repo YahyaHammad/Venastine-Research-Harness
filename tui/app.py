@@ -72,7 +72,7 @@ from safety.policy_enforcement import (
 
 from tools.builtin import file_ops
 from tools.registry import registry as tool_registry
-from tui import diffs, meters, preferences, ravens, themes
+from tui import diffs, history, meters, preferences, ravens, themes
 from tui.commands import SlashCommand, registry as commands
 from tui.screens import (
     ClaimsScreen, ConfirmScreen, GrantPickerScreen, PermissionScreen,
@@ -377,6 +377,26 @@ class VenastineApp(App):
         # and neither binds ctrl+l, which App and Footer also leave free
         # (D22: verified against the installed version, not assumed).
         ("ctrl+l", "show_claims", "Claims"),
+        # Batch 63. ctrl+UP/DOWN, and the pair was chosen by
+        # elimination rather than by taste. ctrl+p is textual's
+        # COMMAND_PALETTE_BINDING, bound priority=True, and the
+        # palette is enabled on purpose here -- `watch_theme` exists
+        # because it sets App.theme directly. Relocating it to
+        # ctrl+shift+p would delete it on Windows: that chord is
+        # indistinguishable from ctrl+p without the kitty protocol,
+        # which textual turns on in its LINUX drivers alone.
+        #
+        # The plain arrows were the other candidate and are already
+        # spoken for twice -- cursor movement in a box batch 54 made
+        # multi-line, and the suggestion panel's highlight since 55.
+        # A third meaning gated on the cursor being at line 1 is the
+        # shell convention and would have been the third.
+        #
+        # Free, measured off `screen.active_bindings` with the prompt
+        # focused, which is App, Screen and TextArea's forty-odd
+        # editing keys in one list rather than a docs page.
+        ("ctrl+up", "recall_previous", "Previous"),
+        ("ctrl+down", "recall_next", "Next"),
     ]
 
     # Set by exit(); consulted by the blocking ask paths (review §19-20
@@ -407,6 +427,7 @@ class VenastineApp(App):
     _meter_last = None
     _last_turn_elapsed = None
     _turn_output_tokens = None
+    _history = None
 
     def __init__(self, provider_name: str = DEFAULT_PROVIDER,
                  model: str = None, settings: dict | None = None,
@@ -515,6 +536,12 @@ class VenastineApp(App):
         #: why the completion line can decline to claim a count
         #: instead of printing a zero.
         self._turn_output_tokens = None
+        # Batch 63. The prompts submitted this session. Session-scoped
+        # and in memory: it records what the PERSON typed rather than
+        # what a thread holds, so it survives /new and /resume -- a
+        # misfire bad enough to start a new thread is exactly when the
+        # text is wanted back.
+        self._history = history.PromptHistory()
         self._busy_state = False
         self._busy = False
         # §18 session-scoped active agent (/agent switch). None = default
@@ -1221,6 +1248,20 @@ class VenastineApp(App):
             self._transcript.write_error("Still working — wait for this turn to finish.")
             return
         event.prompt.value = ""
+        # Batch 63. AFTER the busy refusal above, which returns without
+        # clearing -- a message that was never sent is not something to
+        # recall. Before the dispatch, so a command that fails is still
+        # there to be corrected, which is most of why this exists.
+        was_empty = not self._history
+        self._history.remember(text)
+        if was_empty:
+            # The Footer recomposes off the screen's bindings signal and
+            # nothing else here raises it, so without this the two
+            # entries stay grey for the session while the keys work --
+            # `action_arm_quit` carries the same comment for the same
+            # reason. Guarded on the transition because that is the only
+            # time the answer changes: a history never empties.
+            self.refresh_bindings()
         if text.startswith("/"):
             if not commands.dispatch(self, text):
                 name = text[1:].split(" ")[0]
@@ -1813,7 +1854,61 @@ class VenastineApp(App):
             return self._quit_armed
         if action == "arm_quit":
             return not self._quit_armed
+        if action in ("recall_previous", "recall_next"):
+            # Batch 63, and this is the SAME distinction used the other
+            # way round. ctrl+c needs False because a refused binding
+            # must give up its slot to the other one on that key. These
+            # want None: `active_bindings` KEEPS a None-refused binding,
+            # marked disabled, so the footer greys the entry rather than
+            # dropping it and reflowing -- while `_check_bindings` still
+            # declines the press, so the key is inert on a fresh
+            # session. One return value buys both halves.
+            return True if self._history else None
         return True
+
+    def action_recall_previous(self) -> None:
+        """ctrl+up: the prompt before this one."""
+        self._recall(-1)
+
+    def action_recall_next(self) -> None:
+        """ctrl+down: the prompt after this one, or the draft back."""
+        self._recall(1)
+
+    def _recall(self, direction: int) -> None:
+        """Put a remembered prompt in the box, cursor at the end.
+
+        The box's CURRENT text is handed to the history, and that is
+        what lets an edit survive: a `current` that is not what the
+        history last served means the user has typed, so the move starts
+        a fresh browse with the edit saved as the draft rather than
+        walking past it. See `tui/history.py` for why that beats hooking
+        the keystroke.
+
+        Assignment goes through `.value`, so batch 55's `_api_edit` path
+        closes the suggestion panel on the way -- which is right:
+        recalling `/research --attended` should not open a completion
+        list over it. And `load_text` leaves the cursor at the START of
+        the document, so the next keystroke would land in FRONT of the
+        recalled text; `_complete()` fixes the same thing the same way.
+
+        No `_busy` gate. The box stays editable during a turn on
+        purpose, and recall is part of that.
+        """
+        if self._history is None:
+            return
+        try:
+            prompt = self.query_one("#prompt", PromptInput)
+        except NoMatches:                       # a modal is on top (#104)
+            return
+        move = (self._history.previous if direction < 0
+                else self._history.following)
+        text = move(prompt.value)
+        if text is None:
+            # Nothing to go to: an empty history, or a browse already at
+            # the oldest entry. The box is left exactly as it was.
+            return
+        prompt.value = text
+        prompt.move_cursor(prompt.document.end)
 
     def _copy_selection(self) -> bool:
         """Copy the focused widget's selection; True if there was one.

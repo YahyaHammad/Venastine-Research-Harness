@@ -48,7 +48,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 3906 tests, offline, ~2-3 min by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 3934 tests, offline, ~2-3 min by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -651,6 +651,44 @@ later, five over seven in the middle — measured. Two consequences, neither opt
 is somewhere to be, and `4 of 4` / `1 of 1` when everything already fits. A range on a list
 with nowhere to go is noise, and the rule keeps every case shipped in batch 55 reading exactly
 as it did.
+
+**Prompt recall is on `ctrl+↑`/`ctrl+↓`, and the pair was chosen by elimination** (batch 63).
+Until this batch a submitted prompt existed nowhere a person could reach — `on_prompt_input_submitted`
+cleared the box and that was that — so a misfire on a long `/research --attended --grant …` cost the
+typing. The keys were picked by enumerating `screen.active_bindings` with the prompt focused, which
+is App, Screen and `TextArea`'s forty-odd editing bindings in one list rather than a docs page.
+
+**`ctrl+p` is not available and must not be taken.** It is textual's `COMMAND_PALETTE_BINDING`,
+bound `priority=True`, and the palette is enabled here deliberately — `watch_theme` exists *because*
+it sets `App.theme` directly, bypassing `/theme`. The ClassVar is overridable, but `ctrl+shift+p` is
+indistinguishable from `ctrl+p` without the kitty protocol, which textual turns on in its Linux
+drivers alone, so relocating it would delete the palette on Windows. The plain arrows were the other
+candidate and already mean two things — the cursor in a box batch 54 made multi-line, and the
+suggestion panel's highlight since batch 55 — so the shell convention (recall only when the cursor is
+already on line 1) would have been a third meaning gated on a position.
+
+**Both movers take the box's current text, and that parameter is the whole design.** `tui/history.py`
+records what it last handed out; a `current` that differs means the user has typed, so the move ends
+the old walk and starts a new one with the edit saved as the draft. Recall, edit, recall again: the
+edit comes back under `ctrl+↓` instead of being stepped over. The obvious alternative — hooking
+`PromptInput.on_text_area_changed`, where batch 55's `_api_edit` flag already separates assignment
+from typing — is the wrong seam, because that message is POSTED, so the app would hold a flag across
+an async hop, and the panel's own `SuggestionsChanged` fires on both halves of the split anyway. The
+stated limit: a reader who retypes an entry character for character continues the old walk, because
+position is not knowable from text.
+
+**The walk STOPS at the oldest rather than wrapping**, which is the opposite of the suggestion panel
+one widget away, and deliberately: that list is a menu, where wrapping is how the far end is reached
+quickly, and this is a walk backwards through time under a key that gets held down.
+
+**`check_action` returns `None` here, where ctrl+c needs `False`** — the same distinction used the
+other way round. `active_bindings` KEEPS a `None`-refused binding marked disabled, so the footer greys
+the entry rather than dropping it and reflowing, while `_check_bindings` still declines the press. One
+return value buys both halves. And `remember()` must be followed by **`refresh_bindings()`** on the
+empty-to-non-empty transition: the `Footer` recomposes off the screen's bindings signal and nothing in
+a submit raises it, so without it the entries stay grey for the session while the keys work — a state
+only the drawn row can see. Measured: five footer entries plus the palette fit at 80 columns with 15
+to spare and clip at about 68.
 
 **The bottom border says which keys the panel spends** (batch 62). Four keys change meaning
 while the suggestion panel is open — the arrows move the highlight, `tab` and `enter` both

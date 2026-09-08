@@ -11016,3 +11016,94 @@ The mutation harness needed two fixes of its own before it could be believed: a 
 id is `name[param]`, so an exact-name match never hits, and a multi-line anchor built with
 `\n` matches nothing in a CRLF file. Both presented as SURVIVED and SKIPPED against code that
 was correct.
+
+
+## Batch 63 — the prompt you already sent (2026-09-08)
+
+**Reported:** "No submitted-prompt recall exists anywhere. Re-typing or re-editing a long prompt
+after a misfire is currently the only option."
+
+Correct, and the shell already knew it in one narrow place. A *non-slash* prompt submitted while
+`_busy` is refused **before** the box is cleared, with a comment saying why: "/research holds
+`_busy` for a whole ten-pass pipeline, so a follow-up typed during one was wiped and had to be
+retyped from memory." The same loss on every ordinary send had never been named.
+
+### The keys, by elimination
+
+`ctrl+p`/`ctrl+n` was the proposal and half of it is unavailable. `ctrl+p` is textual's
+`COMMAND_PALETTE_BINDING`, bound `priority=True` so it beats the focused widget, and this project
+enables the palette on purpose — AGENTS.md and ARCHITECTURE.md both say so, and `watch_theme` exists
+*because* the palette sets `App.theme` directly rather than going through `/theme`.
+`COMMAND_PALETTE_BINDING` is a ClassVar and could be moved, but the obvious destination is a dead
+end: `ctrl+shift+p` is indistinguishable from `ctrl+p` without the kitty protocol, which textual
+turns on in its Linux drivers alone (batch 54 found the same wall from the other side with
+`shift+enter`). Moving it would delete the palette on Windows.
+
+`ctrl+n` *is* free. So are `ctrl+o`, `ctrl+b`, `ctrl+r` and `ctrl+↑`/`ctrl+↓` — enumerated from
+`screen.active_bindings` with the prompt focused, which is the honest list because it includes
+`TextArea`'s forty-odd editing bindings alongside the App's four. `ctrl+↑`/`ctrl+↓` won on three
+counts: symmetric, self-evident, and arrow-shaped without touching the plain arrows, which already
+mean the cursor (batch 54) and the suggestion panel's highlight (batch 55). A third meaning gated on
+the cursor being at line 1 is the shell convention and was the alternative offered.
+
+Measured rather than assumed: five footer entries plus the palette fit at 80 columns with fifteen
+to spare, and clip at about 68 — twelve below the floor the app is written to, where three entries
+already have only seventeen. The footer is row 23 and batch 61's meter is row 22 on a different
+widget, so nothing competes.
+
+### The parameter that replaced a race
+
+The interesting decision is what happens when a recalled prompt is edited and the key is pressed
+again. Walking further back would silently destroy typing, which is the exact loss this batch
+exists to prevent.
+
+The obvious implementation watches for keystrokes, and batch 55 even left the right seam:
+`load_text` marks an API edit, so `on_text_area_changed` can tell assignment from typing. It is the
+wrong seam here. That message is **posted**, not called, so the app would be holding a flag across
+an async hop — and the panel's own `SuggestionsChanged` fires on *both* halves of the split, so it
+cannot distinguish them either.
+
+`previous(current)` and `following(current)` take the box's text instead. The history remembers what
+it last handed out, and a `current` that differs means the user has typed. That ends the walk and
+starts a new one with the edit saved as the draft, so `ctrl+↓` gives it back. It is a comparison at
+the only two moments it matters, it needs nothing from the widget, and it makes the rule arithmetic:
+`tests/test_history.py` has no pilot at all.
+
+The limit is stated rather than hidden: a reader who deletes a recalled prompt and retypes it
+character for character continues the old walk. Nothing is lost — the strings are equal — but the
+draft they had before is not restored. Position is not knowable from text.
+
+### Two rules borrowed from one widget away, one of them inverted
+
+**The walk stops at the oldest; the suggestion panel wraps.** That is not an inconsistency. Its list
+is a MENU, where wrapping is how the far end is reached quickly; this is a walk backwards through
+time under a key that gets held down, and arriving at the start of it should not deposit the reader
+at the end.
+
+**`check_action` returns `None`, where batch 57's ctrl+c needs `False`.** Same distinction, opposite
+use. ctrl+c has two bindings on one key and a refused one must give up its slot, so `False`. These
+want the entry to stay in the footer greyed rather than vanish and reflow the row, and `None` is
+exactly that: `active_bindings` keeps a `None`-refused binding marked disabled while
+`_check_bindings` still declines the press. One return value, both halves.
+
+And `remember()` is followed by `refresh_bindings()` — guarded on the empty-to-non-empty transition,
+because that is the only time the answer changes. Without it the bindings are correct and the footer
+row is grey forever, which is `action_arm_quit`'s comment for the third time in this file.
+
+### Verification
+
+Eight mutations, all killed. One of them was rejected by the harness first, and that is the trap
+working: dropping `refresh_bindings()` left an empty `if was_empty:` block, which breaks the file at
+import and would have scored as a kill while measuring nothing. Every mutated source is `ast.parse`d
+before it runs.
+
+| mutation | killed by |
+|---|---|
+| the movers ignore what the box holds | the edit-handed-back test, through the real keys |
+| the walk wraps at the oldest | the stop-at-the-oldest tests |
+| a consecutive repeat is stored twice | the de-duplication test |
+| the cap drops the newest | the cap test |
+| `refresh_bindings()` dropped | the drawn-footer test |
+| `check_action` never refuses | the drawn-footer test |
+| the cursor left at the start | the cursor-at-the-end test |
+| a refused message remembered anyway | the busy-refusal test |

@@ -6088,6 +6088,235 @@ def _quit_key_row(app) -> str:
     return ""
 
 
+def _footer_dim(app, key: str):
+    """Whether the footer drew `key`'s entry greyed, off the SCREEN.
+
+    `_quit_key_row`'s reason one door along: `check_action` returning
+    None leaves the binding in `active_bindings` marked disabled, and
+    whether the footer then paints it dim is a fact about the drawn
+    cell. Reading `enabled` off the binding would pass even when
+    nothing raised the signal that makes the footer repaint.
+    """
+    compositor = app.screen._compositor
+    row = len(compositor.render_strips()) - 1
+    text_row = compositor.render_strips()[row].text
+    column = text_row.index(key)
+    return compositor.get_style_at(column, row).dim
+
+
+class TestRecallingAPromptAlreadySent:
+    """Batch 63. ctrl+up walks back through what was submitted.
+
+    The pair was chosen by elimination. ctrl+p is textual's
+    COMMAND_PALETTE_BINDING, bound priority=True, and the palette is
+    enabled here on purpose -- `watch_theme` exists because it sets
+    App.theme directly. The plain arrows already mean two things: the
+    cursor in a box batch 54 made multi-line, and the suggestion
+    panel's highlight since batch 55.
+
+    The state machine is `tests/test_history.py`'s. What is asserted
+    here is that the keys reach it, that the box and cursor end up
+    right, and that the footer says so.
+    """
+
+    @pytest.mark.asyncio
+    async def test_ctrl_up_brings_back_the_last_prompt(self):
+        """And the cursor lands at the END of it.
+
+        `load_text` leaves the cursor at the start of the document, so
+        without `move_cursor` the next character typed would land in
+        FRONT of the recalled prompt -- `_complete()` fixes the same
+        thing for the same reason.
+        """
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            prompt = app.query_one("#prompt", PromptInput)
+            prompt.focus()
+            for sent in ("first message", "second message"):
+                prompt.value = sent
+                await pilot.press("enter")
+                assert await settle(pilot, lambda: not prompt.value)
+
+            await pilot.press("ctrl+up")
+            assert await settle(
+                pilot, lambda: prompt.value == "second message"), (
+                f"the box holds {prompt.value!r}; ctrl+up has to bring "
+                f"back the prompt that was just sent")
+            assert prompt.cursor_location == (0, len("second message")), (
+                f"the cursor is at {prompt.cursor_location}; it has to "
+                f"be at the END or the next keystroke lands in front "
+                f"of the recalled text")
+
+            await pilot.press("ctrl+up")
+            assert await settle(
+                pilot, lambda: prompt.value == "first message")
+            await pilot.press("ctrl+up")
+            await pump(pilot, 4)
+            assert prompt.value == "first message", (
+                f"the box holds {prompt.value!r}; a press at the oldest "
+                f"entry has to be inert rather than wrapping round")
+
+    @pytest.mark.asyncio
+    async def test_an_edit_is_handed_back_rather_than_walked_past(self):
+        """The rule the whole design turns on, through the real keys.
+
+        Recall, type over it, recall again: the edit is not lost. It
+        becomes the draft, so ctrl+down gives it back. The pure tests
+        pin the arithmetic; this pins that the box's CURRENT text is
+        what reaches it, which is the one thing they cannot see.
+        """
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            prompt = app.query_one("#prompt", PromptInput)
+            prompt.focus()
+            prompt.value = "the original"
+            await pilot.press("enter")
+            assert await settle(pilot, lambda: not prompt.value)
+
+            await pilot.press("ctrl+up")
+            assert await settle(
+                pilot, lambda: prompt.value == "the original")
+            await pilot.press("!")
+            assert await settle(
+                pilot, lambda: prompt.value == "the original!")
+
+            await pilot.press("ctrl+up")
+            assert await settle(
+                pilot, lambda: prompt.value == "the original")
+            await pilot.press("ctrl+down")
+            assert await settle(
+                pilot, lambda: prompt.value == "the original!"), (
+                f"the box holds {prompt.value!r}; the edit had to be "
+                f"kept as the draft, or recalling twice destroys "
+                f"typing -- which is the loss this feature exists to "
+                f"prevent")
+
+    @pytest.mark.asyncio
+    async def test_a_multiline_draft_still_moves_its_own_cursor(self):
+        """The reason the plain arrows were not taken.
+
+        Batch 54 made this box multi-line and batch 55 gave the arrows
+        to the suggestion panel. A third meaning would have had to be
+        gated on the cursor's line, and this is what that avoids: with
+        a two-line draft, up and down move the cursor and ctrl+j still
+        breaks a line.
+        """
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            prompt = app.query_one("#prompt", PromptInput)
+            prompt.focus()
+            prompt.value = "sent earlier"
+            await pilot.press("enter")
+            assert await settle(pilot, lambda: not prompt.value)
+
+            await pilot.press("h", "i", "ctrl+j", "t", "h", "e", "r", "e")
+            assert await settle(pilot, lambda: prompt.value == "hi\nthere")
+            assert prompt.cursor_location == (1, 5)
+
+            await pilot.press("up")
+            assert await settle(
+                pilot, lambda: prompt.cursor_location[0] == 0), (
+                f"up moved to {prompt.cursor_location}; with history "
+                f"recall on ctrl+up the plain arrow has to stay the "
+                f"cursor's")
+            assert prompt.value == "hi\nthere", (
+                f"the box holds {prompt.value!r}; a plain arrow must "
+                f"not recall over a draft")
+
+    @pytest.mark.asyncio
+    async def test_a_recalled_command_does_not_open_the_panel(self):
+        """Assignment is the API, typing is the user (batch 55).
+
+        Recall goes through `.value`, so `load_text` marks it an API
+        edit and the suggestion panel closes rather than opening a
+        completion list over a command the reader has already chosen.
+        """
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            prompt = app.query_one("#prompt", PromptInput)
+            panel = app.query_one("#slash-suggest")
+            prompt.focus()
+            prompt.value = "/help"
+            await pilot.press("enter")
+            assert await settle(pilot, lambda: not prompt.value)
+
+            await pilot.press("ctrl+up")
+            assert await settle(pilot, lambda: prompt.value == "/help")
+            await pump(pilot, 4)
+            assert not panel.display, (
+                "the suggestion panel opened over a recalled command; "
+                "assignment is not typing, and batch 55's load_text "
+                "seam is what says so")
+
+    @pytest.mark.asyncio
+    async def test_a_refused_message_is_not_remembered(self):
+        """A prompt that was never sent is not something to recall.
+
+        A non-slash message submitted while `_busy` is refused BEFORE
+        the box is cleared, so the text is still on screen -- and
+        recording it would put a duplicate one press away from a box
+        that already holds it.
+        """
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            prompt = app.query_one("#prompt", PromptInput)
+            prompt.focus()
+            app._busy = True
+            prompt.value = "this will be refused"
+            await pilot.press("enter")
+            await pump(pilot, 4)
+
+            assert prompt.value == "this will be refused", (
+                "the refusal cleared the box, which is the loss the "
+                "busy check exists to prevent")
+            assert len(app._history) == 0, (
+                "a refused message was remembered; `remember` has to "
+                "sit after the busy check, not before it")
+
+    @pytest.mark.asyncio
+    async def test_the_footer_entries_are_grey_until_there_is_history(self):
+        """And they stop being grey the moment there is.
+
+        `check_action` returns None rather than False here, which is
+        batch 57's distinction used the other way round: None KEEPS the
+        binding in `active_bindings` marked disabled, so the footer
+        greys the entry instead of dropping it and reflowing, while the
+        press is still declined.
+
+        Asserted on the drawn cell. The `Footer` recomposes off the
+        screen's bindings signal and nothing in a submit raises it, so
+        a version that never calls `refresh_bindings()` has correct
+        bindings and a permanently grey row -- and only the screen can
+        tell them apart.
+        """
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            await pump(pilot, 4)
+            for key in ("^\u2191", "^\u2193"):
+                assert _footer_dim(app, key) is True, (
+                    f"the footer drew {key} live with nothing to "
+                    f"recall; check_action has to refuse it while the "
+                    f"history is empty")
+
+            prompt = app.query_one("#prompt", PromptInput)
+            prompt.focus()
+            prompt.value = "something to recall"
+            await pilot.press("enter")
+            assert await settle(pilot, lambda: not prompt.value)
+            assert await settle(
+                pilot, lambda: _footer_dim(app, "^\u2191") is not True), (
+                "the footer entry stayed grey after the first prompt; "
+                "the Footer recomposes off the screen's bindings "
+                "signal and nothing but refresh_bindings() raises it")
+            assert _footer_dim(app, "^\u2193") is not True
+
+
 class TestTheQuitGesture:
     """Batch 57. Two presses to quit, and a copy is never one of them."""
 
