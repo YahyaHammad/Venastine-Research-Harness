@@ -27,8 +27,10 @@ Three pins, each one of the ways this file could silently regress:
 """
 
 import pytest
+from rich.style import Style
+from textual.theme import BUILTIN_THEMES, Theme
 
-from tests.conftest import pump
+from tests.conftest import pump, settle
 from tui import themes
 from tui.widgets import CONVERSATION_ROLES, META_ROLES
 from tui.themes import ALL_THEMES, THEME_NAMES, role_styles
@@ -65,6 +67,21 @@ EXPECTED_ROLE_KEYS = {
     "md_em", "md_strike", "md_link", "md_bullet",
     "table_border", "table_header",
 }
+
+#: Every theme ctrl+p's command palette can actually select: Textual's
+#: own twelve, registered by App.__init__, beside this project's
+#: fourteen. DERIVED, never written down -- a Textual release that adds
+#: a theme is covered the day it lands, and one that adds a BROKEN
+#: theme fails here rather than in somebody's session.
+#:
+#: Batch 64 exists because this list did not. Every check in this file
+#: parametrised over ALL_THEMES, so three of the twelve built-ins had
+#: never once been through role_styles: textual-dark leaves
+#: `background` at None, textual-light leaves `foreground` at None, and
+#: textual-ansi fills every slot with `ansi_*` names Rich cannot read.
+#: Selecting the first of those killed the harness at mount, and kept
+#: killing it, because watch_theme had already remembered the name.
+SELECTABLE_THEMES = list(BUILTIN_THEMES.values()) + list(ALL_THEMES)
 
 
 # ---- WCAG contrast, computed rather than trusted ----------------------------
@@ -137,9 +154,23 @@ def test_paper_is_the_only_new_light_theme():
 from this flag"
 
 
-# ---- Slot completeness -------------------------------------------------------
+# ---- Integrity: can this theme be rendered at all? (batch 64) ----------------
+# ------------------------------------------------------------------------------
+#
+# INTEGRITY over all twenty-six, QUALITY over our fourteen, and the
+# split is measured rather than assumed. Held to this file's own floors,
+# nine of Textual's twelve fail a contrast check -- textual-dark's
+# `secondary` is 1.89:1 against its own background, where the identity
+# floor is 3.5, and solarized-light's foreground is 4.99 against a floor
+# of 7 -- and three fail pairwise distinctness (textual-dark and
+# textual-light both set accent == warning, monokai sets error ==
+# secondary). Those floors are decisions about OUR palettes; widening
+# them to somebody else's themes would mean either a red suite or floors
+# lowered until they said nothing. So the checks below ask only whether
+# a theme can be drawn, and the ones after them keep asking whether ours
+# are any good.
 
-@pytest.mark.parametrize("theme", ALL_THEMES, ids=lambda t: t.name)
+@pytest.mark.parametrize("theme", SELECTABLE_THEMES, ids=lambda t: t.name)
 def test_every_theme_fills_every_role_slot(theme):
     styles = role_styles(theme)
     assert set(styles) == EXPECTED_ROLE_KEYS
@@ -148,6 +179,132 @@ def test_every_theme_fills_every_role_slot(theme):
     assert empty == [], \
         f"{theme.name}: empty role styles {empty} -- the assistant body is \
 the one deliberately unstyled slot"
+
+
+@pytest.mark.parametrize("theme", SELECTABLE_THEMES, ids=lambda t: t.name)
+def test_every_role_style_is_one_rich_can_parse(theme):
+    """The check that would have caught all three, and the only one that
+    could have.
+
+    Rich's Text.render resolves a style string through
+    `console.get_style(style, default=Style.null())`. An unparseable one
+    therefore renders PLAIN and raises nothing -- which is why
+    textual-light lost six roles and textual-ansi lost twenty-five with
+    nobody noticing. A test that merely draws a transcript sees a
+    perfectly ordinary line and passes; only asking Rich to parse the
+    string can tell.
+
+    Batch 41's X1 lesson at one remove. There the unmeasurable thing was
+    `dim`, an attribute no contrast floor can see; here it is a colour
+    name Rich silently drops on the floor.
+    """
+    for role, style in role_styles(theme).items():
+        assert isinstance(style, str), (
+            f"{theme.name}: {role!r} is {style!r}, not a style string")
+        try:
+            Style.parse(style)
+        except Exception as exc:  # noqa: BLE001 -- Rich raises several
+            raise AssertionError(
+                f"{theme.name}: {role!r} is {style!r}, which Rich cannot "
+                f"parse ({exc}). It would render with no style at all "
+                f"and say nothing about it.") from None
+
+
+@pytest.mark.parametrize("dark", [True, False], ids=["dark", "light"])
+def test_the_minimal_legal_theme_is_covered(dark):
+    """Seven of the eight slots blank -- everything Theme lets you omit.
+
+    Pins the fallback against Textual's RULES rather than against its
+    current data. The two themes that crash today happen to be broken
+    now; a release that fills textual-dark's background in would quietly
+    delete the coverage, and this is what stays behind when it does.
+    """
+    theme = Theme(name="minimal", primary="#ff0000", dark=dark)
+    styles = role_styles(theme)
+    assert set(styles) == EXPECTED_ROLE_KEYS
+    for role, style in styles.items():
+        Style.parse(style)
+        assert "None" not in style, (
+            f"{role!r} is {style!r} -- an unfilled slot reached the style "
+            f"string as the literal text 'None', which is exactly what "
+            f"textual-light did")
+
+
+def test_an_ansi_theme_speaks_richs_vocabulary():
+    """textual-ansi's slots are `ansi_blue`, `ansi_default` and the rest
+    of the terminal's own sixteen. Textual's Color.parse knows the
+    prefix and Rich's Style.parse does not; the names underneath it are
+    the same list, so the translation is exact rather than approximate.
+
+    Asserted on the ABSENCE of the prefix rather than on particular
+    colours, because which slot holds which ANSI colour is Textual's
+    decision and may move.
+    """
+    styles = role_styles(BUILTIN_THEMES["textual-ansi"])
+    leaked = {r: s for r, s in styles.items() if "ansi_" in s}
+    assert leaked == {}, (
+        f"{leaked} carry Textual's prefix into a Rich style string, "
+        f"where it parses as nothing and renders as nothing")
+    assert styles["user"] == "bold blue"
+
+
+def test_a_theme_with_no_rgb_background_gets_no_diff_band():
+    """A diff row is the one place the transcript sets a BACKGROUND, and
+    on an ANSI theme there is no RGB to blend one out of -- the terminal
+    owns those sixteen colours and the harness cannot know what they
+    look like.
+
+    So the row takes the severity colour as its FOREGROUND, which is
+    what git, diff and patch all do in a sixteen-colour terminal. The
+    alternative was a solid band, and that is the slab batch 41 turned
+    down for the themes that CAN be measured; picking it here for the
+    one theme that cannot would be backwards.
+    """
+    styles = role_styles(BUILTIN_THEMES["textual-ansi"])
+    assert styles["diff_add"] == "green"
+    assert styles["diff_del"] == "red"
+    for role in ("diff_add", "diff_del"):
+        assert " on " not in styles[role], (
+            f"{role} is {styles[role]!r} -- _tint answered None and the "
+            f"f-string interpolated it anyway")
+
+
+@pytest.mark.parametrize("theme", ALL_THEMES, ids=lambda t: t.name)
+def test_no_shipped_theme_needs_the_fallback(theme):
+    """The promise that keeps batch 64's blast radius at zero.
+
+    `_palette` fills a blank slot from Textual's own
+    to_color_system().generate(), and that derivation is LOSSY: the base
+    shade comes back as `color.lighten(0).hex`, an HSL round trip, which
+    moves #d9a441 to #D8A441 and differs from the raw slot on 41 values
+    across these fourteen. Since none of them leaves a slot blank, none
+    of them can ever reach it -- and a fifteenth that did would be told
+    here rather than by a hex quietly shifting under the contrast floors
+    below.
+    """
+    blank = [slot for slot in themes._SLOTS if not getattr(theme, slot)]
+    assert blank == [], (
+        f"{theme.name} leaves {blank} unset, so its colours would come "
+        f"from Textual's lossy derivation rather than from this file")
+
+
+def test_the_fallback_memo_cannot_serve_a_stale_palette():
+    """Why `_RESOLVED` is keyed on the slot VALUES and not on the name.
+
+    Textual's Theme is a plain mutable dataclass and App.register_theme
+    overwrites by name, so a name key would hand a re-registered theme
+    the colours of the one it replaced -- a cache that is right until
+    somebody changes a theme and then wrong for the rest of the session,
+    which is the worst shape a cache can take.
+
+    Both of these need the fallback (seven slots blank), so both go
+    through the memo rather than the fast path.
+    """
+    red = Theme(name="reused", primary="#ff0000")
+    green = Theme(name="reused", primary="#00ff00")
+    assert role_styles(red)["user"] != role_styles(green)["user"], (
+        "two themes sharing a name got one palette -- the memo is keyed "
+        "on theme.name, so re-registering a theme serves the old one")
 
 
 # ---- Batch 41 (X1/X2): the roles a transcript puts next to each other ---------
@@ -521,3 +678,137 @@ def test_added_and_removed_are_told_apart_by_more_than_position(theme):
     assert _apart(add, delete) >= 25.0, \
         f"{theme.name}: {add} and {delete} are {_apart(add, delete):.1f} apart"
 
+
+# ---- Batch 64: the palette, the mount, and the screen -----------------------
+# ------------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_the_palette_offers_exactly_the_themes_this_file_covers():
+    """The guard that keeps SELECTABLE_THEMES honest.
+
+    Everything above is parametrised over a list built from
+    BUILTIN_THEMES and ALL_THEMES. If Textual ever grows a third source
+    of themes -- or register_all stops reaching one of ours -- the
+    coverage would shrink in silence, which is precisely the shape of
+    the gap batch 64 was reported through: twenty-six themes selectable,
+    fourteen ever tested, and the difference invisible until someone
+    picked one.
+    """
+    from tui.app import VenastineApp
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        await pump(pilot, 2)
+        offered = set(app.available_themes)
+
+    covered = {theme.name for theme in SELECTABLE_THEMES}
+    assert offered == covered, (
+        f"the palette offers {sorted(offered - covered)} that no check "
+        f"in this file has seen, and this file covers "
+        f"{sorted(covered - offered)} that cannot be selected")
+
+
+@pytest.mark.parametrize(
+    "name", ["textual-dark", "textual-light", "textual-ansi"])
+@pytest.mark.asyncio
+async def test_a_remembered_built_in_theme_still_mounts(name):
+    """THE REPORTED BUG, and the half of it that made it urgent.
+
+    watch_theme remembers every theme change whatever route made it, so
+    a palette selection is written to the preference store before the
+    crash it causes. _startup_theme then restores it, on_mount writes the
+    session banner, and Transcript._style asks for colours that cannot be
+    resolved -- so the harness died at startup, every startup. The store
+    is user-tier, at ~/.config/venastine, so reinstalling does not clear
+    it: hand-editing the JSON was the only way out.
+
+    `isolate_ui_preferences` is autouse, so this writes to a file per
+    test rather than to the developer's own.
+    """
+    from tui import preferences
+    from tui.app import VenastineApp
+
+    assert preferences.remember_theme(name, None)
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pump(pilot, 2)
+        assert app.theme == name, (
+            f"mounted on {app.theme!r} rather than the remembered "
+            f"{name!r}")
+        app.screen._compositor.render_strips()
+        await pilot.pause()
+
+
+@pytest.mark.asyncio
+async def test_every_selectable_theme_renders_a_transcript():
+    """The whole path, end to end: styles_for -> Rich -> the compositor.
+
+    Deliberately kept BESIDE the parse check rather than instead of it.
+    This would have caught textual-dark, which raised, and neither of the
+    other two, which rendered plain and said nothing -- Rich resolves an
+    unparseable style with `default=Style.null()`. A green run here is
+    not evidence that a theme has any colour in it.
+
+    One app, twenty-six switches: mounting twenty-six apps would be the
+    same assertion at twenty-six times the cost, and the thing being
+    exercised is the switch.
+    """
+    from tui.app import VenastineApp
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pump(pilot, 2)
+        transcript = app.query_one("#transcript")
+        for theme in SELECTABLE_THEMES:
+            app.theme = theme.name
+            await pilot.pause()
+            for role in sorted(EXPECTED_ROLE_KEYS):
+                transcript.write_role(role, f"a {role} line")
+            await pilot.pause()
+            app.screen._compositor.render_strips()
+
+
+@pytest.mark.asyncio
+async def test_an_unstylable_theme_does_not_take_the_app_down(
+        monkeypatch, caplog):
+    """Section 27's rule, applied to the one path that had escaped it.
+
+    _palette makes textual-dark's particular fault impossible. This makes
+    the CLASS of it non-fatal: styles_for is on the path of every
+    transcript line including the session banner, so anything raising
+    there is a harness that will not start, behind a preference file the
+    installer cannot reach.
+
+    And it WARNS, which is the other half. Silence is what let
+    textual-light and textual-ansi render unstyled for as long as they
+    did, so a contained failure that reported nothing would be the same
+    defect wearing a better exception story.
+
+    Once per theme, though. styles_for runs per drawn line, and the
+    latch is the opposite of preferences._remember's deliberate
+    non-latching for the reason that module gives: a warning fires there
+    on a human's own action, and here on every line.
+    """
+    import logging
+
+    monkeypatch.setattr(themes, "_UNSTYLABLE", set())
+    broken = Theme(name="unstylable", primary="not-a-colour")
+
+    class _App:
+        theme = "unstylable"
+
+        def get_theme(self, name):
+            return broken
+
+    with caplog.at_level(logging.WARNING, logger="tui.themes"):
+        assert themes.styles_for(_App()) == {}, (
+            "an unresolvable theme has to degrade to unstyled, the way a widget "
+            "with no running app already does -- not reach the message pump"
+        )
+        assert themes.styles_for(_App()) == {}
+
+    warnings = [r for r in caplog.records
+               if "unstylable" in r.getMessage()]
+    assert len(warnings) == 1, (
+        f"{len(warnings)} warnings for one theme -- styles_for is called "
+        f"once per rendered line, so this has to be latched")

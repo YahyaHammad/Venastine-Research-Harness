@@ -11107,3 +11107,154 @@ before it runs.
 | `check_action` never refuses | the drawn-footer test |
 | the cursor left at the start | the cursor-at-the-end test |
 | a refused message remembered anyway | the busy-refusal test |
+
+
+## Batch 64 — three of the twenty-six themes could not be drawn (2026-09-09)
+
+**Reported:** switching to `textual-dark` from the command palette crashed the harness
+instantly, and restarting reproduced it exactly — `AttributeError: 'NoneType' object has no
+attribute 'startswith'`, from `Color.parse(None)` inside `themes._tint`.
+
+Correct, and worse than a crash on selection. `watch_theme` remembers **every** theme change
+whatever route made it — that is batch 36's whole point, so a palette selection is not a silent
+no-op — so the name reached the preference store *before* the crash it caused. `_startup_theme`
+restored it, `on_mount` wrote the session banner, `Transcript._style` asked for colours that
+could not be resolved, and the app died at startup. Every startup. And
+`~/.config/venastine/ui_preferences.json` is **user tier, outside the install tree**: the
+reporter's instinct that a reinstall would fix it is wrong, and hand-editing that JSON was the
+only way back in.
+
+### Three themes, three different faults, and only one of them loud
+
+`role_styles` read eight slots straight off the `Theme` dataclass. On the pinned textual 1.0.0
+every slot but `primary` is `Optional[str] = None`, and the twelve built-ins the palette
+registers in `App.__init__` are not obliged to fill them:
+
+| theme | what is wrong | what happened |
+|---|---|---|
+| `textual-dark` | `background=None` | `Color.parse(None)` → `AttributeError`. Fatal at mount |
+| `textual-light` | `foreground=None` | the f-string interpolated the literal `"None"` — 6 roles unparseable |
+| `textual-ansi` | every slot is `ansi_blue` / `ansi_default` | **25 of 34** roles unparseable |
+
+The guess in the report was that some themes were missing hex values. Right for two of the
+three; `textual-ansi` has a value in every slot, in a vocabulary Rich does not read.
+
+**The two non-fatal ones were silent, and that is the more interesting defect.** Rich's
+`Text.render` resolves a style string through `console.get_style(style, default=Style.null())`,
+so an unparseable one renders **plain** and raises nothing. On `textual-ansi` the transcript
+quietly reverted to the uniform white ROADMAP_v2 §26 exists to abolish, and nothing anywhere
+said so. That is batch 41's X1 lesson arriving down a different road: there the unmeasurable
+thing was `dim`, an attribute no contrast floor can see; here it is a colour name Rich drops on
+the floor.
+
+### The gap that let it ship
+
+Every check in `tests/test_themes.py` parametrised over `ALL_THEMES` — this project's fourteen.
+The palette offers **twenty-six**. In 3934 tests, not one had ever passed a textual built-in
+through `role_styles`. The file was written when fourteen was the whole world, and the palette
+being enabled (batch 36, deliberately — `watch_theme` exists *because* it sets `App.theme`
+directly) quietly doubled the world without anyone widening the coverage.
+
+`SELECTABLE_THEMES` is now `list(BUILTIN_THEMES.values()) + list(ALL_THEMES)` — derived, never
+written down, so a textual release that adds a theme is covered the day it lands and one that
+adds a *broken* theme fails in CI rather than in somebody's session. A pilot test holds it
+against the live `app.available_themes`, which is this file's own idiom: one inventory that two
+checks read, so it cannot drift.
+
+### A fallback, and why it is only ever a fallback
+
+A blank slot is filled from `theme.to_color_system().generate()` — textual's own derivation, the
+thing it builds `app.tcss`'s `$background` and `$foreground` out of, so the colour agrees with
+what the rest of the screen is already painted with rather than being a second opinion invented
+here.
+
+It is reached **only** where a slot is actually `None`, and that restraint is the whole design.
+`generate()` is lossy: the base shade comes back as `color.lighten(0).hex`, an HSL round trip,
+which moves `#d9a441` to `#D8A441` and differs from the raw slot on **41 values across the
+fourteen**. It is also **48× slower** than `role_styles` itself (0.194 ms against 0.004 ms), on
+a function called once per rendered line. Using it wholesale would have restyled every shipped
+theme by a unit and put an HSL round trip on the draw path to fix two themes that are not ours.
+Used as a fallback, the fourteen come out **byte-identical** — measured, not hoped — and
+twenty-four of the twenty-six pay eight `getattr`s.
+
+The memo behind it is keyed on the raw slot **values**, not on `theme.name`. `Theme` is a plain
+mutable dataclass and `App.register_theme` overwrites by name, so a name key would hand a
+re-registered theme the colours of the one it replaced: right until somebody changes a theme,
+then wrong for the rest of the session, which is the worst shape a cache can take.
+
+### `ansi_*` is a translation, not an approximation
+
+`textual.color.ANSI_COLORS` is `['black', 'red', …, 'bright_white']` — **exactly** the ANSI
+subset of `rich.color.ANSI_COLOR_NAMES`, verified by set difference against the pinned version
+per D22. So `ansi_X` → `X` and `ansi_default` → `default` is lossless, and `textual-ansi` gets
+its twenty-five roles back in the terminal's own sixteen colours, which is the entire point of
+that theme.
+
+One thing does not survive the translation, and it is stated rather than papered over. A diff
+row is the one place the transcript sets a **background**, and on an ANSI theme there is no RGB
+to blend a tint out of — the terminal owns those colours and the harness cannot know what they
+look like. `_tint` answers `None` there, and the row takes the severity colour as its
+**foreground**: what git, diff and patch all do in a sixteen-colour terminal. A solid band was
+the alternative, and that is the slab batch 41 turned down for the themes that *can* be
+measured; choosing it for the one theme that cannot would be backwards.
+
+### Integrity for twenty-six, quality for fourteen
+
+The new checks ask only whether a theme can be **drawn**: a full role table, no empty slot, and
+every style string one Rich can parse. The contrast floors, the redmean separation floor and the
+pairwise-distinctness check stay on our fourteen, and the split is measured rather than assumed.
+Held to this file's own floors, **nine of textual's twelve fail a contrast check** —
+`textual-dark`'s `secondary` is 1.89:1 against its own background where the identity floor is
+3.5, and `solarized-light`'s foreground is 4.99 against a floor of 7 — and **three fail pairwise
+distinctness** (`textual-dark` and `textual-light` both set `accent == warning`, `monokai` sets
+`error == secondary`). Those floors are decisions about our palettes. Widening them to somebody
+else's themes would mean either a permanently red suite or floors lowered until they said
+nothing.
+
+So the fix makes `textual-dark` *usable*, not *good*. That is the honest limit, and it is
+written here rather than discovered.
+
+### The containment, and why it warns
+
+`styles_for` can no longer take the app down. `_palette` makes that particular fault impossible;
+the guard makes the **class** of it non-fatal, which is §27's rule that a display failure is
+contained rather than fatal — an uncoloured transcript is unhelpful, a harness that will not
+start is not a harness, and the preference file the installer cannot reach is what turns the
+second into a permanent state.
+
+It warns, and it warns **once per theme**. That latch is the exact opposite of
+`preferences._remember`'s deliberate non-latching, and for the reason that module already
+states: a warning fires there on a human's own action, and fires here on every line drawn.
+Silence is precisely what let `textual-light` and `textual-ansi` render unstyled for as long as
+they did, so a contained failure that reported nothing would be the same defect wearing a better
+exception story.
+
+This narrows `themes.py`'s "no harness state" claim by one set of theme names, and the narrowing
+is written into the docstring rather than left for a reader to notice.
+
+### Verified
+
+Full suite **3997 passed** (235 → 298 in `test_themes.py`). Every one of the twenty-six themes
+plus two synthetic minimal ones (`Theme(name=…, primary="#ff0000")`, seven slots blank) yields a
+full role table, no empty value and no unparseable style. The fourteen are byte-identical. A
+live app switched through all twenty-six writing a line of every role, and mounted with each of
+the three formerly-broken themes already remembered — the reported bug, reproduced and then
+fixed.
+
+Eight mutations, all killed:
+
+| mutation | must be killed by |
+|---|---|
+| the fallback dropped; blank slots reach the style strings | the parse check on textual-dark |
+| `ansi_*` reaches Rich untranslated | the ansi-vocabulary test |
+| `_tint` blends whatever it is handed | the no-band test |
+| the memo keyed on `theme.name` | the stale-palette test |
+| a missing tint interpolated anyway | the no-band test |
+| `styles_for` lets the failure through | the containment test |
+| the containment warns per line | the warns-once half of it |
+| `SELECTABLE_THEMES` is `ALL_THEMES` alone | the palette-inventory test |
+
+**Not verified from here, and recorded as such:** the one probe that confirmed the restart case
+mounted the real app against the developer's real preference store before `HOME` was redirected,
+and `watch_theme` then overwrote the poisoned value. The crash was reproduced; the poisoned file
+was destroyed rather than kept.

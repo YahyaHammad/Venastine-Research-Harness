@@ -3660,3 +3660,53 @@ theme list no longer reaches `watch_theme`.
 the palette deliberately. Do not relocate it to `ctrl+shift+p` either — that chord is
 indistinguishable from `ctrl+p` without the kitty protocol, which textual enables in its Linux
 drivers alone, so the palette would simply be gone on Windows. Batch 63.
+
+
+### `role_styles` reading a `Theme` slot directly again
+
+**Symptom:** `test_every_role_style_is_one_rich_can_parse[textual-dark]` fails with
+`AttributeError: 'NoneType' object has no attribute 'startswith'` — and by hand, the harness dies
+at mount and keeps dying, because the theme name is already in the preference store.
+
+**Fix:** read `_palette(theme)`, not `theme.<slot>`. Every slot but `primary` is `Optional[str]`
+on textual's own `Theme`, and three of the twelve built-ins the command palette offers leave one
+blank or fill it with `ansi_*` names. The fallback is textual's own
+`to_color_system().generate()` and it is reached **only** for a blank slot: that derivation is
+lossy (`color.lighten(0).hex`, an HSL round trip, moves `#d9a441` to `#D8A441` on 41 values
+across the fourteen) and 48× slower than `role_styles` itself. Batch 64.
+
+### `_tint` losing its non-hex guard
+
+**Symptom:** `role_styles(BUILTIN_THEMES["textual-ansi"])` raises `ColorParseError: failed to
+parse 'default' as a color`, so every check parametrised over `SELECTABLE_THEMES` errors on that
+one id.
+
+**Fix:** keep the guard and the `None` return. On an ANSI theme the terminal owns the sixteen
+colours, so there is no RGB to blend a diff band out of — textual's `Color.parse` raises on
+Rich's `default`, and blending two ANSI colours hands one back unchanged, so both answers were
+wrong before this said so. The row takes the severity colour as its foreground instead, which is
+git's convention in a sixteen-colour terminal. Batch 64.
+
+### The quality floors widened to `SELECTABLE_THEMES`
+
+**Symptom:** nine of textual's twelve themes fail a contrast floor and three fail
+`test_the_message_roles_are_pairwise_distinct` — `textual-dark`'s `secondary` is 1.89:1 against
+its own background against an identity floor of 3.5, `solarized-light`'s foreground is 4.99
+against a floor of 7, and `textual-dark`/`textual-light` both set `accent == warning`.
+
+**Fix:** do not widen them. Integrity over all twenty-six (can this be drawn), quality over our
+fourteen (is it any good) — the floors are decisions about *our* palettes, and holding somebody
+else's themes to them means either a permanently red suite or floors lowered until they say
+nothing. The measurement is in `DEVLOG.md` batch 64 so it need not be re-derived. Batch 64.
+
+### `styles_for` containing the failure but saying nothing
+
+**Symptom:** `test_an_unstylable_theme_does_not_take_the_app_down` fails on its second half — the
+warning count is 0, or it is 2 after two calls.
+
+**Fix:** warn, and latch on the theme name. Silence is what let `textual-light` and
+`textual-ansi` render unstyled for as long as they did — Rich resolves an unparseable style with
+`default=Style.null()` and raises nothing — so a contained failure that reported nothing would be
+the same defect wearing a better exception story. Latched because `styles_for` runs once per
+drawn line; `preferences._remember` deliberately does *not* latch, and its docstring says why
+that is right there and wrong here. Batch 64.

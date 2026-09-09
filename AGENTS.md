@@ -48,7 +48,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 3934 tests, offline, ~2-3 min by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 3997 tests, offline, ~2-3 min by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -1512,9 +1512,33 @@ run rather than by reading the code.
   override a severity slot when its own panel tint would swallow the shared value,
   keeping the semantic hue family — each override carries its reason in `themes.py`,
   and the contrast floors (foreground ≥ 7:1, severity ≥ 4:1, identity ≥ 3.5 dark / 3.0
-  light) are pinned in `tests/test_themes.py`. A widget with no running app renders
+  light) are pinned in `tests/test_themes.py`, over **our fourteen** — nine of textual's
+  twelve fail one of them, so integrity is checked for all twenty-six and quality for
+  ours. A widget with no running app renders
   **unstyled rather than raising** — `self.app` raises `NoActiveAppError`, and widgets
   are built bare throughout the suite.
+- **A `Theme` slot can be `None`, and `role_styles` must go through `_palette`**
+  (batch 64). Every slot but `primary` is `Optional[str]` on textual's own `Theme`, and
+  the command palette offers **twenty-six** themes, not fourteen — textual registers its
+  twelve in `App.__init__`. Three of them break a naive read: `textual-dark` has no
+  `background`, `textual-light` no `foreground`, and `textual-ansi` fills every slot with
+  `ansi_*` names, which are **textual's vocabulary and not Rich's**. Selecting the first
+  killed the harness *at mount*, and kept killing it, because `watch_theme` had already
+  written the name to a user-tier store the installer cannot reach. A blank slot falls
+  back to `theme.to_color_system().generate()` — textual's own derivation, so the colour
+  agrees with what `app.tcss` paints — and **only** where a slot is blank: that
+  derivation returns `color.lighten(0).hex`, an HSL round trip that moves `#d9a441` to
+  `#D8A441`, and it is 48× slower than `role_styles` itself on a function called once per
+  drawn line. `_tint` answers `None` where there is no RGB to blend toward, and the diff
+  row takes the severity colour as its foreground instead — git's convention in a
+  sixteen-colour terminal.
+- **A bad style string is SILENT, which is why the test parses them** (batch 64). Rich's
+  `Text.render` resolves a style through `console.get_style(style, default=Style.null())`,
+  so an unparseable one renders plain and raises nothing — `textual-light` lost six roles
+  and `textual-ansi` twenty-five without a single test noticing. A test that merely draws
+  a transcript cannot see this; `Style.parse` can. Same shape as batch 41's `dim`, one
+  layer along. `styles_for` also contains anything `role_styles` still manages to raise
+  (§27) and warns **once per theme**, since it runs once per line.
 - **`Transcript._entries` serves the replay and `/copy`.** `RichLog` stores rendered
   segments, so `/theme` needs `rerender()`. Every write path must go through `_emit()`,
   or a line reaches the screen and neither the replay nor the copy.

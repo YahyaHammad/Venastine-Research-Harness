@@ -7,7 +7,10 @@ nightmare, ember, midnight, glassy-lapis, paper) whose PANELS carry the
 identity -- background/surface/panel are theirs, not the grid's shared
 neutrals.
 
-Pure presentation -- no import of core/, no harness state. Two things
+Pure presentation -- no import of core/, no harness state, with one
+narrowing batch 64 wrote down rather than hid: `styles_for` keeps the
+set of theme names it has already complained about, because it runs
+once per rendered line and the complaint must not. Two things
 outside this module carry a theme name: the persisted `tui.theme` setting,
 validated by core/config_loader.py's _KNOWN_TUI, and tui/preferences.py's
 remembered choice. The second deliberately does NOT validate against
@@ -22,8 +25,12 @@ derives the full variable set from these anchors, so each theme only
 declares the colours that actually differ.
 """
 
+import logging
+
 from textual.color import Color
 from textual.theme import Theme
+
+logger = logging.getLogger(__name__)
 
 # Shared neutrals. The accent variants below change only the three hue
 # slots (primary/secondary/accent), so a colour tweak to the base surfaces
@@ -220,15 +227,97 @@ def register_all(app) -> None:
 DIFF_TINT = 0.8
 
 
-def _tint(colour: str, background: str, factor: float = DIFF_TINT) -> str:
-    """`colour` faded toward `background`, as a hex string.
+#: The eight Theme slots `role_styles` reads. Every one of them but
+#: `primary` is Optional[str] on textual's own Theme, and three of the
+#: twelve built-ins the command palette offers do leave one blank or
+#: fill it with a vocabulary Rich cannot read: textual-dark has no
+#: `background`, textual-light no `foreground`, textual-ansi nothing
+#: but `ansi_*` names. Reading them raw is what made selecting
+#: textual-dark kill the harness AT MOUNT -- and keep killing it,
+#: since watch_theme had already remembered the name (batch 64).
+_SLOTS = ("primary", "secondary", "accent", "warning", "error",
+          "success", "foreground", "background")
+
+#: Filled palettes, keyed on the RAW SLOT VALUES rather than on
+#: theme.name. Theme is a plain mutable dataclass and
+#: App.register_theme overwrites by name, so a name key would hand a
+#: re-registered theme the colours of the one it replaced; a value key
+#: cannot. Memoisation of a pure function of its input, which is why
+#: it costs this module nothing the docstring claims -- and it earns
+#: its place because the fallback below is 0.194ms against
+#: role_styles' own 0.004ms, on a function called once per drawn line.
+_RESOLVED: dict[tuple, dict[str, str]] = {}
+
+
+def _rich(colour: str) -> str:
+    """Textual's `ansi_*` colour names in Rich's vocabulary.
+
+    textual-ansi fills every slot with `ansi_blue`/`ansi_default` --
+    the terminal's own sixteen, which is the entire point of that
+    theme -- and Rich's Style.parse does not know the prefix. It knows
+    the names underneath it: textual.color.ANSI_COLORS is exactly the
+    ANSI subset of rich.color.ANSI_COLOR_NAMES (verified by set
+    difference against the pinned 1.0.0, per D22), and `ansi_default`
+    is Rich's `default`. A translation, then, rather than a guess.
+
+    Not doing it was never a crash, which is why it lasted: Rich's
+    Text.render resolves a style string with `default=Style.null()`,
+    so an unparseable one renders PLAIN and says nothing. Twenty-five
+    of the thirty-four roles were silently unstyled on textual-ansi --
+    the uniformly white transcript this section exists to fix, reached
+    by a different road.
+    """
+    return colour[5:] if colour.startswith("ansi_") else colour
+
+
+def _palette(theme: Theme) -> dict[str, str]:
+    """`_SLOTS`, every one of them filled, in Rich's vocabulary.
+
+    A blank slot is filled from textual's OWN derivation --
+    to_color_system().generate() is what it builds app.tcss's
+    $background and $foreground out of -- rather than from a constant
+    invented here, which would be a second opinion about a colour the
+    rest of the screen already has.
+
+    A FALLBACK and never a replacement, for two measured reasons.
+    generate() is lossy: the base shade comes back as
+    `color.lighten(0).hex`, an HSL round trip, which moves #d9a441 to
+    #D8A441 and differs from the raw slot on 41 values across the
+    fourteen shipped themes. And it is 48x slower than role_styles
+    itself. Reaching for it only where a slot is actually None leaves
+    all fourteen byte-identical and costs the other twenty-four themes
+    eight getattrs.
+    """
+    raw = tuple(getattr(theme, slot) for slot in _SLOTS)
+    if all(raw):
+        return {slot: _rich(value) for slot, value in zip(_SLOTS, raw)}
+    key = raw + (theme.dark,)
+    if key not in _RESOLVED:
+        generated = theme.to_color_system().generate()
+        _RESOLVED[key] = {slot: _rich(value or generated[slot])
+                          for slot, value in zip(_SLOTS, raw)}
+    return _RESOLVED[key]
+
+
+def _tint(colour: str, background: str,
+          factor: float = DIFF_TINT) -> str | None:
+    """`colour` faded toward `background`, as a hex string -- or None.
 
     Derived from the theme's own slots rather than written down, for
     the reason the whole of this section exists (#116): a literal pair
     of green and red backgrounds would be designed against one of the
     fourteen palettes and wrong on the other thirteen -- and on the six
     standalone themes, whose panels carry the identity, visibly so.
+
+    None when either end is one of the terminal's own sixteen, which
+    is textual-ansi and nothing else: there is no RGB there to blend,
+    so there is no band to draw. Not a hypothetical guard -- textual's
+    Color.parse raises on Rich's `default`, and blending two ANSI
+    colours in textual hands back one of them unchanged, so both
+    answers were wrong before this said so.
     """
+    if not (colour.startswith("#") and background.startswith("#")):
+        return None
     return Color.parse(colour).blend(Color.parse(background), factor).hex
 
 
@@ -238,12 +327,21 @@ def role_styles(theme: Theme) -> dict[str, str]:
     Roles are what a line MEANS, not where it came from: `pass` covers a
     research pass boundary whether the CLI or the TUI produced it, and
     `tool_error` is a failed tool call rather than "amber".
+
+    Reads the RESOLVED palette rather than the Theme's own slots,
+    which is batch 64: three of the twenty-six themes ctrl+p offers
+    leave a slot at None or fill it with textual's `ansi_*` names,
+    and one of them took the whole app down at mount. `_palette`
+    fills and translates; nothing below can see the difference.
     """
+    palette = _palette(theme)
+    add = _tint(palette["success"], palette["background"])
+    delete = _tint(palette["error"], palette["background"])
     return {
         # Who is speaking. The hues, because these distinguish identity.
-        "user": f"bold {theme.primary}",
-        "user_label": f"bold {theme.primary}",
-        "assistant_label": f"bold {theme.accent}",
+        "user": f"bold {palette['primary']}",
+        "user_label": f"bold {palette['primary']}",
+        "assistant_label": f"bold {palette['accent']}",
         # The answer itself stays plain foreground DELIBERATELY. It is the
         # longest text on screen and the thing most often actually read;
         # tinting it costs contrast to say something the label already said.
@@ -256,9 +354,9 @@ def role_styles(theme: Theme) -> dict[str, str]:
         # clears the identity floor on every theme, so no theme constant
         # moves for this. Italic separates it from `pass`/`pass_done`,
         # which share the hue in the research view.
-        "thinking": f"italic {theme.secondary}",
-        "pass": f"bold {theme.secondary}",
-        "pass_done": theme.secondary,
+        "thinking": f"italic {palette['secondary']}",
+        "pass": f"bold {palette['secondary']}",
+        "pass_done": palette["secondary"],
         # PLAIN accent, not `dim` (batch 41, X1). Two reasons, and the
         # second is the one that generalises. `dim {accent}` sat a
         # measured 98.5 redmean units from `thinking`'s
@@ -272,41 +370,52 @@ def role_styles(theme: Theme) -> dict[str, str]:
         # one style whose real contrast nothing measured. Plain accent
         # moves it up, away from secondary, into a number the floors
         # can see.
-        "tool": theme.accent,
+        "tool": palette["accent"],
         # How bad it is. The three shared colours.
-        "tool_error": theme.warning,
+        "tool_error": palette["warning"],
         # BOLD, where tool_error is plain (X2). Both are non-fatal and
         # keep the hue family; the weight separates the harness raising
         # its voice from a tool that failed. They were the same string
         # outright until batch 41, which was survivable only because
         # nothing routed a WARNING here at all -- see
         # TranscriptLogHandler, where that was the actual defect.
-        "warning": f"bold {theme.warning}",
-        "error": f"bold {theme.error}",
-        "success": theme.success,
+        "warning": f"bold {palette['warning']}",
+        "error": f"bold {palette['error']}",
+        "success": palette["success"],
         # Confidence tiers, ordered worst-to-best in meaning rather than in
         # this dict. UNVERIFIED_COVERAGE is a gap in what was asked, not a
         # claim that failed, so it reads as absent rather than as wrong.
-        "HIGH": theme.success,
-        "MEDIUM": theme.foreground,
-        "LOW": theme.warning,
-        "UNVERIFIED": theme.error,
-        "UNVERIFIED_COVERAGE": f"dim {theme.error}",
+        "HIGH": palette["success"],
+        "MEDIUM": palette["foreground"],
+        "LOW": palette["warning"],
+        "UNVERIFIED": palette["error"],
+        "UNVERIFIED_COVERAGE": f"dim {palette['error']}",
         # §41's inline diff for `write` and `edit`. The only roles in
         # this table that set a BACKGROUND, because the whole point is
         # that a changed row is marked across its full width rather
         # than at the one character that carries the sign.
-        "diff_add": f"{theme.foreground} on {_tint(theme.success, theme.background)}",
-        "diff_del": f"{theme.foreground} on {_tint(theme.error, theme.background)}",
+        #
+        # Unless there is no background to set. `_tint` answers None on
+        # a theme whose colours are the terminal's own sixteen --
+        # textual-ansi and nothing else -- and the row then takes the
+        # severity colour as its FOREGROUND, which is what git, diff
+        # and patch all do in a sixteen-colour terminal. A solid band
+        # was the alternative, and DIFF_TINT's comment above turns that
+        # down for every theme that CAN be measured; picking it for the
+        # one that cannot would be backwards.
+        "diff_add": (f"{palette['foreground']} on {add}" if add
+                     else palette["success"]),
+        "diff_del": (f"{palette['foreground']} on {delete}" if delete
+                     else palette["error"]),
         # Unchanged context recedes: it is there to place the change,
         # not to be read. `secondary` rather than a dimmed foreground
         # for X1's reason -- `dim` is an attribute no floor can
         # measure.
-        "diff_context": theme.secondary,
+        "diff_context": palette["secondary"],
         # The file being changed. Bold foreground takes no hue at all,
         # which is what keeps it out of the identity roles the same
         # batch just separated -- a path is not a speaker.
-        "diff_header": f"bold {theme.foreground}",
+        "diff_header": f"bold {palette['foreground']}",
         # Batch 53's markdown marks. These are marks INSIDE an entry rather
         # than kinds of line, which is why they sit outside MESSAGE_ROLES
         # exactly as the diff roles above do: the pairwise-distinctness and
@@ -326,9 +435,9 @@ def role_styles(theme: Theme) -> dict[str, str]:
         # line. Inline code borrows `secondary`, the transcript's quieter
         # slot, so an identifier reads as set apart from the prose without
         # competing with the accent a tool call uses.
-        "md_heading": f"bold {theme.foreground}",
+        "md_heading": f"bold {palette['foreground']}",
         "md_strong": "bold",
-        "md_code": theme.secondary,
+        "md_code": palette["secondary"],
         # Batch 58's three additions, and the shape of the first two is
         # `md_strong`'s: an inline mark says something about the WORDS it
         # covers, so it takes the attribute and no hue -- a colour would
@@ -344,15 +453,20 @@ def role_styles(theme: Theme) -> dict[str, str]:
         # A list marker recedes for `diff_context`'s reason -- it is there
         # to place the text, not to be read -- so the eye lands on the
         # first word rather than on the hyphen the model happened to type.
-        "md_bullet": theme.secondary,
+        "md_bullet": palette["secondary"],
         # The table's own furniture. The border recedes for
         # `diff_context`'s reason -- it is there to place the cells, not to
         # be read -- and the header row is the heading rule applied inside
         # the grid, so a table and a `##` above it agree about what a title
         # looks like.
-        "table_border": theme.secondary,
-        "table_header": f"bold {theme.foreground}",
+        "table_border": palette["secondary"],
+        "table_header": f"bold {palette['foreground']}",
     }
+
+
+#: Theme names already complained about, so the warning below is said
+#: once each rather than once per line drawn.
+_UNSTYLABLE: set[str] = set()
 
 
 def styles_for(app) -> dict[str, str]:
@@ -364,6 +478,30 @@ def styles_for(app) -> dict[str, str]:
     a widget renderable in both cases -- Rich treats "" as no style -- so
     presentation degrades instead of a NoActiveAppError reaching a test
     that is not about theming at all.
+
+    The SECOND guard is batch 64's, and it is the one that had to be
+    learned. role_styles used to be able to RAISE -- a theme with a
+    slot at None reached Color.parse(None) -- and this function is on
+    the path of every transcript line, the session banner in on_mount
+    included. So a theme the command palette offered took the app down
+    at startup and kept taking it down, because watch_theme had
+    already written the name to a preference store that lives at the
+    USER tier, outside the install tree, where reinstalling cannot
+    reach it. _palette makes that particular fault impossible; this
+    makes the CLASS of it non-fatal, which is Section 27's rule that a
+    display failure is contained rather than fatal. An uncoloured
+    transcript is unhelpful; a harness that will not start is not a
+    harness.
+
+    It warns, ONCE per theme. That is the opposite of
+    preferences._remember's deliberate non-latching, and for the
+    reason that module states: a warning fires there on a human's own
+    action, and fires here on every line drawn. Silence is precisely
+    what let textual-light and textual-ansi render unstyled for as
+    long as they did -- Rich resolves an unparseable style with
+    `default=Style.null()` and says nothing -- so a contained failure
+    that reported nothing would be the same defect wearing a better
+    exception story.
     """
     try:
         theme = app.get_theme(app.theme)
@@ -371,7 +509,17 @@ def styles_for(app) -> dict[str, str]:
         theme = None
     if theme is None:
         return {}
-    return role_styles(theme)
+    try:
+        return role_styles(theme)
+    except Exception:  # noqa: BLE001 -- a theme this build cannot resolve
+        name = getattr(theme, "name", "?")
+        if name not in _UNSTYLABLE:
+            _UNSTYLABLE.add(name)
+            logger.warning(
+                "Theme %r could not be resolved into transcript "
+                "colours, so the transcript will render unstyled. Pick "
+                "another with /theme or ctrl+p.", name)
+        return {}
 
 
 def syntax_theme_for(app) -> str:
