@@ -1071,42 +1071,78 @@ def test_the_loops_authorization_cannot_outlive_one_tool_call():
     """Read the source, because no behaviour can see this.
 
     Two mutations matter here and NEITHER changes an observable outcome
-    today: hoisting the authorization out of `for call in
-    response.tool_calls:`, and replacing the guarded callback with a bare
-    `lambda n, p: True`. Both survive the entire suite, because nothing can
-    currently reach that dispatch call gated and un-authorized -- the three
-    other reasons `needs_approval` is turned off are each short-circuited
-    INSIDE dispatch before its gate. The scope is correct and undefended,
-    which is precisely the state a fourth reason added later would turn
-    into a silent "approve everything".
+    today: widening the authorization's scope beyond one call, and
+    replacing the guarded callback with a bare `lambda n, p: True`. Both
+    survive the entire suite, because nothing can currently reach that
+    dispatch call gated and un-authorized -- the three other reasons
+    `needs_approval` is turned off are each short-circuited INSIDE dispatch
+    before its gate. The scope is correct and undefended, which is
+    precisely the state a fourth reason added later would turn into a
+    silent "approve everything".
 
     The call ID makes the first mutation FAIL CLOSED rather than open; this
     makes both of them fail LOUDLY. Structural on purpose, in the shape
     test_rationale.py already uses when it asserts on what a function
     receives rather than on what it decides.
+
+    §47 SLICE 8 MOVED THE BODY AND MADE THE INVARIANT STRONGER, so this
+    moved with it rather than being deleted. The per-call body used to be
+    `for call in response.tool_calls:` inside `_run`, and what this test
+    pinned was that the authorization never escaped that loop -- one
+    indent out and one approval covered every later call in the turn.
+    NA9's partition needs the body callable from two drivers, so it is
+    `_dispatch_one` now: a function whose whole scope is ONE call.
+
+    That is a better invariant, and the assertions below say so rather than
+    re-checking the old one. There is no enclosing iteration left to hoist
+    out of, so the widening cannot be WRITTEN here; what has to be pinned
+    instead is that it cannot come BACK -- no loop inside `_dispatch_one`,
+    and nothing about authorization in `_run`, which is the frame that now
+    sees every call in the turn. A `for` added around this body, or a
+    dispatch call moved up into `_run`, is the same defect wearing the
+    shape the refactor made available.
     """
     tree = ast.parse(inspect.getsource(core.loop))
-    run = next(n for n in ast.walk(tree)
-               if isinstance(n, ast.FunctionDef) and n.name == "_run")
 
-    per_call = next(
-        (n for n in ast.walk(run)
-         if isinstance(n, ast.For)
-         and ast.unparse(n.iter) == "response.tool_calls"), None)
-    assert per_call is not None, "the per-call loop was renamed or removed"
+    def function(name):
+        found = [n for n in ast.walk(tree)
+                 if isinstance(n, ast.FunctionDef) and n.name == name]
+        assert len(found) == 1, (
+            f"expected exactly one {name}; found {len(found)}. If it was "
+            f"renamed, point this test at the new name rather than "
+            f"letting it pass on a function it cannot see.")
+        return found[0]
 
-    inside = {id(n) for n in ast.walk(per_call)}
-    stores = [n for n in ast.walk(run)
+    per_call = function("_dispatch_one")
+    run = function("_run")
+
+    # ONE CALL PER FRAME, and no iteration to widen it back out.
+    loops = [n for n in ast.walk(per_call)
+             if isinstance(n, (ast.For, ast.AsyncFor, ast.While))]
+    assert not loops, (
+        "_dispatch_one gained a loop. Its whole guarantee is that its "
+        "scope IS one tool call, so an authorization declared in it "
+        "covers one call by construction; a loop reintroduces exactly the "
+        "widening the call id was chosen to fail closed against.")
+
+    stores = [n for n in ast.walk(per_call)
               if isinstance(n, ast.Name) and n.id == "authorized_call"
               and isinstance(n.ctx, ast.Store)]
     assert len(stores) == 3, (
         f"expected the declaration plus two authorizing branches, "
         f"found {len(stores)}")
-    assert all(id(n) in inside for n in stores), (
-        "an assignment to authorized_call escaped the per-call loop; one "
-        "approval would then cover every later call in the same turn")
 
-    calls = [n for n in ast.walk(run)
+    # And nothing about authorization at TURN scope. `_run` is the frame
+    # that sees every call in the response, so it is the one place a
+    # hoisted decision could still be written.
+    escaped = [n for n in ast.walk(run)
+               if isinstance(n, ast.Name) and n.id == "authorized_call"]
+    assert not escaped, (
+        "authorized_call appears in _run, which sees every call in the "
+        "turn. One approval there covers all of them -- the widening this "
+        "test exists for, at the one altitude that can still express it.")
+
+    calls = [n for n in ast.walk(tree)
              if isinstance(n, ast.Call)
              and isinstance(n.func, ast.Attribute)
              and n.func.attr == "dispatch"]
@@ -1114,6 +1150,10 @@ def test_the_loops_authorization_cannot_outlive_one_tool_call():
         f"the loop must have exactly ONE dispatch call site -- two that "
         f"must agree about authorization is the defect batch 60 fixed; "
         f"found {len(calls)}")
+    assert id(calls[0]) in {id(n) for n in ast.walk(per_call)}, (
+        "the dispatch call left _dispatch_one. Wherever it went sees more "
+        "than one call, which is what the per-call frame exists to "
+        "prevent.")
 
     callback = {k.arg: k.value for k in calls[0].keywords}.get(
         "approval_callback")

@@ -394,7 +394,15 @@ class TestQuestion:
 def test_the_module_is_a_leaf():
     """Matches core/approval.py: core/loop.py, main.py, tui/app.py and
     core/reasoning/ all depend on this and it depends on none of them. A
-    project import here would invert that and eventually cycle."""
+    project import here would invert that and eventually cycle.
+
+    `threading` was added by §47 slice 8 (NA12), which serialises questions
+    with a module-level lock so no shell is ever handed two at once. It is
+    listed here rather than the allowlist being loosened to "any stdlib":
+    what this test is about is PROJECT imports, and every stdlib name it
+    permits was permitted one at a time, on purpose, so that adding one is
+    a decision somebody made rather than a category that grew.
+    """
     import ast
     import pathlib
 
@@ -406,4 +414,5 @@ def test_the_module_is_a_leaf():
             imported.update(alias.name.split(".")[0] for alias in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module:
             imported.add(node.module.split(".")[0])
-    assert imported <= {"dataclasses", "typing", "logging"}, imported
+    assert imported <= {
+        "dataclasses", "typing", "logging", "threading"}, imported

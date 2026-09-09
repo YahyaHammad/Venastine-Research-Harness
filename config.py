@@ -23,6 +23,18 @@ MAX_ITERATIONS = 50
 # ToolContext.subagent_depth; this is the value it is checked against (C3).
 SUBAGENT_MAX_DEPTH = 2
 
+# §47 slice 8 (NA10). How many calls of one response may run at once, for
+# tools whose ToolSpec declares `parallel`. A ceiling, not a target: a
+# response naming fewer runs fewer, and a response naming more runs them in
+# waves of this size. 1 makes the parallel path behave exactly like the
+# sequential one, which is the escape hatch if concurrency is ever suspect.
+#
+# Three because that is the case the design keeps citing -- one turn
+# spawning `explore` three times -- and because three children at depth 1,
+# each able to nest to SUBAGENT_MAX_DEPTH, is a bounded worst case for the
+# serialised approval queue and for the SQLite writers.
+SUBAGENT_MAX_PARALLEL = 3
+
 # --- Deep research pipeline ---
 MAX_PIPELINE_RETRIES = 2  # max revise/re-validate loop iterations per claim before fallback
 MAX_JSON_RETRIES = 2  # max corrective follow-up attempts when a pass returns malformed JSON

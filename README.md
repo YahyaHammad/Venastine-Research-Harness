@@ -732,7 +732,9 @@ Three things can end a turn or pass early:
 
 The CLI names the figures behind an early stop — billed this turn, and the thread's measured context size — rather than a bare reason, because "budget exceeded" invites exactly the misreading that there is a size problem.
 
-Other ceilings worth knowing: the six maths tools run in killable subprocesses under a 15-second wall clock (`TOOL_COMPUTE_TIMEOUT_S`) and are told which tool and which limit stopped them; pre-granted tool calls cap at 150 per research run (`MAX_GRANTED_TOOL_CALLS`), degrading to asking when exhausted; subagent nesting stops at depth 2 (`SUBAGENT_MAX_DEPTH`); attended prompts expire after 600 seconds (`ATTENDED_APPROVAL_TIMEOUT_S`), denying that one call while the run continues.
+Other ceilings worth knowing: the six maths tools run in killable subprocesses under a 15-second wall clock (`TOOL_COMPUTE_TIMEOUT_S`) and are told which tool and which limit stopped them; pre-granted tool calls cap at 150 per research run (`MAX_GRANTED_TOOL_CALLS`), degrading to asking when exhausted; subagent nesting stops at depth 2 (`SUBAGENT_MAX_DEPTH`) and at most three subagents of one turn run at once (`SUBAGENT_MAX_PARALLEL`), with anything beyond that running in waves; attended prompts expire after 600 seconds (`ATTENDED_APPROVAL_TIMEOUT_S`), denying that one call while the run continues.
+
+Subagents spawned in one model response run **concurrently**, up to `SUBAGENT_MAX_PARALLEL`. Their answers come back to the model in the order it asked for them however they finish, one approval question reaches you at a time, and the sidebar draws them as a tree rather than a chain. The database runs in SQLite's WAL mode to keep their writes from contending, which means `app.db` is accompanied by `app.db-wal` and `app.db-shm` while the harness is open.
 
 ### Logging
 
@@ -811,6 +813,7 @@ Deliberately not settings.json keys: editing these means editing the file in you
 | `MAX_PIPELINE_RETRIES` / `MAX_JSON_RETRIES` | 2 / 2 | Revise/re-validate rounds per claim; corrective attempts per malformed pass payload |
 | `MAX_ITERATIONS` | 50 | Step ceiling for a turn or pass absent an agent's own `max_steps` |
 | `SUBAGENT_MAX_DEPTH` | 2 | `spawn_subagent` nesting limit |
+| `SUBAGENT_MAX_PARALLEL` | 3 | How many subagents of one model response run at once; 1 makes them sequential again |
 | `PIN_MAX_TRIGGER_FRACTION` | 0.5 | Largest share of the trigger one pin may protect |
 | `MAX_INJECTED_MEMORIES` / `MAX_INJECTED_REFS` / `MAX_TODO_ITEMS` | 50 / 3 / 50 | Prompt-injection caps; refs and todos refuse past the cap rather than trimming silently |
 | `SUMMARY_TARGET_CHARS` | 2000 | Size cap on whole-thread summaries injected via `/ref` |
@@ -867,7 +870,7 @@ classifier is described under *Security model* above. If you have a fork or a lo
 note that `ToolApprovals.shell` now ships `False` and `SHELL_APPROVAL_MODE` is the gate — see
 `tests/BREAKING_CHANGES.md` §24.
 
-Run the test suite with `pytest` — 4159 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
+Run the test suite with `pytest` — 4203 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
 
 ## Documentation
 

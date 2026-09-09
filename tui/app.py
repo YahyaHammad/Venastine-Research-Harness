@@ -32,6 +32,7 @@ import json
 import logging
 import os
 import queue
+import threading
 from dataclasses import replace
 from time import monotonic
 from pathlib import Path
@@ -317,8 +318,29 @@ class TuiActivity(AgentActivity):
     registry.dispatch(), which is inside the loop generator this app
     drains in run_worker(thread=True). So this touches no widget and
     posts instead, exactly as _consume does; post_message is the
-    thread-safe half of the API and `self._stack` below is read and
-    written only here, under the worker's own serialisation.
+    thread-safe half of the API.
+
+    CALLED ON SEVERAL WORKER THREADS SINCE §47 SLICE 8, and this docstring
+    used to finish the paragraph above with "`self._stack` is read and
+    written only here, under the worker's own serialisation". That was
+    true and measured for as long as one agent ran at a time. NA9 makes
+    two children of one response peers, so both halves of the claim went:
+    still only here, no longer serialised.
+
+    ALL THREE MUTATORS REBUILD OR APPEND, WHICH IS WHAT MAKES A LOCK THE
+    FIX rather than a nicety. `exit` and `bind` are read-rebuild-assign,
+    so two of them at once each filter the list they read and the second
+    assignment wins -- resurrecting the row the first removed. That is a
+    row describing a finished run left on screen for the session, which is
+    exactly the failure `span()`'s `finally` is structural to prevent,
+    reached from the other side. `enter`'s append races them the opposite
+    way: appended to the list the rebuild already copied, and lost.
+
+    THE POSTED STACK IS A SNAPSHOT, never the live list. The UI thread
+    stores `message.stack` and iterates it; handing it the object this
+    object goes on appending to makes the worker a second writer of what
+    the UI thread is reading. Cheap -- these lists hold at most root plus
+    SUBAGENT_MAX_DEPTH times SUBAGENT_MAX_PARALLEL rows.
 
     The stack is kept HERE rather than on the app because the enter/exit
     pairing is this object's business: the app holds what it was last
@@ -329,12 +351,23 @@ class TuiActivity(AgentActivity):
     def __init__(self, app) -> None:
         self._app = app
         self._stack: list = []
+        # Guards the three mutators against each other. Plain Lock, not
+        # RLock: none of them calls another, and `_post` is deliberately
+        # outside the held region.
+        self._lock = threading.Lock()
 
     def enter(self, span) -> None:
-        self._stack.append(
-            AgentRow(span.name, span.depth, span.id,
-                     call_id=span.call_id))
-        self._post()
+        with self._lock:
+            self._stack.append(
+                AgentRow(span.name, span.depth, span.id,
+                         call_id=span.call_id,
+                         # Slice 8. The panel orders by lineage now, so
+                         # the row has to carry one. Already on the span
+                         # since batch 67; this is the one hop that was
+                         # missing between the two.
+                         parent_id=span.parent_id))
+            snapshot = list(self._stack)
+        self._post(snapshot)
 
     def exit(self, span) -> None:
         # BY ID since §47, and that retires a workaround rather than
@@ -344,9 +377,15 @@ class TuiActivity(AgentActivity):
         # the sink had no way to tell them apart. Removing the wrong one
         # left the panel one row off for the rest of the run, and now
         # there is no wrong one to remove.
-        self._stack = [row for row in self._stack
-                       if row.span_id != span.id]
-        self._post()
+        #
+        # Slice 8 is what makes the by-id removal load-bearing rather than
+        # merely correct: two runs of one agent open as PEERS, either able
+        # to finish first, is the ordinary case now.
+        with self._lock:
+            self._stack = [row for row in self._stack
+                           if row.span_id != span.id]
+            snapshot = list(self._stack)
+        self._post(snapshot)
 
     def bind(self, span_id, thread_id) -> None:
         """That run's thread exists; give its row an address (§47).
@@ -360,15 +399,24 @@ class TuiActivity(AgentActivity):
         is reachable: a run whose thread is created as the app is being
         torn down. A row that is gone needs no address.
         """
-        self._stack = [
-            replace(row, thread_id=thread_id) if row.span_id == span_id
-            else row
-            for row in self._stack
-        ]
-        self._post()
+        with self._lock:
+            self._stack = [
+                replace(row, thread_id=thread_id) if row.span_id == span_id
+                else row
+                for row in self._stack
+            ]
+            snapshot = list(self._stack)
+        self._post(snapshot)
 
-    def _post(self) -> None:
-        self._app.post_message(AgentStackChanged(self._stack))
+    def _post(self, snapshot: list) -> None:
+        """Hand the UI thread one snapshot. Called outside the lock.
+
+        Outside deliberately: `post_message` reaches Textual's own
+        machinery, and holding this object's lock across another
+        subsystem's call is how a lock ordering nobody wrote down comes
+        into existence.
+        """
+        self._app.post_message(AgentStackChanged(snapshot))
 
 class VenastineApp(App):
     """Chat + research shell."""

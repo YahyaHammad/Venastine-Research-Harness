@@ -48,7 +48,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 4159 tests, offline, ~2-3 min by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 4203 tests, offline, ~2-3 min by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -135,7 +135,7 @@ public and the secret is added deliberately, in that order.
 Read these before changing anything non-trivial — they carry design decisions that are locked, not defaults to re-derive.
 
 - **ARCHITECTURE.md** — what's built, file-by-file contracts ("what belongs here / what does NOT"), known gotchas (§11).
-- **ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **ROADMAP_v2.md** (§13–§46, all built) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I17 from §24, J1–J14 from §23, E1–E14 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A15 from §32, W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37, O1–O8 from §38 Q1–Q6 from §39, UN1–UN6 from §40, X1–X7 from §41, RA1–RA6 from §42, RM1–RM6 from §43, WS1–WS10 from §44, SQ1–SQ10 from §45 and EP1–EP8 from §46). Section and D-numbers are stable and cross-referenced everywhere.
+- **ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **ROADMAP_v2.md** (§13–§47, all built) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I17 from §24, J1–J14 from §23, E1–E14 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A15 from §32, W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37, O1–O8 from §38 Q1–Q6 from §39, UN1–UN6 from §40, X1–X7 from §41, RA1–RA6 from §42, RM1–RM6 from §43, WS1–WS10 from §44, SQ1–SQ10 from §45 EP1–EP8 from §46 and NA1–NA18 from §47). Section and D-numbers are stable and cross-referenced everywhere.
 
 **Six namespaces use the same `LETTER+NUMBER` shape, and only the first is the
 record.** An id that resolves to two places is a cross-reference that fails
@@ -927,13 +927,31 @@ callable tools and two. That is deliberate: `registry.schemas(context)` filters 
 predicate, so nothing uncallable is advertised, while an agent that omitted them would stay
 crippled on an install where the operator had enabled them.
 
-**ONE AGENT RUNS AT A TIME. What nests is a STACK, and the panel that draws it carries
-LIFECYCLE ONLY** (batch 59). Measured rather than assumed, because the question comes up
-whenever someone reaches for concurrency: `core/loop.py` dispatches tool calls in a plain
-`for` loop, `spawn_subagent` BLOCKS on the child run, every TUI worker path is `_busy`-guarded,
-and even ensemble Pass 1 is a loop with a comment saying why. So the maximum simultaneously-live
-set is root + 2 subagents (`SUBAGENT_MAX_DEPTH`), each frame suspended inside the one below it.
-Two `spawn_subagent` blocks in one model turn run one *after* the other.
+**AGENTS RUN AS A TREE, AND THE PANEL THAT DRAWS IT STILL CARRIES LIFECYCLE ONLY**
+(batch 59, changed by §47 slice 8). This entry used to read "ONE AGENT RUNS AT A TIME. What
+nests is a STACK", and it was measured rather than assumed, because the question comes up
+whenever someone reaches for concurrency: `core/loop.py` dispatched tool calls in a plain
+`for` loop, `spawn_subagent` BLOCKED on the child run, every TUI worker path is `_busy`-guarded,
+and even ensemble Pass 1 is a loop with a comment saying why. Two `spawn_subagent` blocks in one
+model turn ran one *after* the other.
+
+NA9 changed the first clause and nothing else. `core/loop.py` now PARTITIONS a response:
+consecutive calls whose `ToolSpec` declares `parallel` run together in a pool bounded by
+`SUBAGENT_MAX_PARALLEL` (3), and every other call stays strictly sequential in its original
+position. So the maximum simultaneously-live set is root + `SUBAGENT_MAX_PARALLEL` peers, each
+still able to nest to `SUBAGENT_MAX_DEPTH`. **`_busy` is unchanged and still correct**: it guards
+the TUI's TURN, not the spawns inside it. **A response with nothing parallel in it takes the same
+path it always did**, and that is structural rather than incidental -- a group of one skips the
+pool and the gate entirely, which is what makes every pre-slice-8 test of that loop a test of the
+sequential branch.
+
+**Six things were correct only because nothing ran alongside anything else**, and each is now
+guarded rather than lucky: `GrantBudget.take()` (a read-modify-write on an object shared by
+reference), §23's sign-off memo (a check-then-act window, not a racy dict), the loop's
+`authorized_call` (now a per-FUNCTION local, which is stronger than the per-iteration one it
+replaces), every shell's single pending-answer slot, `TuiActivity`'s stack, and the panel's row
+ORDER. The one that was measured and needed nothing is the busy timeout on SQLite; WAL was added
+anyway, because the ceiling is a tunable constant. See ROADMAP_v2 §47 NA9-NA18.
 
 `core/agent_activity.py` is how a shell sees that stack while it exists. Four things about it
 are decisions:
@@ -991,8 +1009,27 @@ conversation.
 through `span()`.** Nested spans always unwind innermost-first, so removing the last row
 matching `(name, depth)` happened to be right and the old code was never wrong in
 practice. It is wrong the moment two runs of one agent are open as PEERS and either may
-finish first — which is what slice 8 makes ordinary. The test drives `enter`/`exit`
+finish first — which slice 8 made ordinary. The test drives `enter`/`exit`
 directly, because a `with` block cannot express "the outer one ended first".
+
+**And all three of its mutators are LOCKED, with the stack posted as a SNAPSHOT** (NA16).
+This class's docstring used to finish "`self._stack` is read and written only here, under the
+worker's own serialisation", which was true until there were two workers. `exit` and `bind` are
+read-rebuild-assign, so two at once each filter the list they read and the second assignment
+RESURRECTS the row the first removed — a finished run left on screen for the session, which is
+what `span()`'s `finally` exists to prevent, reached from the other side. `enter`'s append races
+them the other way and is simply lost. The posted list is a copy because the UI thread stores and
+iterates it, and handing over the object the worker keeps appending to makes the worker a second
+writer of what the UI thread is reading.
+
+**The panel is ordered by LINEAGE, not by arrival** (NA17). Rows still indent by depth, and peers
+at one depth now legitimately share a column. What had to change is the order, because arrival
+order and lineage order are the same thing for a stack and are not for a tree: two children of
+one turn each spawning a grandchild can arrive A, B, A's child, B's child, and drawing that in
+order puts A's child one level in from B. The panel would be INVENTING a lineage, which is worse
+than omitting one. `_lineage_order` keys its cycle guard on row IDENTITY rather than on
+`span_id`, because `span_id` defaults to `""` — so a set of ids drops the second hand-built row,
+invisibly in the app and wrongly in every test that builds rows directly.
 
 **ctrl+g is the keyboard route to the sidebar's rows** (§47). The panel is deliberately not
 focusable, so making its rows clickable made navigation mouse-only; the picker mirrors ctrl+t and

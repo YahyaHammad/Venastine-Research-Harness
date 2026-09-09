@@ -55,6 +55,7 @@ import contextlib
 import json
 import os
 import sys
+import threading
 
 import pytest
 
@@ -1316,3 +1317,101 @@ def test_the_lineage_columns_migrate_onto_a_database_that_predates_them(
         assert name in columns
     assert existing == (None, None, None), (
         "the migration backfilled a value onto a row nothing spawned")
+
+
+# ---------------------------------------------------------------------------
+# ---- Concurrent writers (ROADMAP_v2 §47 slice 8, hazard 7) ----------------
+# ---------------------------------------------------------------------------
+
+class TestConcurrentWriters:
+    """NA9 lets several subagents run at once, and each writes its own
+    thread. SQLite allows one writer at a time, so the question is whether
+    the engine's configuration turns that into waiting or into failing.
+
+    HERE, because this is the only file in the suite that meets a real
+    database -- the root conftest fakes `sqlmodel` before collection, and
+    there can be only one swap. A FakeStorage version of this test could not
+    fail: the defect is in SQLite's locking, which the fake does not have.
+
+    EIGHT WRITERS, NOT THREE, and that is the whole discriminating choice.
+    Measured on the shipped engine: at three -- SUBAGENT_MAX_PARALLEL -- a
+    rollback-journal database does NOT lock, so a test at the real ceiling
+    passes with or without the fix and proves nothing. Eight is where the
+    unfixed configuration produced "database is locked", so it is where a
+    test can tell the two apart. The gap between them is also the reason
+    WAL is on at all: the ceiling is a tunable constant, and the failure it
+    walks into when raised is a lost message rather than a slow one.
+    """
+
+    def test_the_engine_is_configured_for_them(self, real_storage):
+        """The two pragmas, asked of a live connection rather than of the
+        source. `journal_mode` is persistent in the FILE, so reading it back
+        is the only way to know the listener actually reached the database
+        this process opened."""
+        import database
+        from sqlalchemy import text
+
+        with database.engine.connect() as conn:
+            assert conn.execute(
+                text("PRAGMA journal_mode")).scalar().lower() == "wal", (
+                "the database is not in WAL mode; concurrent subagent "
+                "writes will contend on a rollback journal")
+            assert conn.execute(
+                text("PRAGMA busy_timeout")).scalar() >= 5000, (
+                "the busy timeout is below the 5000ms the concurrency "
+                "measurements were taken at")
+
+    def test_eight_concurrent_writers_all_land(self, real_storage):
+        """Each writer does what a child run does: create its own thread,
+        then append messages to it. A barrier starts them together, so the
+        contention is real rather than incidental.
+
+        Asserts the ROWS, not merely the absence of an exception. A writer
+        that swallowed a failure would leave a short thread, and "no
+        exception reached the test" is not the same claim as "every message
+        the model was told about is in the archive".
+        """
+        import storage
+
+        writers, rows = 8, 60
+        barrier = threading.Barrier(writers, timeout=30)
+        failures, made = [], {}
+        guard = threading.Lock()
+
+        def writer(n):
+            try:
+                barrier.wait()
+                thread_id = storage.create_thread(
+                    kind=storage.THREAD_KIND_SUBAGENT)
+                for i in range(rows):
+                    # role "user", so the archive's assistant decoder is
+                    # not handed a bare string. The claim here is about
+                    # concurrent WRITES; the payload shape is another
+                    # test's subject.
+                    storage.save_message(
+                        thread_id, "user", "w%d r%d" % (n, i))
+                with guard:
+                    made[n] = thread_id
+            except Exception as e:            # noqa: BLE001 -- the measurement
+                with guard:
+                    failures.append((n, repr(e)))
+
+        threads = [threading.Thread(target=writer, args=(n,))
+                   for n in range(writers)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(60)
+
+        assert failures == [], (
+            f"{len(failures)} of {writers} concurrent writers failed: "
+            f"{failures[:3]}")
+        assert len(made) == writers
+
+        for n, thread_id in made.items():
+            archived = storage.archive_history(thread_id)
+            assert len(archived) == rows, (
+                f"writer {n} wrote {len(archived)} of {rows} rows; a "
+                "message the model was told about is missing from the "
+                "archive")
+

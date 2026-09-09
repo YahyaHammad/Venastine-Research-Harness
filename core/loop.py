@@ -27,6 +27,16 @@ budget-truncated responses.
 """
 
 import logging
+import queue
+import threading
+# §47 slice 8 (NA10). Threads rather than asyncio: `_run` is a synchronous
+# generator and everything under it is blocking I/O, so a bounded pool is
+# the change that fits what is already here. `copy_context` is what makes
+# a submitted call carry the parent span batch 67 put on a ContextVar.
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
+from contextvars import copy_context
+from dataclasses import dataclass, field
 from typing import Optional
 from uuid import UUID
 
@@ -641,6 +651,624 @@ def _resolve_spend_cap(max_total_tokens) -> Optional[int]:
     return max_total_tokens
 
 
+
+@dataclass
+class _CallOutcome:
+    """What deciding and dispatching ONE tool call produced (§47 slice 8).
+
+    Returned rather than written straight into the turn's own lists,
+    because NA11 orders a parallel batch's effects by the MODEL'S call
+    order and a batch finishes in whatever order it finishes. So a call
+    collects what it would have appended, and `_settle_one` appends it at
+    the call's turn. For a lone sequential call that turn is immediately,
+    which is what keeps the single-call path byte-identical.
+
+    `result` is what the model is told. `granted` is §25's pre-authorized
+    call record and `notices` are §23's shell-facing lines, each a list
+    because a call contributes zero or one of the first and zero or more
+    of the second.
+    """
+
+    result: object
+    granted: list = field(default_factory=list)
+    notices: list = field(default_factory=list)
+
+
+#: NA9's gate for a call with no siblings. A lone call cannot contend with
+#: anything, so it takes no lock -- which is what makes "the sequential
+#: path is unchanged" a structural claim rather than a measured one.
+_NO_GATE = nullcontext()
+
+#: NA12's second lock, and it guards a WINDOW rather than an object.
+#:
+#: §23's sign-off memo is a check-then-act: `recall_signoff` says nobody
+#: has answered about this subject, the human is asked, `remember_signoff`
+#: records the answer. Sequentially that is why three spawns of one agent
+#: ask ONCE. Concurrently all three recall before any remembers, and the
+#: user is asked three times about the same agent -- a regression in the
+#: number of questions, which is the thing §25 R11 and §23 J8 are both
+#: about.
+#:
+#: Guarding the dict instead would not close it: no single mutation is
+#: racy, the WINDOW between the read and the write is. Module-level rather
+#: than per-run, because the runs it serialises are siblings in different
+#: frames with no shared object between them but this one.
+#:
+#: RELEASED BEFORE dispatch, always. That is what keeps it a plain Lock: a
+#: child's own gate acquisitions all happen inside its dispatch, by which
+#: time its parent has let go, so nothing re-enters. It is also the outer
+#: of this project's two ask-side locks -- gate, then
+#: core.interaction's -- and the order is never the other way, because
+#: nothing holding the interaction lock reaches back into a gate.
+_GATE_LOCK = threading.Lock()
+
+
+def _parallel_groups(calls) -> list:
+    """Partition one response's calls into consecutive runs (NA9).
+
+    A group is either several calls whose ToolSpec declares `parallel`, or
+    exactly one call of anything else. CONSECUTIVE, and that is the
+    decision rather than an implementation detail: NA9 keeps every
+    non-parallel call in its original position, so two spawns either side
+    of a `shell` cannot be grouped without moving the shell relative to
+    them.
+
+    Asked of the registry, never matched by name, so this file stays free
+    of the knowledge that spawn_subagent is the special one -- the same
+    trade `grant_scope`, `request_kind` and `opens_thread` already make.
+    """
+    groups: list = []
+    for call in calls:
+        # `groups[-1][-1]` rather than a flag, so the question asked is
+        # "may this join what is already open" -- and a group is never
+        # empty, so there is no length to check.
+        if (registry.parallel(call.name)
+                and groups
+                and registry.parallel(groups[-1][-1].name)):
+            groups[-1].append(call)
+        else:
+            groups.append([call])
+    return groups
+
+
+
+def _dispatch_one(call, *, context, run_info, response_channel, memory,
+                  activity, gate=_NO_GATE):
+    """Decide, ask about and dispatch ONE tool call.
+
+    A GENERATOR that yields the call's own narration -- the permission
+    request and any approval notice -- and RETURNS a `_CallOutcome`. Two
+    drivers share it and that is the point of the shape: `_run` does
+    `yield from` for a lone call, and `_dispatch_parallel`'s worker steps
+    it by hand and pushes each event onto a conduit. One copy of the
+    decision, so there is still exactly one place that decides whether a
+    call is authorized and exactly one call to `registry.dispatch`.
+
+    `gate` is NA12's window lock, supplied only when this call has
+    siblings. See `_GATE_LOCK`.
+
+    THE AUTHORIZATION IS THIS FUNCTION'S LOCAL, which is strictly stronger
+    than the loop-body local it replaces. `authorized_call` used to be
+    correct because of WHERE it was declared -- one indent out and it
+    covered every later call in the turn -- and the id, rather than a
+    bool, is what made that mistake fail closed instead of open. A
+    function whose whole scope is one call cannot express the mistake at
+    all: there is no enclosing iteration to hoist out of. The id stays
+    anyway, because it is also what tells `dispatch()` which call the
+    loop answered, and because a fail-closed shape is worth keeping when
+    it costs nothing.
+    """
+    granted: list = []
+    collected: list = []
+
+    # Single source of truth with dispatch(): approval_needed()
+    # ORs the tool's own path/command-dependent approval_check
+    # with the config/context requirement (§15). Both callers
+    # go through it so they cannot diverge — a path-dependent
+    # tool must yield permission_request so the TUI user can
+    # approve, not be silently denied by one check while the
+    # other reports no approval needed.
+    #
+    # There is no separate allowed_tools membership test here
+    # any more: dispatch() calls is_tool_allowed(name, context),
+    # which raises ToolCallDenied with a message distinguishing
+    # a context restriction from a global policy denial.
+    needs_approval = registry.approval_needed(
+        call.name, call.input, context)
+    # Reachability before approval. Asking first meant a
+    # context-excluded tool prompted the user, who clicked
+    # Allow, and was then denied anyway -- and headless, it
+    # reported "requires approval and was not given", telling
+    # the model to retry with approval when the actionable
+    # answer is "not available in this context". dispatch()
+    # still enforces the denial; this only stops asking a
+    # question whose answer cannot matter.
+    if needs_approval and not registry.is_allowed(call.name, context):
+        needs_approval = False
+    # §32 A7 (#70): the same rule for a refusal only the
+    # TOOL can see. spawn_subagent's unknown-agent and
+    # depth-limit checks lived inside run(), so both
+    # prompted first and errored second -- and for an
+    # unknown name the question had an empty notice and an
+    # empty candidate list, i.e. nothing to tick. The
+    # call is refused by dispatch with the tool's own
+    # reason; this only stops ASKING first. It also keeps
+    # J8's memo from being keyed on
+    # (spawn_subagent, None) -- a subject of None is the
+    # absence of the very thing the key exists to
+    # distinguish.
+    if needs_approval and registry.refusal_reason(
+            call.name, call.input, context):
+        needs_approval = False
+    # §33 W3 (#37): the same rule for a call whose arguments
+    # never parsed. Approving it could not make it runnable,
+    # so the question has no answer that changes anything --
+    # and headless it would report "requires approval and was
+    # not given", which is A7's exact wrong-cause failure.
+    if needs_approval and call.parse_error is not None:
+        needs_approval = False
+    # §18 sign-off (S1), narrowed by §25 (R2): a tool whose
+    # grant_scope is "run" is asked about once per run, not
+    # once per call. The loop names no tool -- it asks the
+    # registry, the same way it asks whether approval is
+    # needed at all.
+    #
+    # THREE conditions, and the last two are the §25 change:
+    #
+    #   registry.grantable -- a tool deciding approval from its
+    #     PARAMS was never consented to by name. Before this,
+    #     a signed-off subagent could run any shell command for
+    #     the rest of the turn on the strength of one prompt
+    #     that said "shell". Re-checked here rather than
+    #     trusted from the set, so a stale or hand-built grant
+    #     cannot widen anything.
+    #
+    #   grant_budget.take() -- pre-flight authorization trades
+    #     a per-call decision for one up-front decision, and
+    #     gives up the natural bound on how many times the
+    #     tool runs. Exhaustion falls back to ASKING, not to
+    #     failing: supervised runs continue, headless ones deny
+    #     exactly as they would for any gated tool.
+    #
+    # §23 AC1b: the memo is keyed by (tool, SUBJECT), not by
+    # tool name alone. A subagent sign-off answers about one
+    # agent's candidate list, so reusing it for a different
+    # agent would grant a set nobody was shown -- which is
+    # what the name-only version did: approving a spawn of `a`
+    # silently covered a later spawn of `b` in the same turn.
+    # Tools with no subject (every other one) memo under None
+    # and behave exactly as before.
+    # Batch 60. THIS CALL'S authorization decision, and the
+    # error that stands in for it.
+    #
+    # THE ID, NOT A BOOLEAN, and that is the whole point of the
+    # shape. `authorized` began as a bool whose correctness
+    # rested on WHERE it was declared -- one indent level in and
+    # it covers one call, one level out and it covers every
+    # later call in the turn, which is the exact widening §25
+    # R11 refuses to make even for the one tool whose grant
+    # scope IS the run. That version was measured: hoisting it
+    # out of the per-call loop survived the entire suite, because
+    # no path currently reaches dispatch with a stale flag that
+    # changes anything. Correct, and undefended.
+    #
+    # §47 SLICE 8 MADE THE SCOPE STRUCTURAL. The per-call body is
+    # this function now, so there is no enclosing iteration left
+    # to hoist out of -- the widening the paragraph above defends
+    # against can no longer be WRITTEN here, rather than being
+    # merely absent. That is why the AST guard in
+    # tests/test_grants.py moved with the body instead of being
+    # deleted: what it pins is now "one call per frame, and the
+    # frame is what dispatch is told about".
+    #
+    # A call id cannot be hoisted into a lie, and the id stays for
+    # that reason plus one more: it is also how dispatch() learns
+    # WHICH call the loop answered. Handed a stale one, the
+    # comparison at the dispatch site fails and the call is DENIED
+    # -- the mistake fails closed instead of failing open. It rests
+    # on ids being distinct within a response, which is not a new
+    # assumption: add_tool_result pairs every tool_result to its
+    # tool_use by that same id (M4/D20), and a thread whose ids
+    # collide is already unresumable.
+    #
+    # Set in exactly two places -- the memo/grant hit below and
+    # the fresh approval further down -- and read in exactly
+    # one, the single dispatch() call at the end of this block.
+    authorized_call = None
+    denial = None
+    request_payload = registry.request_payload(
+        call.name, call.input, context)
+    subject = request_payload.get("subject")
+    # NA12's window opens HERE and closes before dispatch. Everything
+    # inside is the sign-off's check-then-act: what has already been
+    # answered about this subject, the question if nothing has, and the
+    # record of the answer. A sibling that arrives mid-window waits, and
+    # then finds the memo -- which is what keeps three spawns of one
+    # agent at ONE question, exactly as they were sequentially.
+    #
+    # `gate` is a no-op for a lone call, so this costs the sequential
+    # path nothing and cannot be held across a suspension there. On the
+    # parallel path the frame that yields is the DRIVER, not this
+    # generator: the worker steps it and pushes, so a permission request
+    # still reaches the transcript before the modal it announces, with
+    # no lock held across anybody's `yield`.
+    with gate:
+        remembered, signoff = run_info.recall_signoff(
+            call.name, subject)
+        #   grant_policy on a NAME-LEVEL grant only -- R13's literal
+        #     claim is that approving the NAME never carries the
+        #     authority for a GRANT_NEVER tool, on either path, and
+        #     until now no path enforced it. Batch 6 declared the
+        #     policy and taught the two functions that decide what
+        #     may be OFFERED to read it; this is the reader that
+        #     decides whether a grant already in hand APPLIES.
+        #     `spawn_subagent` was covered only because R14's
+        #     subject condition happens to catch it; `remember`
+        #     carries no subject, so a grant naming it dispatched a
+        #     durable cross-session write with no prompt -- M17's
+        #     scenario through the one door R13 left unlocked.
+        #
+        #     IT MUST NOT REACH THE SIGN-OFF MEMO, and that is not a
+        #     nicety: `spawn_subagent` is GRANT_NEVER, so testing
+        #     the policy unconditionally here stops §23's memo
+        #     applying and the same agent is asked about twice in
+        #     one turn. R13 is about what approving a NAME buys; a
+        #     memo is an answer somebody gave about this subject,
+        #     which J8 and R14 govern instead. recall_signoff
+        #     already separates them by what it returns -- the memo
+        #     always carries a subset, the grant carries None.
+        answered_by_name = signoff is None
+        if (needs_approval
+                and remembered
+                and registry.grantable(call.name)
+                and not (answered_by_name
+                         and registry.grant_policy(call.name)
+                         == GRANT_NEVER)
+                and (run_info.grant_budget is None
+                     or run_info.grant_budget.take())):
+            needs_approval = False
+            # Batch 60. The half that was missing: the loop
+            # decided this call needs no fresh answer, and until now
+            # it did not tell dispatch(), which re-checks approval on
+            # its own and denied every call this branch let through.
+            # A second spawn of one agent, a subagent calling a tool
+            # it was signed off for, and a --grant-tools name in an
+            # unattended run were all refused with "requires approval
+            # and was not given" and no prompt.
+            authorized_call = call.id
+            granted.append(
+                {"tool": call.name, "params": call.input})
+            # §21, and the reason this batch adds a notice at all:
+            # a gated call proceeding with NO modal is the intended
+            # behaviour (§25 R11 -- re-asking about the same tool
+            # seconds later is noise), and it is also exactly what
+            # the bug looked like from the outside. Silence was
+            # indistinguishable from the bug.
+            #
+            # DELIBERATELY NOT in _ONCE_PER_RUN_NOTICES. That list
+            # is for a STANDING CONDITION re-emitted on every step;
+            # this fires only when a call actually reuses an answer,
+            # which is an event -- the same reading that lets a
+            # compaction that HAPPENED repeat once per compaction.
+            # Once per run would go quiet again from the third spawn
+            # onward, which is the silence that started this.
+            #
+            # Two texts, discriminated by `answered_by_name`, which
+            # is already computed above: one sentence cannot honestly
+            # cover both. A memo is something the user answered
+            # minutes ago in this turn; a grant is something they
+            # decided before the run existed, possibly on a command
+            # line, and telling them they "answered earlier" would
+            # describe a moment that never happened.
+            collected.append({
+                "kind": "approval_reused",
+                "text": (
+                    "%s is running on the authorization granted "
+                    "before this run started." % call.name
+                    if answered_by_name else
+                    "Reusing your approval for %s, given earlier in "
+                    "this turn." % (subject or call.name)),
+            })
+            yield LoopEvent(notice=collected[-1])
+        else:
+            # Not reused: nothing is carried into dispatch unless
+            # this call's own answer supplies it below.
+            signoff = None
+        if needs_approval:
+            notice = registry.approval_notice(
+                call.name, call.input, context)
+            # §42 (RA5). The agent's own stated reason, asked
+            # of the registry so the loop names no key -- the
+            # same way it asks what KIND of question a tool
+            # needs and whether it needs one at all. The VALUE
+            # travels rather than the key, because the two
+            # shells that render it are a Textual screen that
+            # imports nothing from this package and a `print`
+            # in main.py.
+            rationale = registry.rationale_for(
+                call.name, call.input)
+            # §46 (EP2). The SUBJECT of the question, resolved
+            # the same way and travelling the same route: for
+            # `shell` it is the command, and a shell that shows
+            # it must not have to know that. Every other tool
+            # answers None and its prompt is unchanged.
+            headline = registry.headline_for(
+                call.name, call.input)
+            yield LoopEvent(permission_request={
+                "tool_name": call.name, "params": call.input,
+                "notice": notice,
+                "rationale": rationale,
+                "headline": headline,
+            })
+            approved, signoff = _obtain_approval(
+                response_channel, call.name, call.input, notice,
+                request_payload, rationale=rationale,
+                headline=headline)
+            if approved:
+                authorized_call = call.id
+                # §25 R11: run-scope is a shortcut for a chat turn,
+                # where re-asking about the same tool seconds later
+                # is noise. A provider that declines it is saying
+                # its whole purpose is per-call supervision --
+                # attended mode -- and one yes must not silently
+                # cover later calls there.
+                #
+                # This is ALSO the only thing that carries an answer
+                # between calls in a turn, and it is asked of the
+                # registry rather than assumed: `spawn_subagent` is
+                # the sole tool declaring grant_scope "run", so
+                # `shell`, `write` and `edit` are re-asked per call
+                # however many times one turn calls them.
+                if (registry.grant_scope(call.name) == "run"
+                        and (response_channel is None
+                             or response_channel.honour_run_scope)):
+                    run_info.remember_signoff(
+                        call.name, subject, signoff)
+            else:
+                denial = _denial_reason(
+                    call.name, response_channel, context)
+        elif call.parse_error is not None:
+            # §33 W1 (#37). The loop is the only layer that can
+            # see this: dispatch() takes (name, params, context)
+            # and the failure is a fact about the wire, not about
+            # the params -- {} is a perfectly good empty dict by
+            # the time it gets there.
+            #
+            # RETURNED as the tool's result, not raised, for
+            # A10's reason: the model is told its arguments did not
+            # arrive and can reissue the call, which is the whole
+            # difference between losing one step and losing a
+            # ten-pass run.
+            denial = call.parse_error
+
+    # ONE dispatch call site (batch 60). There were two,
+    # identical but for the two arguments that carry
+    # authorization, and the one reached by an already-answered
+    # call was the one that omitted them -- so every call this
+    # loop decided was authorized got denied by dispatch's own
+    # re-check. Two sites that must agree is the defect; one
+    # site is the fix, and no future edit can teach them to
+    # disagree again.
+    #
+    # dispatch() STILL RE-CHECKS, and must: it is a public
+    # entry point and the fail-closed backstop. What changed is
+    # that the loop now answers it.
+    #
+    # The callback is CONDITIONAL, and the condition is an
+    # identity check rather than a truth test: this call, not
+    # some call. See the declaration above for why the id and
+    # not a flag.
+    #
+    # DELETING the condition -- `lambda n, p: True` outright --
+    # is the one mutation here that no behaviour can catch, and
+    # it is caught in tests/test_grants.py by reading this
+    # source instead. Nothing can reach this line gated and
+    # un-authorized today, because the three other reasons
+    # `needs_approval` is turned off above are each
+    # short-circuited INSIDE dispatch before its gate
+    # (is_allowed raises, refusal_check returns, and a
+    # parse_error never gets here at all). A fourth reason added
+    # later would otherwise silently become "approve
+    # everything", with every test still green.
+    #
+    # `signoff` needs no condition -- the memo branch above nulls
+    # it on every path that is not a hit, so it is already None
+    # everywhere it should be.
+    if denial is not None:
+        result = {"error": denial}
+    else:
+        try:
+            result = registry.dispatch(
+                call.name, call.input, context=context,
+                # §47. The id the parent's MessageLog row
+                # already stores for this call, so a child
+                # thread can record which LINE made it --
+                # one turn can spawn three, and a name is
+                # not enough to tell them apart.
+                call_id=call.id,
+                approval_callback=(
+                    (lambda n, p: True)
+                    if authorized_call == call.id else None),
+                parent_run=run_info,
+                response_channel=response_channel,
+                signoff=signoff,
+                memory=memory,
+                activity=activity,
+            )
+        except ToolCallDenied as e:
+            result = {"error": str(e)}
+    return _CallOutcome(
+        result=result, granted=granted, notices=collected)
+
+
+def _dispatch_parallel(calls, *, context, run_info, response_channel,
+                       memory, activity):
+    """Run several calls of one response at once (NA9, NA10, NA15).
+
+    A GENERATOR yielding every worker's narration as it arrives, and
+    RETURNING [(call, _CallOutcome)] in the model's original call order.
+
+    THREADS, NOT ASYNCIO. `_run` is a synchronous generator and everything
+    under it is blocking I/O -- a provider call, a modal a human is
+    looking at, a SQLite write. Converting that to coroutines is a rewrite
+    of every layer; a bounded pool is the change that fits what is already
+    here.
+
+    EVERY FUTURE CARRIES `contextvars.copy_context()`, which is what makes
+    the child's span see its real parent. Batch 67 chose a ContextVar for
+    the parent link over a parameter partly for this: a var is per-context,
+    so a copied context travels with the submitted call, while a plain
+    module global would be wrong the moment two children ran.
+
+    THE CONDUIT IS HOW A WORKER NARRATES, and it is the fifth blocker N8
+    named -- "a synchronous generator with no yield point inside
+    dispatch()". A worker thread cannot yield out of this generator. What
+    it can do is put the event on a queue that THIS frame, which is still
+    inside `_run`'s body and can still yield, drains as the events arrive.
+    So narration stays live: a permission request from one child reaches
+    the transcript while its siblings are still running.
+
+    Note what this does NOT do. It does not forward a CHILD'S events --
+    §18/D6 keeps a child's stream out of its parent, and
+    core/agent_activity.py exists because of it. The events on this queue
+    are the PARENT'S own, about its own tool calls, which it would have
+    yielded itself had it not handed the work to a thread.
+
+    UNBOUNDED QUEUE, deliberately: a worker must never block on the
+    conduit. A bounded one would make a slow consumer able to stall a run,
+    which inverts who is waiting for whom. The bound that matters is on
+    the POOL.
+
+    A worker signals its own end rather than being polled for it, so this
+    drains exactly and never sleeps. If a call hangs, this frame waits
+    forever -- which is what a hanging sequential tool already does, so
+    the shape adds no new way to wedge.
+    """
+    conduit: queue.Queue = queue.Queue()
+    outcomes: dict = {}
+    failures: dict = {}
+
+    def _work(call):
+        """Drive one call's generator, pushing what it would have yielded."""
+        gen = _dispatch_one(
+            call, context=context, run_info=run_info,
+            response_channel=response_channel, memory=memory,
+            activity=activity, gate=_GATE_LOCK)
+        try:
+            while True:
+                conduit.put(("event", next(gen)))
+        except StopIteration as stop:
+            return stop.value
+        finally:
+            # Runs on the return path and on the raising one, so the
+            # drain below always terminates. A worker that died still
+            # reports that it is done.
+            conduit.put(("done", None))
+
+    workers = max(1, min(len(calls), config.SUBAGENT_MAX_PARALLEL))
+    with ThreadPoolExecutor(max_workers=workers,
+                            thread_name_prefix="venastine-call") as pool:
+        futures = []
+        for call in calls:
+            futures.append(
+                (call, pool.submit(copy_context().run, _work, call)))
+        outstanding = len(calls)
+        while outstanding:
+            kind, payload = conduit.get()
+            if kind == "done":
+                outstanding -= 1
+            else:
+                yield payload
+        for call, future in futures:
+            try:
+                outcomes[call.id] = future.result()
+            except Exception as e:      # noqa: BLE001 -- NA14, see below
+                failures[call.id] = e
+
+    # NA14. A RAISING SIBLING BECOMES ITS OWN RESULT, and this is a
+    # deliberate behaviour change scoped to a parallel batch.
+    #
+    # Sequentially an exception out of a tool leaves `_run` and ends the
+    # turn; §16 AC3 pins that this must not kill the app (`test_tui.py`),
+    # and a lone call keeps exactly that. In a batch it would discard the
+    # finished work of every sibling -- runs that cost a model call each
+    # and whose answers are already in hand -- so the raise is converted
+    # to this call's error result and the turn goes on.
+    #
+    # A BACKSTOP RATHER THAN THE USUAL PATH. `dispatch()` already turns a
+    # handler's exception into an error result, and ToolCallDenied is
+    # caught inside `_dispatch_one`. What reaches here is the narrower
+    # set: an unknown tool's ValueError, or a failure in the approval
+    # machinery itself. Logged with the traceback for dispatch()'s reason
+    # -- a real bug must stay findable -- and reported to the model in the
+    # shape it already understands.
+    ordered = []
+    for call in calls:
+        if call.id in failures:
+            logger.exception(
+                "parallel tool call %s (%s) raised; reporting it as that "
+                "call's error and continuing with its siblings",
+                call.id, call.name, exc_info=failures[call.id])
+            ordered.append((call, _CallOutcome(
+                result={"error": "%s failed: %s" % (
+                    call.name, failures[call.id])})))
+        else:
+            ordered.append((call, outcomes[call.id]))
+    return ordered
+
+
+def _settle_one(call, outcome, memory, granted_calls, notices):
+    """Record and announce ONE finished call, at its turn in call order.
+
+    Split out of the per-call body so both drivers reach it identically,
+    and so everything that touches `memory` or the turn's shared lists
+    happens on the generator's own thread in the model's own order (NA11).
+    A reordered turn is a thread that will not resume: `add_tool_result`
+    pairs each result to its `tool_use` by id (M4/D20).
+    """
+    granted_calls.extend(outcome.granted)
+    notices.extend(outcome.notices)
+    result = outcome.result
+
+    # §23 slice 2 (J10). A tool may attach a `notice` to its
+    # result for the shell to show; it is forwarded as a
+    # LoopEvent and REMOVED from what the model sees.
+    #
+    # Generic on purpose. The alternative was for the loop to
+    # notice that `todo_write` had just run, which puts a tool
+    # name in this file -- exactly what ToolSpec.grant_scope and
+    # ToolSpec.request_kind exist to avoid. Any later tool that
+    # wants to say something mid-turn gets this route free.
+    #
+    # POPPED, not copied: a notice is plumbing for the shell, and
+    # leaving it in the result would send the TUI panel's trigger
+    # to the model as if it were part of the tool's answer.
+    if isinstance(result, dict) and "notice" in result:
+        notice = result.pop("notice")
+        if isinstance(notice, dict) and notice.get("kind"):
+            yield LoopEvent(notice=notice)
+        else:
+            # A malformed notice is a bug in the tool, not a
+            # reason to fail the call -- the result is still
+            # good. Logged rather than raised, and the key is
+            # gone either way so it cannot reach the model.
+            logger.warning(
+                "%s returned a malformed notice; dropping it: %r",
+                call.name, notice)
+
+    # Persist BEFORE emitting (#42). A generator only advances
+    # while someone iterates it, so emitting first made the row
+    # depend on a consumer continuing to read -- and an
+    # abandoned generator left the `tool_use` D20 already wrote
+    # with no matching `tool_result`, which is M4's pairing
+    # broken from the other side and an unresumable thread.
+    # Same rule §22 gives _Progress.checkpoint() for trace
+    # lines. The event carries nothing the persist needs, so
+    # the order is free.
+    memory.add_tool_result(call.id, result)
+    yield LoopEvent(tool_result={"id": call.id, "result": result})
+
+
 class RunAgentLoop:
 
     @staticmethod
@@ -881,361 +1509,40 @@ class RunAgentLoop:
                 )
                 return
 
-            for call in response.tool_calls:
-                yield LoopEvent(tool_call_start={
-                    "id": call.id, "name": call.name, "input": call.input,
-                })
-
-                # Single source of truth with dispatch(): approval_needed()
-                # ORs the tool's own path/command-dependent approval_check
-                # with the config/context requirement (§15). Both callers
-                # go through it so they cannot diverge — a path-dependent
-                # tool must yield permission_request so the TUI user can
-                # approve, not be silently denied by one check while the
-                # other reports no approval needed.
-                #
-                # There is no separate allowed_tools membership test here
-                # any more: dispatch() calls is_tool_allowed(name, context),
-                # which raises ToolCallDenied with a message distinguishing
-                # a context restriction from a global policy denial.
-                needs_approval = registry.approval_needed(
-                    call.name, call.input, context)
-                # Reachability before approval. Asking first meant a
-                # context-excluded tool prompted the user, who clicked
-                # Allow, and was then denied anyway -- and headless, it
-                # reported "requires approval and was not given", telling
-                # the model to retry with approval when the actionable
-                # answer is "not available in this context". dispatch()
-                # still enforces the denial; this only stops asking a
-                # question whose answer cannot matter.
-                if needs_approval and not registry.is_allowed(call.name, context):
-                    needs_approval = False
-                # §32 A7 (#70): the same rule for a refusal only the
-                # TOOL can see. spawn_subagent's unknown-agent and
-                # depth-limit checks lived inside run(), so both
-                # prompted first and errored second -- and for an
-                # unknown name the question had an empty notice and an
-                # empty candidate list, i.e. nothing to tick. The
-                # call is refused by dispatch with the tool's own
-                # reason; this only stops ASKING first. It also keeps
-                # J8's memo from being keyed on
-                # (spawn_subagent, None) -- a subject of None is the
-                # absence of the very thing the key exists to
-                # distinguish.
-                if needs_approval and registry.refusal_reason(
-                        call.name, call.input, context):
-                    needs_approval = False
-                # §33 W3 (#37): the same rule for a call whose arguments
-                # never parsed. Approving it could not make it runnable,
-                # so the question has no answer that changes anything --
-                # and headless it would report "requires approval and was
-                # not given", which is A7's exact wrong-cause failure.
-                if needs_approval and call.parse_error is not None:
-                    needs_approval = False
-                # §18 sign-off (S1), narrowed by §25 (R2): a tool whose
-                # grant_scope is "run" is asked about once per run, not
-                # once per call. The loop names no tool -- it asks the
-                # registry, the same way it asks whether approval is
-                # needed at all.
-                #
-                # THREE conditions, and the last two are the §25 change:
-                #
-                #   registry.grantable -- a tool deciding approval from its
-                #     PARAMS was never consented to by name. Before this,
-                #     a signed-off subagent could run any shell command for
-                #     the rest of the turn on the strength of one prompt
-                #     that said "shell". Re-checked here rather than
-                #     trusted from the set, so a stale or hand-built grant
-                #     cannot widen anything.
-                #
-                #   grant_budget.take() -- pre-flight authorization trades
-                #     a per-call decision for one up-front decision, and
-                #     gives up the natural bound on how many times the
-                #     tool runs. Exhaustion falls back to ASKING, not to
-                #     failing: supervised runs continue, headless ones deny
-                #     exactly as they would for any gated tool.
-                #
-                # §23 AC1b: the memo is keyed by (tool, SUBJECT), not by
-                # tool name alone. A subagent sign-off answers about one
-                # agent's candidate list, so reusing it for a different
-                # agent would grant a set nobody was shown -- which is
-                # what the name-only version did: approving a spawn of `a`
-                # silently covered a later spawn of `b` in the same turn.
-                # Tools with no subject (every other one) memo under None
-                # and behave exactly as before.
-                # Batch 60. THIS CALL'S authorization decision, and the
-                # error that stands in for it.
-                #
-                # THE ID, NOT A BOOLEAN, and that is the whole point of the
-                # shape. `authorized` began as a bool whose correctness
-                # rested on WHERE it was declared -- one indent level in and
-                # it covers one call, one level out and it covers every
-                # later call in the turn, which is the exact widening §25
-                # R11 refuses to make even for the one tool whose grant
-                # scope IS the run. That version was measured: hoisting it
-                # out of `for call in response.tool_calls:` survived the
-                # entire suite, because no path currently reaches dispatch
-                # with a stale flag that changes anything. Correct, and
-                # undefended.
-                #
-                # A call id cannot be hoisted into a lie. Moved out of the
-                # loop it holds the PREVIOUS call's id, the comparison at
-                # the dispatch site fails, and the call is DENIED -- the
-                # mistake fails closed instead of failing open. It rests on
-                # ids being distinct within a response, which is not a new
-                # assumption: add_tool_result pairs every tool_result to its
-                # tool_use by that same id (M4/D20), and a thread whose ids
-                # collide is already unresumable.
-                #
-                # Set in exactly two places -- the memo/grant hit below and
-                # the fresh approval further down -- and read in exactly
-                # one, the single dispatch() call at the end of this block.
-                authorized_call = None
-                denial = None
-                request_payload = registry.request_payload(
-                    call.name, call.input, context)
-                subject = request_payload.get("subject")
-                remembered, signoff = run_info.recall_signoff(
-                    call.name, subject)
-                #   grant_policy on a NAME-LEVEL grant only -- R13's literal
-                #     claim is that approving the NAME never carries the
-                #     authority for a GRANT_NEVER tool, on either path, and
-                #     until now no path enforced it. Batch 6 declared the
-                #     policy and taught the two functions that decide what
-                #     may be OFFERED to read it; this is the reader that
-                #     decides whether a grant already in hand APPLIES.
-                #     `spawn_subagent` was covered only because R14's
-                #     subject condition happens to catch it; `remember`
-                #     carries no subject, so a grant naming it dispatched a
-                #     durable cross-session write with no prompt -- M17's
-                #     scenario through the one door R13 left unlocked.
-                #
-                #     IT MUST NOT REACH THE SIGN-OFF MEMO, and that is not a
-                #     nicety: `spawn_subagent` is GRANT_NEVER, so testing
-                #     the policy unconditionally here stops §23's memo
-                #     applying and the same agent is asked about twice in
-                #     one turn. R13 is about what approving a NAME buys; a
-                #     memo is an answer somebody gave about this subject,
-                #     which J8 and R14 govern instead. recall_signoff
-                #     already separates them by what it returns -- the memo
-                #     always carries a subset, the grant carries None.
-                answered_by_name = signoff is None
-                if (needs_approval
-                        and remembered
-                        and registry.grantable(call.name)
-                        and not (answered_by_name
-                                 and registry.grant_policy(call.name)
-                                 == GRANT_NEVER)
-                        and (run_info.grant_budget is None
-                             or run_info.grant_budget.take())):
-                    needs_approval = False
-                    # Batch 60. The half that was missing: the loop
-                    # decided this call needs no fresh answer, and until now
-                    # it did not tell dispatch(), which re-checks approval on
-                    # its own and denied every call this branch let through.
-                    # A second spawn of one agent, a subagent calling a tool
-                    # it was signed off for, and a --grant-tools name in an
-                    # unattended run were all refused with "requires approval
-                    # and was not given" and no prompt.
-                    authorized_call = call.id
-                    granted_calls.append(
-                        {"tool": call.name, "params": call.input})
-                    # §21, and the reason this batch adds a notice at all:
-                    # a gated call proceeding with NO modal is the intended
-                    # behaviour (§25 R11 -- re-asking about the same tool
-                    # seconds later is noise), and it is also exactly what
-                    # the bug looked like from the outside. Silence was
-                    # indistinguishable from the bug.
-                    #
-                    # DELIBERATELY NOT in _ONCE_PER_RUN_NOTICES. That list
-                    # is for a STANDING CONDITION re-emitted on every step;
-                    # this fires only when a call actually reuses an answer,
-                    # which is an event -- the same reading that lets a
-                    # compaction that HAPPENED repeat once per compaction.
-                    # Once per run would go quiet again from the third spawn
-                    # onward, which is the silence that started this.
-                    #
-                    # Two texts, discriminated by `answered_by_name`, which
-                    # is already computed above: one sentence cannot honestly
-                    # cover both. A memo is something the user answered
-                    # minutes ago in this turn; a grant is something they
-                    # decided before the run existed, possibly on a command
-                    # line, and telling them they "answered earlier" would
-                    # describe a moment that never happened.
-                    notices.append({
-                        "kind": "approval_reused",
-                        "text": (
-                            "%s is running on the authorization granted "
-                            "before this run started." % call.name
-                            if answered_by_name else
-                            "Reusing your approval for %s, given earlier in "
-                            "this turn." % (subject or call.name)),
+            # NA9. The response is partitioned before anything runs: a run of
+            # calls whose ToolSpec declares `parallel` goes together, and every
+            # other call is a group of one in its original position. A response
+            # with nothing parallel in it therefore takes the same path it
+            # always did, one group of one at a time.
+            for group in _parallel_groups(response.tool_calls):
+                # In call order, and BEFORE anything is submitted, so a batch
+                # announces its whole membership at once rather than in
+                # whatever order three threads happen to reach their first
+                # line. Hoisted out of `_dispatch_one` for exactly that: the
+                # start of a call is a fact the frame that ordered it knows.
+                for call in group:
+                    yield LoopEvent(tool_call_start={
+                        "id": call.id, "name": call.name, "input": call.input,
                     })
-                    yield LoopEvent(notice=notices[-1])
-                else:
-                    # Not reused: nothing is carried into dispatch unless
-                    # this call's own answer supplies it below.
-                    signoff = None
-                if needs_approval:
-                    notice = registry.approval_notice(
-                        call.name, call.input, context)
-                    # §42 (RA5). The agent's own stated reason, asked
-                    # of the registry so the loop names no key -- the
-                    # same way it asks what KIND of question a tool
-                    # needs and whether it needs one at all. The VALUE
-                    # travels rather than the key, because the two
-                    # shells that render it are a Textual screen that
-                    # imports nothing from this package and a `print`
-                    # in main.py.
-                    rationale = registry.rationale_for(
-                        call.name, call.input)
-                    # §46 (EP2). The SUBJECT of the question, resolved
-                    # the same way and travelling the same route: for
-                    # `shell` it is the command, and a shell that shows
-                    # it must not have to know that. Every other tool
-                    # answers None and its prompt is unchanged.
-                    headline = registry.headline_for(
-                        call.name, call.input)
-                    yield LoopEvent(permission_request={
-                        "tool_name": call.name, "params": call.input,
-                        "notice": notice,
-                        "rationale": rationale,
-                        "headline": headline,
-                    })
-                    approved, signoff = _obtain_approval(
-                        response_channel, call.name, call.input, notice,
-                        request_payload, rationale=rationale,
-                        headline=headline)
-                    if approved:
-                        authorized_call = call.id
-                        # §25 R11: run-scope is a shortcut for a chat turn,
-                        # where re-asking about the same tool seconds later
-                        # is noise. A provider that declines it is saying
-                        # its whole purpose is per-call supervision --
-                        # attended mode -- and one yes must not silently
-                        # cover later calls there.
-                        #
-                        # This is ALSO the only thing that carries an answer
-                        # between calls in a turn, and it is asked of the
-                        # registry rather than assumed: `spawn_subagent` is
-                        # the sole tool declaring grant_scope "run", so
-                        # `shell`, `write` and `edit` are re-asked per call
-                        # however many times one turn calls them.
-                        if (registry.grant_scope(call.name) == "run"
-                                and (response_channel is None
-                                     or response_channel.honour_run_scope)):
-                            run_info.remember_signoff(
-                                call.name, subject, signoff)
-                    else:
-                        denial = _denial_reason(
-                            call.name, response_channel, context)
-                elif call.parse_error is not None:
-                    # §33 W1 (#37). The loop is the only layer that can
-                    # see this: dispatch() takes (name, params, context)
-                    # and the failure is a fact about the wire, not about
-                    # the params -- {} is a perfectly good empty dict by
-                    # the time it gets there.
-                    #
-                    # RETURNED as the tool's result, not raised, for
-                    # A10's reason: the model is told its arguments did not
-                    # arrive and can reissue the call, which is the whole
-                    # difference between losing one step and losing a
-                    # ten-pass run.
-                    denial = call.parse_error
 
-                # ONE dispatch call site (batch 60). There were two,
-                # identical but for the two arguments that carry
-                # authorization, and the one reached by an already-answered
-                # call was the one that omitted them -- so every call this
-                # loop decided was authorized got denied by dispatch's own
-                # re-check. Two sites that must agree is the defect; one
-                # site is the fix, and no future edit can teach them to
-                # disagree again.
-                #
-                # dispatch() STILL RE-CHECKS, and must: it is a public
-                # entry point and the fail-closed backstop. What changed is
-                # that the loop now answers it.
-                #
-                # The callback is CONDITIONAL, and the condition is an
-                # identity check rather than a truth test: this call, not
-                # some call. See the declaration above for why the id and
-                # not a flag.
-                #
-                # DELETING the condition -- `lambda n, p: True` outright --
-                # is the one mutation here that no behaviour can catch, and
-                # it is caught in tests/test_grants.py by reading this
-                # source instead. Nothing can reach this line gated and
-                # un-authorized today, because the three other reasons
-                # `needs_approval` is turned off above are each
-                # short-circuited INSIDE dispatch before its gate
-                # (is_allowed raises, refusal_check returns, and a
-                # parse_error never gets here at all). A fourth reason added
-                # later would otherwise silently become "approve
-                # everything", with every test still green.
-                #
-                # `signoff` needs no condition -- the memo branch above nulls
-                # it on every path that is not a hit, so it is already None
-                # everywhere it should be.
-                if denial is not None:
-                    result = {"error": denial}
+                if len(group) == 1:
+                    # No siblings, no gate, no thread. Byte-identical to the
+                    # pre-slice-8 path, which is what makes every existing
+                    # test of this loop a test of the sequential branch.
+                    settled = [(group[0], (yield from _dispatch_one(
+                        group[0], context=context, run_info=run_info,
+                        response_channel=response_channel, memory=memory,
+                        activity=activity)))]
                 else:
-                    try:
-                        result = registry.dispatch(
-                            call.name, call.input, context=context,
-                            # §47. The id the parent's MessageLog row
-                            # already stores for this call, so a child
-                            # thread can record which LINE made it --
-                            # one turn can spawn three, and a name is
-                            # not enough to tell them apart.
-                            call_id=call.id,
-                            approval_callback=(
-                                (lambda n, p: True)
-                                if authorized_call == call.id else None),
-                            parent_run=run_info,
-                            response_channel=response_channel,
-                            signoff=signoff,
-                            memory=memory,
-                            activity=activity,
-                        )
-                    except ToolCallDenied as e:
-                        result = {"error": str(e)}
-                # §23 slice 2 (J10). A tool may attach a `notice` to its
-                # result for the shell to show; it is forwarded as a
-                # LoopEvent and REMOVED from what the model sees.
-                #
-                # Generic on purpose. The alternative was for the loop to
-                # notice that `todo_write` had just run, which puts a tool
-                # name in this file -- exactly what ToolSpec.grant_scope and
-                # ToolSpec.request_kind exist to avoid. Any later tool that
-                # wants to say something mid-turn gets this route free.
-                #
-                # POPPED, not copied: a notice is plumbing for the shell, and
-                # leaving it in the result would send the TUI panel's trigger
-                # to the model as if it were part of the tool's answer.
-                if isinstance(result, dict) and "notice" in result:
-                    notice = result.pop("notice")
-                    if isinstance(notice, dict) and notice.get("kind"):
-                        yield LoopEvent(notice=notice)
-                    else:
-                        # A malformed notice is a bug in the tool, not a
-                        # reason to fail the call -- the result is still
-                        # good. Logged rather than raised, and the key is
-                        # gone either way so it cannot reach the model.
-                        logger.warning(
-                            "%s returned a malformed notice; dropping it: %r",
-                            call.name, notice)
+                    settled = yield from _dispatch_parallel(
+                        group, context=context, run_info=run_info,
+                        response_channel=response_channel, memory=memory,
+                        activity=activity)
 
-                # Persist BEFORE emitting (#42). A generator only advances
-                # while someone iterates it, so emitting first made the row
-                # depend on a consumer continuing to read -- and an
-                # abandoned generator left the `tool_use` D20 already wrote
-                # with no matching `tool_result`, which is M4's pairing
-                # broken from the other side and an unresumable thread.
-                # Same rule §22 gives _Progress.checkpoint() for trace
-                # lines. The event carries nothing the persist needs, so
-                # the order is free.
-                memory.add_tool_result(call.id, result)
-                yield LoopEvent(tool_result={"id": call.id, "result": result})
+                # NA11. In the MODEL'S order, whatever order they finished in.
+                for call, outcome in settled:
+                    yield from _settle_one(
+                        call, outcome, memory, granted_calls, notices)
 
             # The mid-turn valve (M3). A single turn can add far more than
             # any buffer covers -- MAX_READ_CHARS alone is ~12.5k tokens

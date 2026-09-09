@@ -154,6 +154,19 @@ class ToolSpec:
     # grant_policy, because the safe answer here is "this line opens
     # nothing" and a tool that forgot to say so simply is not clickable.
     opens_thread: bool = False
+    # ROADMAP_v2 §47 slice 8 (NA9). Whether several calls to this tool in
+    # ONE model response may run at the same time.
+    #
+    # DECLARED HERE for `opens_thread`'s reason, one question over: the
+    # loop partitions a response by asking, so no tool name appears in
+    # core/loop.py -- the same argument grant_scope and request_kind
+    # already make. Defaulted to False because the safe answer is "run
+    # this one at a time": a tool that has not been examined for thread
+    # safety must not be made concurrent by having forgotten to say so.
+    #
+    # `spawn_subagent` is the only tool that sets it, and NA9's partition
+    # keeps every other call strictly sequential in its original position.
+    parallel: bool = False
     # ROADMAP_v2 §31 (H1). One of BUDGET_COMPUTE / BUDGET_IO /
     # BUDGET_HUMAN, above.
     #

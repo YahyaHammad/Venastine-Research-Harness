@@ -535,6 +535,21 @@ class ToolRegistry:
         spec = self._tools.get(tool_name)
         return bool(spec is not None and spec.opens_thread)
 
+    def parallel(self, tool_name: str) -> bool:
+        """Whether several calls to this tool in one response may run at
+        the same time (§47 slice 8, NA9).
+
+        Mechanism, not policy, in `opens_thread`'s exact shape and for its
+        reason: core/loop.py partitions a response by asking, so the file
+        that decides what runs concurrently names no tool.
+
+        False for an unknown tool, which is what an MCP tool registered at
+        runtime is until it says otherwise -- and the answer that keeps a
+        stranger's tool sequential, which is the safe one here.
+        """
+        spec = self._tools.get(tool_name)
+        return bool(spec is not None and spec.parallel)
+
     def request_kind(self, tool_name: str) -> str:
         """Which kind of question approving this tool asks (§23).
 
@@ -928,6 +943,15 @@ registry.register(ToolSpec(
     # of its own, which is what makes `▸ spawn_subagent` a line a
     # reader can open.
     opens_thread=True,
+    # §47 slice 8 (NA9). The only tool that declares it, and the reason
+    # the slice exists: a model emitting three spawns in one response
+    # meant three runs one after another, so the parallelism a subagent
+    # swarm is FOR was spent. Safe to declare because everything the
+    # child's run touches was made concurrency-safe first -- the budget's
+    # lock, the serialised question, the per-future authorization -- which
+    # is why this one field is the last line of the section rather than
+    # the first.
+    parallel=True,
 ))
 
 # D24: fail loudly at import if any statically registered tool has no

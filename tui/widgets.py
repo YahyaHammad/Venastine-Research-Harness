@@ -644,18 +644,100 @@ class AgentRow:
     # this row -- and the line becomes openable while the run is
     # still going, rather than only once its result comes back.
     call_id: object = None
+    # §47 slice 8. WHOSE child this run is, carried from AgentSpan so the
+    # panel can order rows by lineage instead of by arrival.
+    #
+    # It was not needed while one agent ran at a time: a stack arrives in
+    # the only order it can be in, so indenting by depth drew the chain
+    # correctly for free. With peers it does not. Two children of one turn
+    # each spawning a grandchild can arrive A, B, A's child, B's child --
+    # and depth alone then draws A's child hanging off B, which is a
+    # LINEAGE THE PANEL INVENTED. Wrong rather than missing, which is the
+    # harder kind to notice.
+    parent_id: object = None
+
+
+def _lineage_order(rows) -> list:
+    """`rows` depth-first, every child immediately under its own parent.
+
+    §47 SLICE 8. The panel indents by depth, so what sits ABOVE a row is
+    what a reader takes to be its parent. While one agent ran at a time
+    arrival order guaranteed that reading: a stack can only arrive
+    outermost-first. Peers break it -- two children of one turn each
+    spawning a grandchild can arrive A, B, A's child, B's child, and
+    drawing that in order puts A's child under B. The panel would be
+    inventing a lineage, which is worse than omitting one.
+
+    Ordered here rather than sorted in the sink for the reason the sink
+    keeps its own stack: enter/exit pairing is the sink's business and
+    what the rows MEAN on screen is this widget's. It is also why this
+    takes rows and returns rows rather than mutating anything.
+
+    ORPHANS ARE DRAWN, at the end. A row whose parent is not in the stack
+    cannot happen through `span()` -- a child's span opens inside its
+    parent's frame, so parents always outlive children -- so this is the
+    defensive half, covering a hand-built row and a stack observed
+    mid-tear-down. Dropping them would make the panel lie by omission
+    instead.
+
+    The `seen` set is what makes a cycle terminate rather than hang, which
+    is the same guard ThreadCrumb's walk carries and for the same reason:
+    a row's parent is data, and data can be wrong in ways that recursion
+    turns into a wedged UI rather than a visible mistake.
+
+    IT KEYS ON ROW IDENTITY, NOT ON `span_id`, and that is not fussiness.
+    `AgentRow.span_id` defaults to `""`, so every hand-built row shares
+    one -- and a set of span ids would treat the second such row as
+    already drawn and silently DROP it. Live rows always carry a real id,
+    so this would have been invisible in the app and wrong in every test
+    that builds rows directly, which `tests/BREAKING_CHANGES.md` already
+    warns is a thing tests here do. Identity is unique by construction,
+    which is the property the guard actually needs.
+    """
+    by_parent: dict = {}
+    for row in rows:
+        by_parent.setdefault(row.parent_id, []).append(row)
+
+    seen: set = set()
+    ordered: list = []
+
+    def walk(parent) -> None:
+        for row in by_parent.get(parent, []):
+            if id(row) in seen:
+                continue
+            seen.add(id(row))
+            ordered.append(row)
+            # Only a row with a real id can have children. Recursing on
+            # `""` would look up the bucket every defaulted row shares.
+            if row.span_id:
+                walk(row.span_id)
+
+    # Depth is bounded by SUBAGENT_MAX_DEPTH, so the recursion is too.
+    walk(None)
+    for row in rows:
+        if id(row) not in seen:
+            seen.add(id(row))
+            ordered.append(row)
+    return ordered
 
 
 class AgentPanel(Static):
     """Who is running, and how deep (batch 59).
 
-    A STACK, NEVER A LIST OF PEERS, and that is a fact about the harness
-    rather than a rendering choice. core/loop.py dispatches tool calls in
-    a plain `for` loop and spawn_subagent BLOCKS on the child run, so
-    there is never a second agent alongside the first -- what there is is
-    a chain, each frame suspended inside the one below it, bounded by
-    config.SUBAGENT_MAX_DEPTH. Indentation is the honest drawing of that;
-    a flat list would claim a concurrency this harness does not have.
+    A TREE SINCE §47 SLICE 8, AND IT USED TO BE A STACK. This docstring
+    said "A STACK, NEVER A LIST OF PEERS, and that is a fact about the
+    harness rather than a rendering choice", because it was: core/loop.py
+    dispatched tool calls in a plain `for` loop and spawn_subagent BLOCKED
+    on the child run, so there was never a second agent alongside the
+    first. It finished "a flat list would claim a concurrency this harness
+    does not have". NA9 gave it that concurrency, so both sentences went.
+
+    What replaces them is smaller than it sounds, because slice 2 built the
+    data model as a tree ON PURPOSE against this day. Rows still indent by
+    `depth`, bounded by config.SUBAGENT_MAX_DEPTH, and peers at one depth
+    now legitimately share a column. The one thing that had to change is
+    the ORDER: arrival order and lineage order were the same thing for a
+    stack and are not for a tree. See `_lineage_order`.
 
     Fed from core/agent_activity.py through app.py, never polled -- the
     same split TodoPanel keeps: the sink says when, and this widget holds
@@ -778,12 +860,18 @@ class AgentPanel(Static):
             # armed like any other -- "back to the main agent" is then a
             # click rather than a special case somebody has to remember.
             self._armed(styles.get("assistant_label", ""), self._root))
-        for row in self._stack:
+        for row in _lineage_order(self._stack):
             name, depth = row.name, row.depth
             # `max(depth, 1)` so a span that somehow reports depth 0 still
-            # reads as nested rather than colliding with the root row --
-            # two rows at column zero would say two agents are running,
-            # which is the one thing this panel must never claim.
+            # reads as nested rather than colliding with the root row.
+            #
+            # The reason USED to be "two rows at column zero would say two
+            # agents are running, which is the one thing this panel must
+            # never claim". Slice 8 makes that claim true, and peers at one
+            # depth sharing a column is now the point. What survives is the
+            # narrower half: the root row stands for the CONVERSATION, and
+            # a span drawn level with it would read as a second
+            # conversation rather than as a run inside this one.
             pad = " " * (self.INDENT * max(depth, 1))
             room = self.WIDTH - len(pad) - 2      # the marker and its space
             body.append(f"{pad}{MARK_RUNNING} {self._fit(name, room)}\n",

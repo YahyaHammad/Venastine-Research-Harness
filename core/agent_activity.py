@@ -3,21 +3,40 @@ core/agent_activity.py
 
 ROADMAP_v2 §18, batch 59: WHICH agent is running right now, and how deep.
 
-The harness runs exactly one agent at a time -- `core/loop.py` dispatches
-tool calls in a plain `for` loop and `spawn_subagent` BLOCKS on the child
-run, so there is never a second one alongside. What there can be is a
-STACK: a chat turn at depth 0 spawning a subagent at depth 1 spawning
-another at depth 2 (config.SUBAGENT_MAX_DEPTH), each frame suspended
-inside the one below it. This module is how a shell learns the shape of
-that stack while it exists.
+The harness runs a TREE of agents, and until §47 slice 8 it ran a stack.
+
+This paragraph used to open "the harness runs exactly one agent at a time",
+and that was measured rather than assumed: `core/loop.py` dispatched tool
+calls in a plain `for` loop and `spawn_subagent` BLOCKED on the child run,
+so there was never a second one alongside. NA9 partitions a response
+instead, so several children of one turn are now PEERS, up to
+config.SUBAGENT_MAX_PARALLEL of them, each still able to nest to
+config.SUBAGENT_MAX_DEPTH. What a shell learns from this module is
+therefore the shape of a tree.
+
+Almost nothing here had to change for that, which is the part worth
+knowing: the depth is still ToolContext.subagent_depth, the parent is
+still a ContextVar, and a span still brackets one run. The two things that
+did are outside this file -- the sink that keeps the stack needs a lock
+(NA16), and the panel that draws it needs lineage order rather than
+arrival order (NA17), because a stack can only arrive outermost-first and
+a tree cannot.
 
 WHY A CHANNEL AND NOT A LoopEvent, which is the obvious first reach:
 
   * A generator cannot yield from inside a nested call. spawn_subagent's
-    handler runs inside registry.dispatch(), which runs inside _run()'s
-    `for call in response.tool_calls:` body -- there is no yield point
-    there, so a child's activity cannot be turned into a parent event
-    however much one would like it to be.
+    handler runs inside registry.dispatch(), which runs inside the loop's
+    per-call body -- there is no yield point there, so a child's activity
+    cannot be turned into a parent event however much one would like it
+    to be.
+
+    STILL TRUE AFTER §47 SLICE 8, and the distinction is worth stating
+    because NA15 adds a queue that looks like a counter-example. That
+    conduit carries the PARENT'S own events about its own tool calls, which
+    it would have yielded itself had it not handed the work to a thread,
+    and it is drained by a frame that is still inside `_run` and can still
+    yield. A child's stream reaches nothing: the bullet below is why, and
+    D6 is unchanged.
   * run_agent_conversation drains its OWN _run() through
     run_to_completion(), so a child's events are consumed internally and
     never reach the parent's stream. That is not an oversight to route

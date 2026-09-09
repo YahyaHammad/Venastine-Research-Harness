@@ -586,3 +586,22 @@ changes enough that the collision goes away.
   reading as the recurring lesson rather than a one-off: a per-case opt-out
   added to a shared assembly point usually means the condition belongs
   inside it.
+
+## ROADMAP_v2's index stops at §31
+
+Found while §47 slice 8 was repairing the record. `ROADMAP_v2.md`'s index -- the
+list `test_every_roadmap_v2_index_entry_carries_a_status_marker` quantifies
+over -- has entries up to §31 and none for §32 through §47. Sixteen sections
+are absent from the document a reader consults to find out what is
+outstanding, which is the exact complaint #129 raised about missing status
+markers, one level up: those entries read as outstanding, these read as
+nonexistent.
+
+The check does not catch it because it asserts a FLOOR (at least fifteen
+entries) and then checks markers on the entries it found. That was the right
+shape for the drift it was written for and is blind to this one.
+
+**Not repaired here**, deliberately: backfilling sixteen entries is a
+documentation pass of its own, and slice 8 was already touching six files.
+Whoever does it should also decide whether the floor becomes "one entry per
+`## N.` heading", which is the version that could not drift again.

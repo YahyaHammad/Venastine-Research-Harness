@@ -4028,3 +4028,115 @@ see the difference. Batch 73.
 **Fix:** a pass is a child of the RUN, and a run is not a conversation. `PipelineRun.pass_threads`
 already indexes them (§27 T2), so a parent column here would be two records of one edge -- the
 producer/consumer shape this project keeps finding. Batch 73.
+
+### The partition run sequentially, or `parallel` matched by name
+
+**Symptom:** `test_three_parallel_calls_overlap`, and
+`test_the_loop_asks_the_registry_rather_than_naming_the_tool`.
+
+**Fix:** NA9. The flag is declared on the `ToolSpec` and asked of the
+registry, so `core/loop.py` names no tool -- `opens_thread`'s trade one
+question over. Note the overlap test asserts with a BARRIER whose timeout is
+the assertion: a sequential implementation fails in seconds rather than
+passing slowly. Batch 74.
+
+### `_dispatch_one` gaining a loop, or `dispatch` moving up into `_run`
+
+**Symptom:** `test_the_loops_authorization_cannot_outlive_one_tool_call`.
+
+**Fix:** the per-call body is a FUNCTION now, and that is the invariant --
+its whole scope is one call, so the widening batch 60's call id was chosen to
+fail closed against cannot be written. A loop inside it, or a dispatch call
+at turn scope in `_run`, is the same defect wearing the shape the refactor
+made available. The test moved with the body rather than being deleted; it
+used to pin that the authorization never escaped `for call in
+response.tool_calls:`. Batch 74.
+
+### Results added in completion order
+
+**Symptom:** `test_results_are_ordered_by_the_model_not_by_completion`.
+
+**Fix:** NA11. `add_tool_result` pairs each result to its `tool_use` by id
+(M4/D20), so a turn assembled in completion order is a thread that will not
+resume. The test forces the handlers to finish in REVERSE with an event
+chain, so a completion-ordered implementation produces exactly the reversed
+list. Batch 74.
+
+### The conduit drained after the last future instead of during
+
+**Symptom:** `test_a_permission_request_arrives_while_a_sibling_is_still_running`.
+
+**Fix:** NA15, and this is the mutation the slice was most likely to lose.
+Collecting every event and yielding it after the batch satisfies every other
+assertion in the file, so the test makes the drain a PRECONDITION: a sibling
+blocks until the driver has yielded the gated call's request, and a batched
+implementation deadlocks. Batch 74.
+
+### A raising sibling propagating, or a LONE raising call being converted
+
+**Symptom:** `test_a_raise_becomes_that_calls_error_and_spares_its_siblings`,
+and its negative `test_a_LONE_raising_call_still_ends_the_turn`.
+
+**Fix:** NA14 is scoped to a batch, and the negative is what scopes it. §16
+AC3 pins that a raising tool must not kill the app, and the mechanism it pins
+is the exception LEAVING `_run`; a conversion applied to every call would
+quietly retire that. Batch 74.
+
+### A test of the sign-off gate whose ask returns instantly
+
+**Symptom:** `test_the_same_agent_twice_in_one_response_is_one_question`
+passes with the gate lock REMOVED.
+
+**Fix:** measured twice over, and worth reading before writing any test of a
+window in this codebase. A barrier at `request_payload` was not enough:
+instrumenting `recall_signoff` and `remember_signoff` under the mutation
+showed the second worker completing recall AND remember before the first
+worker's recall ran, because the whole window is a handful of Python
+statements with no I/O and fits inside one 5ms GIL quantum. What was missing
+is that a real ask is SLOW -- it is a human reading a modal -- so the test
+holds the fake shell open for 100ms. That is modelling the window, not tuning
+around a race. Batch 74.
+
+### A concurrency test whose race fits inside one GIL quantum
+
+**Symptom:** `test_concurrent_exits_leave_no_row_behind` passes with
+`TuiActivity`'s lock removed.
+
+**Fix:** the same lesson from the other side, and the same batch found both.
+Twelve rows at the default switch interval never landed in the window between
+reading `self._stack` and assigning the rebuilt list, because a twelve-element
+comprehension takes about a microsecond against a 5ms quantum. The test now
+WIDENS the window (a few hundred rows) and raises the preemption rate
+(`sys.setswitchinterval`, restored in a `finally`). A test whose input cannot
+discriminate is batch 14's lesson, reached from the scheduling side. Batch 74.
+
+### `_lineage_order` keyed on `span_id` instead of row identity
+
+**Symptom:** `test_hand_built_rows_that_share_a_defaulted_id_all_survive`.
+
+**Fix:** `AgentRow.span_id` defaults to `""`, so every hand-built row shares
+one and a set of ids treats the second as already drawn and DROPS it. Live
+rows always carry a real id, so this is invisible in the app and wrong in
+every test that builds rows directly -- which this file already records tests
+here doing. Batch 74.
+
+### Testing `_lineage_order` and calling it the panel
+
+**Symptom:** `test_the_PANEL_draws_them_in_lineage_order` passes while
+`AgentPanel._redraw` iterates the raw stack.
+
+**Fix:** the leaf-versus-chain trap, for the fourth time in this section, and
+it survived six direct tests of the helper. A correct function nothing calls
+is not a correct panel, so one test asserts on what the widget DREW. Batch 74.
+
+### WAL turned off, or the busy timeout left implicit
+
+**Symptom:** `TestConcurrentWriters`.
+
+**Fix:** NA18, and the test runs EIGHT writers rather than three on purpose.
+Measured: at `SUBAGENT_MAX_PARALLEL`'s three a rollback-journal database does
+not lock, so a test at the real ceiling passes without the fix and proves
+nothing. Eight is where the unfixed configuration produced "database is
+locked". The busy timeout was already 5000ms from SQLAlchemy's pysqlite
+default and is restated explicitly, because the measurements rest on it.
+Batch 74.

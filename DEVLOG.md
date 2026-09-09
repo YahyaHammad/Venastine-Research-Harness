@@ -11837,3 +11837,175 @@ Eight, all killed, and no survivors on the first pass -- the first slice in this
 that happened, which is worth noting only because the reason is dull: every hop of the threading
 had a test written for it before the code, because the previous three slices each lost a mutation
 to exactly the gap between a leaf and its chain.
+
+## Batch 74 -- three at once, and the six things that were only safe alone (2026-09-09)
+
+§47, the last of eight slices, and the only one with nothing on screen as its point. A model that
+emits three `spawn_subagent` calls in one response now gets three runs at once instead of three
+one after another.
+
+The speed is the easy half and it is not what the slice is about. Six things in the authorization,
+display and persistence layers were correct *because* nothing ran alongside anything else, and
+every one of them was correct in the way that is hardest to fix later: no test could see the
+difference, because no test could produce a second runner.
+
+**WHAT THE PARTITION IS, AND WHAT IT DELIBERATELY IS NOT.** A response's calls are grouped before
+anything runs: consecutive calls whose `ToolSpec` declares `parallel` go together, everything else
+stays a group of one in its original position. Consecutive is the decision -- two spawns either
+side of a `shell` are not grouped, because grouping them would move the `shell` relative to them,
+and NA9 promises the sequential calls keep their place. The flag is declared on the tool and asked
+of the registry, so `core/loop.py` contains no tool name, which is `opens_thread`'s trade one
+question over.
+
+**A GROUP OF ONE SKIPS EVERYTHING**, and that is what makes "a response with nothing parallel in
+it is unchanged" a structural claim rather than a hopeful one. No pool, no gate lock, no thread:
+the call runs on the caller's own thread through the same generator the parallel path drives. So
+every pre-slice-8 test of this loop is now a test of the sequential branch, which is why 4159
+tests came through the restructure with one failure -- and that one was the structural test that
+was *supposed* to fail.
+
+**THE PER-CALL BODY BECAME A FUNCTION, AND THE INVARIANT GOT STRONGER.** `_dispatch_one` is a
+generator that yields one call's narration and returns its outcome; `_run` does `yield from` for a
+lone call and a worker steps it by hand for a batch. One copy of the decision, so there is still
+exactly one `registry.dispatch` call site and one place that decides whether a call is authorized.
+
+Batch 60's `authorized_call` used to be correct because of WHERE it was declared -- one indent out
+and one approval covered every later call in the turn -- and the id rather than a bool is what
+made that mistake fail closed. A function whose whole scope is one call cannot express the mistake
+at all: there is no enclosing iteration to hoist out of. So `test_grants.py`'s AST guard moved
+with the body instead of being deleted, and now pins the stronger thing: no loop inside
+`_dispatch_one`, and nothing about authorization in `_run`, which is the only frame left that
+could still express it.
+
+**N8's FIFTH BLOCKER WAS MISSING FROM THE PLAN, AND IT WAS THE BIGGEST PIECE.** §47's own N8 named
+five: the single-slot permission channel, the non-atomic budget, the per-iteration authorization
+id, one pooled SQLite connection, and *"a synchronous generator with no yield point inside
+`dispatch()`"*. The slice-8 plan carried four and dropped that one. It is real: the loop narrates
+approval by YIELDING, and a worker thread cannot yield.
+
+The ask itself was never the problem -- `_obtain_approval` reaches the human through
+`response_channel`, which any thread may call. What was at stake is the live narration, and the
+answer is a conduit: workers put events on an unbounded queue, and the driving frame, which is
+still inside `_run` and can still yield, drains it as they arrive. A worker never blocks pushing,
+because a bounded queue would let a slow consumer stall a run.
+
+This does not contradict `core/agent_activity.py`'s reason for existing, and the distinction is
+worth stating because the queue looks like a counter-example. That module exists because a
+CHILD's events cannot reach its parent's stream. The conduit carries the PARENT'S own events about
+its own tool calls -- the ones it would have yielded itself had it not handed the work to a
+thread. D6 is untouched.
+
+**TWO LOCKS ON THE ASK SIDE, BECAUSE THERE ARE TWO INVARIANTS**, and the plan put one of them in
+the wrong place. It proposed a lock around `tui/app.py`'s `_blocking_modal`. That is the consumer.
+`core/interaction.ask` already documents itself as the one entry point every question goes
+through, and `main.py`'s single `_StdinReader` has the identical hazard -- two readers of one stdin
+is the defect §29's N1 exists to prevent, arrived at from the other direction. So the
+consent-surface lock lives there and the CLI gets it for free, which is this project's
+fix-at-the-producer rule.
+
+That lock does not close §23's sign-off memo, and no modal-level lock could. The memo is a
+check-then-act: `recall_signoff` says nobody has answered about this subject, the human is asked,
+`remember_signoff` records it. Guarding the dict would not help -- no single mutation is racy, the
+WINDOW is. So `core/loop.py` holds a second, module-level lock across that window and releases it
+before dispatch, which is what keeps it a plain Lock: a child's own gate acquisitions all happen
+inside its dispatch, by which time its parent has let go. Order is always gate then ask.
+
+**A NINTH HAZARD, FOUND BY READING RATHER THAN BY DESIGN.** `TuiActivity`'s docstring said its
+stack was *"read and written only here, under the worker's own serialisation"* -- measured, and
+true until there were two workers. `exit` and `bind` are read-rebuild-assign, so two at once each
+filter the list they read and the second assignment RESURRECTS the row the first removed. That is
+a finished run left on screen for the session, which is exactly what `span()`'s `finally` is
+structural to prevent, reached from the other side. `enter`'s append races them the other way and
+is simply lost, leaving a running child with no row. The posted stack is a snapshot now too,
+because the UI thread stores and iterates it.
+
+**THE PANEL NEEDED LINEAGE, NOT PEERS.** Slice 2 built the data model as a tree on purpose, and
+`_redraw` already indented by depth, so peers sharing a column needed no code at all. What did
+need changing was the ORDER, and this is the subtle one: arrival order and lineage order are the
+same thing for a stack and are not for a tree. Two children of one turn each spawning a
+grandchild can arrive A, B, A's child, B's child -- and drawn in that order, A's child sits one
+level in from B. The panel would be INVENTING a lineage, which is worse than omitting one.
+
+### The measurements
+
+**SQLite did not need what the plan assumed, and needed something the plan did not check.** The
+busy timeout was ALREADY 5000ms, from SQLAlchemy's pysqlite dialect default -- the plan listed
+adding one as work. What the numbers actually said, on the real engine against a real database,
+each shape being N threads creating a subagent thread and writing 200 messages:
+
+| writers | journal=delete | journal=WAL |
+|---|---|---|
+| 3 | 0 errors, 2.94s | 0 errors, 1.31s |
+| 8 | 1 "database is locked", 6.78s | 0 errors, 3.21s |
+| 16 | -- | 1 "database is locked", 6.00s |
+
+So at `SUBAGENT_MAX_PARALLEL` = 3 the shipped configuration does not lock. WAL went in anyway for
+the two things the table shows: it removes the failure at 8, which is where a raised ceiling
+lands, and it is a little over twice as fast at 3, which is what everyone runs. A concurrency
+ceiling that is a tunable constant invites being tuned, and the failure it walks into is a lost
+message rather than a slow one.
+
+**TWO OF THE ELEVEN MUTATIONS SURVIVED THEIR FIRST TEST, AND BOTH FOR THE SAME REASON.** This is
+the finding worth carrying out of the batch. Removing the gate lock survived
+`test_the_same_agent_twice_in_one_response_is_one_question` even with a barrier holding both
+workers at the call immediately before the window. Instrumenting `recall_signoff` and
+`remember_signoff` under the mutation showed why: the second worker completed recall AND remember
+before the first worker's recall ran at all. The whole window is a handful of Python statements
+with no I/O in it, so it fits inside one 5ms GIL quantum whatever the barrier does.
+
+Removing `TuiActivity`'s lock survived its test for the mirror image: a twelve-element list
+comprehension takes about a microsecond, so the window between reading `self._stack` and assigning
+the rebuilt list was essentially never landed in.
+
+The fixes are different and both are about making the test's INPUT able to discriminate, which is
+batch 14's lesson reached from the scheduling side. The gate test holds the fake shell open for
+100ms, because a real ask is slow -- it is a human reading a modal -- so that is modelling the
+window rather than tuning around a race. The sink test widens the window (a few hundred rows) and
+raises the preemption rate with `sys.setswitchinterval`, restored in a `finally`.
+
+**AND ONE MORE LEAF-VERSUS-CHAIN, THE FOURTH IN THIS SECTION.** Six tests of `_lineage_order`
+passed while `AgentPanel._redraw` still iterated the raw stack. A correct helper nothing calls is
+not a correct panel, so one test asserts on what the widget drew.
+
+### The record repair
+
+§47's decisions were N1-N8, and §29's are also N1-N8. The record had one family assigned twice,
+green only because `AGENTS.md`'s claimed range "N1-N8 from §29" happened to cover the union -- and
+the map still said ROADMAP_v2 covered "§13-§46", so §47 was absent from it entirely. Adding N9+
+would have made both worse.
+
+Renumbered to NA1-NA8, and it was cheap because that was measured before choosing it: §47's N ids
+were cited only in their own eight table rows plus one cross-reference inside N4. No production
+code, no `AGENTS.md`, no `DEVLOG.md`. Every N citation in production is `main.py`'s, and all
+twenty say §29.
+
+### Files
+
+- `config.py` -- `SUBAGENT_MAX_PARALLEL` (3).
+- `tools/base.py`, `tools/registry.py` -- `ToolSpec.parallel`, the accessor, and the one
+  declaration on `spawn_subagent`.
+- `core/loop.py` -- `_parallel_groups`, `_dispatch_one`, `_dispatch_parallel`, `_settle_one`,
+  `_GATE_LOCK`, `_NO_GATE`, `_CallOutcome`.
+- `core/interaction.py` -- `_ask_lock`, inside the one entry point.
+- `core/approval.py` -- `GrantBudget`'s lock, around the decision as well as the increment.
+- `tui/app.py` -- `TuiActivity`'s lock and its snapshot post; the row carries `parent_id`.
+- `tui/widgets.py` -- `_lineage_order`, `AgentRow.parent_id`, `_redraw` ordering.
+- `database.py` -- WAL and an explicit busy timeout, on connect, on a real engine only.
+- `tests/test_parallel_calls.py` (new, 42), `tests/test_storage_e2e.py` (43 -> 45),
+  `tests/test_grants.py` (56, one test rewritten to the stronger invariant),
+  `tests/test_interaction.py` (the leaf module's stdlib allowlist gains `threading`).
+
+### Mutation
+
+Twelve, all killed -- but three of them only after the tests that were meant to catch them were
+rewritten, which is the honest version of that sentence and the reason the findings above are
+written down rather than summarised as "fixed". Two were the GIL quantum. The third was the
+partition itself, killed by a unit test of `_dispatch_parallel` and NOT by anything that mounted
+the app, so `TestTheRunningApp` was added: it drives the real `VenastineApp` through a turn whose
+response carries two spawns and asserts on what the sidebar was actually told, which is the whole
+chain rather than one hop of it.
+
+Not done, and it is the one thing this batch cannot claim: the terminal pass with a real model and
+a human answering. `TestTheRunningApp` mounts the app and drives a stubbed turn through it, which
+is as close as an offline suite reaches; it does not replace clicking into a running child while
+its siblings work, or watching two approvals queue.

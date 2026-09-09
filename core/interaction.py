@@ -43,8 +43,45 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 import logging
+import threading
 
 logger = logging.getLogger(__name__)
+
+# ROADMAP_v2 §47 slice 8 (NA12). ONE QUESTION ON SCREEN AT A TIME, and it
+# lives here because this module is already the one entry point every
+# question goes through.
+#
+# Until slice 8 nothing could ask twice at once, so no shell needed to cope
+# with it and none does. Both of ours break in the same way and for the
+# same reason -- a single slot for the pending answer. `tui/app.py` keeps
+# one `_permission_channel` so shutdown can release a parked worker: a
+# second ask overwrites the field and orphans the first, and the first ask
+# to FINISH nulls it in its `finally`, so a still-open question becomes
+# unreleasable. `main.py` has one `_StdinReader`, and two readers of one
+# stdin is the defect §29's N1 exists to prevent, arrived at from the other
+# direction. Two consent surfaces at once is also what §42 refuses on its
+# own terms.
+#
+# HERE RATHER THAN IN EACH SHELL, which is this project's canonical rule --
+# fix at the producer. A lock around `tui/app.py`'s `_blocking_modal` would
+# leave the CLI unprotected and would have to be written again for the
+# third shell.
+#
+# NO TIMEOUT, deliberately. Every waiter is bounded by the holder's own
+# deadline: the TUI parks for at most ATTENDED_APPROVAL_TIMEOUT_S and a
+# run-backed CLI prompt carries the same, so the queue drains on its own.
+# A deadline here would need this leaf module to know a number that
+# belongs to config.py, and the failure it would prevent is one no shell
+# can currently produce. Shutdown does not wait either: the TUI's release
+# unblocks the holder, and every queued worker then finds `_shutting_down`
+# already true and returns its declining default without pushing a screen.
+#
+# NOT FIFO, and nothing here claims it is -- a Lock makes no ordering
+# promise, so which of two simultaneous questions is put first is
+# undefined. What IS guaranteed is that each answer reaches the asker that
+# holds it, because the request travels with the caller and never through
+# this module's state.
+_ask_lock = threading.Lock()
 
 
 # ---------------------------------------------------------------------------
@@ -314,7 +351,12 @@ def ask(channel: Optional[ResponseChannel], request: Request) -> Any:
     if channel is None:
         return decode(request, None)
     try:
-        raw = channel.ask(request)
+        # NA12. Serialised, so a shell that can only hold one pending
+        # answer is never handed two. The lock covers the shell's call and
+        # nothing else: `decode` is pure, and holding a lock across it
+        # would make one shell's slowness another's wait for no reason.
+        with _ask_lock:
+            raw = channel.ask(request)
     except Exception:  # noqa: BLE001 -- a shell's failure is not the run's
         # Logged with the traceback, because a shell raising here is a real
         # bug worth finding, and at ERROR because the user's answer was

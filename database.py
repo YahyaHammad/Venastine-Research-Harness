@@ -23,6 +23,87 @@ engine = create_engine(
     connect_args={"check_same_thread": False},
 )
 
+# ---------------------------------------------------------------------------
+# ---- Concurrent writers (ROADMAP_v2 §47 slice 8) --------------------------
+# ---------------------------------------------------------------------------
+#
+# `check_same_thread: False` has always been here, because the TUI drains the
+# loop on a worker thread while the UI thread reads. What was never true
+# until NA9 is that two writers could be in flight at once: one agent ran at
+# a time, so the pool handed out one connection that mattered and SQLite's
+# single-writer rule cost nothing.
+#
+# MEASURED, at the real engine against a real database, because this is the
+# one hazard in the slice it would have been easiest to assume. Each shape is
+# N threads creating a subagent thread and writing 200 messages to it, which
+# is a child run's shape:
+#
+#   writers   journal=delete        journal=WAL
+#   3         0 errors, 2.94s       0 errors, 1.31s
+#   8         1 "database is        0 errors, 3.21s
+#             locked", 6.78s
+#   16        --                    1 "database is locked", 6.00s
+#
+# So at SUBAGENT_MAX_PARALLEL = 3 the shipped configuration does NOT lock,
+# and WAL is enabled anyway for the two things the table shows: it removes
+# the failure at 8, which is where a raised ceiling lands, and it is a little
+# over twice as fast at 3, which is the configuration everyone runs. A
+# concurrency ceiling that is a tunable constant invites being tuned, and the
+# failure it walks into is a lost message rather than a slow one.
+#
+# THE BUSY TIMEOUT WAS ALREADY 5000ms and this does not change it. Measured
+# too, via `PRAGMA busy_timeout`: SQLAlchemy's pysqlite dialect passes
+# `timeout=5.0` to sqlite3.connect by default. It is restated here rather
+# than left implicit because it is load-bearing for the numbers above, and a
+# default nobody wrote down is a number that can change under us.
+#
+# ON CONNECT rather than once at import: `journal_mode` is persistent in the
+# file but the pool opens connections over the life of the process and a
+# fresh database file arrives with none of this, so the reliable place to
+# state it is every connection. Contained and logged for the reason
+# everything at this layer is: WAL needs shared memory, which some network
+# filesystems do not provide, and a harness that refuses to start because it
+# could not make its journal faster would be a self-inflicted outage.
+
+
+def _apply_sqlite_pragmas(dbapi_connection, _record) -> None:
+    """WAL and an explicit busy timeout, per connection. See above."""
+    try:
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA busy_timeout=5000")
+        finally:
+            cursor.close()
+    except Exception:  # noqa: BLE001 -- a slower journal is not an outage
+        logger.warning(
+            "Could not set journal_mode=WAL on this database; continuing on "
+            "whatever journal it has. Concurrent subagent writes may "
+            "contend. This is expected on filesystems without shared "
+            "memory support.", exc_info=True)
+
+
+# Imported here rather than at the top so the listener registration reads as
+# one unit with the reasoning above it.
+from sqlalchemy import event as _sqlalchemy_event  # noqa: E402
+from sqlalchemy.engine import Engine as _SqlAlchemyEngine  # noqa: E402
+
+# ONLY ON A REAL ENGINE, and the condition is named rather than caught.
+#
+# The suite's root conftest stubs `sqlmodel` into sys.modules before
+# collection, so `create_engine` above returns a plain namespace there and
+# `listens_for` raises InvalidRequestError on it -- at import, which is a
+# collection error for every test that touches storage. An `except` around
+# the registration would fix that and would also swallow a genuine
+# misregistration in production, silently, leaving the journal on `delete`
+# with nothing said. An isinstance check cannot: a real engine always
+# passes it, so a production failure still raises.
+#
+# Same seam `ensure_columns` already uses one function down, for the same
+# stated reason -- a boundary that only works in production is not a seam.
+if isinstance(engine, _SqlAlchemyEngine):
+    _sqlalchemy_event.listens_for(engine, "connect")(_apply_sqlite_pragmas)
+
 
 def create_db_and_tables() -> None:
     """Creates any table that doesn't exist yet. Safe to call every startup.
