@@ -535,6 +535,71 @@ class TodoPanel(Static):
         self.update(body)
 
 
+#: How often the viewer re-reads a thread whose run is still going.
+#: A second is slow enough to cost nothing on a database this size and
+#: fast enough that watching a subagent work does not feel like
+#: refreshing a page. The timer only exists while the viewed run is
+#: live, so an idle session pays nothing.
+THREAD_VIEW_POLL_S = 1.0
+
+#: Between crumb segments. A single glyph, so the trail reads as one
+#: line rather than a path someone could mistake for a filename.
+CRUMB_SEPARATOR = "  \u203a  "
+
+
+def armed_style(style, thread_id):
+    """`style`, carrying `thread_id` as click metadata (§47).
+
+    Returns the bare style unchanged when there is no thread, so a run
+    whose thread does not exist yet -- the window between `enter` and
+    `bind` -- draws identically and simply answers nothing when
+    clicked. Arming it anyway and failing on the click would be a lie
+    told to save nobody any time.
+
+    ONE FUNCTION for the panel and the crumb, because they are the same
+    affordance in two places and a second copy is how the two would
+    come to disagree about what a click reads.
+
+    `str()` because a thread id is a UUID and metadata crosses into a
+    handler that looks it up as text.
+    """
+    if thread_id is None:
+        return style
+    return (Style.parse(style or "")
+            + Style(meta={"agent_thread": str(thread_id)}))
+
+
+class ThreadSelected(Message):
+    """Someone clicked a row that names a thread (§47).
+
+    A MESSAGE, not a call into the app. The panel and the crumb know
+    which thread a row is about and nothing else -- what opening one
+    means is the app's question, and a widget reaching into `self.app`
+    to answer it would put half of that decision here.
+
+    Carries the id as TEXT, because that is what came back out of style
+    metadata; the app parses it once, where it also decides what an
+    unparseable one means.
+    """
+
+    def __init__(self, thread_id: str) -> None:
+        self.thread_id = thread_id
+        super().__init__()
+
+
+def _clicked_thread(widget, event):
+    """The thread id under a click, or None (§47).
+
+    METADATA, NEVER ARITHMETIC. Computing a row index from `event.y`
+    would need a second copy of the widget's layout, and that copy
+    would already be wrong: `#agent-panel` has `padding-top: 1`, so the
+    Nth content line sits at y = N+1. `get_style_at` asks the widget
+    that drew the row, which cannot disagree with itself.
+    """
+    style = widget.get_style_at(event.x, event.y)
+    return (getattr(style, "meta", None) or {}).get("agent_thread")
+
+
 @dataclass(frozen=True)
 class AgentRow:
     """One row of the agent panel: a run, and where to find it (§47).
@@ -650,21 +715,24 @@ class AgentPanel(Static):
             return "\u2026"
         return text[:width - 1] + "\u2026"
 
-    @staticmethod
-    def _armed(style, thread_id):
-        """`style`, carrying `thread_id` as click metadata when there is
-        one to carry.
+    #: Shared with ThreadCrumb -- see armed_style.
+    _armed = staticmethod(armed_style)
 
-        Returns the bare style unchanged for an unbound row, so a run
-        whose thread does not exist yet draws identically and simply
-        answers nothing when clicked. `str()` because a thread id is a
-        UUID and metadata crosses into a click handler that will look it
-        up as text.
+    def on_click(self, event) -> None:
+        """Open the run this row is about.
+
+        A PLAIN CLICK, unlike the transcript's ctrl+click, and the
+        asymmetry is caused by text selection existing in one place and
+        not the other. A sidebar row is a control; dragging across it
+        selects nothing, so there is no gesture to dodge.
+
+        A click on a row with no thread does nothing at all -- not even
+        a message -- so an unbound run and the header are the same
+        silence.
         """
-        if thread_id is None:
-            return style
-        return (Style.parse(style or "")
-                + Style(meta={"agent_thread": str(thread_id)}))
+        thread_id = _clicked_thread(self, event)
+        if thread_id:
+            self.post_message(ThreadSelected(thread_id))
 
     def _redraw(self) -> None:
         if self._agent is None and not self._stack:
@@ -707,6 +775,82 @@ class AgentPanel(Static):
         body.overflow = "crop"
         self.display = True
         self.update(body)
+
+class ThreadCrumb(Static):
+    """Where you are, and every step back out (§47).
+
+    `chat  \u203a  explore  \u203a  review`, each segment but the last armed
+    with its own thread. The viewer needs a header row anyway to say
+    what is being looked at, so making it the LINEAGE costs nothing and
+    turns "up one level" into a visible click rather than hidden
+    history. It is honest because the parent link is stored now: this
+    is read from the database, not reconstructed from the order things
+    were opened in.
+
+    THE LAST SEGMENT IS NOT ARMED. It is where you already are, and a
+    control that does nothing is worse than one that is plainly inert.
+
+    Hidden when empty, GoalBanner-style, so the live conversation costs
+    no row for a trail it does not need.
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._steps: list = []
+        self.display = False
+
+    def _styles(self) -> dict:
+        try:
+            app = self.app
+        except Exception:  # noqa: BLE001 -- see Transcript._styles
+            return {}
+        return themes.styles_for(app)
+
+    def show(self, steps) -> None:
+        """Draw the trail. `steps` is [(label, thread_id)], root first.
+
+        An empty list hides the widget, which is how the viewer closes
+        its header without a second method meaning the same thing.
+        """
+        self._steps = list(steps)
+        self._redraw()
+
+    def restyle(self) -> None:
+        """Re-render under the current theme (#183), like AgentPanel."""
+        self._redraw()
+
+    def on_click(self, event) -> None:
+        thread_id = _clicked_thread(self, event)
+        if thread_id:
+            self.post_message(ThreadSelected(thread_id))
+
+    def _redraw(self) -> None:
+        if not self._steps:
+            self.display = False
+            self.update("")
+            return
+
+        styles = self._styles()
+        body = Text()
+        for index, (label, thread_id) in enumerate(self._steps):
+            if index:
+                body.append(CRUMB_SEPARATOR, styles.get("system", ""))
+            here = index == len(self._steps) - 1
+            if here:
+                body.append(label, styles.get("assistant_label", ""))
+            else:
+                body.append(label, armed_style(styles.get("tool", ""),
+                                               thread_id))
+        body.append("    read-only \u2014 esc to go back",
+                    styles.get("system", ""))
+        # One line, cropped rather than wrapped: a trail that reflowed
+        # would take a second row from the transcript below it, and the
+        # segment that matters most is the one you are standing on.
+        body.no_wrap = True
+        body.overflow = "ellipsis"
+        self.display = True
+        self.update(body)
+
 
 class ResearchProgress(Static):
     """Live state of a /research run (ROADMAP_v2 §22).

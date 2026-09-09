@@ -3872,3 +3872,47 @@ Batch 68.
 **Fix:** the property creates a thread on first use, and this runs at mount and on every span --
 so every launch would leave a phantom empty conversation in the picker. `refresh_goal_banner` and
 `refresh_todo_panel` read the field for the same reason. Batch 68.
+
+### `_paint_entries` reaching for `self._transcript` instead of its argument
+
+**Symptom:** `test_it_switches_the_pane_and_paints_the_run`, and
+`test_a_turn_writes_to_the_LIVE_pane_while_a_run_is_open`.
+
+**Fix:** it takes the target because that is what makes it reusable, and it is shared with the
+resume path because what a stored thread LOOKS like is a policy decision with one translation site
+(§26 L2). Two copies would be free to disagree about the thinking rule, which is the divergence
+that rule exists to close. Batch 69.
+
+### `close_thread_view` added back to `_cmd_new`
+
+**Symptom:** none, and that is the entry. The prompt is DISABLED while the viewer is open, so no
+slash command can be typed and the close cannot fire. A guard that cannot fire still reads as the
+thing protecting you. The reachable path is the thread picker (ctrl+t is an app binding), and
+`switch_to_thread` closes the view; `test_the_thread_picker_is_still_reachable` is what keeps that
+premise honest. Batch 69.
+
+### Asserting a poll by the pane's CONTENT
+
+**Symptom:** none -- the test passes against a viewer that repaints every second.
+
+**Fix:** repainting identical entries produces an identical pane, so content cannot tell a gated
+redraw from an ungated one. What ships is a reader thrown back to the bottom once a second. Count
+`reset()` calls. Batch 69.
+
+### Asserting an inert click by where the viewer ENDS UP
+
+**Symptom:** none -- the test passes against a widget that posts on every stray click.
+
+**Fix:** `open_agent_thread` refuses anything that is not a uuid, so a `ThreadSelected(None)` is
+already harmless when it arrives. What ships is a warning logged every time someone clicks the
+padding. Assert that the message was never posted. Both widgets need their own case: the two
+guards are separate code, and a mutation to one survives a test that only drives the other. Batch
+69.
+
+### The lineage trail built from navigation history
+
+**Symptom:** `test_the_trail_is_read_from_STORAGE_not_from_where_you_walked`.
+
+**Fix:** open a sub-subagent directly, having never passed through its parent, and a
+history-derived trail shows one step where the stored parent link shows three. Slice 1 put the
+link in a column so this could be read rather than reconstructed. Batch 69.

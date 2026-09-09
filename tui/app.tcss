@@ -33,9 +33,34 @@
     scrollbar-size-vertical: 1;
 }
 
+/* Section 47. The switcher holding the live transcript and the read-only
+   view. Both children stay mounted; only `current` changes -- which is what
+   lets a running turn keep writing to the live pane while a stored thread is
+   on screen, with nothing to buffer and nothing to flush on the way back. */
+#pane {
+    height: 1fr;
+}
+
 #transcript {
     height: 1fr;
     border: solid $panel;
+    padding: 0 1;
+}
+
+/* The accent border is the whole affordance: at a glance this is not the
+   conversation you are having. The prompt is disabled underneath it, so the
+   read-only rule is visible rather than merely true. */
+#thread-view {
+    height: 1fr;
+    border: solid $accent;
+    padding: 0 1;
+}
+
+/* The lineage trail. `height: auto` and hidden until the viewer opens, so
+   the live conversation costs no row for a trail it does not need -- the
+   GoalBanner rule, which every conditional row in #main follows. */
+#thread-crumb {
+    height: auto;
     padding: 0 1;
 }
 

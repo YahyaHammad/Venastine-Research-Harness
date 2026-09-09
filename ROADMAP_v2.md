@@ -3915,7 +3915,8 @@ subagent-thread sources before research passes.
    columns, `child_threads()`, `call_id` injection. **BUILT, batch 67.**
 2. **The sink and the panel learn identity**; `exit` removes by id, and every row carries
    the thread it stands for. **BUILT, batch 68.**
-3. The viewer: the switcher, the crumb, the extracted paint loop, the poll.
+3. **The viewer**: the switcher, the crumb, the extracted paint loop, the poll, and both
+   clicks. **BUILT, batch 69.**
 4. The inline anchor, and `ReplayEntry`'s fourth element.
 5. The picker, and the permission modal naming who is asking.
 6. The reviewer and the initializer get batch 59's deferred spans.

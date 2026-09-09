@@ -11561,3 +11561,77 @@ leave a phantom empty conversation in the picker for every launch.
 Eight, all killed. The one worth naming is the first: reverting `exit` to last-match survives
 every test that goes through `span()`, and dies only against the peer case -- which is the
 argument for building the identity now rather than when slice 8 needs it.
+
+## Batch 69 -- the run you can read, without leaving the conversation (2026-09-09)
+
+§47, slice 3 of eight, and the first one with anything on screen. Click a row in the agent panel
+and that run's thread opens read-only in the main pane, with a trail across the top saying where
+you are and every step back out.
+
+**A SWITCHER IN `#main`, NOT A MODAL, and the sidebar is the whole reason.** It lives outside
+`#main`, so it stays visible, live and interactive while a stored thread is on screen -- which is
+what makes moving between runs possible without going back to the conversation first. A modal
+would have had to compose its own copy of the agent list to offer the same thing, and two
+independent writers of one piece of display state is the bug shape this project has already found
+and fixed once. Both panes stay mounted; only `current` changes.
+
+**Batch 66 is load-bearing here in a way that was not obvious when it landed.** A turn that keeps
+running while you read a subagent goes on writing to the LIVE pane, because the writer holds that
+widget rather than resolving `#transcript` against whatever is displayed. Had the transcript still
+been a per-access query, the answer would have landed in the pane being read. There is a test
+that says so.
+
+**One fact, everything else derived.** `_viewing` says whether the viewer is open; the switcher's
+`current`, the crumb's rows, the prompt's `disabled` flag and whether escape is bound all follow
+from it, so they cannot drift into disagreeing.
+
+**The trail is read from STORAGE, not from where you walked.** Open a sub-subagent directly and
+the crumb still says `chat > explore > review`, because slice 1 put the parent link in a column.
+A trail assembled from navigation history would be a record of what the reader did, not of what
+spawned what. Every step but the last is armed -- where you already are is not somewhere to go,
+and a control that does nothing is worse than one plainly inert. A cycle guard, because a
+hand-edited database must not hang the UI; the mutation that removes it does not fail, it hangs,
+which is why this batch's harness grew a subprocess timeout.
+
+**The poll reads the archive, and only while the run is live.** A child's own events are drained
+internally (§18/D6), so the only honest source for "what has it written since" is the store it is
+writing to -- the same one replay reads. The timer exists only while the viewed thread is one the
+sidebar says is running, and `on_agent_stack_changed` is what stops it: a span closing is the ONLY
+signal a shell gets that a child has finished. Redraws are gated on the entry count, because a
+repaint every second would fight the reader's scroll position.
+
+**View-only, made visible.** The prompt is disabled rather than merely ignored. That has a
+consequence worth naming: **`/new` cannot be reached while the viewer is open**, so `_cmd_new`
+got no close of its own -- a guard that cannot fire still reads as the thing protecting you. The
+thread picker CAN be reached, because ctrl+t is an app binding, so `switch_to_thread` closes the
+view and a test pins that ctrl+t stays live.
+
+**Escape means one thing.** Back to the conversation, from wherever you are; going up one level is
+the crumb's job. `check_action` keeps the binding off at every other moment, because `PromptInput`
+binds escape to dismissing the slash panel and a live-but-inert app binding is exactly what would
+shadow it.
+
+### Files
+
+- `tui/app.py` -- the switcher, `open_agent_thread`, `close_thread_view`, `_thread_chain`,
+  `_sync_view_poll`, `_poll_thread_view`, the extracted `_paint_entries`, and three more held
+  widgets.
+- `tui/widgets.py` -- `ThreadCrumb`, `ThreadSelected`, `armed_style` shared by both surfaces,
+  and `AgentPanel.on_click`.
+- `tui/app.tcss` -- `#pane`, `#thread-view` (an accent border, so at a glance this is not the
+  conversation you are having), `#thread-crumb`.
+- `tests/test_agent_navigation.py` (new, 25).
+
+### Mutation
+
+Sixteen, all killed -- but two of them only after the tests that were supposed to catch them were
+rewritten, and both failures were the same mistake in different clothes: **observing the outcome
+instead of the mechanism.**
+
+- The no-change poll test compared the pane's TEXT. Repainting identical entries produces an
+  identical pane, so a viewer that redrew unconditionally passed -- while throwing the reader
+  back to the bottom once a second, which is the entire defect. It counts `reset()` calls now.
+- The inert-crumb test compared where the viewer ENDED UP. A `ThreadSelected(None)` is already
+  harmless by the time it reaches `open_agent_thread`, which refuses anything that is not a uuid
+  -- so a widget posting on every stray click passed, and what would have shipped is a warning
+  logged every time someone clicked the padding. It asserts on the message now.

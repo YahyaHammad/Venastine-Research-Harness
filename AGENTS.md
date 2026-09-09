@@ -48,7 +48,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 4081 tests, offline, ~2-3 min by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 4106 tests, offline, ~2-3 min by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -993,6 +993,44 @@ matching `(name, depth)` happened to be right and the old code was never wrong i
 practice. It is wrong the moment two runs of one agent are open as PEERS and either may
 finish first — which is what slice 8 makes ordinary. The test drives `enter`/`exit`
 directly, because a `with` block cannot express "the outer one ended first".
+
+**The read-only thread view is a SWITCHER in `#main`, and the sidebar is why** (§47).
+`#sidebar` lives outside `#main`, so it stays visible, live and interactive while a stored run is
+on screen — which is what lets a reader move between runs without going back to the conversation
+first. A modal would have to compose its own copy of the agent list to offer that, and two
+independent writers of one piece of display state is the bug shape this project already fixed
+once. Both panes stay mounted; only `current` changes, so a running turn goes on writing to the
+live one with nothing to buffer and nothing to flush on the way back. **That last part is batch
+66's held transcript doing the work** — a per-access `query_one` would put the answer in the pane
+being read.
+
+**`_viewing` is the one fact; everything else is derived from it.** The switcher's `current`, the
+crumb's rows, the prompt's `disabled` flag and whether escape is bound all follow from it, so they
+cannot drift into disagreeing about whether the viewer is open.
+
+**The trail is read from STORAGE, never from where the reader walked.** Open a sub-subagent
+directly and the crumb still says `chat › explore › review`, because the parent link is a column.
+A history-derived trail would record what the reader did rather than what spawned what. Every step
+but the last is armed; the last is where you already are. The walk carries a `seen` set, because a
+hand-edited database must not hang the UI — and note that the mutation removing it does not fail,
+it HANGS, so a mutation harness covering it needs a subprocess timeout.
+
+**The poll reads the archive, and only while the run is live.** A child's events are drained
+internally (§18/D6), so the only honest source for "what has it written since" is the store it is
+writing to. `on_agent_stack_changed` starts and stops the timer, because a span closing is the
+ONLY signal a shell gets that a child has finished. Redraws are gated on the entry count: a
+repaint every second would fight the reader's scroll position, and **a test comparing the pane's
+TEXT cannot see that** — identical entries repaint identically. Count `reset()` calls.
+
+**View-only is enforced by disabling the prompt, and that decides which paths can reach the
+viewer's teardown.** `/new` cannot: no slash command can be typed while the prompt is disabled, so
+`_cmd_new` has no close of its own. The thread picker can, because ctrl+t is an app binding, so
+`switch_to_thread` closes the view. One test pins that ctrl+t stays live, which is what keeps the
+first half of this from becoming untrue silently.
+
+**Escape means one thing: back to the conversation.** Going up one level is the crumb's job.
+`check_action` keeps the binding off at every other moment — `PromptInput` binds escape to
+dismissing the slash panel, and a live-but-inert app binding is exactly what would shadow it.
 
 **The child's thread records its parent; the tool result is not a link** (§47).
 `spawn_subagent` has always returned `subagent_thread_id` to the model, so the edge existed —

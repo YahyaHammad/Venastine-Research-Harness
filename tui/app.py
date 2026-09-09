@@ -42,7 +42,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
 from textual.message import Message
-from textual.widgets import Footer, Header
+from textual.widgets import ContentSwitcher, Footer, Header
 from textual.worker import Worker, WorkerState
 
 import config
@@ -84,7 +84,8 @@ from security import posture
 from tui.widgets import (
     AgentPanel, AgentRow, ANIMATION_INTERVAL,
     CONVERSATION_ROLES, EffortRaven, GoalBanner, PostureBadge, PromptInput,
-    RavenPanel, ResearchProgress, SlashSuggest, ThinkingIndicator, TodoPanel,
+    RavenPanel, ResearchProgress, SlashSuggest, ThinkingIndicator,
+    THREAD_VIEW_POLL_S, ThreadCrumb, ThreadSelected, TodoPanel,
     Transcript, UsageLine,
 )
 
@@ -399,6 +400,13 @@ class VenastineApp(App):
         # and neither binds ctrl+l, which App and Footer also leave free
         # (D22: verified against the installed version, not assumed).
         ("ctrl+l", "show_claims", "Claims"),
+        # §47. Escape leaves the read-only thread view, and check_action
+        # keeps it OFF at every other moment -- the prompt binds escape
+        # to dismissing the slash panel, and a live app binding would
+        # shadow it. One rule, and it never surprises: escape always
+        # means "back to the conversation", never "up one level", which
+        # is what the crumb's clickable segments are for.
+        Binding("escape", "close_thread_view", "Back", show=False),
         # Batch 63. ctrl+UP/DOWN, and the pair was chosen by
         # elimination rather than by taste. ctrl+p is textual's
         # COMMAND_PALETTE_BINDING, bound priority=True, and the
@@ -544,6 +552,20 @@ class VenastineApp(App):
         # property and on_mount; None until mounted, which is the state
         # every test that builds this app without a pilot is in.
         self._transcript_widget: "Transcript | None" = None
+        # §47's viewer. Held for the same reason the transcript is (batch
+        # 66): the poll below writes from a timer callback, which can
+        # fire while a modal is up, and `query_one` searches the ACTIVE
+        # screen. None until mounted.
+        self._thread_view_widget: "Transcript | None" = None
+        self._crumb_widget: "ThreadCrumb | None" = None
+        self._pane_widget = None
+        # The thread the viewer is showing, or None when it is closed.
+        # THE ONE FACT that says whether the viewer is open; everything
+        # else -- the switcher's `current`, the crumb's rows, the
+        # prompt's disabled flag, whether escape is bound -- is derived
+        # from it, so they cannot drift into disagreeing.
+        self._viewing = None
+        self._view_timer = None
         self._permission_channel: queue.Queue | None = None
         # Batch 61. BEFORE the `_busy` assignment below, which is a
         # property setter now and drives this object.
@@ -624,7 +646,24 @@ class VenastineApp(App):
                 # mid-session is machinery with no user.
                 if self._todo_position == "top":
                     yield TodoPanel(id="todo-panel")
-                yield Transcript(id="transcript")
+                # §47. The trail, above whichever pane is showing.
+                # Hidden until the viewer opens, GoalBanner-style.
+                yield ThreadCrumb(id="thread-crumb")
+                # §47. A SWITCHER rather than a modal, and the sidebar
+                # is why: it lives outside #main, so it stays live and
+                # interactive while a stored thread is on screen. A
+                # modal would have to compose its own copy of the agent
+                # list to offer the same thing, which is two independent
+                # writers of one piece of display state -- the bug shape
+                # this project has already found and fixed once.
+                #
+                # BOTH panes stay mounted; only `current` changes. That
+                # is what lets a running turn go on writing to the live
+                # transcript while you read something else, with no
+                # buffering and nothing to flush on the way back.
+                with ContentSwitcher(initial="transcript", id="pane"):
+                    yield Transcript(id="transcript")
+                    yield Transcript(id="thread-view")
                 # §38. Between the transcript and the prompt, so the
                 # collapsed thinking line reads as the bottom of the
                 # conversation. Hidden until a span starts, TodoPanel-style,
@@ -672,6 +711,9 @@ class VenastineApp(App):
         # on top. See the `_transcript` property for why holding it is
         # what makes that survivable.
         self._transcript_widget = self.query_one("#transcript", Transcript)
+        self._thread_view_widget = self.query_one("#thread-view", Transcript)
+        self._crumb_widget = self.query_one("#thread-crumb", ThreadCrumb)
+        self._pane_widget = self.query_one("#pane", ContentSwitcher)
         # Attached before anything else can log. Removed in on_unmount --
         # the handler holds a reference to this app, so leaving it on the
         # root logger would keep a dead app alive and, in the test suite,
@@ -1222,6 +1264,196 @@ class VenastineApp(App):
             return self._transcript_widget
         return self.query_one("#transcript", Transcript)
 
+    # -- §47, the read-only thread view ----------------------------------
+
+    def on_thread_selected(self, message: ThreadSelected) -> None:
+        """A panel row or a crumb segment was clicked."""
+        self.open_agent_thread(message.thread_id)
+
+    def open_agent_thread(self, thread_id) -> None:
+        """Show a stored thread, read-only (§47).
+
+        VIEW ONLY, and the prompt is disabled rather than merely
+        ignored, so that is visible instead of only true.
+
+        Clicking the row for the conversation you are already in CLOSES
+        the viewer rather than opening a second copy of it -- the root
+        row and the first crumb segment both mean "back to the main
+        agent", and making that one behaviour keeps them from being two
+        affordances that look identical and are not.
+        """
+        try:
+            resolved = UUID(str(thread_id))
+        except (ValueError, AttributeError, TypeError):
+            # Metadata is text and a UUID is the only shape that means
+            # anything here. Contained rather than raised: this arrives
+            # from a click handler, and an unopenable row must not take
+            # the app down.
+            logger.warning("Ignoring a click naming %r, which is not a "
+                           "thread id.", thread_id)
+            return
+        if resolved == getattr(self._memory, "thread_id", None):
+            self.close_thread_view()
+            return
+
+        try:
+            entries = replay_entries(resolved)
+        except Exception as e:                              # noqa: BLE001
+            # The transcript, not the viewer: the viewer is not open yet
+            # and opening it to hold an error would leave the reader
+            # somewhere they cannot see their conversation.
+            self._transcript.write_error(
+                f"Could not open that run: {e}")
+            return
+
+        view = self._thread_view
+        view.reset()
+        self._paint_entries(view, entries)
+        if not entries:
+            # A run that has not written anything yet -- which is the
+            # ordinary state for the first instant of a live one, and a
+            # real state for one that failed at its first call.
+            view.write_system("This run has not written anything yet.")
+        self._viewing = resolved
+        self._crumb.show(self._thread_chain(resolved))
+        self._pane.current = "thread-view"
+        self._set_prompt_enabled(False)
+        self._sync_view_poll()
+        self.refresh_bindings()
+
+    def close_thread_view(self) -> None:
+        """Back to the live conversation. Idempotent.
+
+        Called by escape, by clicking the row you are already on, and by
+        anything that changes which conversation the session is in --
+        `/new` and a thread switch both, because a trail pointing into
+        the thread you just left is worse than no trail.
+        """
+        if self._viewing is None:
+            return
+        self._viewing = None
+        self._sync_view_poll()
+        self._crumb.show(())
+        self._pane.current = "transcript"
+        self._thread_view.reset()
+        self._set_prompt_enabled(True)
+        self.refresh_bindings()
+
+    def action_close_thread_view(self) -> None:
+        self.close_thread_view()
+
+    def _set_prompt_enabled(self, enabled: bool) -> None:
+        """Disable the prompt while a stored thread is on screen.
+
+        Best-effort (#104's rule, which still holds for `#prompt`): this
+        is a query, so a modal on top hides it. Focus is given back
+        explicitly, because disabling a widget takes it away and a
+        reader who pressed escape expects to be able to type.
+        """
+        try:
+            prompt = self.query_one("#prompt", PromptInput)
+        except NoMatches:
+            return
+        prompt.disabled = not enabled
+        if enabled:
+            prompt.focus()
+
+    def _thread_chain(self, thread_id):
+        """[(label, id)] from the conversation down to `thread_id`.
+
+        Walked from the STORED parent link rather than from the order
+        things were opened in, which is the whole reason slice 1 put it
+        in a column: a trail assembled from navigation history would be
+        a record of what the reader did, not of what spawned what.
+
+        `seen` guards a cycle. Depth is bounded by SUBAGENT_MAX_DEPTH in
+        practice, but a hand-edited database must not hang the UI, and a
+        set is cheaper than trusting a bound this function does not own.
+        """
+        chain = []
+        seen = set()
+        current = thread_id
+        while current is not None and current not in seen:
+            seen.add(current)
+            try:
+                row = storage.get_thread(current)
+            except Exception:                               # noqa: BLE001
+                break
+            if row is None:
+                break
+            label = (row.get("agent_name")
+                     or ("chat" if row.get("kind") == "chat"
+                         else row.get("kind") or "run"))
+            chain.append((label, str(current)))
+            current = row.get("parent_thread_id")
+        chain.reverse()
+        return chain
+
+    def _sync_view_poll(self) -> None:
+        """Run the re-read timer exactly while the viewed run is LIVE.
+
+        A run's own events are drained internally (§18/D6), so the only
+        honest source for "what has it written since" is the archive it
+        is writing -- the same store replay reads. Nothing about D6
+        changes: this polls a database, it does not tap a stream.
+
+        The timer exists only while the viewed thread is one the sidebar
+        says is running, so a finished thread is read once and an idle
+        session pays nothing.
+        """
+        live = {str(row.thread_id) for row in self._agent_stack
+                if row.thread_id is not None}
+        wanted = self._viewing is not None and str(self._viewing) in live
+        if wanted and self._view_timer is None:
+            self._view_timer = self.set_interval(
+                THREAD_VIEW_POLL_S, self._poll_thread_view)
+        elif not wanted and self._view_timer is not None:
+            self._view_timer.stop()
+            self._view_timer = None
+
+    def _poll_thread_view(self) -> None:
+        """Redraw the viewed run if it has written anything new.
+
+        Compared by ENTRY COUNT rather than by content: a repaint that
+        happened every second would fight the reader's scroll position
+        for no reason, and a replayed thread only ever grows.
+
+        Best-effort, batch 66's rule on a new surface: this runs from a
+        timer, so it can fire while a modal is up and while the app is
+        being torn down. A failure to redraw must not take the session
+        with it.
+        """
+        if self._viewing is None:
+            return
+        try:
+            entries = replay_entries(self._viewing)
+            view = self._thread_view
+            if len(entries) == len(view._entries):
+                return
+            view.reset()
+            self._paint_entries(view, entries)
+        except Exception:                                   # noqa: BLE001
+            logger.exception("Could not refresh the thread view.")
+
+    @property
+    def _thread_view(self) -> Transcript:
+        """The read-only pane. HELD, for `_transcript`'s reason."""
+        if self._thread_view_widget is not None:
+            return self._thread_view_widget
+        return self.query_one("#thread-view", Transcript)
+
+    @property
+    def _crumb(self) -> ThreadCrumb:
+        if self._crumb_widget is not None:
+            return self._crumb_widget
+        return self.query_one("#thread-crumb", ThreadCrumb)
+
+    @property
+    def _pane(self) -> ContentSwitcher:
+        if self._pane_widget is not None:
+            return self._pane_widget
+        return self.query_one("#pane", ContentSwitcher)
+
     @property
     def _raven(self) -> RavenPanel:
         return self.query_one("#raven", RavenPanel)
@@ -1628,6 +1860,11 @@ class VenastineApp(App):
         """The sink spoke. Runs on the UI thread."""
         self._agent_stack = message.stack
         self.refresh_agent_panel()
+        # §47. This is the ONLY signal that a viewed run has finished --
+        # a child's own events are drained internally, so its span
+        # closing is what the shell learns. Without this the poll would
+        # go on re-reading a thread nothing is writing to any more.
+        self._sync_view_poll()
 
     def refresh_agent_panel(self) -> None:
         """Redraw the panel from the two facts that make it up: the
@@ -1676,6 +1913,10 @@ class VenastineApp(App):
         # it needs the same poke -- tcss reaches the panel's box and not
         # the styles inside its Text.
         self.query_one("#agent-panel", AgentPanel).restyle()
+        # §47. In #main rather than the sidebar, but the same kind of
+        # surface and the same problem: Rich styles resolved per draw,
+        # which tcss cannot reach inside.
+        self.query_one("#thread-crumb", ThreadCrumb).restyle()
 
     def on_loop_event_message(self, message: LoopEventMessage) -> None:
         event = message.event
@@ -1946,6 +2187,18 @@ class VenastineApp(App):
             # declines the press, so the key is inert on a fresh
             # session. One return value buys both halves.
             return True if self._history else None
+        if action == "close_thread_view":
+            # §47. FALSE when the viewer is closed, and False rather than
+            # None for the ctrl+c reason rather than the recall one: this
+            # binding has no footer entry to grey out (`show=False`), and
+            # what it must not do is sit live-but-inert on a key another
+            # widget wants. `PromptInput` binds escape to dismissing the
+            # slash panel, and a focused widget wins -- but the prompt is
+            # DISABLED while the viewer is open, so nothing is focused
+            # there and this is the binding that fires. The two never
+            # contend, and this is what makes that true rather than
+            # lucky.
+            return self._viewing is not None
         return True
 
     def action_recall_previous(self) -> None:
@@ -2668,6 +2921,11 @@ class VenastineApp(App):
         self._live_claims = {}
         self._tool_names.clear()
         self._file_calls.clear()
+        # §47. A trail pointing into the thread the session just left is
+        # worse than no trail, and the pane underneath it would be
+        # showing a run belonging to a conversation that is no longer
+        # open. Same list, same reason, as the four lines above.
+        self.close_thread_view()
         # CLEAR, then replay. Swapping memory without clearing left the
         # previous conversation on screen beneath the new thread's id --
         # bug 1's worst half, since a blank panel is merely unhelpful
@@ -2695,33 +2953,48 @@ class VenastineApp(App):
                 f"open and usable — only its history could not be "
                 f"drawn.")
             return
-        for role, text, links in entries:
-            if role == "user":
-                self._transcript.write_user(text)
-            elif role == "assistant":
-                self._transcript.write_answer(text)
-            elif role == "thinking":
-                # §44. Skipped rather than dimmed when the setting is off:
-                # /thinking is about whether reasoning is shown at all, and
-                # a replay that showed what a live turn had hidden would be
-                # the same conversation rendered two ways -- which is the
-                # defect this whole commit exists to remove, arriving
-                # through the other door.
-                #
-                # write_role, not a new method: Transcript._render_entry
-                # has known the "thinking" role since §38 and already draws
-                # the bar block and opens §43's turn label above it, so a
-                # replayed span and a streamed one go through one renderer.
-                if self._show_thinking:
-                    self._transcript.write_role(role, text)
-            else:
-                self._transcript.write_role(role, text, links)
+        self._paint_entries(self._transcript, entries)
         if entries:
             noun = "entry" if len(entries) == 1 else "entries"
             self._transcript.write_system(
                 f"— end of {len(entries)} replayed {noun} —")
         else:
             self._transcript.write_system("This thread has no messages yet.")
+
+    def _paint_entries(self, transcript, entries) -> None:
+        """Draw replayed entries into `transcript` (§27 T5).
+
+        ONE loop for the two callers -- a resume, and §47's read-only
+        view -- because what a stored thread LOOKS like is a policy
+        decision, and §26's L2 spent a decision on there being one
+        translation site for it. Two copies would be free to disagree
+        about the thinking rule below, which is exactly the divergence
+        that rule exists to close.
+
+        Takes the target rather than reaching for `self._transcript`,
+        which is what makes it reusable at all.
+        """
+        for role, text, links in entries:
+            if role == "user":
+                transcript.write_user(text)
+            elif role == "assistant":
+                transcript.write_answer(text)
+            elif role == "thinking":
+                # §44. Skipped rather than dimmed when the setting is off:
+                # /thinking is about whether reasoning is shown at all, and
+                # a replay that showed what a live turn had hidden would be
+                # the same conversation rendered two ways -- which is the
+                # defect that commit exists to remove, arriving through the
+                # other door.
+                #
+                # write_role, not a new method: Transcript._render_entry
+                # has known the "thinking" role since §38 and already draws
+                # the bar block and opens §43's turn label above it, so a
+                # replayed span and a streamed one go through one renderer.
+                if self._show_thinking:
+                    transcript.write_role(role, text)
+            else:
+                transcript.write_role(role, text, links)
 
     def action_show_claims(self) -> None:
         self.show_claims("")
