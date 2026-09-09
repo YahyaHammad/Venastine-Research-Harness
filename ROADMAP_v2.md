@@ -3917,7 +3917,7 @@ subagent-thread sources before research passes.
    the thread it stands for. **BUILT, batch 68.**
 3. **The viewer**: the switcher, the crumb, the extracted paint loop, the poll, and both
    clicks. **BUILT, batch 69.**
-4. The inline anchor, and `ReplayEntry`'s fourth element.
+4. **The inline anchor**, and `ReplayEntry`'s fourth element. **BUILT, batch 70.**
 5. The picker, and the permission modal naming who is asking.
 6. The reviewer and the initializer get batch 59's deferred spans.
 7. Research passes.

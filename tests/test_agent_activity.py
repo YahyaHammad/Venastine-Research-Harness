@@ -1016,3 +1016,43 @@ class TestTheSinkKeepsIdentifiedRows:
             sink.bind(span.id, "thread-child")
 
             assert sink._stack == []
+
+class TestASpanNamesTheCallThatStartedIt:
+    """§47 slice 4. Without this the transcript's `spawn_subagent` line
+    cannot be paired with a RUNNING child at all -- it would have to wait
+    for the tool result, which is the moment the run is already over."""
+
+    def test_a_span_carries_no_call_by_default(self):
+        """The compactor and the reviewer are agent-shaped runs that no
+        tool call starts."""
+        assert AgentSpan("compactor", 1).call_id is None
+
+    def test_the_helper_passes_it_through(self):
+        sink = Recorder()
+        with agent_activity.span(sink, "explore", 1, "call_7") as span:
+            assert span.call_id == "call_7"
+
+    def test_a_spawn_opens_its_span_with_the_call_id(
+            self, _roots, mocker, fake_storage):
+        """dispatch() injects the id; the handler brackets the child run
+        with it, and the sink is what carries the pairing to a shell."""
+        _write_harness_agent(_roots, "worker")
+        config_loader.initialize(str(_roots["project"]))
+
+        seen = {}
+
+        class Watcher(AgentActivity):
+            def enter(self, span):
+                seen["call_id"] = span.call_id
+
+        mocker.patch.object(
+            RunAgentLoop, "run_agent_conversation",
+            side_effect=lambda **kw: make_model_response(text="x"))
+
+        subagent_tool.run({"agent_name": "worker", "task": "t"},
+                          parent_context=ToolContext(),
+                          activity=Watcher(), call_id="call_7")
+
+        assert seen["call_id"] == "call_7", (
+            f"the span reported {seen.get('call_id')!r}; a shell cannot "
+            "pair the transcript's line with a running child without it")

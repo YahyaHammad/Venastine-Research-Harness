@@ -520,6 +520,21 @@ class ToolRegistry:
         key = self.rationale_param(tool_name)
         return redacted_values(params, omit=(key,) if key else ())
 
+    def opens_thread(self, tool_name: str) -> bool:
+        """Whether a call to this tool creates a thread of its own (§47).
+
+        Mechanism, not policy, exactly like request_kind below: a reader
+        asks rather than knowing that spawn_subagent is special. Two
+        consumers -- core/replay.py, deciding what a stored tool line
+        carries, and the TUI, deciding which live line to arm -- and one
+        declaration between them.
+
+        False for an unknown tool, which is what an MCP tool registered
+        at runtime is until it says otherwise.
+        """
+        spec = self._tools.get(tool_name)
+        return bool(spec is not None and spec.opens_thread)
+
     def request_kind(self, tool_name: str) -> str:
         """Which kind of question approving this tool asks (§23).
 
@@ -909,6 +924,10 @@ registry.register(ToolSpec(
     # which agent they are authorising.
     grant_policy=GRANT_NEVER,
     budget=BUDGET_HUMAN,
+    # §47. The only tool that does, so far: the child runs in a thread
+    # of its own, which is what makes `▸ spawn_subagent` a line a
+    # reader can open.
+    opens_thread=True,
 ))
 
 # D24: fail loudly at import if any statically registered tool has no

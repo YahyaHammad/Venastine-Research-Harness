@@ -103,6 +103,14 @@ class AgentSpan:
     # positional pair is what every existing caller and test writes.
     id: str = field(default_factory=lambda: uuid4().hex)
     parent_id: Optional[str] = None
+    # §47. WHICH tool call started this run, when one did. The same
+    # kind of fact as the name and the depth -- what the run IS --
+    # rather than a second channel: a shell that knows both this and
+    # the bound thread can make the CALL LINE in the transcript open
+    # the run while it is still going, instead of only once its
+    # result comes back. None for the compactor and the reviewer,
+    # which no tool call starts.
+    call_id: Optional[str] = None
 
 
 class AgentActivity:
@@ -133,7 +141,7 @@ class AgentActivity:
         """
 
     @contextmanager
-    def span(self, name: str, depth: int):
+    def span(self, name: str, depth: int, call_id=None):
         """Bracket one agent-shaped run.
 
         A CONTEXT MANAGER RATHER THAN A PAIR OF CALLS, and that is the
@@ -159,8 +167,9 @@ class AgentActivity:
         frame found, including "there was nothing".
         """
         parent = _CURRENT.get()
-        span = AgentSpan(name, depth,
-                         parent_id=parent.id if parent is not None else None)
+        span = AgentSpan(
+            name, depth, call_id=call_id,
+            parent_id=parent.id if parent is not None else None)
         token = _CURRENT.set(span)
         try:
             self.enter(span)
@@ -180,7 +189,7 @@ NULL = AgentActivity()
 """The no-op sink. Every non-TUI shell runs on this."""
 
 
-def span(activity, name: str, depth: int):
+def span(activity, name: str, depth: int, call_id=None):
     """Bracket a run against an OPTIONAL sink.
 
     `activity` is None on every path but the TUI's, and this is what
@@ -189,7 +198,7 @@ def span(activity, name: str, depth: int):
     `with agent_activity.span(activity, name, depth):` and never have to
     ask whether anyone is watching.
     """
-    return (activity or NULL).span(name, depth)
+    return (activity or NULL).span(name, depth, call_id)
 
 
 def current() -> Optional[AgentSpan]:

@@ -1182,8 +1182,8 @@ class TestResumingAThreadReplaysItAtTheCallSite:
 
         mocker.patch.object(
             main, "replay_entries",
-            return_value=[("user", "earlier question", ()),
-                          ("assistant", "earlier answer", ())])
+            return_value=[("user", "earlier question", (), ""),
+                          ("assistant", "earlier answer", (), "")])
         cli_stdin()                      # EOF immediately: no turn needed
         main.run_chat(uuid4(), "ANTHROPIC", "m")
 

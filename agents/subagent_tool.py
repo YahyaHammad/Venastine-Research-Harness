@@ -209,7 +209,8 @@ def run(params: dict, parent_context=None, parent_run=None,
     #
     # `child.subagent_depth` and not a local count: C3 already maintains
     # that number and a second one would be free to disagree with it.
-    with agent_activity.span(activity, agent.name, child.subagent_depth):
+    with agent_activity.span(activity, agent.name, child.subagent_depth,
+                             call_id):
         response = RunAgentLoop.run_agent_conversation(
             user_goal=task,
             model=model,

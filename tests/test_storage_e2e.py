@@ -1000,7 +1000,7 @@ def test_replaying_a_compacted_thread_shows_the_original_first_message(
 
     assert entries[0][0] == "user"
     assert "THE ORIGINAL FIRST QUESTION" in entries[0][1]
-    assert not any(SUMMARY_PREFIX in text for _r, text, _l in entries), \
+    assert not any(SUMMARY_PREFIX in text for _r, text, _l, _c in entries), \
         "a replay must never render the summary as something the user said"
 
 

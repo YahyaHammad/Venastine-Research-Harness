@@ -84,7 +84,8 @@ from security import posture
 from tui.widgets import (
     AgentPanel, AgentRow, ANIMATION_INTERVAL,
     CONVERSATION_ROLES, EffortRaven, GoalBanner, PostureBadge, PromptInput,
-    RavenPanel, ResearchProgress, SlashSuggest, ThinkingIndicator,
+    RavenPanel, ResearchProgress, SlashSuggest, SpawnSelected,
+    ThinkingIndicator,
     THREAD_VIEW_POLL_S, ThreadCrumb, ThreadSelected, TodoPanel,
     Transcript, UsageLine,
 )
@@ -329,7 +330,9 @@ class TuiActivity(AgentActivity):
         self._stack: list = []
 
     def enter(self, span) -> None:
-        self._stack.append(AgentRow(span.name, span.depth, span.id))
+        self._stack.append(
+            AgentRow(span.name, span.depth, span.id,
+                     call_id=span.call_id))
         self._post()
 
     def exit(self, span) -> None:
@@ -566,6 +569,23 @@ class VenastineApp(App):
         # from it, so they cannot drift into disagreeing.
         self._viewing = None
         self._view_timer = None
+        # §47. Spawn call id -> the thread that call created, as TEXT
+        # both sides, because it arrives from style metadata.
+        #
+        # ONE map, THREE sources, and they are three because a spawn
+        # line outlives every one of them individually:
+        #
+        #   the agent stack   while the child RUNS -- its span carries
+        #                     the call and its bound thread, so the
+        #                     line opens before the result comes back.
+        #   the tool result   after it finishes, which is when the span
+        #                     is gone and the row with it.
+        #   child_threads()   on a REPLAY, where neither ever happened
+        #                     in this process.
+        #
+        # Per-thread state: `reset()`'s list, since the keys are call
+        # ids of one conversation's calls.
+        self._spawn_threads: dict = {}
         self._permission_channel: queue.Queue | None = None
         # Batch 61. BEFORE the `_busy` assignment below, which is a
         # property setter now and drives this object.
@@ -1270,6 +1290,27 @@ class VenastineApp(App):
         """A panel row or a crumb segment was clicked."""
         self.open_agent_thread(message.thread_id)
 
+    def on_spawn_selected(self, message: SpawnSelected) -> None:
+        """A `▸ spawn_subagent` line in the transcript was ctrl+clicked.
+
+        RESOLVED HERE, at press time, which is the whole reason the
+        line carries a call id rather than a thread: it is drawn before
+        the child exists, and a target baked in at draw time would have
+        to be nothing.
+
+        A call with no thread is SAID rather than ignored. It is a real
+        state -- a spawn refused for an unknown agent or a depth limit
+        never made one -- and a deliberate ctrl+click that produces
+        silence reads as a broken feature rather than as an answer.
+        """
+        thread_id = self._spawn_threads.get(str(message.call_id))
+        if thread_id:
+            self.open_agent_thread(thread_id)
+            return
+        self._transcript.write_system(
+            "That spawn has no thread to open — it was refused, or it "
+            "has not started writing yet.")
+
     def open_agent_thread(self, thread_id) -> None:
         """Show a stored thread, read-only (§47).
 
@@ -1859,6 +1900,15 @@ class VenastineApp(App):
     def on_agent_stack_changed(self, message: AgentStackChanged) -> None:
         """The sink spoke. Runs on the UI thread."""
         self._agent_stack = message.stack
+        # §47. A running child's thread reaches the transcript's spawn
+        # LINE through here: the span knows which call started it and
+        # `bind` gave it a thread, so the pairing exists before the
+        # tool result does. Accumulated rather than replaced -- a row
+        # leaves the stack the moment its run ends, and the line it
+        # belongs to stays on screen for the rest of the session.
+        for row in message.stack:
+            if row.call_id and row.thread_id is not None:
+                self._spawn_threads[str(row.call_id)] = str(row.thread_id)
         self.refresh_agent_panel()
         # §47. This is the ONLY signal that a viewed run has finished --
         # a child's own events are drained internally, so its span
@@ -1982,13 +2032,32 @@ class VenastineApp(App):
                 # cut-off span to resolve against. Redacted at the
                 # producer, and a value the redactor rewrote is not
                 # among them -- see `redacted_values`.
+                # §47. The call id rides along for a tool that opens a
+                # thread of its own, so the line becomes openable once
+                # the run it started has one. The REGISTRY is asked
+                # rather than the name compared, for the same reason
+                # core/replay.py asks: one declaration, and the live
+                # line and the replayed one cannot disagree about
+                # which lines are openable.
+                opens = (call_id if tool_registry.opens_thread(name)
+                         else "")
                 transcript.write_role(
                     "tool", f"▸ {name}{detail}",
-                    tool_registry.call_links(name, params))
+                    tool_registry.call_links(name, params), opens or "")
 
         if event.tool_result:
             result = event.tool_result["result"]
             call_id = event.tool_result.get("id")
+            # §47, the second of three sources for `_spawn_threads`.
+            # The agent stack pairs a call with its thread while the
+            # child RUNS; this is what survives the span closing, and
+            # it is the one that catches a child whose span never
+            # reached the shell at all. The tool has said the id in
+            # its result since §18 -- it was simply never read here.
+            if call_id and isinstance(result, dict):
+                spawned = result.get("subagent_thread_id")
+                if spawned:
+                    self._spawn_threads[str(call_id)] = str(spawned)
             failed = isinstance(result, dict) and "error" in result
             if failed:
                 tool_name = self._tool_names.get(call_id) if call_id else None
@@ -2921,6 +2990,10 @@ class VenastineApp(App):
         self._live_claims = {}
         self._tool_names.clear()
         self._file_calls.clear()
+        # §47. Keyed by the call ids of the thread being left, so a map
+        # that survived would answer the next conversation's clicks
+        # with the previous one's runs.
+        self._spawn_threads.clear()
         # §47. A trail pointing into the thread the session just left is
         # worse than no trail, and the pane underneath it would be
         # showing a run belonging to a conversation that is no longer
@@ -2953,6 +3026,11 @@ class VenastineApp(App):
                 f"open and usable — only its history could not be "
                 f"drawn.")
             return
+        # §47. BEFORE the paint, because the paint arms the lines and
+        # the arming is what a click resolves against. Contained: a
+        # thread whose children cannot be read still replays, with its
+        # spawn lines simply not openable.
+        self._learn_spawn_threads(resolved)
         self._paint_entries(self._transcript, entries)
         if entries:
             noun = "entry" if len(entries) == 1 else "entries"
@@ -2960,6 +3038,28 @@ class VenastineApp(App):
                 f"— end of {len(entries)} replayed {noun} —")
         else:
             self._transcript.write_system("This thread has no messages yet.")
+
+    def _learn_spawn_threads(self, thread_id) -> None:
+        """Pair this thread's spawn calls with the runs they made (§47).
+
+        ONE query for the whole conversation rather than one per line:
+        a resumed thread resolves every `▸ spawn_subagent` it draws,
+        and asking per line would be a query per row of a screen.
+
+        This is the third source for `_spawn_threads`, and the only one
+        that works after a restart -- the other two are a live span and
+        a live tool result, neither of which happened in this process.
+        It is why slice 1 put the parent link in a column.
+        """
+        try:
+            children = storage.child_threads(thread_id)
+        except Exception:                                   # noqa: BLE001
+            logger.exception("Could not read this thread's spawned runs.")
+            return
+        for child in children:
+            call_id = child.get("parent_call_id")
+            if call_id:
+                self._spawn_threads[str(call_id)] = str(child["id"])
 
     def _paint_entries(self, transcript, entries) -> None:
         """Draw replayed entries into `transcript` (§27 T5).
@@ -2974,7 +3074,7 @@ class VenastineApp(App):
         Takes the target rather than reaching for `self._transcript`,
         which is what makes it reusable at all.
         """
-        for role, text, links in entries:
+        for role, text, links, call_id in entries:
             if role == "user":
                 transcript.write_user(text)
             elif role == "assistant":
@@ -2994,7 +3094,7 @@ class VenastineApp(App):
                 if self._show_thinking:
                     transcript.write_role(role, text)
             else:
-                transcript.write_role(role, text, links)
+                transcript.write_role(role, text, links, call_id)
 
     def action_show_claims(self) -> None:
         self.show_claims("")
@@ -3605,6 +3705,9 @@ def _cmd_new(app: VenastineApp, args: str) -> None:
     app._live_claims = {}
     app._tool_names.clear()
     app._file_calls.clear()
+    # §47, on that list for that reason: these keys belong to the
+    # conversation being left.
+    app._spawn_threads.clear()
     # State first, then the screen, then anything written -- so a
     # failure cannot leave the transcript cleared while the panels still
     # describe the previous thread.

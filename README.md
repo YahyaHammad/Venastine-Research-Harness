@@ -597,7 +597,7 @@ The first connection to a **user-level** server asks once, showing the resolved 
 | `/init [--software\|--research] [--config]` | Scaffold the project documentation set; `--config` adds `.venastine/settings.json` and `mcp.json` with default values, and on its own is the whole command |
 | `/quit` | Leave the harness, on one invocation — a typed command is already deliberate. `/exit` and `/bye` are the same command under other names; type toward either and the suggestion list says so |
 
-Keys: **ctrl+c** twice quits — the first press arms it and the footer changes to say so, and it goes back to `Quit` after a couple of seconds; a **ctrl+c** over selected text copies instead and arms nothing, so nothing you copy can end the session. **ctrl+q** quits on a single press, from anywhere, including under a dialog · **ctrl+t** thread picker · **ctrl+l** claims view · **ctrl+j** (or **shift+enter**) newline in the prompt · **up/down** and **enter**/**tab** to pick a slash command, **escape** to dismiss the list · **ctrl+click** a URL in an answer — or in a tool line — to open it.
+Keys: **ctrl+c** twice quits — the first press arms it and the footer changes to say so, and it goes back to `Quit` after a couple of seconds; a **ctrl+c** over selected text copies instead and arms nothing, so nothing you copy can end the session. **ctrl+q** quits on a single press, from anywhere, including under a dialog · **ctrl+t** thread picker · **ctrl+l** claims view · **ctrl+j** (or **shift+enter**) newline in the prompt · **up/down** and **enter**/**tab** to pick a slash command, **escape** to dismiss the list · **ctrl+click** a URL in an answer — or in a tool line — to open it, or the name on a `spawn_subagent` line to read what that agent did.
 
 Answers are rendered rather than printed as their source: tables become grids, headings and `**bold**` take weight, `*emphasis*` and `~~strike~~` take their own marks, code fences are highlighted, and a list item that runs past the edge wraps **under its own text** instead of back to the margin. A line indented four spaces or more is left exactly as written, so a code sample keeps its operators and its `#` comments. What is deliberately not rendered: block quotes, horizontal rules, heading *levels* (a `#` and a `######` look the same), and anything at all inside a reasoning block. `/copy` always hands back the markdown the model wrote — the rendering is what the screen does, never what is stored.
 
@@ -867,7 +867,7 @@ classifier is described under *Security model* above. If you have a fork or a lo
 note that `ToolApprovals.shell` now ships `False` and `SHELL_APPROVAL_MODE` is the gate — see
 `tests/BREAKING_CHANGES.md` §24.
 
-Run the test suite with `pytest` — 4106 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
+Run the test suite with `pytest` — 4127 tests, fully offline, no API keys needed. One further test is marked `integration` and excluded by default; it spawns a real stdio MCP server (`pytest -m integration`).
 
 ## Documentation
 

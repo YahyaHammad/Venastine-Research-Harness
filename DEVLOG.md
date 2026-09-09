@@ -11635,3 +11635,65 @@ instead of the mechanism.**
   harmless by the time it reaches `open_agent_thread`, which refuses anything that is not a uuid
   -- so a widget posting on every stray click passed, and what would have shipped is a warning
   logged every time someone clicked the padding. It asserts on the message now.
+
+## Batch 70 -- the line that started it, and what it started (2026-09-09)
+
+§47, slice 4 of eight. Ctrl+click the agent's name on a `▸ spawn_subagent` line and that run's
+thread opens. It works on a running child, on a finished one, and on a conversation resumed in a
+fresh process -- which needs three different sources, because the LINE outlives every one of them.
+
+**Armed with the CALL, resolved at PRESS time.** The line is drawn when the call starts, before
+the child has a thread, so a target baked in at draw time would have to be nothing. The transcript
+carries the call id and the app resolves it when clicked.
+
+| the pairing comes from | while |
+|---|---|
+| the agent stack | the child is RUNNING -- its span carries the call, `bind` gave it a thread |
+| the tool result | after it finishes, when the span and its row are gone |
+| `child_threads()` | a RESUMED conversation, where neither happened in this process |
+
+The third is the only one that survives a restart, and it is what slice 1's parent column was for.
+The second reads `subagent_thread_id`, which `spawn_subagent` has returned since §18 and which
+nothing had ever read.
+
+**Only the agent's NAME is armed.** A tool line is `▸ name  digest`, and for a spawn the digest is
+the task -- a sentence a reader wants to read, not a control. The armed region is exactly as wide
+as the thing it is about, and a URL inside the task keeps its own target because the two never
+overlap.
+
+**`opens_thread` is DECLARED on the ToolSpec**, R13's shape: two readers ask it -- `core/replay.py`
+deciding what a stored tool line carries, and the TUI deciding which live line to arm -- and a
+tool name written in two places is how they come to disagree about which lines are openable.
+Defaulted to False, unlike `grant_policy`, because the safe answer is "this line opens nothing".
+
+**The name is found structurally, not by the marker glyph.** `▸` is written as a literal by
+`tui/app.py` and by `core/replay.py` and has no shared constant; matching on it here would be a
+third copy. The shape -- indent, marker, space, name, two spaces, digest -- is what both writers
+actually agree on.
+
+**An unresolvable click is SAID.** A spawn refused for an unknown agent or a depth limit made no
+thread, and a deliberate ctrl+click that produces silence reads as a broken feature rather than as
+an answer.
+
+### Files
+
+- `tools/base.py`, `tools/registry.py` -- `opens_thread`, declared and asked.
+- `core/agent_activity.py`, `agents/subagent_tool.py` -- a span knows which call started it.
+- `core/replay.py`, `main.py` -- `ReplayEntry`'s fourth element.
+- `tui/widgets.py` -- `SpawnSelected`, `_agents`, `_arm_spawn`, the click's second branch.
+- `tui/app.py` -- `_spawn_threads` and its three sources, `_learn_spawn_threads`, the resolution.
+- `tests/test_agent_navigation.py` (25 -> 43), `tests/test_agent_activity.py` (55 -> 58), plus
+  contract updates wherever a test spells out a `ReplayEntry`.
+
+### Mutation
+
+Seventeen, all killed, after two survivors -- and the first of them is a lesson this project has
+now learned twice.
+
+- **`reset()` leaving the side table survived**, because the test wrote ONE line into an emptied
+  transcript. The table is keyed by entry index, the old spawn sat at index 2, and index 0 was
+  never stale. Batch 65 hit exactly this and wrote it down; the fix is the same both times --
+  the new thread's lines have to REACH the index the old one held, and the test has to redraw
+  before it asserts.
+- **The sink dropping the call from its row survived**, because every test that observed the
+  pairing posted a hand-built row. The one link nothing drove was the sink's own copy.

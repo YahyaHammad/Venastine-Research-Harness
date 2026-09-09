@@ -48,7 +48,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 4106 tests, offline, ~2-3 min by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 4127 tests, offline, ~2-3 min by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -993,6 +993,30 @@ matching `(name, depth)` happened to be right and the old code was never wrong i
 practice. It is wrong the moment two runs of one agent are open as PEERS and either may
 finish first — which is what slice 8 makes ordinary. The test drives `enter`/`exit`
 directly, because a `with` block cannot express "the outer one ended first".
+
+**A `spawn_subagent` line is armed with its CALL, and resolved at PRESS time** (§47). The line
+is drawn when the call starts, before the child has a thread, so a target baked in at draw time
+would have to be nothing. `app._spawn_threads` maps call id to thread id and has **three
+sources**, because the line outlives each of them: the agent stack while the child RUNS (its span
+carries the call, `bind` gave it a thread), the tool result once it finishes (`subagent_thread_id`,
+returned since §18 and never read until now), and `storage.child_threads()` on a resumed
+conversation, which is the only one that survives a restart. Only the agent's NAME is armed — the
+digest on a spawn line is the task, prose a reader wants rather than a control.
+
+**`opens_thread` is declared on the `ToolSpec`, not matched by name.** Two readers ask which calls
+open a run: `core/replay.py`, deciding what a stored tool line carries, and the TUI, deciding
+which live line to arm. A tool name written in both is how they come to disagree about which lines
+are clickable — R13's argument, one field over. Defaulted to False, unlike `grant_policy`, because
+the safe answer is "this line opens nothing".
+
+**Two side tables on the transcript, one rule.** `_links` (batch 65) and `_agents` (§47) are both
+keyed by entry index, both dropped by `reset()`, both replayed by `rerender()`. They stay separate
+because a link opens a browser and a spawn opens a pane, and the click handler tells them apart
+anyway. **Testing a `reset()` on either needs two things that are easy to get wrong**: the test
+has to REDRAW before asserting, because on the live path a write is handed its targets as an
+argument and a stale table is invisible; and the new thread's lines have to reach the same INDEX
+the old entry held, or the assertion passes against a `reset()` that clears nothing. Both mistakes
+have now been made once each, in batches 65 and 70.
 
 **The read-only thread view is a SWITCHER in `#main`, and the sidebar is why** (§47).
 `#sidebar` lives outside `#main`, so it stays visible, live and interactive while a stored run is

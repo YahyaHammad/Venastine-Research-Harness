@@ -143,6 +143,17 @@ class ToolSpec:
     # assert_grant_policy_declared() below makes omission fatal at import,
     # the same trade D24 made for permissions.
     grant_policy: Optional[str] = None
+    # ROADMAP_v2 §47. Whether a call to this tool creates a conversation
+    # thread of its own, which is what makes the line that called it
+    # something a reader can OPEN.
+    #
+    # DECLARED HERE rather than by naming `spawn_subagent` at each reader,
+    # for grant_policy's reason (R13): two consumers ask this -- core/replay.py
+    # and the TUI -- and a string in two places is how they come to
+    # disagree about which lines are openable. Defaulted to False, unlike
+    # grant_policy, because the safe answer here is "this line opens
+    # nothing" and a tool that forgot to say so simply is not clickable.
+    opens_thread: bool = False
     # ROADMAP_v2 §31 (H1). One of BUDGET_COMPUTE / BUDGET_IO /
     # BUDGET_HUMAN, above.
     #

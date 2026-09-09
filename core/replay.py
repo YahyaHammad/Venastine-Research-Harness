@@ -76,7 +76,18 @@ from storage import archive_history
 #: the same characters as a live turn and quietly refuse to open them,
 #: which is the one conversation rendered two ways that Section 44 removed
 #: for thinking spans. Empty for every entry that is not a tool call.
-ReplayEntry = Tuple[str, str, Tuple[str, ...]]
+#:
+#: `call_id` is §47's, and it is the model's own id for the call that
+#: drew the line. Empty unless the tool OPENS A THREAD -- the registry
+#: is asked, so this file does not have to know that `spawn_subagent`
+#: is special and cannot come to disagree with the TUI about which
+#: lines are openable. It does not widen the sentence above either: a
+#: caller is still rendering rather than reasoning about history, and
+#: which run a line started is a fact about the LINE. Without it a
+#: resumed conversation would draw `▸ spawn_subagent` exactly as the
+#: live turn did and refuse to open it -- the same divergence §44
+#: removed for thinking spans, and batch 65 for a truncated URL.
+ReplayEntry = Tuple[str, str, Tuple[str, ...], str]
 
 
 def replay_entries(thread_id: UUID) -> List[ReplayEntry]:
@@ -92,7 +103,7 @@ def replay_entries(thread_id: UUID) -> List[ReplayEntry]:
         if role == "user":
             text = _as_text(message.get("content"))
             if text:
-                entries.append(("user", text, ()))
+                entries.append(("user", text, (), ""))
         elif role == "assistant":
             # BEFORE the answer, because that is the order it happened in
             # and the order the live transcript drew it in (§43 RM1 puts
@@ -101,10 +112,10 @@ def replay_entries(thread_id: UUID) -> List[ReplayEntry]:
             # reflowed it.
             reasoning = _reasoning_text(message.get("thinking"))
             if reasoning:
-                entries.append(("thinking", reasoning, ()))
+                entries.append(("thinking", reasoning, (), ""))
             text = _as_text(message.get("text"))
             if text:
-                entries.append(("assistant", text, ()))
+                entries.append(("assistant", text, (), ""))
             for call in message.get("tool_calls") or []:
                 entries.append(("tool", *_tool_marker(call)))
         # role == "tool": skipped by T4. Not a gap -- see the module
@@ -139,8 +150,8 @@ def _reasoning_text(record) -> str:
     return "\n\n".join(parts)
 
 
-def _tool_marker(call: dict) -> Tuple[str, Tuple[str, ...]]:
-    """One line for one tool call, and its click targets.
+def _tool_marker(call: dict) -> Tuple[str, Tuple[str, ...], str]:
+    """One line for one tool call, its click targets, and its own id.
 
     The line is the name, then a redacted param digest.
 
@@ -167,7 +178,13 @@ def _tool_marker(call: dict) -> Tuple[str, Tuple[str, ...]]:
     # (batch 65): a resumed thread that armed fewer URLs than the live
     # turn would be the archive disagreeing with the screen it came from.
     line = f"▸ {name}  {digest}".rstrip() if digest else f"▸ {name}"
-    return line, registry.call_links(name, params)
+    # §47. The id ONLY where the call opened a thread, and the registry
+    # is what says so -- naming `spawn_subagent` here would be a second
+    # copy of a fact the tool already declares, free to disagree with
+    # the TUI's copy. `str()` because it crosses into style metadata.
+    opens = registry.opens_thread(name)
+    call_id = str(call.get("id") or "") if opens else ""
+    return line, registry.call_links(name, params), call_id
 
 
 def _as_text(value: Optional[object]) -> str:

@@ -21,6 +21,7 @@ from uuid import uuid4
 
 import pytest
 
+from core import agent_activity
 from tests.conftest import settle
 from tui.app import VenastineApp
 from tui.widgets import (
@@ -58,12 +59,17 @@ def lineage(mocker):
                             call="call_9"),
     }
     mocker.patch("tui.app.storage.get_thread", side_effect=rows.get)
+    # Slice 4: a resume pairs this thread's spawn calls with the runs
+    # they made. Empty here -- the spawn line is slice 4's own subject
+    # and has its own tests.
+    mocker.patch("tui.app.storage.child_threads", return_value=[])
     return type("Lineage", (), {
         "chat": chat, "child": child, "grandchild": grandchild})()
 
 
 def _entries(*texts):
-    return [("assistant", text, ()) for text in texts]
+    """Replay entries in ReplayEntry shape: (role, text, links, call)."""
+    return [("assistant", text, (), "") for text in texts]
 
 
 def _crumb_targets(crumb):
@@ -635,3 +641,384 @@ class TestLeavingTheThreadClosesTheView:
                 "thread's id")
             assert app._pane.current == "transcript"
             assert app.query_one("#prompt").disabled is False
+
+# ---------------------------------------------------------------------------
+# ---- the inline anchor -----------------------------------------------------
+# ---------------------------------------------------------------------------
+
+def _spawn_cells(app):
+    """Every screen cell carrying a spawn call, as `(x, y, call_id)`.
+
+    Scanned off the SCREEN, like batch 65's URL test, because what matters
+    is which drawn cells a click can land on -- not which spans a renderer
+    was handed.
+    """
+    out = []
+    for y in range(app.size.height):
+        for x in range(app.size.width):
+            style = app.screen.get_style_at(x, y)
+            call = style and (style.meta or {}).get("agent_call")
+            if call:
+                out.append((x, y, call))
+    return out
+
+
+def _spawn_start(app):
+    """A screen point inside the armed name, in the transcript's own
+    coordinates, or None."""
+    cells = _spawn_cells(app)
+    if not cells:
+        return None
+    x, y, _call = cells[0]
+    origin = app._transcript.region.offset
+    return (x - origin.x, y - origin.y)
+
+
+def _spawn_event(app, name="spawn_subagent", call_id="call_7"):
+    from core.events import LoopEvent
+
+    from tui.app import LoopEventMessage
+
+    params = ({"agent_name": "explore", "task": "go and look"}
+              if name == "spawn_subagent" else {"url": "https://x.test/a"})
+    app.post_message(LoopEventMessage(LoopEvent(tool_call_start={
+        "id": call_id, "name": name, "input": params})))
+
+
+class TestTheSpawnLineIsTheInlineAnchor:
+
+    @pytest.mark.asyncio
+    async def test_a_spawn_line_arms_its_call(self):
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            _spawn_event(app)
+            await pilot.pause()
+            await pilot.pause()
+            cells = _spawn_cells(app)
+
+        assert cells, "the spawn line carries no call, so it cannot open"
+        assert {call for _x, _y, call in cells} == {"call_7"}
+
+    @pytest.mark.asyncio
+    async def test_only_the_agent_NAME_is_armed(self):
+        """A tool line is `> name  digest`, and for a spawn the digest is
+        the task -- a sentence a reader wants to read, not a control. The
+        armed region has to be exactly as wide as the thing it is about."""
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            _spawn_event(app)
+            await pilot.pause()
+            await pilot.pause()
+            cells = _spawn_cells(app)
+            row = {y for _x, y, _c in cells}
+            width = len({x for x, _y, _c in cells})
+
+        assert len(row) == 1, "the arming spread across rows"
+        assert width == len("spawn_subagent"), (
+            f"{width} cells are armed; the name is "
+            f"{len('spawn_subagent')} and the task must stay prose")
+
+    @pytest.mark.asyncio
+    async def test_a_tool_that_opens_no_thread_arms_nothing(self):
+        """The registry declares it, so the live line and the replayed one
+        cannot disagree about which lines are openable."""
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            _spawn_event(app, name="fetch_url", call_id="call_8")
+            await pilot.pause()
+            await pilot.pause()
+
+            assert _spawn_cells(app) == []
+
+    @pytest.mark.asyncio
+    async def test_ctrl_clicking_it_opens_the_run(self, lineage, mocker):
+        mocker.patch("tui.app.replay_entries", return_value=_entries("x"))
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            _spawn_event(app)
+            await pilot.pause()
+            await pilot.pause()
+            app._spawn_threads["call_7"] = str(lineage.child)
+
+            offset = _spawn_start(app)
+            assert offset is not None, "nothing was armed to click"
+            await pilot.click("#transcript", offset=offset, control=True)
+            assert await settle(pilot, lambda: app._viewing is not None), \
+                "ctrl+click on a spawn line opened nothing"
+
+        assert app._viewing == lineage.child
+
+    @pytest.mark.asyncio
+    async def test_a_plain_click_opens_nothing(self, lineage, mocker):
+        """Ctrl for batch 58's reason, unchanged: a click while reading
+        must not navigate by accident, and a bare click is selection."""
+        mocker.patch("tui.app.replay_entries", return_value=_entries("x"))
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            _spawn_event(app)
+            await pilot.pause()
+            await pilot.pause()
+            app._spawn_threads["call_7"] = str(lineage.child)
+
+            await pilot.click("#transcript", offset=_spawn_start(app))
+            await pilot.pause()
+            await pilot.pause()
+
+            assert app._viewing is None
+
+    @pytest.mark.asyncio
+    async def test_a_spawn_with_no_run_says_so(self):
+        """A refused spawn -- an unknown agent, the depth limit -- made no
+        thread. A deliberate ctrl+click that produces silence reads as a
+        broken feature rather than as an answer."""
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            transcript = app._transcript
+            _spawn_event(app)
+            await pilot.pause()
+            await pilot.pause()
+
+            await pilot.click("#transcript", offset=_spawn_start(app),
+                              control=True)
+            await pilot.pause()
+            await pilot.pause()
+
+            assert app._viewing is None
+            assert any("no thread to open" in t for _, t in
+                       transcript._entries)
+
+
+class TestTheThreeWaysACallFindsItsRun:
+    """A spawn line outlives every source individually, which is why
+    there are three of them."""
+
+    @pytest.mark.asyncio
+    async def test_a_RUNNING_child_is_paired_from_the_agent_stack(self):
+        """The line opens before the result comes back, because the span
+        carries the call and `bind` gave it a thread."""
+        from tui.app import AgentStackChanged
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.post_message(AgentStackChanged(
+                [AgentRow("explore", 1, "s1", "thread-live", "call_7")]))
+            await pilot.pause()
+            await pilot.pause()
+
+            assert app._spawn_threads == {"call_7": "thread-live"}
+
+    @pytest.mark.asyncio
+    async def test_the_pairing_survives_the_run_ending(self):
+        """The row leaves the stack the moment the run ends, and the LINE
+        stays on screen for the rest of the session."""
+        from tui.app import AgentStackChanged
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.post_message(AgentStackChanged(
+                [AgentRow("explore", 1, "s1", "thread-live", "call_7")]))
+            await pilot.pause()
+            app.post_message(AgentStackChanged([]))
+            await pilot.pause()
+            await pilot.pause()
+
+            assert app._spawn_threads == {"call_7": "thread-live"}
+
+    @pytest.mark.asyncio
+    async def test_the_sink_puts_the_call_on_the_row(self):
+        """The link in the chain between a span and the map. Every other
+        test here posts a hand-built row, so without this the sink could
+        drop the call id and the whole live pairing would go quiet."""
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            sink = app._activity
+
+            with agent_activity.span(sink, "explore", 1, "call_7"):
+                agent_activity.bind(sink, "thread-live")
+                rows = [(r.call_id, r.thread_id) for r in sink._stack]
+                await pilot.pause()
+                await pilot.pause()
+                paired = dict(app._spawn_threads)
+
+        assert rows == [("call_7", "thread-live")]
+        assert paired == {"call_7": "thread-live"}, (
+            f"the app paired {paired}; the sink is what carries a running "
+            "child's call to the transcript's line")
+
+    @pytest.mark.asyncio
+    async def test_a_FINISHED_child_is_paired_from_its_tool_result(self):
+        """The backstop, and the one that catches a child whose span never
+        reached the shell. The tool has said the id in its result since
+        §18 -- it was simply never read here."""
+        from core.events import LoopEvent
+
+        from tui.app import LoopEventMessage
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.post_message(LoopEventMessage(LoopEvent(tool_result={
+                "id": "call_7",
+                "result": {"result": "done",
+                           "subagent_thread_id": "thread-done"}})))
+            await pilot.pause()
+            await pilot.pause()
+
+            assert app._spawn_threads == {"call_7": "thread-done"}
+
+    @pytest.mark.asyncio
+    async def test_a_RESUMED_conversation_is_paired_from_storage(self,
+                                                                 mocker):
+        """The only source that works after a restart -- the other two are
+        a live span and a live tool result, neither of which happened in
+        this process. This is what the parent column is for."""
+        resumed, child = uuid4(), uuid4()
+        mocker.patch("tui.app.storage.list_threads", return_value=[])
+        mocker.patch("tui.app.replay_entries", return_value=[])
+        mocker.patch("tui.app.storage.child_threads", return_value=[
+            {"id": child, "created_at": None, "kind": "subagent",
+             "parent_call_id": "call_7", "agent_name": "explore"}])
+        mocker.patch("tui.app.ConversationMemory",
+                     lambda thread_id=None, kind="chat", **kw: type(
+                         "M", (), {"thread_id": thread_id or uuid4(),
+                                   "extra": {}, "messages": []})())
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.switch_to_thread(resumed)
+            await pilot.pause()
+
+            assert app._spawn_threads == {"call_7": str(child)}
+
+    @pytest.mark.asyncio
+    async def test_the_pairing_does_not_outlive_its_conversation(self,
+                                                                 mocker):
+        """Keyed by the call ids of one conversation's calls, so a map
+        that survived would answer the next one's clicks with the
+        previous one's runs."""
+        mocker.patch("tui.app.storage.child_threads", return_value=[])
+        mocker.patch("tui.app.replay_entries", return_value=[])
+        mocker.patch("tui.app.ConversationMemory",
+                     lambda thread_id=None, kind="chat", **kw: type(
+                         "M", (), {"thread_id": thread_id or uuid4(),
+                                   "extra": {}, "messages": []})())
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._spawn_threads["call_7"] = "thread-old"
+
+            app.switch_to_thread(uuid4())
+            await pilot.pause()
+
+            assert app._spawn_threads == {}
+
+
+class TestTheArmingSurvivesWhatTheEntriesDo:
+
+    @pytest.mark.asyncio
+    async def test_a_theme_switch_arms_the_same_line(self):
+        """`rerender()` redraws from `_entries`, so a side table it did not
+        replay would leave the line looking identical and silently
+        unopenable -- batch 65's lesson, one table over."""
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            _spawn_event(app)
+            await pilot.pause()
+            await pilot.pause()
+            before = {call for _x, _y, call in _spawn_cells(app)}
+
+            app._transcript.rerender()
+            await pilot.pause()
+            after = {call for _x, _y, call in _spawn_cells(app)}
+
+        assert before == {"call_7"}
+        assert after == before, (
+            f"the redraw armed {after}; a /theme silently disarmed the line")
+
+    @pytest.mark.asyncio
+    async def test_a_new_thread_does_not_inherit_one(self):
+        """The side table is keyed by ENTRY INDEX, so one that outlived its
+        entries would arm the next thread's Nth line with the previous
+        thread's run.
+
+        TWO THINGS THIS TEST HAS TO GET RIGHT, and the first version got
+        neither. It has to REDRAW before asserting, because on the live
+        path a write is handed its call as an argument and a stale table
+        is invisible. And the new thread's lines have to reach the SAME
+        INDEX the old spawn held -- writing one line into an empty
+        transcript lands at 0, where nothing was ever recorded, so a
+        `reset()` that cleared nothing passes.
+        """
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            transcript = app._transcript
+            _spawn_event(app)
+            await pilot.pause()
+            await pilot.pause()
+            armed_index = len(transcript._entries) - 1
+            assert transcript.spawn_at(armed_index) == "call_7"
+
+            transcript.reset()
+            for _ in range(armed_index + 1):
+                transcript.write_role("tool", "\u25b8 fetch_url  https://x.test/a")
+            transcript.rerender()
+            await pilot.pause()
+
+            assert _spawn_cells(app) == [], (
+                "a line in a fresh thread inherited the previous thread's "
+                "run")
+
+
+class TestTheRegistryIsWhatDecides:
+
+    def test_spawn_subagent_declares_that_it_opens_a_thread(self):
+        from tools.registry import registry
+
+        assert registry.opens_thread("spawn_subagent") is True
+
+    def test_nothing_else_does(self):
+        from tools.registry import registry
+
+        assert registry.opens_thread("fetch_url") is False
+        assert registry.opens_thread("shell") is False
+
+    def test_an_unknown_tool_opens_nothing(self):
+        """What an MCP tool registered at runtime is until it says
+        otherwise."""
+        from tools.registry import registry
+
+        assert registry.opens_thread("mcp__probe__whatever") is False
+
+    def test_replay_asks_the_registry_rather_than_naming_the_tool(self,
+                                                                  mocker):
+        """One declaration between two readers, so a line that opens in a
+        live turn opens in a resumed one."""
+        from core.replay import replay_entries
+
+        mocker.patch("core.replay.archive_history", return_value=[
+            {"role": "assistant", "text": "", "tool_calls": [
+                {"id": "t1", "name": "spawn_subagent",
+                 "input": {"agent_name": "explore", "task": "look"}},
+                {"id": "t2", "name": "fetch_url",
+                 "input": {"url": "https://x.test/a"}}]},
+        ])
+
+        calls = [entry[3] for entry in replay_entries(uuid4())
+                 if entry[0] == "tool"]
+
+        assert calls == ["t1", ""], (
+            f"replay carried {calls}; only a tool that opens a thread has "
+            "an id worth carrying")

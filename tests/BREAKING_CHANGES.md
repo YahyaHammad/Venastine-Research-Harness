@@ -3916,3 +3916,38 @@ guards are separate code, and a mutation to one survives a test that only drives
 **Fix:** open a sub-subagent directly, having never passed through its parent, and a
 history-derived trail shows one step where the stored parent link shows three. Slice 1 put the
 link in a column so this could be read rather than reconstructed. Batch 69.
+
+### `ToolSpec.opens_thread` removed, or read by name instead
+
+**Symptom:** `test_spawn_subagent_declares_that_it_opens_a_thread`,
+`test_a_tool_that_opens_no_thread_arms_nothing`, or
+`test_replay_asks_the_registry_rather_than_naming_the_tool`.
+
+**Fix:** two readers ask which tool calls open a run -- `core/replay.py` for a stored line and the
+TUI for a live one -- and a tool name written in both is how they come to disagree about which
+lines are clickable. Declared on the tool, R13's shape. Batch 70.
+
+### Arming the whole spawn line instead of the agent's name
+
+**Symptom:** `test_only_the_agent_NAME_is_armed`.
+
+**Fix:** the digest on a spawn line is the TASK, a sentence a reader wants to read rather than a
+control. The armed region has to be as wide as the thing it is about, and no wider. Batch 70.
+
+### A `reset()` test that writes ONE line into an emptied transcript
+
+**Symptom:** none -- the test passes against a `reset()` that clears nothing.
+
+**Fix:** the side table is keyed by entry index. The old spawn sat at index 2 (two banner lines
+precede it), so a single new line lands at index 0 where nothing was ever recorded. Write enough
+lines to REACH the index the old entry held, and redraw before asserting -- on the live path a
+write is handed its call as an argument, so a stale table is invisible. **This is the second time
+this exact test shape has been wrong**; see batch 65's entry for `_links`. Batch 70.
+
+### Observing the live pairing only through a hand-built `AgentRow`
+
+**Symptom:** none -- the sink can drop `span.call_id` and every test still passes.
+
+**Fix:** posting an `AgentStackChanged` with a row you built yourself skips the sink, which is the
+link that carries a running child's call to the transcript. One test has to open a real span.
+Batch 70.

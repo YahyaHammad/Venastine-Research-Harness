@@ -569,6 +569,21 @@ def armed_style(style, thread_id):
             + Style(meta={"agent_thread": str(thread_id)}))
 
 
+class SpawnSelected(Message):
+    """Someone ctrl+clicked a `▸ spawn_subagent` line (§47).
+
+    Carries the CALL id, not a thread id, because the transcript does
+    not have one: the line is drawn when the call starts, and the
+    child's thread does not exist yet. Resolution happens at PRESS
+    time in the app, which is what lets a line drawn before its run
+    existed still open it.
+    """
+
+    def __init__(self, call_id: str) -> None:
+        self.call_id = call_id
+        super().__init__()
+
+
 class ThreadSelected(Message):
     """Someone clicked a row that names a thread (§47).
 
@@ -624,6 +639,11 @@ class AgentRow:
     depth: int
     span_id: str = ""
     thread_id: object = None
+    # §47. WHICH tool call started this run, so the app can pair the
+    # transcript's `▸ spawn_subagent` line with the thread bound to
+    # this row -- and the line becomes openable while the run is
+    # still going, rather than only once its result comes back.
+    call_id: object = None
 
 
 class AgentPanel(Static):
@@ -1690,6 +1710,8 @@ class Transcript(RichLog):
         # rather than part of what was said. Keyed by INDEX, which
         # rerender() already walks.
         self._links: dict[int, tuple] = {}
+        # §47. entry index -> the spawn call that drew that line.
+        self._agents: dict = {}
         # §38. An assistant span with rows already on screen: its label is
         # drawn and its single entry is open at _entries[-1].
         self._stream_open = False
@@ -1736,21 +1758,31 @@ class Transcript(RichLog):
     # -- writing -----------------------------------------------------------
 
     def _emit(self, role: str, text: str, record: bool = True,
-              links=()) -> None:
+              links=(), agent_call: str = "") -> None:
         """Render one entry and remember it. THE single write path.
 
         `links` are batch 65's click targets, remembered beside the
         entry so a `/theme` rerender arms what the live draw armed. An
         entry with none -- every role outside LINKED_ROLES, and most
         tool lines -- stores nothing.
+
+        `agent_call` is §47's, and it is kept in a SECOND side table
+        rather than folded into `_links`. They are different kinds of
+        target: a link opens a browser and a spawn opens a pane, and
+        the click handler has to tell them apart anyway. Same keying,
+        same two lifetimes -- `reset()` drops it, `rerender()` replays
+        it -- because it is the same kind of fact ABOUT a line.
         """
         if record:
             self._entries.append((role, text))
             if links:
                 self._links[len(self._entries) - 1] = tuple(links)
-        self._render_entry(role, text, links)
+            if agent_call:
+                self._agents[len(self._entries) - 1] = agent_call
+        self._render_entry(role, text, links, agent_call)
 
-    def _render_entry(self, role: str, text: str, links=()) -> None:
+    def _render_entry(self, role: str, text: str, links=(),
+                      agent_call: str = "") -> None:
         if role == "user":
             # §43 (RM1). The turn's label is retired HERE and nowhere
             # else, so where the labels land is a pure function of the
@@ -1783,7 +1815,8 @@ class Transcript(RichLog):
             # §43 sentence true: a tool line INSIDE the turn, after
             # reasoning or text has already opened the label, is a no-op.
             self._open_label()
-            self.write(self._linked_line(text, "tool", links))
+            self.write(self._linked_line(text, "tool", links,
+                                         agent_call))
         elif role == "pipeline_tool":
             # The research pipeline's tool lines. Same kind of line and
             # the same style, deliberately NOT an opener: the run's label
@@ -1808,7 +1841,8 @@ class Transcript(RichLog):
         else:
             self.write(Text(f"     {text}", self._style(role)))
 
-    def _linked_line(self, text: str, role: str, targets=()) -> Text:
+    def _linked_line(self, text: str, role: str, targets=(),
+                     agent_call: str = "") -> Text:
         """One harness-drawn line, with its URLs armed (batch 65).
 
         The five-space indent every one of these lines carries is inside
@@ -1820,7 +1854,43 @@ class Transcript(RichLog):
         out = Text(style=self._style(role))
         self._append_spans(out, f"     {text}", self._styles(),
                            block=False, links_only=True, targets=targets)
+        if agent_call:
+            self._arm_spawn(out, agent_call)
         return out
+
+    def _arm_spawn(self, out: Text, call_id: str) -> None:
+        """Make the TOOL NAME on a spawn line open its run (§47).
+
+        THE NAME, not the whole line. A tool line is `▸ name  digest`,
+        and the digest is the task text -- which for a spawn is a
+        sentence a reader wants to select and read, not a control.
+        Arming the name keeps the clickable region exactly as wide as
+        the thing it is about.
+
+        Applied AFTER the URL scan and over its own columns only, so a
+        URL in the task text keeps its own target: the two never
+        overlap, because the name ends before the digest begins.
+
+        Located STRUCTURALLY rather than by the marker glyph. The `▸`
+        is written by app.py and by core/replay.py as a literal and has
+        no shared constant, so matching on it here would be a third
+        copy -- and the shape (indent, marker, space, name, two spaces,
+        digest) is what both writers actually agree on.
+
+        A line that does not have that shape is left unarmed, which is
+        what an unopenable line should be.
+        """
+        plain = out.plain
+        marker = len(plain) - len(plain.lstrip())
+        start = plain.find(" ", marker) + 1
+        if not start or start >= len(plain):
+            return
+        end = plain.find("  ", start)
+        if end < 0:
+            end = len(plain.rstrip())
+        if end <= start:
+            return
+        out.stylize(Style(meta={"agent_call": str(call_id)}), start, end)
 
     def _open_label(self) -> None:
         """Draw this turn's `venastine ›`, once (§43, RM1).
@@ -2100,7 +2170,7 @@ class Transcript(RichLog):
     # -- links (batch 58) ---------------------------------------------------
 
     def on_click(self, event) -> None:
-        """CTRL+click a URL to open it.
+        """CTRL+click a URL to open it, or a spawn to read its run.
 
         Ctrl rather than a bare click, which is the terminal's own
         convention for a link and also the reason a click while reading
@@ -2119,9 +2189,22 @@ class Transcript(RichLog):
         if not getattr(event, "ctrl", False):
             return
         style = getattr(event, "style", None)
-        url = (getattr(style, "meta", None) or {}).get("url")
+        meta = getattr(style, "meta", None) or {}
+        url = meta.get("url")
         if url:
             self.open_url(url)
+            return
+        # §47. The same gesture, a different kind of target: a URL
+        # leaves for a browser, a spawn opens a pane. One key each
+        # rather than one key with two meanings, so the branch here
+        # reads as what it is.
+        #
+        # POSTED rather than resolved: the transcript knows which CALL
+        # drew the line and nothing about which thread it made -- the
+        # line is drawn before the child exists.
+        call_id = meta.get("agent_call")
+        if call_id:
+            self.post_message(SpawnSelected(call_id))
 
     def open_url(self, url) -> None:
         """Hand `url` to the platform's browser, off the UI thread.
@@ -2164,7 +2247,8 @@ class Transcript(RichLog):
         self.flush_stream()
         self._emit("error", text)
 
-    def write_role(self, role: str, text: str, links=()) -> None:
+    def write_role(self, role: str, text: str, links=(),
+                   agent_call: str = "") -> None:
         """Write a line in an arbitrary palette role (§26).
 
         Exists so the research view can style a pass boundary, a tool call
@@ -2174,10 +2258,12 @@ class Transcript(RichLog):
 
         `links` is batch 65's, and it is ignored for every role outside
         LINKED_ROLES rather than refused: a caller that has candidates
-        should not have to know which roles use them.
+        should not have to know which roles use them. `agent_call` is
+        §47's and follows the same rule -- only a `tool` line arms it,
+        because only a tool call opens a run.
         """
         self.flush_stream()
-        self._emit(role, text, links=links)
+        self._emit(role, text, links=links, agent_call=agent_call)
 
     def write_answer(self, text: str) -> None:
         """A model answer that did not arrive as a stream (a one-shot turn,
@@ -2461,7 +2547,20 @@ class Transcript(RichLog):
         # on screen, and index N would then arm the NEXT thread's Nth
         # line with the previous one's URL.
         self._links.clear()
+        # §47, on `_links`' list for its reason: keyed by entry index,
+        # so a table that outlived its entries would arm the NEXT
+        # thread's Nth line with the previous thread's run.
+        self._agents.clear()
         self.clear()
+
+    def spawn_at(self, index: int) -> str:
+        """The spawn call recorded for entry `index`, or "" (§47).
+
+        An accessor because the app resolves at press time and has no
+        business reading a private table -- and because `_agents` is
+        keyed by entry index, which is this widget's own bookkeeping.
+        """
+        return self._agents.get(index, "")
 
     def rerender(self) -> None:
         """Redraw every entry under the current theme.
@@ -2482,7 +2581,11 @@ class Transcript(RichLog):
             # disarm every long URL in the session -- the line would
             # look identical and stop being clickable, which is the
             # kind of loss only the pointer can find.
-            self._render_entry(role, text, self._links.get(index, ()))
+            # §47's side table too, for batch 65's reason one table
+            # over: a /theme that dropped it would leave every spawn
+            # line looking identical and silently unopenable.
+            self._render_entry(role, text, self._links.get(index, ()),
+                               self._agents.get(index, ""))
 
     def last_answer(self) -> str:
         """The most recent answer in this session, or "" (for /copy last).

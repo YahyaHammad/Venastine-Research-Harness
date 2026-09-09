@@ -704,8 +704,12 @@ async def test_switching_theme_replays_the_transcript():
         # `links` since batch 65: rerender() passes the stored click
         # targets, so a two-argument spy stops standing in for the method
         # it replaced.
-        transcript._render_entry = lambda role, text, links=(): (
-            replayed.append((role, text)), original(role, text, links))[1]
+        # §47 widened it again (an armed spawn line); the spy takes
+        # whatever it is handed rather than enumerating the arguments,
+        # which is the coupling registry.dispatch()'s stubs already
+        # dropped for the same reason.
+        transcript._render_entry = lambda role, text, *targets: (
+            replayed.append((role, text)), original(role, text, *targets))[1]
 
         app.query_one("#prompt").value = "/theme light-red"
         await pilot.press("enter")
