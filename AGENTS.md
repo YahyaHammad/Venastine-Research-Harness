@@ -48,7 +48,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 4127 tests, offline, ~2-3 min by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 4143 tests, offline, ~2-3 min by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -993,6 +993,23 @@ matching `(name, depth)` happened to be right and the old code was never wrong i
 practice. It is wrong the moment two runs of one agent are open as PEERS and either may
 finish first — which is what slice 8 makes ordinary. The test drives `enter`/`exit`
 directly, because a `with` block cannot express "the outer one ended first".
+
+**ctrl+g is the keyboard route to the sidebar's rows** (§47). The panel is deliberately not
+focusable, so making its rows clickable made navigation mouse-only; the picker mirrors ctrl+t and
+draws from the same two facts the panel does, so the two cannot come to offer different things.
+**The letter was chosen by elimination and the test MEASURES it** against
+`screen.active_bindings` with the prompt focused, which is the only state where the answer means
+anything: `TextArea` claims a/c/d/e/f/k/u/v/w/x/y/z, `App` claims ctrl+c and ctrl+q, textual claims
+ctrl+p, and this app already held ctrl+t, ctrl+l and ctrl+up/down.
+
+**The permission modal names the asking run, and the harness fact is written LAST.** A subagent's
+approvals have always surfaced on the parent's screen — the channel is inherited — and the modal
+said only which tool was asked for. It reads the open span through §47's ContextVar, says nothing
+at depth 0 (the asking run is then the conversation on screen), and uses `asking_agent` rather
+than `agent`, which `spawn_subagent`'s own `request_payload` already uses for the agent about to
+be SPAWNED. **It is written after `payload.update(request_payload)`**, so a tool cannot declare
+that key and overwrite it: an agent-supplied claim replacing a harness fact is the inversion §42's
+RA6 orders this screen to prevent. Nothing declares it today; the point is that nothing can.
 
 **A `spawn_subagent` line is armed with its CALL, and resolved at PRESS time** (§47). The line
 is drawn when the call starts, before the child has a thread, so a target baked in at draw time

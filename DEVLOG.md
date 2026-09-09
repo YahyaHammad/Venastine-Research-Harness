@@ -11697,3 +11697,60 @@ now learned twice.
   before it asserts.
 - **The sink dropping the call from its row survived**, because every test that observed the
   pairing posted a hand-built row. The one link nothing drove was the sink's own copy.
+
+## Batch 71 -- the keyboard's way in, and the name on the question (2026-09-09)
+
+§47, slice 5 of eight. Two small surfaces, one of which turns out to have been protecting a hole.
+
+**ctrl+g lists the runs and opens one.** The sidebar's rows became clickable in slice 3, and the
+sidebar is deliberately not focusable -- batch 59 refused a tab stop and refused to take the arrow
+keys the suggestion panel uses -- so that made navigation reachable by mouse only. The picker
+mirrors ctrl+t, which is already this project's answer to "choose a thread", and draws from the
+same two facts the sidebar does, so the two routes cannot come to offer different things. Runs
+with no thread yet are left out; a row that cannot be opened would be a control that does nothing.
+
+**The letter was chosen by elimination and MEASURED.** `TextArea` claims a/c/d/e/f/k/u/v/w/x/y/z
+and the prompt holds focus almost always; `App` claims ctrl+c and ctrl+q; textual claims ctrl+p;
+this app already held ctrl+t, ctrl+l and ctrl+up/down. The test asserts against
+`screen.active_bindings` **with the prompt focused**, which is the only condition under which the
+answer means anything -- ctrl+k was rejected on exactly this evidence in §26.
+
+**The permission modal names the asking run.** A subagent's approvals have always surfaced on the
+parent's screen, because the channel is inherited, and the modal said only which TOOL was asked
+for -- so "Allow shell?" from a chat turn and from an agent two levels down were the same screen.
+It reads the open span through §47's ContextVar rather than threading a parameter through four
+layers, and it says nothing at depth 0, which is scope rather than a gap: the asking run is then
+the conversation you are looking at.
+
+### The hole a mutation found
+
+`asking_agent`, not `agent`, because `spawn_subagent`'s own `request_payload` carries an `agent`
+key meaning the agent about to be SPAWNED. That much was deliberate and tested.
+
+What was not deliberate: the asker was written **before** `payload.update(request_payload)`, so a
+tool declaring `asking_agent` could overwrite it -- **an agent-supplied claim silently replacing a
+harness fact, which is the exact inversion §42's RA6 orders this modal to prevent.** Nothing
+declares that key today. The point is that nothing can: the harness fact is written last now, and
+a test says so.
+
+The mutation that found it was "swap the two statements", which survived because every test
+compared the payload for a tool whose own payload had no such key.
+
+### Files
+
+- `tui/screens.py` -- `AgentPickerScreen`, and `PermissionScreen`'s asker line.
+- `tui/app.py` -- ctrl+g and `action_pick_agent`, and the two payload keys through to the screen.
+- `core/loop.py` -- `_obtain_approval` reads the open span.
+- `tui/app.tcss` -- the picker dialog, and the asker line under the title.
+- `tests/test_agent_navigation.py` (43 -> 59).
+
+### Mutation
+
+Fourteen, all killed, after three survivors -- and two of the three were the same mistake this
+project keeps finding: **observing the outcome instead of the mechanism.**
+
+- Cancelling the picker survived, because `open_agent_thread(None)` is already harmless and a
+  "did we move?" check cannot tell a guarded callback from an unguarded one. What would ship is a
+  warning logged every time somebody presses escape.
+- Dropping the asker between the request and the screen survived, because every test either built
+  the request or built the screen and nothing drove the bridge between them.

@@ -76,7 +76,8 @@ from tools.registry import registry as tool_registry
 from tui import diffs, history, meters, preferences, ravens, themes
 from tui.commands import SlashCommand, registry as commands
 from tui.screens import (
-    ClaimsScreen, ConfirmScreen, GrantPickerScreen, PermissionScreen,
+    AgentPickerScreen, ClaimsScreen, ConfirmScreen, GrantPickerScreen,
+    PermissionScreen,
     ProjectKindScreen, QuestionScreen, ReviewScreen, SubagentSignoffScreen,
     ThreadPickerScreen,
 )
@@ -403,6 +404,17 @@ class VenastineApp(App):
         # and neither binds ctrl+l, which App and Footer also leave free
         # (D22: verified against the installed version, not assumed).
         ("ctrl+l", "show_claims", "Claims"),
+        # §47. The keyboard route to what the sidebar offers on a
+        # click, because the sidebar is deliberately not focusable
+        # (batch 59 refused a tab stop and refused to take the arrows).
+        #
+        # ctrl+g, and the letter was chosen by ELIMINATION rather than
+        # by taste. `TextArea` claims a/c/d/e/f/k/u/v/w/x/y/z and the
+        # prompt holds focus almost always; `App` claims ctrl+c and
+        # ctrl+q; textual claims ctrl+p for the palette; and this app
+        # already holds ctrl+t, ctrl+l and ctrl+up/down. Measured off
+        # the installed version, not assumed (D22).
+        ("ctrl+g", "pick_agent", "Runs"),
         # §47. Escape leaves the read-only thread view, and check_action
         # keeps it OFF at every other moment -- the prompt binds escape
         # to dismissing the slash panel, and a live app binding would
@@ -1285,6 +1297,39 @@ class VenastineApp(App):
         return self.query_one("#transcript", Transcript)
 
     # -- §47, the read-only thread view ----------------------------------
+
+    def action_pick_agent(self) -> None:
+        """ctrl+g: choose a run to read, from the keyboard (§47).
+
+        The SAME list the sidebar draws, from the same two facts -- the
+        conversation's own thread and the spans open right now -- so
+        the two routes cannot come to offer different things.
+
+        Runs with no thread yet are left out. A row that cannot be
+        opened would be a control that does nothing, which is the rule
+        the sidebar's unbound rows already follow.
+
+        `self._memory`, not `self.memory`: opening a picker must not be
+        what creates a conversation (refresh_agent_panel's rule).
+        """
+        runs = []
+        root = getattr(self._memory, "thread_id", None)
+        if root is not None:
+            runs.append({
+                "label": (self.active_agent.name if self.active_agent
+                          else "this conversation"),
+                "depth": 0, "thread_id": str(root)})
+        for row in self._agent_stack:
+            if row.thread_id is not None:
+                runs.append({"label": row.name,
+                             "depth": max(row.depth, 1),
+                             "thread_id": str(row.thread_id)})
+
+        def chosen(thread_id) -> None:
+            if thread_id:
+                self.open_agent_thread(thread_id)
+
+        self.push_screen(AgentPickerScreen(runs), chosen)
 
     def on_thread_selected(self, message: ThreadSelected) -> None:
         """A panel row or a crumb segment was clicked."""
@@ -2445,7 +2490,9 @@ class VenastineApp(App):
                 request.payload.get("params") or {},
                 request.notice,
                 request.payload.get("rationale"),
-                request.payload.get("headline"))
+                request.payload.get("headline"),
+                request.payload.get("asking_agent"),
+                request.payload.get("asking_depth") or 0)
         if request.kind == interaction.REVIEW:
             return self.ask_review_blocking(
                 request.payload.get("finding") or {},
@@ -2470,7 +2517,8 @@ class VenastineApp(App):
 
     def ask_permission_blocking(self, tool_name: str, params: dict,
                                 notice, rationale=None,
-                                headline=None) -> bool:
+                                headline=None, asked_by=None,
+                                depth=0) -> bool:
         """Show the permission modal and BLOCK until answered.
 
         Called from a worker thread, never the UI thread -- both the chat
@@ -2492,7 +2540,7 @@ class VenastineApp(App):
         # answer no longer goes anywhere.
         return self._blocking_modal(
             PermissionScreen(tool_name, params, notice, rationale,
-                             headline),
+                             headline, asked_by, depth),
             on_timeout=lambda screen: self._timed_out_ask(
                 screen,
                 dismiss_with=False,

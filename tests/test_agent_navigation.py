@@ -24,6 +24,7 @@ import pytest
 from core import agent_activity
 from tests.conftest import settle
 from tui.app import VenastineApp
+from tui.screens import AgentPickerScreen, PermissionScreen
 from tui.widgets import (
     AgentPanel, AgentRow, ThreadCrumb, ThreadSelected, Transcript,
 )
@@ -1022,3 +1023,315 @@ class TestTheRegistryIsWhatDecides:
         assert calls == ["t1", ""], (
             f"replay carried {calls}; only a tool that opens a thread has "
             "an id worth carrying")
+
+# ---------------------------------------------------------------------------
+# ---- the keyboard route ----------------------------------------------------
+# ---------------------------------------------------------------------------
+
+def _picker_rows(screen):
+    from textual.widgets import ListItem
+
+    return [str(item.children[0].renderable)
+            for item in screen.query(ListItem)]
+
+
+class TestTheRunPicker:
+
+    @pytest.mark.asyncio
+    async def test_ctrl_g_is_not_shadowed_with_the_prompt_focused(self):
+        """The prompt holds focus almost always, so a key it claims is a
+        key this app cannot have. Measured off the LIVE bindings rather
+        than reasoned about -- ctrl+k was chosen against on exactly this
+        evidence, and ctrl+p is textual's own."""
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.query_one("#prompt").focus()
+            await pilot.pause()
+            live = app.screen.active_bindings
+
+            assert "ctrl+g" in live, "ctrl+g never reaches the app"
+            assert live["ctrl+g"].binding.action == "pick_agent"
+            assert type(app.focused).__name__ == "PromptInput", (
+                "this test only means something while the prompt has focus")
+
+    @pytest.mark.asyncio
+    async def test_it_offers_the_conversation_and_the_running_runs(self):
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.memory = type("M", (), {"thread_id": uuid4(), "extra": {},
+                                        "messages": []})()
+            app._agent_stack = [AgentRow("explore", 1, "s1", uuid4()),
+                                AgentRow("review", 2, "s2", uuid4())]
+
+            await pilot.press("ctrl+g")
+            assert await settle(
+                pilot, lambda: isinstance(app.screen, AgentPickerScreen))
+            rows = _picker_rows(app.screen)
+
+        assert rows == ["this conversation", "  explore", "    review"], (
+            f"the picker offered {rows}; it draws the same shape the "
+            "sidebar does, from the same two facts")
+
+    @pytest.mark.asyncio
+    async def test_a_run_with_no_thread_is_not_offered(self):
+        """A row that cannot be opened would be a control that does
+        nothing -- the rule the sidebar's unbound rows already follow."""
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._agent_stack = [AgentRow("explore", 1, "s1")]
+
+            await pilot.press("ctrl+g")
+            assert await settle(
+                pilot, lambda: isinstance(app.screen, AgentPickerScreen))
+            rows = _picker_rows(app.screen)
+
+        assert rows == []
+
+    @pytest.mark.asyncio
+    async def test_the_root_row_names_an_active_agent(self):
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.memory = type("M", (), {"thread_id": uuid4(), "extra": {},
+                                        "messages": []})()
+            app.active_agent = type("A", (), {"name": "plan"})()
+
+            await pilot.press("ctrl+g")
+            assert await settle(
+                pilot, lambda: isinstance(app.screen, AgentPickerScreen))
+            rows = _picker_rows(app.screen)
+
+        assert rows == ["plan"]
+
+    @pytest.mark.asyncio
+    async def test_opening_it_does_not_start_a_conversation(self):
+        """`self._memory`, not `self.memory`: the property creates a
+        thread on first use, and a picker that opened one would leave a
+        phantom conversation behind every time someone pressed the key."""
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+
+            await pilot.press("ctrl+g")
+            assert await settle(
+                pilot, lambda: isinstance(app.screen, AgentPickerScreen))
+
+            assert app._memory is None
+
+    @pytest.mark.asyncio
+    async def test_choosing_a_run_opens_it(self, lineage, mocker):
+        mocker.patch("tui.app.replay_entries", return_value=_entries("x"))
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._agent_stack = [AgentRow("explore", 1, "s1", lineage.child)]
+
+            await pilot.press("ctrl+g")
+            assert await settle(
+                pilot, lambda: isinstance(app.screen, AgentPickerScreen))
+            app.screen.dismiss(str(lineage.child))
+            assert await settle(pilot, lambda: app._viewing is not None)
+
+        assert app._viewing == lineage.child
+
+    @pytest.mark.asyncio
+    async def test_cancelling_opens_nothing(self, lineage, mocker):
+        """ASSERTED ON THE CALL, not on where the viewer ends up.
+
+        `open_agent_thread(None)` is already harmless -- it refuses
+        anything that is not a uuid -- so a callback that called it
+        unconditionally would pass a "did we move?" check while logging
+        a warning every time somebody pressed escape.
+        """
+        mocker.patch("tui.app.replay_entries", return_value=_entries("x"))
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._agent_stack = [AgentRow("explore", 1, "s1", lineage.child)]
+
+            await pilot.press("ctrl+g")
+            assert await settle(
+                pilot, lambda: isinstance(app.screen, AgentPickerScreen))
+            opened = mocker.patch.object(app, "open_agent_thread")
+            await pilot.press("escape")
+            await pilot.pause()
+            await pilot.pause()
+
+            assert app._viewing is None
+            opened.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# ---- who is asking ---------------------------------------------------------
+# ---------------------------------------------------------------------------
+
+class TestThePermissionModalNamesTheAsker:
+    """A subagent's approvals have always surfaced on the parent's screen
+    -- the channel is inherited -- and the modal said only which TOOL was
+    asked for. It becomes load-bearing once two questions can be pending
+    at once, which is why it lands before that slice rather than with it.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_nested_run_is_named_with_its_depth(self):
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.push_screen(PermissionScreen(
+                "shell", {"command": ["ls"]}, asked_by="explore", depth=2))
+            assert await settle(
+                pilot, lambda: isinstance(app.screen, PermissionScreen))
+            drawn = [str(w.renderable)
+                     for w in app.screen.query("#permission-asker")]
+            app.screen.dismiss(False)
+            await pilot.pause()
+
+        assert drawn == ["asked by explore (depth 2)"], drawn
+
+    @pytest.mark.asyncio
+    async def test_a_top_level_turn_says_nothing(self):
+        """The asking run is then the conversation you are looking at,
+        which needs no label. Scope, not a gap."""
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.push_screen(PermissionScreen("shell", {"command": ["ls"]}))
+            assert await settle(
+                pilot, lambda: isinstance(app.screen, PermissionScreen))
+            rows = len(app.screen.query("#permission-asker"))
+            app.screen.dismiss(False)
+            await pilot.pause()
+
+        assert rows == 0
+
+
+class TestTheAskerReachesTheScreen:
+    """The bridge between the payload and the modal. Every other test
+    here either builds the request or builds the screen, so without
+    this the app could drop the two keys in between and nothing would
+    notice."""
+
+    @pytest.mark.asyncio
+    async def test_the_payload_is_carried_to_the_modal(self, mocker):
+        from core import interaction
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            shown = mocker.patch.object(app, "ask_permission_blocking",
+                                        return_value=False)
+
+            app._ask_blocking(interaction.Request(
+                kind=interaction.APPROVAL,
+                payload={"tool_name": "shell", "params": {},
+                         "asking_agent": "explore", "asking_depth": 2}))
+
+            args = shown.call_args.args
+
+        assert args[-2:] == ("explore", 2), (
+            f"the modal was asked with {args!r}; the asking run has to "
+            "survive the trip from the request to the screen")
+
+    @pytest.mark.asyncio
+    async def test_a_request_naming_nobody_carries_nothing(self, mocker):
+        from core import interaction
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            shown = mocker.patch.object(app, "ask_permission_blocking",
+                                        return_value=False)
+
+            app._ask_blocking(interaction.Request(
+                kind=interaction.APPROVAL,
+                payload={"tool_name": "shell", "params": {}}))
+
+            args = shown.call_args.args
+
+        assert args[-2:] == (None, 0)
+
+
+class TestTheAskerComesFromTheOpenSpan:
+
+    def _ask(self, payloads):
+        from core import interaction
+
+        def ask(request):
+            payloads.append(dict(request.payload))
+            return False
+
+        return interaction.ResponseChannel(ask=ask)
+
+    def test_a_gated_call_inside_a_run_names_it(self):
+        from core.loop import _obtain_approval
+
+        payloads = []
+        with agent_activity.span(None, "explore", 1):
+            _obtain_approval(self._ask(payloads), "shell",
+                             {"command": ["ls"]}, None)
+
+        assert payloads[0]["asking_agent"] == "explore"
+        assert payloads[0]["asking_depth"] == 1
+
+    def test_a_gated_call_at_the_top_names_nobody(self):
+        from core.loop import _obtain_approval
+
+        payloads = []
+        _obtain_approval(self._ask(payloads), "shell", {"command": ["ls"]},
+                         None)
+
+        assert "asking_agent" not in payloads[0]
+
+    def test_the_innermost_run_is_the_one_named(self):
+        from core.loop import _obtain_approval
+
+        payloads = []
+        with agent_activity.span(None, "explore", 1):
+            with agent_activity.span(None, "review", 2):
+                _obtain_approval(self._ask(payloads), "shell",
+                                 {"command": ["ls"]}, None)
+
+        assert payloads[0]["asking_agent"] == "review"
+        assert payloads[0]["asking_depth"] == 2
+
+    def test_it_does_not_collide_with_the_agent_being_SPAWNED(self):
+        """`spawn_subagent`'s own request_payload carries an `agent` key
+        meaning the agent about to be spawned, and it updates over this
+        dict. Two different agents; one key would have named the wrong
+        one on the sign-off screen."""
+        from core.loop import _obtain_approval
+
+        payloads = []
+        with agent_activity.span(None, "explore", 1):
+            _obtain_approval(
+                self._ask(payloads), "spawn_subagent",
+                {"agent_name": "review", "task": "t"}, None,
+                request_payload={"subject": "review", "agent": "review",
+                                 "candidates": ["shell"]})
+
+        assert payloads[0]["agent"] == "review", "the spawned agent was lost"
+        assert payloads[0]["asking_agent"] == "explore", (
+            "the ASKING agent was overwritten by the one being spawned")
+
+    def test_a_tool_cannot_claim_to_be_the_asker(self):
+        """The harness fact wins over anything the tool supplies.
+
+        Nothing declares this key today; the point is that nothing CAN.
+        Written before the tool's payload, a tool would overwrite it --
+        an agent-supplied claim replacing a harness fact, which is the
+        inversion §42's RA6 orders the modal to prevent.
+        """
+        from core.loop import _obtain_approval
+
+        payloads = []
+        with agent_activity.span(None, "explore", 1):
+            _obtain_approval(
+                self._ask(payloads), "shell", {"command": ["ls"]}, None,
+                request_payload={"asking_agent": "something-else",
+                                 "asking_depth": 99})
+
+        assert payloads[0]["asking_agent"] == "explore"
+        assert payloads[0]["asking_depth"] == 1

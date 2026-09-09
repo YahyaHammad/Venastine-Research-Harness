@@ -389,7 +389,31 @@ def _obtain_approval(response_channel, tool_name: str, params: dict,
     kind = registry.request_kind(tool_name)
     payload = {"tool_name": tool_name, "params": params,
                "rationale": rationale, "headline": headline}
+    # §47. WHICH run is asking, read off the span that is open rather
+    # than threaded through four layers -- the same ContextVar slice 1
+    # put the parent link on, asked one question over.
+    #
+    # None at depth 0, and that is the right SCOPE rather than a gap:
+    # the asking run is then the conversation on screen, which needs no
+    # label. A nested one does, because its approvals surface on the
+    # parent's screen and "Allow shell?" said only which tool.
+    #
+    # `asking_agent`, NOT `agent`: spawn_subagent's own request_payload
+    # carries an `agent` key meaning the agent about to be SPAWNED.
+    # Two different agents, one key, and the sign-off screen would
+    # have named the wrong one.
     payload.update(request_payload or {})
+    # AFTER the tool's own payload, deliberately, and this is the half
+    # that took a mutation to notice. Written before it, a tool
+    # declaring `asking_agent` in its request_payload would silently
+    # replace this -- an agent-supplied claim overwriting a harness
+    # fact, which is the exact inversion §42's RA6 orders the modal to
+    # prevent. Nothing declares that key today; the point is that
+    # nothing CAN.
+    asking = agent_activity.current()
+    if asking is not None:
+        payload["asking_agent"] = asking.name
+        payload["asking_depth"] = asking.depth
     answer = interaction.ask(response_channel, interaction.Request(
         kind=kind, payload=payload, notice=notice))
     if kind == interaction.SUBAGENT_SIGNOFF:

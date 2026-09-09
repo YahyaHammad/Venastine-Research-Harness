@@ -3951,3 +3951,29 @@ this exact test shape has been wrong**; see batch 65's entry for `_links`. Batch
 **Fix:** posting an `AgentStackChanged` with a row you built yourself skips the sink, which is the
 link that carries a running child's call to the transcript. One test has to open a real span.
 Batch 70.
+
+### Binding the run picker to a key the prompt claims
+
+**Symptom:** `test_ctrl_g_is_not_shadowed_with_the_prompt_focused`.
+
+**Fix:** `TextArea` claims a/c/d/e/f/k/u/v/w/x/y/z, `App` claims ctrl+c and ctrl+q, textual claims
+ctrl+p, and this app already holds ctrl+t, ctrl+l and ctrl+up/down. The test measures
+`screen.active_bindings` **with the prompt focused**, which is the only state where the answer
+means anything. Batch 71.
+
+### Writing the asking run into the payload BEFORE the tool's own
+
+**Symptom:** `test_a_tool_cannot_claim_to_be_the_asker`.
+
+**Fix:** `payload.update(request_payload)` runs after, so a tool declaring `asking_agent` would
+overwrite the harness's answer -- an agent-supplied claim replacing a harness fact, which is the
+inversion §42's RA6 orders the permission modal to prevent. Nothing declares that key today; the
+point is that nothing can. Found by a mutation, not by the suite. Batch 71.
+
+### Asserting a cancelled picker by where the viewer ENDS UP
+
+**Symptom:** none -- the test passes against a callback that opens unconditionally.
+
+**Fix:** `open_agent_thread(None)` refuses anything that is not a uuid, so nothing moves either
+way. What ships is a warning logged every time somebody presses escape. Assert the call was never
+made. **Third time this shape has appeared** -- see batches 69 and 70. Batch 71.

@@ -255,6 +255,19 @@ ReviewScreen {
     margin-bottom: 1;
 }
 
+/* Section 47. Which run raised the question, when it was not the
+   conversation itself. Muted and unbold: it qualifies the title rather
+   than competing with it, and it sits directly under it because RA6
+   reads a harness fact before anything the agent wrote.
+
+   It eats the title's margin, so the pair reads as one heading rather
+   than as two blocks -- which is what the margin exists to separate. */
+#permission-asker {
+    color: $text-muted;
+    margin-top: -1;
+    margin-bottom: 1;
+}
+
 /* The pinned subject of the question (§46, EP1), and the split
    favours it deliberately: the payload below repeats the notice, the
    reason and the command itself, so rows spent here buy the one thing
@@ -425,6 +438,35 @@ ClaimsScreen {
     height: auto;
     max-height: 8;
     margin-bottom: 1;
+}
+
+/* Section 47's run picker, the keyboard route to what the sidebar
+   offers on a click. Narrower than the thread picker because its rows
+   are agent names and an indent rather than a uuid plus a preview,
+   and it takes the accent border the read-only pane takes: both say
+   the same thing, that what you are about to look at is not the
+   conversation you are having. */
+#agent-picker-dialog {
+    width: 48;
+    height: auto;
+    max-height: 20;
+    padding: 1 2;
+    border: thick $accent;
+    background: $surface;
+}
+
+#agent-picker-title {
+    text-style: bold;
+    padding-bottom: 1;
+}
+
+#agent-picker-list {
+    height: auto;
+    max-height: 14;
+}
+
+AgentPickerScreen {
+    align: center middle;
 }
 
 #thread-dialog {

@@ -161,10 +161,26 @@ class PermissionScreen(ModalScreen[bool]):
     BINDINGS = [("escape", "deny", "Deny")]
 
     def __init__(self, tool_name: str, params: dict, notice: str = None,
-                 rationale: str = None, headline: str = None):
+                 rationale: str = None, headline: str = None,
+                 asked_by: str = None, depth: int = 0):
         super().__init__()
         self._tool_name = tool_name
         self._params = params
+        # ROADMAP_v2 §47. WHICH run raised this question, when it was
+        # not the conversation itself. A subagent's approvals have
+        # always surfaced here -- the channel is inherited -- and the
+        # modal said only which TOOL was asked for, so "Allow shell?"
+        # over a chat turn and over a nested agent two levels down
+        # were the same screen.
+        #
+        # None for a top-level turn, and that is the right scope
+        # rather than a gap: the asking run is then the conversation
+        # you are looking at, which needs no label. It becomes
+        # load-bearing when two questions can be pending at once,
+        # which is why it is a prerequisite for §47's last slice
+        # rather than a nicety.
+        self._asked_by = asked_by
+        self._depth = depth
         # §46 (EP2). What this call is asking to DO -- for `shell`, the
         # command. Resolved by the registry from whichever param the
         # tool declared and passed in already a string, for the reason
@@ -205,6 +221,17 @@ class PermissionScreen(ModalScreen[bool]):
             rendered = f"{self._notice}\n\n{rendered}"
         widgets = [Label(Text(f"Allow {self._tool_name}?"),
                          id="permission-title")]
+        if self._asked_by:
+            # DIRECTLY under the title, above the headline and
+            # everything the agent wrote: RA6's ordering says a
+            # harness fact is read before an agent's claim, and which
+            # run is asking is the most harness-y fact on the screen.
+            # `Text(...)` for RA1's reason -- an agent name comes from
+            # a file whose author is not necessarily this project.
+            widgets.append(Label(
+                Text(f"asked by {self._asked_by} "
+                     f"(depth {self._depth})"),
+                id="permission-asker"))
         if self._headline:
             # `Text(...)` is not optional here (batch 42, RA1). This is
             # the most attacker-influenced string on the screen -- a
@@ -888,6 +915,58 @@ class ProjectKindScreen(ModalScreen[object]):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         self.dismiss("research" if event.button.id == "kind-research"
                      else "software")
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class AgentPickerScreen(ModalScreen[object]):
+    """Pick a run to read. Dismisses with a thread id, or None (§47).
+
+    THE KEYBOARD ROUTE to what the sidebar offers on a click. The
+    sidebar is deliberately not focusable -- batch 59 refused a tab
+    stop and refused to take the arrow keys the suggestion panel
+    uses -- so making its rows clickable made navigation reachable by
+    mouse only. A key-bound picker keeps the panel as it is and
+    mirrors ctrl+t, which is already this project's answer to
+    "choose a thread".
+
+    Only runs that HAVE a thread are listed. A row for one that
+    cannot be opened would be a control that does nothing, which is
+    the rule the sidebar's unbound rows already follow.
+    """
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, runs: list[dict]):
+        super().__init__()
+        self._runs = runs
+
+    def compose(self) -> ComposeResult:
+        items = [
+            # Indented by depth, so the list reads as the same shape
+            # the sidebar draws rather than as a flat menu of names.
+            # `Text(...)` for RA1's reason: an agent name comes from a
+            # file this project did not necessarily write.
+            ListItem(Label(Text(
+                f"{'  ' * run.get('depth', 0)}{run['label']}")))
+            for run in self._runs
+        ]
+        children = [Label("Read which run?", id="agent-picker-title")]
+        if items:
+            children.append(ListView(*items, id="agent-picker-list"))
+        else:
+            children.append(Static(
+                "Nothing is running, and this conversation has not "
+                "started yet.", id="agent-picker-empty"))
+        yield Vertical(*children, id="agent-picker-dialog")
+
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        index = event.list_view.index
+        if index is not None and 0 <= index < len(self._runs):
+            self.dismiss(self._runs[index]["thread_id"])
+        else:
+            self.dismiss(None)
 
     def action_cancel(self) -> None:
         self.dismiss(None)
