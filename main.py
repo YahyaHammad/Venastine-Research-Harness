@@ -89,7 +89,9 @@ def _print_replay(thread_id: UUID) -> None:
         print("(this thread has no messages yet)")
         return
     print()
-    for role, text in entries:
+    # `links` is the TUI's -- a ctrl+click target for a truncated URL
+    # (batch 65). This shell prints, so it drops them.
+    for role, text, _links in entries:
         if role == "user":
             print(f"You: {text}")
         elif role == "assistant":

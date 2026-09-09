@@ -499,6 +499,8 @@ class TestPromptAssembly:
         app._t = _T()
         app.active_skills = ["alpha"]
         app.active_agent = None
+        # Batch 59: run_agent_turn hands its activity sink to _run().
+        app._activity = None
         app.memory = ConversationMemory()
         app.model = "m"
         app.provider_name = "ANTHROPIC"
@@ -548,6 +550,10 @@ class TestPromptAssembly:
         # empty dict keeps them no-op appends.
         app.memory = SimpleNamespace(thread_id=uuid4(), extra={})
         app._busy = False
+        # Batch 59: the run sites hand their activity sink down so a
+        # spawn becomes a sidebar row. None is the supported "nobody
+        # is watching" value, which is what a bare app is.
+        app._activity = None
         app.model = "m"
         app.provider_name = "ANTHROPIC"
         app.effort = None

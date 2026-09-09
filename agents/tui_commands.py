@@ -1,10 +1,10 @@
 """
 agents/tui_commands.py
 
-ROADMAP_v2 Â§18, D6 user-initiated half: /agent, /goal and /grill-me
-register into Â§16's slash registry. The shell hosts the commands; this
+ROADMAP_v2 §18, D6 user-initiated half: /agent, /goal and /grill-me
+register into §16's slash registry. The shell hosts the commands; this
 section owns them -- the same mechanism-vs-policy split tools/registry.py
-uses for tools. TUI-only for now (CLI stays unchanged per the Â§18 scope
+uses for tools. TUI-only for now (CLI stays unchanged per the §18 scope
 decision); the model-initiated half lives in subagent_tool.py and works
 in every shell.
 
@@ -31,8 +31,9 @@ def _cmd_agent(app, args: str) -> None:
         return
     if args == "default":
         app.active_agent = None
-        app._transcript.write_system("Active agent cleared â€” default harness.")
+        app._transcript.write_system("Active agent cleared — default harness.")
         _note_skills_under_new_context(app)
+        _refresh_agent_panel(app)
         return
     agent = manager.get(args)
     if agent is None:
@@ -43,15 +44,29 @@ def _cmd_agent(app, args: str) -> None:
         return
     app.active_agent = agent
     app._transcript.write_system(
-        f"Active agent: {agent.name} â€” {agent.description}")
+        f"Active agent: {agent.name} — {agent.description}")
     _note_skills_under_new_context(app)
+    _refresh_agent_panel(app)
+
+
+def _refresh_agent_panel(app) -> None:
+    """Batch 59: the panel's root row IS the active agent, so a
+    switch has to repaint it.
+
+    getattr rather than a direct call because this module is driven
+    against stub apps in tests/test_agents.py that carry a transcript
+    and nothing else -- and /agent must not start depending on a
+    sidebar widget to do its actual job."""
+    refresh = getattr(app, "refresh_agent_panel", None)
+    if refresh is not None:
+        refresh()
 
 
 def _note_skills_under_new_context(app) -> None:
     """K2's activation note is computed against the context active at
     activation time; an /agent switch changes the context for every
     subsequent turn, so re-check active skills and say what is now
-    denied (review Â§19-20 f21). Advisory only -- enforcement still
+    denied (review §19-20 f21). Advisory only -- enforcement still
     happens per call via is_tool_allowed."""
     from skills.manager import manager as skill_manager
 
@@ -104,7 +119,7 @@ def _cmd_grill(app, args: str) -> None:
     prompt -- it reads the live history directly (no digest loss)."""
     if app._busy:
         app._transcript.write_error(
-            "Still working â€” wait for this turn to finish.")
+            "Still working — wait for this turn to finish.")
         return
     agent = manager.get("grill-me")
     if agent is None:
@@ -114,7 +129,7 @@ def _cmd_grill(app, args: str) -> None:
     # run_one_shot owns the WHOLE assembly (#170): the channel, the
     # catalog facts and the run must come from one answer, so nothing is
     # decided here. (Review f19's "no context, deliberately" answered a
-    # question Â§25 R15 replaced -- what matters now is not which policy
+    # question §25 R15 replaced -- what matters now is not which policy
     # governs but whether anything can answer, and only the run knows.)
     app.run_one_shot(
         agent,
@@ -123,7 +138,7 @@ def _cmd_grill(app, args: str) -> None:
 
 
 def register_agent_commands() -> None:
-    """Idempotent â€” registering by name overwrites, matching Â§16's
+    """Idempotent — registering by name overwrites, matching §16's
     register_builtin_commands()."""
     for command in (
         SlashCommand("agent", "switch the active agent", _cmd_agent,

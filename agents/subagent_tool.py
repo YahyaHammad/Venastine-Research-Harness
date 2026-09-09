@@ -19,6 +19,7 @@ imports this module to register it, and core.loop imports tools.registry
 """
 
 import config
+from core import agent_activity
 from storage import THREAD_KIND_SUBAGENT
 from tools.context import ToolContext
 
@@ -132,7 +133,7 @@ def request_payload(params: dict, context=None) -> dict:
 
 
 def run(params: dict, parent_context=None, parent_run=None,
-        response_channel=None, signoff=None) -> dict:
+        response_channel=None, signoff=None, activity=None) -> dict:
     from core.loop import (
         RunAgentLoop, DEFAULT_PROVIDER, DEFAULT_SYSTEM_PROMPT,
     )
@@ -184,31 +185,53 @@ def run(params: dict, parent_context=None, parent_run=None,
         or DEFAULT_PROVIDER
     effort = parent_run.effort if parent_run else None
 
-    response = RunAgentLoop.run_agent_conversation(
-        user_goal=task,
-        model=model,
-        provider_name=provider,
-        max_steps=agent.max_steps or config.MAX_ITERATIONS,
-        context=child,
-        effort=effort,
-        # `child`, not the agent's own context: C6 intersects with the
-        # parent, so a parent that excluded spawn_subagent must not have
-        # the catalog re-invite its child to spawn one (review f19).
-        # #68: the child's own facts, not the parent's. A subagent
-        # spawned from a headless run inherits no channel, so its
-        # catalogs must be decided by what IT can call -- the same
-        # values handed to run_agent_conversation two lines below.
-        system_prompt=manager.system_prompt_for(
-            agent, DEFAULT_SYSTEM_PROMPT, context=child,
-            callable_only=response_channel is None,
-            granted=granted),
-        response_channel=response_channel,
-        granted_tools=granted if (response_channel is not None
-                                  and granted) else None,
-        # §27 AC1. A spawned agent's thread is not a conversation anyone
-        # will resume, and one goal-mode turn can spawn several.
-        thread_kind=THREAD_KIND_SUBAGENT,
-    )
+    # Batch 59. THE SPAN AND THE PASS-DOWN ARE ONE CHANGE, and the
+    # pass-down is the half that does the work: `activity=activity` on the
+    # call below is what lets the child's OWN spawn_subagent open a span
+    # too, so a shell sees depth 2 rather than only the spawn it can
+    # already infer from tool_call_start. Without it this reports exactly
+    # what the TUI knew before the batch.
+    #
+    # A context manager rather than a pair of calls, because the exit has
+    # to happen when the child RAISES -- a provider error inside a
+    # subagent must not leave a row on screen describing a run that is
+    # over. run_agent_conversation does not contain its own exceptions
+    # (core/events.py: "exceptions raised mid-loop propagate naturally"),
+    # so this is a reachable path rather than a defensive one.
+    #
+    # `child.subagent_depth` and not a local count: C3 already maintains
+    # that number and a second one would be free to disagree with it.
+    with agent_activity.span(activity, agent.name, child.subagent_depth):
+        response = RunAgentLoop.run_agent_conversation(
+            user_goal=task,
+            model=model,
+            provider_name=provider,
+            max_steps=agent.max_steps or config.MAX_ITERATIONS,
+            context=child,
+            effort=effort,
+            # `child`, not the agent's own context: C6 intersects with
+            # the parent, so a parent that excluded spawn_subagent must not
+            # have the catalog re-invite its child to spawn one (review
+            # f19).
+            # #68: the child's own facts, not the parent's. A subagent
+            # spawned from a headless run inherits no channel, so its
+            # catalogs must be decided by what IT can call -- the same
+            # values handed to run_agent_conversation two lines below.
+            system_prompt=manager.system_prompt_for(
+                agent, DEFAULT_SYSTEM_PROMPT, context=child,
+                callable_only=response_channel is None,
+                granted=granted),
+            response_channel=response_channel,
+            granted_tools=granted if (response_channel is not None
+                                      and granted) else None,
+            # §27 AC1. A spawned agent's thread is not a conversation
+            # anyone will resume, and one goal-mode turn can spawn several.
+            thread_kind=THREAD_KIND_SUBAGENT,
+            # The recursion. Inherited exactly as response_channel is, and
+            # for the same reason: the child is a run in its own right and
+            # whatever is watching this stack is watching that one too.
+            activity=activity,
+        )
     return {
         "result": response.text,
         "subagent_thread_id": str(response.thread_id),

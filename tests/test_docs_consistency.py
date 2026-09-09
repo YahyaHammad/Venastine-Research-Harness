@@ -49,6 +49,7 @@ under `pytest tests/test_foo.py` while you are mid-change.
 """
 
 import json
+import io
 import os
 import re
 from collections import Counter
@@ -524,6 +525,63 @@ def test_no_notebook_checkpoint_file_is_committed():
     assert tracked == [], (
         f"{tracked} -- committed notebook checkpoints are stale copies of live code, unmarked as historical, and reachable by every grep and code search a reader or an agent runs (#56)")
 
+
+def test_no_source_file_carries_double_encoded_text():
+    """Batch 59. `agents/tui_commands.py` had been decoded as cp1252 and
+    re-encoded as UTF-8 at some point, so it literally CONTAINED the
+    mojibake: `Â§` on six lines where `§` belonged, and `â€”` on three --
+    two of which were strings the user reads (`/agent` and the busy
+    refusal). Every sibling command module spells `§` correctly, so the
+    file disagreed with the whole codebase around it and nothing said so.
+
+    Invisible to every other check here. It is not a count, not a tree
+    entry, and not a claim about the code -- the module imports, the
+    tests pass, and the strings simply render wrong on screen. A reader
+    diffing the file sees `§` in their editor only if their editor
+    guesses the same wrong encoding twice.
+
+    DETECTED BY ROUND TRIP rather than by a list of bad sequences: if
+    `line.encode('cp1252').decode('utf-8')` both SUCCEEDS and DIFFERS,
+    the line is mangled and that expression is also the repair. A correct
+    line fails one of the two -- ordinary ASCII cannot decode as UTF-8
+    into something else, and a genuine `§` is not cp1252-encodable at
+    all. That is why this needs no vocabulary of dashes and quotes to
+    keep up to date, which is exactly the doc-linting rot this file's
+    header warns about.
+    """
+    suspicious = ("Ã", "â", "Â")   # the lead bytes mojibake always starts with
+    extensions = {".py", ".md", ".json", ".tcss", ".mjs", ".toml", ".ini"}
+    mangled = []
+
+    for dirpath, _dirnames, filenames in _walk_project():
+        for name in filenames:
+            if os.path.splitext(name)[1] not in extensions:
+                continue
+            path = os.path.join(dirpath, name)
+            try:
+                with io.open(path, encoding="utf-8") as f:
+                    text = f.read()
+            except (UnicodeDecodeError, OSError):
+                continue
+            for n, line in enumerate(text.splitlines(), 1):
+                if not any(c in line for c in suspicious):
+                    continue
+                try:
+                    repaired = line.encode("cp1252").decode("utf-8")
+                except (UnicodeEncodeError, UnicodeDecodeError):
+                    continue
+                if repaired != line:
+                    rel = os.path.relpath(path, _project_root())
+                    mangled.append((rel, n, line.strip(), repaired.strip()))
+
+    assert not mangled, (
+        "double-encoded text (UTF-8 read as cp1252, then re-encoded):\n"
+        + "".join(f"  {rel}:{n}\n    is: {bad[:90]}\n"
+                  f"    should be: {good[:90]}\n"
+                  for rel, n, bad, good in mangled)
+        + "The repair is the same round trip: "
+          "line.encode('cp1252').decode('utf-8')."
+    )
 
 def test_the_url_blocklist_is_defined_exactly_once():
     """The harm #56 names, stated as the property rather than as the file.

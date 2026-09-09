@@ -5,10 +5,32 @@
     width: 1fr;
 }
 
+/* IT SCROLLS, because a Vertical does not (batch 59). Textual's Vertical
+   is `overflow: hidden hidden`, so the sidebar silently dropped whatever
+   did not fit. Measured at the 24-row floor with a todo list and a
+   research run both live: `max_scroll_y` was 11 -- eleven rows the
+   container had already computed and clipped anyway -- #todo-panel lost
+   three rows and #research-progress was ENTIRELY off screen, its header
+   drawn on the last visible row with its whole body gone.
+
+   `overflow-y` on the CONTAINER, not a swap to VerticalScroll. That class
+   is `can_focus=True` and binds up/down/home/end/pageup/pagedown, which
+   would add a tab stop and take the arrows batch 55 gave the suggestion
+   panel. The trade, named rather than discovered later: this scrolls by
+   wheel and not by keyboard. EP3's sibling rule (a consent surface must
+   not be mouse-only) does not reach here -- no decision is made in the
+   sidebar, and every figure in it is also said in the transcript.
+
+   `scrollbar-size-vertical: 1` because the budget is tiny. Measured: 19
+   usable columns when everything fits, 18 while the bar is up, against 17
+   at textual's default 2. The width is CONDITIONAL either way -- widgets
+   reflow by a column when the bar appears. */
 #sidebar {
     width: 22;
     border-left: solid $panel;
     padding: 1;
+    overflow-y: auto;
+    scrollbar-size-vertical: 1;
 }
 
 #transcript {
@@ -17,9 +39,60 @@
     padding: 0 1;
 }
 
+/* Batch 55, the slash-command suggestions. Directly above the prompt
+   because it is the last child in #main's flow and #prompt is docked out
+   of that flow -- so it opens UPWARDS with no layer and no offset.
+
+   `height: auto` with a `max-height` again, and the cap is arithmetic:
+   SUGGEST_MAX_ROWS is 8, plus two border rows is 10, which at the 24-row
+   floor leaves the transcript nine rows while the panel is up. The widget
+   budgets itself to those 8 rows, so the cap is a backstop rather than a
+   clip -- if it ever clips, the budget is wrong.
+
+   No `overflow-y`. A panel that scrolled would be a second thing to
+   navigate inside a thing being navigated. */
+#slash-suggest {
+    height: auto;
+    max-height: 10;
+    border: solid $primary;
+    padding: 0 1;
+    /* The count, `4 of 26 - /help for all`. Muted for #prompt's reason:
+       it is a hint about the list, not a heading over it. */
+    border-title-color: $text-muted;
+    /* Batch 62's key hints, on the bottom border. STATED, and measured
+       rather than assumed: an unstyled subtitle renders in $primary --
+       the border's own green -- so without this the hint would be
+       brighter than the count above it on the same box, and the less
+       important of the two labels would be the louder one. No
+       `border-subtitle-align`: textual already defaults a subtitle to
+       the right, which is the corner #prompt's meter uses one box
+       down, so titles sit left and status sits right throughout. */
+    border-subtitle-color: $text-muted;
+}
+
+/* Batch 54. `height: auto` with a `max-height` -- batch 49's shape, for
+   batch 49's reason. A definite height would reserve four rows whether or
+   not anything is typed, and this box's whole point is that it is one row
+   until it isn't; auto also means the transcript gets those rows back the
+   moment a turn is submitted. The cap is what stops a pasted essay from
+   eating the transcript: 6 is the border plus four text rows, so a fully
+   extended prompt still leaves 18 of the 24-row floor above it, and past
+   four rows the box scrolls instead of growing.
+
+   `padding: 0 1` is stated rather than inherited. TextArea's own default
+   is `0 1` and the Input this replaced was `0 2`; naming it is what keeps
+   the typed text's left edge where a reader already has it. */
 #prompt {
     dock: bottom;
     border: solid $primary;
+    height: auto;
+    max-height: 6;
+    padding: 0 1;
+    /* The placeholder, which a TextArea has no other way to carry. Muted
+       is already this sheet's vocabulary for a hint (#usage-line,
+       #todo-panel, #research-progress), so it reads as one rather than
+       as a heading. */
+    border-title-color: $text-muted;
 }
 
 #raven {
@@ -38,6 +111,16 @@
     padding: 1 0 0 0;
 }
 
+/* Batch 59's agent stack. Auto height and hidden until there is an active
+   agent or a running spawn, so it costs no rows in the ordinary case --
+   the same shape #posture-badge and #usage-line already use. No colours
+   here: the panel renders through Rich styles resolved per draw
+   (role_styles), which is what makes /theme reach it. */
+#agent-panel {
+    height: auto;
+    padding-top: 1;
+}
+
 #effort-raven {
     height: 2;
     color: $secondary;
@@ -52,13 +135,24 @@
     color: $text-muted;
 }
 
-/* §22 live research view. Auto height so it takes no sidebar space
-   until a run starts, and scrolls rather than pushing the ravens off
-   screen on a long retry loop. */
+/* §22 live research view. Auto height so it takes no sidebar space until
+   a run starts.
+
+   THE CAP AND THE OVERFLOW ARE GONE (batch 59), and they were EP3's trap
+   a second time. `Static` + `max-height` + `overflow-y: auto` reads as
+   "clip it and let them scroll" and does neither: a Static's
+   `virtual_size` follows its clamped box rather than its text, so
+   `max_scroll_y` was 0 and the rows past the bound were not below the
+   fold, they were gone. Measured here at one lost row with twenty passes
+   and twelve claims; measured in tui/screens.py at nine lines in a
+   seven-row block, which is the ScrollBox that fixed it there.
+
+   The fix is the same shape: the bound belongs on a real scroll
+   container, and #sidebar is now one. What still bounds this panel is
+   ResearchProgress.ROWS -- a window over the passes, which is the half of
+   that comment that was always true. */
 #research-progress {
     height: auto;
-    max-height: 20;
-    overflow-y: auto;
     padding-top: 1;
     color: $text-muted;
 }
@@ -448,11 +542,15 @@ QuestionScreen {
 
 /* §23 slice 2's checklist. `height: auto` so an empty list costs no rows in
    whichever slot tui.todo_position put it in -- the widget hides itself, and
-   this is what makes the unused slots free. */
+   this is what makes the unused slots free.
+
+   No `max-height`, no `overflow-y`: see #research-progress for why that
+   pairing on a Static clips rather than scrolls (batch 59, EP3's trap).
+   TodoPanel.ROWS is the bound. This panel also sits in the `top` and
+   `bottom` slots inside #main, where nothing scrolls at all -- one more
+   reason its own height must be honest rather than clamped. */
 #todo-panel {
     height: auto;
-    max-height: 14;
-    overflow-y: auto;
     padding: 0 1;
     color: $text-muted;
 }

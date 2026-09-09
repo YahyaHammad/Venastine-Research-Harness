@@ -421,6 +421,10 @@ class TestTheOneShotPromptSpeaksForTheRun:
         app.active_skills = []
         app.memory = SimpleNamespace(thread_id=uuid4(), extra={})
         app._busy = False
+        # Batch 59: the run sites hand their activity sink down so a
+        # spawn becomes a sidebar row. None is the supported "nobody
+        # is watching" value, which is what a bare app is.
+        app._activity = None
         app.model = "m"
         app.provider_name = "ANTHROPIC"
         app.effort = None

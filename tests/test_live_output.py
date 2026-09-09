@@ -219,6 +219,153 @@ class TestAnOpenFenceIsHeld:
             "the prefix looks right and is not")
 
 
+class TestATableIsHeldAndDrawnWhole:
+    """Batch 53. §38's fence hold, generalised: RichLog appends and cannot
+    rewrite a drawn row, so a table committed row by row would render as
+    its own pipes and could never be put right.
+
+    The grammar itself is tested in tests/test_markdown_render.py. What is
+    here is what the WIDGET does with it -- which rows reach the screen and
+    when, and that the entry log still holds the markdown the model wrote.
+    """
+
+    TABLE = ("| Domain | Skills |\n"
+             "|---|---|\n"
+             "| math | proof-writing |\n")
+
+    def test_nothing_commits_while_a_table_is_open(self):
+        transcript, written = _recording_transcript()
+
+        transcript.stream_delta("Here:\n")
+        written.clear()
+        transcript.stream_delta(self.TABLE)
+
+        assert written == [], (
+            "a table row reached the screen before the table ended -- "
+            "RichLog cannot rewrite it, so the grid can never be drawn")
+
+    def test_the_prose_before_it_streams_anyway(self):
+        """What the CAP buys over §38's rejection. The paragraph above a
+        table has finished arriving and has nothing to do with it."""
+        transcript, written = _recording_transcript()
+
+        transcript.stream_delta("Here:\n" + self.TABLE)
+
+        assert any("Here:" in row for row in written)
+        assert not any("Domain" in row for row in written)
+
+    def test_a_non_table_line_releases_it_as_a_grid(self):
+        from rich.table import Table
+
+        transcript, written = _recording_objects()
+        transcript.stream_delta(self.TABLE + "\nAfter.\n")
+
+        tables = [row for row in written if isinstance(row, Table)]
+        assert len(tables) == 1, "the table did not render as a rich Table"
+        assert tables[0].row_count == 1
+
+    def test_a_table_open_at_the_flush_still_draws(self):
+        """A table has no terminator, so a turn that ends on one is the
+        normal way of finishing the last table in an answer -- not an
+        edge case."""
+        from rich.table import Table
+
+        transcript, written = _recording_objects()
+        transcript.stream_delta(self.TABLE)
+        transcript.flush_stream()
+
+        assert any(isinstance(row, Table) for row in written)
+
+    def test_the_entry_keeps_the_markdown_not_the_grid(self):
+        """The rule the thinking bar and the diff block already follow:
+        `_entries` holds what the model wrote, so /copy hands back pipes a
+        reader can paste somewhere else and a /theme replay re-derives the
+        box rather than replaying one drawn once."""
+        transcript, _ = _recording_transcript()
+        transcript.stream_delta(self.TABLE + "\nAfter.\n")
+        transcript.flush_stream()
+
+        assistant = [text for role, text in transcript._entries
+                     if role == "assistant"]
+        assert len(assistant) == 1
+        assert assistant[0] == self.TABLE + "\nAfter.\n"
+        assert "| Domain | Skills |" in transcript.as_text()
+
+    @pytest.mark.asyncio
+    async def test_a_table_is_spaced_like_a_fence(self):
+        """One rule for the two renderable blocks, asserted on drawn rows.
+
+        `text.split("```")` puts the newline after a closing fence into the
+        FOLLOWING plain run, so the trimming in `_render_blocks` finds two
+        there and keeps one -- a fence draws a blank line after it. A table
+        that consumed its own last newline left one behind, the trimming
+        took it, and the paragraph after a table butted straight up against
+        the bottom border while the same paragraph after a fence did not.
+
+        Rendered rather than parsed, because the parse was where the
+        asymmetry hid: both block lists looked reasonable on their own.
+        """
+        from tui.app import VenastineApp
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(60, 30)) as pilot:
+            transcript = app._transcript
+
+            def rows(text):
+                transcript.clear()
+                transcript._entries.clear()
+                transcript.write_answer(text)
+                return [strip.text.rstrip() for strip in transcript.lines]
+
+            fence = rows("before:\n\n```py\nx = 1\n```\n\nafter.\n")
+            table = rows("before:\n\n| a | b |\n|---|---|\n| 1 | 2 |\n"
+                         "\nafter.\n")
+            await pilot.pause()
+
+        assert fence[-2] == "" and fence[-1] == "after."
+        assert table[-2] == "" and table[-1] == "after.", (
+            "a table and a fence space their following paragraph "
+            f"differently: {table[-3:]!r} against {fence[-3:]!r}")
+
+    def test_a_cell_that_looks_like_console_markup_survives_verbatim(self):
+        """Cells are `Text`, and both halves of why were measured against
+        the pinned Rich rather than assumed.
+
+        A bare `str` cell is parsed for console markup by the console that
+        renders it, and the RichLog's own `markup=False` does not reach
+        inside a renderable. `[bold]x` then renders as `x` -- swallowed,
+        with nothing raised -- and `a[/]b` raises `MarkupError`, which is
+        batch 42's RA1 arriving in the middle of an answer instead of in a
+        modal. `[1, 2]` survives either way, which is why the rule is
+        about the TYPE and not about scanning for brackets.
+
+        Rendered for real through a Console: asserting that a Table object
+        was built proves nothing about what markup does to it, since the
+        parsing happens at render time.
+        """
+        import io
+
+        from rich.console import Console
+        from rich.table import Table
+
+        transcript, written = _recording_objects()
+        transcript.stream_delta(
+            "| Selector | Note |\n"
+            "|---|---|\n"
+            "| [bold]x | swallowed if this cell were a str |\n"
+            "| a[/]b | MarkupError if this cell were a str |\n"
+            "\ndone\n")
+
+        table = next(row for row in written if isinstance(row, Table))
+        buffer = io.StringIO()
+        Console(file=buffer, width=120).print(table)
+        drawn = buffer.getvalue()
+
+        assert "[bold]x" in drawn, \
+            "the markup tag was swallowed -- this cell reached Rich as a str"
+        assert "a[/]b" in drawn
+
+
 class TestTheSplitRuleItself:
 
     @pytest.mark.parametrize("pending,width,expected", [
@@ -748,6 +895,79 @@ class TestAStreamedAnswerRendersLikeAWrittenOne:
             "    self._pending += delta\n"
             "```\n\n"
             "That is the whole of it.\n"),
+        # Batch 53. The four constructs the commit cap holds, each in the
+        # shape that made the batch necessary. A table is the reported
+        # defect; the inline marks are the reason the width rule had to
+        # start measuring RENDERED cells, since `**bold**` is four cells
+        # narrower drawn than written and a source-column cut therefore
+        # lands where Rich would not have wrapped.
+        "a table": (
+            "The skills, by domain:\n\n"
+            "| Domain | Skills |\n"
+            "|---|---|\n"
+            "| math | `proof-writing`, `numerical-methods` |\n"
+            "| software | `code-review`, `debugging` |\n"
+            "\n"
+            "Loaded with `load_skill`.\n"),
+        "a table with alignment": (
+            "| Pass | Calls | Cost |\n"
+            "|:--|:-:|--:|\n"
+            "| 1 | 4 | 12k |\n"
+            "| 3b | 0 | 0 |\n"),
+        "a heading": (
+            "# Harness showcase\n\n"
+            "Three layers, mapped first.\n\n"
+            "## Live demo\n\n"
+            "The Gaussian integral is the canonical test.\n"),
+        "inline marks in a long paragraph": (
+            "The **transcript** buffers every delta until a boundary "
+            "arrives, and `stream_delta` is where anyone chasing streaming "
+            "latency should look first -- the **answer** is the two rules "
+            "in the class docstring, not the `flush_stream` call.\n"),
+        "a mark spanning a wrap boundary": (
+            "one two three four five six seven eight nine ten **eleven "
+            "twelve thirteen** fourteen fifteen sixteen seventeen.\n"),
+        # Batch 58. The list item is the batch's own construct and the
+        # rest are the shapes that made it risky -- each one a place
+        # where the live path and the replay could disagree about what a
+        # line IS.
+        "a list item that wraps": (
+            "Two things:\n\n"
+            "- the buffer holds every delta until a boundary arrives, "
+            "which is why a plain answer showed nothing at all\n"
+            "- the capture\n\n"
+            "Both fixed.\n"),
+        "an ordered list that wraps": (
+            "Steps:\n\n"
+            "1. Read the file and then measure the width of the row "
+            "before deciding where the wrap should land.\n"
+            "2. Commit.\n"),
+        "a nested list": "- outer one\n  - inner one\n  - inner two\n",
+        "a four-space nest": "1. outer\n    - four space nested item\n",
+        "an indented code sample": (
+            "Like this:\n\n"
+            "    x = a ** b ** c\n"
+            "    # a comment\n\n"
+            "Done.\n"),
+        "a url in prose": (
+            "See [the docs](https://textual.textualize.io/guide/widgets/) "
+            "for more, or just https://example.com/x instead.\n"),
+        "emphasis and strike": (
+            "This is *emphasis*, this is ~~struck~~, and 2*3*4 stays.\n"),
+        # The shipped defect this batch fixes. At this exact prefix length
+        # the wrap boundary falls immediately before the `# ` token, so
+        # the committed fragment used to render as a HEADING and swallow
+        # the hash -- which a /theme replay then put back. Pinned at the
+        # length that reproduces it rather than at a shape that might.
+        "a hash at a wrap boundary": (
+            "word0 word1 word2 word3 word4 word5 word6 word7 word8 word9 "
+            "word10 word11 wor # 42 is the issue number and the rest "
+            "continues on.\n"),
+        # Past HOLD_LIMIT the cap gives up and the line stops being an
+        # item on BOTH paths, which is the only reason these rows can
+        # still be equal.
+        "a list item past the hold limit": (
+            "- " + ("filler word here " * 80) + "and the end of it.\n"),
     }
 
     @staticmethod
@@ -856,3 +1076,595 @@ class TestTheIndicator:
 
         indicator.stop()
         assert indicator.display is False
+
+
+# ===========================================================================
+# ---- Lists, drawn (batch 58) ----------------------------------------------
+# ===========================================================================
+
+async def _drawn(text, size=(84, 40)):
+    """The rows a written answer puts on screen, with their styles.
+
+    Through a running app rather than a recording `write`, because the
+    hanging indent is a property of the ROWS: a recorder sees one `Text`
+    with newlines in it and cannot tell whether the terminal will draw
+    them where the replay would.
+    """
+    from tui.app import VenastineApp
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test(size=size) as pilot:
+        transcript = app._transcript
+        transcript.clear()
+        transcript._entries.clear()
+        transcript.write_answer(text)
+        await pilot.pause()
+        return [[(segment.text, str(segment.style))
+                 for segment in strip._segments]
+                for strip in transcript.lines if strip.text.strip()]
+
+
+def _texts(rows):
+    return ["".join(text for text, _style in row).rstrip() for row in rows]
+
+
+class TestAListItemHangsUnderItsMarker:
+    """The defect the batch exists for. A wrapped item used to return to
+    column 0, so its second row read as a new paragraph -- and structure
+    dissolved exactly when items were long, which is the common case.
+
+    Drawn rows rather than the entry log, for §27's reason: an assertion
+    that reads `_entries` would pass on a transcript that renders nothing
+    at all.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_second_row_starts_at_the_markers_text(self):
+        rows = _texts(await _drawn(
+            "- the buffer holds every delta until a boundary arrives, which "
+            "is why a plain answer showed nothing at all\n"))
+
+        assert rows[1].startswith("- the buffer")
+        assert rows[2].startswith("  ") and not rows[2].startswith("   ")
+
+    @pytest.mark.asyncio
+    async def test_an_ordered_item_hangs_under_its_own_number(self):
+        """Three columns rather than two: the indent is the column the
+        item's TEXT starts at, so it moves with the marker's width."""
+        rows = _texts(await _drawn(
+            "1. Read the file and then measure the width of the row before "
+            "deciding where the wrap should land.\n"))
+
+        assert rows[1].startswith("1. Read")
+        assert rows[2].startswith("   the") and not rows[2].startswith("    ")
+
+    @pytest.mark.asyncio
+    async def test_a_nested_item_keeps_its_own_indent(self):
+        rows = _texts(await _drawn("- outer\n  - inner\n"))
+
+        assert rows[1] == "- outer"
+        assert rows[2] == "  - inner"
+
+    @pytest.mark.asyncio
+    async def test_a_four_space_nest_renders_flat(self):
+        """The stated price of the stateless indent rule, pinned so it
+        stays a decision. Two-space nesting renders; four-space does not,
+        because at four columns nothing is read into the line at all."""
+        rows = _texts(await _drawn("1. outer\n    - four space nest\n"))
+
+        assert rows[2] == "    - four space nest"
+
+    @pytest.mark.asyncio
+    async def test_the_marker_is_the_character_the_model_wrote(self):
+        """No glyph substitution. Nothing on screen is a character
+        nobody typed -- the same rule that keeps a URL visible."""
+        rows = _texts(await _drawn("* star\n+ plus\n- dash\n"))
+
+        assert rows[1:4] == ["* star", "+ plus", "- dash"]
+
+    @pytest.mark.asyncio
+    async def test_the_marker_recedes_and_the_text_does_not(self):
+        rows = await _drawn("- the item\n")
+        marker, body = rows[1][0], rows[1][1]
+
+        assert marker[0] == "- "
+        assert marker[1] and marker[1] != body[1], \
+            "the marker took the same style as the text it places"
+
+    @pytest.mark.asyncio
+    async def test_copy_still_hands_back_the_markdown(self):
+        """`_entries` keeps what the model wrote, so the hanging indent is
+        the RENDERER's and /copy is unaffected -- the same contract the
+        thinking bar and the diff gutter keep."""
+        from tui.app import VenastineApp
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(84, 40)) as pilot:
+            transcript = app._transcript
+            transcript.clear()
+            transcript._entries.clear()
+            transcript.write_answer("- one\n- two\n")
+            await pilot.pause()
+
+            assert "- one\n- two" in transcript.as_text()
+
+
+class TestAnIndentedSampleIsLeftAlone:
+
+    @pytest.mark.asyncio
+    async def test_its_operators_survive(self):
+        """Batch 53 drew ` b ` in bold here and ate four characters that
+        were never markup. Asserted on the ROW, because the eaten
+        asterisks are only missing on screen."""
+        rows = _texts(await _drawn("Like this:\n\n    x = a ** b ** c\n"))
+
+        assert "    x = a ** b ** c" in rows
+
+
+# ===========================================================================
+# ---- Links (batch 58) -----------------------------------------------------
+# ===========================================================================
+
+def _armed(app):
+    """Every screen cell carrying a URL, as `(x, y, url)`."""
+    out = []
+    for y in range(app.size.height):
+        for x in range(app.size.width):
+            style = app.screen.get_style_at(x, y)
+            if style and style.meta.get("url"):
+                out.append((x, y, style.meta["url"]))
+    return out
+
+
+class TestOnlyTheURLIsClickable:
+    """The security rule, asserted where it can actually be checked.
+
+    `[label](url)` is not a construct: the URL is detected wherever it
+    appears and the label stays prose, so the only armed cells on screen
+    are the URL's own. A rogue model has no name to hide a target behind,
+    and that has to be true of the DRAWN cells rather than of the parse.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_armed_cells_are_the_url_and_nothing_else(self):
+        from tui.app import VenastineApp
+
+        url = "https://example.com/a"
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(84, 40)) as pilot:
+            app._transcript.clear()
+            app._transcript._entries.clear()
+            app._transcript.write_answer(f"See [docs]({url}) now.")
+            await pilot.pause()
+            cells = _armed(app)
+
+            assert len(cells) == len(url)
+            assert {found for _x, _y, found in cells} == {url}
+
+    @pytest.mark.asyncio
+    async def test_ctrl_click_opens_it(self, monkeypatch):
+        opened = []
+        monkeypatch.setattr(Transcript, "open_url",
+                            lambda self, url: opened.append(url))
+        from tui.app import VenastineApp
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(84, 40)) as pilot:
+            app._transcript.clear()
+            app._transcript._entries.clear()
+            app._transcript.write_answer("See https://example.com/a now.")
+            await pilot.pause()
+            x, y, _url = _armed(app)[0]
+            region = app._transcript.region
+
+            await pilot.click(Transcript,
+                              offset=(x - region.x, y - region.y),
+                              control=True)
+            await pilot.pause()
+
+            assert opened == ["https://example.com/a"]
+
+    @pytest.mark.asyncio
+    async def test_a_plain_click_opens_nothing(self, monkeypatch):
+        """Ctrl is the terminal's own convention for a link, and it is
+        what keeps a click while reading from launching a browser."""
+        opened = []
+        monkeypatch.setattr(Transcript, "open_url",
+                            lambda self, url: opened.append(url))
+        from tui.app import VenastineApp
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(84, 40)) as pilot:
+            app._transcript.clear()
+            app._transcript._entries.clear()
+            app._transcript.write_answer("See https://example.com/a now.")
+            await pilot.pause()
+            x, y, _url = _armed(app)[0]
+            region = app._transcript.region
+
+            await pilot.click(Transcript,
+                              offset=(x - region.x, y - region.y))
+            await pilot.pause()
+
+            assert opened == []
+
+    @pytest.mark.asyncio
+    async def test_a_ctrl_click_beside_the_url_opens_nothing(self, monkeypatch):
+        opened = []
+        monkeypatch.setattr(Transcript, "open_url",
+                            lambda self, url: opened.append(url))
+        from tui.app import VenastineApp
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(84, 40)) as pilot:
+            app._transcript.clear()
+            app._transcript._entries.clear()
+            app._transcript.write_answer("See https://example.com/a now.")
+            await pilot.pause()
+            x, y, _url = _armed(app)[0]
+            region = app._transcript.region
+
+            await pilot.click(Transcript,
+                              offset=(x - region.x - 2, y - region.y),
+                              control=True)
+            await pilot.pause()
+
+            assert opened == []
+
+    @pytest.mark.asyncio
+    async def test_a_homograph_url_renders_and_is_not_armed(self):
+        """Visible, copyable, inert. "The visible text is the target" is
+        no defence when the visible form is a lie, so a URL that is not
+        plain ASCII is drawn and left unarmed."""
+        from tui.app import VenastineApp
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(84, 40)) as pilot:
+            app._transcript.clear()
+            app._transcript._entries.clear()
+            app._transcript.write_answer("See https://аpple.com now.")
+            await pilot.pause()
+
+            assert _armed(app) == []
+            assert any("аpple.com" in strip.text
+                       for strip in app._transcript.lines)
+
+
+class TestOpenURLRefusesWhatItShould:
+    """The check is re-asked at the point of ACTION rather than trusted
+    from render time: a style in a RichLog outlives the text that made it,
+    and the moment that matters is the one where a browser would start."""
+
+    @pytest.mark.parametrize("url", [
+        "file:///etc/passwd", "javascript:alert(1)", "ftp://x.com/a",
+        "https://аpple.com", None, "",
+    ])
+    def test_it_opens_nothing(self, url, monkeypatch):
+        called = []
+        monkeypatch.setattr("tui.widgets.webbrowser.open",
+                            lambda target: called.append(target) or True)
+        transcript = Transcript()
+
+        transcript.open_url(url)
+
+        assert called == []
+
+
+async def _drawn_streamed(text, size=(84, 40)):
+    """`_drawn`, but the answer arrives five characters at a time."""
+    from tui.app import LoopEventMessage, VenastineApp
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test(size=size) as pilot:
+        transcript = app._transcript
+        transcript.clear()
+        transcript._entries.clear()
+        for index in range(0, len(text), 5):
+            app.post_message(LoopEventMessage(
+                LoopEvent(token_delta=text[index:index + 5])))
+        await pilot.pause()
+        transcript.flush_stream()
+        await pilot.pause()
+        return [[(segment.text, str(segment.style))
+                 for segment in strip._segments]
+                for strip in transcript.lines if strip.text.strip()]
+
+
+class TestPastTheHoldLimitTheStreamDrawsProseToo:
+    """What `forced` buys, and it is invisible to a comparison of TEXT.
+
+    Past HOLD_LIMIT the cap gives up on the hold, and the fragment it
+    releases still OPENS with a marker. Without `forced` reaching the
+    renderer, the live path draws that fragment as a list item -- styled
+    marker, body wrapped to the content column -- while the replay, which
+    sees the whole over-long line, draws prose. The rows can still read
+    identically, because the released fragment is one row wide either
+    way. The marker's STYLE is where the two paths part, so that is what
+    this asserts.
+    """
+
+    LONG = "- " + ("filler word here " * 80) + "and the end of it.\n"
+    SHORT = "- a short item\n"
+
+    @pytest.mark.asyncio
+    async def test_a_short_item_has_its_marker_as_its_own_styled_span(self):
+        rows = await _drawn_streamed(self.SHORT)
+        marker = rows[1][0]
+
+        assert marker[0] == "- "
+        assert marker[1] not in ("None", "none"), \
+            "the marker went out with no style of its own"
+
+    @pytest.mark.asyncio
+    async def test_an_over_long_one_does_not(self):
+        rows = await _drawn_streamed(self.LONG)
+
+        assert rows[1][0][0].startswith("- filler"), (
+            "the released fragment was drawn as a list item -- its marker "
+            "came out as its own span, which the replay never does")
+
+    @pytest.mark.asyncio
+    async def test_the_two_paths_agree_on_styles_and_not_just_rows(self):
+        """The strongest form of the batch-38 property, run on the one
+        case where the text alone cannot tell the paths apart."""
+        assert await _drawn_streamed(self.LONG) == await _drawn(self.LONG)
+
+
+# ===========================================================================
+# ---- A URL in a tool line (batch 65, TECHNICAL_DEBT 16) -------------------
+# ===========================================================================
+
+async def _harness_line(role, text, links=(), size=(110, 30)):
+    """One harness-drawn line on screen: its armed cells and its rows."""
+    from tui.app import VenastineApp
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test(size=size) as pilot:
+        transcript = app._transcript
+        transcript.clear()
+        transcript._entries.clear()
+        transcript._links.clear()
+        transcript.write_role(role, text, links)
+        await pilot.pause()
+        return _armed(app), [strip.text for strip in transcript.lines]
+
+
+def _call(name, params):
+    """The line the transcript would draw for a call, and its targets."""
+    from tools.registry import registry
+
+    digest = registry.call_digest(name, params)
+    return (f"\u25b8 {name}  {digest}".rstrip(),
+            registry.call_links(name, params))
+
+
+class TestAToolLineArmsItsURL:
+    """TECHNICAL_DEBT 16, reported and closed.
+
+    Batch 58 armed a URL in an assistant body and left tool lines out:
+    `write_role("tool", ...)` reached a plain Text, so the place a URL
+    most obviously appears was the one place inert. Asserted on the DRAWN
+    CELLS, which is the only thing a click can land on.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_fetch_url_call_is_clickable(self):
+        url = "https://example.com/relnotes"
+        cells, _rows = await _harness_line(
+            "tool", f"\u25b8 fetch_url  {url}")
+
+        assert len(cells) == len(url), (
+            f"{len(cells)} armed cells for a {len(url)}-character URL -- "
+            f"the arming has to cover the URL and nothing either side")
+        assert {found for _x, _y, found in cells} == {url}
+
+    @pytest.mark.asyncio
+    async def test_so_is_a_research_pass_tool_row(self):
+        url = "https://example.com/docs"
+        cells, _rows = await _harness_line(
+            "pipeline_tool", f"  \u25b8 web_search  {url}")
+
+        assert {found for _x, _y, found in cells} == {url}
+
+    @pytest.mark.asyncio
+    async def test_and_the_url_a_call_FAILED_on(self):
+        """Often the one actually worth opening, and unlike the call
+        digest an error line is not truncated: `redact_secrets(str(...))`
+        with no cap, so the span resolves to itself."""
+        url = "https://example.com/gone"
+        cells, _rows = await _harness_line(
+            "tool_error", f"  \u2717 fetch_url  404 fetching {url}")
+
+        assert {found for _x, _y, found in cells} == {url}
+
+    @pytest.mark.asyncio
+    async def test_the_harness_own_voice_is_not_armed(self):
+        """LINKED_ROLES is an allowlist. A `system` line is written HERE
+        rather than by a model, and nothing has asked to click one --
+        so it stays prose-free and link-free rather than being swept in
+        by a rule about `every line with a URL in it`."""
+        cells, _rows = await _harness_line(
+            "system", "see https://example.com/help for more")
+
+        assert cells == []
+
+
+class TestADigestIsNotProse:
+    """The reason tool lines take a links-only scanner.
+
+    Run through the prose grammar a shell command loses characters --
+    the backticks of a command substitution become a code span. Asserted
+    on the ROW, because the eaten characters are only missing on screen.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_shell_digest_keeps_its_backticks(self):
+        line = "\u25b8 shell  git log --format=%h  # `date`"
+        cells, rows = await _harness_line("tool", line)
+
+        assert any(line in row for row in rows), (
+            f"the drawn rows are {rows} -- the digest was marked up and no "
+            f"longer shows the command that ran")
+        assert cells == []
+
+    @pytest.mark.asyncio
+    async def test_an_mcp_filter_keeps_its_tildes_and_asterisks(self):
+        line = "\u25b8 mcp__x__y  name~=*test*  ~~old~~"
+        _cells, rows = await _harness_line("tool", line)
+
+        assert any(line in row for row in rows), rows
+
+
+class TestACandidateComesFromWhatTheLineSHOWS:
+    """Section 42 RA3's rule, arriving at a second consumer.
+
+    `call_digest` drops a tool's declared rationale param -- prose
+    written for a person, which would take sixty of the line's hundred
+    and forty characters. `call_links` has to drop the same one, or a
+    URL the reader cannot see anywhere on screen becomes a click target,
+    which is the hidden-destination problem this whole feature is built
+    against, arriving from the harness's own side.
+    """
+
+    def test_a_url_in_the_rationale_is_not_a_target(self):
+        from tools.registry import registry
+
+        params = {"rationale": "see https://example.com/why-i-ran-this",
+                  "command": "ls -la"}
+
+        assert "why-i-ran-this" not in registry.call_digest(
+            "shell", params), "the premise: the line does not show it"
+        assert registry.call_links("shell", params) == (), (
+            "the rationale's URL became a click target while the line "
+            "that would justify it is not on screen")
+
+    def test_but_one_in_the_command_is(self):
+        from tools.registry import registry
+
+        params = {"rationale": "checking the release notes",
+                  "command": "curl https://example.com/relnotes"}
+
+        assert registry.call_links("shell", params) == (
+            "curl https://example.com/relnotes",)
+
+
+class TestALongURLIsArmedBehindItsTruncation:
+    """Batch 65's trade, through the real producer.
+
+    `param_digest` caps a value at 60 characters, so the line draws a
+    prefix and an ellipsis while the click opens the whole URL. The
+    invariant that replaces `the visible text is the target` is that the
+    visible text still tells you the ORIGIN -- so the two tests below are
+    one rule read from both sides.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_click_opens_the_whole_url(self):
+        url = "https://example.com/a/very/long/path/that/keeps/going/and/on?page=2"
+        line, links = _call("fetch_url", {"url": url})
+        cells, rows = await _harness_line("tool", line, links)
+
+        assert "\u2026" in line, "the premise: this URL is truncated"
+        assert {found for _x, _y, found in cells} == {url}, (
+            f"the drawn line is {line!r} and the armed targets are "
+            f"{ {c[2] for c in cells} } -- a truncated span has to resolve "
+            f"to the URL it was cut from or long URLs stay inert")
+        assert any("example.com" in row for row in rows), (
+            "the origin has to be VISIBLE, which is what makes the "
+            "resolution honest rather than a hidden redirect")
+
+    @pytest.mark.asyncio
+    async def test_a_host_that_did_not_fit_arms_nothing(self):
+        """The pin on the invariant. Nothing on screen would say where
+        this goes, so nothing offers to take you there."""
+        url = "https://" + "a" * 70 + ".example.com/x"
+        line, links = _call("fetch_url", {"url": url})
+        cells, _rows = await _harness_line("tool", line, links)
+
+        assert cells == [], (
+            f"{line!r} armed a click whose destination the reader cannot "
+            f"see any part of")
+
+    @pytest.mark.asyncio
+    async def test_a_redacted_url_is_never_a_target(self):
+        """#167 held at the one place a URL leaves the harness.
+
+        A click hands its target to a browser, so a target taken from the
+        raw params would send the api_key the transcript deliberately
+        kept out. `redacted_values` drops any value the redactor touched,
+        so there is no candidate at all -- and the drawn `[REDACTED]`
+        form is refused a second time by `clickable`.
+        """
+        url = "https://example.com/x?api_key=sk-ant-api03-" + "A" * 80
+        line, links = _call("fetch_url", {"url": url})
+        cells, rows = await _harness_line("tool", line, links)
+
+        assert links == (), f"redacted_values offered {links}"
+        assert cells == []
+        assert not any("sk-ant" in row for row in rows)
+
+
+class TestTheTargetsSurviveWhatTheEntriesDo:
+    """The side table is the only thing that can lose them, so both of
+    its lifetimes get a pin."""
+
+    URL = "https://example.com/a/very/long/path/that/keeps/going/and/on?page=2"
+
+    @pytest.mark.asyncio
+    async def test_a_theme_switch_arms_the_same_cells(self):
+        """rerender() redraws every entry from `_entries`, and a version
+        that did not pass the stored targets would leave a line looking
+        identical and quietly unclickable -- a loss only the pointer can
+        find."""
+        from tui.app import VenastineApp
+
+        line, links = _call("fetch_url", {"url": self.URL})
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(110, 30)) as pilot:
+            transcript = app._transcript
+            transcript.clear()
+            transcript._entries.clear()
+            transcript._links.clear()
+            transcript.write_role("tool", line, links)
+            await pilot.pause()
+            before = {found for _x, _y, found in _armed(app)}
+
+            app.query_one("#prompt").value = "/theme light-red"
+            await pilot.press("enter")
+            await pump(pilot, 4)
+
+            assert {found for _x, _y, found in _armed(app)} == before, (
+                "a /theme disarmed the line it only meant to recolour")
+            assert before == {self.URL}
+
+    @pytest.mark.asyncio
+    async def test_a_new_thread_does_not_inherit_one(self):
+        """reset() clears the entries; a target left behind would arm the
+        NEXT thread's line at the same index with the previous one's
+        URL."""
+        from tui.app import VenastineApp
+
+        line, links = _call("fetch_url", {"url": self.URL})
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(110, 30)) as pilot:
+            transcript = app._transcript
+            transcript.clear()
+            transcript._entries.clear()
+            transcript._links.clear()
+            transcript.write_role("tool", line, links)
+            await pilot.pause()
+            assert _armed(app), "the premise: this line was armed"
+
+            transcript.reset()
+            transcript.write_role("tool", line)
+            # THROUGH A REDRAW, which is the only path that reads the
+            # side table. The live write is handed its links as an
+            # argument, so a stale entry is invisible until something
+            # re-renders -- a /theme, three commands later, arming a
+            # line in this thread with the previous thread's URL.
+            transcript.rerender()
+            await pilot.pause()
+
+            assert _armed(app) == [], (
+                "the new thread's line resolved against the old thread's "
+                "target -- reset() has to clear the side table too")

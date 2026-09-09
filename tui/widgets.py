@@ -5,14 +5,23 @@ ROADMAP_v2 §16 widgets. Presentation only -- nothing here imports core/
 or reaches into harness state; tui/app.py feeds them.
 """
 
+import webbrowser
+
+from rich import box
+from rich.console import Console
+from rich.style import Style
 from rich.syntax import Syntax
+from rich.table import Table
 from rich.text import Text
+from textual.binding import Binding
+from textual.message import Message
 from textual.reactive import reactive
-from textual.widgets import RichLog, Static
+from textual.widgets import RichLog, Static, TextArea
 
 from prompts.system_prompts import pass_label
 
-from tui import diffs, ravens, themes
+from tui import diffs, markdown, ravens, themes
+from tui.commands import registry as commands
 
 # Animation cadence. Slow enough to read, and paused outright while tokens
 # are streaming -- a redraw loop competing with token deltas is the one
@@ -33,6 +42,39 @@ THINKING_INDENT = "  "
 # has bigger problems than streaming cadence, and an unmeasurable width
 # (a bare-built test widget, a widget before mount) reads as 0.
 MIN_WRAP_WIDTH = 20
+
+# Batch 55, the slash-command suggestion panel. The two caps are a pair:
+# five entries is the list a reader takes in at a glance, eight rows is
+# what leaves the transcript readable at the 24-row floor, and at 80
+# columns most entries wrap to two rows so the ROW cap is usually the one
+# that bites. See SlashSuggest for why the gutters are inside the wrap.
+SUGGEST_SEP = " ● "
+SUGGEST_ELLIPSIS = "…"
+SUGGEST_LEAD = "  "
+SUGGEST_CONT = "    "
+SUGGEST_MAX_ENTRIES = 5
+SUGGEST_MAX_ROWS = 8
+SUGGEST_MAX_LINES = 2
+SUGGEST_HIGHLIGHT = "reverse"
+
+# Batch 62, the keys the panel spends while it is open. Four of them
+# change meaning here and none was written anywhere in the TUI: the
+# arrows move the highlight, tab and enter BOTH complete, escape
+# dismisses. `enter` is the one that costs something -- it completes
+# rather than sends, so a fully typed /help takes two presses, and the
+# first changes nothing a reader can see except a trailing space.
+#
+# `tab/enter` is one item because they are one action: action_submit
+# and action_complete both call _complete(). The separator is the
+# title's, so the two labels on this box read as one voice.
+#
+# NO SQUARE BRACKETS. `_BorderTitle.__set__` runs the value through
+# `render_str`, so a `[` is markup -- and the getter hands back
+# `.markup`, which re-escapes it, so the change-guard below would
+# never compare equal and every paint would schedule another.
+SUGGEST_HINT_SEP = " · "
+SUGGEST_HINT_MOVE = "↑↓ move"
+SUGGEST_HINT_REST = ("tab/enter complete", "esc dismiss")
 
 # §41. The inline diff's furniture, owned by the renderer for the same
 # reason the thinking bar is: `_entries` keeps the canonical block, so
@@ -68,6 +110,14 @@ _DIFF_MARKS = {
     diffs.ADDED: "+",
     diffs.ELIDED: " ",
 }
+
+# Batch 53. The table's box, and the owner's choice among rich.box's
+# presets. A full grid rather than one of the rule-only forms: the
+# transcript already draws box characters for a thinking span (╭ │ ╰), so
+# the vocabulary is established, and a table is the one construct here
+# whose whole point is that a reader can follow a row across several
+# columns without losing the line.
+TABLE_BOX = box.SQUARE
 
 # Batch 41 (X3). The checklist vocabulary, in ONE place because two
 # panels render it and they were already spelling it differently: the
@@ -125,6 +175,23 @@ CONVERSATION_ROLES = frozenset({
 # shape survives the rename unchanged.
 META_ROLES = frozenset({
     "system", "warning", "error", "pass", "pass_done", "success"})
+
+# Batch 65 (TECHNICAL_DEBT 16). The lines whose URLs are armed for
+# ctrl+click, beside the two sets above for their reason: which roles a
+# rule is true of is a list, and a list that lives at its one use site
+# is a list nothing can check.
+#
+# These three are what a model's tool CALL or its failure produced --
+# `▸ fetch_url  https://…` is where a URL most obviously appears, and it
+# was the one place inert while the same URL in prose was not. The
+# harness's own voice (`system`, `error`, `warning`) is deliberately
+# absent: those lines are written here, not by a model, and nothing has
+# reported wanting to click one.
+#
+# They take the LINKS-ONLY scanner, never the prose grammar. A tool
+# line is a digest, and `markdown.link_spans` says at length what the
+# full grammar does to one.
+LINKED_ROLES = frozenset({"tool", "pipeline_tool", "tool_error"})
 
 
 class RavenPanel(Static):
@@ -414,7 +481,9 @@ class TodoPanel(Static):
 
     # A window, for ResearchProgress's reason: a Static does not scroll
     # itself to the bottom, so an unbounded list would push the newest item
-    # out of view -- the opposite of the problem being solved.
+    # out of view -- the opposite of the problem being solved. The window is
+    # the ONLY bound since batch 59; the `max-height` beside it in the
+    # stylesheet was clipping, not scrolling.
     ROWS = 12
 
     todos = reactive(None, always_update=True)
@@ -464,6 +533,121 @@ class TodoPanel(Static):
         self.update(body)
 
 
+class AgentPanel(Static):
+    """Who is running, and how deep (batch 59).
+
+    A STACK, NEVER A LIST OF PEERS, and that is a fact about the harness
+    rather than a rendering choice. core/loop.py dispatches tool calls in
+    a plain `for` loop and spawn_subagent BLOCKS on the child run, so
+    there is never a second agent alongside the first -- what there is is
+    a chain, each frame suspended inside the one below it, bounded by
+    config.SUBAGENT_MAX_DEPTH. Indentation is the honest drawing of that;
+    a flat list would claim a concurrency this harness does not have.
+
+    Fed from core/agent_activity.py through app.py, never polled -- the
+    same split TodoPanel keeps: the sink says when, and this widget holds
+    no authoritative copy of anything.
+
+    Hidden when it has nothing to say, GoalBanner-style: the sidebar is
+    twenty columns wide and its rows are contested, so `default` with an
+    empty stack costs nothing rather than a permanent row saying so.
+    """
+
+    # 22-column box, less a border column and a padding column each side.
+    # MEASURED, not derived from the `width: 22` in the stylesheet: the
+    # border is easy to forget and the answer is 19, dropping to 18 while
+    # the sidebar's scrollbar is up. The narrow case is the one to lay out
+    # against, since a row that fits 18 fits 19.
+    WIDTH = 18
+
+    # Two spaces per level, so depth 2 costs four columns of the eighteen.
+    INDENT = 2
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._agent = None
+        self._stack: list = []
+        # Explicit, for TodoPanel's reason: a widget that renders nothing
+        # yet must not be a visible empty box before its first update.
+        self.display = False
+
+    def _styles(self) -> dict:
+        try:
+            app = self.app
+        except Exception:  # noqa: BLE001 -- see Transcript._styles
+            return {}
+        return themes.styles_for(app)
+
+    def show(self, agent_name, stack) -> None:
+        """Draw the active agent and the spans currently open under it.
+
+        `agent_name` is None when no /agent switch is active. `stack` is a
+        list of (name, depth), outermost first.
+        """
+        self._agent = agent_name
+        self._stack = list(stack)
+        self._redraw()
+
+    def restyle(self) -> None:
+        """Re-render under the current theme (#183), like ResearchProgress."""
+        self._redraw()
+
+    @classmethod
+    def _fit(cls, text: str, width: int) -> str:
+        """Truncate to `width` cells, with an ellipsis when it bites.
+
+        Appended by hand rather than through `Text.truncate()`, which
+        batch 55 measured doing nothing on a wrapped line -- and the rows
+        here are `no_wrap`, so an overlong one would be cropped invisibly
+        instead. `pipeline-reviewer` is seventeen characters and reaches
+        this at every depth below the root.
+        """
+        if width <= 0:
+            return ""
+        if len(text) <= width:
+            return text
+        if width == 1:
+            return "\u2026"
+        return text[:width - 1] + "\u2026"
+
+    def _redraw(self) -> None:
+        if self._agent is None and not self._stack:
+            self.display = False
+            self.update("")
+            return
+
+        styles = self._styles()
+        body = Text()
+        body.append("agent\n\n")
+        # The root row is drawn whenever anything is: the indented rows
+        # below hang off it, and a spawn under no /agent switch would
+        # otherwise start at column two with nothing above it.
+        # `assistant_label`, not a raw "accent" key -- role_styles has no
+        # such role, so that lookup would silently return "" and /theme
+        # would never reach this row. Bold accent is the IDENTITY role,
+        # which is exactly what "which agent is answering" is; the spans
+        # below take plain `tool` accent, so the root reads as the heavier
+        # of the two without introducing a second hue.
+        body.append(
+            self._fit(self._agent or "default", self.WIDTH) + "\n",
+            styles.get("assistant_label", ""))
+        for name, depth in self._stack:
+            # `max(depth, 1)` so a span that somehow reports depth 0 still
+            # reads as nested rather than colliding with the root row --
+            # two rows at column zero would say two agents are running,
+            # which is the one thing this panel must never claim.
+            pad = " " * (self.INDENT * max(depth, 1))
+            room = self.WIDTH - len(pad) - 2      # the marker and its space
+            body.append(f"{pad}{MARK_RUNNING} {self._fit(name, room)}\n",
+                        styles.get("tool", ""))
+        # `no_wrap` / crop for batch 55's reason: a row this widget already
+        # sized must not be re-wrapped by the Static underneath it, and a
+        # miscalculation should clip visibly rather than reflow invisibly.
+        body.no_wrap = True
+        body.overflow = "crop"
+        self.display = True
+        self.update(body)
+
 class ResearchProgress(Static):
     """Live state of a /research run (ROADMAP_v2 §22).
 
@@ -493,10 +677,15 @@ class ResearchProgress(Static):
 
     # §26. Code stages roughly double the row count, so the §22 window of 8
     # would push Pass 0 off before the run reached its own claims. Still a
-    # WINDOW rather than the whole list: #research-progress scrolls, but a
-    # Static does not scroll itself to the bottom, so an unbounded list
-    # would leave the newest row out of view -- the opposite of the
-    # problem being fixed.
+    # WINDOW rather than the whole list: a Static does not scroll itself to
+    # the bottom, so an unbounded list would leave the newest row out of
+    # view -- the opposite of the problem being fixed.
+    #
+    # This used to say "#research-progress scrolls", and it never did
+    # (batch 59). The panel carried `max-height` + `overflow-y: auto`,
+    # which on a Static clips rather than scrolls -- EP3's trap, measured
+    # here at one lost row. The SIDEBAR scrolls now; this window is what
+    # keeps the newest row near the top of what it reveals.
     ROWS = 16
 
     def __init__(self, **kwargs):
@@ -634,6 +823,587 @@ class ResearchProgress(Static):
         self.update(body)
 
 
+class SlashSuggest(Static):
+    """The commands you could be typing, above the prompt (batch 55).
+
+    Twenty-six slash commands were reachable only by remembering that
+    `/help` exists -- the mount banner says so once and then scrolls away.
+    This lists the ones whose name starts with what has been typed, and
+    `tui/commands.py`'s `matching()` is what it lists, so the panel and
+    `/help` read one registry and cannot drift.
+
+    A widget in `#main`, NOT a screen. `#prompt` is `dock: bottom`, so a
+    sibling yielded after the transcript lands directly above it -- the
+    ThinkingIndicator/TodoPanel shape, hidden until it has something to
+    say, `height: auto` so it costs nothing while hidden.
+
+    Three things here are load-bearing.
+
+    **It owns the selection, not the prompt.** How many entries fit is a
+    function of the RENDERED WIDTH, and only the thing that draws knows
+    that. Split the two and the prompt can highlight a sixth entry the
+    panel had no room for -- an invisible selection that `enter` would
+    then complete. `chosen` and `move()` are the whole interface.
+
+    **The budget is on ROWS.** At most SUGGEST_MAX_ENTRIES entries and at
+    most SUGGEST_MAX_ROWS rows, whichever binds first, stopping at the
+    first entry that would overflow rather than skipping it -- a list that
+    skipped would no longer be alphabetical and the order would read as
+    arbitrary. At 80 columns most entries wrap to two rows, so the row cap
+    is usually the one that bites: `/` shows four.
+
+    **The window SLIDES** (batch 56). `_first` is where it starts and it is
+    derived, never stored beside the selection: `move()` picks a command
+    out of all the matches and `_budget()` scrolls the window the least
+    it can to keep that command on screen. Batch 55 wrapped at the last
+    DRAWN entry instead, which left twenty-two of twenty-six commands
+    unreachable by keyboard under a panel whose own title said twenty-six.
+
+    Because entries are one or two rows, a step down drops one entry from
+    the top and gains one at the bottom -- or drops one and gains two. That
+    is not a rule; it is the row budget refilling, and it is why the window
+    changes SIZE as well as contents while it scrolls (measured: four
+    entries over seven rows at the top of the list, four over eight one
+    step later, five over seven in the middle). Two things follow, and
+    neither is optional: `move()` refreshes with `layout=True`, and it is
+    reached through app.py rather than called directly -- a panel that
+    resizes takes rows from the transcript, and the scroll position that
+    has to survive that is only knowable before the relayout.
+
+    **A Static RE-WRAPS what you already wrapped.** The first draft wrapped
+    each entry to `width - 2` and then drew continuation lines under a
+    four-space gutter, so a two-line entry rendered as THREE rows, the
+    height arithmetic was wrong by one per entry, and the ellipsis ended up
+    on a row that had already been dropped. Both gutters have to fit inside
+    the wrap width, and the outer Text carries `no_wrap` / `overflow="crop"`
+    so that a miscalculation clips where it can be seen instead of
+    reflowing where it cannot. The pin is a test that no rendered row is
+    wider than the panel.
+
+    A related trap in the same family: `Text.truncate()` on a WRAPPED line
+    does nothing. The overflow is in the lines that were dropped, not in
+    the line that was kept, so the line reads as complete when it is not --
+    the ellipsis has to be appended deliberately.
+
+    **The bottom border says which keys this spends** (batch 62). Four
+    keys change meaning while the panel is open and none of them was
+    written anywhere. Not the TITLE, which the count already holds --
+    at 80 columns the label budget is 52 cells, the count is 25 and the
+    hint is 42, so they cannot share the row. And not the FOOTER:
+    `Screen.active_bindings` drops a binding only on `check_action`
+    returning `is False`, and `tab`/`escape` must return `None` here so
+    they still reach the focus system with the panel shut -- a shown
+    binding would therefore sit in the footer greyed and permanent.
+
+    The hint shortens by STATE first and by width second, and the state
+    half is the title's own rule applied to a control: with one match
+    `move()` wraps to the command it is already on, so `↑↓ move` would
+    advertise a key that does nothing. Parts then drop from the LEFT
+    while the rest overflows, rather than being truncated -- an
+    ellipsised `esc dism…` is furniture, not help. What survives the
+    narrowest terminal is therefore how to get rid of the panel, which
+    is the useful key at a width where the entries are unreadable.
+
+    The highlight is `reverse` rather than a palette role. TodoPanel's
+    caution applies (only the theme-invariant roles are safe across all
+    fourteen themes) and reverse is invariant by construction: it swaps
+    whatever the theme already chose, so it adds no colour for
+    tests/test_themes.py's contrast floors to fail to measure.
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        # EXPLICIT, TodoPanel's reason: nothing sets a list until the user
+        # types a slash, which on many sessions is never, and a visible
+        # empty box is worse than the thing it advertises.
+        self.display = False
+        self._matches: list = []
+        # An index into _matches, NOT into the window: the window slides to
+        # follow it (batch 56), and _first is where the window starts.
+        self._selected = 0
+        self._first = 0
+        self._width = 0
+        # Per entry, the rendered lines. Computed in get_content_height,
+        # where the width arrives before the first paint.
+        self._groups: list = []
+
+    # -- what the prompt drives ---------------------------------------------
+
+    def offer(self, matches: list) -> None:
+        """Replace the list, hiding the panel when it is empty.
+
+        `refresh(layout=True)`, not `update()`: the render is a function of
+        the width, so the panel has to be re-MEASURED, not just repainted.
+        """
+        self._matches = list(matches)
+        self._selected = 0
+        self._first = 0
+        self._groups = []
+        self.display = bool(self._matches)
+        self.refresh(layout=True)
+
+    def move(self, delta: int) -> None:
+        """Move the highlight over ALL the matches, wrapping at the ends.
+
+        Over the matches, not over what is on screen (batch 56). Wrapping
+        at the last DRAWN entry left twenty-two of twenty-six commands
+        unreachable by keyboard under a bare slash, on a panel whose own
+        title said there were twenty-six.
+
+        This sets the selection and nothing else. Where the window has to
+        move so the selection is visible is `_budget`'s answer, because it
+        is a function of the WIDTH -- which is the same split the class
+        docstring already turns on.
+
+        `layout=True` is load-bearing rather than tidy. A sliding window
+        changes SIZE as well as contents (measured: four entries over seven
+        rows at the top of the list, four over eight one step later, five
+        over seven in the middle), and a plain `refresh()` leaves the
+        widget measured at its old height with the extra row silently
+        clipped.
+        """
+        self._ensure()
+        if not self._matches:
+            return
+        self._selected = (self._selected + delta) % len(self._matches)
+        self._groups = []
+        self.refresh(layout=True)
+
+    @property
+    def chosen(self):
+        """The highlighted command, or None when nothing is offered."""
+        self._ensure()
+        if not self.display or not self._matches:
+            return None
+        return self._matches[min(self._selected, len(self._matches) - 1)]
+
+    @property
+    def visible(self) -> list:
+        """The commands actually on screen, in order.
+
+        The honest accessor, and it exists because the obvious spelling --
+        `_matches[:shown]` -- quietly assumes a window that starts at zero,
+        which stopped being true the moment the list could scroll.
+        """
+        self._ensure()
+        return self._matches[self._first:self._first + len(self._groups)]
+
+    @property
+    def shown(self) -> int:
+        """How many entries the last measurement had room for."""
+        self._ensure()
+        return len(self._groups)
+
+    def _ensure(self) -> None:
+        """Measure now if a layout pass has not happened yet.
+
+        `offer()` and `move()` clear the groups and the next layout
+        recomputes them, but a key pressed in between -- or a test that
+        offers and asks in one breath -- would otherwise see an empty list
+        and no selection.
+        """
+        if not self._groups and self._matches and self._width:
+            self._budget(self._width)
+
+    # -- measuring -----------------------------------------------------------
+
+    def _entry(self, command, inner: int) -> list:
+        """One command's rendered lines, at most SUGGEST_MAX_LINES of them.
+
+        `/name SEP summary  usage`, in that order: the reverse order pushes
+        the DESCRIPTION off the entry for the two commands whose flags are
+        long, and the description is the half this panel exists for. The
+        flags are what truncates.
+        """
+        body = "/" + command.name + SUGGEST_SEP + command.summary
+        if command.usage:
+            body += "  " + command.usage
+        lines = list(Text(body).wrap(Console(width=inner), inner, no_wrap=False))
+        if len(lines) > SUGGEST_MAX_LINES:
+            lines = lines[:SUGGEST_MAX_LINES]
+            # crop THEN append: truncate(overflow="ellipsis") is a no-op
+            # here, because this line is not the one that overflowed.
+            lines[-1].truncate(max(0, inner - 1), overflow="crop")
+            lines[-1].append(SUGGEST_ELLIPSIS)
+        return lines
+
+    def _fill(self, first: int, inner: int) -> list:
+        """The entries that fit starting at `first`, under both caps."""
+        groups, used = [], 0
+        for command in self._matches[first:first + SUGGEST_MAX_ENTRIES]:
+            lines = self._entry(command, inner)
+            if used + len(lines) > SUGGEST_MAX_ROWS:
+                break
+            groups.append(lines)
+            used += len(lines)
+        return groups
+
+    def _budget(self, width: int) -> None:
+        """Where the window sits, what fits in it, and the title.
+
+        The window is DERIVED from the selection rather than stored beside
+        it, so the two cannot disagree: `move()` says which command is
+        chosen and this says which commands can be seen.
+
+        Scrolling is minimal in both directions -- the window advances only
+        far enough to keep the selection visible, and jumps straight to it
+        going the other way. Because the entries are one or two rows, that
+        is what makes a step down drop one entry and gain one, or drop one
+        and gain TWO: it is the row budget refilling, not a rule of its own.
+
+        The loop terminates because `first` only rises and a single entry
+        is at most SUGGEST_MAX_LINES rows, so `first == self._selected`
+        always yields a window containing the selection. The empty guard is
+        what keeps that true -- with no matches `_fill` returns nothing and
+        the condition could never be met.
+
+        No minimum width: a terminal too narrow to read is still bounded
+        here, because the two-line cap holds whatever the wrap does, so the
+        panel degrades to something short rather than to something
+        unbounded. MIN_WRAP_WIDTH's posture, one line up the same street.
+        """
+        self._width = width
+        if not self._matches:
+            self._groups = []
+            self._first = 0
+            return
+        inner = max(1, width - len(SUGGEST_CONT))
+        if self._selected >= len(self._matches):
+            self._selected = 0
+        first = min(self._first, self._selected)
+        while True:
+            groups = self._fill(first, inner)
+            if self._selected < first + len(groups):
+                break
+            first += 1
+        self._first = first
+        self._groups = groups
+        # #30/M14: a capped list that does not say it is capped reads as
+        # "this is everything". Shown-of-MATCHED rather than shown-of-all,
+        # because "4 of 26" under a typed `/c` would claim twenty-two
+        # candidates that do not exist. Both numbers are counted, never
+        # written down -- register a twenty-seventh command and the bare
+        # `/` title says 27 with no edit here.
+        #
+        # The RANGE appears only once the list can scroll (batch 56). On a
+        # list that fits entirely there is nowhere to be, so "1-1 of 1"
+        # would be noise where "1 of 1" is a fact.
+        if len(groups) == len(self._matches):
+            span = str(len(groups))
+        else:
+            span = f"{first + 1}-{first + len(groups)}"
+        title = f"{span} of {len(self._matches)} · /help for all"
+        if self.border_title != title:
+            self.border_title = title
+        # Batch 62. The same honesty rule one row down, applied to a
+        # control instead of to a count: `↑↓ move` is a claim about a
+        # key, and with one match that key does nothing.
+        #
+        # `width - 2` is the border label's budget, MEASURED rather than
+        # reasoned: textual truncates a label at the outer width minus
+        # six, and `border: solid` plus `padding: 0 1` makes the outer
+        # width four more than the one handed here. Change either in
+        # app.tcss and this constant is wrong -- which is why the pilot
+        # test asserts the drawn row carries no ellipsis.
+        #
+        # cell_len, not len: the arrows are East-Asian AMBIGUOUS width,
+        # exactly like the SUGGEST_SEP this panel already ships.
+        parts = list(SUGGEST_HINT_REST)
+        if len(self._matches) > 1:
+            parts.insert(0, SUGGEST_HINT_MOVE)
+        while parts and Text(
+                SUGGEST_HINT_SEP.join(parts)).cell_len > width - 2:
+            parts.pop(0)
+        hint = SUGGEST_HINT_SEP.join(parts) or None
+        # Guarded for the title's reason, and it is not tidiness:
+        # `_BorderTitle.__set__` calls `refresh()` and this runs from
+        # `render()`, so an unguarded assignment schedules a paint from
+        # inside a paint. It converges because the second pass compares
+        # equal -- `border_subtitle` hands back markup, and neither
+        # string carries any.
+        if self.border_subtitle != hint:
+            self.border_subtitle = hint
+
+    def get_content_height(self, container, viewport, width: int) -> int:
+        # Textual hands the width here BEFORE the first paint, which is the
+        # only place it is knowable while the panel is still hidden.
+        self._budget(width)
+        return sum(len(group) for group in self._groups)
+
+    # -- drawing -------------------------------------------------------------
+
+    def render(self):
+        width = self.size.width or self._width
+        if width and (width != self._width or not self._groups):
+            self._budget(width)
+        rows = []
+        for index, group in enumerate(self._groups):
+            for offset, line in enumerate(group):
+                gutter = SUGGEST_LEAD if offset == 0 else SUGGEST_CONT
+                row = Text(gutter, no_wrap=True, overflow="crop")
+                row.append_text(line)
+                # Padded to the full width so the highlight is a BAR rather
+                # than a stripe the length of the text.
+                row.pad_right(max(0, width - row.cell_len))
+                if index == self._selected - self._first:
+                    row.stylize(SUGGEST_HIGHLIGHT)
+                rows.append(row)
+        body = Text(no_wrap=True, overflow="crop")
+        for position, row in enumerate(rows):
+            if position:
+                body.append("\n")
+            body.append_text(row)
+        return body
+
+
+class PromptInput(TextArea):
+    """The box the user types into. Wraps, grows to four rows, and since
+    batch 55 offers the slash commands while one is being typed.
+
+    It was a plain `Input` until batch 54, and an `Input` is single-line by
+    construction -- `height: 3` in its own DEFAULT_CSS, one text row, no
+    wrap, horizontal scroll. A prompt longer than the box showed its last
+    ~70 columns and nothing before them, so a paragraph could not be read
+    back before it was sent. `TextArea` is the only multi-line widget in
+    the pinned textual, so this is a swap rather than a setting.
+
+    The GROWING is `soft_wrap` plus `height: auto` in app.tcss, and those
+    two are the feature: a long line wraps and the box gets taller on its
+    own, with no key pressed. `ctrl+j` is for a break the user WANTS.
+
+    Four things here are load-bearing.
+
+    `value`. `TextArea` calls it `text`, and roughly sixty test sites plus
+    the app's own submit handler say `.value`. An alias is a one-line
+    adapter; renaming them would have been sixty edits across five files
+    to make a rendering change, and every one of those files is about
+    something else. It is a property over `text`, not a second store --
+    two writers of one string is the shape §22 spent a section removing.
+
+    `priority=True` on enter. `TextArea._on_key` maps enter to a newline
+    insert and calls `event.stop()` / `event.prevent_default()`, which
+    beats an ordinary binding: measured on the pinned textual 1.0.0 (D22,
+    both ways -- without the flag enter inserts and never submits). It
+    reads like caution and is the opposite.
+
+    `ctrl+j` is what carries the newline; `shift+enter` is a courtesy.
+    Textual turns the kitty keyboard protocol on in its LINUX drivers
+    alone (`drivers/linux_driver.py`, `linux_inline_driver.py`), and
+    without it a terminal sends a bare CR for shift+enter and the parser
+    yields plain `enter` -- so on Windows that binding is unreachable and
+    the box would submit instead. `ctrl+j` is byte 0x0a, parses to its own
+    key, is bound by neither Input, TextArea, App nor Footer, and is
+    exactly what iTerm2 / VS Code / Windows Terminal emit once configured
+    to send a newline on shift+enter. `alt+enter` is the obvious third
+    guess and is a dead end: fed `ESC CR` the parser yields no key at all,
+    and a second one behind it degrades to `escape`, `enter`.
+
+    **`load_text` is where typing is told apart from assignment** (batch
+    55), and it is the seam the whole suggestion panel hangs off. Setting
+    `.value` posts `TextArea.Changed` exactly as a keystroke does --
+    measured -- so a panel driven straight off that message would open in
+    the ~73 `query_one("#prompt").value = "/..."` sites across four test
+    files and turn each one's single `press("enter")` into a COMPLETION
+    instead of a dispatch. The line to draw is not a test accommodation:
+    assignment is the API, typing is the user, and textual draws the same
+    line itself -- `_replace_via_keyboard`'s docstring says "as opposed to
+    the API". That method covers inserts only (backspace does not go
+    through it, measured), and this panel must react to deletions, so the
+    seam is `load_text` instead: the single public funnel behind both
+    `.text =` and `.value =`.
+
+    `tab_behavior` stays at its "focus" default, deliberately. Under
+    "indent" `TextArea._on_key` also swallows `escape` (it focuses the
+    next widget), and tab/escape behaving as they did under `Input` is
+    worth more here than tab-indenting a chat message. Batch 55 spends
+    both keys, but only while the panel is open: `check_action` hands them
+    back to the focus system and to nobody the rest of the time.
+
+    The placeholder is the border TITLE because `TextArea` has no
+    placeholder at all -- no parameter, no attribute. Taking it as a
+    `placeholder=` keyword anyway keeps the call site in app.py reading
+    as it always did.
+    """
+
+    BINDINGS = [
+        Binding("enter", "submit", "Submit", show=False, priority=True),
+        Binding("ctrl+j", "newline", "Newline", show=False),
+        Binding("shift+enter", "newline", "Newline", show=False),
+        # Both gated by check_action, so with no panel open they are the
+        # keys they have always been: tab moves focus, escape reaches
+        # whoever wants it.
+        Binding("tab", "complete", "Complete", show=False),
+        Binding("escape", "dismiss_suggestions", "Dismiss", show=False),
+    ]
+
+    # CLASS attributes, not set in __init__: `load_text` runs during
+    # TextArea.__init__, before any assignment of ours could have happened.
+    suggest = None          # the SlashSuggest panel; app.py hands it over
+    _api_edit = False       # the next Changed came from .value, not a key
+    _dismissed = False      # escape latched the panel shut
+
+    class Submitted(Message):
+        """Posted when enter is pressed. `Input.Submitted`'s shape.
+
+        A distinct message type rather than reusing `Input.Submitted`, and
+        that is a fix as much as a necessity: `Input.Submitted` BUBBLES
+        past a modal's own handler to the app's (measured -- the screen
+        handler runs and then the app's), so enter in ReviewScreen's note
+        box reached the prompt's submit handler, which cleared the note
+        and dispatched it as a slash command if it began with one.
+        """
+
+        def __init__(self, prompt: "PromptInput", value: str) -> None:
+            self.prompt = prompt
+            self.value = value
+            super().__init__()
+
+        @property
+        def control(self) -> "PromptInput":
+            return self.prompt
+
+    class SuggestionsChanged(Message):
+        """The command list to offer, after a keystroke (batch 55).
+
+        A message rather than the prompt writing to the panel directly, so
+        app.py stays the one place that touches both this and the
+        transcript -- which it has to, because a panel opening SHRINKS the
+        transcript and textual does not re-pin a scroll on shrink.
+        """
+
+        def __init__(self, prompt: "PromptInput", matches: list) -> None:
+            self.prompt = prompt
+            self.matches = matches
+            super().__init__()
+
+        @property
+        def control(self) -> "PromptInput":
+            return self.prompt
+
+    class SuggestionsMoved(Message):
+        """The arrow keys, asking the panel to move its highlight.
+
+        A message rather than a direct `suggest.move()` call, and batch 56
+        is what made that necessary: the window SLIDES now, so a move can
+        change the panel's HEIGHT, and a panel that changes height takes
+        rows from the transcript. Whether the reader was at the bottom is
+        knowable only before that relayout, so the move has to happen
+        inside app.py's pin -- the same one `SuggestionsChanged` uses.
+        """
+
+        def __init__(self, prompt: "PromptInput", delta: int) -> None:
+            self.prompt = prompt
+            self.delta = delta
+            super().__init__()
+
+        @property
+        def control(self) -> "PromptInput":
+            return self.prompt
+
+    def __init__(self, placeholder: str = "", **kwargs) -> None:
+        super().__init__(soft_wrap=True, show_line_numbers=False, **kwargs)
+        self.placeholder = placeholder
+        self.border_title = placeholder
+
+    @property
+    def value(self) -> str:
+        return self.text
+
+    @value.setter
+    def value(self, new_value: str) -> None:
+        self.text = new_value
+
+    # -- the suggestion panel -----------------------------------------------
+
+    def load_text(self, text: str) -> None:
+        # See the docstring: this is the API half of the API/keyboard
+        # split, and `.value =` reaches it through `.text =`.
+        self._api_edit = True
+        super().load_text(text)
+
+    def on_text_area_changed(self, event: TextArea.Changed) -> None:
+        if self._api_edit:
+            # Assignment is not typing. It also CLOSES the panel, which is
+            # what makes `event.prompt.value = ""` on submit tidy up.
+            self._api_edit = False
+            self._dismissed = False
+            self.post_message(self.SuggestionsChanged(self, []))
+            return
+        matches = commands.matching(self.text)
+        if not matches:
+            # Nothing to dismiss any more, so the latch is spent. This is
+            # what lets a dismissed panel come back: type a space (or clear
+            # the line) and the next bare slash token offers again.
+            self._dismissed = False
+        self.post_message(
+            self.SuggestionsChanged(self, [] if self._dismissed else matches))
+
+    def _panel_open(self) -> bool:
+        return self.suggest is not None and self.suggest.display
+
+    def _complete(self) -> bool:
+        """Put the highlighted command in the box. True if one was taken."""
+        if not self._panel_open():
+            return False
+        command = self.suggest.chosen
+        if command is None:
+            return False
+        # The TRAILING SPACE is doing two jobs: `matching()` is empty once
+        # the line has whitespace in it, so the panel closes on its own,
+        # and deleting that one character is what brings it back.
+        self.value = "/" + command.name + " "
+        # load_text leaves the cursor at the START of the document, which
+        # would have the next typed argument land in front of the command.
+        self.move_cursor(self.document.end)
+        return True
+
+    def check_action(self, action: str, parameters) -> bool | None:
+        # None, not False: False would DISABLE the key, where None declines
+        # it and lets the press carry on to the focus system (tab) or to
+        # nobody (escape) -- which is what both did before batch 55.
+        if action in ("complete", "dismiss_suggestions"):
+            return True if self._panel_open() else None
+        return True
+
+    # -- actions -------------------------------------------------------------
+
+    def action_submit(self) -> None:
+        # Enter ALWAYS completes while the panel is open, so a fully typed
+        # /help takes two presses. The alternative -- submit when the typed
+        # token already equals the highlighted name -- is a coin flip from
+        # the user's side and stops being well defined the day two commands
+        # share a prefix.
+        if self._complete():
+            return
+        self.post_message(self.Submitted(self, self.text))
+
+    def action_newline(self) -> None:
+        self.insert("\n")
+
+    def action_complete(self) -> None:
+        self._complete()
+
+    def action_dismiss_suggestions(self) -> None:
+        self._dismissed = True
+        self.post_message(self.SuggestionsChanged(self, []))
+
+    def action_cursor_up(self, select: bool = False) -> None:
+        # `select` is shift+up, which is a text selection and stays one.
+        # Everything else: batch 54 made this box multi-line, so the arrow
+        # keys have to go back to moving the CURSOR the moment the panel
+        # is closed.
+        if not select and self._panel_open():
+            self.post_message(self.SuggestionsMoved(self, -1))
+            return
+        super().action_cursor_up(select)
+
+    def action_cursor_down(self, select: bool = False) -> None:
+        if not select and self._panel_open():
+            self.post_message(self.SuggestionsMoved(self, 1))
+            return
+        super().action_cursor_down(select)
+
+
 class Transcript(RichLog):
     """The conversation. Code fences render highlighted via Rich's Syntax.
 
@@ -708,6 +1478,14 @@ class Transcript(RichLog):
         super().__init__(wrap=True, markup=False, **kwargs)
         self._pending = ""
         self._entries: list[tuple[str, str]] = []
+        # Batch 65. Click TARGETS for entry N, when the drawn line is
+        # too short to be one -- see `markdown.link_spans`. A side
+        # table rather than a third element in the tuple above, because
+        # `_entries` is read by /copy, by last_answer() and by the
+        # replay contract, and a link is a rendering fact about a line
+        # rather than part of what was said. Keyed by INDEX, which
+        # rerender() already walks.
+        self._links: dict[int, tuple] = {}
         # §38. An assistant span with rows already on screen: its label is
         # drawn and its single entry is open at _entries[-1].
         self._stream_open = False
@@ -753,13 +1531,22 @@ class Transcript(RichLog):
 
     # -- writing -----------------------------------------------------------
 
-    def _emit(self, role: str, text: str, record: bool = True) -> None:
-        """Render one entry and remember it. THE single write path."""
+    def _emit(self, role: str, text: str, record: bool = True,
+              links=()) -> None:
+        """Render one entry and remember it. THE single write path.
+
+        `links` are batch 65's click targets, remembered beside the
+        entry so a `/theme` rerender arms what the live draw armed. An
+        entry with none -- every role outside LINKED_ROLES, and most
+        tool lines -- stores nothing.
+        """
         if record:
             self._entries.append((role, text))
-        self._render_entry(role, text)
+            if links:
+                self._links[len(self._entries) - 1] = tuple(links)
+        self._render_entry(role, text, links)
 
-    def _render_entry(self, role: str, text: str) -> None:
+    def _render_entry(self, role: str, text: str, links=()) -> None:
         if role == "user":
             # §43 (RM1). The turn's label is retired HERE and nowhere
             # else, so where the labels land is a pure function of the
@@ -792,13 +1579,13 @@ class Transcript(RichLog):
             # §43 sentence true: a tool line INSIDE the turn, after
             # reasoning or text has already opened the label, is a no-op.
             self._open_label()
-            self.write(Text(f"     {text}", self._style("tool")))
+            self.write(self._linked_line(text, "tool", links))
         elif role == "pipeline_tool":
             # The research pipeline's tool lines. Same kind of line and
             # the same style, deliberately NOT an opener: the run's label
             # belongs to the report, and a pipeline call is the harness
             # working, not the model answering (§43 RM1, owner decision).
-            self.write(Text(f"     {text}", self._style("tool")))
+            self.write(self._linked_line(text, "tool", links))
         elif role == "thinking":
             # §38. The furniture is OWNED by the renderer, not stored in
             # the entry: `_entries` keeps the model's raw reasoning, so
@@ -809,8 +1596,27 @@ class Transcript(RichLog):
             self._write_thinking_open()
             self._write_thinking_lines(text)
             self._write_thinking_close()
+        elif role in LINKED_ROLES:
+            # `tool_error` arrives here, and needs no `links`: its text
+            # is redact_secrets(str(error)) with no truncation, so the
+            # URL it carries is whole and the span resolves to itself.
+            self.write(self._linked_line(text, role, links))
         else:
             self.write(Text(f"     {text}", self._style(role)))
+
+    def _linked_line(self, text: str, role: str, targets=()) -> Text:
+        """One harness-drawn line, with its URLs armed (batch 65).
+
+        The five-space indent every one of these lines carries is inside
+        the scanned text rather than prepended after, so a span's
+        columns are the columns Textual dispatches a click on -- the
+        offsets have to be the drawn ones or the arming lands beside the
+        URL instead of on it.
+        """
+        out = Text(style=self._style(role))
+        self._append_spans(out, f"     {text}", self._styles(),
+                           block=False, links_only=True, targets=targets)
+        return out
 
     def _open_label(self) -> None:
         """Draw this turn's `venastine ›`, once (§43, RM1).
@@ -893,10 +1699,19 @@ class Transcript(RichLog):
             return
         self.write(Text(text.ljust(total), style), width=total)
 
-    def _render_blocks(self, text: str) -> None:
+    def _render_blocks(self, text: str, *, line_start: bool = True) -> None:
         """The assistant body: fenced code highlighted, everything else
         plain. Shared by a replayed entry and a committed stream chunk, so
         the two cannot render the same text differently.
+
+        `line_start=False` says this chunk begins in the MIDDLE of a line,
+        so nothing that depends on where a line starts may fire on its
+        first line. Two callers want it and both were bugs without it: a
+        streamed fragment whose wrap boundary fell just before a `# `
+        token rendered as a heading and swallowed the hash, which a
+        `/theme` replay then put back; and a chunk the cap released
+        because HOLD_LIMIT expired, which is a line the cap gave up on
+        rather than a construct.
 
         The newline trimming around a fence is what makes that sharing
         exact rather than approximate. A `Syntax` renderable occupies its own
@@ -908,14 +1723,21 @@ class Transcript(RichLog):
         answer grew a blank row per code block, and a /theme mid-session
         reflowed a transcript it was only meant to recolour.
         """
-        blocks = _split_fences(text)
+        blocks = markdown.split_blocks(text)
         for index, block in enumerate(blocks):
-            if isinstance(block, tuple):
-                language, code = block
-                self.write(Syntax(code, language or "text",
+            # Batch 53. `isinstance(block, tuple)` still asks exactly the
+            # question §26 asked -- "does this block occupy its own rows"
+            # -- because both block kinds are tuple subclasses. That is
+            # what keeps the trimming below ONE rule for the two of them
+            # rather than a second branch to be kept in step.
+            if isinstance(block, markdown.CodeBlock):
+                self.write(Syntax(block.code, block.language or "text",
                                   theme=self._syntax_theme(),
                                   word_wrap=True,
                                   indent_guides=False))
+                continue
+            if isinstance(block, markdown.TableBlock):
+                self._render_table(block)
                 continue
             body = block
             if index and isinstance(blocks[index - 1], tuple) \
@@ -924,7 +1746,207 @@ class Transcript(RichLog):
             if index + 1 < len(blocks) and isinstance(blocks[index + 1], tuple) \
                     and body.endswith("\n"):
                 body = body[:-1]
-            self.write(Text(body, self._style("assistant")))
+            # Only the FIRST block can begin mid-line; everything after a
+            # renderable block starts where that block ended.
+            self.write(self._inline_text(
+                body, line_start=line_start and index == 0))
+
+    def _inline_text(self, body: str, *, line_start: bool = True) -> Text:
+        """A plain stretch of an answer, with its inline marks painted.
+
+        The marks are the RENDERER's, exactly as the thinking bar and the
+        diff's gutter are: `_entries` keeps the markdown the model wrote,
+        so `/copy` hands back `**bold**`, `- ` and the brackets of a link,
+        and a replay under a new theme re-derives the weight rather than
+        replaying something decorated once.
+
+        Line by line, because a heading, a list item and the indent rule
+        are all properties of a LINE and `tui/markdown.py` is where that
+        is decided. The newlines are put back here so the block still
+        reaches Rich as one `Text` and wraps as one flow -- which is what
+        `markdown.width_split` is measuring against.
+
+        A LIST ITEM is the one line this widget wraps itself (batch 58).
+        Rich has no hanging indent -- `Text` has none and `Padding`
+        indents the first row too -- so the item's body is pre-wrapped
+        through `markdown.wrap_display` at the width left after its
+        marker, and every row after the first is padded to the column the
+        marker's own text starts at. It is the same reason `_render_diff`
+        and the thinking bar pre-wrap, and it is why the cap holds an item
+        until its newline: a fragment committed without its marker could
+        never be indented afterwards.
+
+        With no measurable width -- unmounted, or built bare in the suite
+        -- nothing is pre-wrapped and the item draws flat, which is
+        `_write_padded`'s guard rule applied to the same geometry.
+        """
+        styles = self._styles()
+        base = styles.get("assistant", "")
+        out = Text(style=base)
+        width = self._wrap_width()
+        for index, line in enumerate(body.split("\n")):
+            if index:
+                out.append("\n")
+            block = line_start or index > 0
+            item = markdown.list_item(line) if block else None
+            if item is None:
+                self._append_spans(out, line, styles, block=block)
+                continue
+            prefix, content, indent = item
+            out.append(prefix, styles.get(markdown.BULLET) or None)
+            rows = markdown.wrap_display(content, width - indent) \
+                if width > indent else [content]
+            for row_index, row in enumerate(rows):
+                if row_index:
+                    out.append("\n" + " " * indent)
+                self._append_spans(out, row, styles, block=False)
+        return out
+
+    def _append_spans(self, out: Text, line: str, styles: dict, *,
+                      block: bool, links_only: bool = False,
+                      targets=()) -> None:
+        """One line's spans, appended to `out` in their palette roles.
+
+        A LINK span is the one that carries more than a style. Its text is
+        the URL -- the grammar guarantees that, which is the whole security
+        rule: there is no label to hide a target behind, so the only thing
+        a click can open is the thing the reader is looking at. The URL
+        rides along as style METADATA, which `on_click` reads back.
+
+        Metadata rather than textual's `@click` action string, and the
+        difference is not stylistic: an action string is PARSED, so
+        building one out of model output would be an injection grammar fed
+        by the model. A plain key is data all the way through.
+
+        `links_only` picks the other scanner (batch 65): a harness-drawn
+        line gets URLs and no other mark, because it is a digest rather
+        than prose. Both scanners are normalised to `(text, role,
+        target)` here so that the metadata attach below stays a SINGLE
+        line -- it is the security-critical one, and two copies of it
+        drifting apart is the shape this project keeps recording.
+
+        For prose the target IS the span, which is batch 58 unchanged.
+        `targets` is how a TRUNCATED tool line resolves to the URL it
+        was cut from, under the rules `markdown.link_spans` states.
+        """
+        spans = markdown.link_spans(line, targets=targets) if links_only \
+            else ((text, role, text)
+                  for text, role in markdown.inline_spans(line, block=block))
+        for span, role, target in spans:
+            if role == markdown.LINK:
+                out.append(span, Style.parse(styles.get(role) or "")
+                           + Style(meta={"url": target}))
+                continue
+            out.append(span, styles.get(role) if role else None)
+
+    def _render_table(self, block) -> None:
+        """One markdown table (batch 53).
+
+        A `rich.table.Table` rather than characters we lay out ourselves,
+        for the reason `Syntax` is a `Syntax`: `RichLog.write` takes any
+        renderable, so the alignment, the column widths and the wrapping
+        inside a cell are Rich's problem and stay right at any terminal
+        size. Textual's own `Markdown` cannot be used here -- it is a
+        Widget, not a renderable, so reaching for it means replacing the
+        transcript rather than rendering into it.
+
+        EVERY CELL IS A `Text`, header cells included. A bare `str` handed
+        to a Table is parsed for console markup by the console that renders
+        it, and the RichLog's own `markup=False` does not reach inside a
+        renderable. Measured against the pinned Rich, both halves bite:
+
+          - `[bold]x` renders as `x`. The tag is SWALLOWED, silently, and
+            a cell describing a style, a Textual selector or a log line
+            loses part of itself with nothing raised.
+          - `a[/]b` raises `MarkupError`, which is batch 42's RA1 -- the
+            failure where a modal was pushed, never drew, and left a
+            worker waiting on a dismissal that could not come. Here it
+            would take down the turn that was answering.
+
+        `[1, 2]` survives, which is why the rule has to be about the TYPE
+        rather than about scanning for brackets: the shapes that fail are
+        not the ones a reader expects to be dangerous.
+
+        Cells are rendered with `line_start=False` (batch 58). A cell is a
+        fragment rather than a line, so a cell reading `- 3` is a minus
+        three and not a bullet, and one indented four spaces is a padded
+        column rather than a code sample.
+
+        Written with an explicit `width=` when the widget can be measured,
+        following the diff's discipline: it is the same number the text
+        pre-wrap uses, so a table and the paragraph above it break at one
+        width rather than two.
+        """
+        styles = self._styles()
+        table = Table(box=TABLE_BOX,
+                      border_style=styles.get("table_border") or None,
+                      header_style=styles.get("table_header") or None)
+        for header, align in zip(block.headers, block.aligns):
+            table.add_column(
+                self._inline_text(header, line_start=False), justify=align)
+        for row in block.rows:
+            table.add_row(*(self._inline_text(cell, line_start=False)
+                             for cell in row))
+        width = self._wrap_width()
+        if width:
+            self.write(table, width=width)
+        else:
+            self.write(table)
+
+    # -- links (batch 58) ---------------------------------------------------
+
+    def on_click(self, event) -> None:
+        """CTRL+click a URL to open it.
+
+        Ctrl rather than a bare click, which is the terminal's own
+        convention for a link and also the reason a click while reading
+        cannot launch a browser by accident.
+
+        The target is read back out of the style METADATA the span was
+        drawn with, so what opens is what was underlined, which is what
+        the reader saw. `markdown.clickable` is re-asked here rather than
+        trusted from render time: the styles in a `RichLog` outlive the
+        text that produced them, and a check at the point of ACTION is
+        the one that governs.
+
+        Textual dispatches this by position, so a click one column off the
+        URL carries no metadata and does nothing.
+        """
+        if not getattr(event, "ctrl", False):
+            return
+        style = getattr(event, "style", None)
+        url = (getattr(style, "meta", None) or {}).get("url")
+        if url:
+            self.open_url(url)
+
+    def open_url(self, url) -> None:
+        """Hand `url` to the platform's browser, off the UI thread.
+
+        A thread worker for the reason every other outward call in this
+        app uses one: `webbrowser.open` can block while a cold browser
+        starts, and the UI thread is drawing a live stream.
+
+        SILENT on success -- the browser appearing is the confirmation,
+        and a transcript line would call `flush_stream()` and close a
+        live answer span in the middle of a turn. A failure is a toast,
+        which is the vocabulary `tui/app.py` already uses for a turn that
+        did not survive.
+        """
+        if not markdown.clickable(url):
+            return
+
+        def work() -> None:
+            try:
+                opened = webbrowser.open(url)
+            except Exception:  # noqa: BLE001 -- reported, never fatal
+                opened = False
+            if not opened:
+                self.app.call_from_thread(
+                    self.app.notify,
+                    f"Could not open {url}", severity="warning")
+
+        self.run_worker(work, thread=True, exit_on_error=False,
+                        name="open-url")
 
     def write_user(self, text: str) -> None:
         self.flush_stream()
@@ -938,16 +1960,20 @@ class Transcript(RichLog):
         self.flush_stream()
         self._emit("error", text)
 
-    def write_role(self, role: str, text: str) -> None:
+    def write_role(self, role: str, text: str, links=()) -> None:
         """Write a line in an arbitrary palette role (§26).
 
         Exists so the research view can style a pass boundary, a tool call
         and a failed tool differently without Transcript growing a method
         per event kind -- the roles already live in one table, and this is
         the accessor for it.
+
+        `links` is batch 65's, and it is ignored for every role outside
+        LINKED_ROLES rather than refused: a caller that has candidates
+        should not have to know which roles use them.
         """
         self.flush_stream()
-        self._emit(role, text)
+        self._emit(role, text, links=links)
 
     def write_answer(self, text: str) -> None:
         """A model answer that did not arrive as a stream (a one-shot turn,
@@ -985,12 +2011,9 @@ class Transcript(RichLog):
         return width if width >= MIN_WRAP_WIDTH else 0
 
     @staticmethod
-    def _fence_is_open(text: str) -> bool:
-        """An odd number of ``` means a code fence is still open."""
-        return text.count("```") % 2 == 1
-
-    @staticmethod
-    def _split_committable(pending: str, width: int) -> tuple[str, str]:
+    def _split_committable(pending: str, width: int,
+                           *, marks: bool = False,
+                           block: bool = True) -> tuple[str, str]:
         """Split `pending` into (commit now, keep buffered).
 
         The two rules from the class docstring. The over-long-token branch
@@ -998,16 +2021,31 @@ class Transcript(RichLog):
         space in it (a URL) would otherwise be held until a newline
         arrived, so it is cut at the row boundary -- which is what Rich's
         own wrapping does with a word too long for the line.
+
+        `marks` measures the width rule in RENDERED cells rather than in
+        source characters (batch 53), which is what an answer carrying
+        `**bold**` needs: the mark is four cells narrower drawn than
+        written, so a source-column cut lands where Rich would not have
+        wrapped and the streamed rows stop matching the ones rerender()
+        draws from the same text. OFF by default, and the default is the
+        answer for `thinking_delta`: reasoning is rendered as prose, marks
+        and all, so measuring it as anything else would be describing a
+        rendering that does not happen.
+
+        `block` is `markdown.inline_spans`' and travels with `marks`: when
+        the pending text is the tail of a line already partly drawn, its
+        leading spaces are not an indent, so the indent rule must not
+        decide the measurement here when it will not decide the drawing
+        there.
         """
         cut = pending.rfind("\n")
         if cut != -1:
             return pending[:cut + 1], pending[cut + 1:]
-        if width and len(pending) > width:
-            space = pending.rfind(" ", 0, width + 1)
-            if space > 0:
-                return pending[:space + 1], pending[space + 1:]
-            return pending[:width], pending[width:]
-        return "", pending
+        if not width:
+            return "", pending
+        if marks:
+            return markdown.width_split(pending, width, block=block)
+        return markdown.plain_split(pending, width)
 
     def stream_delta(self, delta: str) -> None:
         self._pending += delta
@@ -1019,16 +2057,44 @@ class Transcript(RichLog):
         Loops because one delta can make several rows committable at once
         -- a paragraph arriving in one chunk, or a buffer that has been
         held back behind a closing fence.
+
+        §38 held the whole chunk while a ``` fence was open. Batch 53 turns
+        that single rejection into `markdown.safe_commit_limit`, a CAP over
+        four constructs -- an open fence, a table, a heading, an unclosed
+        inline mark -- because the reason was never about fences: RichLog
+        appends and cannot rewrite a drawn row, so anything committed in
+        halves renders as its own source and can never be put right.
+
+        A cap is strictly better than the rejection it replaces: a
+        paragraph sharing a buffer with a fence used to wait for the fence
+        to close, and now streams. Where the construct starts the buffer,
+        the cap is 0 and nothing commits -- which is what keeps §38's two
+        fence pins saying what they always said.
+
+        Batch 58 adds the fifth construct (a list item) and the ceiling.
+        `commit_span`'s second value says the cap gave up on a line-scoped
+        hold because HOLD_LIMIT expired, and it reaches the renderer as
+        `line_start=False`: the line is no longer a heading or a list item
+        on EITHER path, so the rows it is drawn in are the rows the replay
+        will draw. Without that a model could hold the screen indefinitely
+        by never sending a newline.
         """
         width = self._wrap_width()
         while True:
-            chunk, rest = self._split_committable(self._pending, width)
-            if not chunk or self._fence_is_open(self._stream_text + chunk):
+            limit, forced = markdown.commit_span(
+                self._stream_text, self._pending)
+            mid_line = bool(self._stream_text) \
+                and not self._stream_text.endswith("\n")
+            chunk, rest = self._split_committable(
+                self._pending[:limit], width, marks=True,
+                block=not mid_line)
+            if not chunk:
                 return
-            self._pending = rest
-            self._write_stream_chunk(chunk)
+            self._pending = rest + self._pending[limit:]
+            self._write_stream_chunk(chunk, line_start=not (mid_line or forced))
 
-    def _write_stream_chunk(self, chunk: str) -> None:
+    def _write_stream_chunk(self, chunk: str, *,
+                            line_start: bool = True) -> None:
         if not self._stream_open:
             self.end_thinking()
             self._open_label()
@@ -1043,7 +2109,7 @@ class Transcript(RichLog):
         # still has to draw one.
         body = chunk[:-1] if chunk.endswith("\n") else chunk
         if body:
-            self._render_blocks(body)
+            self._render_blocks(body, line_start=line_start)
         else:
             self.write(Text("", self._style("assistant")))
 
@@ -1079,9 +2145,14 @@ class Transcript(RichLog):
             self._emit("assistant", residual)
             return residual
         if residual:
+            # Read BEFORE the append, for _commit_ready's reason: the
+            # flush draws the tail of a line the stream may already have
+            # drawn part of, and that tail is not the start of one.
+            line_start = not self._stream_text \
+                or self._stream_text.endswith("\n")
             self._stream_text += residual
             self._entries[-1] = ("assistant", self._stream_text)
-            self._render_blocks(residual)
+            self._render_blocks(residual, line_start=line_start)
         text = self._stream_text
         self._stream_open = False
         self._stream_text = ""
@@ -1181,6 +2252,11 @@ class Transcript(RichLog):
         # in the session with no `venastine ›`.
         self._label_in_force = False
         self._entries.clear()
+        # Batch 65, and the same sentence as the line above it: a click
+        # target left behind would belong to a thread that is no longer
+        # on screen, and index N would then arm the NEXT thread's Nth
+        # line with the previous one's URL.
+        self._links.clear()
         self.clear()
 
     def rerender(self) -> None:
@@ -1197,8 +2273,12 @@ class Transcript(RichLog):
         # loop below re-derives every one of them from the role sequence
         # exactly as the live path did.
         self._label_in_force = False
-        for role, text in self._entries:
-            self._render_entry(role, text)
+        for index, (role, text) in enumerate(self._entries):
+            # Batch 65: the targets too, or a /theme would silently
+            # disarm every long URL in the session -- the line would
+            # look identical and stop being clickable, which is the
+            # kind of loss only the pointer can find.
+            self._render_entry(role, text, self._links.get(index, ()))
 
     def last_answer(self) -> str:
         """The most recent answer in this session, or "" (for /copy last).
@@ -1250,22 +2330,3 @@ class Transcript(RichLog):
             label = labels.get(role)
             out.append(f"{label}: {text}" if label else text)
         return "\n\n".join(out)
-
-
-def _split_fences(text: str):
-    """Split markdown into plain strings and (language, code) tuples.
-
-    Deliberately small: this is a renderer, not a markdown parser. An
-    unterminated fence is treated as running to the end of the text, which
-    is the common case mid-stream.
-    """
-    out = []
-    parts = text.split("```")
-    for i, part in enumerate(parts):
-        if i % 2 == 0:
-            if part:
-                out.append(part)
-        else:
-            language, _, code = part.partition("\n")
-            out.append((language.strip() or None, code))
-    return out

@@ -1553,6 +1553,13 @@ class _FakeTuiApp:
     def run_the_worker(self):
         self._work()
 
+    def _write_turn_time(self):
+        """Batch 61. `on_research_finished` is one of the four turn exits
+        that say how long the turn took, and this double is called through
+        the real unbound handler -- so it has to grow the method the
+        handler now calls. Silent here: what this file asserts is the
+        review summary, and a timing line would be noise in it."""
+
     def post_message(self, message):
         self.messages.append(message)
 

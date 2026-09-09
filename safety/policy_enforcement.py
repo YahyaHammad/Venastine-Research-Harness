@@ -224,10 +224,21 @@ _SECRET_PATTERNS = [
 ]
 
 
+#: What this module puts where a secret was. Named in batch 65 rather
+#: than written out at each of the four substitutions, because a second
+#: module now has to RECOGNISE it: `tui/markdown.py` refuses to arm a
+#: URL wearing this mark for a click, since a redacted address is a real
+#: one and simply not the one that was fetched. That module is pure and
+#: may not import policy, so it keeps its own copy and
+#: `tests/test_markdown_render.py` holds the two against each other --
+#: one string, two readers, and a check rather than a hope.
+REDACTION_MARKER = "[REDACTED]"
+
+
 def redact_secrets(text: str) -> str:
     """Replace strings matching known secret patterns with [REDACTED]."""
     for pattern in _SECRET_PATTERNS:
-        text = pattern.sub("[REDACTED]", text)
+        text = pattern.sub(REDACTION_MARKER, text)
     return text
 
 
@@ -303,12 +314,12 @@ def _redact_credential_shapes(text: str) -> str:
     before substituting -- a template reference is exactly what docs and
     build files are full of, and redacting it destroys the example while
     protecting nothing."""
-    text = _URL_USERINFO_RE.sub(r"\1[REDACTED]\3", text)
+    text = _URL_USERINFO_RE.sub(rf"\1{REDACTION_MARKER}\3", text)
 
     def _xml(m):
         if _TEMPLATE_VALUE_RE.match(m.group(3)):
             return m.group(0)
-        return f"{m.group(1)}[REDACTED]{m.group(4)}"
+        return f"{m.group(1)}{REDACTION_MARKER}{m.group(4)}"
 
     text = _XML_PASSWORD_RE.sub(_xml, text)
 
@@ -316,7 +327,7 @@ def _redact_credential_shapes(text: str) -> str:
         if _TEMPLATE_VALUE_RE.match(m.group(4)):
             return m.group(0)
         return (f"{m.group(1)}{m.group(2)}{m.group(3)}"
-                f"[REDACTED]{m.group(3)}")
+                f"{REDACTION_MARKER}{m.group(3)}")
 
     return _ASSIGNMENT_RE.sub(_assign, text)
 
@@ -444,6 +455,59 @@ def param_digest(params, omit=()) -> str:
     if len(digest) > _DIGEST_CHARS:
         digest = digest[:_DIGEST_CHARS - 1] + "…"
     return digest
+
+
+def redacted_values(params, omit=()) -> tuple:
+    """The same values `param_digest` summarises, UNTRUNCATED (batch 65).
+
+    The transcript arms a URL in a tool line for ctrl+click, and the
+    line it draws is a digest: the 60-character value cap above turns
+    most real documentation URLs into `https://…/pa…`, which cannot be
+    clicked because it is not the URL. These are the candidates a
+    truncated span resolves against.
+
+    IT LIVES HERE, beside param_digest, and it is the redaction that
+    puts it here rather than tidiness. A click hands its target to the
+    platform's browser, so a target taken from the RAW params would
+    send the `?api_key=…` this module deliberately kept out of the
+    transcript -- #167's protection defeated at the one place it was
+    designed to hold, by a feature whose whole subject is the same
+    string.
+
+    A VALUE THE REDACTOR CHANGED IS DROPPED ENTIRELY. Redacting and
+    then offering the result would arm a link to somewhere that does
+    not exist -- `https://user:[REDACTED]@host/…` is a real URL, it is
+    simply not the one that was fetched. Refusing the value is the
+    honest answer: nothing was hidden from the reader, and nothing
+    invented is offered to the browser. (`markdown.clickable` refuses
+    that particular shape a second time, at the point of action, for
+    the reason every check in this project is asked twice.)
+
+    Values only and `omit` skipped, both matching param_digest exactly:
+    the two functions describe ONE call, and a candidate the line does
+    not draw is a target nothing can resolve to.
+
+    The `http` test is a filter and not a grammar. Which substrings are
+    URLs is `tui/markdown.py`'s question and is asked there against one
+    definition; this only declines to carry values that cannot possibly
+    contain one, so a `write` call's file content never reaches the
+    renderer.
+    """
+    if not isinstance(params, dict) or not params:
+        return ()
+    values = []
+    for key, value in params.items():
+        if key in omit:
+            continue
+        text = value if isinstance(value, str) \
+            else json.dumps(value, default=str)
+        if "http" not in text:
+            continue
+        redacted = redact_output_text(text)
+        if redacted != text:
+            continue
+        values.append(redacted)
+    return tuple(dict.fromkeys(values))
 
 
 # ---------------------------------------------------------------------------

@@ -94,7 +94,14 @@ def _cmd_summary(app, args: str) -> None:
         from core import compaction
         try:
             notice = compaction.summarize_thread(
-                memory.thread_id, app.model, app.provider_name)
+                memory.thread_id, app.model, app.provider_name,
+                # Batch 59. /summary runs the compactor with
+                # nothing above it, so depth 0 -- it IS the stack.
+                # getattr: these commands are driven against stub apps
+                # in the suite (tests/test_thread_refs.py), and a
+                # summary must not depend on a sidebar widget
+                # existing. None is a fully supported sink.
+                activity=getattr(app, "_activity", None), depth=0)
         except Exception as e:  # noqa: BLE001 — same containment as /compact
             app.call_from_thread(
                 app._transcript.write_error, f"Summary failed: {e}")
@@ -193,7 +200,12 @@ def _attach_in_worker(app, thread_id, threads) -> None:
     def _work() -> None:
         try:
             notice = compaction.summarize_thread(
-                thread_id, app.model, app.provider_name)
+                thread_id, app.model, app.provider_name,
+                # getattr: these commands are driven against stub apps
+                # in the suite (tests/test_thread_refs.py), and a
+                # summary must not depend on a sidebar widget
+                # existing. None is a fully supported sink.
+                activity=getattr(app, "_activity", None), depth=0)
         except Exception as e:  # noqa: BLE001
             app.call_from_thread(
                 app._transcript.write_error, f"Reference failed: {e}")

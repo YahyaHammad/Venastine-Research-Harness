@@ -32,14 +32,16 @@ import json
 import logging
 import os
 import queue
+from time import monotonic
 from pathlib import Path
 from uuid import UUID
 
 from textual.app import App, ComposeResult
+from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
 from textual.message import Message
-from textual.widgets import Footer, Header, Input
+from textual.widgets import Footer, Header
 from textual.worker import Worker, WorkerState
 
 import config
@@ -51,6 +53,7 @@ from memories.tui_commands import register_memory_commands
 from project_init.tui_commands import register_init_commands
 from skills.tui_commands import register_skill_commands
 from core import config_loader
+from core.agent_activity import AgentActivity
 from core.approval import RunAuthorization
 from core.client import api_initialization, effort_levels_for_model
 from core.loop import (
@@ -69,7 +72,7 @@ from safety.policy_enforcement import (
 
 from tools.builtin import file_ops
 from tools.registry import registry as tool_registry
-from tui import diffs, preferences, ravens, themes
+from tui import diffs, history, meters, preferences, ravens, themes
 from tui.commands import SlashCommand, registry as commands
 from tui.screens import (
     ClaimsScreen, ConfirmScreen, GrantPickerScreen, PermissionScreen,
@@ -78,8 +81,10 @@ from tui.screens import (
 )
 from security import posture
 from tui.widgets import (
-    CONVERSATION_ROLES, EffortRaven, GoalBanner, PostureBadge, RavenPanel,
-    ResearchProgress, ThinkingIndicator, TodoPanel, Transcript, UsageLine,
+    AgentPanel, ANIMATION_INTERVAL,
+    CONVERSATION_ROLES, EffortRaven, GoalBanner, PostureBadge, PromptInput,
+    RavenPanel, ResearchProgress, SlashSuggest, ThinkingIndicator, TodoPanel,
+    Transcript, UsageLine,
 )
 
 logger = logging.getLogger(__name__)
@@ -97,6 +102,13 @@ DIFFED_TOOLS = ("write", "edit")
 #: `write` renders as an all-new block, `edit` as its own old/new text
 #: without line numbers.
 DIFF_SNAPSHOT_MAX_BYTES = 512_000
+
+#: How long a first ctrl+c stays armed (batch 57). Short enough that
+#: "twice in quick succession" is the only way through it, and it is also
+#: how long the footer says so -- the label reverts on this timer, so the
+#: window is something the screen shows rather than something the user has
+#: to guess at.
+QUIT_CONFIRM_S = 2.0
 
 
 class LoopEventMessage(Message):
@@ -278,6 +290,59 @@ class OneShotFinished(Message):
         super().__init__()
 
 
+class AgentStackChanged(Message):
+    """The set of running agent-shaped runs changed (batch 59).
+
+    Carries the WHOLE stack rather than a delta. The sink runs on the
+    worker thread and the handler on the UI thread, so a message per
+    push/pop would have the panel reassembling an order it did not
+    observe; a snapshot cannot disagree with itself.
+    """
+
+    def __init__(self, stack) -> None:
+        super().__init__()
+        self.stack = list(stack)
+
+
+class TuiActivity(AgentActivity):
+    """core/agent_activity.py's sink, wired to the sidebar.
+
+    CALLED ON THE WORKER THREAD -- spawn_subagent opens its span inside
+    registry.dispatch(), which is inside the loop generator this app
+    drains in run_worker(thread=True). So this touches no widget and
+    posts instead, exactly as _consume does; post_message is the
+    thread-safe half of the API and `self._stack` below is read and
+    written only here, under the worker's own serialisation.
+
+    The stack is kept HERE rather than on the app because the enter/exit
+    pairing is this object's business: the app holds what it was last
+    told to draw, which is a different question and one the UI thread
+    owns.
+    """
+
+    def __init__(self, app) -> None:
+        self._app = app
+        self._stack: list = []
+
+    def enter(self, span) -> None:
+        self._stack.append((span.name, span.depth))
+        self._post()
+
+    def exit(self, span) -> None:
+        # Remove the LAST matching entry, not the first: two spans can
+        # legitimately share a name and a depth across one turn (a goal
+        # turn spawning `explore` twice), and popping the wrong one would
+        # leave the panel one row off for the rest of the run.
+        entry = (span.name, span.depth)
+        for i in range(len(self._stack) - 1, -1, -1):
+            if self._stack[i] == entry:
+                del self._stack[i]
+                break
+        self._post()
+
+    def _post(self) -> None:
+        self._app.post_message(AgentStackChanged(self._stack))
+
 class VenastineApp(App):
     """Chat + research shell."""
 
@@ -285,15 +350,53 @@ class VenastineApp(App):
     TITLE = "Venastine Research Harness"
 
     BINDINGS = [
-        ("ctrl+c", "quit", "Quit"),
+        # Batch 57. TWO bindings on one key, and `check_action` decides
+        # which is live -- textual's dynamic-actions path, and the only
+        # way to relabel a footer entry, since a Binding's description is
+        # fixed at class definition. The armed one is listed FIRST so it
+        # claims the slot the moment it is enabled (`active_bindings` is a
+        # dict keyed by KEY, first writer wins).
+        #
+        # `priority=True` on both, and it is what makes ctrl+c work at
+        # all: `Input` and `TextArea` bind ctrl+c to `copy`, the prompt
+        # holds focus almost always, and an ordinary app binding loses to
+        # the focused widget -- measured, `("ctrl+c", "quit")` fired under
+        # NEITHER text box. It also loses under a modal, which blocks
+        # non-priority app bindings outright. The cost of the flag is that
+        # it takes the copy away too, which is why `_copy_selection` gives
+        # it back; see `action_arm_quit`.
+        Binding("ctrl+c", "confirm_quit", "Press again to quit",
+                priority=True),
+        Binding("ctrl+c", "arm_quit", "Quit", priority=True),
         ("ctrl+t", "pick_thread", "Threads"),
-        # §26. ctrl+l, NOT ctrl+k: Textual's Input binds ctrl+k to
-        # delete_right_all and the input holds focus almost always, so a
+        # §26. ctrl+l, NOT ctrl+k: the prompt binds ctrl+k to a
+        # delete-to-end-of-line and it holds focus almost always, so a
         # ctrl+k binding here would be shadowed -- pressing it would
-        # silently delete the rest of the typed line instead. ctrl+l is
-        # bound by neither Input, App nor Footer on the pinned textual
+        # silently delete the rest of the typed line instead. Still true
+        # after batch 54 swapped Input for TextArea: BOTH bind ctrl+k,
+        # and neither binds ctrl+l, which App and Footer also leave free
         # (D22: verified against the installed version, not assumed).
         ("ctrl+l", "show_claims", "Claims"),
+        # Batch 63. ctrl+UP/DOWN, and the pair was chosen by
+        # elimination rather than by taste. ctrl+p is textual's
+        # COMMAND_PALETTE_BINDING, bound priority=True, and the
+        # palette is enabled on purpose here -- `watch_theme` exists
+        # because it sets App.theme directly. Relocating it to
+        # ctrl+shift+p would delete it on Windows: that chord is
+        # indistinguishable from ctrl+p without the kitty protocol,
+        # which textual turns on in its LINUX drivers alone.
+        #
+        # The plain arrows were the other candidate and are already
+        # spoken for twice -- cursor movement in a box batch 54 made
+        # multi-line, and the suggestion panel's highlight since 55.
+        # A third meaning gated on the cursor being at line 1 is the
+        # shell convention and would have been the third.
+        #
+        # Free, measured off `screen.active_bindings` with the prompt
+        # focused, which is App, Screen and TextArea's forty-odd
+        # editing keys in one list rather than a docs page.
+        ("ctrl+up", "recall_previous", "Previous"),
+        ("ctrl+down", "recall_next", "Next"),
     ]
 
     # Set by exit(); consulted by the blocking ask paths (review §19-20
@@ -304,6 +407,27 @@ class VenastineApp(App):
     # test files use for exactly this callback logic -- reads False
     # instead of raising.
     _shutting_down = False
+
+    # Batch 57's quit gesture. CLASS attributes for `_shutting_down`'s
+    # reason, and read by `check_action`, which textual calls while the
+    # footer is composing -- before anything of ours has run.
+    _quit_armed = False
+    _quit_timer = None
+
+    # Batch 61. CLASS-level defaults, so an app built with __new__ and
+    # no __init__ -- four tests do exactly that, to exercise one method
+    # against a handful of injected attributes -- can assign `_busy`
+    # without an AttributeError. Transcript._styles' rule applied to
+    # state instead of to styling: a bare object degrades to doing
+    # nothing, because there is no screen to paint and no clock worth
+    # keeping.
+    _busy_state = False
+    _meter = None
+    _meter_timer = None
+    _meter_last = None
+    _last_turn_elapsed = None
+    _turn_output_tokens = None
+    _history = None
 
     def __init__(self, provider_name: str = DEFAULT_PROVIDER,
                  model: str = None, settings: dict | None = None,
@@ -395,6 +519,30 @@ class VenastineApp(App):
 
         self._memory: ConversationMemory | None = None
         self._permission_channel: queue.Queue | None = None
+        # Batch 61. BEFORE the `_busy` assignment below, which is a
+        # property setter now and drives this object.
+        self._meter = meters.TurnMeter()
+        self._meter_timer = None
+        self._meter_last = None
+        #: The last finished turn's active seconds, stashed by the
+        #: setter for the exit handler that writes the line. The
+        #: setter owns the CLOCK; saying so in the transcript stays
+        #: at the exits, because `_busy` is also cleared on paths
+        #: where no turn ever ran.
+        self._last_turn_elapsed = None
+        #: The finished turn's OUTPUT tokens, off the terminal
+        #: response. None where the provider reports no usage, which
+        #: is sixteen of the nineteen configured ones -- and None is
+        #: why the completion line can decline to claim a count
+        #: instead of printing a zero.
+        self._turn_output_tokens = None
+        # Batch 63. The prompts submitted this session. Session-scoped
+        # and in memory: it records what the PERSON typed rather than
+        # what a thread holds, so it survives /new and /resume -- a
+        # misfire bad enough to start a new thread is exactly when the
+        # text is wanted back.
+        self._history = history.PromptHistory()
+        self._busy_state = False
         self._busy = False
         # §18 session-scoped active agent (/agent switch). None = default
         # harness. Applies to subsequent turns until switched or cleared.
@@ -428,6 +576,12 @@ class VenastineApp(App):
         # that clear it; a per-turn map that outlives its turn is a
         # leak on an app that stays open for hours.
         self._file_calls: dict = {}
+        # Batch 59. The sidebar's view of who is running. `_agent_stack` is
+        # what the panel was last told to draw and is touched ONLY on the
+        # UI thread, in on_agent_stack_changed; the sink that feeds it
+        # keeps its own copy on the worker side. One writer each.
+        self._agent_stack: list = []
+        self._activity = TuiActivity(self)
 
     # -- layout --------------------------------------------------------------
 
@@ -453,7 +607,16 @@ class VenastineApp(App):
                                         id="thinking-indicator")
                 if self._todo_position == "bottom":
                     yield TodoPanel(id="todo-panel")
-                yield Input(placeholder="Message, or /help", id="prompt")
+                # Batch 55. LAST before the prompt, and that is the whole
+                # placement: #prompt is dock: bottom, so the last widget in
+                # the flow lands directly above it and the panel opens
+                # upwards without a layer, an offset or a screen. Hidden
+                # until a slash is typed, ThinkingIndicator-style.
+                yield SlashSuggest(id="slash-suggest")
+                # Batch 54. Wraps and grows to four rows as it is typed,
+                # then collapses on submit -- see PromptInput for why this
+                # is a TextArea and what `priority=True` buys on enter.
+                yield PromptInput(placeholder="Message, or /help", id="prompt")
             with Vertical(id="sidebar"):
                 yield RavenPanel(animations=self._animations, id="raven")
                 yield EffortRaven(id="effort-raven")
@@ -462,6 +625,12 @@ class VenastineApp(App):
                 # transcript where it would scroll away.
                 yield PostureBadge(posture.current().unsafe_reasons(),
                                    id="posture-badge")
+                # Batch 59. Under the posture badge, which §40 put above
+                # the ravens' siblings and wants kept in view; above the
+                # usage line, so "who is working" sits with the ravens
+                # rather than among the figures. Hidden until there is an
+                # agent or a spawn, PostureBadge-style.
+                yield AgentPanel(id="agent-panel")
                 # #4: billed-since-resume and current context size, one
                 # line. Hidden until a turn produces figures.
                 yield UsageLine(id="usage-line")
@@ -489,7 +658,20 @@ class VenastineApp(App):
         self.query_one("#effort-raven", EffortRaven).effort = self.effort
         self.refresh_goal_banner()
         self.refresh_todo_panel()
+        self.refresh_agent_panel()
         self.refresh_status()
+        # Batch 61. HERE and not in __init__: "up" means the shell
+        # has been on screen, not that an object was constructed.
+        self._meter.begin_session(monotonic())
+        if self._animations:
+            # RavenPanel's cadence, spelled once and imported. Created
+            # PAUSED (ThinkingIndicator's shape) and resumed only while
+            # a turn runs -- `tui.animations: false` therefore costs
+            # exactly the two silences a token delta cannot cover: a
+            # long tool call, and pre-first-token latency.
+            self._meter_timer = self.set_interval(
+                ANIMATION_INTERVAL, self._refresh_meter, pause=True)
+        self._refresh_meter()
         self._write_session_banner()
         # #138. Beside the status line it qualifies, before anything the
         # user might type. write_error, matching /model: an unknown
@@ -497,7 +679,13 @@ class VenastineApp(App):
         for warning in self._startup_warnings:
             self._transcript.write_error(warning)
         self._transcript.write_system("Type /help for commands.")
-        self.query_one("#prompt", Input).focus()
+        prompt = self.query_one("#prompt", PromptInput)
+        # Batch 55. Handed over once, here, rather than looked up per
+        # keystroke: app.py stays the thing that introduces two widgets to
+        # each other, and a PromptInput built bare (which the suite does)
+        # keeps `suggest = None` and behaves exactly as it did in batch 54.
+        prompt.suggest = self.query_one("#slash-suggest", SlashSuggest)
+        prompt.focus()
         if self.effort and self._effort_named:
             # A persisted effort level was trusted as-is and sent on every
             # turn, unlike the sibling tui.theme three lines up which gets
@@ -662,6 +850,135 @@ class VenastineApp(App):
             f"{self.provider_name} | {self.model}{remembered} "
             f"| theme {self._theme_name}"
         )
+
+    # -- the turn meter (batch 61) ------------------------------------------
+
+    @property
+    def _busy(self) -> bool:
+        return self._busy_state
+
+    @_busy.setter
+    def _busy(self, value) -> None:
+        """The one funnel a turn clock can hang off.
+
+        A PROPERTY rather than a rename, and the arithmetic is the
+        argument: `_busy` is written at eleven sites with four distinct
+        turn exits (on_turn_finished, on_one_shot_finished,
+        on_research_finished, and _cmd_compact's worker `finally` via
+        call_from_thread), and read by 89 references across 11 test
+        files. A clock started at one of those and stopped at another
+        WILL leak -- that is the defect batch 60 removed from
+        core/loop.py, one layer up. Batch 54 made the same trade for
+        the same reason: a one-line property is cheaper than sixty
+        edits made to land a rendering change.
+
+        Guarded like Transcript._styles: this runs during __init__ and
+        in bare-built apps across the suite, where there is no screen
+        to query and no timer to move.
+        """
+        value = bool(value)
+        was = self._busy_state
+        self._busy_state = value
+        if self._meter is None:
+            # A bare-built app (see the class defaults above): the flag
+            # is the whole contract there.
+            return
+        if value == was:
+            # Idempotent. `_busy = True` is assigned twice on at least
+            # one path, and the second must not restart the clock.
+            return
+        now = monotonic()
+        if value:
+            self._meter.start(now)
+        else:
+            self._last_turn_elapsed = self._meter.stop(now)
+        self._sync_meter_timer()
+        self._refresh_meter()
+
+    def _sync_meter_timer(self) -> None:
+        """Tick only while a turn is running (ThinkingIndicator's rule).
+
+        A 0.4s tick against an idle shell is exactly the redraw loop
+        RavenPanel.pause_animation exists to avoid. The price, named
+        rather than discovered: uptime is refreshed at every turn
+        boundary and on every loop event, so a session left idle shows
+        the uptime it had when the last turn ended until the next one
+        starts."""
+        if self._meter_timer is None:
+            return
+        if self._busy_state:
+            self._meter_timer.resume()
+        else:
+            self._meter_timer.pause()
+
+    def _refresh_meter(self) -> None:
+        """Paint the live figures onto the prompt's bottom border.
+
+        THE BORDER SUBTITLE, which costs zero rows -- and #prompt's
+        border TITLE is already taken by the TextArea placeholder,
+        which a TextArea has no other way to carry. RichLog cannot
+        rewrite a drawn row, so the live half could never have lived
+        in the transcript; this is the nearest surface to the input
+        box that redraws.
+
+        EVENT-DRIVEN FIRST, timed second. on_loop_event_message calls
+        this once per token delta, and those keep arriving while the
+        commit cap withholds a table -- it is the renderer that is
+        holding, not the stream -- so the figures stay live through
+        the silence whether or not the timer is running. The
+        change-guard is what makes that nearly free (UsageLine's
+        shape): a repaint happens only when the rendered string is
+        actually different.
+
+        The modal pause is read off the SCREEN STACK rather than
+        hooked into the four push_screen sites, so every modal counts
+        including ones added after this batch. Measured: textual's
+        on_screen_suspend does not reach the App, but the stack depth
+        moves 1 -> 2 -> 1 reliably.
+        """
+        if self._meter is None:
+            return
+        now = monotonic()
+        try:
+            blocked = len(self.screen_stack) > 1
+        except Exception:  # noqa: BLE001 -- no screen yet; nothing is blocking
+            blocked = False
+        self._meter.set_blocked(blocked, now)
+        text = self._meter.subtitle(now)
+        if text == self._meter_last:
+            return
+        self._meter_last = text
+        try:
+            self.query_one('#prompt', PromptInput).border_subtitle = text or ''
+        except Exception:  # noqa: BLE001 -- unmounted; nothing to paint
+            pass
+
+    def _write_turn_time(self) -> None:
+        """Say the turn is over, under the answer it belongs to.
+
+        `system` -- the harness talking about itself -- which is
+        already in META_ROLES, so /copy conversation keeps excluding
+        it. A new role would have to be classified in both role sets,
+        and tests/test_themes.py holds both halves against
+        MESSAGE_ROLES.
+
+        The exact token count is the provider's own, and where a
+        provider reports none NO TOKEN CLAIM IS MADE -- a zero would
+        say the model wrote nothing on sixteen of the nineteen
+        configured providers (D21: OpenAI-compatible streaming reports
+        no usage unless stream_options is sent, which Mistral rejects
+        outright)."""
+        if self._meter is None:
+            return
+        elapsed = self._last_turn_elapsed
+        self._last_turn_elapsed = None
+        if elapsed is None:
+            # `_busy` was cleared without a turn having run.
+            return
+        self._transcript.write_role(
+            'system',
+            self._meter.completion(elapsed, self._turn_output_tokens))
+        self._turn_output_tokens = None
 
     def refresh_status(self) -> None:
         """Keep the header showing which provider/model turns will use.
@@ -872,10 +1189,57 @@ class VenastineApp(App):
 
     # -- input ---------------------------------------------------------------
 
-    def on_input_submitted(self, event: Input.Submitted) -> None:
+    def _change_suggestions(self, panel, apply) -> None:
+        """Change the slash panel, and keep the transcript where it was.
+
+        The re-pin is the part that is not obvious. Measured: a panel
+        opening under the transcript takes rows from it and textual does
+        NOT re-pin the scroll -- `scroll_y` stayed at 41 while
+        `max_scroll_y` grew 41 -> 53, so the newest twelve lines of the
+        conversation scrolled silently out of view and came back only when
+        the panel closed. Whether the reader was at the bottom is knowable
+        only BEFORE the relayout, which is why it is captured here and
+        restored after, and why a reader who had deliberately scrolled up
+        is left where they were.
+
+        Batch 56 is why this is a helper rather than a handler body: the
+        panel's window slides, so ARROW KEYS resize it too -- measured, a
+        seven-to-eight-row step unpins the transcript exactly as opening
+        it does, and that one would repeat on most keypresses.
+        """
+        if panel is None:
+            return
+        try:
+            transcript = self._transcript
+            pinned = transcript.scroll_offset.y >= transcript.max_scroll_y
+        except NoMatches:                      # a modal is on top (#104)
+            transcript, pinned = None, False
+        apply()
+        if pinned:
+            self.call_after_refresh(transcript.scroll_end, animate=False)
+
+    def on_prompt_input_suggestions_changed(
+            self, event: PromptInput.SuggestionsChanged) -> None:
+        """The typed line changed, so the offered commands did.
+
+        The panel comes off the event rather than out of a query: the
+        prompt was handed it at mount, and #104's rule would otherwise
+        make this raise the moment a modal is on top (a slash command that
+        pushes a screen clears `.value`, which posts one of these).
+        """
+        panel = event.prompt.suggest
+        self._change_suggestions(panel, lambda: panel.offer(event.matches))
+
+    def on_prompt_input_suggestions_moved(
+            self, event: PromptInput.SuggestionsMoved) -> None:
+        """An arrow key, moving the highlight and possibly the window."""
+        panel = event.prompt.suggest
+        self._change_suggestions(panel, lambda: panel.move(event.delta))
+
+    def on_prompt_input_submitted(self, event: PromptInput.Submitted) -> None:
         text = event.value.strip()
         if not text:
-            event.input.value = ""
+            event.prompt.value = ""
             return
         # Clear AFTER the busy check, not before. /research holds _busy
         # for a whole ten-pass pipeline, so a follow-up typed during one
@@ -883,7 +1247,21 @@ class VenastineApp(App):
         if not text.startswith("/") and self._busy:
             self._transcript.write_error("Still working — wait for this turn to finish.")
             return
-        event.input.value = ""
+        event.prompt.value = ""
+        # Batch 63. AFTER the busy refusal above, which returns without
+        # clearing -- a message that was never sent is not something to
+        # recall. Before the dispatch, so a command that fails is still
+        # there to be corrected, which is most of why this exists.
+        was_empty = not self._history
+        self._history.remember(text)
+        if was_empty:
+            # The Footer recomposes off the screen's bindings signal and
+            # nothing else here raises it, so without this the two
+            # entries stay grey for the session while the keys work --
+            # `action_arm_quit` carries the same comment for the same
+            # reason. Guarded on the transition because that is the only
+            # time the answer changes: a history never empties.
+            self.refresh_bindings()
         if text.startswith("/"):
             if not commands.dispatch(self, text):
                 name = text[1:].split(" ")[0]
@@ -978,6 +1356,12 @@ class VenastineApp(App):
             config_loader.spend_cap(),
             effort=self.effort,
             response_channel=self.response_channel(),
+            # Batch 59. Rides beside the response channel because it is the
+            # same kind of thing: an out-of-band object handed down to a
+            # run that happens inside a tool call, where a LoopEvent cannot
+            # reach. This is the route by which a spawn -- and a spawn
+            # inside that spawn -- becomes a row in the sidebar.
+            activity=self._activity,
         )
         self.run_worker(
             lambda: self._consume(generator),
@@ -1070,6 +1454,10 @@ class VenastineApp(App):
                     provider_name=provider,
                     effort=self.effort,
                     authorization=authorization,
+                    # continue_conversation drains its own loop, so this
+                    # channel is the ONLY way a subagent spawned inside a
+                    # /grill-me turn is visible at all.
+                    activity=self._activity,
                 )
                 text = response.text
                 notices = list(getattr(response, "notices", ()) or ())
@@ -1107,6 +1495,7 @@ class VenastineApp(App):
 
     def on_one_shot_finished(self, message: OneShotFinished) -> None:
         self._busy = False
+        self._write_turn_time()
         self._raven.resume_animation()
         self._raven.state = ravens.IDLE
         if message.error is not None:
@@ -1167,6 +1556,33 @@ class VenastineApp(App):
             self._memory.billed_tokens, self._memory.last_input_tokens,
             ceiling, overridden)
 
+    def on_agent_stack_changed(self, message: AgentStackChanged) -> None:
+        """The sink spoke. Runs on the UI thread."""
+        self._agent_stack = message.stack
+        self.refresh_agent_panel()
+
+    def refresh_agent_panel(self) -> None:
+        """Redraw the panel from the two facts that make it up: the
+        session's active agent (an /agent switch) and the spans open right
+        now. ONE function, called from both writers -- the sink's handler
+        above and /agent -- so the panel cannot be shown a stack without
+        its root, or a root without its stack.
+
+        `query`, not `query_one`: the sink posts from a worker thread, so
+        an exit landing while the app is being torn down would raise
+        NoMatches out of a message handler on a DOM that no longer has the
+        widget. Measured -- a turn whose spans close as the app closes,
+        which is exactly what an interrupted run looks like. The same
+        shape as removing the log handler in on_unmount: a message can
+        outlive the thing it is about.
+        """
+        panel = self.query("#agent-panel").first(AgentPanel) \
+            if self.query("#agent-panel") else None
+        if panel is None:
+            return
+        name = self.active_agent.name if self.active_agent else None
+        panel.show(name, self._agent_stack)
+
     def restyle_sidebar(self) -> None:
         """Re-render the Rich-styled sidebar widgets after a /theme
         (#183).
@@ -1182,12 +1598,23 @@ class VenastineApp(App):
         self.refresh_goal_banner()
         self.refresh_todo_panel()
         self.query_one("#research-progress", ResearchProgress).restyle()
+        # Batch 59. A Rich-styled sidebar widget like the two above it, so
+        # it needs the same poke -- tcss reaches the panel's box and not
+        # the styles inside its Text.
+        self.query_one("#agent-panel", AgentPanel).restyle()
 
     def on_loop_event_message(self, message: LoopEventMessage) -> None:
         event = message.event
         transcript = self._transcript
 
         self.refresh_usage_line()
+        # Batch 61. Counted whether or not the renderer draws it: the
+        # commit cap withholds a table from its header row with no
+        # HOLD_LIMIT to bound it, and a figure that stopped there
+        # would go still during the one silence it exists to cover.
+        if event.token_delta:
+            self._meter.add_output_chars(len(event.token_delta))
+        self._refresh_meter()
 
         if event.thinking_delta:
             # §38. Same mascot handling as a token delta -- reasoning is
@@ -1234,7 +1661,15 @@ class VenastineApp(App):
                 # whenever the model emits that key first.
                 digest = tool_registry.call_digest(name, params)
                 detail = f"  {digest}" if digest else ""
-                transcript.write_role("tool", f"▸ {name}{detail}")
+                # Batch 65 (TECHNICAL_DEBT 16). The digest caps a value
+                # at sixty characters, which is shorter than most real
+                # URLs, so the untruncated values ride alongside for a
+                # cut-off span to resolve against. Redacted at the
+                # producer, and a value the redactor rewrote is not
+                # among them -- see `redacted_values`.
+                transcript.write_role(
+                    "tool", f"▸ {name}{detail}",
+                    tool_registry.call_links(name, params))
 
         if event.tool_result:
             result = event.tool_result["result"]
@@ -1282,6 +1717,14 @@ class VenastineApp(App):
 
         if event.final_response is not None:
             self._end_thinking()
+            # Batch 61's third instrument. NOT turn_billed_tokens (a
+            # spend meter, which counts the prompt again every step)
+            # and NOT turn_new_tokens (a size meter, which adds the
+            # input deltas a tool-using turn brings in). Dividing
+            # either by a duration yields a number that looks like
+            # tok/s and is not.
+            self._turn_output_tokens = getattr(
+                event.final_response, 'turn_output_tokens', None)
             transcript.flush_stream()
             if event.stop_reason and event.stop_reason != "complete":
                 transcript.write_system(f"[stopped early: {event.stop_reason}]")
@@ -1391,6 +1834,138 @@ class VenastineApp(App):
             transcript.write_role(
                 "system",
                 f"  {path}: the change is entirely inside redacted content")
+
+    # -- quitting (batch 57) -------------------------------------------------
+    #
+    # ctrl+c used to mean four different things depending on what had
+    # focus: it copied in the prompt (and did NOTHING there without a
+    # selection), quit outright one `tab` away, and did nothing at all
+    # under a modal, which blocks non-priority app bindings. README
+    # promised it quit. It now means one thing everywhere, and that one
+    # thing takes two presses, so selecting a typed prompt and copying it
+    # cannot end the session by accident.
+
+    def check_action(self, action: str, parameters) -> bool | None:
+        """Which of the two ctrl+c bindings is live.
+
+        `False`, never `None`, and that is not a style choice.
+        `Screen.active_bindings` skips a binding only on `is False`; a
+        `None` leaves it in the map marked disabled, and the map is keyed
+        by KEY -- so the first ctrl+c binding keeps the slot regardless.
+        Under `None` the DISPATCH is still correct (`_check_bindings`
+        walks past a refused action to the next binding for the same key)
+        and the FOOTER shows the wrong label permanently. Measured, and it
+        is why the footer test asserts on the drawn row rather than on the
+        binding object, where the bug is invisible.
+        """
+        if action == "confirm_quit":
+            return self._quit_armed
+        if action == "arm_quit":
+            return not self._quit_armed
+        if action in ("recall_previous", "recall_next"):
+            # Batch 63, and this is the SAME distinction used the other
+            # way round. ctrl+c needs False because a refused binding
+            # must give up its slot to the other one on that key. These
+            # want None: `active_bindings` KEEPS a None-refused binding,
+            # marked disabled, so the footer greys the entry rather than
+            # dropping it and reflowing -- while `_check_bindings` still
+            # declines the press, so the key is inert on a fresh
+            # session. One return value buys both halves.
+            return True if self._history else None
+        return True
+
+    def action_recall_previous(self) -> None:
+        """ctrl+up: the prompt before this one."""
+        self._recall(-1)
+
+    def action_recall_next(self) -> None:
+        """ctrl+down: the prompt after this one, or the draft back."""
+        self._recall(1)
+
+    def _recall(self, direction: int) -> None:
+        """Put a remembered prompt in the box, cursor at the end.
+
+        The box's CURRENT text is handed to the history, and that is
+        what lets an edit survive: a `current` that is not what the
+        history last served means the user has typed, so the move starts
+        a fresh browse with the edit saved as the draft rather than
+        walking past it. See `tui/history.py` for why that beats hooking
+        the keystroke.
+
+        Assignment goes through `.value`, so batch 55's `_api_edit` path
+        closes the suggestion panel on the way -- which is right:
+        recalling `/research --attended` should not open a completion
+        list over it. And `load_text` leaves the cursor at the START of
+        the document, so the next keystroke would land in FRONT of the
+        recalled text; `_complete()` fixes the same thing the same way.
+
+        No `_busy` gate. The box stays editable during a turn on
+        purpose, and recall is part of that.
+        """
+        if self._history is None:
+            return
+        try:
+            prompt = self.query_one("#prompt", PromptInput)
+        except NoMatches:                       # a modal is on top (#104)
+            return
+        move = (self._history.previous if direction < 0
+                else self._history.following)
+        text = move(prompt.value)
+        if text is None:
+            # Nothing to go to: an empty history, or a browse already at
+            # the oldest entry. The box is left exactly as it was.
+            return
+        prompt.value = text
+        prompt.move_cursor(prompt.document.end)
+
+    def _copy_selection(self) -> bool:
+        """Copy the focused widget's selection; True if there was one.
+
+        This is what `priority=True` takes away and has to hand back. Both
+        `Input` and `TextArea` bind ctrl+c to `copy`, and a priority app
+        binding pre-empts them completely -- measured, the clipboard
+        stayed empty. So the app performs the copy itself, and the rule
+        the whole gesture rests on is: **ctrl+c copies when there is
+        something to copy, and starts a quit when there is not.** A press
+        that copies never arms and never quits, armed or not -- so no
+        sequence of copies can end the session.
+        """
+        selection = getattr(self.focused, "selected_text", "")
+        if not selection:
+            return False
+        self.copy_to_clipboard(selection)
+        return True
+
+    def action_arm_quit(self) -> None:
+        """First ctrl+c: say what a second one does, and mean it for
+        `QUIT_CONFIRM_S`."""
+        if self._copy_selection():
+            return
+        self._quit_armed = True
+        self._quit_timer = self.set_timer(QUIT_CONFIRM_S, self._disarm_quit)
+        # Without this the state changes and the footer does not: the
+        # Footer recomposes off the screen's bindings signal, which
+        # nothing else here raises.
+        self.refresh_bindings()
+
+    def action_confirm_quit(self) -> None:
+        """Second ctrl+c, inside the window."""
+        if self._copy_selection():
+            return
+        if self._quit_timer is not None:
+            self._quit_timer.stop()
+            self._quit_timer = None
+        self.exit()
+
+    def _disarm_quit(self) -> None:
+        """The window closed with one press in it. The label goes back."""
+        # A quit that came from somewhere else (/quit, ctrl+q) can leave
+        # this timer pending; refreshing bindings without a screen raises.
+        if self._shutting_down:
+            return
+        self._quit_armed = False
+        self._quit_timer = None
+        self.refresh_bindings()
 
     def _release_permission_channel(self) -> None:
         """Unblock a worker parked on permission_channel.get(), denying.
@@ -1572,6 +2147,23 @@ class VenastineApp(App):
         """
         channel: queue.Queue = queue.Queue()
         self._permission_channel = channel
+        # Batch 61. The turn clock stops while a human is being waited
+        # on -- this is their time, not the harness's, and counting it
+        # would make a 30-second decision read as a slow model and
+        # collapse the throughput figure to nothing. The tick reads the
+        # screen stack for the general case; this call is what makes
+        # the pause exact when `tui.animations: false` leaves no tick
+        # to notice the transition. set_blocked is idempotent, so the
+        # two routes are one piece of state.
+        #
+        # DIRECT, never call_from_thread: this runs on a worker, and
+        # a quitting app has no message pump left to marshal into --
+        # measured, that parks the worker forever and breaks the
+        # shutdown release this method exists to keep working
+        # (test_quitting_during_an_attended_research_prompt_releases_
+        # the_worker). The meter touches no widget, so there is
+        # nothing to marshal.
+        self._meter.set_blocked(True, monotonic())
         self.call_from_thread(
             self.push_screen, screen, lambda answer: channel.put(answer))
         try:
@@ -1581,6 +2173,7 @@ class VenastineApp(App):
             return None
         finally:
             self._permission_channel = None
+            self._meter.set_blocked(False, monotonic())
 
     def ask_choice_blocking(self, payload: dict):
         """Pick one of a set of offered options. Blocks; returns whatever
@@ -1761,6 +2354,9 @@ class VenastineApp(App):
         # record now (Transcript.last_answer), so there is no second buffer
         # to keep in step and no flush site that has to remember to.
         self._transcript.flush_stream()
+        # Batch 61. AFTER the flush, so the line lands under the
+        # answer rather than inside it.
+        self._write_turn_time()
         self._raven.resume_animation()
         self._raven.state = ravens.IDLE
         if message.error is not None:
@@ -1842,6 +2438,7 @@ class VenastineApp(App):
 
     def on_research_finished(self, message: ResearchFinished) -> None:
         self._busy = False
+        self._write_turn_time()
         self._raven.state = ravens.IDLE
         if getattr(message, "abandoned", False):
             # #105. A deliberate quit is not a pipeline failure: say what
@@ -2006,7 +2603,7 @@ class VenastineApp(App):
                 f"open and usable — only its history could not be "
                 f"drawn.")
             return
-        for role, text in entries:
+        for role, text, links in entries:
             if role == "user":
                 self._transcript.write_user(text)
             elif role == "assistant":
@@ -2026,7 +2623,7 @@ class VenastineApp(App):
                 if self._show_thinking:
                     self._transcript.write_role(role, text)
             else:
-                self._transcript.write_role(role, text)
+                self._transcript.write_role(role, text, links)
         if entries:
             noun = "entry" if len(entries) == 1 else "entries"
             self._transcript.write_system(
@@ -2099,7 +2696,12 @@ def _cmd_help(app: VenastineApp, args: str) -> None:
     app._transcript.write_system("Commands:")
     for command in commands.all():
         usage = f" {command.usage}" if command.usage else ""
-        app._transcript.write_system(f"  /{command.name}{usage} — {command.summary}")
+        # `all()` is canonical, so an alias has exactly one place to be
+        # named: on the row of the command it belongs to (batch 57).
+        also = (f" (also {', '.join('/' + a for a in command.aliases)})"
+                if command.aliases else "")
+        app._transcript.write_system(
+            f"  /{command.name}{usage} — {command.summary}{also}")
     # §26. Worth saying plainly: the pinned textual has no text selection,
     # so someone trying to select with the mouse gets nothing and has no
     # way to know why. Most terminals let shift+drag bypass the app's
@@ -2967,7 +3569,11 @@ def _cmd_compact(app: VenastineApp, args: str) -> None:
         from core import compaction
         try:
             outcome = compaction.compact(
-                memory, app.model, app.provider_name, overrides=overrides)
+                memory, app.model, app.provider_name, overrides=overrides,
+                # Batch 59. A manual /compact runs the compactor agent in
+                # its own worker with nothing above it, so its span is the
+                # root of the stack rather than one level down.
+                activity=getattr(app, "_activity", None), depth=0)
         except Exception as e:  # noqa: BLE001 — same containment as the loop's
             app.call_from_thread(
                 app._transcript.write_error, f"Compaction failed: {e}")
@@ -3403,7 +4009,8 @@ def register_builtin_commands() -> None:
         SlashCommand("resume", "resume a thread by id, even an old one",
                      _cmd_resume, "<thread-id>"),
         SlashCommand("new", "start a new thread", _cmd_new),
-        SlashCommand("quit", "exit", _cmd_quit),
+        SlashCommand("quit", "exit the harness", _cmd_quit,
+                     aliases=("exit", "bye")),
     ):
         commands.register(command)
 

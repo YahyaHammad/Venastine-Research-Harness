@@ -9703,3 +9703,1679 @@ the style test red — the text is identical either way, which is why the style 
   `tests/BREAKING_CHANGES.md`.
 
 Count 3510 -> 3517.
+
+## Batch 53 — the table that was only ever its own pipes (2026-09-06)
+
+### The reported symptom
+
+A markdown table in a model answer rendered as plain text: `| Domain | Skills |` and the
+`|---|---|` under it, verbatim, in a transcript that had been highlighting code blocks since
+§26. Reported with a screenshot of a live session.
+
+### Why it was there
+
+`Transcript._render_blocks` handled exactly one construct, and `_split_fences`' own docstring
+said so without anyone reading it as a bug report: *"Deliberately small: this is a renderer,
+not a markdown parser. An unterminated fence is treated as running to the end of the text."*
+So the table was not a special case that had been missed — headings, `**strong**` and inline
+backticks were raw for the identical reason, and the screenshot showed all four.
+
+### The proposal, and the two things measuring it changed
+
+The reported fix was to detect table markers, cache the deltas while one is in flight, and
+draw it whole once the markers stop. That is the right shape and it is not a new mechanism:
+§38 already held a chunk while a ``` fence was open, for a reason that was never about
+fences — `RichLog` appends and cannot rewrite a drawn row, so anything committed in halves
+renders as its own source and can never be put right.
+
+Two premises did not survive being checked against the code.
+
+**The stream is not committed line by line.** `_split_committable` has a second rule: past
+the last newline, a tail longer than one rendered row is committed *at its last space*. A
+table row wider than the transcript would have been cut mid-row before any newline arrived,
+so gating on newlines alone would have shipped a half-drawn table on exactly the wide tables
+that motivated the report.
+
+**Textual's `Markdown` is a Widget, not a renderable**, so it cannot go inside a `RichLog`:
+adopting it means replacing the transcript, not extending it. `rich.table.Table` *is* a
+renderable and `RichLog.write` takes any renderable — the route `Syntax` has taken since §26.
+So the choice was never "Textual's built-in or hand-rolled unicode"; there was a third option
+with no new machinery in it.
+
+### What changed
+
+`tui/markdown.py`, new and PURE (`tui/diffs.py`'s rule, since `widgets.py` imports it): the
+block splitter, the inline tokeniser, and `safe_commit_limit`. Inside the package on purpose
+— a root-level `markdown.py` is the `logging.py` incident again.
+
+`safe_commit_limit(committed, pending)` turns §38's single rejection into a **cap**: the
+offset past which drawing would split an open fence, a table, a heading, or an unclosed
+`**` / `` ` ``. A cap is strictly better than the rejection it replaces — a paragraph sharing
+a buffer with a fence used to wait for the fence to close and now streams — and §38's two
+pins still say what they always said, because in both of them the fence starts the buffer and
+the cap is therefore 0.
+
+`_split_committable` grew `marks=`, measuring the width rule in **rendered cells**. This is
+the half that is easy to skip and cannot be: `**bold**` draws four cells narrower than it is
+written, so a source-column cut lands where Rich would not have wrapped, and the streamed
+rows then differ from the ones `rerender()` draws from the same text. The cap is what makes
+the measurement well-defined, since no cut is offered while a mark is still open and its
+drawn width therefore still unknown. It is **off by default**, which is the right answer for
+`thinking_delta`: reasoning renders as prose, marks and all.
+
+`_render_blocks` gained a table branch and routes plain text through `inline_spans`. Both
+block kinds are tuple subclasses, so `isinstance(block, tuple)` still asks §26's question —
+"does this occupy its own rows" — and the newline trimming around a renderable stayed one
+rule rather than becoming two.
+
+### What the tests found that reasoning had not
+
+Three defects, each caught by a test written before it was known to be needed.
+
+- `display_len` read `_spans` directly, so it counted a heading's `#` — a width the terminal
+  never draws. It goes through `inline_spans` now, which is where the marker is stripped.
+- A construct opening later could push the cap **past** an earlier unresolved one. Two
+  consecutive pipe lines are both undecidable headers, and the second reported its own offset
+  as the limit — so the first would have committed as prose and the delimiter arriving next
+  would have had nothing to attach to. `_hold` takes the minimum now, and the table's
+  termination check moved above the fence branch so a fence opener cannot clear a table's
+  hold by never reaching it.
+- A closing fence with no newline after it reported as resolved, which is §38's own
+  `test_a_prefix_that_would_reopen_the_fence_is_held` from the other side. The fence is
+  closed for the scan; the cap stays where the opener put it until that line ends.
+
+Two more came from rendering the screenshot's own answer through the app rather than from any
+test, and neither was visible at the parse level.
+
+- A paragraph after a table butted straight against the bottom border, while the same
+  paragraph after a fence had a blank line above it. `text.split(FENCE)` leaves the newline
+  after a closing ``` in the FOLLOWING plain run, so `_render_blocks` finds two there and
+  keeps one — but a table consumed its own last row's terminator, so one was left and the
+  trimming took it. `_split_tables` hands it back, which puts both constructs on one rule
+  instead of two that happen to agree most of the time. Pinned on DRAWN ROWS, because both
+  block lists looked reasonable read on their own.
+- `pad_edge=False` rendered `|Domain   | Skills` with no edge padding, where the design that
+  was chosen has it. Rich's default is what that preview was made from.
+
+And one claim in the plan was wrong in the writing. The `Text`-not-`str` rule for table cells
+was justified as "a `[` raises `MarkupError`". Measured against the pinned Rich, `[1, 2]`
+renders fine; what actually happens is `[bold]x` rendering as `x` — **swallowed, with nothing
+raised** — and `a[/]b` raising. Both matter, the silent one arguably more, and the first test
+written for it demonstrated neither. The rule has to be about the TYPE rather than about
+scanning for brackets, because the shapes that fail are not the ones a reader expects to be
+dangerous.
+
+### Owner decisions
+
+- **Tables, headings and the two inline marks; full markdown deferred, not rejected.** Lists,
+  block quotes and links stay verbatim. `rich.markdown.Markdown` re-flows text itself, which
+  is precisely what the cell measurement exists to keep under our control, and it takes over
+  the fence handling §26 and §38 pinned.
+- **A full box grid** (`rich.box.SQUARE`) over the rule-only presets. The transcript already
+  draws box characters for a thinking span, so the vocabulary was established.
+- **GFM-strict detection — a delimiter row is required.** A false table is not a cosmetic
+  slip: the cap would hold the stream waiting for one that never arrives, so a shell
+  pipeline or a `|` in prose would stall the answer. Which is why most of
+  `test_markdown_render.py` is the tables that are NOT there.
+- **`assistant` entries only.** Thinking spans keep their bar-prefixed plain lines: reasoning
+  is quoted prose, and a table inside a `│ ` bar has no clean rendering.
+- **`assistant` staying plain foreground is narrowed, deliberately.** That rule is about the
+  BODY, whose length is why tinting it costs more contrast than it buys. A heading and a bold
+  run are marks the model asked for, on a few cells at a time.
+
+### Mutation
+
+Replacing the `Text` cells with the raw strings (`table.add_row(*row)`) raises `MarkupError`
+inside `test_a_cell_that_looks_like_console_markup_survives_verbatim` — verified by making
+the change and watching it go red, then reverting. The streamed-vs-written equality cases are
+the pin for the width rule: they stream five characters at a time, so a boundary lands
+mid-mark, mid-row and mid-table.
+
+### Files
+
+- `tui/markdown.py` — new: `split_blocks`, `inline_spans`, `display_len`, `width_split`,
+  `safe_commit_limit`.
+- `tui/widgets.py` — the cap in `_commit_ready`, `marks=` in `_split_committable`, the table
+  and inline branches in `_render_blocks`, `_inline_text`, `_render_table`, `TABLE_BOX`;
+  `_split_fences` and `_fence_is_open` removed (the grammar has one home now).
+- `tui/themes.py` — `md_heading`, `md_strong`, `md_code`, `table_border`, `table_header`.
+- `tests/test_markdown_render.py` (new, 66) — the grammar as a pure function.
+  `tests/test_live_output.py` (+11) — `TestATableIsHeldAndDrawnWhole` and five cases in
+  `TestAStreamedAnswerRendersLikeAWrittenOne`. `tests/test_themes.py` —
+  `EXPECTED_ROLE_KEYS`.
+- `AGENTS.md` (the §38/O7 paragraph), `ARCHITECTURE.md` (§4.16, the tree, the counts),
+  `README.md`, `tests/BREAKING_CHANGES.md`.
+
+Count 3517 -> 3595.
+
+
+## Batch 54 — the prompt box that could only ever show its own tail (2026-09-06)
+
+### The reported symptom
+
+A prompt longer than the input box scrolled sideways. The user could see roughly the last
+seventy columns of what they had typed and nothing before them, with no way to read a
+paragraph back before sending it. Asked for: a box that wraps and grows to three or four
+lines while being typed, and returns to one line on submit so the transcript keeps its rows
+for the answer.
+
+### Why it was there
+
+`tui/app.py` composed `textual.widgets.Input`, and an `Input` is single-line by
+construction — `height: 3` in its own `DEFAULT_CSS`, one text row between two borders, no
+wrap, horizontal scroll. There is no setting that changes that. `TextArea` is the only
+multi-line widget in the pinned textual, so the fix was a swap.
+
+The layout needed nothing at all, which is worth recording because it was the one part
+expected to be work: `#prompt` was already `dock: bottom` and `#transcript` already
+`height: 1fr`, so a taller prompt takes rows from the transcript and gives them back with
+no second rule. `#thinking-indicator` and `#todo-panel` between them were already
+`height: auto`. The sheet had the pattern.
+
+### What measuring changed
+
+Everything below was run headless against the installed textual 1.0.0 rather than read from
+its documentation — D22's rule, and it moved three decisions.
+
+**`enter` does not reach a binding without `priority=True`.** `TextArea._on_key` maps
+`enter` to a newline insert and calls `event.stop()` / `event.prevent_default()`, which
+beats an ordinary binding. Measured both ways: with the flag, submitted and the text
+untouched; without it, `'hi\n'` inserted and no submit. The flag reads like caution and is
+the opposite — without it no turn in this shell would ever start.
+
+**`shift+enter` cannot be the newline key.** This was the plan's assumption and it is
+wrong on the platform the project is developed on. Textual enables the kitty keyboard
+protocol in `drivers/linux_driver.py` and `linux_inline_driver.py` and nowhere else, so on
+the Windows driver a terminal sends a bare CR for that chord and `XTermParser` yields plain
+`enter` — the box would submit the half-written message. Fed a kitty `\x1b[13;2u` the parser
+*does* yield `shift+enter`, so binding it costs one line and works where a terminal supplies
+it.
+
+**`alt+enter` is the obvious third guess and is a dead end.** Fed `ESC CR`, `XTermParser`
+yields *no key at all* — the ESC opens a sequence that never completes — and a second
+`ESC CR` behind it degrades to `escape`, `enter`. Written down because it is what the next
+person will reach for after reading the paragraph above.
+
+**`ctrl+j` is what carries the feature.** Byte 0x0a parses to its own key, is bound by
+neither `Input`, `TextArea`, `App` nor `Footer`, and is exactly what iTerm2, VS Code and
+Windows Terminal emit once configured to send a newline for shift+enter — so the two
+bindings are one affordance for anyone who has done that setup.
+
+**`TextArea` has no placeholder.** No parameter, no attribute. A `render_line` override was
+prototyped and works, but the border title carries it without overriding a method whose
+contract is the cursor, and it stays legible once the box has text in it. Measured: it
+renders left-aligned in the top border and ellipsises to `Message, or…` at width 18.
+
+### The false green, and it was in this batch's own test
+
+The mutation pass turned `soft_wrap` off and **nothing went red**. The test asserted that a
+long line made the box taller than one row, and that was satisfied — because a `TextArea`
+that does not wrap grows a **horizontal scrollbar**, which is a row. Measured on a
+54-column box: wrapped, a 186-character line is 4 rows at `max_scroll_x == 0`; unwrapped it
+is 2 rows at `max_scroll_x == 133`.
+
+So the test passed while the text was still scrolling sideways — the entire defect the batch
+exists to remove — and its own failure message said "it is still scrolling sideways" about a
+condition it could not see. `max_scroll_x` is what tells the two apart, and the row count is
+now pinned exactly and sized to land below the cap, so "wrapped" also cannot be confused with
+"hit `max-height`".
+
+This is the same shape as batch 15's citation check and batch 49's too-small case table: a
+domain in which the bug cannot express itself. Twice now the mutation pass has been the only
+thing that found it.
+
+### The bug that came free
+
+`Input.Submitted` BUBBLES past a modal's own handler to the app's — measured, the screen
+handler runs and then the app's does. The prompt handled that message, so Enter in
+`ReviewScreen`'s note box (a screen with no submit handler of its own) reached
+`on_input_submitted`, cleared the reviewer's note, and dispatched the text as a slash command
+if it began with one. Giving `PromptInput` its own message type ends that by construction.
+Confirmed by mutation: restoring an `Input.Submitted` handler makes the new test fail with
+`/help` dispatching from inside the modal and `_cmd_help` then raising `NoMatches` on
+`#transcript`, because a modal was on top.
+
+### Owner decisions
+
+- **`ctrl+j` and `shift+enter` both bound.** That the second silently does nothing on
+  Windows Terminal is accepted; it is why the first exists, and it costs one line to work
+  under WSL and on kitty/ghostty/WezTerm.
+- **Four text rows** (`max-height: 6`), then it scrolls. At the 80×24 floor a fully extended
+  prompt leaves the transcript 18 rows.
+- **The border title carries the placeholder**, rather than a `render_line` overlay.
+
+### Deliberately not done
+
+The two modal `Input`s stay single-line. Prompt history recall is not added — `TextArea` now
+owns up/down, so it would need a design rather than a binding, and no such feature existed
+before. And `ctrl+c` was already shadowed before this batch: `Input` and `TextArea` both bind
+it to `copy` with no `check_action` gate, and measured, an app-level `ctrl+c → quit` fires
+under neither while the box has focus. README promises it does. That is a separate defect and
+it is left standing rather than folded in.
+
+### Files
+
+- `tui/widgets.py` — new: `PromptInput` (the `Submitted` message, the `value` alias,
+  `action_submit`, `action_newline`, the bindings).
+- `tui/app.py` — the composed widget, the focus call, and `on_input_submitted` renamed to
+  `on_prompt_input_submitted` over an unchanged body; the §26 `ctrl+l` comment amended to
+  say both widgets bind `ctrl+k`.
+- `tui/app.tcss` — `#prompt` gains `height: auto`, `max-height: 6`, an explicit `padding`
+  and `border-title-color`.
+- `tests/test_tui.py` (+10) — `TestThePromptBoxGrowsWithWhatIsTyped`,
+  `TestEnterSubmitsAndCtrlJDoesNot`, and the review-note bubbling pin. **No existing test
+  changed**, which the `value` alias is what bought.
+- `AGENTS.md`, `ARCHITECTURE.md` (§4.16), `README.md`, `tests/BREAKING_CHANGES.md`.
+
+### Mutation
+
+Five mutations, five kills, one survivor found and fixed:
+
+| mutation | result |
+|---|---|
+| `priority=True` dropped from the `enter` binding | 3 tests red |
+| `soft_wrap=False` | **survived** — see the false green above; red after the test was strengthened |
+| `height: auto` / `max-height` removed from `#prompt` | 6 tests red |
+| `max-height` widened to 20 | 2 tests red |
+| app handles `Input.Submitted` again | the review-note test red, reproducing the original bug in the traceback |
+
+Count 3595 -> 3605.
+
+
+## Batch 55 — twenty-six commands nobody could see (2026-09-07)
+
+### The reported symptom
+
+There is no way to discover a slash command from the prompt. `on_mount` writes "Type /help for
+commands." once, it scrolls away with the first turn, and after that the only route to the list
+is remembering that `/help` exists. Twenty-six commands, four modules registering into the
+registry, and a shell that told you about them once.
+
+Asked for: while a slash command is being typed, a panel above the prompt listing the matching
+commands as `/name ● description  [flags]`, at most two lines each, at most five, updating on
+every keystroke and deletion, arrow keys to move a highlight, Enter to complete WITHOUT sending.
+Reading the same registry `/help` reads, so the two cannot drift.
+
+### What it is, and what it is not
+
+Not a fourth screen. The thread picker is a `ModalScreen`, which is what made "a fourth panel"
+the natural way to describe this, but the suggestions belong in `#main` beside the transcript —
+`ThinkingIndicator`'s shape, `height: auto` and `display = False` until there is something to
+say. `#prompt` is `dock: bottom`, so the last widget in the flow lands directly above it and the
+panel "opens upwards" with no layer, no offset and no focus to juggle. #104's
+query-searches-the-active-screen trap does not arise, because there is no second screen.
+
+The matching lives in `tui/commands.py` next to the registry, the fitting lives in the widget,
+and app.py introduces the two. That split is not tidiness: **how many entries fit is a function
+of the rendered width**, and only the thing that draws knows it. Split the selection from the
+budget and the prompt can highlight a sixth entry the panel had no room for — an invisible
+selection that Enter would then complete.
+
+### What measuring changed
+
+**`prompt.value = "…"` posts `TextArea.Changed` exactly as a keystroke does.** This is the
+finding the batch turns on. With Enter always completing (the owner decision below), a panel
+driven straight off `Changed` would open in the ~73 `query_one("#prompt").value = "/…"` sites
+across four test files and turn each one's single `press("enter")` into a completion instead of
+a dispatch. Every bare assignment in the suite — `/help`, `/copy`, `/theme`, `/model`,
+`/claims`, `/grill-me` — is an exact command name, so all of them would have gone from "run
+this" to "type it again".
+
+The line to draw is not a test accommodation: **assignment is the API, typing is the user**, and
+textual draws the same line itself — `_replace_via_keyboard`'s docstring says "a replacement
+performed using a keyboard (as opposed to the API)". That method was the obvious seam and is the
+wrong one: measured, backspace and `ctrl+w` do not go through it, and a panel that ignored
+deletions fails the requirement outright. `load_text` is the seam instead — the single public
+funnel behind both `.text =` and `.value =` — and it is public rather than private, which the
+other candidate was not.
+
+**Opening the panel scrolls the transcript away from its newest line.** Measured: the transcript
+sat at `scroll_y=41, max_scroll_y=41`, pinned to the bottom; showing a twelve-row panel left it
+at `scroll_y=41, max_scroll_y=53`. Textual does not re-pin a scroll on shrink, so the last twelve
+lines of the conversation left the screen the moment a slash was typed and came back only when
+the panel closed. Whether the reader WAS at the bottom is knowable only before the relayout,
+which is why app.py captures it there and restores it after — and why someone who had
+deliberately scrolled up is left where they were.
+
+**A `Static` re-wraps rows you already wrapped.** The first draft wrapped each entry to
+`width - 2` and then drew continuation lines under a four-space gutter, so a two-line entry
+rendered as THREE rows: the height arithmetic was wrong by one per entry, and the truncation
+ellipsis landed on a row that had then been dropped. Both gutters have to fit inside the wrap
+width, and the outer `Text` carries `no_wrap` / `overflow="crop"` so a miscalculation clips
+where it can be seen rather than reflowing where it cannot. The pin is a test that no rendered
+row is wider than the panel — asserted in CELLS, not characters.
+
+**And that pin, written through the pilot, was blind to the defect it was written for.** The
+mutation pass is what said so: wrapping at `width - 2` SURVIVED a test that drives the real
+app, types `/`, and measures every drawn row. At 80 columns only `/research` has a
+continuation line long enough to overflow, and a bare slash shows four entries that do not
+include it — so the test was correct, ran the real thing, and could not observe the bug.
+The replacement is a sweep with no pilot at all: every registered command, four widths,
+instant. Same shape as batch 54's own false green and batch 49's too-small case table, with a
+new wrinkle worth naming — there the assertion could not distinguish the states, here the
+INPUTS never reached the state. Driving the real app is not the same as exercising it.
+
+**`Text.truncate()` on a wrapped line does nothing.** Same family, found in the same render: the
+overflow is in the lines that were DROPPED, not in the line that was kept, so the kept line is
+shorter than the width and truncate is a no-op. A line that reads as complete when it is not is
+worse than one that is visibly short, so the ellipsis is appended deliberately.
+
+**`up`/`down` are ordinary bindings on `TextArea`, not `_on_key` interceptions.** Unlike
+`enter` — batch 54's `priority=True` — they can be claimed by overriding the ACTIONS, which is
+better than re-binding the keys: `super()` is still there to hand them back the moment the panel
+is closed. That matters because batch 54 made this box multi-line, and a prompt four rows tall
+that cannot move its own cursor would be a regression no test about suggestions would notice.
+`select=True` (shift+up) is excluded — that is a text selection and stays one.
+
+**`tab` and `escape` can be spent conditionally.** A `tab` binding on the prompt beats textual's
+focus-move, and `check_action` returning `None` — not `False` — declines the key and lets the
+press carry on to the focus system. False would DISABLE it. Both keys behave exactly as they did
+before this batch whenever the panel is closed.
+
+### The bug this batch found in its own predicate
+
+`matching()` first read the line as `text.strip()` and rejected internal whitespace, which is
+the same reading `on_prompt_input_submitted` gives it. It is the wrong reading here, and the
+smoke test caught it: a TRAILING space survives nothing — `strip()` removes it — so `"/copy "`
+read as `"/copy"` and the panel stayed open over a line that had already moved on to its
+arguments. Enter at that point would have completed `/copy` on top of itself rather than
+sending. `lstrip()` and then "no whitespace at all", because once a space is typed there is
+nothing left to complete, whichever end of the token it is on. The leading half stays tolerant,
+since `dispatch` tolerates it and `"  /help"` genuinely runs.
+
+### Owner decisions
+
+- **Enter always completes** while the panel is open, so a fully typed `/help` takes two
+  presses. The alternative — submit when the typed token already equals the highlighted name —
+  is more convenient and was rejected: it is a coin flip from the user's side and stops being
+  well defined the day two commands share a prefix.
+- **The cap is on ROWS, not entries.** At most 5 entries and at most 8 rows, whichever binds
+  first, stopping at the first entry that would overflow rather than skipping it — a list that
+  skipped would no longer be alphabetical and the order would read as arbitrary. At 80 columns
+  most entries wrap to two rows, so the row cap is usually the one that bites: a bare `/` offers
+  twenty-six and shows four.
+- **The border title carries the count**, `4 of 26 · /help for all`, which costs no rows.
+  Shown-of-MATCHED rather than shown-of-all: "4 of 26" under a typed `/c` would claim
+  twenty-two candidates that do not exist. Both numbers are counted, never written down.
+- **Tab completes** while the panel is open and moves focus when it is not.
+- **Escape hides it and latches**, until the line stops being a bare slash token. A dismissal
+  that the next keystroke undoes is not a dismissal.
+- **Completion inserts a trailing space**, which is doing two jobs: `matching()` is empty once
+  the line has whitespace in it, so the panel closes on its own, and deleting that one character
+  is what brings it back.
+- **`/name ● summary  usage`**, in that order. The reverse pushes the DESCRIPTION off the entry
+  for `/research` and `/copy`, and the description is the half the panel exists for.
+
+### Deliberately not done
+
+Mouse selection — the panel stays keyboard-only. Argument completion (`/theme` offering theme
+names): the panel completes the command and gets out of the way. And `ctrl+c` is still shadowed
+by the focused input, as batch 54 recorded; still a separate defect, still not folded in.
+
+### Files
+
+- `tui/commands.py` — `CommandRegistry.matching()`, beside `all()` and `dispatch()`.
+- `tui/widgets.py` — new: `SlashSuggest` (the row budget, the selection, the two-line entry,
+  the counted title); `PromptInput` gains `suggest`, the `load_text` seam,
+  `on_text_area_changed`, `SuggestionsChanged`, `check_action`, and four actions.
+- `tui/app.py` — the composed panel, the one-time wiring in `on_mount`, and
+  `on_prompt_input_suggestions_changed` (which is where the transcript re-pin lives, because it
+  is the one place that can see both widgets).
+- `tui/app.tcss` — `#slash-suggest`.
+- `tests/test_tui.py` (+31).
+- `AGENTS.md`, `ARCHITECTURE.md`, `README.md`, `tests/BREAKING_CHANGES.md`.
+
+### Mutation
+
+Seven mutations, seven kills — but only after the second round:
+
+| mutation | result |
+|---|---|
+| the `load_text` override dropped | `test_assigning_the_value_does_not_open_it` red |
+| wrap at `width - 2` instead of `width - 4` | **survived** — see the pilot's blind spot above; red once the sweep replaced it |
+| the appended ellipsis omitted | 1 red |
+| budget by entry count instead of rows | 3 red |
+| the arrows always drive the panel | `test_the_arrows_still_move_the_cursor_with_no_panel` red |
+| the transcript re-pin skipped | 1 red |
+| `in` instead of `startswith` | 2 red — and the first draft of the prefix test did NOT catch it, because `/co` gives the identical pair either way |
+
+Count 3605 -> 3636.
+
+
+## Batch 56 — a list that said twenty-six and showed four (2026-09-07)
+
+### The reported symptom
+
+Batch 55's panel navigated the wrong list. A bare `/` matches all twenty-six commands, draws
+four, and pressing down on the fourth wrapped back to the first — so twenty-two commands were
+unreachable by keyboard, on a panel whose own border title said there were twenty-six.
+
+Asked for: past the last visible entry, drop the top entry (or two) and bring in the next one
+(or two), still inside the same row budget. The user's own framing named the "omit 1, display
+2" case before it was measured.
+
+### Why it was there
+
+`_selected` was an index into `_groups` — the window — rather than into `_matches`, and
+`_budget` sliced `self._matches[:SUGGEST_MAX_ENTRIES]` from the head with no start offset to
+move. So `% len(self._groups)` was wrapping at the edge of what had been drawn, which is a
+different boundary from the edge of what had matched, and nothing in the panel could tell them
+apart.
+
+The fix keeps the split batch 55 already documents and pushes it one step: `move()` decides
+what is SELECTED, `_budget()` decides what is VISIBLE, because only `_budget` knows the width.
+`_first` is derived on every measurement rather than maintained alongside the selection.
+
+### What measuring changed
+
+**The window changes SIZE as it slides, and that is the whole design.** Entries are one or two
+rows, so keeping the selection visible under an eight-row budget gives four entries over seven
+rows at the top of the list, four over eight one step later, and five over seven in the middle.
+The user's "omit 1 and display 2" guess turns out to be a specific position rather than a
+special case: `/compact` is two rows and `/embedder` plus `/forget` are two rows between them,
+so the step that needs `/embedder` on screen drops one entry and gains two. It is the row budget
+refilling, not a rule.
+
+**A plain `refresh()` leaves the extra row clipped.** Measured: with `_groups` holding eight
+rows, the widget's content height stayed at seven — no exception, no visible error, an entry
+simply missing. `move()`'s `refresh(layout=True)` is load-bearing the moment a window can
+resize, and was merely correct before.
+
+**A resize outside app.py's handler unpins the transcript — again.** This is batch 55's finding
+arriving a second time and worse. Measured: after `/` through the real key path the transcript
+is pinned; after a bare seven-to-eight-row change it is not. Batch 55 only had to survive the
+panel OPENING, once. A sliding window resizes on most arrow presses, so the drift would
+accumulate as the reader scrolled. The re-pin became `_change_suggestions(panel, apply)` and
+the arrows post `SuggestionsMoved` so they land inside it.
+
+**Two things that did not need handling.** The window never shrinks at the tail: minimal
+scrolling only advances `_first` far enough to keep the selection visible, so it never reaches
+a position with fewer entries left than fit, and the last match is still shown in a full five
+entries over eight rows. And `test_the_highlight_wraps_at_both_ends` carried over untouched,
+because `/c`'s four matches all fit and its boundary was never the false one.
+
+### Owner decisions
+
+- **Wrapping stays, at the real boundary.** Down on the twenty-sixth goes to the first with the
+  window back at the top; up on the first goes to the twenty-sixth with the window at the tail.
+  The shipped behaviour with the false edge removed, rather than a new behaviour.
+- **The title gains a range only when the list can scroll.** `1-4 of 26` where there is
+  somewhere to be, `4 of 4` and `1 of 1` where everything already fits. Every case shipped in
+  batch 55 reads exactly as it did.
+- **The five-entry cap stays** beside the eight-row cap, though measured it is the binding one
+  in fourteen of the twenty-six window positions against the row cap's seven. Kept because a
+  glanceable panel was the original ask; the cost is slightly more scrolling.
+
+### Deliberately not done
+
+`pageup`/`pagedown`/`home`/`end` — the arrows are the whole navigation, as specified. Mouse and
+scroll-wheel selection. Argument completion. And `ctrl+c` is still shadowed by the focused
+input, unchanged since batch 54.
+
+### Files
+
+- `tui/widgets.py` — `SlashSuggest` gains `_first`, `_fill()` and `visible`; `_budget()` derives
+  the window; `move()` wraps over the matches and refreshes with `layout=True`; `render()`
+  highlights at `_selected - _first`. `PromptInput` gains `SuggestionsMoved`, and its two
+  cursor actions post it instead of calling `move()`.
+- `tui/app.py` — `_change_suggestions(panel, apply)` extracted from batch 55's handler, with a
+  second handler for the moves.
+- `tui/app.tcss` — **unchanged**: the window is still bounded by `SUGGEST_MAX_ROWS`.
+- `tests/test_tui.py` (+12), three of batch 55's adjusted for the new accessor and title.
+- `AGENTS.md`, `ARCHITECTURE.md`, `README.md`, `tests/BREAKING_CHANGES.md`.
+
+### Mutation
+
+Seven mutations, seven kills, first pass — batch 55's lesson applied up front rather than after
+a survivor: the budget invariant is swept over every selection at four widths with no pilot,
+because a pilot only walks the positions its keystrokes reach.
+
+| mutation | result |
+|---|---|
+| `move` wraps over `_groups` again | 7 red |
+| `_budget` recomputes the window from the top | 1 red — the list jitters for a selection it was already showing |
+| `_budget` never scrolls back up (no `min`) | 2 red |
+| `move` refreshes without `layout=True` | 1 red — the drawn rows outnumber the measured ones |
+| the arrows call `move()` directly again | 1 red — the transcript creeps |
+| the title drops the range | 2 red |
+| `render` highlights without subtracting `_first` | 1 red — `chosen` stays right while the wrong row lights up |
+
+Count 3636 -> 3648.
+
+
+## Batch 57 — one key that meant four things, and a quit with three names (2026-09-07)
+
+### The reported symptom
+
+`README.md` promised **ctrl+c** quits. Asked: why does that depend on what has focus, make it
+two presses so that copying a typed prompt cannot end the session, and let `/exit` and `/bye`
+work as well as `/quit`.
+
+### What it actually did
+
+Four things, measured, and the count is the finding — the question assumed two:
+
+| focus | ctrl+c |
+|---|---|
+| the prompt, which is where focus sits almost always | `TextArea.copy` — copies a selection, and **nothing whatsoever** without one |
+| any other main-screen widget, one `tab` away | quits immediately, no confirmation |
+| under any modal | **nothing at all** — `ModalScreen` blocks non-priority app bindings |
+| a modal's `Input` | copies |
+
+Two things that were not wrong. The FOOTER was the honest one: `TextArea`'s ctrl+c is
+`show=False`, so while the prompt has focus the footer shows only `ctrl+t`/`ctrl+l`, and "Quit"
+*appears* when you tab away — the advertisement tracked the behaviour exactly. And there was
+already a working single-press quit nobody knew about: `ctrl+q`, textual's own priority system
+binding, which quits from everywhere including under modals. It is now documented rather than
+changed.
+
+### What measuring changed
+
+**`priority=True` is the only way in, and it takes the copy with it.** Only a priority binding
+reaches past a focused text widget *and* past a modal's block on app bindings. Measured, it also
+pre-empts `TextArea.copy` completely — the clipboard stayed empty — so the app performs the copy
+itself. That is not a workaround bolted on; it is what makes the gesture coherent: **ctrl+c
+copies when there is something to copy and starts a quit when there is not**, in either state,
+so no sequence of copies can end the session. `PromptInput` — the most loaded class in
+`widgets.py` — needed no change at all.
+
+**A footer label cannot be edited, so the key carries two bindings.** A `Binding`'s description
+is fixed at class definition. Relabelling is textual's dynamic-actions path: two bindings on
+`ctrl+c`, different descriptions, different actions, `check_action` enabling exactly one, and
+`refresh_bindings()` to repaint.
+
+**And `check_action` must return `False`, never `None`.** `Screen.active_bindings` skips a
+binding only on `is False`; `None` leaves it in the map marked disabled, and the map is keyed by
+KEY, so the first-listed binding keeps the slot regardless. Under `None` the DISPATCH is still
+correct — `_check_bindings` walks past a refused action to the next binding for the same key —
+and the footer shows the wrong label permanently. Found by prototyping rather than by reading:
+the first attempt dispatched perfectly and displayed "Press again to quit" before anything had
+been pressed.
+
+**The label is the short one, for a measured reason.** `Press ctrl+c again to quit` truncates to
+`Press ctrl+c again to` at 40 columns, dropping the only word that matters; `Press again to
+quit` survives every width, and the `^c` badge sits immediately to its left. The owner rejected
+"Quit again", which reads as repeating a previous quit.
+
+**Aliases as a FIELD keep the menu still.** Registering `/exit` and `/bye` as commands is free
+mechanically and costs elsewhere: `bye` sorts second in a bare `/`, ahead of `/claims`, and
+`/exit` lands between `/embedder` and `/forget` — exactly the position batch 56's "drop one, gain
+two" test measures. `SlashCommand.aliases` plus a second index leaves `all()` and `names()`
+canonical, so `matching("/") == all()` still holds exactly and no window position moves.
+
+### Owner decisions
+
+- **A press that copies never arms and never quits**, armed or not. The cost is that "ctrl+c
+  twice always quits" is not literally true — with a selection live you clear it first — and the
+  gain is that the protection is unconditional.
+- **The same behaviour under modals.** Quitting from under a permission prompt is already a
+  supported dismissal path: `exit()` releases the blocked worker's channel (§4.14), and there is
+  now a test that presses the keys rather than calling `exit()`.
+- **The footer is the only notice.** No toast, no transcript line — nothing lands in the
+  conversation, so `/copy all` is unaffected and a brushed key leaves no trace.
+- **Aliases surface only once a prefix is typed.** A bare slash is the MENU, and a menu names
+  each thing once; `/ex` is a guess, and the answer to a guess is whether it works.
+- **`/quit` stays immediate**, and so does `ctrl+q`. A typed command is already deliberate.
+
+### Deliberately not done
+
+Aliases for any other command — the field is there when one is wanted. The CLI shell's own
+ctrl+c, which is a `KeyboardInterrupt` path in a shell with no slash commands. And `#105`
+remains as it was: neither quit route checks `_busy`, and `exit()` still narrates what became of
+a running turn.
+
+### Files
+
+- `tui/app.py` — two `ctrl+c` bindings, `check_action`, `_copy_selection`, `action_arm_quit`,
+  `action_confirm_quit`, `_disarm_quit`, `QUIT_CONFIRM_S`; `_cmd_help` names a row's aliases;
+  `/quit` gains `aliases=("exit", "bye")` and a summary that reads as one.
+- `tui/commands.py` — `SlashCommand.aliases`, the `_aliases` index, collision guards in
+  `register()`, the fallback in `get()`, and `_alias_row()` behind `matching()`.
+- `tui/widgets.py`, `tui/app.tcss` — **unchanged**, both.
+- `tests/test_tui.py` (+17), `tests/test_posture.py` (the no-posture-command guard now reads
+  alias names too — they reach `dispatch` exactly as names do).
+- `AGENTS.md`, `ARCHITECTURE.md`, `README.md` (the keys line, and a `/quit` row the command
+  table never had), `tests/BREAKING_CHANGES.md`.
+
+### Mutation
+
+Twelve mutations, twelve kills, first pass — each verified against the NAMED test rather than
+against any red.
+
+| mutation | result |
+|---|---|
+| `check_action` returns `None` instead of `False` | 2 red — the footer label, and only it |
+| `priority=True` dropped from both bindings | 8 red |
+| the copy branch removed from `arm_quit` | 1 red |
+| the copy branch removed from `confirm_quit` | 1 red |
+| the first press quits outright | 5 red |
+| the disarm timer is never set | 2 red |
+| `arm_quit` does not `refresh_bindings()` | 1 red — the state moves and the screen does not |
+| `get()` without the alias fallback | 2 red |
+| a bare slash offers the aliases too | 1 red |
+| an alias row carries the canonical name | 2 red — completion corrects `/exit` to `/quit` |
+| the alias-shadows-a-command guard removed | 1 red |
+| the command-shadows-an-alias guard removed | 1 red |
+
+Count 3648 -> 3665.
+
+
+## Batch 58 — the rest of the grammar, and the line a fragment forgot it was in (2026-09-07)
+
+### What was asked
+
+Batch 53 left a note: lists, block quotes and links are *"still verbatim — deferred rather than
+rejected, and `tui/markdown.py` is the seam."* The owner asked what was worth doing, with one
+constraint stated up front — **rich, but not cluttered or incoherent** — and the discussion
+curated the answer rather than completing GFM.
+
+### What the code actually did
+
+Rendered at 84 columns against the real widget, a wrapped list item was the defect:
+
+```
+- the buffer holds every delta until a boundary arrives, which is why a plain
+answer showed nothing at all until the turn ended
+- the capture
+```
+
+The second row returns to column 0, so it reads as a new paragraph — structure dissolving
+exactly when items are long, which is the common case, and the same path a research report
+takes (`tui/app.py:2037` sends `run.final_report` to `write_answer`).
+
+Two more, both found by measuring and both **shipped bugs** rather than gaps:
+
+- **A streamed fragment could open a construct mid-paragraph.** With a prefix of exactly 77
+  characters the wrap boundary falls immediately before a `# ` token, the committed fragment
+  reads as the start of a line, and the heading rule **eats the hash** — which a `/theme`
+  replay then puts back. Lists would have multiplied it: a `- ` token mid-sentence is far more
+  common than a lone hash.
+- **Inline marks were parsed inside indented code.** `    x = a ** b ** c` drew ` b ` in bold
+  and lost four characters that were never markup.
+
+### The one mechanism, and what it costs
+
+Lists need a hanging indent; `Text` has none and `Padding` indents the first row too, so the
+wrap is ours — the third construct to need that, after the diff gutter and the thinking bar.
+Which means a list item joins the commit cap: **held from its marker to its newline**, because
+a fragment committed without its marker can never be indented afterwards.
+
+`markdown.wrap_display` is that wrap, and it is ONE pass over ONE points list rather than
+`width_split` in a loop — the loop rescans from the start of the remainder each time, which is
+quadratic on a long line and paid again on every `/theme`. `_cut_points` is now shared by the
+wrap and the streaming cut, so the two cannot disagree about where a row ends.
+
+### `line_start`, which is the fix and the prerequisite at once
+
+`_render_blocks` and `_inline_text` take `line_start`, and `False` means *this chunk begins in
+the middle of a line*, so nothing that depends on where a line starts may fire on its first
+line. It is derived from `self._stream_text.endswith("\n")` — state that already existed.
+
+That single flag closes the `#`-eating bug and is also what makes the hold limit possible, so
+it earned its way in twice.
+
+### The ceiling
+
+Three of the cap's five constructs wait on a newline no model is obliged to send. `HOLD_LIMIT`
+(1000 characters) bounds them: past it the cap gives up and `commit_span` returns `forced`,
+which reaches the renderer as `line_start=False`.
+
+**The half that makes it correct rather than merely safe:** `list_item()` and `heading()` refuse
+the same line at the same limit, and a mark whose closer is farther away than the limit is
+literal. So past the ceiling the line is prose on BOTH paths, and the released rows are the
+replayed rows — verified by an equality case with a 1387-character bullet.
+
+A fence and a table are **exempt and stay exempt**. Half a fence inverts the fence parity of
+everything after it; half a table is two stacked grids. Both must be drawn whole to be drawn
+correctly, and `flush_stream` is their bound. That is a narrower guarantee than the other three
+get, and saying so is better than pretending the ceiling is universal.
+
+### Links, and the rule that made them simple
+
+The owner's constraint decided the design: *the link should never be hidden behind a word in
+brackets, because it means the agent can hide any link behind any name.* So `[text](url)` is
+**not a construct at all**. A bare `http(s)://` URL is detected wherever it appears — which
+catches the one inside the parentheses for free — and only the URL is marked. There is no label
+to hide a target behind, because the span's TEXT is the target.
+
+Measured rather than assumed, three times over:
+
+- Style **metadata** survives `RichLog`'s strip cache into the compositor: a 21-character URL
+  arms exactly 21 cells, none bleeding into the text either side.
+- A simulated ctrl+click on those cells delivers the URL to a handler; one column off delivers
+  nothing.
+- Textual dispatches on `style.meta["@click"]`, **not** on Rich's `link`. So OSC 8 would be
+  opened by the TERMINAL, which is the one route we could not gate — and it was left off, since
+  a terminal that honours it would double-open.
+
+The URL travels in a plain metadata key we read ourselves rather than in Textual's `@click`
+action string, and that is not stylistic: an action string is PARSED, so building one out of
+model output would be an injection grammar fed by the model.
+
+Ctrl+click rather than a click, `http`/`https` only, and **ASCII only** — "the visible text is
+the target" is no defence when the visible form is a homograph, so `https://аpple.com` with a
+Cyrillic а renders, copies, and is not armed. The check is re-asked in `open_url` at the point
+of action, because a style in a `RichLog` outlives the text that made it.
+
+### Emphasis, narrowed rather than reversed
+
+Batch 53 refused `*emphasis*` because `a * b * c` is arithmetic and `__init__` is a dunder. Run
+against a real CommonMark parser, half of that was measured to be wrong and half exactly right:
+
+| written | full GFM | here |
+|---|---|---|
+| `call __init__ on it` | **init** in bold | literal |
+| `2*3*4`, `x*y*z` | emphasised | literal |
+| `a * b * c`, `5 * 3 = 15` | literal | literal |
+| `_private_method`, `snake_case_name` | literal | literal |
+| `the *point*` | emphasised | emphasised |
+
+So the asterisk is refused when **wedged between two word characters**, and underscores are not
+recognised at all — no flanking rule saves `__init__`, and it is everywhere in this domain. The
+second half of `_em_edge` (an opener needs a non-space after it) is about STREAMING rather than
+rendering: without it `a * b` opens a mark that never closes and the cap holds the rest of the
+paragraph waiting for a closer that is not coming.
+
+`~~strike~~` has no collisions at all and is the `**` branch again.
+
+### The indent rule
+
+A line indented four or more columns — or carrying a tab in its indent — is drawn exactly as
+written: no list marker, no table row, no inline marks. Stateless, which is the decision: GFM
+tells indented code from a nested list item by the surrounding list context, and tracking that
+would put state across the commit boundary, which is where this widget has broken before.
+
+The price is stated rather than hidden and has its own test: an item nested with **four** spaces
+renders flat; two-space nesting renders. Fences are exempt, and that exemption is `TECHNICAL_DEBT.md`
+entry 14 rather than a silence.
+
+### Owner decisions
+
+- **Lists render; block quotes and horizontal rules do not.** A quote's best reading is a bar
+  down the left, and the thinking span already draws one — two bar-prefixed blocks a few rows
+  apart would risk a quoted source reading as the model's own reasoning. A `---` stays three
+  hyphens: drawing a rule is inventing furniture nobody typed.
+- **Markers keep the character the model wrote**, in the quieter colour. No glyph substitution,
+  for the reason the URL stays visible.
+- **Headings keep rendering identically at every level.** A ladder that reads as arbitrary is
+  worse than no ladder, and there is only one text size in a terminal.
+- **Reasoning stays plain prose**, parsed for nothing. Unchanged, now pinned.
+- **Task-list glyphs, setext headings, indented code as a highlighted block, nested marks
+  composing, bare autolinks** — all still out.
+
+### Files
+
+- `tui/markdown.py` — `verbatim`, `heading`, `list_item`, `wrap_display`, `_cut_points`,
+  `clickable`, `_trim_url`, `_url`, `_em`, `_em_edge`, `_paired`, `commit_span`; `HOLD_LIMIT`,
+  `CODE_INDENT` and four roles. `safe_commit_limit` is now a one-line wrapper over
+  `commit_span`, so batch 53's pins are untouched.
+- `tui/widgets.py` — `line_start` through `_render_blocks`/`_inline_text`, the list layout,
+  `_append_spans`, `on_click`, `open_url`; `_split_committable` gained `block`.
+- `tui/themes.py` — `md_em`, `md_strike`, `md_link`, `md_bullet`.
+- `tui/app.py`, `tui/app.tcss`, `PromptInput` — **unchanged**.
+- `tests/test_markdown_render.py` (+82), `tests/test_live_output.py` (+28),
+  `tests/test_themes.py` (the four role keys).
+- `TECHNICAL_DEBT.md` gains four entries: the fence exemption, the resize freeze, tool lines
+  not being URL-aware, and block quotes.
+
+### Mutation
+
+Fifteen mutations. Thirteen killed on the first pass; the other two are the reason the pass was
+worth running.
+
+**One survived**, and it was a genuine hole in the tests rather than a harmless mutation:
+dropping `forced` on the way to the renderer leaves the released fragment drawn as a list item
+while the replay draws prose — and the ROWS still read the same, because the fragment is one row
+wide either way. Only the marker's STYLE differs. Three tests were added over the drawn
+segments, and they kill it twice.
+
+**One went red against the wrong test.** Wrapping the item body at the full width breaks
+`test_an_ordered_item_hangs_under_its_own_number` rather than the bullet test named for it: a
+three-column marker crosses a word boundary that a two-column marker does not. The named test
+was corrected to the one that actually catches it, which is the whole point of naming it.
+
+| mutation | result |
+|---|---|
+| `CODE_INDENT` raised past four | 9 red |
+| `_is_row` stops asking about the indent | 1 red |
+| the `line_start` guard removed from the renderer | 1 red — the `#`-eating bug, back |
+| the `HOLD_LIMIT` release removed | 3 red |
+| `forced` never reaches the renderer | SURVIVED, then 2 red once the styles were pinned |
+| a list item no longer holds the stream | 6 red |
+| the emphasis wedge check removed | 3 red |
+| the emphasis flanking check removed | 3 red |
+| the URL punctuation trim removed | 6 red |
+| a non-ASCII URL is armed | 5 red |
+| the scheme check removed | 8 red |
+| the ctrl check removed from the click | 1 red |
+| the continuation indent dropped | 2 red |
+| the item body wraps at the full width | 1 red — under a different name than predicted |
+| the marker takes no style | 1 red |
+
+Count 3665 -> 3778.
+
+
+## Batch 59 — a sidebar that hid what it drew, and a stack nobody could see (2026-09-08)
+
+Two things, and they arrived from opposite ends of the same question: *can this harness have
+two agents running at once?*
+
+**It cannot, and that is measured rather than assumed.** `core/loop.py:833` dispatches tool
+calls in a plain `for` loop; `spawn_subagent` BLOCKS on the child run; every TUI worker path is
+`_busy`-guarded; even ensemble Pass 1 is a loop with a comment saying so. What exists instead is
+a STACK — a chat turn at depth 0 spawning at 1 spawning at 2 (`SUBAGENT_MAX_DEPTH`), each frame
+suspended inside the one below it. So the panel this batch adds indents. A flat list would claim
+a concurrency this harness does not have.
+
+### The sidebar was clipping, silently
+
+Found on the way to placing the panel, and worth landing on its own. Textual's `Vertical` is
+`overflow: hidden hidden`, so `#sidebar` dropped whatever did not fit. Measured at the 24-row
+floor with a checklist and a research run both live: `max_scroll_y` was **11** — eleven rows the
+container had already computed and then clipped anyway — `#todo-panel` lost three, and
+`#research-progress` was **entirely off screen**, its header drawn on the last visible row with
+its whole body gone.
+
+**And both sidebar panels were EP3's trap a second time.** `Static` + `max-height` +
+`overflow-y: auto` reads as "clip it and let them scroll" and does neither: a `Static`'s
+`virtual_size` follows its clamped box rather than its text, so `allow_vertical_scroll` is False
+and the rows past the bound are not below the fold, they are gone. §46 found this in a
+permission modal and fixed it with `ScrollBox`; the same pairing was still shipped on
+`#todo-panel` and `#research-progress`, and `ResearchProgress.ROWS`' comment asserted
+"#research-progress scrolls" — which it never did.
+
+- `#sidebar` gains `overflow-y: auto` and `scrollbar-size-vertical: 1`. Measured: **19 usable
+  columns when everything fits, 18 while the bar is up**, against 17 at textual's default 2.
+- **`overflow-y` on the container, not a swap to `VerticalScroll`.** That class is
+  `can_focus=True` and binds up/down/home/end/pageup/pagedown — it would add a tab stop and take
+  the arrows batch 55 gave the suggestion panel. The trade, named rather than discovered later:
+  the sidebar scrolls by wheel and not by keyboard. EP3's sibling rule (a consent surface must
+  not be mouse-only) does not reach here — no decision is made in the sidebar.
+- Both panels lose their `max-height` and their inert `overflow-y`. `TodoPanel.ROWS` and
+  `ResearchProgress.ROWS` stay as the real bound, which is the half of those comments that was
+  always true.
+
+**The usable width is 19, not 20**, and that correction matters for anything laid out against
+it: `border-left: solid` takes a column on top of `padding: 1`. Every "22 columns" comment in
+`tui/widgets.py` is about the box, not the budget.
+
+### The activity channel
+
+A shell could already infer a depth-1 spawn from `tool_call_start`. Everything under it was
+invisible, and not by accident: `run_agent_conversation` drains its own `_run()` through
+`run_to_completion()`, so a child's events are consumed internally.
+
+**Not a `LoopEvent`, and the reason is structural rather than stylistic.** A generator cannot
+yield from inside a nested call — `spawn_subagent`'s handler runs inside `registry.dispatch()`,
+inside `_run()`'s `for call in response.tool_calls:` body, where there is no yield point at all.
+So the channel rides the route `response_channel` already rides, for the same reason: an
+out-of-band object is what crosses a boundary a generator cannot.
+
+**It carries LIFECYCLE ONLY — a name and a depth, in and out.** Never the child's text, tools or
+events. §18/D6 returns the subagent's distilled answer on the pipeline's "don't share raw
+history" principle, and forwarding the child's stream would break that outright, one field over.
+
+- **`core/agent_activity.py`** — `AgentSpan`, the `AgentActivity` sink, `NULL`, and
+  `span(activity, name, depth)` over an OPTIONAL sink so every call site is one unconditional
+  `with`. A context manager rather than a pair of calls because the exit has to run when the
+  child RAISES; otherwise a row describing a finished run stays on screen for the session. Sink
+  failures are contained both ways — display machinery must not fail the run it describes.
+- **`"activity"` joins `_INJECTABLE_PARAMS`**, which is the extension route `tools/registry.py`'s
+  own comment anticipates.
+- **`agents/subagent_tool.py` passes the sink DOWN** into the child's `run_agent_conversation`.
+  That one argument is what closes the recursion; without it the panel reports exactly what the
+  TUI knew before this batch.
+- The compactor gets a span too, at `_compactor_depth(context)` — derived from
+  `ToolContext.subagent_depth` rather than counted again, and ONE span over the retry loop,
+  because a row per attempt would draw the retries as a stack of compactors.
+
+### The trap that was not taken
+
+A depth-2 sign-off *does* reach the TUI as a `SUBAGENT_SIGNOFF` request naming the grandchild,
+and pushing that name onto the panel is the obvious cheap win. There is no corresponding
+completion signal, so the row would never clear. A panel that lies is worse than no panel.
+
+### Files
+
+- `core/agent_activity.py` (new), `tools/registry.py`, `core/loop.py`
+  (`_compactor_depth`, `_maybe_compact`, `_run` and the three public entry points),
+  `core/compaction.py`, `agents/subagent_tool.py`, `agents/tui_commands.py`.
+- `tui/widgets.py` — `AgentPanel`, and the two ROWS comments corrected.
+- `tui/app.py` — `TuiActivity`, `AgentStackChanged`, `refresh_agent_panel`, the compose slot
+  under `#posture-badge`, `restyle_sidebar`, and the four run sites.
+- `tui/app.tcss` — `#sidebar`, `#agent-panel`, `#todo-panel`, `#research-progress`.
+- `tests/test_agent_activity.py` (+26), `tests/test_tui.py` (+3).
+- Six test stubs enumerated every `dispatch` kwarg and broke on the new one; they take
+  `**_run_scoped` now, which is the coupling `registry.py` says `dispatch()` should not have.
+
+### Mutation
+
+Four mutations on the channel, all killed, each by the test written for it and none by a
+collection error: dropping the pass-down (the grandchild goes blind), replacing the context
+manager with a bare enter/exit pair (the raise cases), opening the span at the parent's depth,
+and moving the refusal check after the span (a row for a run that never started).
+
+### One more thing the batch found
+
+`agents/tui_commands.py` had been decoded as cp1252 and re-encoded as UTF-8 at some point, so it
+literally CONTAINED the mojibake -- `Â§` on six lines where `§` belonged and `â€”` on three, two
+of which are strings the user reads (`/agent`'s confirmation and the busy refusal). Every sibling
+command module spells `§` correctly, so the file disagreed with the codebase around it and
+nothing said so: it imports, the tests pass, and the strings simply render wrong.
+
+Repaired by the inverse round trip, and `test_docs_consistency.py` grew the guard --
+`line.encode('cp1252').decode('utf-8')` succeeding AND differing is both the detector and the
+repair, which is why it needs no vocabulary of dashes and quotes to keep current. The guard was
+verified by re-mangling the file and watching it go red, then restoring byte-for-byte.
+
+### Not done
+
+Research mode. `stream_deep_research_mode` takes `activity` now, but the orchestrator does not
+thread it through `_run_pass` yet — a wider blast radius for a narrow case, since R16 makes
+`spawn_subagent` unreachable headless and only `--attended`/`--grant` runs can spawn at all.
+`core/reasoning/review.py`'s reviewer and `project_init/generator.py`'s initializer get their
+one-line spans in the same follow-on.
+
+## Batch 60 — the answer that never reached the gate (2026-09-08)
+
+Reported from the TUI: spawning the same subagent twice in one turn showed the approval modal
+for the first and auto-rejected the second with no modal at all. Two *different* subagents were
+fine.
+
+**Backend, and reproduced with no TUI in the picture.** `core/loop.py` decided a gated call was
+already authorized — by §23's subject-keyed memo or by a §25 grant — and then called
+`dispatch()` without saying so. `dispatch()` re-checks approval itself, correctly: it is a public
+entry point and the fail-closed backstop. It found no `approval_callback` and raised
+`ToolCallDenied`.
+
+```
+explore then explore -- modals: 1 ['explore']
+   s1 -> {'result': 'child done', ...}
+   s2 -> {'error': 'spawn_subagent requires approval and was not given'}
+```
+
+`approval_callback` had appeared exactly ONCE in this file since §18 landed it on 2026-08-04
+(`4598d77`), inside the approved branch. The fall-through branch never had it. Four weeks, not a
+regression from the batch before.
+
+### One line, three broken things
+
+The report was the mildest of them.
+
+**The §18 sign-off was INVERTED.** `grill-me` is the one shipped agent with a gated candidate:
+
+```
+write_project_doc  signed-off-for=['write_project_doc']  re-asked=0 -> {'error': '... was not given'}
+write_project_doc  signed-off-for=[]                     re-asked=1 -> {'result': 'HANDLER RAN'}
+```
+
+Ticking the box made the tool unusable; leaving it unticked made it work, because an unticked
+tool still reached a human. A feature whose whole promise is "the child may use these without
+asking again" denied exactly the tools it named.
+
+**And §25's pre-flight grant never worked at all**, on the only population it has.
+`core/reasoning/authorization.py` offers `--grant-tools` the grantable + `GRANT_ANYWHERE` names,
+which among gated tools is the `mcp__*` set — and `registry.grant_policy` makes those
+`GRANT_ANYWHERE` precisely because R1 argues the tool's own description is the whole of informed
+consent for them. Every one of them was refused in a run with nobody to ask.
+
+`remember` was untouched throughout: `GRANT_NEVER` with no subject, so R13's guard stops the memo
+before this branch and it prompts, correctly.
+
+### Why 3820 tests did not see it
+
+They mock `core.loop.registry.dispatch`. **The gate under test lives inside the mock.** They
+count `permission_request` events and never ask whether the call that skipped the prompt actually
+ran — `test_s1_signoff_is_remembered_per_agent_not_per_tool_name` asserts "the same agent twice
+in one turn must be asked about once" and is satisfied by a second call that was silently
+refused.
+
+Everything added here drives the real `dispatch` and stubs the tool's HANDLER instead. Two traps
+came with that, both of which bit: `shell` and `write` are disabled in the shipped config and die
+at `is_tool_allowed()` long before the gate — the first draft of the non-widening cases was green
+against a gate it never touched — and `subagent_tool.run` builds the child's system prompt, which
+walks into the memories subsystem and therefore storage.
+
+### The fix, and the question it had to answer first
+
+Two `dispatch()` call sites, identical but for the arguments carrying authorization, and the one
+an answered call reached was the one that omitted them. So: **one call site**, passing
+`approval_callback` and `signoff` from the loop's own decision. Two sites that must agree is the
+defect; one site cannot disagree with itself.
+
+`signoff` was the quieter half. The fall-through dropped it too, so even with the denial fixed
+the second child of one sign-off would have run with nothing granted while the first got the
+ticked set — two children of one answer with different authority.
+
+**The question, asked before any of it shipped: does this sign off things that must stay per
+call — `shell`, `write`, `edit`?** It does not, and the reasons are structural rather than
+careful: `registry.grantable()` is False for any tool deciding approval from its PARAMS, and all
+four declare an `approval_check`; and `spawn_subagent` is the ONLY tool declaring
+`grant_scope="run"`, which is the only thing `remember_signoff` records. Measured across the
+whole surface — shell twice in a turn, an approved spawn followed by a shell call, hand-built
+grants naming all three, a path outside the workspace twice, `--attended`'s `honour_run_scope`,
+and the sign-off's three routes (never offered for any agent including an unrestricted child,
+and a forced answer intersected away by `interaction.decode`). All of it is now
+`TestAnAnswerCoversOneCallOnly` rather than a script that ran once.
+
+### An ID, not a flag
+
+The first version used `authorized = False` per call, with a comment saying the indentation was
+the security property. So it was mutated: hoisted out of `for call in response.tool_calls:`,
+which is exactly the widening the batch must not permit.
+
+**It survived the entire suite.** Not because scope does not matter, but because nothing can
+currently reach that dispatch call gated and un-authorized — the three other reasons
+`needs_approval` is turned off are each short-circuited INSIDE `dispatch()` before its gate
+(`is_allowed` raises, `refusal_check` returns, a `parse_error` never gets there). Correct, and
+undefended.
+
+So the flag became the call's own id:
+
+```python
+approval_callback=(
+    (lambda n, p: True) if authorized_call == call.id else None),
+```
+
+Hoisted, it holds the PREVIOUS call's id, the comparison fails, and the call is **denied** — the
+mistake fails closed instead of failing open. It rests on ids being distinct within a response,
+which is not a new assumption: `add_tool_result` pairs every `tool_result` to its `tool_use` by
+that same id (M4/D20), and a thread whose ids collide is already unresumable.
+
+That still leaves one mutation no behaviour can catch — deleting the guard outright. Pinned by
+reading the source, in the shape `test_rationale.py` already uses when it asserts on what a
+function RECEIVES rather than on what it decides. Both mutations now die there; the false-RED
+trap showed up on the way, since replacing only the inner expression leaves
+`approval_callback=(` unbalanced and a collection error scores as a kill while measuring
+nothing.
+
+### The notice
+
+A gated call proceeding with no modal is the intended behaviour (§25 R11 — re-asking about the
+same tool seconds later is noise) and was also exactly what the bug looked like. Silence was
+indistinguishable from the defect, so a reuse now says so, on the existing notice route that the
+CLI and the TUI both already render.
+
+Deliberately NOT in `_ONCE_PER_RUN_NOTICES`: that list is for a standing condition re-emitted on
+every step, and this fires only when a call actually reuses an answer — the same reading that
+lets a compaction that HAPPENED repeat once per compaction. Once per run would go quiet again
+from the third spawn onward, which is the silence that started this.
+
+Two texts, discriminated by the `answered_by_name` local the loop already computes. A memo is
+something the user answered minutes ago in this turn; a grant is something they decided before
+the run existed, possibly on a command line. Telling them they "answered earlier" would describe
+a moment that never happened.
+
+
+## Batch 61 — three figures for a silence the harness built itself (2026-09-08)
+
+**Reported:** when a turn ends nothing says so. And there are stretches mid-turn where the
+screen sits completely still while the model is streaming hard — "the harness is receiving
+table rows, every token delta gets cached until the table is complete" — so a pause is
+indistinguishable from a finished answer.
+
+### The measurement
+
+Both halves are things this project decided on purpose, which is why neither showed up as a
+bug.
+
+`markdown.commit_span` holds a table **from its header row** until a line arrives that is not
+a row, or until `flush_stream` at the end of the turn. A table and an open fence are the two
+constructs **exempt from `HOLD_LIMIT`**, the 1000-character ceiling that bounds every other
+hold — AGENTS.md says it outright: *"A TABLE HAS NO TERMINATOR"*, and calls the narrower
+guarantee "the honest one". So the gap has no upper bound at all.
+
+Beside it, `on_loop_event_message` calls `self._raven.pause_animation()` on every
+`token_delta`: *"a redraw loop competing with deltas is the one place animation costs
+responsiveness."* Also right. Together they mean the one moving thing on screen stops exactly
+when the harness is busiest. **This batch refills the spot the raven was vacated from. It does
+not reverse that decision** — the raven still pauses, and the new tick is a change-guarded
+one-line repaint rather than an ASCII redraw.
+
+### The provider question, which changed a decision
+
+The plan was an exact tokens-per-second from provider usage — the user's reasoning was sound:
+a figure sourced differently from the sidebar's `ctx` could drift from it. The condition
+attached to it ("if the provider usage is always there") turned out to be false, and the repo
+had already written down why.
+
+`StreamToken` carries `text_delta`, `thinking_delta`, `final_response` and no usage. Usage
+arrives once per model call, and only where the provider is marked `supports_stream_usage` —
+D21: OpenAI-compatible streaming returns none unless `stream_options` is sent, and Mistral
+rejects that parameter with HTTP 422, so it is a per-provider capability. Measured against the
+local `providers.json`: **3 of 19** (OPENAI, QWEN_TOKEN_PLAN, ANTHROPIC). On the other sixteen
+an exact live rate reads `0 tok/s` forever — D21's own failure mode, correct-looking output,
+one layer up in the UI.
+
+The drift concern also dissolves under measurement: `update_usage` returns early on
+`not (billed or ctx)`, so on those sixteen providers the sidebar usage line is **hidden
+entirely**. There is no `ctx` figure there to drift from.
+
+So the live figure is an estimate from characters, marked with a tilde, and the exact count
+goes in the completion line. The estimate is not a compromise — it is the requirement. It
+keeps moving during a table hold, because the deltas *are* arriving; it is the renderer that
+is withholding.
+
+### A third instrument
+
+Neither existing per-turn field means "tokens the model generated". `turn_billed_tokens` is a
+spend meter — the prompt is counted again on every step. `turn_new_tokens` is a size meter —
+output plus the positive input deltas, so a tool-using turn's tool results land in it.
+Dividing either by a duration produces a number that looks like tok/s and is not, which is
+TECHNICAL_DEBT item 9's misreading exactly, and the reason `UsageLine`'s docstring opens with
+*"TWO DIFFERENT INSTRUMENTS, labelled so nobody repeats it."* So `turn_output_tokens` is a
+third field, one accumulator beside the two that already ride every response.
+
+### `_busy` is a property now
+
+The leak this prevents is batch 60's defect one layer up. `_busy` is written at **eleven**
+sites with **four** distinct turn exits — `on_turn_finished`, `on_one_shot_finished`,
+`on_research_finished`, and `_cmd_compact`'s worker `finally` via `call_from_thread`. A clock
+started in one place and stopped in another will leak; the only question is when.
+
+A property makes the setter the single funnel and edits nothing else — batch 54's
+`PromptInput.value` lesson, and not hypothetically: **89 references across 11 test files**, all
+plain reads and assignments, nothing patched. `/research` and `/compact` get the live elapsed
+figure for free as a result.
+
+The setter owns the *clock*; the transcript line stays at the exits. Putting the line in the
+setter too would print `took 0.0s` under `run_agent_turn`'s and `run_one_shot`'s early-return
+error branches, which set `_busy` and immediately clear it. `stop()` returns **None** rather
+than `0.0` for the same distinction — the caller has to tell "nothing ran" from "it was
+instant", and one of those gets a line.
+
+`test_the_busy_flag_is_the_only_way_to_move_the_clock` reads the source and fails if
+`_busy_state` is assigned outside the setter. Source-level for batch 60's reason: no behaviour
+can see the fifth exit that forgets, until it is added.
+
+### Two things the tests found rather than the reasoning
+
+**`call_from_thread` in a `finally` deadlocks a quitting app.** The first version marshalled
+`set_blocked` onto the UI thread out of habit.
+`test_quitting_during_an_attended_research_prompt_releases_the_worker` went red: `app.exit()`
+tears down the message pump, and a worker parked in `call_from_thread` afterwards never
+returns — so the shutdown release that test exists to protect stopped working. The marshalling
+was never needed; the meter touches no widget. Called directly it is also correct under the
+race, because `set_blocked` is idempotent by construction: whichever of the worker and the
+tick observes the transition first wins, and the second call is a no-op. That idempotence is
+what lets two routes drive one piece of state instead of being two mechanisms that must agree.
+
+**`import time` is the wrong seam, and it hung the suite rather than failing it.**
+`mocker.patch("tui.app.time.monotonic", ...)` resolves `tui.app.time` to the *global* time
+module and patches `monotonic` on it — freezing the clock for textual's event loop and for
+conftest's `settle` timeout as well, so the run never came back. `from time import monotonic`
+binds the name in the module's own namespace, and `tui.app.monotonic` is a patch point that
+reaches nothing else.
+
+That seam is also what keeps `tui/meters.py` pure. It is `tui/markdown.py`'s and
+`tui/diffs.py`'s rule with one addition — **no clock either**: every method takes `now` as a
+parameter, so `app.py` is the only file that reads a real one and all 42 tests in
+`test_meters.py` are arithmetic rather than a pilot racing a live timer.
+
+### Where they sit
+
+`#prompt`'s **border subtitle** — verified by rendering onto a bordered bottom-docked
+`TextArea` in a headless `run_test` and reading it back off the compositor, since
+`border_title` is already the placeholder a `TextArea` has no other way to carry. It costs
+**zero rows**, which matters against the 24-row floor `app.tcss` is written to; the sidebar
+alternative was measured at **19 usable columns, 18 with the scrollbar up** (batch 59) and
+would have needed three.
+
+### Verification
+
+Three mutations, each removing one thing the feature is made of, all killed:
+
+| mutation | killed by |
+|---|---|
+| no `_refresh_meter()` on a loop event | the table-hold test and the throughput test |
+| characters never counted | the throughput test |
+| the `_busy` setter stops driving the meter | three, including the completion line |
+
+Every mutated source is `ast.parse`d before it runs — a mutation that breaks the file at
+import scores as a kill while measuring nothing, which is the false-RED trap batch 60 hit.
+
+
+## Batch 62 — the keys the panel never mentioned (2026-09-08)
+
+**Reported:** the suggestion panel's keys are written nowhere — "↑↓ navigate, enter
+completes-then-sends, esc dismisses, tab completes — none of it is written anywhere in the
+TUI."
+
+All four are accurate, and one of them is the reason this is worth doing. `action_submit`
+calls `_complete()` and returns, so `enter` **completes rather than sends** and a fully typed
+`/help` takes two presses. That was deliberate in batch 55 ("the alternative is a coin flip
+from the user's side, and stops being well defined the day two commands share a prefix") and
+it is invisible: the first press changes nothing on screen except a trailing space.
+
+### Where it could not go
+
+The **border title** is taken, and by something batch 56 made load-bearing: `1-4 of 26 ·
+/help for all` is a derived claim about where the sliding window sits. Measured at five
+widths, a border label is truncated at the outer width minus six — with `border: solid` and
+`padding: 0 1` that is 52 cells at 80 columns, against a 25-cell count and a 42-cell hint.
+They cannot share the row.
+
+The **footer** is the interesting refusal, because it looks free. `PromptInput` already binds
+`tab` and `escape`; flipping `show=True` would seem to put them in the footer for nothing. It
+does not: `Screen.active_bindings` skips a binding only on `check_action` returning
+`is False`, and `None` leaves it in the map marked *disabled*. Batch 55 requires `None` there
+precisely so `tab` still reaches the focus system when the panel is shut — so the entries
+would sit in the footer greyed and permanent. This is batch 57's finding from the other side:
+that batch needed `False` to relabel a footer entry, this one cannot use `False` without
+taking a key away from the rest of the app.
+
+So: the **bottom border of the panel itself**. Zero rows, one owner, and it disappears with
+the thing it describes.
+
+### The state rule, which is the title's rule
+
+`↑↓ move` is a claim about a key. With one match `move()` computes `(0 + 1) % 1 == 0` and
+nothing happens, so the claim is false — the same way `1-1 of 1` was false about a window
+with nowhere to be. The hint drops the arrows there, and the test asserts **both halves**:
+that the string is gone, and that `move(1)` really does leave `chosen` where it was. A test
+of the string alone would still pass on the day `move()` started wrapping somewhere.
+
+The width rule drops whole parts from the left rather than letting textual ellipsise. An
+`esc dism…` is furniture, not help. The named consequence: what survives the narrowest
+terminal is how to get rid of the panel — at 46 columns the *title* is cut to `1-4 of 26 ·
+/help…` and the hint reads `esc dismiss` whole, which is the right way round.
+
+### Two things that were measured rather than assumed
+
+**A border label's budget is `width - 2` here**, where `width` is what `_budget` is handed.
+That 2 is `border: solid` plus `padding: 0 1` minus textual's own reservation for corners and
+blanks. It is a coupling to `app.tcss` that no type checker sees, so the pilot test asserts
+the drawn row carries **no ellipsis** at 80 columns — move the padding and that fails.
+
+**An unstyled border subtitle renders in `$primary`.** Measured: `#3dd968` against the title's
+`#9da09d`. Without `border-subtitle-color: $text-muted` the hint would be the brightest thing
+on a box whose own count is deliberately quiet. Nothing else fails if that rule is deleted,
+which is why there is a test reading both border rows' styles off the compositor.
+
+The same asymmetry is shipping on `#prompt` since batch 61 — the turn meter draws in
+`$primary` while its placeholder title is muted — and it stays, deliberately: that figure
+exists to be findable during a silence, and muting it would work against the reassurance it
+was added for.
+
+### Verification
+
+Four mutations, each removing one thing this is made of, all killed:
+
+| mutation | killed by |
+|---|---|
+| the arrows offered whatever the match count | the single-match test |
+| the label budget forgetting the border and the padding | the width sweep, at 43, 33 and 12 |
+| the `border-subtitle-color` rule deleted | the two-labels-one-weight test |
+| the subtitle assigned unguarded | the second-measurement test |
+
+The width sweep is at the widths where a part **drops** — 44/43, 34/33, 13/12 — rather than at
+round ones, and that is what makes the second mutation die: at 80, 54, 44, 38, 30 and 20 the
+budget error changes nothing, and a sweep over those alone reports a survivor.
+
+The mutation harness needed two fixes of its own before it could be believed: a parametrized
+id is `name[param]`, so an exact-name match never hits, and a multi-line anchor built with
+`\n` matches nothing in a CRLF file. Both presented as SURVIVED and SKIPPED against code that
+was correct.
+
+
+## Batch 63 — the prompt you already sent (2026-09-08)
+
+**Reported:** "No submitted-prompt recall exists anywhere. Re-typing or re-editing a long prompt
+after a misfire is currently the only option."
+
+Correct, and the shell already knew it in one narrow place. A *non-slash* prompt submitted while
+`_busy` is refused **before** the box is cleared, with a comment saying why: "/research holds
+`_busy` for a whole ten-pass pipeline, so a follow-up typed during one was wiped and had to be
+retyped from memory." The same loss on every ordinary send had never been named.
+
+### The keys, by elimination
+
+`ctrl+p`/`ctrl+n` was the proposal and half of it is unavailable. `ctrl+p` is textual's
+`COMMAND_PALETTE_BINDING`, bound `priority=True` so it beats the focused widget, and this project
+enables the palette on purpose — AGENTS.md and ARCHITECTURE.md both say so, and `watch_theme` exists
+*because* the palette sets `App.theme` directly rather than going through `/theme`.
+`COMMAND_PALETTE_BINDING` is a ClassVar and could be moved, but the obvious destination is a dead
+end: `ctrl+shift+p` is indistinguishable from `ctrl+p` without the kitty protocol, which textual
+turns on in its Linux drivers alone (batch 54 found the same wall from the other side with
+`shift+enter`). Moving it would delete the palette on Windows.
+
+`ctrl+n` *is* free. So are `ctrl+o`, `ctrl+b`, `ctrl+r` and `ctrl+↑`/`ctrl+↓` — enumerated from
+`screen.active_bindings` with the prompt focused, which is the honest list because it includes
+`TextArea`'s forty-odd editing bindings alongside the App's four. `ctrl+↑`/`ctrl+↓` won on three
+counts: symmetric, self-evident, and arrow-shaped without touching the plain arrows, which already
+mean the cursor (batch 54) and the suggestion panel's highlight (batch 55). A third meaning gated on
+the cursor being at line 1 is the shell convention and was the alternative offered.
+
+Measured rather than assumed: five footer entries plus the palette fit at 80 columns with fifteen
+to spare, and clip at about 68 — twelve below the floor the app is written to, where three entries
+already have only seventeen. The footer is row 23 and batch 61's meter is row 22 on a different
+widget, so nothing competes.
+
+### The parameter that replaced a race
+
+The interesting decision is what happens when a recalled prompt is edited and the key is pressed
+again. Walking further back would silently destroy typing, which is the exact loss this batch
+exists to prevent.
+
+The obvious implementation watches for keystrokes, and batch 55 even left the right seam:
+`load_text` marks an API edit, so `on_text_area_changed` can tell assignment from typing. It is the
+wrong seam here. That message is **posted**, not called, so the app would be holding a flag across
+an async hop — and the panel's own `SuggestionsChanged` fires on *both* halves of the split, so it
+cannot distinguish them either.
+
+`previous(current)` and `following(current)` take the box's text instead. The history remembers what
+it last handed out, and a `current` that differs means the user has typed. That ends the walk and
+starts a new one with the edit saved as the draft, so `ctrl+↓` gives it back. It is a comparison at
+the only two moments it matters, it needs nothing from the widget, and it makes the rule arithmetic:
+`tests/test_history.py` has no pilot at all.
+
+The limit is stated rather than hidden: a reader who deletes a recalled prompt and retypes it
+character for character continues the old walk. Nothing is lost — the strings are equal — but the
+draft they had before is not restored. Position is not knowable from text.
+
+### Two rules borrowed from one widget away, one of them inverted
+
+**The walk stops at the oldest; the suggestion panel wraps.** That is not an inconsistency. Its list
+is a MENU, where wrapping is how the far end is reached quickly; this is a walk backwards through
+time under a key that gets held down, and arriving at the start of it should not deposit the reader
+at the end.
+
+**`check_action` returns `None`, where batch 57's ctrl+c needs `False`.** Same distinction, opposite
+use. ctrl+c has two bindings on one key and a refused one must give up its slot, so `False`. These
+want the entry to stay in the footer greyed rather than vanish and reflow the row, and `None` is
+exactly that: `active_bindings` keeps a `None`-refused binding marked disabled while
+`_check_bindings` still declines the press. One return value, both halves.
+
+And `remember()` is followed by `refresh_bindings()` — guarded on the empty-to-non-empty transition,
+because that is the only time the answer changes. Without it the bindings are correct and the footer
+row is grey forever, which is `action_arm_quit`'s comment for the third time in this file.
+
+### Verification
+
+Eight mutations, all killed. One of them was rejected by the harness first, and that is the trap
+working: dropping `refresh_bindings()` left an empty `if was_empty:` block, which breaks the file at
+import and would have scored as a kill while measuring nothing. Every mutated source is `ast.parse`d
+before it runs.
+
+| mutation | killed by |
+|---|---|
+| the movers ignore what the box holds | the edit-handed-back test, through the real keys |
+| the walk wraps at the oldest | the stop-at-the-oldest tests |
+| a consecutive repeat is stored twice | the de-duplication test |
+| the cap drops the newest | the cap test |
+| `refresh_bindings()` dropped | the drawn-footer test |
+| `check_action` never refuses | the drawn-footer test |
+| the cursor left at the start | the cursor-at-the-end test |
+| a refused message remembered anyway | the busy-refusal test |
+
+
+## Batch 64 — three of the twenty-six themes could not be drawn (2026-09-09)
+
+**Reported:** switching to `textual-dark` from the command palette crashed the harness
+instantly, and restarting reproduced it exactly — `AttributeError: 'NoneType' object has no
+attribute 'startswith'`, from `Color.parse(None)` inside `themes._tint`.
+
+Correct, and worse than a crash on selection. `watch_theme` remembers **every** theme change
+whatever route made it — that is batch 36's whole point, so a palette selection is not a silent
+no-op — so the name reached the preference store *before* the crash it caused. `_startup_theme`
+restored it, `on_mount` wrote the session banner, `Transcript._style` asked for colours that
+could not be resolved, and the app died at startup. Every startup. And
+`~/.config/venastine/ui_preferences.json` is **user tier, outside the install tree**: the
+reporter's instinct that a reinstall would fix it is wrong, and hand-editing that JSON was the
+only way back in.
+
+### Three themes, three different faults, and only one of them loud
+
+`role_styles` read eight slots straight off the `Theme` dataclass. On the pinned textual 1.0.0
+every slot but `primary` is `Optional[str] = None`, and the twelve built-ins the palette
+registers in `App.__init__` are not obliged to fill them:
+
+| theme | what is wrong | what happened |
+|---|---|---|
+| `textual-dark` | `background=None` | `Color.parse(None)` → `AttributeError`. Fatal at mount |
+| `textual-light` | `foreground=None` | the f-string interpolated the literal `"None"` — 6 roles unparseable |
+| `textual-ansi` | every slot is `ansi_blue` / `ansi_default` | **25 of 34** roles unparseable |
+
+The guess in the report was that some themes were missing hex values. Right for two of the
+three; `textual-ansi` has a value in every slot, in a vocabulary Rich does not read.
+
+**The two non-fatal ones were silent, and that is the more interesting defect.** Rich's
+`Text.render` resolves a style string through `console.get_style(style, default=Style.null())`,
+so an unparseable one renders **plain** and raises nothing. On `textual-ansi` the transcript
+quietly reverted to the uniform white ROADMAP_v2 §26 exists to abolish, and nothing anywhere
+said so. That is batch 41's X1 lesson arriving down a different road: there the unmeasurable
+thing was `dim`, an attribute no contrast floor can see; here it is a colour name Rich drops on
+the floor.
+
+### The gap that let it ship
+
+Every check in `tests/test_themes.py` parametrised over `ALL_THEMES` — this project's fourteen.
+The palette offers **twenty-six**. In 3934 tests, not one had ever passed a textual built-in
+through `role_styles`. The file was written when fourteen was the whole world, and the palette
+being enabled (batch 36, deliberately — `watch_theme` exists *because* it sets `App.theme`
+directly) quietly doubled the world without anyone widening the coverage.
+
+`SELECTABLE_THEMES` is now `list(BUILTIN_THEMES.values()) + list(ALL_THEMES)` — derived, never
+written down, so a textual release that adds a theme is covered the day it lands and one that
+adds a *broken* theme fails in CI rather than in somebody's session. A pilot test holds it
+against the live `app.available_themes`, which is this file's own idiom: one inventory that two
+checks read, so it cannot drift.
+
+### A fallback, and why it is only ever a fallback
+
+A blank slot is filled from `theme.to_color_system().generate()` — textual's own derivation, the
+thing it builds `app.tcss`'s `$background` and `$foreground` out of, so the colour agrees with
+what the rest of the screen is already painted with rather than being a second opinion invented
+here.
+
+It is reached **only** where a slot is actually `None`, and that restraint is the whole design.
+`generate()` is lossy: the base shade comes back as `color.lighten(0).hex`, an HSL round trip,
+which moves `#d9a441` to `#D8A441` and differs from the raw slot on **41 values across the
+fourteen**. It is also **48× slower** than `role_styles` itself (0.194 ms against 0.004 ms), on
+a function called once per rendered line. Using it wholesale would have restyled every shipped
+theme by a unit and put an HSL round trip on the draw path to fix two themes that are not ours.
+Used as a fallback, the fourteen come out **byte-identical** — measured, not hoped — and
+twenty-four of the twenty-six pay eight `getattr`s.
+
+The memo behind it is keyed on the raw slot **values**, not on `theme.name`. `Theme` is a plain
+mutable dataclass and `App.register_theme` overwrites by name, so a name key would hand a
+re-registered theme the colours of the one it replaced: right until somebody changes a theme,
+then wrong for the rest of the session, which is the worst shape a cache can take.
+
+### `ansi_*` is a translation, not an approximation
+
+`textual.color.ANSI_COLORS` is `['black', 'red', …, 'bright_white']` — **exactly** the ANSI
+subset of `rich.color.ANSI_COLOR_NAMES`, verified by set difference against the pinned version
+per D22. So `ansi_X` → `X` and `ansi_default` → `default` is lossless, and `textual-ansi` gets
+its twenty-five roles back in the terminal's own sixteen colours, which is the entire point of
+that theme.
+
+One thing does not survive the translation, and it is stated rather than papered over. A diff
+row is the one place the transcript sets a **background**, and on an ANSI theme there is no RGB
+to blend a tint out of — the terminal owns those colours and the harness cannot know what they
+look like. `_tint` answers `None` there, and the row takes the severity colour as its
+**foreground**: what git, diff and patch all do in a sixteen-colour terminal. A solid band was
+the alternative, and that is the slab batch 41 turned down for the themes that *can* be
+measured; choosing it for the one theme that cannot would be backwards.
+
+### Integrity for twenty-six, quality for fourteen
+
+The new checks ask only whether a theme can be **drawn**: a full role table, no empty slot, and
+every style string one Rich can parse. The contrast floors, the redmean separation floor and the
+pairwise-distinctness check stay on our fourteen, and the split is measured rather than assumed.
+Held to this file's own floors, **nine of textual's twelve fail a contrast check** —
+`textual-dark`'s `secondary` is 1.89:1 against its own background where the identity floor is
+3.5, and `solarized-light`'s foreground is 4.99 against a floor of 7 — and **three fail pairwise
+distinctness** (`textual-dark` and `textual-light` both set `accent == warning`, `monokai` sets
+`error == secondary`). Those floors are decisions about our palettes. Widening them to somebody
+else's themes would mean either a permanently red suite or floors lowered until they said
+nothing.
+
+So the fix makes `textual-dark` *usable*, not *good*. That is the honest limit, and it is
+written here rather than discovered.
+
+### The containment, and why it warns
+
+`styles_for` can no longer take the app down. `_palette` makes that particular fault impossible;
+the guard makes the **class** of it non-fatal, which is §27's rule that a display failure is
+contained rather than fatal — an uncoloured transcript is unhelpful, a harness that will not
+start is not a harness, and the preference file the installer cannot reach is what turns the
+second into a permanent state.
+
+It warns, and it warns **once per theme**. That latch is the exact opposite of
+`preferences._remember`'s deliberate non-latching, and for the reason that module already
+states: a warning fires there on a human's own action, and fires here on every line drawn.
+Silence is precisely what let `textual-light` and `textual-ansi` render unstyled for as long as
+they did, so a contained failure that reported nothing would be the same defect wearing a better
+exception story.
+
+This narrows `themes.py`'s "no harness state" claim by one set of theme names, and the narrowing
+is written into the docstring rather than left for a reader to notice.
+
+### Verified
+
+Full suite **3997 passed** (235 → 298 in `test_themes.py`). Every one of the twenty-six themes
+plus two synthetic minimal ones (`Theme(name=…, primary="#ff0000")`, seven slots blank) yields a
+full role table, no empty value and no unparseable style. The fourteen are byte-identical. A
+live app switched through all twenty-six writing a line of every role, and mounted with each of
+the three formerly-broken themes already remembered — the reported bug, reproduced and then
+fixed.
+
+Eight mutations, all killed:
+
+| mutation | must be killed by |
+|---|---|
+| the fallback dropped; blank slots reach the style strings | the parse check on textual-dark |
+| `ansi_*` reaches Rich untranslated | the ansi-vocabulary test |
+| `_tint` blends whatever it is handed | the no-band test |
+| the memo keyed on `theme.name` | the stale-palette test |
+| a missing tint interpolated anyway | the no-band test |
+| `styles_for` lets the failure through | the containment test |
+| the containment warns per line | the warns-once half of it |
+| `SELECTABLE_THEMES` is `ALL_THEMES` alone | the palette-inventory test |
+
+**Not verified from here, and recorded as such:** the one probe that confirmed the restart case
+mounted the real app against the developer's real preference store before `HOME` was redirected,
+and `watch_theme` then overwrote the poisoned value. The crash was reproduced; the poisoned file
+was destroyed rather than kept.
+
+
+## Batch 65 — the URL in the line that fetched it (2026-09-09)
+
+**Reported:** links in the fetch tool were deferred; the transcript's own links already work, so
+this should share the backbone.
+
+Correct on both counts, and the deferral was written down — `TECHNICAL_DEBT.md` 16, *"revisit if
+the asymmetry is reported"*. It also predicted the seam correctly (`_append_spans` with
+`block=False`). What it did not predict is why that seam is the wrong one to use as it stands.
+
+### A tool line is a digest, and the prose grammar eats it
+
+The URL machinery lives in the same scanner as bold, italic, code and strike, so the obvious
+implementation hands a tool line the whole grammar. Measured over real call shapes:
+
+```
+'▸ shell  git log --format=%h  # `date`'   ->  '▸ shell  git log --format=%h  # date'    LOST
+'▸ mcp__x__y  name~=*test*  ~~old~~'       ->  '▸ mcp__x__y  name~=test  old'            LOST
+'▸ shell  ls *.py'  '▸ edit  __init__'     ->  verbatim, because batch 58's _em_edge rule already
+                                               refuses an asterisk wedged between word characters
+```
+
+Two of six shapes come out with characters missing. A digest that no longer shows what ran is
+worse than a URL that cannot be clicked, so `markdown.link_spans` recognises URLs and nothing
+else, and `LINKED_ROLES` — `tool`, `pipeline_tool`, `tool_error` — says which lines get it. The
+harness's own voice (`system`, `error`) is deliberately not in the set: those lines are written
+here rather than by a model, and nobody has asked to click one.
+
+`tool_error` earns its place by being the most useful of the three. `✗ fetch_url  404 fetching
+https://…` carries the URL a reader actually wants, and unlike a call digest an error line is
+not truncated.
+
+### The invariant that had to be replaced rather than kept
+
+`param_digest` caps each value at 60 characters, which is shorter than most real documentation
+URLs, so the line draws `https://example.com/a/very/long/pa…`. That was **already** safe by
+accident — the ellipsis is not ASCII, so `clickable` refused it — and it is also why the obvious
+fix would have left the common case inert.
+
+The owner's decision was to carry the untruncated URL out of band, with the cost named: the
+visible text stops being the target, which is the single rule batch 58 is built on. So the rule
+is replaced rather than dropped:
+
+> **The visible text tells you the origin, and the origin is where it goes.**
+
+A span resolves only when three things hold at once: it is actually elided; exactly ONE candidate
+has the visible part as its prefix; and **the whole authority is visible**. A run cut off inside
+its host stays literal, so truncation may elide a path and a query and may never elide the answer
+to "where does this take me".
+
+The elision test is asked generically — trailing characters that are not ASCII — rather than by
+naming the ellipsis, so `tui/markdown.py` needs to know nothing about the producer that put one
+there.
+
+### The candidates come from the redactor, not from the params
+
+A click hands its target to the platform's browser, so a target taken from the raw parameters
+would send the `?api_key=…` that `param_digest` deliberately kept out of the transcript — #167's
+protection defeated at the one place it was designed to hold, by a feature whose whole subject is
+the same string. `redacted_values` redacts first and then **drops any value the redactor
+changed**, so a rewritten URL is never offered at all. `call_links` applies the same `omit` as
+`call_digest` (§42 RA3), because a candidate drawn from a parameter the line does not show would
+be a click target the reader cannot see anywhere.
+
+### Two refusals, both found by measuring rather than by thinking
+
+**Userinfo.** `https://accounts.google.com@phish.example/x` was armed and clickable in assistant
+prose *today*, and it opens `phish.example`. The letter of batch 58's rule held — the visible text
+IS the target — while the part a reader takes for the destination is userinfo and the host is
+somewhere else. That is exactly the attack `[label](url)` was refused for, arriving through the
+URL's own syntax instead of through a label. This is a pre-existing defect in shipped code, found
+on the way to something else, and it is fixed in prose as well as in tool lines.
+
+**The redaction mark.** Caught by a test, not by reasoning, and it is the better story of the two.
+`redacted_values` correctly offered no target for a credentialed call — and the line still *drew*
+`https://example.com/x?api_key=[REDACTED]`, which is ASCII, https and userinfo-free, so the span
+armed **itself**. Clicking it would have sent the literal string `[REDACTED]` to a real host. A
+URL the harness rewrote is a real address and simply not the one that was fetched, so `clickable`
+refuses it. `REDACTION_MARKER` is now named in `safety/policy_enforcement.py` (it was four bare
+literals); `tui/markdown.py` is pure and may not import policy, so it keeps its own copy and
+`tests/test_markdown_render.py` holds the two against each other — one string, two readers, and a
+check rather than a hope.
+
+### Where the target lives, and the two lifetimes it has
+
+`_entries` keeps its `(role, text)` shape: it is read by `/copy`, by `last_answer()` and by the
+replay contract, and a link is a rendering fact about a line rather than part of what was said.
+The targets go in `_links`, keyed by entry index, which is what `rerender()` already walks. Both
+of its lifetimes are pinned, and the second was a bug in the first draft of its own test: the
+LIVE path is handed its links as an argument, so a stale side table is invisible until something
+re-renders. The test only became honest once it redrew.
+
+`ReplayEntry` is now `(role, text, links)`. That widens a contract whose docstring says a caller
+is *"rendering, not reasoning about history"* — still true, and the alternative was worse: a
+resumed thread would draw the same characters as the live turn and quietly refuse to open them,
+which is the one-conversation-rendered-two-ways defect §44 removed for thinking spans.
+
+### Verified
+
+Full suite **4041 passed** (`test_markdown_render.py` 148 → 178, `test_live_output.py` 99 → 112,
+`test_thread_legibility.py` 41 → 42). Eleven mutations, all killed — but only after three
+survivors, and all three were gaps in the tests rather than in the code:
+
+| mutation | must be killed by |
+|---|---|
+| a tool line takes the prose grammar | the verbatim-digest tests |
+| `clickable()` stops looking at the authority | the userinfo table |
+| `clickable()` arms a URL the harness rewrote | the redacted-target test |
+| the origin need not be visible | the host-did-not-fit test |
+| any candidate will do, not exactly one | the two-candidates test |
+| an unelided run may borrow a candidate | `_elided`'s own contract |
+| `redacted_values` offers the raw parameter | the redacted-target test |
+| `rerender()` forgets the targets | the /theme test |
+| `reset()` leaves the previous thread's | the /new test, through a redraw |
+| a replayed call carries no targets | the resumed-thread test |
+| `call_links` ignores the rationale param | the hidden-parameter test |
+
+**Still unverified from here:** that a real terminal delivers ctrl+click to these cells. The
+pilot injects the event rather than receiving it, so this proves textual's dispatch and not the
+mouse.

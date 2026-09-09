@@ -58,7 +58,9 @@ def _drive(mocker, *responses):
         yield from make_stream_from_response(responses[calls["n"]])()
 
     def fake_dispatch(name, params, context=None, approval_callback=None,
-                      parent_run=None, response_channel=None, memory=None):
+                      parent_run=None, response_channel=None, memory=None,
+                      # Batch 59: run-scoped values this stub ignores.
+                      **_run_scoped):
         return {"result": "ok"}
 
     mocker.patch("core.loop.call_model_stream", side_effect=fake_stream)
@@ -148,7 +150,13 @@ class TestUncappedByDefault:
 
         def fake_dispatch(name, params, context=None,
                           approval_callback=None, parent_run=None,
-                          response_channel=None, memory=None):
+                          response_channel=None, memory=None,
+                          # Batch 59: run-scoped values this stub does not care
+                          # about. Spelling every injectable name out made a
+                          # handful of tests break each time one was added,
+                          # which is the coupling registry.py's own comment
+                          # says dispatch() should not have.
+                          **_run_scoped):
             return {"result": "ok"}
 
         responses = [_resp(150_000, 60_000, tool=True),
@@ -216,7 +224,13 @@ class TestConfiguredCap:
 
         def fake_dispatch(name, params, context=None,
                           approval_callback=None, parent_run=None,
-                          response_channel=None, memory=None):
+                          response_channel=None, memory=None,
+                          # Batch 59: run-scoped values this stub does not care
+                          # about. Spelling every injectable name out made a
+                          # handful of tests break each time one was added,
+                          # which is the coupling registry.py's own comment
+                          # says dispatch() should not have.
+                          **_run_scoped):
             return {"result": "ok"}
 
         responses = [_resp(30_000, 10, tool=True), _resp(40_000, 10)]

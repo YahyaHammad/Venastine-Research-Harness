@@ -35,7 +35,7 @@ import re
 from typing import Optional
 
 import config
-from core import config_loader, model_windows, session
+from core import agent_activity, config_loader, model_windows, session
 from storage import THREAD_KIND_SUBAGENT
 
 logger = logging.getLogger(__name__)
@@ -530,7 +530,8 @@ def _input_budget(model: str, provider_name: Optional[str] = None) -> int:
 def compact(memory, model: str, provider_name: str,
             current_turn_start: Optional[int] = None,
             overrides: Optional[dict] = None,
-            authorization=None) -> dict:
+            authorization=None,
+            activity=None, depth: int = 1) -> dict:
     """Compact `memory`'s thread. Returns an OUTCOME dict -- never None.
 
     Batch 16 (#44) changed this contract. It used to return a notice dict
@@ -708,10 +709,16 @@ def compact(memory, model: str, provider_name: str,
 
     _compacting = True
     try:
-        summary = _summarize(
-            RunAgentLoop, manager, agent, DEFAULT_SYSTEM_PROMPT,
-            segment_text, target, original, model, provider_name,
-            settings["max_retries"], authorization)
+        # Batch 59. ONE span over the whole call, retries included: this is
+        # one compactor run that may take several calls to hit its target,
+        # and a shell drawing a row per attempt would report the retry loop
+        # as a stack of compactors. Inside the `_compacting` guard rather
+        # than around it, so the two brackets nest instead of interleaving.
+        with agent_activity.span(activity, agent.name, depth):
+            summary = _summarize(
+                RunAgentLoop, manager, agent, DEFAULT_SYSTEM_PROMPT,
+                segment_text, target, original, model, provider_name,
+                settings["max_retries"], authorization)
     finally:
         _compacting = False
 
@@ -749,7 +756,8 @@ def compact(memory, model: str, provider_name: str,
 
 def summarize_thread(thread_id, model: str, provider_name: str,
                      overrides: Optional[dict] = None,
-                     authorization=None) -> Optional[dict]:
+                     authorization=None,
+                     activity=None, depth: int = 1) -> Optional[dict]:
     """Distil a WHOLE thread into a stored summary (ROADMAP_v2 §21c).
 
     Returns a notice dict carrying the summary, or None if the thread has
@@ -856,10 +864,14 @@ def summarize_thread(thread_id, model: str, provider_name: str,
     # quietly.
     _compacting = True
     try:
-        summary = _summarize(
-            RunAgentLoop, manager, agent, DEFAULT_SYSTEM_PROMPT,
-            thread_text, target, original, model, provider_name,
-            settings["max_retries"], authorization)
+        # Batch 59, and see compact() above for why one span covers the
+        # retries. §21c's /summary runs this from its own worker, so it is
+        # the one compactor run with no parent turn under it.
+        with agent_activity.span(activity, agent.name, depth):
+            summary = _summarize(
+                RunAgentLoop, manager, agent, DEFAULT_SYSTEM_PROMPT,
+                thread_text, target, original, model, provider_name,
+                settings["max_retries"], authorization)
     finally:
         _compacting = False
 

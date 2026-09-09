@@ -1168,9 +1168,10 @@ class TestResumingAThreadReplaysItAtTheCallSite:
                                                fake_storage, cli_stdin):
         import main
 
-        mocker.patch.object(main, "replay_entries",
-                            return_value=[("user", "earlier question"),
-                                          ("assistant", "earlier answer")])
+        mocker.patch.object(
+            main, "replay_entries",
+            return_value=[("user", "earlier question", ()),
+                          ("assistant", "earlier answer", ())])
         cli_stdin()                      # EOF immediately: no turn needed
         main.run_chat(uuid4(), "ANTHROPIC", "m")
 
