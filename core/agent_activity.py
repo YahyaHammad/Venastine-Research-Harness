@@ -24,9 +24,31 @@ WHY A CHANNEL AND NOT A LoopEvent, which is the obvious first reach:
     around; §18/D6 returns only the subagent's distilled final text, on
     the pipeline's "don't share raw history" principle.
 
-So this carries LIFECYCLE ONLY -- a name and a depth, in and out. Never
-the child's text, tool calls, or events. A shell that wanted those would
-be asking for the thing D6 declines to give it.
+So this carries LIFECYCLE ONLY -- a name, a depth, an identity, and the
+id of the thread the run is writing. Never the child's text, tool calls,
+or events. A shell that wanted those would be asking for the thing D6
+declines to give it.
+
+§47 ADDED THE IDENTITY, AND AN IDENTIFIER IS NOT CONTENT. A run already
+writes its whole conversation to its own ConversationThread, and a human
+can already open one by id (`--ref`, `/resume`). What nobody could do was
+find out WHICH thread a row in the sidebar was about. So a span carries
+`id` and `parent_id` now, and `bind()` says which thread it opened.
+Everything a shell then displays it reads back out of the ARCHIVE --
+`core/replay.py`, the same function and the same policy `/resume` uses --
+so nothing here forwards a child's stream to its parent, which is what
+D6 is about. The distinction is the whole design: the channel gained an
+address, not a payload.
+
+THE PARENT COMES FROM A ContextVar, NOT FROM A PARAMETER. Five call sites
+open spans and none of them knows what is above it; threading a parent
+through all of them would put the answer in the hands of whoever
+remembers to pass it -- the D24/R13 failure shape. The var is set and
+reset inside the same context manager whose `finally` already makes
+`exit` unforgettable, so the two cannot drift. It is also the shape that
+survives concurrency: a ContextVar is per-thread, so a run submitted to
+an executor takes `contextvars.copy_context()` with it rather than
+reading a variable that would be wrong the moment two children run.
 
 It rides the same route response_channel already rides (loop -> dispatch
 -> handler -> the child's own loop), for the same reason: an out-of-band
@@ -37,10 +59,19 @@ fallback -- and because nothing here knows what a widget is.
 """
 
 from contextlib import contextmanager
-from dataclasses import dataclass
+from contextvars import ContextVar
+from dataclasses import dataclass, field
+from typing import Optional
+from uuid import uuid4
 import logging
 
 logger = logging.getLogger(__name__)
+
+#: The innermost span open on THIS thread, or None. Read by `span()` to
+#: find a new span's parent and by `bind()` to find the run whose thread
+#: has just been created. Module-level and private: nothing outside this
+#: file sets it, so the context manager below is the only writer.
+_CURRENT: ContextVar = ContextVar("venastine_agent_span", default=None)
 
 
 @dataclass(frozen=True)
@@ -51,9 +82,27 @@ class AgentSpan:
     consumer indenting by it is drawing the same nesting the depth limit
     is about. Frozen because a span is posted to another thread and read
     later; a mutable one would be a second writer of the stack.
+
+    `id` is minted per span rather than derived from anything, because
+    the thing it has to distinguish is two runs that agree on every other
+    field: a goal turn spawning `explore` twice gives two spans with the
+    same name and the same depth, and a sink that could not tell them
+    apart had to pop by last match and hope. `parent_id` is the enclosing
+    span's, or None at the root.
+
+    NEITHER IS THE THREAD ID, and the gap between them is deliberate. A
+    span opens BEFORE the run it describes creates its thread -- the
+    handler brackets the call, the thread is made inside it -- so the
+    address arrives later, through `bind()`. A frozen span cannot be
+    edited to hold it, which is correct: the binding belongs to the sink,
+    which is the thing that has to redraw when it arrives.
     """
     name: str
     depth: int
+    # Defaulted so `AgentSpan("explore", 1)` still constructs -- the
+    # positional pair is what every existing caller and test writes.
+    id: str = field(default_factory=lambda: uuid4().hex)
+    parent_id: Optional[str] = None
 
 
 class AgentActivity:
@@ -69,6 +118,19 @@ class AgentActivity:
 
     def exit(self, span: AgentSpan) -> None:
         """That run ended -- successfully or not."""
+
+    def bind(self, span_id: str, thread_id) -> None:
+        """That run's conversation thread exists, and this is its id.
+
+        Separate from `enter` because it genuinely happens later: the
+        span brackets the call, and the thread is created inside it. A
+        sink that wants to make a row openable holds this against the
+        span id it was given at `enter`.
+
+        Called at most once per span, and not at all for a run that
+        never gets that far -- a spawn refused before it starts, or a
+        provider that fails at the first call.
+        """
 
     @contextmanager
     def span(self, name: str, depth: int):
@@ -87,8 +149,19 @@ class AgentActivity:
         it is merely describing. Logged rather than swallowed silently,
         so a broken sink is findable -- the same posture
         tools/registry.dispatch() takes around a tool handler.
+
+        THE ContextVar IS RESET IN THE SAME `finally` AS `exit`, and that
+        pairing is the point rather than a convenience. A token that
+        outlived its span would make the NEXT sibling a child of a run
+        that has finished -- lineage that is wrong rather than missing,
+        which is the harder kind to notice. `reset(token)` rather than
+        `set(parent)`, because that is what restores the exact state this
+        frame found, including "there was nothing".
         """
-        span = AgentSpan(name, depth)
+        parent = _CURRENT.get()
+        span = AgentSpan(name, depth,
+                         parent_id=parent.id if parent is not None else None)
+        token = _CURRENT.set(span)
         try:
             self.enter(span)
         except Exception:                       # noqa: BLE001 -- contained
@@ -96,6 +169,7 @@ class AgentActivity:
         try:
             yield span
         finally:
+            _CURRENT.reset(token)
             try:
                 self.exit(span)
             except Exception:                   # noqa: BLE001 -- contained
@@ -116,3 +190,35 @@ def span(activity, name: str, depth: int):
     ask whether anyone is watching.
     """
     return (activity or NULL).span(name, depth)
+
+
+def current() -> Optional[AgentSpan]:
+    """The innermost span open on this thread, or None.
+
+    Public because two things outside this module need to know which run
+    is speaking without being handed it: `bind()` below, and the approval
+    path, which names the asking agent on a modal that would otherwise
+    say only which TOOL was asked for.
+    """
+    return _CURRENT.get()
+
+
+def bind(activity, thread_id) -> None:
+    """Tell the sink which thread the innermost open run is writing.
+
+    A no-op when nothing is open, which is the ordinary state of a
+    top-level `run_agent_conversation` -- the CLI's chat, a test calling
+    it directly. That is why the call site needs no branch, matching
+    `span()` above.
+
+    CONTAINED like the sink's other two calls, and for the identical
+    reason: this is display machinery. A sink that raises while learning
+    an id must not fail the run whose id it was learning.
+    """
+    span = _CURRENT.get()
+    if span is None or thread_id is None:
+        return
+    try:
+        (activity or NULL).bind(span.id, thread_id)
+    except Exception:                           # noqa: BLE001 -- contained
+        logger.exception("agent activity sink raised on bind")

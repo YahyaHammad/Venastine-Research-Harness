@@ -72,7 +72,10 @@ SUMMARY_PREFIX = (
 
 class ConversationMemory:
     def __init__(self, thread_id: Optional[UUID] = None,
-                 kind: str = THREAD_KIND_CHAT) -> None:
+                 kind: str = THREAD_KIND_CHAT, *,
+                 parent_thread_id: Optional[UUID] = None,
+                 parent_call_id: Optional[str] = None,
+                 agent_name: Optional[str] = None) -> None:
         """`kind` (§27 T1) says what a NEW thread is, and is forwarded to
         storage.create_thread and nowhere else.
 
@@ -81,13 +84,21 @@ class ConversationMemory:
         data exists -- that boundary is storage.py's. Ignored when
         `thread_id` is given, because resuming does not reclassify: a
         thread's kind was decided when it was created.
+
+        The three lineage arguments (§47) are forwarded the same way and
+        are ignored on a resume for the same reason: who spawned a thread
+        was settled when it was created, and reopening it settles nothing.
+        Keyword-only, so a caller that does not know it is creating a
+        child cannot say it is by filling a positional slot.
         """
         # Session-scoped billing (#4): zero on EVERY construction, fresh or
         # resumed -- see record_billed for why this one is deliberately not
         # extra_data like its neighbour.
         self.billed_tokens = 0
         if thread_id is None:
-            self.thread_id = create_thread(kind=kind)
+            self.thread_id = create_thread(
+                kind=kind, parent_thread_id=parent_thread_id,
+                parent_call_id=parent_call_id, agent_name=agent_name)
             self._messages: list[dict] = []
             self._extra: dict = {}
             self._kind = kind

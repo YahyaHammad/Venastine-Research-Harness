@@ -1171,3 +1171,148 @@ def test_a_thread_with_no_messages_sorts_by_creation(real_storage):
 def _thread_activity(real_storage, thread_id):
     row = real_storage.get_thread(thread_id)
     return row["last_activity_at"]
+
+# ---------------------------------------------------------------------------
+# ---- §47: the lineage columns, and the query that walks them --------------
+# ---------------------------------------------------------------------------
+
+def test_a_child_thread_records_who_spawned_it(real_storage):
+    """The three columns end to end. Before them the only trace of the
+    edge was the child's uuid stringified into the parent's tool-result
+    row -- a repr inside a JSON blob, which nothing can query and replay
+    skips outright (T4)."""
+    import storage
+
+    parent = storage.create_thread()
+    child = storage.create_thread(
+        storage.THREAD_KIND_SUBAGENT, parent_thread_id=parent,
+        parent_call_id="call_7", agent_name="explore")
+
+    row = storage.get_thread(child)
+    assert row["parent_thread_id"] == parent
+    assert row["parent_call_id"] == "call_7"
+    assert row["agent_name"] == "explore"
+    assert storage.get_thread(parent)["parent_thread_id"] is None
+
+
+def test_child_threads_returns_this_parents_children_oldest_first(real_storage):
+    """Oldest first because that is the order the calls happened in, so a
+    reader comparing this against the transcript walks both the same way."""
+    import storage
+
+    parent = storage.create_thread()
+    other = storage.create_thread()
+    first = storage.create_thread(
+        storage.THREAD_KIND_SUBAGENT, parent_thread_id=parent,
+        parent_call_id="call_1", agent_name="explore")
+    second = storage.create_thread(
+        storage.THREAD_KIND_SUBAGENT, parent_thread_id=parent,
+        parent_call_id="call_2", agent_name="review")
+    storage.create_thread(
+        storage.THREAD_KIND_SUBAGENT, parent_thread_id=other,
+        parent_call_id="call_3", agent_name="explore")
+
+    kids = storage.child_threads(parent)
+
+    assert [k["id"] for k in kids] == [first, second], (
+        "child_threads returned the wrong set or the wrong order")
+    assert [k["parent_call_id"] for k in kids] == ["call_1", "call_2"]
+    assert [k["agent_name"] for k in kids] == ["explore", "review"]
+
+
+def test_two_spawns_of_one_agent_are_told_apart_by_their_call(real_storage):
+    """THE reason the call id is stored at all. A goal turn can spawn
+    `explore` twice, so the agent name identifies the roster entry and
+    not the run -- only the call id ties one child to one line."""
+    import storage
+
+    parent = storage.create_thread()
+    first = storage.create_thread(
+        storage.THREAD_KIND_SUBAGENT, parent_thread_id=parent,
+        parent_call_id="call_1", agent_name="explore")
+    second = storage.create_thread(
+        storage.THREAD_KIND_SUBAGENT, parent_thread_id=parent,
+        parent_call_id="call_2", agent_name="explore")
+
+    by_call = {k["parent_call_id"]: k["id"] for k in
+               storage.child_threads(parent)}
+
+    assert by_call == {"call_1": first, "call_2": second}
+
+
+def test_a_grandchild_hangs_off_its_own_parent(real_storage):
+    """Depth 2 is reachable (SUBAGENT_MAX_DEPTH), so the edge has to be a
+    tree rather than one level of children."""
+    import storage
+
+    root = storage.create_thread()
+    child = storage.create_thread(
+        storage.THREAD_KIND_SUBAGENT, parent_thread_id=root,
+        parent_call_id="call_1", agent_name="explore")
+    grandchild = storage.create_thread(
+        storage.THREAD_KIND_SUBAGENT, parent_thread_id=child,
+        parent_call_id="call_9", agent_name="review")
+
+    assert [k["id"] for k in storage.child_threads(root)] == [child]
+    assert [k["id"] for k in storage.child_threads(child)] == [grandchild]
+
+
+def test_a_thread_that_spawned_nothing_has_no_children(real_storage):
+    """Most threads. Empty rather than an error, matching replay_entries'
+    rule for a thread with no messages."""
+    import storage
+
+    assert storage.child_threads(storage.create_thread()) == []
+
+
+def test_child_threads_does_not_filter_by_kind(real_storage):
+    """Deliberate. Which kinds exist is §27's question, and a filter here
+    would need widening the moment a sixth source appears -- which is
+    exactly how §27's own picker missed the compactor."""
+    import storage
+
+    parent = storage.create_thread()
+    subagent = storage.create_thread(
+        storage.THREAD_KIND_SUBAGENT, parent_thread_id=parent,
+        parent_call_id="call_1", agent_name="explore")
+    a_pass = storage.create_thread(
+        storage.THREAD_KIND_RESEARCH_PASS, parent_thread_id=parent,
+        parent_call_id=None, agent_name=None)
+
+    assert {k["id"] for k in storage.child_threads(parent)} == {subagent, a_pass}
+
+
+def test_the_lineage_columns_migrate_onto_a_database_that_predates_them(
+        real_storage, tmp_path):
+    """M7's contract for the three §47 columns: additive, nullable, and
+    never backfilled -- so every thread written before them reads as one
+    nothing spawned, which is what it was."""
+    import sqlite3
+
+    import database
+
+    old = tmp_path / "predates.db"
+    connection = sqlite3.connect(str(old))
+    connection.execute(
+        "CREATE TABLE conversationthread (id VARCHAR PRIMARY KEY, "
+        "created_at DATETIME, extra_data JSON, kind VARCHAR)")
+    connection.execute(
+        "INSERT INTO conversationthread VALUES "
+        "('11111111-1111-1111-1111-111111111111', '2026-01-01', '{}', 'chat')")
+    connection.commit()
+
+    added = database.ensure_columns(connection, database._declared_columns())
+
+    columns = {row[1] for row in
+               connection.execute("PRAGMA table_info(conversationthread)")}
+    existing = connection.execute(
+        "SELECT parent_thread_id, parent_call_id, agent_name "
+        "FROM conversationthread").fetchone()
+    connection.close()
+
+    for name in ("parent_thread_id", "parent_call_id", "agent_name"):
+        assert f"conversationthread.{name}" in added, (
+            f"{name} was not added to a database that predates it")
+        assert name in columns
+    assert existing == (None, None, None), (
+        "the migration backfilled a value onto a row nothing spawned")

@@ -35,7 +35,7 @@ Venastine Research Harness/
 ├── credentials.py                 # LLM PROVIDER keys (providers.json) -- NOT misc tool keys
 ├── env_secrets.py                 # misc TOOL keys (.env) -- NOT LLM provider keys
 ├── database.py                    # the DB engine + table creation -- owns the CONNECTION only
-├── storage.py                     # thread/message schema + CRUD -- owns PERSISTENCE only
+├── storage.py                     # thread/message schema + CRUD -- owns PERSISTENCE only. §47 adds the lineage columns (parent_thread_id, parent_call_id, agent_name) and `child_threads()`, the one query that walks the edge -- columns rather than extra_data for `kind`'s reason, since the question asked of them is which threads are children of this one
 ├── json_store.py                  # batch 45: the atomic-write + versioned-read mechanics the four user-tier JSON stores (trust, MCP, model windows, UI prefs) each had a copy of. Mechanics only -- every store keeps its own module, path, version and failure posture
 ├── logging_setup.py                # logging config -- see ROADMAP.md §2, DEVLOG.md §2
 ├── providers.json.example            # tracked template -- LLM provider credentials structure (empty keys)
@@ -57,7 +57,7 @@ Venastine Research Harness/
 ├── scripts/
 │   └── prepublish-check.mjs        # batch 35: package.json's `prepublishOnly` gate, so a non-zero exit aborts the publish. Checks the two things that fail SILENTLY and cannot be undone once a version is on the registry -- the two version numbers agreeing, and no secret in the tarball while LICENSE/NOTICE are in it
 │
-├── tests/                          # 4045 tests, all offline, ~2-3 min depending on the machine (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
+├── tests/                          # 4071 tests, all offline, ~2-3 min depending on the machine (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
 │   ├── conftest.py                 # fixtures: make_model_response, make_stream_from_response, make_stream_sequence, FakeStorage, ...
 │   ├── BREAKING_CHANGES.md         # what-breaks-it / symptom / fix per area
 │   ├── test_cli.py                 # 91 tests -- ROADMAP §1 thread_id passthrough + UUID validation + §14 parser defaults/resolution/trust flow + §29 N1-N8 the one stdin reader, N2's channel deadline, every request kind rendered, and the startup block main(argv) made reachable + #102's four declining defaults
@@ -94,7 +94,7 @@ Venastine Research Harness/
 │   ├── test_policy_enforcement.py  # 101 tests -- ROADMAP §8 secret redaction, domain blocking (#48 normalisation + suffix match), is_url_permitted's address guard (#54), output policy, registry integration
 │   ├── test_critic_routing.py      # 2 tests -- ROADMAP §11 critic-model routing (3a/3b/6c to critic, rest to main)
 │   ├── test_permission_context.py  # 21 tests -- ROADMAP_v2 §15 AC1-AC7 (stricter wins, mcp default, redaction survives, D24, unregister) + schemas filtering
-│   ├── test_agent_activity.py      # 26 tests -- batch 59's agent activity channel: the span that closes even when the run RAISES, the depth-2 spawn that only reaches a shell because the sink is passed DOWN into the child run, `activity=None` leaving the CLI and the pipeline untouched, and the sidebar panel that draws the stack (indented, truncated to the sidebar's real 18 columns, hidden when idle)
+│   ├── test_agent_activity.py      # 45 tests -- batch 59's agent activity channel: the span that closes even when the run RAISES, the depth-2 spawn that only reaches a shell because the sink is passed DOWN into the child run, `activity=None` leaving the CLI and the pipeline untouched, and the sidebar panel that draws the stack (indented, truncated to the sidebar's real 18 columns, hidden when idle); batch 67 adds §47's identity -- two runs of one agent at one depth telling themselves apart, the parent read off a ContextVar and restored when a child RAISES, and `bind()` reaching the sink from the production call site rather than from a stub, which is the only test that can see a sidebar row become openable while its run is still going
 │   ├── test_agents.py              # 47 tests -- ROADMAP_v2 §18 AC1-AC3 (intersection, depth, manager surface), dispatch injection, headless filter + warning, goal mode, catalog, D24, TUI commands, and R16's "a headless run cannot spawn at all"
 │   ├── test_catalog_advertisement.py # 19 tests -- ROADMAP_v2 §32 A1/A2 (#68): is_advertised as the one predicate schemas/headless_hidden/with_catalogs all read, every pass id driven headless, and the grant that cannot re-admit a GRANT_NEVER catalog
 │   ├── test_catalog_text.py        # 21 tests -- ROADMAP_v2 §32 A5/A6 (#131): a description cannot leave its bullet or forge a prompt section, the cap and its boundary, our own files already comply, and the trust prompt showing the NORMALISED text it is deciding about
@@ -131,7 +131,7 @@ Venastine Research Harness/
 │   ├── test_pin_tool.py           # 18 tests -- ROADMAP_v2 §21a D24/D26 declarations, the `memory` injectable, input handling, and #89's cap + the symmetric `unpin` tool
 │   ├── test_pid_scanner.py        # 5 tests -- batch 28 (#10): the POSIX branch of _child_pids() driven from any platform via a sys.platform monkeypatch and an argv-aware fake ps -- the ww width fix, a failed enumeration failing loudly instead of reading as no children, garbage lines skipped, empty-set control
 │   ├── test_shell_compaction.py   # 17 tests -- ROADMAP_v2 §21a §21's visibility rule at both shells, and /compact
-│   ├── test_storage_e2e.py     # 36 tests -- ROADMAP_v2 §21a review: real ConversationMemory + real storage.py on real SQLite, compacting four times through the loop path. The only test at this level, and it found the shipped M11 defect
+│   ├── test_storage_e2e.py     # 43 tests -- ROADMAP_v2 §21a review: real ConversationMemory + real storage.py on real SQLite, compacting four times through the loop path. The only test at this level, and it found the shipped M11 defect. §47's lineage columns are here too, for the same reason: whether `child_threads` returns this parent's children in the right order, and whether the additive migration adds three nullable columns to a database that predates them without backfilling one, are questions about what SQL actually does
 │   ├── test_memories.py           # 13 tests -- ROADMAP_v2 §21b scope resolution, the injection cap (M14) and the opt-in rule (M13)
 │   ├── test_remember_tool.py      # 17 tests -- ROADMAP_v2 §21b D24/D26 declarations, the approval notice, M17's exclusion from BOTH grant paths (#67)
 │   ├── test_memory_injection.py   # 12 tests -- ROADMAP_v2 §21b the three placements and the with_catalogs boundary (M13/K6), plus AC5/AC6 end to end
@@ -222,7 +222,7 @@ Venastine Research Harness/
 │
 ├── agents/                        # ROADMAP_v2 §18: agent system. Namespace package (no __init__.py), like tools/ and tui/
 │   ├── manager.py                 # AgentManager -- thin lookup over config_loader + C6 intersection / C3 depth composition + prompt assembly
-│   ├── subagent_tool.py           # spawn_subagent tool (D6 model-initiated); declares parent_context/parent_run for dispatch injection
+│   ├── subagent_tool.py           # spawn_subagent tool (D6 model-initiated); declares parent_context/parent_run for dispatch injection, plus §47's memory/call_id -- what the CHILD's thread records as its parent, so a `▸ spawn_subagent` line can still open its run tomorrow
 │   ├── tui_commands.py            # /agent, /goal, /grill-me registered into §16's slash registry (TUI-only commands)
 │   └── builtin/
 │       ├── grill-me.md            # built-in agent: surfaces what still needs a decision in the current thread

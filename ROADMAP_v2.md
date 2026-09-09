@@ -3875,3 +3875,48 @@ filters, attaches to or reuses a container. `_run_docker` always creates a fresh
   twenty-row box as a twenty-five-line one. Bounding what each block REPORTS keeps both.
 - **Filling the columns with the Allow/Deny pair** (batch 49). It is symmetric, and it makes the
   permissive answer a target half the width of the modal. Centring the pair is symmetric too.
+
+## §47. Navigable agents -- the subagent thread you can open
+
+**Added after batch 59's sidebar was used.** The `AgentPanel` draws who is running and how deep,
+and that is all it does: no row can be clicked, and a row vanishes the moment its run returns.
+Meanwhile every spawn already writes its whole conversation to its own `ConversationThread`
+(`kind="subagent"`), and `core/replay.py` already turns any thread id into display entries. So the
+work is not capturing subagent output. It is **indexing and navigating what the database already
+holds**.
+
+**What D6 does and does not forbid.** §18/D6 keeps a child's raw history out of its PARENT's
+context, and `core/agent_activity.py` carries lifecycle only for that reason. Nothing here changes
+that. The channel gains an **identifier**; every byte a viewer shows is read back from the archive
+through the same function `/resume` uses. An address is not a payload.
+
+### Decisions
+
+| # | Decision |
+|---|---|
+| **N1** | **Lineage is PERSISTED on the thread row**, in three nullable columns added by `ensure_columns()` exactly as `pinned`, `kind`, `last_activity_at` and `thinking` were. In-session memory would leave a resumed conversation drawing spawn lines that look identical and quietly refuse to open -- the divergence §44 and batch 65 each removed once |
+| **N2** | **The call id is what makes the edge specific.** One turn can spawn `explore` three times, so the agent name identifies the roster entry and not the run. `MessageLog.tool_call_id` already stores that id on the parent's side, so the two halves meet without inventing a key |
+| **N3** | **`call_id` is INJECTED, never a param.** Params are the model's, parsed from its tool call; a model that could write its own call id could claim a line it did not make |
+| **N4** | **The parent comes from a `ContextVar`**, set and reset inside the same context manager whose `finally` already makes `exit` unforgettable. Not a parameter: five call sites open spans and none knows what is above it. It is also the shape that survives N8 |
+| **N5** | **`bind()` is a third sink call**, because the span opens before the run creates its thread. It fires immediately after `ConversationMemory` is constructed -- the earliest moment the id exists -- which is what makes a RUNNING child openable rather than only a finished one |
+| **N6** | **The spawn line is armed and opened by ctrl+click, resolved at PRESS time.** A line drawn before its child existed still opens it: live from the session map the bind fills, replayed from `child_threads()` matched on `parent_call_id` |
+| **N7** | **The viewer is a switcher inside `#main`, not a modal.** The sidebar lives outside it and stays live, so moving between runs needs no second copy of the agent list -- two independent writers of one piece of display state being the bug shape this project has already fixed once |
+| **N8** | **Parallel spawns are designed now and built LAST.** The blockers are correctness, not speed: a single-slot permission channel, a non-atomic `GrantBudget.take()`, a per-iteration authorization id, a synchronous generator with no yield point inside `dispatch()`, and one pooled SQLite connection |
+
+Plus, settled with the owner at design time: plain click on sidebar rows (no text selection there
+to dodge); a key-bound picker as the keyboard route, so the sidebar stays unfocusable; polling the
+archive while a viewed run is still open; escape exits the viewer and a clickable lineage trail
+goes up one level; the permission modal names the agent and its depth; and all five
+subagent-thread sources before research passes.
+
+### Slices
+
+1. **Identity and lineage** -- `AgentSpan.id`/`parent_id`, the ContextVar, `bind()`, the three
+   columns, `child_threads()`, `call_id` injection. **BUILT, batch 67.**
+2. The sink and the panel learn identity; `exit` removes by id.
+3. The viewer: the switcher, the crumb, the extracted paint loop, the poll.
+4. The inline anchor, and `ReplayEntry`'s fourth element.
+5. The picker, and the permission modal naming who is asking.
+6. The reviewer and the initializer get batch 59's deferred spans.
+7. Research passes.
+8. Parallel spawns.

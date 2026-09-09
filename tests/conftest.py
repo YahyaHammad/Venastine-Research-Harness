@@ -807,13 +807,19 @@ class FakeStorage:
         self._thread_created_at = {}  # thread_id -> datetime
         self._thread_last_activity = {}  # thread_id -> datetime or None (#32)
         self._thread_kind = {}    # thread_id -> "chat" / "research_pass" / "subagent" (§27)
+        # §47: thread_id -> (parent_thread_id, parent_call_id, agent_name),
+        # mirroring the three nullable columns. Recorded for the same
+        # reason `kind` is: a test asserting WHO spawned a run should not
+        # need a database to see it.
+        self._thread_lineage = {}
         self._messages_by_thread = {}  # thread_id -> list of neutral-shape dicts
         self._thread_extra = {}   # thread_id -> dict (extra_data mirror)
         self._checkpoints = {}    # thread_id -> the latest CompactionCheckpoint (§21)
         self._thread_summaries = {}  # thread_id -> the latest ThreadSummary (§21c)
         self._memories = []       # UserMemory rows, oldest first (§21b)
 
-    def create_thread(self, kind="chat"):
+    def create_thread(self, kind="chat", *, parent_thread_id=None,
+                      parent_call_id=None, agent_name=None):
         from datetime import datetime, timezone
         from uuid import uuid4
         thread_id = uuid4()
@@ -828,6 +834,11 @@ class FakeStorage:
         self._thread_last_activity[thread_id] = None
         self._messages_by_thread[thread_id] = []
         self._thread_extra[thread_id] = {}
+        # §47, keyword-only in production for the same reason it is here:
+        # a caller that does not know it is creating a child must not be
+        # able to say it is by filling a positional slot.
+        self._thread_lineage[thread_id] = (
+            parent_thread_id, parent_call_id, agent_name)
         return thread_id
 
     def thread_kind(self, thread_id):
@@ -849,7 +860,34 @@ class FakeStorage:
             "extra_data": dict(self._thread_extra.get(thread_id, {})),
             "kind": self._thread_kind.get(thread_id, "chat"),
             "last_activity_at": self._thread_last_activity.get(thread_id),
+            "parent_thread_id": self._lineage(thread_id)[0],
+            "parent_call_id": self._lineage(thread_id)[1],
+            "agent_name": self._lineage(thread_id)[2],
         }
+
+    def _lineage(self, thread_id):
+        """(parent_thread_id, parent_call_id, agent_name), all None by
+        default -- which is what every thread nothing spawned reads as,
+        and what every row predating the columns reads as in production
+        since the additive migration never backfills."""
+        return self._thread_lineage.get(thread_id, (None, None, None))
+
+    def child_threads(self, parent_thread_id):
+        """Mirrors storage.child_threads(): the threads this one spawned,
+        oldest first, with no filter by kind (§47)."""
+        kids = [tid for tid, row in self._thread_lineage.items()
+                if row[0] == parent_thread_id]
+        kids.sort(key=lambda tid: self._thread_created_at[tid])
+        return [
+            {
+                "id": tid,
+                "created_at": self._thread_created_at[tid],
+                "kind": self._thread_kind.get(tid, "chat"),
+                "parent_call_id": self._lineage(tid)[1],
+                "agent_name": self._lineage(tid)[2],
+            }
+            for tid in kids
+        ]
 
     def get_thread_extra(self, thread_id):
         if thread_id not in self._threads:

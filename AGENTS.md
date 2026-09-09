@@ -48,7 +48,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 4045 tests, offline, ~2-3 min by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 4071 tests, offline, ~2-3 min by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -954,6 +954,33 @@ are decisions:
 - **`activity=activity` on the child's `run_agent_conversation` is what makes depth 2 visible.**
   Drop that one argument and the panel reports exactly what `tool_call_start` already implied.
   Depth comes from `ToolContext.subagent_depth`, never a second count.
+- **§47 gave it an IDENTITY, and an identifier is not content.** A span carries `id` and
+  `parent_id` now, and `bind()` says which thread the run is writing. That does not reopen the
+  bullet above it: everything a shell then displays it reads back out of the ARCHIVE, through
+  `core/replay.py` — the same function and the same policy `/resume` uses. The channel gained
+  an address, not a payload.
+- **The parent comes from a `ContextVar`, and the reset lives in the SAME `finally` as `exit`.**
+  Five call sites open spans and none knows what is above it, so threading a parent through
+  them would put the answer in the hands of whoever remembers to pass it. A token that outlived
+  its frame is worse than absent lineage — the next sibling would be recorded as a child of a
+  run that has finished, which is wrong rather than missing. It is also the shape that survives
+  concurrency: a run submitted to an executor takes `contextvars.copy_context()` with it.
+- **`bind()` is a THIRD call, not a field on the span, because the thread does not exist yet
+  when the span opens.** The handler brackets the call and the thread is created inside it, so
+  the address arrives later — and it has to arrive DURING the run, or a sidebar row could only
+  be opened after the run it describes had finished. `core/loop.py` binds immediately after
+  `ConversationMemory` is constructed, the earliest moment the id exists. A no-op when no span
+  is open, so the call site needs no branch.
+
+**The child's thread records its parent; the tool result is not a link** (§47).
+`spawn_subagent` has always returned `subagent_thread_id` to the model, so the edge existed —
+as a repr inside a JSON blob in one message row, which nothing can query and replay skips
+outright (T4). It is stored on the CHILD's row now, in three nullable columns added the way
+`pinned` and `kind` were. **The call id is what makes the edge specific**: one turn can spawn
+`explore` three times, so the agent name identifies the roster entry and not the run.
+`"call_id"` joins `_INJECTABLE_PARAMS` rather than riding in params, twice over — params are
+the MODEL'S, and a model that could write its own call id could claim a line it did not make.
+
 
 **The tempting wrong source is the sign-off.** A depth-2 `SUBAGENT_SIGNOFF` request does reach
 the TUI naming the grandchild, and there is no matching completion signal — a row pushed from it

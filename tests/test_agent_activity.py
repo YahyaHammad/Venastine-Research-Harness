@@ -29,6 +29,7 @@ from core import agent_activity
 from core.agent_activity import AgentActivity, AgentSpan
 from core import config_loader
 from core.loop import RunAgentLoop
+from tests.conftest import make_model_response
 from tools.context import ToolContext, RunInfo
 from tools.registry import registry
 
@@ -63,12 +64,19 @@ class Recorder(AgentActivity):
 
     def __init__(self):
         self.events = []
+        self.bound = []
 
     def enter(self, span):
         self.events.append(("enter", span.name, span.depth))
 
     def exit(self, span):
         self.events.append(("exit", span.name, span.depth))
+
+    def bind(self, span_id, thread_id):
+        # §47. Recorded as (span id, thread id) so a test can assert
+        # WHICH run was addressed, which is the thing a name and a
+        # depth could never say.
+        self.bound.append((span_id, thread_id))
 
     @property
     def live(self):
@@ -141,6 +149,222 @@ class TestTheSpanClosesWhateverHappens:
         span = AgentSpan("explore", 1)
         with pytest.raises(Exception):
             span.name = "review"
+
+
+class TestASpanKnowsWhoItIsAndWhatItCameFrom:
+    """§47. Batch 59's span was a (name, depth) pair, and two runs that
+    agree on both are indistinguishable -- which is why the sink had to
+    pop by last match and hope. An identity is what makes a row in a panel
+    a thing you can open rather than a thing you can only read."""
+
+    def test_two_spans_sharing_a_name_and_depth_have_different_ids(self):
+        """The exact case the last-match scan exists for: one goal turn
+        spawning `explore` twice."""
+        first = AgentSpan("explore", 1)
+        second = AgentSpan("explore", 1)
+
+        assert first.id and second.id
+        assert first.id != second.id, (
+            "two runs of the same agent at the same depth got the same id, "
+            "so nothing downstream can tell them apart")
+
+    def test_the_positional_pair_still_constructs(self):
+        """Every existing call site and test writes `AgentSpan(name,
+        depth)`. The new fields are defaulted, not inserted."""
+        span = AgentSpan("explore", 1)
+
+        assert (span.name, span.depth) == ("explore", 1)
+        assert span.parent_id is None
+
+    def test_a_nested_span_names_its_parent(self):
+        sink = Recorder()
+        with agent_activity.span(sink, "outer", 1) as outer:
+            with agent_activity.span(sink, "inner", 2) as inner:
+                pass
+
+        assert inner.parent_id == outer.id
+        assert outer.parent_id is None
+
+    def test_siblings_share_a_parent_and_not_an_id(self):
+        """Two spawns in one turn are siblings, not a chain. The panel
+        draws a chain today because that is what RUNS; the data model has
+        to be a tree anyway, or parallel spawns would need it rebuilt."""
+        sink = Recorder()
+        with agent_activity.span(sink, "root", 1) as root:
+            with agent_activity.span(sink, "explore", 2) as first:
+                pass
+            with agent_activity.span(sink, "explore", 2) as second:
+                pass
+
+        assert first.parent_id == second.parent_id == root.id
+        assert first.id != second.id
+
+    def test_current_is_the_innermost_open_span(self):
+        sink = Recorder()
+        assert agent_activity.current() is None
+        with agent_activity.span(sink, "outer", 1) as outer:
+            assert agent_activity.current() is outer
+            with agent_activity.span(sink, "inner", 2) as inner:
+                assert agent_activity.current() is inner
+            assert agent_activity.current() is outer, (
+                "the parent did not come back into force, so the next "
+                "sibling would be parented to a run that has finished")
+        assert agent_activity.current() is None
+
+    def test_a_raising_run_restores_the_previous_span(self):
+        """The `finally` that closes the span closes the context too.
+        A token that outlived its frame is worse than no lineage: the
+        next sibling would be recorded as a child of a finished run."""
+        sink = Recorder()
+        with agent_activity.span(sink, "outer", 1) as outer:
+            with pytest.raises(RuntimeError):
+                with agent_activity.span(sink, "inner", 2):
+                    raise RuntimeError("the provider fell over")
+            assert agent_activity.current() is outer
+
+        assert agent_activity.current() is None
+
+
+class TestBindCarriesTheAddressAndNothingElse:
+    """The channel learns WHICH thread a run is writing. Not what is in
+    it -- everything a shell shows it reads back from the archive, which
+    is what keeps §18/D6 intact."""
+
+    def test_bind_reaches_the_sink_with_the_open_spans_id(self):
+        sink = Recorder()
+        with agent_activity.span(sink, "explore", 1) as span:
+            agent_activity.bind(sink, "thread-A")
+
+        assert sink.bound == [(span.id, "thread-A")]
+
+    def test_the_innermost_run_is_the_one_bound(self):
+        sink = Recorder()
+        with agent_activity.span(sink, "outer", 1) as outer:
+            agent_activity.bind(sink, "thread-outer")
+            with agent_activity.span(sink, "inner", 2) as inner:
+                agent_activity.bind(sink, "thread-inner")
+
+        assert sink.bound == [(outer.id, "thread-outer"),
+                              (inner.id, "thread-inner")]
+
+    def test_binding_with_no_span_open_is_a_no_op(self):
+        """Every top-level run_agent_conversation takes this path -- the
+        CLI's chat, a test calling it directly -- which is why the call
+        site needs no branch."""
+        sink = Recorder()
+        agent_activity.bind(sink, "thread-A")
+
+        assert sink.bound == []
+
+    def test_binding_nothing_records_nothing(self):
+        sink = Recorder()
+        with agent_activity.span(sink, "explore", 1):
+            agent_activity.bind(sink, None)
+
+        assert sink.bound == []
+
+    def test_a_sink_that_raises_on_bind_does_not_take_down_the_run(self):
+        """Display machinery, the same posture as enter and exit."""
+        class Broken(AgentActivity):
+            def bind(self, span_id, thread_id):
+                raise ValueError("widget exploded")
+
+        ran = []
+        with agent_activity.span(Broken(), "explore", 1):
+            agent_activity.bind(Broken(), "thread-A")
+            ran.append(True)
+
+        assert ran == [True]
+
+    def test_none_is_still_a_working_sink(self):
+        with agent_activity.span(None, "explore", 1):
+            agent_activity.bind(None, "thread-A")
+
+
+class TestASpawnRecordsWhoSpawnedIt:
+
+    def test_the_child_thread_names_its_parent_call_and_agent(
+            self, _roots, mocker, fake_storage):
+        """The edge existed before this as the child's uuid stringified
+        into the parent's tool-result row -- a repr inside a JSON blob,
+        which nothing can query and replay skips outright."""
+        _write_harness_agent(_roots, "worker")
+        config_loader.initialize(str(_roots["project"]))
+
+        captured = {}
+        mocker.patch.object(
+            RunAgentLoop, "run_agent_conversation",
+            side_effect=lambda **kw: (captured.update(kw),
+                                      make_model_response(text="x"))[1])
+
+        parent_thread = fake_storage.create_thread()
+        memory = type("M", (), {"thread_id": parent_thread})()
+
+        subagent_tool.run({"agent_name": "worker", "task": "t"},
+                          parent_context=ToolContext(),
+                          memory=memory, call_id="call_7")
+
+        assert captured["thread_parent"] == parent_thread
+        assert captured["thread_parent_call"] == "call_7"
+        assert captured["thread_agent"] == "worker"
+
+    def test_a_spawn_reached_directly_records_no_parent(
+            self, _roots, mocker, fake_storage):
+        """dispatch() injects both; a caller that reaches run() by hand --
+        which is most of this suite -- gets a child with no recorded
+        parent, exactly as it did before §47."""
+        _write_harness_agent(_roots, "worker")
+        config_loader.initialize(str(_roots["project"]))
+
+        captured = {}
+        mocker.patch.object(
+            RunAgentLoop, "run_agent_conversation",
+            side_effect=lambda **kw: (captured.update(kw),
+                                      make_model_response(text="x"))[1])
+
+        subagent_tool.run({"agent_name": "worker", "task": "t"},
+                          parent_context=ToolContext())
+
+        assert captured["thread_parent"] is None
+        assert captured["thread_parent_call"] is None
+
+    def test_call_id_is_injectable(self):
+        """Declared on the handler and injected by name, which is the
+        §18 mechanism the registry's own comment anticipates. It is NOT
+        in params: those are the model's, and a model that could write
+        its own call id could claim a line it did not make."""
+        from tools.registry import _INJECTABLE_PARAMS
+
+        assert "call_id" in _INJECTABLE_PARAMS
+        assert "call_id" in registry._injectable["spawn_subagent"]
+
+    def test_the_running_child_is_bound_before_it_finishes(
+            self, _roots, mocker, fake_storage):
+        """The whole reason bind() is a third call rather than a field on
+        the span: the row has to become openable WHILE the run is going,
+        and the span opens before the thread exists."""
+        _write_harness_agent(_roots, "worker")
+        config_loader.initialize(str(_roots["project"]))
+
+        sink = Recorder()
+        seen = {}
+
+        def _run(**kwargs):
+            memory = type("M", (), {"thread_id": "child-thread"})()
+            agent_activity.bind(sink, memory.thread_id)
+            seen["bound_during_the_run"] = list(sink.bound)
+            return make_model_response(text="x")
+
+        mocker.patch.object(RunAgentLoop, "run_agent_conversation",
+                            side_effect=_run)
+
+        subagent_tool.run({"agent_name": "worker", "task": "t"},
+                          parent_context=ToolContext(), activity=sink)
+
+        assert seen["bound_during_the_run"], (
+            "nothing was bound while the child was still running, so a "
+            "sidebar row could only be opened after it finished")
+        assert seen["bound_during_the_run"][0][1] == "child-thread"
 
 
 # ---------------------------------------------------------------------------
@@ -491,3 +715,57 @@ class TestTheSinkDrivesThePanel:
         assert depth_two == [("explore", 1), ("explore", 1)]
         assert depth_one == [("explore", 1)]
         assert depth_zero == []
+
+class TestTheLoopBindsTheThreadItJustCreated:
+    """The production call site, driven rather than stubbed. Every test
+    above patches run_agent_conversation out, so without this one the
+    mutation "bind is never called" survives them all -- and the symptom
+    it would ship is a sidebar row that draws and cannot be opened."""
+
+    def test_a_run_under_a_span_binds_its_new_thread(
+            self, _roots, mocker, fake_storage):
+        config_loader.initialize(str(_roots["project"]))
+        mocker.patch("core.loop.run_to_completion",
+                     return_value=make_model_response(text="done"))
+
+        sink = Recorder()
+        with agent_activity.span(sink, "worker", 1) as span:
+            response = RunAgentLoop.run_agent_conversation(
+                user_goal="t", model="test-model", activity=sink)
+
+        assert sink.bound == [(span.id, response.thread_id)], (
+            f"the loop bound {sink.bound!r}; the open span must learn the "
+            "id of the thread its run just created")
+
+    def test_a_top_level_run_binds_nothing(
+            self, _roots, mocker, fake_storage):
+        """The CLI's chat, and every test that calls this directly. No
+        span is open, so there is nothing to address -- which is why the
+        call site needs no branch."""
+        config_loader.initialize(str(_roots["project"]))
+        mocker.patch("core.loop.run_to_completion",
+                     return_value=make_model_response(text="done"))
+
+        sink = Recorder()
+        RunAgentLoop.run_agent_conversation(
+            user_goal="t", model="test-model", activity=sink)
+
+        assert sink.bound == []
+
+    def test_a_resumed_thread_is_bound_too(
+            self, _roots, mocker, fake_storage):
+        """Resuming does not reclassify and does not re-parent, but the
+        run is still writing to a thread and a shell watching it still
+        needs the address."""
+        config_loader.initialize(str(_roots["project"]))
+        mocker.patch("core.loop.run_to_completion",
+                     return_value=make_model_response(text="done"))
+        existing = fake_storage.create_thread()
+
+        sink = Recorder()
+        with agent_activity.span(sink, "worker", 1) as span:
+            RunAgentLoop.run_agent_conversation(
+                user_goal="t", model="test-model", thread_id=existing,
+                activity=sink)
+
+        assert sink.bound == [(span.id, existing)]

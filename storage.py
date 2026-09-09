@@ -48,6 +48,38 @@ class ConversationThread(SQLModel, table=True):
     # MessageLog rows in production and stamps this in the same session
     # it writes the message, so the two cannot drift.
     last_activity_at: Optional[datetime] = Field(default=None)
+    # ROADMAP_v2 §47. WHO spawned this thread, and at which call.
+    #
+    # Before these, the only trace of the edge was the child's uuid
+    # stringified inside the parent's tool-result row -- a repr inside a
+    # JSON blob, not a field, not queryable, and skipped by replay's T4
+    # anyway. A sidebar row and a `▸ spawn_subagent` line could describe
+    # a run nobody could then open.
+    #
+    # COLUMNS, not `extra_data`, for `kind`'s reason exactly (T1): the
+    # question asked of them is "which threads are children of this
+    # one", and answering that from an opaque JSON blob means loading
+    # every row and testing in Python. Not indexed, also for T1's
+    # reason -- ensure_columns() ALTERs a column in and builds no index,
+    # and create_all() adds none to a table that already exists, so
+    # index=True would mean an index on fresh databases and none on
+    # migrated ones.
+    #
+    # Nullable and additive, so database.ensure_columns() adds them to an
+    # existing app.db exactly as it added `pinned`, `kind`, `thinking`
+    # and `last_activity_at`. NULL is the honest value for every thread
+    # that predates them and for every one nothing spawned.
+    parent_thread_id: Optional[UUID] = Field(default=None)
+    # The parent's `tool_call_id` for the call that made this thread --
+    # the SAME id MessageLog stores on the parent's side, which is what
+    # lets one specific `▸ spawn_subagent` line find one specific child
+    # when a turn spawned three. None for a run no tool call made: the
+    # compactor, the reviewer, /init's initializer.
+    parent_call_id: Optional[str] = Field(default=None)
+    # Which agent ran, for a reader who has only the row. `kind` says
+    # what a thread IS; this says who it was. A viewer opening a stored
+    # thread cannot ask the span, because the span is long gone.
+    agent_name: Optional[str] = Field(default=None)
 
 
 class MessageLog(SQLModel, table=True):
@@ -196,15 +228,25 @@ THREAD_KIND_RESEARCH_PASS = "research_pass"
 THREAD_KIND_SUBAGENT = "subagent"
 
 
-def create_thread(kind: str = THREAD_KIND_CHAT) -> UUID:
+def create_thread(kind: str = THREAD_KIND_CHAT, *,
+                  parent_thread_id: Optional[UUID] = None,
+                  parent_call_id: Optional[str] = None,
+                  agent_name: Optional[str] = None) -> UUID:
     """Starts a brand-new conversation thread and returns its id.
 
     `kind` defaults to "chat" (§27 AC1), so every existing caller keeps
     creating conversations and only the paths that know they are creating
     something else pass anything here.
+
+    The three lineage arguments (§47) are keyword-only and all default to
+    None, for the same reason: a caller that does not know it is creating
+    a child is not one, and should not be able to say so by accident in a
+    positional slot.
     """
     with Session(engine) as session:
-        thread = ConversationThread(kind=kind)
+        thread = ConversationThread(
+            kind=kind, parent_thread_id=parent_thread_id,
+            parent_call_id=parent_call_id, agent_name=agent_name)
         session.add(thread)
         session.commit()
         session.refresh(thread)
@@ -236,7 +278,55 @@ def get_thread(thread_id: UUID) -> Optional[dict]:
             "extra_data": dict(thread.extra_data or {}),
             "kind": getattr(thread, "kind", None) or THREAD_KIND_CHAT,
             "last_activity_at": getattr(thread, "last_activity_at", None),
+            # getattr for the kind fallback's reason, one column over: a
+            # row read from a database whose ALTER has not run has no
+            # attribute at all, and a viewer that raises is worse than
+            # one that shows a thread with no known parent (§47).
+            "parent_thread_id": getattr(thread, "parent_thread_id", None),
+            "parent_call_id": getattr(thread, "parent_call_id", None),
+            "agent_name": getattr(thread, "agent_name", None),
         }
+
+
+def child_threads(parent_thread_id: UUID) -> List[dict]:
+    """The threads spawned by this one, oldest first (§47).
+
+    Each entry: ``{"id", "created_at", "kind", "parent_call_id",
+    "agent_name"}``. Empty for a thread that spawned nothing, which is
+    most of them -- and for every thread in a database whose ALTER has
+    not run, since the column reads NULL on every row.
+
+    ONE QUERY, not one per spawn line. A resumed conversation resolves
+    every `▸ spawn_subagent` line it draws, and asking per line would be
+    a query per row of a screen.
+
+    Oldest first because that is the order the calls happened in, so a
+    reader comparing this against the transcript walks both the same
+    way. `parent_call_id` is what pairs an entry to a specific line;
+    ordering is for the human, not for the lookup.
+
+    NO `kind` FILTER, deliberately. Every child of a chat thread is
+    machinery of some sort, and which kinds exist is §27's question
+    rather than this one's -- a filter here would have to be widened
+    again the moment a sixth source appears, which is how §27's own
+    picker missed the compactor.
+    """
+    with Session(engine) as session:
+        statement = (
+            select(ConversationThread)
+            .where(ConversationThread.parent_thread_id == parent_thread_id)
+            .order_by(ConversationThread.created_at)
+        )
+        return [
+            {
+                "id": t.id,
+                "created_at": t.created_at,
+                "kind": getattr(t, "kind", None) or THREAD_KIND_CHAT,
+                "parent_call_id": getattr(t, "parent_call_id", None),
+                "agent_name": getattr(t, "agent_name", None),
+            }
+            for t in session.exec(statement).all()
+        ]
 
 
 def get_thread_extra(thread_id: UUID) -> Dict[str, Any]:

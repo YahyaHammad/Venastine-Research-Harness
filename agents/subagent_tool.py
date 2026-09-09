@@ -13,6 +13,13 @@ Rev. 1 sketch's `depth: int` parameter and `allowed_tools=` kwarg are
 both gone: depth lives on ToolContext.subagent_depth, and §15 replaced
 allowed_tools with context= everywhere.
 
+§47 added two more declared names, `memory` and `call_id`, and they are
+what the child's thread records as its PARENT. The spawn already returned
+`subagent_thread_id` to the model, so the edge existed -- as a repr
+inside a JSON blob in one message row, which nothing could query and
+replay skips. Stored on the child's own row, it survives the process and
+lets a `▸ spawn_subagent` line still open its run tomorrow.
+
 core.loop is imported INSIDE run(), not at module top: tools/registry.py
 imports this module to register it, and core.loop imports tools.registry
 -- a top-level import here would close that cycle at import time.
@@ -133,7 +140,8 @@ def request_payload(params: dict, context=None) -> dict:
 
 
 def run(params: dict, parent_context=None, parent_run=None,
-        response_channel=None, signoff=None, activity=None) -> dict:
+        response_channel=None, signoff=None, activity=None,
+        memory=None, call_id=None) -> dict:
     from core.loop import (
         RunAgentLoop, DEFAULT_PROVIDER, DEFAULT_SYSTEM_PROMPT,
     )
@@ -231,6 +239,23 @@ def run(params: dict, parent_context=None, parent_run=None,
             # for the same reason: the child is a run in its own right and
             # whatever is watching this stack is watching that one too.
             activity=activity,
+            # §47. WHO spawned this thread, stored on the child's own row.
+            #
+            # `memory` and `call_id` are injected by dispatch() the same
+            # way the four values above it are -- the parent's live
+            # ConversationMemory, and the model's id for THIS call. Both
+            # are None on a path that reaches run() directly (every test
+            # that calls it by hand), and the child is then simply a
+            # thread with no recorded parent, which is what it was before
+            # this batch.
+            #
+            # THE CALL ID IS WHAT MAKES THE EDGE SPECIFIC. One turn can
+            # spawn `explore` three times, so the agent name identifies
+            # the roster entry and not the run; the call id is the only
+            # thing that ties one child to one `▸ spawn_subagent` line.
+            thread_parent=getattr(memory, "thread_id", None),
+            thread_parent_call=call_id,
+            thread_agent=agent.name,
         )
     return {
         "result": response.text,

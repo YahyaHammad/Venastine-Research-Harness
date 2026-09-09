@@ -3791,3 +3791,47 @@ approval went nowhere the user could see. Batch 66, amending #104.
 `interaction.decode` turns into the declining default. A narration that raises used to replace
 that with an exception, which `interaction.ask` then logged as "response channel raised" — naming
 the narration as the cause of a refusal it did not cause and hiding the real failure. Batch 66.
+
+### `AgentSpan` losing `id` or `parent_id`
+
+**Symptom:** `test_two_spans_sharing_a_name_and_depth_have_different_ids`, or
+`test_a_nested_span_names_its_parent`.
+
+**Fix:** batch 59's span was a `(name, depth)` pair, and two runs that agree on both are
+indistinguishable -- which is why `TuiActivity.exit` pops by last match. Both fields are defaulted
+so `AgentSpan("explore", 1)` still constructs, which is what every existing call site writes.
+Batch 67.
+
+### The ContextVar reset moving out of `span()`'s `finally`
+
+**Symptom:** `test_a_raising_run_restores_the_previous_span`, and
+`test_current_is_the_innermost_open_span`.
+
+**Fix:** the reset pairs with `exit` and must run when the body RAISES, for a reason one step
+worse than the row that stays on screen: a token that outlived its frame makes the NEXT sibling a
+child of a run that has finished. That is lineage which is wrong rather than missing. Batch 67.
+
+### `bind()` not called, or called somewhere other than after the memory is built
+
+**Symptom:** `test_a_run_under_a_span_binds_its_new_thread` (the production call site, driven
+rather than stubbed -- every other spawn test patches `run_agent_conversation` out, so without
+this one the mutation survives them all).
+
+**Fix:** the span opens before the run creates its thread, so the address arrives later, and it
+has to arrive DURING the run or a sidebar row could only be opened after the run it describes had
+finished. Batch 67.
+
+### A dispatch-contract assertion written as `call_id=ANY`
+
+**Symptom:** none -- and that is the entry. `ANY` matches `None`, so a mutation replacing
+`call_id=call.id` with `call_id=None` passes, while a spawned thread silently loses the only thing
+that ties it to one `▸ spawn_subagent` line. Pin the real id. Found by the mutation pass, not by
+the suite. Batch 67.
+
+### `child_threads()` gaining a `kind` filter
+
+**Symptom:** `test_child_threads_does_not_filter_by_kind`.
+
+**Fix:** which kinds exist is §27's question. A filter here would need widening the moment a sixth
+thread source appears -- which is exactly how §27's own picker came to miss the compactor. Batch
+67.

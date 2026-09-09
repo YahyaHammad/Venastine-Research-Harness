@@ -11448,3 +11448,69 @@ is logged with its traceback instead of being described as something else.
 Three, all killed, none by a collection error: returning to a per-access `query_one`, dropping
 the hold in `on_mount`, and unwrapping the narration guard. The first two are the same defect
 approached from either end, and both go red on the routed-warning test.
+
+## Batch 67 -- the run you can name, and the thread it is writing (2026-09-09)
+
+§47, slice 1 of eight. Nothing on screen changes yet; this is the layer everything above it
+needs, and it is worth landing alone because it is the half that touches the database.
+
+**The thing that reframed the project.** A spawned subagent already writes its whole conversation
+to its own `ConversationThread` with `kind="subagent"`, into the same `MessageLog` table as a
+chat, and `core/replay.py` already turns any thread id into transcript entries. So "let me see
+what that subagent did" is not a capture problem. Every byte is on disk already. What was missing
+was any way to find out WHICH thread a row in the sidebar was about.
+
+**Identity, and why it is not a D6 problem.** `core/agent_activity.py` carries lifecycle only,
+deliberately: §18/D6 hands a parent the child's distilled answer, never its stream. That stays
+exactly as it was. A span now carries `id` and `parent_id`, and `bind()` says which thread the run
+is writing -- and everything a shell will display it reads back out of the ARCHIVE, through the
+same function `/resume` uses. **The channel gained an address, not a payload.**
+
+- **`id` is minted per span**, because the thing it has to distinguish is two runs that agree on
+  every other field. A goal turn spawning `explore` twice produces two spans with the same name
+  and depth, which is why `TuiActivity.exit` has to pop by last match and hope.
+- **`parent_id` comes from a `ContextVar`**, not a parameter. Five call sites open spans and none
+  of them knows what is above it. The reset lives in the same `finally` as `exit`, and that
+  pairing is the point: a token that outlived its frame would make the next sibling a child of a
+  run that has finished -- lineage that is wrong rather than missing, which is the harder kind to
+  notice. It is also the shape that survives slice 8, where a run submitted to an executor takes
+  `contextvars.copy_context()` with it.
+- **`bind()` is a THIRD call rather than a field**, because the thread does not exist when the
+  span opens -- the handler brackets the call, the thread is created inside it. `core/loop.py`
+  binds immediately after `ConversationMemory` is constructed, which is the earliest moment the id
+  exists and therefore the only way a row becomes openable while its run is still going.
+
+**Lineage, stored.** `spawn_subagent` has always returned `subagent_thread_id` to the model, so
+the edge existed -- as a repr inside a JSON blob in one message row, which nothing can query and
+which replay skips outright (T4). Three nullable columns on the CHILD's row now carry it:
+`parent_thread_id`, `parent_call_id`, `agent_name`, added by `ensure_columns()` exactly as
+`pinned` and `kind` were, and never backfilled, so every thread written before them reads as one
+nothing spawned -- which is what it was. `child_threads()` is the one query that walks the edge,
+and it deliberately does not filter by kind: which kinds exist is §27's question, and a filter
+here would need widening the moment a sixth source appears, which is exactly how §27's own picker
+missed the compactor.
+
+**The call id is what makes the edge specific.** One turn can spawn `explore` three times, so the
+agent name identifies the roster entry and not the run. `"call_id"` joins `_INJECTABLE_PARAMS` --
+the extension route the registry's own comment anticipates and batch 59 used for `activity` --
+rather than riding in params, twice over: params are the MODEL'S, and a model that could write its
+own call id could claim a line it did not make.
+
+### Files
+
+- `core/agent_activity.py`, `core/loop.py`, `core/memory.py`, `storage.py`, `tools/registry.py`,
+  `agents/subagent_tool.py`.
+- `tests/test_agent_activity.py` (26 -> 45), `tests/test_storage_e2e.py` (36 -> 43),
+  `tests/conftest.py` (FakeStorage records lineage and grows `child_threads`).
+- Contract updates where a spy or an assertion enumerates what it receives: `tests/test_cli.py`,
+  `tests/test_e2e.py`, `tests/test_loop_tool_dispatch.py`.
+
+### Mutation
+
+Twelve, and eleven were killed on the first pass. **The twelfth is the one worth recording.** The
+three dispatch-contract assertions had been updated to `call_id=ANY`, and `ANY` matches `None` --
+so mutating `call_id=call.id` to `call_id=None` passed every test while silently removing the
+thing a spawn needs to find its own line. Pinned to the real id (`"t1"`), it dies immediately.
+A contract test that accepts any value is not a contract test.
+
+Verified: full suite 4071.

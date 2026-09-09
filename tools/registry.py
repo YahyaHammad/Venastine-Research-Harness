@@ -76,6 +76,14 @@ _INJECTABLE_PARAMS = (
     # threaded through params because it is a run-scoped value, exactly
     # like response_channel beside it.
     "activity",
+    # ROADMAP_v2 §47: the model's own id for THIS call. A tool that
+    # creates something durable can then record which call created it,
+    # which is what lets one line in a transcript find one row in the
+    # database when a turn made three of them. Injected rather than put
+    # in params, twice over: params are the MODEL'S, parsed from its
+    # tool call, and a model that could write its own call id could
+    # claim a line it did not make.
+    "call_id",
 )
 
 
@@ -600,6 +608,7 @@ class ToolRegistry:
         signoff=None,
         memory=None,
         activity=None,
+        call_id=None,
     ) -> dict:
         # Unknown-tool guard: ValueError, deliberately NOT ToolCallDenied.
         # The two exception types separate "you misnamed it" from "policy
@@ -673,6 +682,7 @@ class ToolRegistry:
             "signoff": signoff,
             "memory": memory,
             "activity": activity,
+            "call_id": call_id,
         }
         injected = {p: available[p] for p in self._injectable.get(tool_name, ())}
         try:

@@ -37,6 +37,7 @@ from core.client import (
     ModelResponse,
 )
 from core.events import LoopEvent
+from core import agent_activity
 from core import interaction
 from core.memory import ConversationMemory
 # §27 (T1). The loop is where a thread's kind is DECIDED -- it knows which
@@ -1157,6 +1158,12 @@ class RunAgentLoop:
                     try:
                         result = registry.dispatch(
                             call.name, call.input, context=context,
+                            # §47. The id the parent's MessageLog row
+                            # already stores for this call, so a child
+                            # thread can record which LINE made it --
+                            # one turn can spawn three, and a name is
+                            # not enough to tell them apart.
+                            call_id=call.id,
                             approval_callback=(
                                 (lambda n, p: True)
                                 if authorized_call == call.id else None),
@@ -1256,6 +1263,9 @@ class RunAgentLoop:
         authorization=None,
         thread_kind: str = THREAD_KIND_CHAT,
         activity=None,
+        thread_parent: Optional[UUID] = None,
+        thread_parent_call: Optional[str] = None,
+        thread_agent: Optional[str] = None,
     ) -> ModelResponse:
         """Regular conversation — full tool set, default system prompt,
         one continuous thread. Pass thread_id to resume an existing
@@ -1295,14 +1305,32 @@ class RunAgentLoop:
         that are not a human conversation -- spawn_subagent, §20's reviewer
         and §21a's compactor -- pass THREAD_KIND_SUBAGENT, which is what
         keeps their threads out of the picker. Ignored when thread_id is
-        given: resuming does not reclassify."""
+        given: resuming does not reclassify.
+
+        thread_parent / thread_parent_call / thread_agent (§47) record
+        WHO created this thread, on the same terms: forwarded to the new
+        thread, ignored on a resume. They are what makes a spawned run
+        reachable afterwards -- without them a `▸ spawn_subagent` line
+        describes a conversation nothing can find. Only the callers that
+        know they are creating a child pass them."""
         if authorization is not None and granted_tools is not None:
             raise ValueError(
                 "run_agent_conversation: pass authorization= or "
                 "granted_tools=, not both -- they set the same underlying "
                 "argument, so one would silently win."
             )
-        memory = ConversationMemory(thread_id=thread_id, kind=thread_kind)
+        memory = ConversationMemory(
+            thread_id=thread_id, kind=thread_kind,
+            parent_thread_id=thread_parent,
+            parent_call_id=thread_parent_call, agent_name=thread_agent)
+        # §47. THE EARLIEST MOMENT THE ID EXISTS, which is what makes a
+        # RUNNING child openable rather than only a finished one. The
+        # span was opened by the caller before this function was called
+        # -- the handler brackets the call, the thread is created inside
+        # it -- so the sink learned a name and a depth and had no address
+        # for them. A no-op when no span is open, which is every
+        # top-level conversation, so this needs no branch.
+        agent_activity.bind(activity, memory.thread_id)
         memory.add_user_message(user_goal)
         # #68, and this branch is the one an unattended CLI run takes.
         _callable_only, _granted = advertisement_facts(
