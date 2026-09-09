@@ -3767,3 +3767,27 @@ raises `ValueError: too many values to unpack`.
 **Fix:** the third element is a click target, and the module docstring's reason for a narrow tuple
 is untouched by it — a link is a rendering fact, not history. Removing it would leave a resumed
 thread drawing the same characters as the live turn and refusing to open them. Batch 65.
+
+### `_transcript` going back to a per-access `query_one`
+
+**Symptom:** `test_a_routed_warning_under_a_modal_reaches_the_transcript`,
+`test_a_worker_report_under_a_modal_does_not_kill_the_app`, or
+`test_a_timeout_narration_under_a_modal_reaches_the_transcript` — and in the wild, an unrelated
+test dying on `NoMatches: No nodes match '#transcript'`.
+
+**Fix:** `app.query_one` searches the ACTIVE screen, so a pushed modal shadows the transcript.
+The callers that cannot guard against that are the ones whose occasion IS an open modal — a
+routed WARNING from any thread, a startup worker's report, the timeout narration — and an
+exception out of a Textual message handler kills the app. `on_mount` holds the widget; the query
+remains only as the fallback for an app that never mounted. Note the second half: the
+`except NoMatches` guards this replaced **dropped the line**, so a warning raised during an
+approval went nowhere the user could see. Batch 66, amending #104.
+
+### Removing `_blocking_modal`'s guard around the timeout narration
+
+**Symptom:** `test_a_narration_that_raises_still_declines`.
+
+**Fix:** the method's contract is to return the dismissal value raw, and `None` is what
+`interaction.decode` turns into the declining default. A narration that raises used to replace
+that with an exception, which `interaction.ask` then logged as "response channel raised" — naming
+the narration as the cause of a refusal it did not cause and hiding the real failure. Batch 66.

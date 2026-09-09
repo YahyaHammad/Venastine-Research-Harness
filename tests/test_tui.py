@@ -23,7 +23,9 @@ to asyncio_mode=auto: ARCHITECTURE §4.13 records "no asyncio" as a property
 of pytest.ini, and per-test markers keep that true.
 """
 
+import asyncio
 import json
+import logging
 import queue
 import time
 
@@ -37,7 +39,7 @@ from rich.cells import cell_len
 from core.events import LoopEvent
 from tests.conftest import (make_model_response, make_stream_sequence,
                             pump, settle)
-from tui.app import LoopEventMessage, VenastineApp
+from tui.app import EffortLevelsReady, LoopEventMessage, VenastineApp
 from tui.commands import registry as commands
 from tui.widgets import (SUGGEST_HIGHLIGHT, SUGGEST_HINT_MOVE,
                          SUGGEST_HINT_REST, SUGGEST_HINT_SEP,
@@ -450,6 +452,116 @@ async def test_ac2_escape_denies_rather_than_hanging(_mocked_loop):
         assert await settle(pilot, lambda: app._busy is False), "escape left the loop blocked"
 
     dispatch.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# ---- a modal must not shadow the transcript out of existence --------------
+# ---------------------------------------------------------------------------
+#
+# `app.query_one` searches the ACTIVE screen, so a pushed modal hid
+# `#transcript` and `_transcript` raised NoMatches (§27). That was fine
+# wherever a caller caught it and fatal everywhere else, because an
+# exception out of a Textual message handler takes the app down -- and the
+# handlers that cannot catch it are exactly the ones whose occasion IS an
+# open modal. It reached CI as
+# `test_ac2_denying_a_permission_prompt_blocks_the_tool` dying on NoMatches
+# with no modal-related code anywhere near it: the trigger was a routed
+# WARNING from an unrelated worker landing while the permission modal was up.
+#
+# Three entry points, measured separately below because they fail
+# independently. Each one killed the app before the transcript was held.
+
+
+async def _with_a_modal_up(pilot, app, act):
+    """Run `act()` with a ConfirmScreen on top. Returns the entry texts.
+
+    The transcript is taken BEFORE the modal opens, which is the spelling
+    the suite already uses elsewhere for this reason -- reading it after
+    is the thing under test, not the way to test it.
+    """
+    await pilot.pause()
+    transcript = app._transcript
+    app.push_screen(ConfirmScreen("Confirm", "body", "Yes"))
+    assert await settle(pilot, lambda: isinstance(app.screen, ConfirmScreen)), \
+        "the modal never opened, so nothing was shadowed"
+    act()
+    await pilot.pause()
+    await pilot.pause()
+    assert app.is_running, "the app died under the modal"
+    return [text for _, text in transcript._entries]
+
+
+@pytest.mark.asyncio
+async def test_a_routed_warning_under_a_modal_reaches_the_transcript():
+    """The CI failure, reduced. TranscriptLogHandler exists because the
+    TUI detaches stderr, so a warning that is dropped instead of drawn is
+    invisible everywhere but logs/app.log -- and one that arrives during
+    an approval is exactly the kind worth seeing."""
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        texts = await _with_a_modal_up(
+            pilot, app,
+            lambda: logging.getLogger("tests.modal").warning("the disk is full"))
+
+    assert any("disk is full" in t for t in texts), (
+        f"the warning never reached the transcript; entries were {texts}")
+
+
+@pytest.mark.asyncio
+async def test_a_worker_report_under_a_modal_does_not_kill_the_app():
+    """The effort-levels probe runs in a thread worker started at mount,
+    so its report lands whenever it lands -- including mid-approval. It
+    writes to the transcript on the failure path."""
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        await _with_a_modal_up(
+            pilot, app,
+            lambda: app.post_message(EffortLevelsReady(
+                None, RuntimeError("probe failed"), "high", True)))
+
+
+@pytest.mark.asyncio
+async def test_a_timeout_narration_under_a_modal_reaches_the_transcript():
+    """_timed_out_ask's whole occasion is an open modal, and its second
+    branch -- the user answered microseconds late, so THAT screen is gone
+    -- can still run with another one on top."""
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        already_gone = ConfirmScreen("Gone", "body", "Yes")
+        texts = await _with_a_modal_up(
+            pilot, app,
+            lambda: app._timed_out_ask(
+                already_gone, dismiss_with=False,
+                on_timeout_line="[no answer]", after_line="[late answer]"))
+
+    assert any("late answer" in t for t in texts), (
+        f"the narration never reached the transcript; entries were {texts}")
+
+
+@pytest.mark.asyncio
+async def test_a_narration_that_raises_still_declines(mocker):
+    """The masking half. _blocking_modal's contract is to return the raw
+    dismissal value, and None is what decode turns into the declining
+    default. A failure while merely SAYING the request timed out used to
+    escape as an exception, get logged by interaction.ask as "response
+    channel raised", and name itself as the cause of a refusal it did not
+    cause -- hiding whatever actually broke.
+    """
+    mocker.patch.object(config, "ATTENDED_APPROVAL_TIMEOUT_S", 0.05)
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+
+    def explode(screen):
+        raise RuntimeError("the narration itself fell over")
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        answer = await asyncio.to_thread(
+            app._blocking_modal,
+            ConfirmScreen("Confirm", "body", "Yes"), on_timeout=explode)
+
+    assert answer is None, (
+        f"a broken narration changed the answer to {answer!r}; the request "
+        "must still decline")
 
 
 # ---------------------------------------------------------------------------

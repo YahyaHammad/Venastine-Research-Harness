@@ -518,6 +518,10 @@ class VenastineApp(App):
         self._todo_position = tui_settings.get("todo_position", "side")
 
         self._memory: ConversationMemory | None = None
+        # The transcript, held rather than re-queried. See the `_transcript`
+        # property and on_mount; None until mounted, which is the state
+        # every test that builds this app without a pilot is in.
+        self._transcript_widget: "Transcript | None" = None
         self._permission_channel: queue.Queue | None = None
         # Batch 61. BEFORE the `_busy` assignment below, which is a
         # property setter now and drives this object.
@@ -640,6 +644,12 @@ class VenastineApp(App):
         yield Footer()
 
     def on_mount(self) -> None:
+        # HELD BEFORE THE LOG HANDLER IS ATTACHED, because the handler is
+        # the fastest way to need it: the first routed WARNING can arrive
+        # from any thread at any moment, including one where a modal is
+        # on top. See the `_transcript` property for why holding it is
+        # what makes that survivable.
+        self._transcript_widget = self.query_one("#transcript", Transcript)
         # Attached before anything else can log. Removed in on_unmount --
         # the handler holds a reference to this app, so leaving it on the
         # root logger would keep a dead app alive and, in the test suite,
@@ -1156,6 +1166,38 @@ class VenastineApp(App):
 
     @property
     def _transcript(self) -> Transcript:
+        """The transcript widget, HELD rather than queried per access.
+
+        `query_one` on the app searches the ACTIVE screen, so any pushed
+        modal shadows `#transcript` and this raised `NoMatches` (§27).
+        That was survivable only where a caller remembered to catch it,
+        and the callers who cannot are exactly the ones that fire while a
+        modal is up: `on_log_record_message` for any routed WARNING+, the
+        startup workers' report handlers, and `_timed_out_ask`, whose
+        whole occasion IS an open modal. An exception out of a Textual
+        message handler takes the app down, so a diagnostic could kill the
+        session it was diagnosing -- which is the failure
+        TranscriptLogHandler.emit's own docstring refuses one hop earlier.
+
+        Measured on all three: a `logging.warning` under a `ConfirmScreen`,
+        an `EffortLevelsReady` carrying a probe failure, and a timeout
+        narration for a screen already dismissed. Each killed the app.
+
+        Nothing ever remounts this widget -- there is no `mount()` or
+        `remove()` for it anywhere in the app -- so the reference cannot go
+        stale, and `/new` clears it through `reset()` rather than replacing
+        it. The query remains as the fallback for an app that was
+        constructed but never mounted, which is what most of the suite
+        does, so those tests behave exactly as they did.
+
+        The consequence worth naming: a line written while a modal is up
+        now LANDS, in the real transcript, and is there when the modal
+        closes. The `except NoMatches` guards that used to stand in for
+        this dropped it instead -- and for a routed warning, dropping it
+        defeats the handler that exists because the TUI detached stderr.
+        """
+        if self._transcript_widget is not None:
+            return self._transcript_widget
         return self.query_one("#transcript", Transcript)
 
     @property
@@ -1176,10 +1218,14 @@ class VenastineApp(App):
         the same moment and a flipped tui.show_thinking cannot leave one
         of them running.
 
-        Best-effort, #104's rule: a modal on top means query_one searches
-        the ACTIVE screen and finds neither widget (§27), and an
-        undrawable indicator must not be the reason an event handler
-        dies mid-turn.
+        Best-effort, #104's rule, and it is now about the INDICATOR
+        alone: `_transcript` is held from on_mount and no longer cares
+        which screen is active, but `_thinking_indicator` is still a
+        query, so a modal on top still hides it (§27). An undrawable
+        indicator must not be the reason an event handler dies mid-turn.
+        The transcript half therefore runs where it used to be skipped,
+        which is the right way round -- a thinking span left open under a
+        modal was closed only by whatever wrote next.
         """
         try:
             self._transcript.end_thinking()
@@ -1212,7 +1258,7 @@ class VenastineApp(App):
         try:
             transcript = self._transcript
             pinned = transcript.scroll_offset.y >= transcript.max_scroll_y
-        except NoMatches:                      # a modal is on top (#104)
+        except NoMatches:                      # never mounted (see #104)
             transcript, pinned = None, False
         apply()
         if pinned:
@@ -1999,10 +2045,12 @@ class VenastineApp(App):
             # next event (#105's fix), so this is a bounded goodbye, and
             # the line tells the user what became of the run.
             #
-            # Best-effort twice over (#104's rule): quitting from under a
-            # modal means query_one finds no #transcript at all -- it
-            # searches the ACTIVE screen (§27) -- and an unrenderable
-            # goodbye must not block the goodbye.
+            # Best-effort (#104's rule), though the case it was written
+            # for is gone: `_transcript` is held from on_mount, so
+            # quitting from under a modal now WRITES this line rather
+            # than skipping it. The guard stays for an app that never
+            # mounted, and because an unrenderable goodbye must not block
+            # the goodbye.
             try:
                 self._transcript.write_system(
                     "[quitting — the active work is abandoned at its next "
@@ -2169,7 +2217,23 @@ class VenastineApp(App):
         try:
             return channel.get(timeout=config.ATTENDED_APPROVAL_TIMEOUT_S)
         except queue.Empty:
-            self.call_from_thread(on_timeout, screen)
+            # NARRATION IS BEST-EFFORT; THE ANSWER IS NOT. This method's
+            # contract is to return the dismissal value raw, and None here
+            # is what interaction.decode turns into the kind's declining
+            # default. A failure while merely SAYING so must not replace
+            # that with an exception, which would travel out through
+            # `_ask_blocking` and be logged by interaction.ask as
+            # "response channel raised" -- naming this call as the cause
+            # of a refusal it did not cause, and masking whatever actually
+            # broke. Observed: a crash inside on_log_record_message killed
+            # the app, the next call_from_thread failed because of it, and
+            # the interaction.py line was the one that surfaced.
+            try:
+                self.call_from_thread(on_timeout, screen)
+            except Exception:  # noqa: BLE001 -- the answer stands regardless
+                logger.exception(
+                    "Could not narrate the timeout for this request; it is "
+                    "still declined.")
             return None
         finally:
             self._permission_channel = None

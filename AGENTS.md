@@ -48,7 +48,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 4041 tests, offline, ~2-3 min by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 4045 tests, offline, ~2-3 min by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -1663,8 +1663,28 @@ independent bugs, both found by using the app.
   previous thread's run — the same class of bug the goal banner already fixed in that
   callback. `Transcript.reset()` (not `rerender()`'s `clear()`) drops `_entries` too,
   or `/copy all` keeps handing back a thread the session has left.
-- **In a pilot test, `app._transcript` queries the ACTIVE screen.** Reading it while a
-  modal is up raises `NoMatches`; hold the widget before opening one.
+- **The transcript is HELD, not queried, and that is what makes a modal survivable**
+  (batch 66, amending #104). `app.query_one` searches the ACTIVE screen, so any pushed
+  modal shadowed `#transcript` and `_transcript` raised `NoMatches`. The rule used to be
+  "catch it at each site", and it was applied at four of them — but the callers that
+  CANNOT catch it are the ones whose occasion IS an open modal: `on_log_record_message`
+  for any routed WARNING+, the startup workers' report handlers, and `_timed_out_ask`.
+  An exception out of a Textual message handler takes the app down, so a diagnostic
+  could kill the session it was diagnosing — the failure `TranscriptLogHandler.emit`
+  already refuses one hop earlier. It reached CI as an unrelated permission test dying
+  on `NoMatches`. `on_mount` now holds the widget; nothing ever remounts it, and the
+  query stays as the fallback for an app that was never mounted, which is most of the
+  suite. **A line written under a modal now LANDS** rather than being dropped, which for
+  a routed warning is the whole point of a handler that exists because the TUI detached
+  stderr. In a pilot test, holding the widget before opening a modal still works and is
+  still the clearer spelling; `#thinking-indicator` and `#prompt` are still queries, so
+  their `NoMatches` guards are still load-bearing.
+- **Narration is best-effort; the ANSWER is not.** `_blocking_modal` returns the raw
+  dismissal value, and `None` on timeout is what `interaction.decode` turns into the
+  declining default. A failure while merely SAYING a request timed out used to escape as
+  an exception, reach `interaction.ask`, and be logged as "response channel raised" —
+  naming itself as the cause of a refusal it did not cause, and masking whatever really
+  broke. That is exactly how batch 66's crash presented.
 
 ### The response channel (`core/interaction.py`, §23)
 

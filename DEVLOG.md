@@ -11379,3 +11379,72 @@ survivors, and all three were gaps in the tests rather than in the code:
 **Still unverified from here:** that a real terminal delivers ctrl+click to these cells. The
 pilot injects the event rather than receiving it, so this proves textual's dispatch and not the
 mouse.
+
+## Batch 66 — a modal could hide the transcript, and a diagnostic could kill the app (2026-09-09)
+
+Reported from CI, on a test with no modal-related code in it:
+`test_ac2_denying_a_permission_prompt_blocks_the_tool` died on
+`textual.css.query.NoMatches: No nodes match '#transcript'`. Passing locally, failing on the
+runner, and failing on a different test each time — because the trigger was never in the test.
+
+**`app.query_one` searches the ACTIVE screen.** A pushed modal therefore shadowed `#transcript`
+and `_transcript` raised. That was known — `#104`, recorded three times in
+`tests/BREAKING_CHANGES.md`, and guarded at four call sites with `except NoMatches`. What the
+rule never covered is that **the callers who cannot catch it are exactly the ones whose occasion
+IS an open modal**, and an exception out of a Textual message handler takes the app down. So a
+diagnostic could kill the session it was diagnosing, which is the failure
+`TranscriptLogHandler.emit` already refuses one hop earlier, in a docstring that says so.
+
+**Three entry points, each fatal on its own, each driven separately in the tests:**
+
+| under a `ConfirmScreen` | before |
+|---|---|
+| any routed WARNING+ (`on_log_record_message`) | app dies |
+| a startup worker's report (`EffortLevelsReady` carrying a probe failure) | app dies |
+| `_timed_out_ask`, second branch — the screen already dismissed | app dies |
+
+The CI instance was the first: the effort/context probe for an unknown model warns, from a
+thread, whenever it finishes — which on a loaded runner is mid-approval.
+
+**The transcript is HELD from `on_mount` now**, before the log handler is attached, because the
+handler is the fastest way to need it. Nothing ever remounts that widget — there is no `mount()`
+or `remove()` for it anywhere in the app, and `/new` clears it through `reset()` rather than
+replacing it — so the reference cannot go stale. The query stays as the fallback for an app
+constructed but never mounted, which is most of the suite, so those tests behave exactly as they
+did.
+
+**The line now LANDS rather than being dropped**, and that is the half worth naming. The
+`except NoMatches` guards this replaces were not neutral: they discarded the warning. For a
+handler that exists *because* the TUI detached stderr, a warning that fires during an approval —
+the most interesting moment it can fire in — was going nowhere but `logs/app.log`. `exit()`'s
+goodbye is in the same position and now prints where it used to be skipped.
+
+`#thinking-indicator` and `#prompt` are still queries, so their guards are still load-bearing;
+their comments were narrowed to say which half they still protect rather than left claiming a
+case that is gone.
+
+### The second finding, which is why the first was hard to see
+
+`_blocking_modal`'s contract is to return the dismissal value RAW, and `None` on timeout is what
+`interaction.decode` turns into the kind's declining default. The timeout narration sat outside
+any guard, so when it raised, the exception travelled out through `_ask_blocking` into
+`interaction.ask` and was logged as **"response channel raised; treating as declined"** — naming
+itself as the cause of a refusal it did not cause. In the CI run that is the loudest line, and
+the crash it was reporting was a *consequence* of the first one having already killed the app.
+
+Narration is best-effort now; the answer is not. The request still declines, and the real failure
+is logged with its traceback instead of being described as something else.
+
+### Files
+
+- `tui/app.py` — `_transcript_widget`, held at the top of `on_mount`; the `_transcript`
+  property; `_blocking_modal`'s guarded narration; three guard comments narrowed.
+- `tests/test_tui.py` (374 -> 378) — the three entry points, each driven on its own, plus the
+  declining default surviving a narration that raises.
+- `AGENTS.md`, `ARCHITECTURE.md`, `README.md`, `tests/BREAKING_CHANGES.md`.
+
+### Mutation
+
+Three, all killed, none by a collection error: returning to a per-access `query_one`, dropping
+the hold in `on_mount`, and unwrapping the narration guard. The first two are the same defect
+approached from either end, and both go red on the routed-warning test.
