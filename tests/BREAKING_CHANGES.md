@@ -3835,3 +3835,40 @@ the suite. Batch 67.
 **Fix:** which kinds exist is §27's question. A filter here would need widening the moment a sixth
 thread source appears -- which is exactly how §27's own picker came to miss the compactor. Batch
 67.
+
+### `AgentPanel.show()` taking `(name, depth)` tuples again
+
+**Symptom:** `AttributeError: 'tuple' object has no attribute 'name'` from `_redraw`, and every
+`TestTheAgentPanel` case.
+
+**Fix:** rows are `AgentRow` since §47. A tuple cannot name a run, and a row that cannot name its
+run cannot be opened. `show()` also takes the root thread, which is what arms the root row. Batch
+68.
+
+### `TuiActivity.exit` going back to last-match removal
+
+**Symptom:** `test_the_row_removed_is_the_one_that_ENDED` -- and nothing else, which is the point.
+
+**Fix:** nested spans unwind innermost-first, so last-match agrees with by-id for every case
+`span()` can produce. It disagrees when two runs of one agent are open as peers and either may
+finish first, dropping the one still going and keeping the one that ended with its address
+attached. Drive `enter`/`exit` directly to see it; a `with` block cannot express it. Batch 68.
+
+### Reading a panel row by computing its y
+
+**Symptom:** a test that scans `renderable.plain.splitlines()` finds the root row and misses the
+last one.
+
+**Fix:** `#agent-panel` has `padding-top: 1`, so the Nth content line is at **y = N+1**. Rows are
+armed with style metadata and read back through `get_style_at`; scan `panel.region.height`, not
+the content lines. This is the whole argument for metadata over arithmetic -- the arithmetic
+version is a second copy of the widget's layout, and it was wrong the first time it was written.
+Batch 68.
+
+### `refresh_agent_panel` reading `self.memory`
+
+**Symptom:** `test_painting_the_panel_does_not_start_a_conversation`.
+
+**Fix:** the property creates a thread on first use, and this runs at mount and on every span --
+so every launch would leave a phantom empty conversation in the picker. `refresh_goal_banner` and
+`refresh_todo_panel` read the field for the same reason. Batch 68.

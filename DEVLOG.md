@@ -11514,3 +11514,50 @@ thing a spawn needs to find its own line. Pinned to the real id (`"t1"`), it die
 A contract test that accepts any value is not a contract test.
 
 Verified: full suite 4071.
+
+## Batch 68 -- a row that names its run, and knows where to find it (2026-09-09)
+
+§47, slice 2 of eight. The sidebar looks identical and behaves identically; what changed is
+that every row now knows which conversation it is about. The click that reads it arrives in
+slice 3, with the viewer it opens -- shipping the handler first would put an affordance on screen
+that does nothing, which is the same lie as a panel drawing a run that has ended.
+
+**`AgentRow` replaces the `(name, depth)` tuple.** A tuple cannot name a RUN: two spawns of
+`explore` at one depth produce the same one, which is why the sink removed rows by last match and
+hoped. Rows carry `span_id` and, once slice 1's `bind()` arrives, `thread_id`.
+
+**`exit` removes by id, and the case that justifies it is not reachable through `span()`.** Nested
+spans unwind innermost-first, so last-match happened to be right and the old code was never wrong
+in practice. It is wrong the moment two runs of one agent are open as PEERS and either may finish
+first -- slice 8's ordinary case. The test drives `enter`/`exit` directly, because a `with` block
+cannot express "the outer one ended first"; under last-match it drops the run still going and
+keeps the one that ended, with its address attached.
+
+**Rows are armed with metadata, not arithmetic**, reusing batch 58's mechanism rather than
+re-deriving one. A click will read `Static.get_style_at`, and the alternative -- computing a row
+index from the click's y -- would need a second copy of this widget's layout. **That copy would
+already be wrong:** `#agent-panel` has `padding-top: 1`, so the Nth content line sits at y = N+1.
+Measured, not reasoned about: the first version of the test scanned
+`renderable.plain.splitlines()` and found only the root row, because the last row was one past
+the end of its own range.
+
+**An unbound row is armed with nothing.** Between `enter` and `bind` a run has no thread yet.
+Arming it anyway and failing on the click would be a lie told to save nobody any time.
+
+**The root row is armed too**, with the conversation's own id, so "back to the main agent" is a
+click like any other. It reads `self._memory` and never `self.memory` -- the property creates a
+thread on first use, and the panel is redrawn at mount and on every span, so the property would
+leave a phantom empty conversation in the picker for every launch.
+
+### Files
+
+- `tui/widgets.py` -- `AgentRow`, `AgentPanel._armed`, `show()` taking rows and a root thread.
+- `tui/app.py` -- `TuiActivity` keeping rows and removing by id, `bind()`, and
+  `refresh_agent_panel` passing the root.
+- `tests/test_agent_activity.py` (45 -> 55).
+
+### Mutation
+
+Eight, all killed. The one worth naming is the first: reverting `exit` to last-match survives
+every test that goes through `span()`, and dies only against the peer case -- which is the
+argument for building the identity now rather than when slice 8 needs it.

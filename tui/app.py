@@ -32,6 +32,7 @@ import json
 import logging
 import os
 import queue
+from dataclasses import replace
 from time import monotonic
 from pathlib import Path
 from uuid import UUID
@@ -81,7 +82,7 @@ from tui.screens import (
 )
 from security import posture
 from tui.widgets import (
-    AgentPanel, ANIMATION_INTERVAL,
+    AgentPanel, AgentRow, ANIMATION_INTERVAL,
     CONVERSATION_ROLES, EffortRaven, GoalBanner, PostureBadge, PromptInput,
     RavenPanel, ResearchProgress, SlashSuggest, ThinkingIndicator, TodoPanel,
     Transcript, UsageLine,
@@ -301,6 +302,8 @@ class AgentStackChanged(Message):
 
     def __init__(self, stack) -> None:
         super().__init__()
+        # AgentRow records since §47, not (name, depth) tuples: a row
+        # has to name a RUN for a click on it to mean anything.
         self.stack = list(stack)
 
 
@@ -325,19 +328,38 @@ class TuiActivity(AgentActivity):
         self._stack: list = []
 
     def enter(self, span) -> None:
-        self._stack.append((span.name, span.depth))
+        self._stack.append(AgentRow(span.name, span.depth, span.id))
         self._post()
 
     def exit(self, span) -> None:
-        # Remove the LAST matching entry, not the first: two spans can
-        # legitimately share a name and a depth across one turn (a goal
-        # turn spawning `explore` twice), and popping the wrong one would
-        # leave the panel one row off for the rest of the run.
-        entry = (span.name, span.depth)
-        for i in range(len(self._stack) - 1, -1, -1):
-            if self._stack[i] == entry:
-                del self._stack[i]
-                break
+        # BY ID since §47, and that retires a workaround rather than
+        # changing a policy. This used to remove the LAST entry matching
+        # (name, depth), because two spans can legitimately share both
+        # across one turn -- a goal turn spawning `explore` twice -- and
+        # the sink had no way to tell them apart. Removing the wrong one
+        # left the panel one row off for the rest of the run, and now
+        # there is no wrong one to remove.
+        self._stack = [row for row in self._stack
+                       if row.span_id != span.id]
+        self._post()
+
+    def bind(self, span_id, thread_id) -> None:
+        """That run's thread exists; give its row an address (§47).
+
+        Rebuilt rather than mutated because AgentRow is frozen, for
+        AgentSpan's reason: these records are posted to the UI thread
+        and read there, so a mutable one would be a second writer of
+        the stack.
+
+        Silently does nothing for a span that has already exited, which
+        is reachable: a run whose thread is created as the app is being
+        torn down. A row that is gone needs no address.
+        """
+        self._stack = [
+            replace(row, thread_id=thread_id) if row.span_id == span_id
+            else row
+            for row in self._stack
+        ]
         self._post()
 
     def _post(self) -> None:
@@ -1627,7 +1649,13 @@ class VenastineApp(App):
         if panel is None:
             return
         name = self.active_agent.name if self.active_agent else None
-        panel.show(name, self._agent_stack)
+        # `self._memory`, NOT `self.memory`: the property CREATES a
+        # thread on first use, and painting a panel must not be what
+        # starts a conversation -- refresh_goal_banner's rule, and the
+        # reason this reads the field. None before the first turn, which
+        # draws a root row that is simply not armed.
+        root = getattr(self._memory, "thread_id", None)
+        panel.show(name, self._agent_stack, root)
 
     def restyle_sidebar(self) -> None:
         """Re-render the Rich-styled sidebar widgets after a /theme

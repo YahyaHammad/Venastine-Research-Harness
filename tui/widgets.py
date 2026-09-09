@@ -7,6 +7,8 @@ or reaches into harness state; tui/app.py feeds them.
 
 import webbrowser
 
+from dataclasses import dataclass
+
 from rich import box
 from rich.console import Console
 from rich.style import Style
@@ -533,6 +535,32 @@ class TodoPanel(Static):
         self.update(body)
 
 
+@dataclass(frozen=True)
+class AgentRow:
+    """One row of the agent panel: a run, and where to find it (§47).
+
+    Batch 59 drew rows from `(name, depth)` tuples, which cannot name a
+    RUN -- two spawns of `explore` at one depth produce the same tuple,
+    which is why the sink had to remove rows by last match and hope.
+
+    `thread_id` is None between `enter` and `bind`: the span opens
+    before its run creates a thread, so for the first instants a row
+    describes a run that has no address yet. An unbound row simply
+    carries no metadata, which is the honest drawing of "there is
+    nothing to open yet" -- and the window is short enough that the
+    alternative, arming it and failing on the click, would be a lie
+    told to save nobody any time.
+
+    Lives here rather than in tui/app.py because the panel is what
+    draws it and app.py already imports this module; the reverse would
+    close an import cycle.
+    """
+    name: str
+    depth: int
+    span_id: str = ""
+    thread_id: object = None
+
+
 class AgentPanel(Static):
     """Who is running, and how deep (batch 59).
 
@@ -551,6 +579,13 @@ class AgentPanel(Static):
     Hidden when it has nothing to say, GoalBanner-style: the sidebar is
     twenty columns wide and its rows are contested, so `default` with an
     empty stack costs nothing rather than a permanent row saying so.
+
+    §47 ARMS EACH ROW WITH THE THREAD IT STANDS FOR, as style metadata
+    -- the mechanism batch 58 built for URLs, reused rather than
+    re-derived. Metadata rather than arithmetic on the click's y: the
+    row heights, the blank line and the header are this widget's own
+    layout, and a second copy of them at the click site would be free
+    to disagree with the first.
     """
 
     # 22-column box, less a border column and a padding column each side.
@@ -567,6 +602,7 @@ class AgentPanel(Static):
         super().__init__(**kwargs)
         self._agent = None
         self._stack: list = []
+        self._root = None
         # Explicit, for TodoPanel's reason: a widget that renders nothing
         # yet must not be a visible empty box before its first update.
         self.display = False
@@ -578,14 +614,18 @@ class AgentPanel(Static):
             return {}
         return themes.styles_for(app)
 
-    def show(self, agent_name, stack) -> None:
+    def show(self, agent_name, stack, root_thread=None) -> None:
         """Draw the active agent and the spans currently open under it.
 
         `agent_name` is None when no /agent switch is active. `stack` is a
-        list of (name, depth), outermost first.
+        list of AgentRow, outermost first. `root_thread` is the id of the
+        conversation the root row stands for, or None before there is
+        one -- a session that has not had a turn yet has no thread, and
+        the panel must not be what creates one.
         """
         self._agent = agent_name
         self._stack = list(stack)
+        self._root = root_thread
         self._redraw()
 
     def restyle(self) -> None:
@@ -610,6 +650,22 @@ class AgentPanel(Static):
             return "\u2026"
         return text[:width - 1] + "\u2026"
 
+    @staticmethod
+    def _armed(style, thread_id):
+        """`style`, carrying `thread_id` as click metadata when there is
+        one to carry.
+
+        Returns the bare style unchanged for an unbound row, so a run
+        whose thread does not exist yet draws identically and simply
+        answers nothing when clicked. `str()` because a thread id is a
+        UUID and metadata crosses into a click handler that will look it
+        up as text.
+        """
+        if thread_id is None:
+            return style
+        return (Style.parse(style or "")
+                + Style(meta={"agent_thread": str(thread_id)}))
+
     def _redraw(self) -> None:
         if self._agent is None and not self._stack:
             self.display = False
@@ -630,8 +686,12 @@ class AgentPanel(Static):
         # of the two without introducing a second hue.
         body.append(
             self._fit(self._agent or "default", self.WIDTH) + "\n",
-            styles.get("assistant_label", ""))
-        for name, depth in self._stack:
+            # The root row stands for the conversation itself, so it is
+            # armed like any other -- "back to the main agent" is then a
+            # click rather than a special case somebody has to remember.
+            self._armed(styles.get("assistant_label", ""), self._root))
+        for row in self._stack:
+            name, depth = row.name, row.depth
             # `max(depth, 1)` so a span that somehow reports depth 0 still
             # reads as nested rather than colliding with the root row --
             # two rows at column zero would say two agents are running,
@@ -639,7 +699,7 @@ class AgentPanel(Static):
             pad = " " * (self.INDENT * max(depth, 1))
             room = self.WIDTH - len(pad) - 2      # the marker and its space
             body.append(f"{pad}{MARK_RUNNING} {self._fit(name, room)}\n",
-                        styles.get("tool", ""))
+                        self._armed(styles.get("tool", ""), row.thread_id))
         # `no_wrap` / crop for batch 55's reason: a row this widget already
         # sized must not be re-wrapped by the Static underneath it, and a
         # miscalculation should clip visibly rather than reflow invisibly.

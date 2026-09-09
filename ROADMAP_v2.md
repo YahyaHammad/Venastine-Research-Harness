@@ -3913,7 +3913,8 @@ subagent-thread sources before research passes.
 
 1. **Identity and lineage** -- `AgentSpan.id`/`parent_id`, the ContextVar, `bind()`, the three
    columns, `child_threads()`, `call_id` injection. **BUILT, batch 67.**
-2. The sink and the panel learn identity; `exit` removes by id.
+2. **The sink and the panel learn identity**; `exit` removes by id, and every row carries
+   the thread it stands for. **BUILT, batch 68.**
 3. The viewer: the switcher, the crumb, the extracted paint loop, the poll.
 4. The inline anchor, and `ReplayEntry`'s fourth element.
 5. The picker, and the permission modal naming who is asking.

@@ -27,6 +27,7 @@ import config
 from agents import subagent_tool
 from core import agent_activity
 from core.agent_activity import AgentActivity, AgentSpan
+from tui.widgets import AgentRow
 from core import config_loader
 from core.loop import RunAgentLoop
 from tests.conftest import make_model_response
@@ -588,7 +589,7 @@ class TestTheAgentPanel:
         async with app.run_test() as pilot:
             await pilot.pause()
             panel = app.query_one("#agent-panel", AgentPanel)
-            panel.show(None, [("explore", 1)])
+            panel.show(None, [AgentRow("explore", 1)])
             await pilot.pause()
 
             lines = [ln for ln in panel.renderable.plain.splitlines() if ln]
@@ -609,7 +610,7 @@ class TestTheAgentPanel:
         async with app.run_test() as pilot:
             await pilot.pause()
             panel = app.query_one("#agent-panel", AgentPanel)
-            panel.show("plan", [("explore", 1), ("review", 2)])
+            panel.show("plan", [AgentRow("explore", 1), AgentRow("review", 2)])
             await pilot.pause()
 
             rows = [ln for ln in panel.renderable.plain.splitlines() if ln]
@@ -632,7 +633,8 @@ class TestTheAgentPanel:
             await pilot.pause()
             panel = app.query_one("#agent-panel", AgentPanel)
             panel.show("pipeline-reviewer",
-                       [("pipeline-reviewer", 1), ("pipeline-reviewer", 2)])
+                       [AgentRow("pipeline-reviewer", 1),
+                        AgentRow("pipeline-reviewer", 2)])
             await pilot.pause()
             rows = panel.renderable.plain.splitlines()
 
@@ -697,23 +699,31 @@ class TestTheSinkDrivesThePanel:
 
     @pytest.mark.asyncio
     async def test_two_spans_sharing_a_name_pop_one_at_a_time(self):
-        """A goal turn can spawn `explore` twice. Popping the FIRST match
-        instead of the last would leave the panel one row off for the rest
-        of the run."""
+        """A goal turn can spawn `explore` twice, and before §47 the sink
+        could not tell the two rows apart -- it removed the LAST entry
+        matching (name, depth) and hoped. Removing by span id makes the
+        question disappear rather than answering it more carefully, so
+        this now asserts the identities as well as the shape."""
         from tui.app import VenastineApp
 
         app = VenastineApp("ANTHROPIC", "test-model", {})
         async with app.run_test() as pilot:
             await pilot.pause()
             sink = app._activity
-            with agent_activity.span(sink, "explore", 1):
-                with agent_activity.span(sink, "explore", 1):
+            with agent_activity.span(sink, "explore", 1) as outer:
+                with agent_activity.span(sink, "explore", 1) as inner:
                     depth_two = list(sink._stack)
                 depth_one = list(sink._stack)
             depth_zero = list(sink._stack)
 
-        assert depth_two == [("explore", 1), ("explore", 1)]
-        assert depth_one == [("explore", 1)]
+        assert [(r.name, r.depth) for r in depth_two] == [
+            ("explore", 1), ("explore", 1)]
+        assert [r.span_id for r in depth_two] == [outer.id, inner.id], (
+            "the two rows are indistinguishable, which is the state that "
+            "forced the last-match removal in the first place")
+        assert [r.span_id for r in depth_one] == [outer.id], (
+            "the INNER span exited, so the outer row is the one that "
+            "must remain")
         assert depth_zero == []
 
 class TestTheLoopBindsTheThreadItJustCreated:
@@ -769,3 +779,240 @@ class TestTheLoopBindsTheThreadItJustCreated:
                 activity=sink)
 
         assert sink.bound == [(span.id, existing)]
+
+class TestAPanelRowCarriesTheThreadItStandsFor:
+    """§47. The row is drawn from an AgentRow now, and an armed one carries
+    its thread id as style metadata -- the mechanism batch 58 built for
+    URLs, reused rather than re-derived."""
+
+    @staticmethod
+    def _threads(panel):
+        """Every `agent_thread` a click could read off this panel, in row
+        order. Read through `get_style_at`, which is the call a click
+        handler makes -- asserting on the Text's spans would prove the
+        metadata was attached and not that it survives to the screen.
+
+        SCANNED OVER THE WIDGET'S HEIGHT, not over the content lines, and
+        the two differ: `#agent-panel` has `padding-top: 1`, so the row
+        holding the Nth line of text is at y = N + 1. That offset is the
+        whole argument for metadata over arithmetic -- a click handler
+        computing a row index would have to know about the padding, the
+        header and the blank line, and would be free to disagree with the
+        widget that drew them."""
+        found = []
+        for y in range(panel.region.height):
+            style = panel.get_style_at(0, y)
+            meta = (getattr(style, "meta", None) or {})
+            if meta.get("agent_thread"):
+                found.append(meta["agent_thread"])
+        return found
+
+    @pytest.mark.asyncio
+    async def test_a_bound_row_is_armed_with_its_thread(self):
+        from tui.app import VenastineApp
+        from tui.widgets import AgentPanel
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            panel = app.query_one("#agent-panel", AgentPanel)
+            panel.show(None, [AgentRow("explore", 1, "s1", "thread-child")],
+                       "thread-root")
+            await pilot.pause()
+
+            found = self._threads(panel)
+
+        assert found == ["thread-root", "thread-child"], (
+            f"the panel offered {found!r}; the root row stands for the "
+            "conversation and each spawn row for its own run")
+
+    @pytest.mark.asyncio
+    async def test_an_unbound_row_is_armed_with_nothing(self):
+        """Between `enter` and `bind` a run has no thread yet. Arming the
+        row anyway and failing on the click would be a lie told to save
+        nobody any time."""
+        from tui.app import VenastineApp
+        from tui.widgets import AgentPanel
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            panel = app.query_one("#agent-panel", AgentPanel)
+            panel.show(None, [AgentRow("explore", 1, "s1")], "thread-root")
+            await pilot.pause()
+
+            found = self._threads(panel)
+
+        assert found == ["thread-root"], (
+            f"the panel offered {found!r}; a run with no thread yet has "
+            "nothing to open")
+
+    @pytest.mark.asyncio
+    async def test_a_session_with_no_thread_arms_no_root(self):
+        """A session that has not had a turn has no conversation to open,
+        and painting the panel must not be what creates one."""
+        from tui.app import VenastineApp
+        from tui.widgets import AgentPanel
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            panel = app.query_one("#agent-panel", AgentPanel)
+            panel.show(None, [AgentRow("explore", 1, "s1")])
+            await pilot.pause()
+
+            found = self._threads(panel)
+
+        assert found == []
+
+    @pytest.mark.asyncio
+    async def test_two_rows_of_one_agent_offer_two_threads(self):
+        """The case (name, depth) could never express. Both rows say
+        `explore`; they are different runs and open different threads."""
+        from tui.app import VenastineApp
+        from tui.widgets import AgentPanel
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            panel = app.query_one("#agent-panel", AgentPanel)
+            panel.show(None, [AgentRow("explore", 1, "s1", "thread-1"),
+                              AgentRow("explore", 2, "s2", "thread-2")],
+                       "thread-root")
+            await pilot.pause()
+
+            found = self._threads(panel)
+
+        assert found == ["thread-root", "thread-1", "thread-2"]
+
+    @pytest.mark.asyncio
+    async def test_painting_the_panel_does_not_start_a_conversation(self):
+        """`self._memory`, not `self.memory`: the property CREATES a thread
+        on first use, and refresh_agent_panel runs at mount and on every
+        span. A panel that opened a thread would leave a phantom empty
+        conversation in the picker for every launch."""
+        from tui.app import VenastineApp
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.refresh_agent_panel()
+            await pilot.pause()
+
+            assert app._memory is None, (
+                "drawing the sidebar created a conversation thread")
+
+
+class TestTheSinkKeepsIdentifiedRows:
+
+    @pytest.mark.asyncio
+    async def test_a_bind_gives_the_running_row_its_address(self):
+        """The whole point of slice 1's third sink call, seen from the
+        panel: the row becomes openable WHILE the run is still going."""
+        from tui.app import VenastineApp
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            sink = app._activity
+
+            with agent_activity.span(sink, "explore", 1) as span:
+                before = [row.thread_id for row in sink._stack]
+                agent_activity.bind(sink, "thread-child")
+                after = [(row.span_id, row.thread_id) for row in sink._stack]
+
+        assert before == [None], "a row had an address before its run had one"
+        assert after == [(span.id, "thread-child")]
+
+    @pytest.mark.asyncio
+    async def test_a_bind_reaches_the_panel_through_the_message_path(self):
+        """The sink runs on the worker thread and posts; nothing here
+        touches a widget directly. This drives that path rather than the
+        sink's own list."""
+        from tui.app import VenastineApp
+        from tui.widgets import AgentPanel
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            panel = app.query_one("#agent-panel", AgentPanel)
+
+            with agent_activity.span(app._activity, "explore", 1):
+                agent_activity.bind(app._activity, "thread-child")
+                await pilot.pause()
+                await pilot.pause()
+                armed = TestAPanelRowCarriesTheThreadItStandsFor._threads(panel)
+
+        assert "thread-child" in armed, (
+            f"the panel offered {armed!r}; the bind never reached it")
+
+    @pytest.mark.asyncio
+    async def test_only_the_bound_span_gets_the_address(self):
+        """Two runs open at once, one bound. The other must not inherit
+        an address that is not its own."""
+        from tui.app import VenastineApp
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            sink = app._activity
+
+            with agent_activity.span(sink, "outer", 1) as outer:
+                with agent_activity.span(sink, "inner", 2) as inner:
+                    agent_activity.bind(sink, "thread-inner")
+                    rows = {r.span_id: r.thread_id for r in sink._stack}
+
+        assert rows == {outer.id: None, inner.id: "thread-inner"}
+
+
+    @pytest.mark.asyncio
+    async def test_the_row_removed_is_the_one_that_ENDED(self):
+        """The case last-match gets wrong, driven on the sink directly.
+
+        Through `span()` the two rows always nest, so removing the last
+        match happens to be right and the old code was never wrong in
+        practice. It is wrong the moment two runs of one agent are open as
+        PEERS and either may finish first -- which is what slice 8 makes
+        ordinary, and why the identity is built now rather than then.
+
+        Driven through enter/exit rather than `with`, because a context
+        manager cannot express "the outer one ended first" and that is
+        exactly the state under test."""
+        from tui.app import VenastineApp
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            sink = app._activity
+            first = AgentSpan("explore", 1)
+            second = AgentSpan("explore", 1)
+
+            sink.enter(first)
+            sink.enter(second)
+            sink.bind(second.id, "thread-second")
+            sink.exit(first)
+
+            left = [(r.span_id, r.thread_id) for r in sink._stack]
+
+        assert left == [(second.id, "thread-second")], (
+            f"the sink left {left!r}; removing the LAST row matching "
+            "(name, depth) would have dropped the run that is still going "
+            "and kept the one that ended -- with its address attached")
+
+    @pytest.mark.asyncio
+    async def test_binding_a_span_that_already_exited_changes_nothing(self):
+        """Reachable: a run whose thread is created as the app is torn
+        down. A row that is gone needs no address, and inventing one
+        would put a row back."""
+        from tui.app import VenastineApp
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            sink = app._activity
+
+            with agent_activity.span(sink, "explore", 1) as span:
+                pass
+            sink.bind(span.id, "thread-child")
+
+            assert sink._stack == []

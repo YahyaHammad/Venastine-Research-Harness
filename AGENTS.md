@@ -48,7 +48,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 4071 tests, offline, ~2-3 min by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 4081 tests, offline, ~2-3 min by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -971,6 +971,28 @@ are decisions:
   be opened after the run it describes had finished. `core/loop.py` binds immediately after
   `ConversationMemory` is constructed, the earliest moment the id exists. A no-op when no span
   is open, so the call site needs no branch.
+
+**A panel row is armed with METADATA, never with arithmetic** (§47). `AgentPanel` rows
+carry the thread they stand for as a Rich style, and a click reads it back through
+`Static.get_style_at` — the mechanism batch 58 built for URLs. Computing a row index from
+the click's y would need a second copy of the widget's layout, and the two would be free
+to disagree: `#agent-panel` has `padding-top: 1`, so **the Nth content line is at y = N+1**,
+which a test scanning `renderable.plain.splitlines()` silently gets wrong. Scan
+`panel.region.height`. The root row is armed too, so "back to the main agent" is a click
+like any other rather than a special case someone has to remember.
+
+**`refresh_agent_panel` reads `self._memory`, never `self.memory`.** The property CREATES a
+thread on first use, and the panel is redrawn at mount and on every span — so the property
+would leave a phantom empty conversation in the picker for every launch. Same rule as
+`refresh_goal_banner` and `refresh_todo_panel`: painting a panel must not be what starts a
+conversation.
+
+**`TuiActivity.exit` removes by SPAN ID, and the case that proves it is not reachable
+through `span()`.** Nested spans always unwind innermost-first, so removing the last row
+matching `(name, depth)` happened to be right and the old code was never wrong in
+practice. It is wrong the moment two runs of one agent are open as PEERS and either may
+finish first — which is what slice 8 makes ordinary. The test drives `enter`/`exit`
+directly, because a `with` block cannot express "the outer one ended first".
 
 **The child's thread records its parent; the tool result is not a link** (§47).
 `spawn_subagent` has always returned `subagent_thread_id` to the model, so the edge existed —
