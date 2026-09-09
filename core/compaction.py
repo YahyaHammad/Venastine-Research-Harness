@@ -718,7 +718,13 @@ def compact(memory, model: str, provider_name: str,
             summary = _summarize(
                 RunAgentLoop, manager, agent, DEFAULT_SYSTEM_PROMPT,
                 segment_text, target, original, model, provider_name,
-                settings["max_retries"], authorization)
+                settings["max_retries"], authorization,
+                # §47. The compactor already had a span; what it did not
+                # have was a way to say WHOSE conversation it is
+                # summarising. It is a child of that thread in the only
+                # sense that matters -- the summary is of it -- so the
+                # link is not a convention, it is what happened.
+                parent_thread_id=memory.thread_id)
     finally:
         _compacting = False
 
@@ -895,7 +901,8 @@ def summarize_thread(thread_id, model: str, provider_name: str,
 
 
 def _summarize(loop_cls, manager, agent, base_prompt, segment_text, target,
-               original, model, provider_name, max_retries, authorization):
+               original, model, provider_name, max_retries, authorization,
+               parent_thread_id=None):
     """Run the compactor, retrying while the summary overshoots its target.
 
     STRUCTURALLY §3's JSON-retry loop with a length constraint in place of
@@ -934,6 +941,12 @@ def _summarize(loop_cls, manager, agent, base_prompt, segment_text, target,
         # served them. The compactor is an agent, so it is labelled like the
         # other agent-shaped runs.
         thread_kind=THREAD_KIND_SUBAGENT,
+        # §47. No parent CALL -- no tool started this -- so the run is
+        # findable by the conversation it belongs to and by nothing
+        # else, which is the honest shape for a thread the harness
+        # opened on its own initiative.
+        thread_parent=parent_thread_id,
+        thread_agent=agent.name,
     )
     summary = (response.text or "").strip()
 

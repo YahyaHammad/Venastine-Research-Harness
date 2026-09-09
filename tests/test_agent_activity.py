@@ -1056,3 +1056,205 @@ class TestASpanNamesTheCallThatStartedIt:
         assert seen["call_id"] == "call_7", (
             f"the span reported {seen.get('call_id')!r}; a shell cannot "
             "pair the transcript's line with a running child without it")
+
+class TestTheSourcesThatWereSilent:
+    """§47 slice 6, and batch 59's named follow-on. Five things in this
+    harness create a subagent-kind thread; two of them opened no span, so
+    a shell watching the agent stack saw nothing at all while they ran.
+
+    The REVIEWER is deliberately not here. It runs from the research
+    orchestrator, which carries no sink at all, and threading one there
+    is the same plumbing the passes need -- doing it twice is two copies
+    that can disagree, so it goes with slice 7 rather than being
+    half-built now.
+    """
+
+    def test_the_initializer_reports_itself(self, _roots, mocker,
+                                            fake_storage):
+        """/init is a long agent-shaped run -- it reads the project and
+        drafts a document -- and until now nothing on screen said so."""
+        from project_init import generator
+
+        _write_harness_agent(_roots, config.INITIALIZER_AGENT)
+        config_loader.initialize(str(_roots["project"]))
+        mocker.patch.object(
+            RunAgentLoop, "run_agent_conversation",
+            side_effect=lambda **kw: make_model_response(text="a document"))
+        # `_task` renders the manifest into prose, so the seam to
+        # stub is the task text rather than the manifest shape --
+        # what is under test is the SPAN, not what /init reads.
+        mocker.patch.object(generator, "_task",
+                            return_value="draft the hub document")
+
+        sink = Recorder()
+        generator._run_initializer(str(_roots["project"]), "software", None,
+                                   "m", "ANTHROPIC", sink)
+
+        assert [(kind, name) for kind, name, _d in sink.events] == [
+            ("enter", config.INITIALIZER_AGENT),
+            ("exit", config.INITIALIZER_AGENT)]
+
+    def test_the_initializer_runs_one_level_down(self, _roots, mocker,
+                                                 fake_storage):
+        """Derived from the depth the run starts at rather than written as
+        a 1 -- `_compactor_depth`'s rule, one command over, so a second
+        count cannot disagree with the first."""
+        from project_init import generator
+
+        _write_harness_agent(_roots, config.INITIALIZER_AGENT)
+        config_loader.initialize(str(_roots["project"]))
+        mocker.patch.object(
+            RunAgentLoop, "run_agent_conversation",
+            side_effect=lambda **kw: make_model_response(text="a document"))
+        # `_task` renders the manifest into prose, so the seam to
+        # stub is the task text rather than the manifest shape --
+        # what is under test is the SPAN, not what /init reads.
+        mocker.patch.object(generator, "_task",
+                            return_value="draft the hub document")
+
+        sink = Recorder()
+        generator._run_initializer(str(_roots["project"]), "software", None,
+                                   "m", "ANTHROPIC", sink)
+
+        assert [d for _k, _n, d in sink.events] == [1, 1]
+
+    def test_a_failing_initializer_still_closes_its_row(self, _roots, mocker,
+                                                        fake_storage):
+        """The context manager's whole reason: /init raises InitError on an
+        empty document, and a row describing a run that is over would stay
+        on screen for the session."""
+        from project_init import generator
+
+        _write_harness_agent(_roots, config.INITIALIZER_AGENT)
+        config_loader.initialize(str(_roots["project"]))
+        mocker.patch.object(
+            RunAgentLoop, "run_agent_conversation",
+            side_effect=RuntimeError("the provider fell over"))
+        # `_task` renders the manifest into prose, so the seam to
+        # stub is the task text rather than the manifest shape --
+        # what is under test is the SPAN, not what /init reads.
+        mocker.patch.object(generator, "_task",
+                            return_value="draft the hub document")
+
+        sink = Recorder()
+        with pytest.raises(RuntimeError):
+            generator._run_initializer(str(_roots["project"]), "software",
+                                       None, "m", "ANTHROPIC", sink)
+
+        assert sink.live == [], "the initializer's row outlived its run"
+
+    def test_the_initializer_records_what_it_was(self, _roots, mocker,
+                                                 fake_storage):
+        """No parent thread, deliberately: /init scaffolds a project, it is
+        not a child of the conversation the command was typed in -- and
+        `generate()` is shell-agnostic and has no conversation to name."""
+        from project_init import generator
+
+        _write_harness_agent(_roots, config.INITIALIZER_AGENT)
+        config_loader.initialize(str(_roots["project"]))
+        captured = {}
+        mocker.patch.object(
+            RunAgentLoop, "run_agent_conversation",
+            side_effect=lambda **kw: (captured.update(kw),
+                                      make_model_response(text="doc"))[1])
+        # `_task` renders the manifest into prose, so the seam to
+        # stub is the task text rather than the manifest shape --
+        # what is under test is the SPAN, not what /init reads.
+        mocker.patch.object(generator, "_task",
+                            return_value="draft the hub document")
+
+        generator._run_initializer(str(_roots["project"]), "software", None,
+                                   "m", "ANTHROPIC", None)
+
+        assert captured["thread_agent"] == config.INITIALIZER_AGENT
+        assert captured.get("thread_parent") is None
+
+    def test_the_compactor_says_whose_conversation_it_summarised(self,
+                                                                 mocker):
+        """It already had a span. What it did not have was a way to say
+        which thread the summary is OF -- and it is a child of that thread
+        in the only sense that matters."""
+        from core import compaction
+
+        captured = {}
+
+        class FakeLoop:
+            """`_summarize` takes the loop class as an ARGUMENT, so the
+            seam is a parameter rather than a patch."""
+
+            @staticmethod
+            def run_agent_conversation(**kwargs):
+                captured.update(kwargs)
+                return make_model_response(text="short")
+
+        agent = type("A", (), {"name": "compactor", "model": None,
+                               "provider": None, "max_steps": 1})()
+        manager = type("M", (), {
+            "active_context": staticmethod(lambda *a, **k: None),
+            "system_prompt_for": staticmethod(lambda *a, **k: "p")})()
+        compaction._summarize(
+            FakeLoop, manager, agent, "base", "long text", 10,
+            100, "m", "ANTHROPIC", 0, None,
+            parent_thread_id="thread-being-compacted")
+
+        assert captured["thread_parent"] == "thread-being-compacted"
+        assert captured["thread_agent"] == "compactor"
+
+class TestTheSinkReachesTheInitializerFromTheSHELL:
+    """The tests above call the run's own function, which leaves the
+    plumbing between the shell and it untested -- and that is exactly
+    where a sink gets dropped. The same gap slice 4's mutation pass found
+    on the other side of `AgentRow`.
+    """
+
+    def test_generate_hands_the_sink_down(self, _roots, mocker,
+                                          fake_storage):
+        """`generate()` is the shell-agnostic entry point and the span is
+        two calls below it."""
+        from project_init import generator
+
+        seen = {}
+
+        def _record(*args):
+            seen["activity"] = args[5]
+            raise generator.InitError("stopping -- the sink is the subject")
+
+        mocker.patch.object(generator, "_run_initializer",
+                            side_effect=_record)
+        sink = Recorder()
+
+        with pytest.raises(generator.InitError):
+            generator.generate(project_path=str(_roots["project"]),
+                               model="m", provider_name="ANTHROPIC",
+                               kind="software", confirm=lambda _s: True,
+                               activity=sink)
+
+        assert seen["activity"] is sink, (
+            "generate() dropped the sink on the way to the run")
+
+    @pytest.mark.asyncio
+    async def test_the_init_command_hands_over_the_APPS_sink(self, mocker):
+        """The last hop, and the easy one to write as None: the shell has
+        to reach for `app._activity`."""
+        from tests.conftest import settle
+        from tui.app import VenastineApp
+
+        captured = {}
+
+        def _fake_generate(**kwargs):
+            captured.update(kwargs)
+            return {"kind": "init", "text": "done"}
+
+        mocker.patch("project_init.generator.generate",
+                     side_effect=_fake_generate)
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.query_one("#prompt").text = "/init --software"
+            await pilot.press("enter")
+            assert await settle(pilot, lambda: "activity" in captured), \
+                "/init never reached generate()"
+            sink = app._activity
+
+        assert captured["activity"] is sink

@@ -955,3 +955,24 @@ def test_validation_still_raises_off_the_startup_path():
     without warn=True."""
     with pytest.raises(ValueError, match="strength"):
         config_loader.effective_compaction({"strength": 9})
+
+def test_compaction_tells_the_compactor_whose_thread_it_is(fake_storage,
+                                                           mocker):
+    """§47. `_summarize` takes the parent thread as an argument, so a test
+    of _summarize can only say what it does with one -- this is where it
+    comes from, and the summary is OF this thread in the only sense that
+    matters."""
+    memory = ConversationMemory()
+    _thread(memory)
+
+    captured = {}
+    mocker.patch.object(
+        compaction, "_summarize",
+        side_effect=lambda *a, **kw: (captured.update(kw), "A summary.")[1])
+
+    compaction.compact(memory, "claude-sonnet-5", "ANTHROPIC",
+                       overrides=OVERRIDES)
+
+    assert captured.get("parent_thread_id") == memory.thread_id, (
+        f"the compactor was told {captured.get('parent_thread_id')!r}; "
+        "nothing else records which conversation the summary is of")

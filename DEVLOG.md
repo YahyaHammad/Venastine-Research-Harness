@@ -11754,3 +11754,45 @@ project keeps finding: **observing the outcome instead of the mechanism.**
   warning logged every time somebody presses escape.
 - Dropping the asker between the request and the screen survived, because every test either built
   the request or built the screen and nothing drove the bridge between them.
+
+## Batch 72 -- the run that scaffolds, and the one that summarises (2026-09-09)
+
+§47, slice 6 of eight, and smaller than the plan said -- for a reason worth recording rather than
+working around.
+
+**The initializer opens a span now**, which is half of batch 59's named follow-on. `/init` is a
+long agent-shaped run: it reads the project and drafts a document, and a shell watching the agent
+stack saw nothing at all while it happened. Its depth is `context.subagent_depth + 1` rather than
+a literal 1 -- `_compactor_depth`'s rule, one command over, so a second count cannot disagree with
+the first.
+
+**It records no parent thread, deliberately.** `/init` scaffolds a project; it is not a child of
+the conversation the command was typed in, and `generate()` is shell-agnostic and has no
+conversation to name anyway. It is reachable from the panel while it runs, which is what the span
+buys.
+
+**The compactor now says whose conversation it summarised.** It already had a span; what it had no
+way to say was which thread the summary is OF. It is a child of that thread in the only sense that
+matters -- the summary is of it -- so the link is not a convention, it is what happened. No parent
+CALL, because no tool started it: findable by its conversation and by nothing else, which is the
+honest shape for a thread the harness opened on its own initiative.
+
+### Why the reviewer is NOT here
+
+The plan put it in this slice. It runs from `core/reasoning/orchestrator.py`, which carries no
+`activity` at all -- batch 59 threaded the sink as far as `stream_deep_research_mode` and stopped.
+Threading one to the reviewer means threading one through the orchestrator, which is exactly the
+plumbing slice 7 needs for the ten passes. **Doing it twice is two copies that can disagree**, so
+the reviewer moved to slice 7 rather than being half-built here.
+
+### Mutation
+
+Eight, all killed, after four survivors -- and three of the four were one mistake, the same one
+slice 4's pass found on the other side of `AgentRow`: **every test called the run's own function,
+so the plumbing between the shell and it was untested.** That is precisely where a sink gets
+dropped. There are three chain tests now: `generate()` hands the sink down, `/init` reaches for
+the app's, and `compact()` tells the compactor whose thread it is.
+
+The fourth survivor is an honest limit rather than a gap. "Replace the `with` with a pair of
+calls" cannot be expressed as a one-hunk substitution here, so the initializer's own
+raise-still-closes test is not what kills it; the module's context-manager tests are.

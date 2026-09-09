@@ -3919,6 +3919,9 @@ subagent-thread sources before research passes.
    clicks. **BUILT, batch 69.**
 4. **The inline anchor**, and `ReplayEntry`'s fourth element. **BUILT, batch 70.**
 5. **The picker, and the permission modal naming who is asking.** **BUILT, batch 71.**
-6. The reviewer and the initializer get batch 59's deferred spans.
-7. Research passes.
+6. **The initializer gets batch 59's deferred span**, and the compactor records whose
+   conversation it summarised. **BUILT, batch 72.** *The REVIEWER moved to slice 7: it
+   runs from the orchestrator, which carries no sink at all, and that is the same
+   plumbing the passes need.*
+7. Research passes -- **and the reviewer**, which shares their plumbing.
 8. Parallel spawns.

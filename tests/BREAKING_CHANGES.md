@@ -3977,3 +3977,28 @@ point is that nothing can. Found by a mutation, not by the suite. Batch 71.
 **Fix:** `open_agent_thread(None)` refuses anything that is not a uuid, so nothing moves either
 way. What ships is a warning logged every time somebody presses escape. Assert the call was never
 made. **Third time this shape has appeared** -- see batches 69 and 70. Batch 71.
+
+### Testing a span at the run's own function and stopping there
+
+**Symptom:** none -- the shell can pass `activity=None` and every test still passes.
+
+**Fix:** three of slice 6's four mutation survivors were this. `_run_initializer` opening a span
+proves nothing about `/init` reaching it, and `_summarize` taking a parent thread proves nothing
+about `compact()` supplying one. Test the CHAIN as well as the leaf: the same gap slice 4's pass
+found where the sink copies a call onto its row. Batch 72.
+
+### Giving the initializer a parent thread
+
+**Symptom:** `test_the_initializer_records_what_it_was`.
+
+**Fix:** `/init` scaffolds a project. It is not a child of the conversation the command was typed
+in, and `generate()` is shell-agnostic and has no conversation to name. Batch 72.
+
+### Dropping the compactor's `parent_thread_id`
+
+**Symptom:** `test_the_compactor_says_whose_conversation_it_summarised`, or
+`test_compaction_tells_the_compactor_whose_thread_it_is`.
+
+**Fix:** the compactor's thread is a child of the one it summarises in the only sense that
+matters. It has no parent CALL, because no tool started it -- findable by its conversation and by
+nothing else. Batch 72.

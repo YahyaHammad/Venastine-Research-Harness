@@ -219,8 +219,9 @@ def _task(manifest_text: str, existing: Optional[str], kind: str) -> str:
 
 
 def _run_initializer(project_path: str, kind: str, existing: Optional[str],
-                     model: str, provider_name: str) -> str:
+                     model: str, provider_name: str, activity=None) -> str:
     from agents.manager import manager
+    from core import agent_activity
     from core.loop import RunAgentLoop, DEFAULT_SYSTEM_PROMPT
     from storage import THREAD_KIND_SUBAGENT
 
@@ -234,20 +235,38 @@ def _run_initializer(project_path: str, kind: str, existing: Optional[str],
     system_prompt = manager.system_prompt_for(
         agent, DEFAULT_SYSTEM_PROMPT, context=context)
 
-    response = RunAgentLoop.run_agent_conversation(
-        user_goal=_task(manifest_mod.build_manifest(project_path),
-                        existing, kind),
-        model=agent.model or model,
-        provider_name=agent.provider or provider_name,
-        max_steps=agent.max_steps or config.INIT_MAX_STEPS,
-        # #4: no separate /init ceiling any more -- the wrapper resolves the
-        # configured spend cap, same as every other path.
-        context=context,
-        system_prompt=system_prompt,
-        # §27: the initializer is a SIXTH thread source. Left unlabelled it
-        # clutters the picker with a thread nobody will ever resume.
-        thread_kind=THREAD_KIND_SUBAGENT,
-    )
+    # §47, the span batch 59 named as a follow-on and did not build. /init
+    # is a long agent-shaped run -- it reads the project and drafts a
+    # document -- and until now a shell watching the agent stack saw
+    # nothing at all while it happened.
+    #
+    # `context.subagent_depth + 1` rather than a literal 1, which is
+    # core/loop._compactor_depth's rule one command over: the number is
+    # derived from the depth the run actually starts at, so a second
+    # count cannot disagree with the first.
+    with agent_activity.span(activity, agent.name,
+                             context.subagent_depth + 1):
+        response = RunAgentLoop.run_agent_conversation(
+            user_goal=_task(manifest_mod.build_manifest(project_path),
+                            existing, kind),
+            model=agent.model or model,
+            provider_name=agent.provider or provider_name,
+            max_steps=agent.max_steps or config.INIT_MAX_STEPS,
+            # #4: no separate /init ceiling any more -- the wrapper
+            # resolves the configured spend cap, same as every other path.
+            context=context,
+            system_prompt=system_prompt,
+            # §27: the initializer is a SIXTH thread source. Left
+            # unlabelled it clutters the picker with a thread nobody
+            # will ever resume.
+            thread_kind=THREAD_KIND_SUBAGENT,
+            # §47. NO parent thread, deliberately: /init scaffolds a
+            # project, it is not a child of the conversation the command
+            # was typed in -- and `generate()` is shell-agnostic and has
+            # no conversation to name anyway. Reachable from the panel
+            # while it runs, which is what the span is for.
+            thread_agent=agent.name,
+        )
     body = (response.text or "").strip()
     if not body:
         raise InitError(
@@ -279,6 +298,7 @@ def generate(
     choose_kind: Optional[Callable] = None,
     scaffold_docs: bool = True,
     scaffold_config: bool = False,
+    activity=None,
 ) -> dict:
     """Scaffold this project's documentation set, its configuration, or both.
 
@@ -346,7 +366,7 @@ def generate(
         existing_context = _read_existing_context(root)
         say(f"Reading the project and drafting {HUB_FILENAME}…")
         body = _run_initializer(root, kind, existing_context, model,
-                                provider_name)
+                                provider_name, activity)
 
         already_there = _existing_documents(root, kind)
         body = f"{body.rstrip()}\n\n{doc_sets.render_index(kind)}"
