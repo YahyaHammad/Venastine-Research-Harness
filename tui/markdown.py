@@ -140,6 +140,15 @@ _URL_TRIM = ".,;:!?*_~'\""
 #: Bracket pairs whose closer is trimmed only when it was never opened.
 _URL_PAIRS = {")": "(", "]": "[", "}": "{"}
 
+#: What `safety.policy_enforcement` leaves where a secret was, and the
+#: one thing this module knows about that one. Its own copy rather than
+#: an import, because this file is pure -- it imports `re` and nothing
+#: else -- and reaching into policy for a nine-character string would
+#: cost that for no gain. `tests/test_markdown_render.py` holds the two
+#: against each other, so the duplication is checked rather than
+#: trusted.
+REDACTED_MARK = "[REDACTED]"
+
 
 # ---------------------------------------------------------------------------
 # ---- Lines ----------------------------------------------------------------
@@ -554,6 +563,118 @@ def inline_spans(line: str, *, block: bool = True):
             for text, role, _s, _e in _spans(body, block=block)]
 
 
+def link_spans(text: str, *, targets=()):
+    """`(text, role, target)` triples where the ONLY mark is a URL.
+
+    The scanner a HARNESS-DRAWN line gets (batch 65), where
+    `inline_spans` is the one model prose gets. A tool line is a
+    digest -- a shell command, a JSON argument -- not prose, and the
+    full grammar does not merely over-decorate it, it EATS
+    CHARACTERS. Measured on real calls: `git log --format=%h  # `date``
+    loses its backticks to a code span, and an MCP filter
+    `name~=*test*  ~~old~~` renders as `name~=test  old`. A digest that
+    no longer shows what was run is worse than an inert URL, so
+    everything that is not a URL passes through literally.
+
+    `target` is what a click OPENS and is normally the span's own text,
+    which is batch 58's rule unchanged: the URL is its own label, so
+    there is nowhere for a destination to differ from what is read.
+
+    `targets` is the exception, and it exists because a tool line is
+    TRUNCATED before it is drawn -- `param_digest` caps a value at 60
+    characters, which is shorter than most real documentation URLs.
+    An elided run resolves against these candidates, and three things
+    have to hold at once:
+
+      - the run is elided at all, i.e. it ends in characters that are
+        not ASCII. Asked that way rather than by naming the ellipsis,
+        so this module needs to know nothing about the producer that
+        put one there;
+      - exactly ONE candidate has the visible part as its prefix. Two
+        would make the click a guess;
+      - THE WHOLE ORIGIN IS VISIBLE. The invariant that replaces
+        "the visible text is the target" is `the visible text tells
+        you the origin, and the origin is where it goes`, so a run cut
+        off inside its host resolves to nothing and stays literal.
+        Truncation may elide a path and a query; it may never elide
+        the answer to "where does this take me".
+
+    A candidate is itself run through `_url`, so `clickable`'s rules --
+    ASCII, http(s), and no userinfo -- gate a target exactly as they
+    gate a span, and a caller cannot hand in something the reader
+    would not have been allowed to click.
+    """
+    candidates = [url for value in targets for url in _urls_in(value)]
+    out = []
+    cursor = at = 0
+    while True:
+        at = text.find("http", at)
+        if at == -1:
+            break
+        run = _URL.match(text, at)
+        if run is None or (at and text[at - 1].isalnum()):
+            at += 1
+            continue
+        url = _trim_url(run.group(0))
+        target = url if clickable(url) else _elided(url, candidates)
+        if not target:
+            at += 1
+            continue
+        if at > cursor:
+            out.append((text[cursor:at], "", ""))
+        out.append((url, LINK, target))
+        cursor = at = at + len(url)
+    if cursor < len(text):
+        out.append((text[cursor:], "", ""))
+    return out
+
+
+def _urls_in(value: str):
+    """Every armable URL inside one candidate value.
+
+    Callers hand in whole PARAMETER VALUES rather than URLs, so the URL
+    grammar has one definition and it is this module's. A search query
+    that happens to contain a URL therefore offers it, and a value that
+    contains none offers nothing.
+    """
+    if not isinstance(value, str):
+        return []
+    found = []
+    at = 0
+    while True:
+        at = value.find("http", at)
+        if at == -1:
+            return found
+        span, _opened = _url(value, at)
+        if span is None:
+            at += 1
+            continue
+        found.append(span[0])
+        at = span[3]
+
+
+def _elided(run: str, candidates) -> str:
+    """The full URL a truncated `run` stands for, or "".
+
+    See `link_spans`. The three conditions are in the order that makes
+    the cheapest one fail first, and the last of them is the one that
+    carries the security property.
+    """
+    end = len(run)
+    while end and not run[end - 1].isascii():
+        end -= 1
+    if end == len(run) or not end:
+        return ""
+    prefix = run[:end]
+    matched = [url for url in candidates if url.startswith(prefix)]
+    if len(matched) != 1:
+        return ""
+    target = matched[0]
+    origin = len(target) - len(target.split("://", 1)[-1]) \
+        + len(_authority(target))
+    return target if len(prefix) >= origin else ""
+
+
 def _spans(text: str, *, block: bool = True):
     """`(text, role, source start, source end)` for one line."""
     return _scan(text, block=block)[0]
@@ -640,12 +761,52 @@ def clickable(url) -> bool:
     http and https only: the click ends in the platform's URL handler,
     and a `file://` or a registered custom scheme is not something a
     model gets to reach through a transcript.
+
+    NO USERINFO, which batch 65 added after measuring that the rule
+    above had a hole exactly its own shape.
+    `https://accounts.google.com@phish.example/x` is ASCII and https,
+    so it was armed -- and it opens phish.example. The visible text IS
+    the target, so the letter of the rule held; what a reader takes for
+    the destination is the userinfo, and the host is somewhere else.
+    That is the same attack `[label](url)` was refused for, arriving
+    through the URL's own syntax rather than through a label.
+
+    NOR A URL THE HARNESS REWROTE, which is the same argument one step
+    further and was found by a test rather than by reasoning. The
+    userinfo rule alone catches
+    `https://user:[REDACTED]@host/...`, and nothing caught
+    `https://example.com/x?api_key=[REDACTED]` -- ASCII, https, no
+    userinfo, and a perfectly real address that is simply not the one
+    that was fetched. Clicking it would send the literal string
+    `[REDACTED]` to a host as an api_key.
+
+    A redacted URL still RENDERS and is still copied, exactly as a
+    homograph is: the rule is about what a click may do, never about
+    hiding text from the reader.
     """
     if not isinstance(url, str) or not url.isascii():
         return False
     if any(ord(char) < 32 or ord(char) == 127 for char in url):
         return False
-    return url.startswith("http://") or url.startswith("https://")
+    if not (url.startswith("http://") or url.startswith("https://")):
+        return False
+    if REDACTED_MARK in url:
+        return False
+    return "@" not in _authority(url)
+
+
+def _authority(url: str) -> str:
+    """Everything between `scheme://` and the path, query or fragment.
+
+    Written out rather than `urllib.parse`d, for this module's rule: it
+    imports `re` and nothing else, and a parser that normalises would
+    answer about a URL slightly different from the one on screen --
+    which is the exact gap the whole link design exists to close.
+    """
+    rest = url.split("://", 1)[-1]
+    for stop in "/?#":
+        rest = rest.split(stop, 1)[0]
+    return rest
 
 
 def _trim_url(url: str) -> str:

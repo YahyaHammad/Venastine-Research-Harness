@@ -329,8 +329,8 @@ class TestWhatIsReplayed:
         ])
 
         assert replay_entries(uuid4()) == [
-            ("user", "explain quorum reads"),
-            ("assistant", "A quorum read is …"),
+            ("user", "explain quorum reads", ()),
+            ("assistant", "A quorum read is …", ()),
         ]
 
     def test_a_tool_call_is_one_line_and_its_result_is_skipped(self, mocker):
@@ -347,10 +347,10 @@ class TestWhatIsReplayed:
 
         entries = replay_entries(uuid4())
 
-        assert [role for role, _ in entries] == ["assistant", "tool"]
+        assert [role for role, _t, _l in entries] == ["assistant", "tool"]
         assert "fetch_url" in entries[1][1]
         assert "example.test" in entries[1][1]
-        assert "PAGE TEXT" not in "".join(text for _, text in entries)
+        assert "PAGE TEXT" not in "".join(text for _r, text, _l in entries)
 
     def test_a_credential_in_a_replayed_tool_call_is_redacted(self, mocker):
         """The archive is written before anything redacts a tool ARGUMENT --
@@ -391,9 +391,9 @@ class TestWhatIsReplayed:
         ])
 
         assert replay_entries(uuid4()) == [
-            ("user", "why?"),
-            ("thinking", "Let me think."),
-            ("assistant", "Because."),
+            ("user", "why?", ()),
+            ("thinking", "Let me think.", ()),
+            ("assistant", "Because.", ()),
         ]
 
     def test_several_blocks_replay_as_paragraphs(self, mocker):
@@ -403,7 +403,8 @@ class TestWhatIsReplayed:
                                      {"type": "thinking", "thinking": "Two."}]}},
         ])
 
-        assert replay_entries(uuid4())[0] == ("thinking", "One.\n\nTwo.")
+        assert replay_entries(uuid4())[0] == (
+            "thinking", "One.\n\nTwo.", ())
 
     def test_the_v1_shape_replays_by_field_name_not_by_provider(self, mocker):
         """Two spellings reach _reasoning_text -- Anthropic's `thinking`
@@ -416,7 +417,7 @@ class TestWhatIsReplayed:
                                       "text": "Hmm."}]}},
         ])
 
-        assert ("thinking", "Hmm.") in replay_entries(uuid4())
+        assert ("thinking", "Hmm.", ()) in replay_entries(uuid4())
 
     def test_redacted_blocks_travel_but_are_not_drawn(self, mocker):
         """Opaque ciphertext meaningful only to the model. It is stored --
@@ -428,7 +429,7 @@ class TestWhatIsReplayed:
                                       "data": "Blob=="}]}},
         ])
 
-        assert replay_entries(uuid4()) == [("assistant", "a")]
+        assert replay_entries(uuid4()) == [("assistant", "a", ())]
 
     def test_a_turn_without_reasoning_replays_exactly_as_before(self, mocker):
         """The property that makes §44 safe on an existing database: a row
@@ -437,7 +438,7 @@ class TestWhatIsReplayed:
             {"role": "assistant", "text": "a", "tool_calls": []},
         ])
 
-        assert replay_entries(uuid4()) == [("assistant", "a")]
+        assert replay_entries(uuid4()) == [("assistant", "a", ())]
 
     def test_an_empty_thread_replays_to_nothing(self, mocker):
         mocker.patch("core.replay.archive_history", return_value=[])
@@ -472,8 +473,8 @@ async def test_resuming_clears_the_screen_and_replays(mocker):
                      "M", (), {"thread_id": thread_id or uuid4(),
                                "extra": {}, "messages": []})())
     mocker.patch("tui.app.replay_entries", return_value=[
-        ("user", "what did we decide about quorum"),
-        ("assistant", "we decided on 3 of 5"),
+        ("user", "what did we decide about quorum", ()),
+        ("assistant", "we decided on 3 of 5", ()),
     ])
 
     app = VenastineApp("ANTHROPIC", "test-model", {})
@@ -538,9 +539,9 @@ async def test_a_reopened_thread_draws_its_reasoning_when_thinking_is_on(
                      "M", (), {"thread_id": thread_id or uuid4(),
                                "extra": {}, "messages": []})())
     mocker.patch("tui.app.replay_entries", return_value=[
-        ("user", "why 3 of 5"),
-        ("thinking", "A quorum has to survive one failure."),
-        ("assistant", "we decided on 3 of 5"),
+        ("user", "why 3 of 5", ()),
+        ("thinking", "A quorum has to survive one failure.", ()),
+        ("assistant", "we decided on 3 of 5", ()),
     ])
 
     app = VenastineApp("ANTHROPIC", "test-model",
@@ -575,9 +576,10 @@ def test_the_cli_replays_a_resumed_thread(mocker, capsys):
     import main
 
     mocker.patch.object(main, "replay_entries", return_value=[
-        ("user", "what did we decide"), ("assistant", "3 of 5"),
-        ("thinking", "A quorum has to survive one failure."),
-        ("tool", "⟩ read  notes.md")])
+        ("user", "what did we decide", ()),
+        ("assistant", "3 of 5", ()),
+        ("thinking", "A quorum has to survive one failure.", ()),
+        ("tool", "⟩ read  notes.md", ())])
 
     main._print_replay(uuid4())
 
@@ -897,3 +899,49 @@ class TestTheMissingKindColumnGuard:
 
         assert classify_legacy_pass_threads(connection) == 0
         connection.close()
+
+
+# ---- Batch 65: a resumed thread arms what the live turn armed -------------
+
+@pytest.mark.asyncio
+async def test_a_replayed_tool_call_is_as_clickable_as_a_live_one(mocker):
+    """Why ReplayEntry grew a third element.
+
+    A tool line's digest truncates a long URL, so the click target rides
+    beside the text. Without it in the replay, resuming a thread would
+    draw the SAME CHARACTERS as the live turn and quietly refuse to open
+    them -- one conversation rendered two ways, which is the defect
+    Section 44 removed for thinking spans and this would have reopened
+    for links.
+    """
+    from tui.app import VenastineApp
+
+    url = "https://example.com/a/very/long/path/that/keeps/going/and/on?page=2"
+    mocker.patch("core.replay.archive_history", return_value=[
+        {"role": "assistant", "text": "Looking that up.", "tool_calls": [
+            {"id": "t1", "name": "fetch_url", "input": {"url": url}}]},
+    ])
+    entries = replay_entries(uuid4())
+
+    assert len(entries) == 2 and entries[1][0] == "tool"
+    assert "\u2026" in entries[1][1], (
+        "the premise: this URL is long enough that the digest cuts it")
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test(size=(110, 30)) as pilot:
+        transcript = app._transcript
+        transcript.reset()
+        for role, text, links in entries:
+            transcript.write_role(role, text, links)
+        await pilot.pause()
+
+        armed = set()
+        for y in range(app.size.height):
+            for x in range(app.size.width):
+                style = app.screen.get_style_at(x, y)
+                if style and style.meta.get("url"):
+                    armed.add(style.meta["url"])
+
+    assert armed == {url}, (
+        f"a replayed fetch_url armed {armed} -- a resumed thread has to be "
+        f"as clickable as the turn it is a record of")

@@ -3710,3 +3710,60 @@ warning count is 0, or it is 2 after two calls.
 the same defect wearing a better exception story. Latched because `styles_for` runs once per
 drawn line; `preferences._remember` deliberately does *not* latch, and its docstring says why
 that is right there and wrong here. Batch 64.
+
+
+### A tool line routed through `inline_spans` instead of `link_spans`
+
+**Symptom:** `test_a_shell_digest_keeps_its_backticks` and
+`test_an_mcp_filter_keeps_its_tildes_and_asterisks` fail — the drawn row no longer contains the
+digest that was written.
+
+**Fix:** keep the two scanners apart. A tool line is a shell command or a JSON argument, not
+prose, and the full grammar does not merely over-decorate one: `# `date`` loses its backticks to
+a code span and `~~old~~` loses its tildes. The `_em_edge` rule already saves `*.py`, `2**8` and
+`__init__`, which is why this looks safe until it is measured. Batch 65.
+
+### `clickable()` losing the userinfo or the redaction-mark refusal
+
+**Symptom:** the `test_and_nothing_else` table fails on
+`https://accounts.google.com@phish.example/x`, or `test_a_redacted_url_is_never_a_target` fails.
+
+**Fix:** both refusals are load-bearing and neither is cosmetic. Userinfo means the part a reader
+takes for the destination is not the host — the same hidden-destination attack `[label](url)` is
+refused for, through the URL's own syntax. The redaction mark means the harness rewrote the
+address, so it is real and simply not the one that was fetched; clicking
+`https://x/?api_key=[REDACTED]` would send that literal string to a live host. `REDACTED_MARK` is
+`tui/markdown.py`'s own copy of `safety.policy_enforcement.REDACTION_MARKER` because that module
+is pure; the two are held against each other by
+`test_the_redaction_mark_is_the_one_safety_actually_writes`. Batch 65.
+
+### The origin rule dropped from `_elided`
+
+**Symptom:** `test_a_truncation_that_cut_the_host_resolves_to_nothing` and
+`test_a_host_that_did_not_fit_arms_nothing` fail.
+
+**Fix:** restore it. Batch 65 carries an untruncated URL beside a truncated line, which means the
+visible text is no longer the target — and the rule that replaces it is that the visible text
+still tells you the ORIGIN. Without the check, a line showing `https://very-long-host-nam…` would
+open a host nothing on screen names, which is a silent redirect rather than a truncation a reader
+can see. Batch 65.
+
+### `rerender()` or `reset()` not touching `_links`
+
+**Symptom:** `test_a_theme_switch_arms_the_same_cells`, or `test_a_new_thread_does_not_inherit_one`.
+
+**Fix:** the side table is keyed by entry index, so both lifetimes are its own. A `rerender()`
+without it leaves a `/theme` looking identical and silently unclickable; a `reset()` without it
+arms the next thread's Nth line with the previous thread's URL. **The second is invisible on the
+live path** — a write is handed its links as an argument — so its test has to redraw before it
+asserts, which is how the first version of that test passed against a broken `reset()`. Batch 65.
+
+### `ReplayEntry` narrowed back to `(role, text)`
+
+**Symptom:** `test_a_replayed_tool_call_is_as_clickable_as_a_live_one` fails, and every unpack in
+`tui/app.py`, `main.py`, `test_thread_legibility.py`, `test_cli.py` and `test_storage_e2e.py`
+raises `ValueError: too many values to unpack`.
+
+**Fix:** the third element is a click target, and the module docstring's reason for a narrow tuple
+is untouched by it — a link is a rendering fact, not history. Removing it would leave a resumed
+thread drawing the same characters as the live turn and refusing to open them. Batch 65.

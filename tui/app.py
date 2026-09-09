@@ -1661,7 +1661,15 @@ class VenastineApp(App):
                 # whenever the model emits that key first.
                 digest = tool_registry.call_digest(name, params)
                 detail = f"  {digest}" if digest else ""
-                transcript.write_role("tool", f"▸ {name}{detail}")
+                # Batch 65 (TECHNICAL_DEBT 16). The digest caps a value
+                # at sixty characters, which is shorter than most real
+                # URLs, so the untruncated values ride alongside for a
+                # cut-off span to resolve against. Redacted at the
+                # producer, and a value the redactor rewrote is not
+                # among them -- see `redacted_values`.
+                transcript.write_role(
+                    "tool", f"▸ {name}{detail}",
+                    tool_registry.call_links(name, params))
 
         if event.tool_result:
             result = event.tool_result["result"]
@@ -2595,7 +2603,7 @@ class VenastineApp(App):
                 f"open and usable — only its history could not be "
                 f"drawn.")
             return
-        for role, text in entries:
+        for role, text, links in entries:
             if role == "user":
                 self._transcript.write_user(text)
             elif role == "assistant":
@@ -2615,7 +2623,7 @@ class VenastineApp(App):
                 if self._show_thinking:
                     self._transcript.write_role(role, text)
             else:
-                self._transcript.write_role(role, text)
+                self._transcript.write_role(role, text, links)
         if entries:
             noun = "entry" if len(entries) == 1 else "entries"
             self._transcript.write_system(

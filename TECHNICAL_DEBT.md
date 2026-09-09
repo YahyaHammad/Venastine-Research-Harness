@@ -528,19 +528,28 @@ loses the scroll position, and fires per event while a window edge is dragged, s
 debouncing and a scroll-anchor. **Revisit** if resizing mid-session becomes a normal thing to
 do, or alongside any work that touches `rerender()` anyway.
 
-## 16. A URL in a tool line is not clickable (open, noted batch 58)
+## 16. A URL in a tool line is not clickable (closed, batch 65)
 
-Batch 58 arms bare `http(s)://` URLs in an assistant body for ctrl+click. Tool lines are not
-armed: `write_role("tool", …)` reaches a plain `Text` and never goes through
+Batch 58 armed bare `http(s)://` URLs in an assistant body for ctrl+click and left tool lines
+out: `write_role("tool", …)` reached a plain `Text` and never went through
 `markdown.inline_spans`, so `▸ fetch_url https://…` — the place a URL most obviously appears —
-is inert while the same URL in prose is not.
+was inert while the same URL in prose was not. The entry said **revisit if the asymmetry is
+reported**, and it was.
 
-Deliberate for now. Tool lines are harness-generated furniture rather than model prose, and
-routing them through a text scanner is a different decision from rendering an answer. The
-inconsistency is real and small: the URL is visible and `/copy` returns it either way.
+The prediction that the mechanism was already there (`_append_spans` with `block=False`) was
+half right, and the wrong half is the interesting one. **Routing a tool line through the prose
+grammar eats characters**: measured, `▸ shell  git log --format=%h  # `date`` loses its
+backticks to a code span and `▸ mcp__x__y  name~=*test*  ~~old~~` renders as `name~=test  old`.
+A digest that no longer shows what ran is worse than an inert URL, so batch 65 added
+`markdown.link_spans` — URLs and nothing else — and `LINKED_ROLES` to say which lines get it
+(`tool`, `pipeline_tool`, `tool_error`).
 
-**Revisit if** the asymmetry is reported, or when a tool line next needs to carry any styled
-span at all. The mechanism is already there — `_append_spans` with `block=False`.
+Two things the entry did not anticipate. `param_digest` caps a value at 60 characters, which is
+shorter than most real URLs, so the untruncated target rides beside the line and a span
+resolves against it — under the rule that **the visible text tells you the origin, and the
+origin is where it goes**. And the work turned up a live defect in batch 58 itself: a URL
+carrying userinfo (`https://accounts.google.com@phish.example/x`) was armed and opened
+`phish.example`. See DEVLOG batch 65.
 
 ## 17. Block quotes render as written (open, deferred batch 58)
 

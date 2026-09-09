@@ -48,7 +48,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 3997 tests, offline, ~2-3 min by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 4041 tests, offline, ~2-3 min by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -394,6 +394,37 @@ stays unarmed. The URL rides in a plain style METADATA key read by `on_click` �
 grammar fed by the model. `clickable()` is re-asked in `open_url` because a style in a `RichLog`
 outlives the text that made it. Textual dispatches on `style.meta`, not on Rich's `link`; OSC 8
 was left off, since a terminal that honours it would double-open what we already handle.
+
+**A tool line arms its URLs too, and takes a DIFFERENT scanner** (batch 65, closing
+`TECHNICAL_DEBT.md` 16). `LINKED_ROLES` — `tool`, `pipeline_tool`, `tool_error` — go through
+`markdown.link_spans`, which recognises URLs and nothing else. Not the prose grammar: a
+digest is a shell command or a JSON argument, and `inline_spans` does not merely
+over-decorate one, it **eats characters** — `# \`date\`` loses its backticks to a code span
+and `name~=*test*  ~~old~~` renders as `name~=test  old`. A digest that no longer shows
+what ran is worse than an inert URL. The harness's own voice (`system`, `error`) is
+deliberately not in the set.
+
+**`param_digest` truncates at 60 characters, so the target rides beside the text.**
+Most real URLs are longer, and an elided one is refused by the ASCII rule (the ellipsis
+is not ASCII), so batch 65 carries `registry.call_links` — `redacted_values`, untruncated —
+alongside the line. **That means the visible text is no longer the target, and the rule
+it is replaced by is narrower rather than absent: _the visible text tells you the origin,
+and the origin is where it goes._** A span resolves only when it is actually elided, when
+exactly ONE candidate has the visible part as its prefix, and when the whole authority is
+visible — a run cut off inside its host stays literal. Targets are stored in `_links`
+beside `_entries` (a rendering fact, not part of what was said), which is why `rerender()`
+and `reset()` both have to touch it, and why `ReplayEntry` grew a third element.
+
+**A URL the harness REWROTE is not a link.** Two refusals added in batch 65, both found
+by measurement rather than by reasoning. `clickable` now rejects **userinfo**: 
+`https://accounts.google.com@phish.example/x` was armed and opened `phish.example` — the
+same hidden-destination attack `[label](url)` is refused for, arriving through the URL's
+own syntax. And it rejects the **redaction mark**: `https://x/?api_key=[REDACTED]` is ASCII,
+https and userinfo-free, and clicking it would send the literal string `[REDACTED]` to a
+real host. `REDACTION_MARKER` lives in `safety/policy_enforcement.py`; `tui/markdown.py` is
+pure and keeps its own copy, and `tests/test_markdown_render.py` holds the two against
+each other. `redacted_values` closes the same door at the producer by dropping any value
+the redactor touched, so no rewritten URL is ever offered as a target in the first place.
 
 **`*emphasis*` is narrowed, not reversed, and underscores stay refused.** Measured against a real
 CommonMark parser: full GFM renders `call __init__ on it` as a bold `init`, and `2*3*4` and

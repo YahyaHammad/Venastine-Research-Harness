@@ -1408,3 +1408,263 @@ class TestPastTheHoldLimitTheStreamDrawsProseToo:
         """The strongest form of the batch-38 property, run on the one
         case where the text alone cannot tell the paths apart."""
         assert await _drawn_streamed(self.LONG) == await _drawn(self.LONG)
+
+
+# ===========================================================================
+# ---- A URL in a tool line (batch 65, TECHNICAL_DEBT 16) -------------------
+# ===========================================================================
+
+async def _harness_line(role, text, links=(), size=(110, 30)):
+    """One harness-drawn line on screen: its armed cells and its rows."""
+    from tui.app import VenastineApp
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test(size=size) as pilot:
+        transcript = app._transcript
+        transcript.clear()
+        transcript._entries.clear()
+        transcript._links.clear()
+        transcript.write_role(role, text, links)
+        await pilot.pause()
+        return _armed(app), [strip.text for strip in transcript.lines]
+
+
+def _call(name, params):
+    """The line the transcript would draw for a call, and its targets."""
+    from tools.registry import registry
+
+    digest = registry.call_digest(name, params)
+    return (f"\u25b8 {name}  {digest}".rstrip(),
+            registry.call_links(name, params))
+
+
+class TestAToolLineArmsItsURL:
+    """TECHNICAL_DEBT 16, reported and closed.
+
+    Batch 58 armed a URL in an assistant body and left tool lines out:
+    `write_role("tool", ...)` reached a plain Text, so the place a URL
+    most obviously appears was the one place inert. Asserted on the DRAWN
+    CELLS, which is the only thing a click can land on.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_fetch_url_call_is_clickable(self):
+        url = "https://example.com/relnotes"
+        cells, _rows = await _harness_line(
+            "tool", f"\u25b8 fetch_url  {url}")
+
+        assert len(cells) == len(url), (
+            f"{len(cells)} armed cells for a {len(url)}-character URL -- "
+            f"the arming has to cover the URL and nothing either side")
+        assert {found for _x, _y, found in cells} == {url}
+
+    @pytest.mark.asyncio
+    async def test_so_is_a_research_pass_tool_row(self):
+        url = "https://example.com/docs"
+        cells, _rows = await _harness_line(
+            "pipeline_tool", f"  \u25b8 web_search  {url}")
+
+        assert {found for _x, _y, found in cells} == {url}
+
+    @pytest.mark.asyncio
+    async def test_and_the_url_a_call_FAILED_on(self):
+        """Often the one actually worth opening, and unlike the call
+        digest an error line is not truncated: `redact_secrets(str(...))`
+        with no cap, so the span resolves to itself."""
+        url = "https://example.com/gone"
+        cells, _rows = await _harness_line(
+            "tool_error", f"  \u2717 fetch_url  404 fetching {url}")
+
+        assert {found for _x, _y, found in cells} == {url}
+
+    @pytest.mark.asyncio
+    async def test_the_harness_own_voice_is_not_armed(self):
+        """LINKED_ROLES is an allowlist. A `system` line is written HERE
+        rather than by a model, and nothing has asked to click one --
+        so it stays prose-free and link-free rather than being swept in
+        by a rule about `every line with a URL in it`."""
+        cells, _rows = await _harness_line(
+            "system", "see https://example.com/help for more")
+
+        assert cells == []
+
+
+class TestADigestIsNotProse:
+    """The reason tool lines take a links-only scanner.
+
+    Run through the prose grammar a shell command loses characters --
+    the backticks of a command substitution become a code span. Asserted
+    on the ROW, because the eaten characters are only missing on screen.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_shell_digest_keeps_its_backticks(self):
+        line = "\u25b8 shell  git log --format=%h  # `date`"
+        cells, rows = await _harness_line("tool", line)
+
+        assert any(line in row for row in rows), (
+            f"the drawn rows are {rows} -- the digest was marked up and no "
+            f"longer shows the command that ran")
+        assert cells == []
+
+    @pytest.mark.asyncio
+    async def test_an_mcp_filter_keeps_its_tildes_and_asterisks(self):
+        line = "\u25b8 mcp__x__y  name~=*test*  ~~old~~"
+        _cells, rows = await _harness_line("tool", line)
+
+        assert any(line in row for row in rows), rows
+
+
+class TestACandidateComesFromWhatTheLineSHOWS:
+    """Section 42 RA3's rule, arriving at a second consumer.
+
+    `call_digest` drops a tool's declared rationale param -- prose
+    written for a person, which would take sixty of the line's hundred
+    and forty characters. `call_links` has to drop the same one, or a
+    URL the reader cannot see anywhere on screen becomes a click target,
+    which is the hidden-destination problem this whole feature is built
+    against, arriving from the harness's own side.
+    """
+
+    def test_a_url_in_the_rationale_is_not_a_target(self):
+        from tools.registry import registry
+
+        params = {"rationale": "see https://example.com/why-i-ran-this",
+                  "command": "ls -la"}
+
+        assert "why-i-ran-this" not in registry.call_digest(
+            "shell", params), "the premise: the line does not show it"
+        assert registry.call_links("shell", params) == (), (
+            "the rationale's URL became a click target while the line "
+            "that would justify it is not on screen")
+
+    def test_but_one_in_the_command_is(self):
+        from tools.registry import registry
+
+        params = {"rationale": "checking the release notes",
+                  "command": "curl https://example.com/relnotes"}
+
+        assert registry.call_links("shell", params) == (
+            "curl https://example.com/relnotes",)
+
+
+class TestALongURLIsArmedBehindItsTruncation:
+    """Batch 65's trade, through the real producer.
+
+    `param_digest` caps a value at 60 characters, so the line draws a
+    prefix and an ellipsis while the click opens the whole URL. The
+    invariant that replaces `the visible text is the target` is that the
+    visible text still tells you the ORIGIN -- so the two tests below are
+    one rule read from both sides.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_click_opens_the_whole_url(self):
+        url = "https://example.com/a/very/long/path/that/keeps/going/and/on?page=2"
+        line, links = _call("fetch_url", {"url": url})
+        cells, rows = await _harness_line("tool", line, links)
+
+        assert "\u2026" in line, "the premise: this URL is truncated"
+        assert {found for _x, _y, found in cells} == {url}, (
+            f"the drawn line is {line!r} and the armed targets are "
+            f"{ {c[2] for c in cells} } -- a truncated span has to resolve "
+            f"to the URL it was cut from or long URLs stay inert")
+        assert any("example.com" in row for row in rows), (
+            "the origin has to be VISIBLE, which is what makes the "
+            "resolution honest rather than a hidden redirect")
+
+    @pytest.mark.asyncio
+    async def test_a_host_that_did_not_fit_arms_nothing(self):
+        """The pin on the invariant. Nothing on screen would say where
+        this goes, so nothing offers to take you there."""
+        url = "https://" + "a" * 70 + ".example.com/x"
+        line, links = _call("fetch_url", {"url": url})
+        cells, _rows = await _harness_line("tool", line, links)
+
+        assert cells == [], (
+            f"{line!r} armed a click whose destination the reader cannot "
+            f"see any part of")
+
+    @pytest.mark.asyncio
+    async def test_a_redacted_url_is_never_a_target(self):
+        """#167 held at the one place a URL leaves the harness.
+
+        A click hands its target to a browser, so a target taken from the
+        raw params would send the api_key the transcript deliberately
+        kept out. `redacted_values` drops any value the redactor touched,
+        so there is no candidate at all -- and the drawn `[REDACTED]`
+        form is refused a second time by `clickable`.
+        """
+        url = "https://example.com/x?api_key=sk-ant-api03-" + "A" * 80
+        line, links = _call("fetch_url", {"url": url})
+        cells, rows = await _harness_line("tool", line, links)
+
+        assert links == (), f"redacted_values offered {links}"
+        assert cells == []
+        assert not any("sk-ant" in row for row in rows)
+
+
+class TestTheTargetsSurviveWhatTheEntriesDo:
+    """The side table is the only thing that can lose them, so both of
+    its lifetimes get a pin."""
+
+    URL = "https://example.com/a/very/long/path/that/keeps/going/and/on?page=2"
+
+    @pytest.mark.asyncio
+    async def test_a_theme_switch_arms_the_same_cells(self):
+        """rerender() redraws every entry from `_entries`, and a version
+        that did not pass the stored targets would leave a line looking
+        identical and quietly unclickable -- a loss only the pointer can
+        find."""
+        from tui.app import VenastineApp
+
+        line, links = _call("fetch_url", {"url": self.URL})
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(110, 30)) as pilot:
+            transcript = app._transcript
+            transcript.clear()
+            transcript._entries.clear()
+            transcript._links.clear()
+            transcript.write_role("tool", line, links)
+            await pilot.pause()
+            before = {found for _x, _y, found in _armed(app)}
+
+            app.query_one("#prompt").value = "/theme light-red"
+            await pilot.press("enter")
+            await pump(pilot, 4)
+
+            assert {found for _x, _y, found in _armed(app)} == before, (
+                "a /theme disarmed the line it only meant to recolour")
+            assert before == {self.URL}
+
+    @pytest.mark.asyncio
+    async def test_a_new_thread_does_not_inherit_one(self):
+        """reset() clears the entries; a target left behind would arm the
+        NEXT thread's line at the same index with the previous one's
+        URL."""
+        from tui.app import VenastineApp
+
+        line, links = _call("fetch_url", {"url": self.URL})
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(110, 30)) as pilot:
+            transcript = app._transcript
+            transcript.clear()
+            transcript._entries.clear()
+            transcript._links.clear()
+            transcript.write_role("tool", line, links)
+            await pilot.pause()
+            assert _armed(app), "the premise: this line was armed"
+
+            transcript.reset()
+            transcript.write_role("tool", line)
+            # THROUGH A REDRAW, which is the only path that reads the
+            # side table. The live write is handed its links as an
+            # argument, so a stale entry is invisible until something
+            # re-renders -- a /theme, three commands later, arming a
+            # line in this thread with the previous thread's URL.
+            transcript.rerender()
+            await pilot.pause()
+
+            assert _armed(app) == [], (
+                "the new thread's line resolved against the old thread's "
+                "target -- reset() has to clear the side table too")

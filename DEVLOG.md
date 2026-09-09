@@ -11258,3 +11258,124 @@ Eight mutations, all killed:
 mounted the real app against the developer's real preference store before `HOME` was redirected,
 and `watch_theme` then overwrote the poisoned value. The crash was reproduced; the poisoned file
 was destroyed rather than kept.
+
+
+## Batch 65 — the URL in the line that fetched it (2026-09-09)
+
+**Reported:** links in the fetch tool were deferred; the transcript's own links already work, so
+this should share the backbone.
+
+Correct on both counts, and the deferral was written down — `TECHNICAL_DEBT.md` 16, *"revisit if
+the asymmetry is reported"*. It also predicted the seam correctly (`_append_spans` with
+`block=False`). What it did not predict is why that seam is the wrong one to use as it stands.
+
+### A tool line is a digest, and the prose grammar eats it
+
+The URL machinery lives in the same scanner as bold, italic, code and strike, so the obvious
+implementation hands a tool line the whole grammar. Measured over real call shapes:
+
+```
+'▸ shell  git log --format=%h  # `date`'   ->  '▸ shell  git log --format=%h  # date'    LOST
+'▸ mcp__x__y  name~=*test*  ~~old~~'       ->  '▸ mcp__x__y  name~=test  old'            LOST
+'▸ shell  ls *.py'  '▸ edit  __init__'     ->  verbatim, because batch 58's _em_edge rule already
+                                               refuses an asterisk wedged between word characters
+```
+
+Two of six shapes come out with characters missing. A digest that no longer shows what ran is
+worse than a URL that cannot be clicked, so `markdown.link_spans` recognises URLs and nothing
+else, and `LINKED_ROLES` — `tool`, `pipeline_tool`, `tool_error` — says which lines get it. The
+harness's own voice (`system`, `error`) is deliberately not in the set: those lines are written
+here rather than by a model, and nobody has asked to click one.
+
+`tool_error` earns its place by being the most useful of the three. `✗ fetch_url  404 fetching
+https://…` carries the URL a reader actually wants, and unlike a call digest an error line is
+not truncated.
+
+### The invariant that had to be replaced rather than kept
+
+`param_digest` caps each value at 60 characters, which is shorter than most real documentation
+URLs, so the line draws `https://example.com/a/very/long/pa…`. That was **already** safe by
+accident — the ellipsis is not ASCII, so `clickable` refused it — and it is also why the obvious
+fix would have left the common case inert.
+
+The owner's decision was to carry the untruncated URL out of band, with the cost named: the
+visible text stops being the target, which is the single rule batch 58 is built on. So the rule
+is replaced rather than dropped:
+
+> **The visible text tells you the origin, and the origin is where it goes.**
+
+A span resolves only when three things hold at once: it is actually elided; exactly ONE candidate
+has the visible part as its prefix; and **the whole authority is visible**. A run cut off inside
+its host stays literal, so truncation may elide a path and a query and may never elide the answer
+to "where does this take me".
+
+The elision test is asked generically — trailing characters that are not ASCII — rather than by
+naming the ellipsis, so `tui/markdown.py` needs to know nothing about the producer that put one
+there.
+
+### The candidates come from the redactor, not from the params
+
+A click hands its target to the platform's browser, so a target taken from the raw parameters
+would send the `?api_key=…` that `param_digest` deliberately kept out of the transcript — #167's
+protection defeated at the one place it was designed to hold, by a feature whose whole subject is
+the same string. `redacted_values` redacts first and then **drops any value the redactor
+changed**, so a rewritten URL is never offered at all. `call_links` applies the same `omit` as
+`call_digest` (§42 RA3), because a candidate drawn from a parameter the line does not show would
+be a click target the reader cannot see anywhere.
+
+### Two refusals, both found by measuring rather than by thinking
+
+**Userinfo.** `https://accounts.google.com@phish.example/x` was armed and clickable in assistant
+prose *today*, and it opens `phish.example`. The letter of batch 58's rule held — the visible text
+IS the target — while the part a reader takes for the destination is userinfo and the host is
+somewhere else. That is exactly the attack `[label](url)` was refused for, arriving through the
+URL's own syntax instead of through a label. This is a pre-existing defect in shipped code, found
+on the way to something else, and it is fixed in prose as well as in tool lines.
+
+**The redaction mark.** Caught by a test, not by reasoning, and it is the better story of the two.
+`redacted_values` correctly offered no target for a credentialed call — and the line still *drew*
+`https://example.com/x?api_key=[REDACTED]`, which is ASCII, https and userinfo-free, so the span
+armed **itself**. Clicking it would have sent the literal string `[REDACTED]` to a real host. A
+URL the harness rewrote is a real address and simply not the one that was fetched, so `clickable`
+refuses it. `REDACTION_MARKER` is now named in `safety/policy_enforcement.py` (it was four bare
+literals); `tui/markdown.py` is pure and may not import policy, so it keeps its own copy and
+`tests/test_markdown_render.py` holds the two against each other — one string, two readers, and a
+check rather than a hope.
+
+### Where the target lives, and the two lifetimes it has
+
+`_entries` keeps its `(role, text)` shape: it is read by `/copy`, by `last_answer()` and by the
+replay contract, and a link is a rendering fact about a line rather than part of what was said.
+The targets go in `_links`, keyed by entry index, which is what `rerender()` already walks. Both
+of its lifetimes are pinned, and the second was a bug in the first draft of its own test: the
+LIVE path is handed its links as an argument, so a stale side table is invisible until something
+re-renders. The test only became honest once it redrew.
+
+`ReplayEntry` is now `(role, text, links)`. That widens a contract whose docstring says a caller
+is *"rendering, not reasoning about history"* — still true, and the alternative was worse: a
+resumed thread would draw the same characters as the live turn and quietly refuse to open them,
+which is the one-conversation-rendered-two-ways defect §44 removed for thinking spans.
+
+### Verified
+
+Full suite **4041 passed** (`test_markdown_render.py` 148 → 178, `test_live_output.py` 99 → 112,
+`test_thread_legibility.py` 41 → 42). Eleven mutations, all killed — but only after three
+survivors, and all three were gaps in the tests rather than in the code:
+
+| mutation | must be killed by |
+|---|---|
+| a tool line takes the prose grammar | the verbatim-digest tests |
+| `clickable()` stops looking at the authority | the userinfo table |
+| `clickable()` arms a URL the harness rewrote | the redacted-target test |
+| the origin need not be visible | the host-did-not-fit test |
+| any candidate will do, not exactly one | the two-candidates test |
+| an unelided run may borrow a candidate | `_elided`'s own contract |
+| `redacted_values` offers the raw parameter | the redacted-target test |
+| `rerender()` forgets the targets | the /theme test |
+| `reset()` leaves the previous thread's | the /new test, through a redraw |
+| a replayed call carries no targets | the resumed-thread test |
+| `call_links` ignores the rationale param | the hidden-parameter test |
+
+**Still unverified from here:** that a real terminal delivers ctrl+click to these cells. The
+pilot injects the event rather than receiving it, so this proves textual's dispatch and not the
+mouse.

@@ -176,6 +176,23 @@ CONVERSATION_ROLES = frozenset({
 META_ROLES = frozenset({
     "system", "warning", "error", "pass", "pass_done", "success"})
 
+# Batch 65 (TECHNICAL_DEBT 16). The lines whose URLs are armed for
+# ctrl+click, beside the two sets above for their reason: which roles a
+# rule is true of is a list, and a list that lives at its one use site
+# is a list nothing can check.
+#
+# These three are what a model's tool CALL or its failure produced --
+# `▸ fetch_url  https://…` is where a URL most obviously appears, and it
+# was the one place inert while the same URL in prose was not. The
+# harness's own voice (`system`, `error`, `warning`) is deliberately
+# absent: those lines are written here, not by a model, and nothing has
+# reported wanting to click one.
+#
+# They take the LINKS-ONLY scanner, never the prose grammar. A tool
+# line is a digest, and `markdown.link_spans` says at length what the
+# full grammar does to one.
+LINKED_ROLES = frozenset({"tool", "pipeline_tool", "tool_error"})
+
 
 class RavenPanel(Static):
     """Corner raven: what the harness is doing right now."""
@@ -1461,6 +1478,14 @@ class Transcript(RichLog):
         super().__init__(wrap=True, markup=False, **kwargs)
         self._pending = ""
         self._entries: list[tuple[str, str]] = []
+        # Batch 65. Click TARGETS for entry N, when the drawn line is
+        # too short to be one -- see `markdown.link_spans`. A side
+        # table rather than a third element in the tuple above, because
+        # `_entries` is read by /copy, by last_answer() and by the
+        # replay contract, and a link is a rendering fact about a line
+        # rather than part of what was said. Keyed by INDEX, which
+        # rerender() already walks.
+        self._links: dict[int, tuple] = {}
         # §38. An assistant span with rows already on screen: its label is
         # drawn and its single entry is open at _entries[-1].
         self._stream_open = False
@@ -1506,13 +1531,22 @@ class Transcript(RichLog):
 
     # -- writing -----------------------------------------------------------
 
-    def _emit(self, role: str, text: str, record: bool = True) -> None:
-        """Render one entry and remember it. THE single write path."""
+    def _emit(self, role: str, text: str, record: bool = True,
+              links=()) -> None:
+        """Render one entry and remember it. THE single write path.
+
+        `links` are batch 65's click targets, remembered beside the
+        entry so a `/theme` rerender arms what the live draw armed. An
+        entry with none -- every role outside LINKED_ROLES, and most
+        tool lines -- stores nothing.
+        """
         if record:
             self._entries.append((role, text))
-        self._render_entry(role, text)
+            if links:
+                self._links[len(self._entries) - 1] = tuple(links)
+        self._render_entry(role, text, links)
 
-    def _render_entry(self, role: str, text: str) -> None:
+    def _render_entry(self, role: str, text: str, links=()) -> None:
         if role == "user":
             # §43 (RM1). The turn's label is retired HERE and nowhere
             # else, so where the labels land is a pure function of the
@@ -1545,13 +1579,13 @@ class Transcript(RichLog):
             # §43 sentence true: a tool line INSIDE the turn, after
             # reasoning or text has already opened the label, is a no-op.
             self._open_label()
-            self.write(Text(f"     {text}", self._style("tool")))
+            self.write(self._linked_line(text, "tool", links))
         elif role == "pipeline_tool":
             # The research pipeline's tool lines. Same kind of line and
             # the same style, deliberately NOT an opener: the run's label
             # belongs to the report, and a pipeline call is the harness
             # working, not the model answering (§43 RM1, owner decision).
-            self.write(Text(f"     {text}", self._style("tool")))
+            self.write(self._linked_line(text, "tool", links))
         elif role == "thinking":
             # §38. The furniture is OWNED by the renderer, not stored in
             # the entry: `_entries` keeps the model's raw reasoning, so
@@ -1562,8 +1596,27 @@ class Transcript(RichLog):
             self._write_thinking_open()
             self._write_thinking_lines(text)
             self._write_thinking_close()
+        elif role in LINKED_ROLES:
+            # `tool_error` arrives here, and needs no `links`: its text
+            # is redact_secrets(str(error)) with no truncation, so the
+            # URL it carries is whole and the span resolves to itself.
+            self.write(self._linked_line(text, role, links))
         else:
             self.write(Text(f"     {text}", self._style(role)))
+
+    def _linked_line(self, text: str, role: str, targets=()) -> Text:
+        """One harness-drawn line, with its URLs armed (batch 65).
+
+        The five-space indent every one of these lines carries is inside
+        the scanned text rather than prepended after, so a span's
+        columns are the columns Textual dispatches a click on -- the
+        offsets have to be the drawn ones or the arming lands beside the
+        URL instead of on it.
+        """
+        out = Text(style=self._style(role))
+        self._append_spans(out, f"     {text}", self._styles(),
+                           block=False, links_only=True, targets=targets)
+        return out
 
     def _open_label(self) -> None:
         """Draw this turn's `venastine ›`, once (§43, RM1).
@@ -1750,7 +1803,8 @@ class Transcript(RichLog):
         return out
 
     def _append_spans(self, out: Text, line: str, styles: dict, *,
-                      block: bool) -> None:
+                      block: bool, links_only: bool = False,
+                      targets=()) -> None:
         """One line's spans, appended to `out` in their palette roles.
 
         A LINK span is the one that carries more than a style. Its text is
@@ -1763,11 +1817,25 @@ class Transcript(RichLog):
         difference is not stylistic: an action string is PARSED, so
         building one out of model output would be an injection grammar fed
         by the model. A plain key is data all the way through.
+
+        `links_only` picks the other scanner (batch 65): a harness-drawn
+        line gets URLs and no other mark, because it is a digest rather
+        than prose. Both scanners are normalised to `(text, role,
+        target)` here so that the metadata attach below stays a SINGLE
+        line -- it is the security-critical one, and two copies of it
+        drifting apart is the shape this project keeps recording.
+
+        For prose the target IS the span, which is batch 58 unchanged.
+        `targets` is how a TRUNCATED tool line resolves to the URL it
+        was cut from, under the rules `markdown.link_spans` states.
         """
-        for span, role in markdown.inline_spans(line, block=block):
+        spans = markdown.link_spans(line, targets=targets) if links_only \
+            else ((text, role, text)
+                  for text, role in markdown.inline_spans(line, block=block))
+        for span, role, target in spans:
             if role == markdown.LINK:
                 out.append(span, Style.parse(styles.get(role) or "")
-                           + Style(meta={"url": span}))
+                           + Style(meta={"url": target}))
                 continue
             out.append(span, styles.get(role) if role else None)
 
@@ -1892,16 +1960,20 @@ class Transcript(RichLog):
         self.flush_stream()
         self._emit("error", text)
 
-    def write_role(self, role: str, text: str) -> None:
+    def write_role(self, role: str, text: str, links=()) -> None:
         """Write a line in an arbitrary palette role (§26).
 
         Exists so the research view can style a pass boundary, a tool call
         and a failed tool differently without Transcript growing a method
         per event kind -- the roles already live in one table, and this is
         the accessor for it.
+
+        `links` is batch 65's, and it is ignored for every role outside
+        LINKED_ROLES rather than refused: a caller that has candidates
+        should not have to know which roles use them.
         """
         self.flush_stream()
-        self._emit(role, text)
+        self._emit(role, text, links=links)
 
     def write_answer(self, text: str) -> None:
         """A model answer that did not arrive as a stream (a one-shot turn,
@@ -2180,6 +2252,11 @@ class Transcript(RichLog):
         # in the session with no `venastine ›`.
         self._label_in_force = False
         self._entries.clear()
+        # Batch 65, and the same sentence as the line above it: a click
+        # target left behind would belong to a thread that is no longer
+        # on screen, and index N would then arm the NEXT thread's Nth
+        # line with the previous one's URL.
+        self._links.clear()
         self.clear()
 
     def rerender(self) -> None:
@@ -2196,8 +2273,12 @@ class Transcript(RichLog):
         # loop below re-derives every one of them from the role sequence
         # exactly as the live path did.
         self._label_in_force = False
-        for role, text in self._entries:
-            self._render_entry(role, text)
+        for index, (role, text) in enumerate(self._entries):
+            # Batch 65: the targets too, or a /theme would silently
+            # disarm every long URL in the session -- the line would
+            # look identical and stop being clickable, which is the
+            # kind of loss only the pointer can find.
+            self._render_entry(role, text, self._links.get(index, ()))
 
     def last_answer(self) -> str:
         """The most recent answer in this session, or "" (for /copy last).

@@ -42,7 +42,8 @@ from security.permissions import (
 )
 from safety.policy_enforcement import (check_input_policy,
                                         check_output_policy,
-                                        param_digest)
+                                        param_digest,
+                                        redacted_values)
 from agents import subagent_tool
 
 logger = logging.getLogger(__name__)
@@ -492,6 +493,24 @@ class ToolRegistry:
         """
         key = self.rationale_param(tool_name)
         return param_digest(params, omit=(key,) if key else ())
+
+    def call_links(self, tool_name: str, params) -> tuple:
+        """The untruncated values behind that summary (batch 65).
+
+        `call_digest` caps a value at 60 characters, which is shorter
+        than most real URLs, so the transcript resolves a truncated
+        span against these to arm a ctrl+click. Redacted, and with any
+        value the redactor rewrote dropped -- `redacted_values` says
+        why a target may never come from the raw params.
+
+        THE SAME `omit`, which is the whole reason this sits here
+        rather than being called direct (Section 42, RA3): the two
+        halves describe one call, and a candidate drawn from a
+        parameter the line does not show is a target no span could
+        resolve to.
+        """
+        key = self.rationale_param(tool_name)
+        return redacted_values(params, omit=(key,) if key else ())
 
     def request_kind(self, tool_name: str) -> str:
         """Which kind of question approving this tool asks (§23).

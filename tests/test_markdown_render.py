@@ -708,12 +708,37 @@ class TestWhatMayBeArmed:
         ("javascript:alert(1)", "nor is a script scheme"),
         ("ftp://x.com/a", "nor anything else"),
         ("https://аpple.com", "a homograph: the visible form lies"),
+        ("https://accounts.google.com@phish.example/x",
+         "userinfo: what a reader takes for the destination is not the "
+         "host, which is the attack `[label](url)` was refused for "
+         "arriving through the URL's own syntax (batch 65)"),
+        ("https://x.com@evil.example", "the same with no path"),
+        ("http://user@x.com/a", "a bare username is enough to mislead"),
+        ("https://user:[REDACTED]@example.com/private",
+         "what param_digest makes of a credentialed URL -- a real "
+         "address, and not the one that was fetched"),
+        ("https://example.com/x?api_key=[REDACTED]",
+         "the same rewriting in a QUERY, which the userinfo rule alone "
+         "does not catch -- a click would send the literal string "
+         "[REDACTED] to a real host as an api_key"),
         ("https://x.com/​a", "an invisible character in the path"),
         (None, "no url at all"),
         ("", "an empty one"),
     ])
     def test_and_nothing_else(self, url, why):
         assert not md.clickable(url), why
+
+    def test_the_redaction_mark_is_the_one_safety_actually_writes(self):
+        """The duplication, checked rather than trusted.
+
+        This module is pure and may not import policy, so it keeps its own
+        copy of the marker. One string with two readers is exactly the
+        shape this project keeps recording as a bug, so the two are held
+        against each other here instead of hoped about.
+        """
+        from safety.policy_enforcement import REDACTION_MARKER
+
+        assert md.REDACTED_MARK == REDACTION_MARKER
 
     def test_a_url_that_cannot_be_armed_still_renders(self):
         """Visible and copyable, simply not clickable. The rule is about
@@ -759,3 +784,191 @@ class TestWrapDisplay:
 
     def test_an_unmeasurable_width_is_one_row(self):
         assert md.wrap_display("anything at all", 0) == ["anything at all"]
+
+
+# ===========================================================================
+# ---- link_spans: the scanner a harness line gets (batch 65) ---------------
+# ===========================================================================
+
+#: Real tool digests. The first four are the ones that made this a
+#: separate scanner rather than a reuse of `inline_spans`: run through the
+#: prose grammar, the last two LOSE CHARACTERS -- the backticks become a
+#: code span and the tildes a strikethrough -- so a reader is shown a
+#: shell command that is not the one that ran.
+DIGESTS = [
+    "\u25b8 shell  ls *.py",
+    "\u25b8 shell  python -c 'print(2**8)'",
+    "\u25b8 edit  __init__  __new__",
+    "\u25b8 write  a_b_c.py",
+    "\u25b8 shell  git log --format=%h  # `date`",
+    "\u25b8 mcp__x__y  name~=*test*  ~~old~~",
+]
+
+
+class TestALineTheHarnessDrewKeepsItsCharacters:
+    """A tool line is a digest, not prose (TECHNICAL_DEBT 16, closed).
+
+    The URL machinery lives in the same scanner as bold, italic, code
+    and strike, so the obvious way to arm a tool line hands it the whole
+    grammar. That is not merely over-decoration: two of the six shapes
+    below come out with characters missing, and a digest that no longer
+    shows what was run is worse than a URL that cannot be clicked.
+    """
+
+    @pytest.mark.parametrize("line", DIGESTS)
+    def test_every_digest_renders_verbatim(self, line):
+        drawn = "".join(text for text, _role, _target
+                        in md.link_spans(line))
+
+        assert drawn == line, (
+            f"{line!r} rendered as {drawn!r} -- a mark was read into a "
+            f"digest and ate the characters that made it")
+
+    @pytest.mark.parametrize("line", DIGESTS)
+    def test_and_carries_no_mark_but_a_link(self, line):
+        roles = {role for _text, role, _target in md.link_spans(line)
+                 if role}
+
+        assert roles <= {md.LINK}
+
+    def test_the_full_grammar_is_what_this_avoids(self):
+        """The measurement the decision rests on, kept as a test so it
+        cannot quietly stop being true."""
+        line = "\u25b8 shell  git log --format=%h  # `date`"
+        prose = "".join(text for text, _role in md.inline_spans(
+            line, block=False))
+
+        assert prose != line, (
+            "inline_spans no longer eats this, so the two scanners may "
+            "be worth collapsing again -- check the other cases first")
+
+
+class TestAnElidedURLResolvesToWhatItWasCutFrom:
+    """Batch 65's trade, and the invariant that bounds it.
+
+    `param_digest` caps a value at 60 characters, which is shorter than
+    most real documentation URLs, so the line draws a prefix and an
+    ellipsis. The full URL rides alongside and the span resolves to it --
+    which means the visible text is no longer the target, and batch 58's
+    rule needs a replacement rather than an exception:
+
+        the visible text tells you the ORIGIN, and the origin is where
+        it goes.
+
+    So a run cut off inside its host resolves to nothing. Truncation may
+    elide a path and a query; it may never elide the answer to `where
+    does this take me`.
+    """
+
+    FULL = "https://example.com/a/very/long/path/that/keeps/going"
+
+    def test_the_span_resolves_to_the_whole_url(self):
+        line = "\u25b8 fetch_url  https://example.com/a/very/long/pa\u2026"
+        armed = [(text, target) for text, role, target
+                 in md.link_spans(line, targets=(self.FULL,))
+                 if role == md.LINK]
+
+        assert armed == [
+            ("https://example.com/a/very/long/pa\u2026", self.FULL)], (
+            "the elided span did not resolve, so a long URL -- which is "
+            "most of them -- stays inert in the one line it appears in")
+
+    def test_a_truncation_that_cut_the_host_resolves_to_nothing(self):
+        """THE pin on the invariant above."""
+        full = "https://very-long-host-name.example.com/x"
+        line = "\u25b8 fetch_url  https://very-long-host-nam\u2026"
+
+        assert not [1 for _t, role, _g in
+                    md.link_spans(line, targets=(full,)) if role], (
+            "a span cut off inside its host was armed -- the reader can "
+            "see example.com in neither the drawn text nor the click, so "
+            "nothing on screen says where it goes")
+
+    def test_two_candidates_are_no_candidate(self):
+        """A click is not a guess."""
+        line = "\u25b8 fetch_url  https://example.com/pages/a\u2026"
+        targets = ("https://example.com/pages/a1/long/enough",
+                   "https://example.com/pages/a2/long/enough")
+
+        assert not [1 for _t, role, _g in
+                    md.link_spans(line, targets=targets) if role]
+
+    def test_a_candidate_that_could_not_be_clicked_is_no_target(self):
+        """`clickable` gates a target exactly as it gates a span, so a
+        caller cannot hand in something a reader would not have been
+        allowed to click -- the homograph and the userinfo spoof
+        included."""
+        line = "\u25b8 fetch_url  https://accounts.google.co\u2026"
+        spoof = "https://accounts.google.com@phish.example/some/path"
+
+        assert not [1 for _t, role, _g in
+                    md.link_spans(line, targets=(spoof,)) if role]
+
+    def test_an_untruncated_url_is_its_own_target(self):
+        """Batch 58 unchanged: where nothing was cut, the span IS the
+        target and the candidates are not consulted at all."""
+        url = "https://example.com/short"
+        line = f"\u25b8 fetch_url  {url}"
+
+        assert [(t, g) for t, role, g in md.link_spans(
+            line, targets=("https://elsewhere.example/x",))
+            if role] == [(url, url)]
+
+    def test_only_an_elision_resolves_at_all(self):
+        """`_elided`'s own contract, asked directly.
+
+        Through `link_spans` this guard is unreachable: a run is only
+        offered to it when `clickable` has already refused the run, and
+        every reason `clickable` refuses -- non-ASCII, a control
+        character, the redaction mark -- is inherited by anything the
+        run is a prefix OF, so a matching candidate would have been
+        refused too. Which makes it defence rather than decoration, and
+        defence nothing exercises is defence nobody can see break.
+        """
+        assert md._elided("https://example.com/x",
+                          ("https://example.com/xyz",)) == "", (
+            "a run with nothing elided borrowed a longer candidate -- "
+            "the visible text would then be a silent redirect rather "
+            "than a truncation the reader can see")
+
+    def test_a_target_is_never_invented_for_an_unelided_run(self):
+        """A run that is merely unclickable -- a homograph -- must not
+        borrow a candidate. Only an ELISION resolves."""
+        line = "\u25b8 fetch_url  https://аpple.com/login"
+
+        assert not [1 for _t, role, _g in md.link_spans(
+            line, targets=("https://apple.com/login",)) if role]
+
+
+class TestTheDigestBoundary:
+    """Swept where the cap actually bites rather than at a comfortable
+    middle, which is batch 62's lesson: away from the edge every one of
+    these renders the same and proves nothing."""
+
+    HOST = "https://example.com/"
+
+    @staticmethod
+    def _digest(url):
+        from safety.policy_enforcement import param_digest
+        return param_digest({"url": url})
+
+    @staticmethod
+    def _targets(url):
+        from safety.policy_enforcement import redacted_values
+        return redacted_values({"url": url})
+
+    @pytest.mark.parametrize("length, elided", [
+        (59, False), (60, False), (61, True), (200, True),
+    ])
+    def test_the_url_is_armed_at_every_length(self, length, elided):
+        url = self.HOST + "a" * (length - len(self.HOST))
+        line = f"\u25b8 fetch_url  {self._digest(url)}"
+
+        armed = [(text, target) for text, role, target in md.link_spans(
+            line, targets=self._targets(url)) if role == md.LINK]
+
+        assert len(armed) == 1, f"{line!r} armed {armed}"
+        assert armed[0][1] == url
+        assert (armed[0][0] != url) is elided, (
+            f"expected elided={elided} at {length} characters, drew "
+            f"{armed[0][0]!r}")

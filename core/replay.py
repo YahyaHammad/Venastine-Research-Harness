@@ -62,13 +62,21 @@ from uuid import UUID
 from tools.registry import registry
 from storage import archive_history
 
-#: One replayed entry: (role, text). The roles are transcript palette roles
-#: (tui/themes.role_styles), so the TUI can paint them with what it already
-#: has and the CLI can label them. Deliberately NOT the neutral message
-#: shape -- a caller of this function is rendering, not reasoning about
-#: history, and handing it messages would invite a second policy decision
-#: about tool results at the call site.
-ReplayEntry = Tuple[str, str]
+#: One replayed entry: (role, text, links). The roles are transcript palette
+#: roles (tui/themes.role_styles), so the TUI can paint them with what it
+#: already has and the CLI can label them. Deliberately NOT the neutral
+#: message shape -- a caller of this function is rendering, not reasoning
+#: about history, and handing it messages would invite a second policy
+#: decision about tool results at the call site.
+#:
+#: `links` is batch 65's, and it does not narrow the sentence above: a
+#: click target is a RENDERING fact about a line, not part of what was
+#: said. It is here because the alternative is worse -- a tool line's
+#: digest truncates a long URL, so without it a resumed thread would draw
+#: the same characters as a live turn and quietly refuse to open them,
+#: which is the one conversation rendered two ways that Section 44 removed
+#: for thinking spans. Empty for every entry that is not a tool call.
+ReplayEntry = Tuple[str, str, Tuple[str, ...]]
 
 
 def replay_entries(thread_id: UUID) -> List[ReplayEntry]:
@@ -84,7 +92,7 @@ def replay_entries(thread_id: UUID) -> List[ReplayEntry]:
         if role == "user":
             text = _as_text(message.get("content"))
             if text:
-                entries.append(("user", text))
+                entries.append(("user", text, ()))
         elif role == "assistant":
             # BEFORE the answer, because that is the order it happened in
             # and the order the live transcript drew it in (§43 RM1 puts
@@ -93,12 +101,12 @@ def replay_entries(thread_id: UUID) -> List[ReplayEntry]:
             # reflowed it.
             reasoning = _reasoning_text(message.get("thinking"))
             if reasoning:
-                entries.append(("thinking", reasoning))
+                entries.append(("thinking", reasoning, ()))
             text = _as_text(message.get("text"))
             if text:
-                entries.append(("assistant", text))
+                entries.append(("assistant", text, ()))
             for call in message.get("tool_calls") or []:
-                entries.append(("tool", _tool_marker(call)))
+                entries.append(("tool", *_tool_marker(call)))
         # role == "tool": skipped by T4. Not a gap -- see the module
         # docstring. The CALL above is the record that it happened.
     return entries
@@ -131,8 +139,10 @@ def _reasoning_text(record) -> str:
     return "\n\n".join(parts)
 
 
-def _tool_marker(call: dict) -> str:
-    """One line for one tool call: name, then a redacted param digest.
+def _tool_marker(call: dict) -> Tuple[str, Tuple[str, ...]]:
+    """One line for one tool call, and its click targets.
+
+    The line is the name, then a redacted param digest.
 
     The digest comes from `registry.call_digest` rather than from a
     local copy -- it redacts BEFORE truncating, and a second
@@ -148,10 +158,16 @@ def _tool_marker(call: dict) -> str:
     (1.9s cold at process start, 0.0s here).
     """
     name = call.get("name") or "tool"
-    digest = registry.call_digest(name, call.get("input"))
+    params = call.get("input")
+    digest = registry.call_digest(name, params)
     # Standardised to ▸ like the live transcript (tui/app.py both modes).
     # Replay stays redacted via param_digest, same producer as live.
-    return f"▸ {name}  {digest}".rstrip() if digest else f"▸ {name}"
+    #
+    # And the click targets from the same producer for the same reason
+    # (batch 65): a resumed thread that armed fewer URLs than the live
+    # turn would be the archive disagreeing with the screen it came from.
+    line = f"▸ {name}  {digest}".rstrip() if digest else f"▸ {name}"
+    return line, registry.call_links(name, params)
 
 
 def _as_text(value: Optional[object]) -> str:

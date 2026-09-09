@@ -701,8 +701,11 @@ async def test_switching_theme_replays_the_transcript():
         # removed entirely.
         replayed = []
         original = transcript._render_entry
-        transcript._render_entry = lambda role, text: (
-            replayed.append((role, text)), original(role, text))[1]
+        # `links` since batch 65: rerender() passes the stored click
+        # targets, so a two-argument spy stops standing in for the method
+        # it replaced.
+        transcript._render_entry = lambda role, text, links=(): (
+            replayed.append((role, text)), original(role, text, links))[1]
 
         app.query_one("#prompt").value = "/theme light-red"
         await pilot.press("enter")
