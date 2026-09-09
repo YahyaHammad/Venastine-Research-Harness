@@ -3923,5 +3923,5 @@ subagent-thread sources before research passes.
    conversation it summarised. **BUILT, batch 72.** *The REVIEWER moved to slice 7: it
    runs from the orchestrator, which carries no sink at all, and that is the same
    plumbing the passes need.*
-7. Research passes -- **and the reviewer**, which shares their plumbing.
+7. **Research passes -- and the reviewer**, which shares their plumbing. **BUILT, batch 73.**
 8. Parallel spawns.

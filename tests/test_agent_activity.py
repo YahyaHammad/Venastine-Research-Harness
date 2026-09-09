@@ -1258,3 +1258,212 @@ class TestTheSinkReachesTheInitializerFromTheSHELL:
             sink = app._activity
 
         assert captured["activity"] is sink
+
+class TestAResearchPassReportsItself:
+    """§47 slice 7, and the other half of batch 59's follow-on. A research
+    run is mostly passes and each takes minutes; until now the panel stayed
+    blank for the part worth watching."""
+
+    def _drain(self, gen):
+        from tests.conftest import drain
+
+        return drain(gen)
+
+    def test_a_pass_opens_and_closes_a_span(self, mocker):
+        from core.loop import RunAgentLoop
+
+        mocker.patch.object(
+            RunAgentLoop, "_run",
+            side_effect=lambda *a, **kw: iter(
+                [type("E", (), {"final_response":
+                                make_model_response(text="done")})()]))
+
+        sink = Recorder()
+        self._drain(RunAgentLoop.stream_deep_research_mode(
+            "input", "m", "Pass 1", activity=sink))
+
+        assert [(k, n) for k, n, _d in sink.events] == [
+            ("enter", "Pass 1"), ("exit", "Pass 1")]
+        assert sink.live == []
+
+    def test_a_pass_runs_one_level_down(self, mocker):
+        from core.loop import RunAgentLoop
+
+        mocker.patch.object(
+            RunAgentLoop, "_run",
+            side_effect=lambda *a, **kw: iter(
+                [type("E", (), {"final_response":
+                                make_model_response(text="done")})()]))
+
+        sink = Recorder()
+        self._drain(RunAgentLoop.stream_deep_research_mode(
+            "input", "m", "Pass 1", activity=sink))
+
+        assert [d for _k, _n, d in sink.events] == [1, 1]
+
+    def test_an_abandoned_pass_still_closes_its_row(self, mocker):
+        """§22 records abandonment: a TUI quitting mid-run raises
+        GeneratorExit inside the generator. The span has to close on that
+        too, or the panel keeps a row for a pass nobody is running."""
+        from core.loop import RunAgentLoop
+
+        def _forever(*a, **kw):
+            while True:
+                yield type("E", (), {"final_response": None})()
+
+        mocker.patch.object(RunAgentLoop, "_run", side_effect=_forever)
+
+        sink = Recorder()
+        gen = RunAgentLoop.stream_deep_research_mode(
+            "input", "m", "Pass 1", activity=sink)
+        next(gen)
+        assert sink.live == [("Pass 1", 1)]
+        gen.close()
+
+        assert sink.live == [], "an abandoned pass left its row on screen"
+
+    def test_a_pass_thread_says_which_pass_it_was(self, mocker):
+        """No parent THREAD -- a pass is a child of the RUN, and a run is
+        not a conversation. §27's T2 already indexes them on the run."""
+        from core import loop as loop_mod
+        from core.loop import RunAgentLoop
+
+        captured = {}
+        original = loop_mod.ConversationMemory
+
+        def _spy(**kwargs):
+            captured.update(kwargs)
+            return original(**kwargs)
+
+        mocker.patch.object(loop_mod, "ConversationMemory", _spy)
+        mocker.patch.object(
+            RunAgentLoop, "_run",
+            side_effect=lambda *a, **kw: iter(
+                [type("E", (), {"final_response":
+                                make_model_response(text="done")})()]))
+
+        self._drain(RunAgentLoop.stream_deep_research_mode(
+            "input", "m", "Pass 3a"))
+
+        assert captured["agent_name"] == "Pass 3a"
+        assert "parent_thread_id" not in captured or \
+            captured["parent_thread_id"] is None
+
+    def test_the_pass_is_bound_so_it_can_be_opened_while_it_runs(self,
+                                                                 mocker):
+        from core.loop import RunAgentLoop
+
+        mocker.patch.object(
+            RunAgentLoop, "_run",
+            side_effect=lambda *a, **kw: iter(
+                [type("E", (), {"final_response":
+                                make_model_response(text="done")})()]))
+
+        sink = Recorder()
+        response = self._drain(RunAgentLoop.stream_deep_research_mode(
+            "input", "m", "Pass 1", activity=sink))
+
+        assert [thread for _span, thread in sink.bound] == [
+            response.thread_id], (
+                f"the pass bound {sink.bound!r}; a row with no address "
+                "cannot be opened until the run is over")
+
+
+class TestTheOrchestratorCarriesTheSink:
+    """The threading itself. Batch 59 stopped at
+    `stream_deep_research_mode`'s signature and said so; this is the rest
+    of the chain, and each hop is a place it can be dropped."""
+
+    @staticmethod
+    def _fake_pass(captured):
+        """A stand-in for `stream_deep_research_mode`: a GENERATOR that
+        returns a response, because `_run_pass` drains it with
+        `yield from` and reads the return value."""
+        def _run(**kwargs):
+            captured.update(kwargs)
+            return
+            yield                                   # noqa: unreachable
+        return _run
+
+    def test_a_pass_runner_hands_it_down(self, mocker):
+        from core.reasoning import orchestrator
+
+        captured = {}
+        mocker.patch.object(orchestrator.RunAgentLoop,
+                            "stream_deep_research_mode",
+                            side_effect=self._fake_pass(captured))
+
+        sink = Recorder()
+        try:
+            list(orchestrator._run_pass("Pass 1", "in", "m", "ANTHROPIC",
+                                        activity=sink))
+        except Exception:                                       # noqa: BLE001
+            # The fake returns no response, which the real one never does.
+            # What is under test is the ARGUMENT, and it was captured
+            # before anything downstream could object to the answer.
+            pass
+
+        assert captured["activity"] is sink
+
+    def test_the_retrying_pass_runner_hands_it_down(self, mocker):
+        from core.reasoning import orchestrator
+
+        captured = {}
+        mocker.patch.object(orchestrator.RunAgentLoop,
+                            "stream_deep_research_mode",
+                            side_effect=self._fake_pass(captured))
+
+        sink = Recorder()
+        try:
+            list(orchestrator._run_pass_with_json_retry(
+                "Pass 2", "in", "m", "ANTHROPIC", activity=sink))
+        except Exception:                                       # noqa: BLE001
+            pass
+
+        assert captured["activity"] is sink
+
+    def test_the_reviewer_gets_one_too(self, _roots, mocker,
+                                       fake_storage):
+        """Moved here from slice 6 deliberately: the reviewer runs from
+        the orchestrator, so it needs the same plumbing the passes do and
+        building it twice would be two copies that can disagree.
+
+        Patched on `core.loop` rather than on the review module, which
+        imports the loop INSIDE the function to avoid an import cycle.
+        """
+        from core.reasoning import review as review_module
+
+        _write_harness_agent(_roots, review_module.REVIEWER_AGENT)
+        config_loader.initialize(str(_roots["project"]))
+
+        captured = {}
+        mocker.patch.object(
+            RunAgentLoop, "run_agent_conversation",
+            side_effect=lambda **kw: (captured.update(kw),
+                                      make_model_response(text="[]"))[1])
+
+        class _Run:
+            """Answers whatever the reviewer prompt asks for. The
+            prompt's SHAPE is `_reviewer_prompt`'s business and has
+            its own tests; what is under test here is one argument."""
+
+            trace = []
+            claims = []
+            final_report = ""
+            user_query = "q"
+
+            def log(self, _message):
+                pass
+
+            def __getattr__(self, _name):
+                return []
+
+        run = _Run()
+        sink = Recorder()
+        try:
+            review_module.run_review(run, "m", "ANTHROPIC", activity=sink)
+        except Exception:                                       # noqa: BLE001
+            pass
+
+        assert captured.get("activity") is sink
+        assert captured.get("thread_agent")

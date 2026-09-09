@@ -4002,3 +4002,29 @@ in, and `generate()` is shell-agnostic and has no conversation to name. Batch 72
 **Fix:** the compactor's thread is a child of the one it summarises in the only sense that
 matters. It has no parent CALL, because no tool started it -- findable by its conversation and by
 nothing else. Batch 72.
+
+### Dropping `activity` at any orchestrator hop
+
+**Symptom:** `test_a_pass_runner_hands_it_down`, `test_the_retrying_pass_runner_hands_it_down`, or
+`test_the_reviewer_gets_one_too`.
+
+**Fix:** the sink is threaded explicitly beside `authorization` because both are run-scoped values
+the layers between the entry point and the model call only forward. Batch 59 stopped at
+`stream_deep_research_mode`'s signature; batch 73 is the rest of the chain, and each hop is a
+place it can be dropped. Batch 73.
+
+### A pass's span not bracketing the whole generator
+
+**Symptom:** `test_an_abandoned_pass_still_closes_its_row`.
+
+**Fix:** it has to close on `GeneratorExit`, which is §22's abandonment case -- a TUI quitting
+mid-run. Drive it with `next()` then `close()`; a test that drains the generator normally cannot
+see the difference. Batch 73.
+
+### Giving a research pass a parent THREAD
+
+**Symptom:** `test_a_pass_thread_says_which_pass_it_was`.
+
+**Fix:** a pass is a child of the RUN, and a run is not a conversation. `PipelineRun.pass_threads`
+already indexes them (§27 T2), so a parent column here would be two records of one edge -- the
+producer/consumer shape this project keeps finding. Batch 73.

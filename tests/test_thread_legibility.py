@@ -60,8 +60,9 @@ class TestWhatEachPathCreates:
         created = []
 
         class SpyMemory(FakeMemory):
-            def __init__(self, thread_id=None, kind="chat"):
-                super().__init__(thread_id=thread_id, kind=kind)
+            def __init__(self, thread_id=None, kind="chat", **lineage):
+                super().__init__(thread_id=thread_id, kind=kind,
+                                 **lineage)
                 created.append(kind)
 
         mocker.patch("core.loop.ConversationMemory", SpyMemory)

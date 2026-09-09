@@ -1458,42 +1458,65 @@ class RunAgentLoop:
         and never raw history, which is what stops a later pass reading how
         an earlier one argued. What was missing is the thread saying so, so
         that ~15 threads per run stop being offered as conversations.
+
+        §47: the span brackets the WHOLE generator, which is why it is the
+        outermost thing in the body. A pass is a run in its own right and
+        takes minutes; a row that appeared only at the end would describe
+        something already over. It closes on GeneratorExit too, which is
+        the abandonment case §22 records above -- a TUI quitting mid-run
+        must not leave the pass on screen.
         """
-        memory = ConversationMemory(kind=THREAD_KIND_RESEARCH_PASS)
-        memory.add_user_message(pass_input)
-        # #68. The catalogs are decided from the SAME bundle the tool
-        # schemas are decided from a few frames down, so a pass cannot
-        # be told to spawn a subagent it will not be given.
-        _callable_only, _granted = advertisement_facts(authorization)
-        system_prompt = system_prompts.pass_prompt(
-            pass_id, callable_only=_callable_only, granted=_granted)
-        response = None
-        for event in RunAgentLoop._run(
-            memory, system_prompt, provider_name, model, context,
-            max_steps, _resolve_spend_cap(max_total_tokens),
-            temperature=temperature, effort=effort,
-            # §21 M6. A pass is headless and unattended and already returns
-            # a distillation, so routine compaction here would spend on a
-            # judgment call nobody is watching. The backstop still fires
-            # near the model's real context window, because the
-            # alternative there is a hard provider error mid-pipeline.
-            compaction_mode="backstop",
-            activity=activity,
-            **_authorization_kwargs(authorization),
-        ):
-            if event.final_response is not None:
-                response = event.final_response
-            yield event
-        if response is None:
-            # Same contract as run_to_completion's RuntimeError, and for
-            # the same reason: a loop that ended without a final response
-            # has a bug, and returning None would push the failure into
-            # whichever pass dereferences .text first.
-            raise RuntimeError(
-                "Generator completed without yielding a final_response"
-            )
-        response.thread_id = memory.thread_id
-        return response
+        # Depth derived from the context the pass starts at rather than
+        # written as a 1: `_compactor_depth`'s rule, one entry point over.
+        depth = (context.subagent_depth if context is not None else 0) + 1
+        with agent_activity.span(activity, pass_id, depth):
+            memory = ConversationMemory(
+                kind=THREAD_KIND_RESEARCH_PASS,
+                # §47. No parent THREAD: a pass is a child of the RUN, and
+                # a run is not a conversation. §27's T2 already indexes
+                # them on `PipelineRun.pass_threads`, the run's own
+                # object, so a second index here would be two records of
+                # one edge -- the producer/consumer shape this project
+                # keeps finding.
+                agent_name=pass_id)
+            # The address, at the earliest moment it exists, so a pass is
+            # openable WHILE it runs rather than once the report lands.
+            agent_activity.bind(activity, memory.thread_id)
+            memory.add_user_message(pass_input)
+            # #68. The catalogs are decided from the SAME bundle the tool
+            # schemas are decided from a few frames down, so a pass cannot
+            # be told to spawn a subagent it will not be given.
+            _callable_only, _granted = advertisement_facts(authorization)
+            system_prompt = system_prompts.pass_prompt(
+                pass_id, callable_only=_callable_only, granted=_granted)
+            response = None
+            for event in RunAgentLoop._run(
+                memory, system_prompt, provider_name, model, context,
+                max_steps, _resolve_spend_cap(max_total_tokens),
+                temperature=temperature, effort=effort,
+                # §21 M6. A pass is headless and unattended and already
+                # returns a distillation, so routine compaction here would
+                # spend on a judgment call nobody is watching. The
+                # backstop still fires near the model's real context
+                # window, because the alternative there is a hard provider
+                # error mid-pipeline.
+                compaction_mode="backstop",
+                activity=activity,
+                **_authorization_kwargs(authorization),
+            ):
+                if event.final_response is not None:
+                    response = event.final_response
+                yield event
+            if response is None:
+                # Same contract as run_to_completion's RuntimeError, and
+                # for the same reason: a loop that ended without a final
+                # response has a bug, and returning None would push the
+                # failure into whichever pass dereferences .text first.
+                raise RuntimeError(
+                    "Generator completed without yielding a final_response"
+                )
+            response.thread_id = memory.thread_id
+            return response
 
     @staticmethod
     def continue_conversation(

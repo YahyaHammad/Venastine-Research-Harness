@@ -726,12 +726,18 @@ class FakeMemory:
     the FakeStorage patch list drift in the same section.
     """
 
-    def __init__(self, thread_id=None, kind="chat"):
+    def __init__(self, thread_id=None, kind="chat", **lineage):
         # §27: accepts ConversationMemory's real signature, because
         # stream_deep_research_mode() now constructs one WITH a kind and a
         # doubled class that refuses the kwarg fails inside the loop rather
         # than in the test that installed it. Recorded rather than ignored
         # so a test can assert what a code path created.
+        #
+        # §47's three lineage kwargs are SWALLOWED rather than
+        # enumerated, for registry.dispatch()'s stub reason: a double
+        # that lists every argument breaks on each one added, and what
+        # this class is for is the add_* path the loop took.
+        self.lineage = lineage
         self.user_messages = []
         self.assistant_messages = []
         self.tool_results = []  # list of (tool_call_id, result)

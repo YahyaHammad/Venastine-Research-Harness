@@ -101,7 +101,7 @@ def _review_input(run) -> str:
 
 
 def run_review(run, model: str, provider_name: str, authorization=None,
-               effort: str | None = None):
+               effort: str | None = None, activity=None):
     """Runs the reviewer agent over the finished run. Returns
     (findings, thread_id) -- the thread_id is what a refinement re-enters.
 
@@ -154,6 +154,11 @@ def run_review(run, model: str, provider_name: str, authorization=None,
             # runs through the same entry point -- so its thread is labelled
             # like one rather than getting a fourth kind of its own.
             thread_kind=THREAD_KIND_SUBAGENT,
+            activity=activity,
+            # §47. What it WAS, for a reader who has only the row. No
+            # parent thread: the reviewer reviews a RUN, and a run is
+            # not a conversation.
+            thread_agent=agent.name,
         )
         _record_granted_calls(run, response, authorization)
 

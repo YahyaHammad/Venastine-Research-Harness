@@ -3644,6 +3644,11 @@ def _start_research(app: VenastineApp, query: str, authorization) -> None:
                 authorization=authorization,
                 review=consent,
                 subagent_review=review_on,
+                # §47. The sink, so the ten passes and the reviewer
+                # draw in the panel and can be opened while they run.
+                # `getattr`, matching every other span call site: a
+                # stub app in the suite has no sink.
+                activity=getattr(app, "_activity", None),
                 # #139. The pipeline runs at the effort the session shows
                 # in the status bar -- captured HERE, so a mid-run /effort
                 # affects the next run, exactly like model/provider.

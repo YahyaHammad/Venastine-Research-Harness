@@ -11796,3 +11796,44 @@ the app's, and `compact()` tells the compactor whose thread it is.
 The fourth survivor is an honest limit rather than a gap. "Replace the `with` with a pair of
 calls" cannot be expressed as a one-hunk substitution here, so the initializer's own
 raise-still-closes test is not what kills it; the module's context-manager tests are.
+
+## Batch 73 -- the ten passes, seen at last (2026-09-09)
+
+§47, slice 7 of eight, and the end of batch 59's follow-on list. A research run draws in the agent
+panel now, one row per pass, each openable while it runs.
+
+**The sink is threaded explicitly, beside `authorization`** (owner's call at design time). Batch 59
+carried it as far as `stream_deep_research_mode`'s signature and stopped, calling the rest "a
+wider blast radius for a narrow case". The case stopped being narrow when a span became something
+you could click: a run is mostly passes, each takes minutes, and the panel stayed blank for the
+part worth watching. The alternative considered and rejected was a second ContextVar holding the
+current sink -- which would have solved the threading permanently and made ambient a value batch
+59 deliberately made explicit.
+
+**A pass's span brackets the WHOLE generator**, which is why it is the outermost thing in the
+body. It closes on `GeneratorExit` too, which is the abandonment case §22 records: a TUI quitting
+mid-run must not leave a pass on screen. There is a test that drives exactly that -- `next()`,
+then `close()`.
+
+**A pass records which pass it was and no parent thread.** It is a child of the RUN, and a run is
+not a conversation; §27's T2 already indexes them on `PipelineRun.pass_threads`, the run's own
+object, so a second index here would be two records of one edge. Same for the reviewer, which
+reviews a run rather than a thread.
+
+**Depth is derived, never written as a 1** -- `_compactor_depth`'s rule, now applied at its third
+call site.
+
+### Files
+
+- `core/loop.py` -- the pass's span, its bind, and its `agent_name`.
+- `core/reasoning/orchestrator.py` -- `activity` at four signatures and fourteen call sites.
+- `core/reasoning/review.py` -- the reviewer's sink and `thread_agent`.
+- `tui/app.py` -- `/research` hands over `app._activity`.
+- `tests/test_agent_activity.py` (65 -> 73).
+
+### Mutation
+
+Eight, all killed, and no survivors on the first pass -- the first slice in this project where
+that happened, which is worth noting only because the reason is dull: every hop of the threading
+had a test written for it before the code, because the previous three slices each lost a mutation
+to exactly the gap between a leaf and its chain.
