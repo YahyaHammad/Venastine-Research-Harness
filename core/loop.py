@@ -1145,8 +1145,21 @@ def _dispatch_parallel(calls, *, context, run_info, response_channel,
     the shape adds no new way to wedge.
     """
     conduit: queue.Queue = queue.Queue()
-    outcomes: dict = {}
-    failures: dict = {}
+    # `[(call, outcome_or_None, exception_or_None)]`, in the order the
+    # futures were submitted, which is the order the MODEL asked (NA11).
+    #
+    # A LIST RATHER THAN A DICT KEYED BY `call.id`, which is what this was
+    # until batch 76's review round. The id is the PROVIDER'S, and
+    # core/client.py's v1-compatible branch defaults a tool-call fragment's
+    # id to "" and fills it only if a delta carries one -- the same branch
+    # that accumulates `function.name` across deltas because some providers
+    # split it, so a provider being sloppy here is the case this code is
+    # written for. Two spawns arriving with one id made a dict hand every
+    # call in the batch the last-finishing worker's outcome: the model told
+    # one child's answer for a different child's call, which is the exact
+    # thing NA11 exists to prevent. Positions cannot collide, so ordering
+    # is now structural rather than a lookup.
+    settled_calls: list = []
 
     def _work(call):
         """Drive one call's generator, pushing what it would have yielded."""
@@ -1181,9 +1194,9 @@ def _dispatch_parallel(calls, *, context, run_info, response_channel,
                 yield payload
         for call, future in futures:
             try:
-                outcomes[call.id] = future.result()
+                settled_calls.append((call, future.result(), None))
             except Exception as e:      # noqa: BLE001 -- NA14, see below
-                failures[call.id] = e
+                settled_calls.append((call, None, e))
 
     # NA14. A RAISING SIBLING BECOMES ITS OWN RESULT, and this is a
     # deliberate behaviour change scoped to a parallel batch.
@@ -1203,17 +1216,17 @@ def _dispatch_parallel(calls, *, context, run_info, response_channel,
     # -- a real bug must stay findable -- and reported to the model in the
     # shape it already understands.
     ordered = []
-    for call in calls:
-        if call.id in failures:
+    for call, outcome, failure in settled_calls:
+        if failure is not None:
             logger.exception(
                 "parallel tool call %s (%s) raised; reporting it as that "
                 "call's error and continuing with its siblings",
-                call.id, call.name, exc_info=failures[call.id])
+                call.id, call.name, exc_info=failure)
             ordered.append((call, _CallOutcome(
                 result={"error": "%s failed: %s" % (
-                    call.name, failures[call.id])})))
+                    call.name, failure)})))
         else:
-            ordered.append((call, outcomes[call.id]))
+            ordered.append((call, outcome))
     return ordered
 
 

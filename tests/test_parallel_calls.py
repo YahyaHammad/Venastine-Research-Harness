@@ -357,6 +357,56 @@ class TestResultsComeBackInCallOrder:
         assert [r["n"] for r in _results(events)] == [0, 1, 2], (
             "each result was paired with the wrong call")
 
+    def test_two_calls_sharing_one_id_still_get_their_own_answers(
+            self, mocker):
+        """THE ORDER IS THE POSITION, NOT A LOOKUP (batch 76's review).
+
+        The batch collected its outcomes into a dict keyed by `call.id`
+        and rebuilt the list by looking each one back up. That id is the
+        PROVIDER'S: core/client.py's v1-compatible branch defaults a
+        tool-call fragment's id to "" and fills it only if a delta carries
+        one, and the branch twenty lines below it accumulates
+        `function.name` across deltas because some providers split it --
+        so a provider being sloppy about the id is the case that file is
+        written for. Two spawns arriving with one id made the dict hand
+        every call in the batch the last-finishing worker's outcome: one
+        child's answer reported for a different child's call, which is
+        what NA11 exists to prevent.
+
+        The adapter defaults a missing id now too, one commit along. Both,
+        because this frame should not need a provider to keep a promise
+        for its own bookkeeping to hold.
+        """
+        _make_parallel(mocker, "get_time")
+
+        def handler(params, **kw):
+            return {"n": params["n"]}
+
+        mocker.patch.object(registry._tools["get_time"], "handler", handler)
+
+        # Built by hand, because `_drive` numbers the ids and the whole
+        # point here is that they are not distinct.
+        uses = make_model_response(text="", tool_calls=[
+            {"id": "", "name": "get_time", "input": {"n": n}}
+            for n in range(2)])
+        seq = [uses, make_model_response(text="done")]
+        mocker.patch("core.loop.api_initialization", return_value=object())
+        mocker.patch("core.loop.effort_for", return_value=None)
+        mocker.patch(
+            "core.loop.call_model_stream",
+            side_effect=lambda *a, **kw: iter([StreamToken(
+                final_response=(seq.pop(0) if seq
+                                else make_model_response(text="x")))]))
+
+        events = list(RunAgentLoop._run(
+            memory=_Mem(), system_prompt="s", provider_name="ANTHROPIC",
+            model="m", context=None, max_steps=2, response_channel=None))
+
+        assert [r["n"] for r in _results(events)] == [0, 1], (
+            f"got {_results(events)}; each call is owed the answer its own "
+            "handler produced, and two of them cannot be told apart by an "
+            "id the provider did not give them")
+
     def test_every_call_is_announced_before_any_of_them_runs(self, mocker):
         """`tool_call_start` for the whole group, in call order, before the
         first handler is entered. A batch announces its membership at once
