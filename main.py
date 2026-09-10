@@ -533,8 +533,39 @@ def build_attended_provider(honour_run_scope: bool = False,
         for line in rendered.splitlines():
             print(f"  {line}")
 
+    def _asker(payload: dict) -> None:
+        """Name the run that raised this, when it is not the conversation.
+
+        §47 put `asking_agent` / `asking_depth` on every payload that can
+        be raised from inside a run -- core/loop.py writes them onto an
+        approval, and the `ask_user` tool onto a question -- and rendered
+        them in the TUI only. This shell dropped all three, which is the
+        gap `_approval` below names in its own comment: a kind one shell
+        renders and the other drops looks perfectly wired up (D12). Found
+        by the second round of reviewing §47, batch 76.
+
+        It matters most where the subject of the question is a NAME. NA9
+        means three children of one response can each be spawning a
+        grandchild, and their three sign-offs name the grandchild and
+        nothing else -- three identical prompts on the one stdin reader.
+
+        DIRECTLY UNDER THE BRACKETED HEADER, above the candidates or the
+        payload, at every site: one placement rule rather than three, and
+        the same position relative to the header that the modal gives it.
+
+        Silent at depth 0, which is SCOPE rather than a gap -- the asking
+        run is then the conversation being watched.
+        """
+        asked_by = payload.get("asking_agent")
+        if asked_by:
+            print(f"  asked by {asked_by} "
+                  f"(depth {payload.get('asking_depth') or 0})")
+
     def _approval(request) -> bool:
         print(f"\n[approval] {request.payload.get('tool_name')}")
+        # Under the header, above everything the agent wrote -- see
+        # `_asker`, which is the one placement rule for the three kinds.
+        _asker(request.payload)
         # §46 (EP1). The subject of the question, first. The TUI pins it
         # because a modal has a bottom edge; a terminal does not, so
         # here it is placement rather than rescue -- but a kind one
@@ -582,6 +613,12 @@ def build_attended_provider(honour_run_scope: bool = False,
         allow_text = payload.get("allow_text", True) is not False
 
         print(f"\n[question] {payload.get('question', '')}")
+        # The one site where the header already carries the model's own
+        # words, so the label follows them rather than preceding them --
+        # the same order `_approval` keeps for its headline, and for the
+        # reason its comment gives: a terminal has no bottom edge, so
+        # this is placement rather than rescue.
+        _asker(payload)
         for index, option in enumerate(options, start=1):
             print(f"  {index}. {option}")
         how = []
@@ -632,12 +669,17 @@ def build_attended_provider(honour_run_scope: bool = False,
         candidates = list(request.payload.get("candidates") or [])
         if not candidates:
             print(f"\n[subagent] {agent} needs no approval-gated tools.")
+            # BOTH branches, as the modal splices it into both of its own:
+            # a nested spawn of an agent with no gated tools reaches this
+            # one, and `agent` here is the run about to be SPAWNED.
+            _asker(request.payload)
             answer = reader.ask(f"  Run it? [y/N]{clock}: ", timeout)
             if answer and answer.strip().lower() in ("y", "yes"):
                 return set()
             print("  [the spawn was refused]")
             return None
         print(f"\n[subagent] {agent} may be granted, for this turn only:")
+        _asker(request.payload)
         for index, name in enumerate(candidates, 1):
             print(f"  {index}. {name}")
         answer = reader.ask(

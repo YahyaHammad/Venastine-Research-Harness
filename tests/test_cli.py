@@ -711,6 +711,105 @@ class TestEveryKindIsRendered:
         assert not missing, f"tui/app.py cannot render {missing}"
 
 
+class TestTheTerminalNamesTheAskingRun:
+    """§47's asker line, in the shell that was dropping it (batch 76).
+
+    `core/loop.py` puts `asking_agent` / `asking_depth` on every approval
+    payload and the `ask_user` tool puts them on a question, so all three
+    kinds that can be raised from INSIDE a run carry the asker -- and this
+    file rendered none of them while the TUI rendered one, then three.
+    That is audit #7's shape one level down: not a missing branch, but a
+    branch that drops a field, which looks perfectly wired up.
+
+    It matters most where the subject is a NAME. NA9 lets three children
+    of one response each ask at once, and three sign-offs naming only the
+    grandchild about to be spawned are three identical prompts on the one
+    stdin reader.
+    """
+
+    @staticmethod
+    def _ask(kind, payload, typed=None):
+        import unittest.mock as mock
+
+        import main
+        from core import interaction
+        from tests.conftest import FakeStdinReader
+
+        reader = FakeStdinReader([typed] if typed is not None else [])
+        with mock.patch.object(main, "_stdin_reader", return_value=reader):
+            channel = main.build_attended_provider()
+        return interaction.ask(
+            channel, interaction.Request(kind=kind, payload=payload))
+
+    def test_an_approval_says_who_is_asking_before_it_says_what(self, capsys):
+        """Placement as well as presence: under the bracketed header the
+        harness wrote, above the agent's own rationale. The line is the
+        most harness-y fact on the prompt, and a reader scrolling past it
+        after the agent's claim has already read the claim."""
+        from core import interaction
+
+        self._ask(interaction.APPROVAL,
+                  dict(_PAYLOADS["approval"],
+                       asking_agent="explore", asking_depth=2,
+                       rationale="I need this"))
+        lines = [ln for ln in capsys.readouterr().out.splitlines() if ln]
+        where = [i for i, ln in enumerate(lines) if "asked by" in ln]
+
+        assert where, f"the prompt said {lines}, naming nobody"
+        assert lines[where[0]].strip() == "asked by explore (depth 2)"
+        assert lines[where[0] - 1].startswith("[approval]"), (
+            f"the label landed under {lines[where[0] - 1]!r}; it belongs "
+            "directly under the header")
+        assert any("I need this" in ln for ln in lines[where[0] + 1:]), (
+            "the agent's own words came BEFORE the harness fact")
+
+    def test_a_signoff_names_the_run_doing_the_spawning(self, capsys):
+        """`agent` on that prompt is the run about to be SPAWNED, which is
+        why this cannot be read off it."""
+        from core import interaction
+
+        self._ask(interaction.SUBAGENT_SIGNOFF,
+                  dict(_PAYLOADS["subagent_signoff"],
+                       asking_agent="explore", asking_depth=1))
+
+        assert "asked by explore (depth 1)" in capsys.readouterr().out
+
+    def test_a_signoff_with_nothing_to_tick_names_it_too(self, capsys):
+        """The no-candidates branch is its own composition here as it is
+        in the modal, and a nested spawn of an agent with no gated tools
+        is what reaches it."""
+        from core import interaction
+
+        self._ask(interaction.SUBAGENT_SIGNOFF,
+                  {"agent": "scout", "candidates": [],
+                   "asking_agent": "explore", "asking_depth": 1})
+
+        assert "asked by explore (depth 1)" in capsys.readouterr().out
+
+    def test_a_question_from_a_nested_run_names_it(self, capsys):
+        """"The assistant has a question" is an understatement for a run
+        two levels down, whose question surfaces here exactly as its
+        approvals do."""
+        from core import interaction
+
+        self._ask(interaction.QUESTION,
+                  dict(_PAYLOADS["question"],
+                       asking_agent="explore", asking_depth=2))
+
+        assert "asked by explore (depth 2)" in capsys.readouterr().out
+
+    @pytest.mark.parametrize("kind", ["approval", "subagent_signoff",
+                                      "question"])
+    def test_nothing_is_said_at_the_top(self, kind, capsys):
+        """Scope rather than a gap: the asking run is then the
+        conversation the reader is watching, which needs no label."""
+        from core import interaction
+
+        self._ask(getattr(interaction, kind.upper()), _PAYLOADS[kind])
+
+        assert "asked by" not in capsys.readouterr().out
+
+
 class TestTheConfirmRenderer:
 
     @staticmethod
