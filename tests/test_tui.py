@@ -1404,6 +1404,90 @@ class TestEventsUnderAnOpenModal:
             app.screen.dismiss(False)
             await pilot.pause()
 
+    @pytest.mark.asyncio
+    async def test_loop_events_leave_debug_breadcrumbs(self, caplog):
+        """Batch 78. The spawn crash needed two facts -- which event was
+        handled, and whether a modal was on top -- and neither shell
+        recorded either. Kind flags plus screen depth, never payloads;
+        off by default so the per-token hot path pays one predicate."""
+        import logging
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            with caplog.at_level(logging.DEBUG, logger="tui.app"):
+                app.post_message(LoopEventMessage(LoopEvent(
+                    token_delta="hi ",
+                    tool_call_start={"id": "c1", "name": "shell",
+                                     "input": {}})))
+                assert await settle(
+                    pilot,
+                    lambda: any("loop event" in r.getMessage()
+                                for r in caplog.records)), \
+                    "no breadcrumb for a handled loop event"
+
+        kinds = [r.getMessage() for r in caplog.records
+                 if "loop event" in r.getMessage()]
+        assert any("token" in k and "call" in k for k in kinds), kinds
+        assert any("1 screen(s)" in k for k in kinds), kinds
+
+    @pytest.mark.asyncio
+    async def test_no_breadcrumbs_at_the_default_level(self, caplog):
+        """The control: DEBUG lines must not reach the default log, or
+        every token of every turn doubles the file for no reader."""
+        import logging
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            with caplog.at_level(logging.INFO, logger="tui.app"):
+                app.post_message(LoopEventMessage(
+                    LoopEvent(token_delta="hi ")))
+                await pump(pilot, 5)
+
+        assert not [r for r in caplog.records
+                    if "loop event" in r.getMessage()]
+
+    @pytest.mark.asyncio
+    async def test_a_modal_round_trip_leaves_push_and_answer(self, caplog):
+        """The other half of the ordering story: which question went on
+        screen, and that it was answered rather than timed out. Screen
+        type only -- params and answers stay out of the file."""
+        import logging
+        import threading
+
+        from tui.screens import ConfirmScreen
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            with caplog.at_level(logging.DEBUG, logger="tui.app"):
+                worker = threading.Thread(
+                    target=lambda: app._blocking_modal(
+                        ConfirmScreen("T", "B", "Yes"),
+                        on_timeout=lambda screen: None),
+                    daemon=True)
+                worker.start()
+                assert await settle(
+                    pilot,
+                    lambda: isinstance(app.screen, ConfirmScreen)), \
+                    "the modal never opened"
+                app.screen.dismiss(True)
+                # Poll, never join: the dismissal callback travels the
+                # message pump, and a blocking join would starve the very
+                # loop that has to deliver it -- hanging the test for the
+                # join's whole timeout instead of failing it.
+                assert await settle(pilot, lambda: not worker.is_alive()), \
+                    "the ask never returned"
+                worker.join(timeout=5)
+
+        pushed = [r.getMessage() for r in caplog.records
+                  if "modal pushed" in r.getMessage()]
+        answered = [r.getMessage() for r in caplog.records
+                    if "modal answered" in r.getMessage()]
+        assert pushed == ["modal pushed: ConfirmScreen"], pushed
+        assert answered == ["modal answered: ConfirmScreen"], answered
+
 
 @pytest.mark.asyncio
 async def test_an_unhandled_ui_error_is_logged_before_textual_reports_it(caplog):

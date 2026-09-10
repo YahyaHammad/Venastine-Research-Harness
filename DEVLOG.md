@@ -12281,3 +12281,39 @@ The `screens.py:581` list juggling was re-read and is a modal-local python list,
 removal -- noted so the next reader does not re-audit it. `restyle_sidebar`'s remaining direct
 queries (`#agent-panel`, `#thread-crumb`) stay queries: restyling cannot run mid-turn today, and
 holding them would be machinery pretending to work.
+
+## Batch 78 -- the crash that left nothing in the log (2026-09-10)
+
+A live TUI crash with an empty `app.log`: three `spawn_subagent` calls in one response, and the
+app went down handling the first `permission_request` with `NoMatches` on `#usage-line`. Batch
+77 had just extended the held-widget set to seven and still missed the two widgets on the crash
+path itself -- the usage line whose docstring claimed containment, and the raven three lines
+below it on the same branch.
+
+**THE MODAL WINS A RACE IT WAS NEVER SUPPOSED TO RUN.** The loop yields the narration before
+it asks, and the worker's `_consume` posts the event then steps the generator into the ask,
+which pushes the modal via `call_from_thread`. But Textual 1.0.0's `post_message` from a
+foreign thread only *enqueues* (`message_pump.py:831`), while the push is a *direct* loop
+callback -- so the modal can be mounted before the already-posted event is *handled*, and the
+handler's first line is `refresh_usage_line()`. No parallel machinery implicated: `with gate:`
+spans the whole ask and `_ask_lock` serialises the modals. The exit screen's `textual run
+--dev` note does not apply to a `main.py` entry, and the hidden second exit-renderable is only
+recoverable from the log -- which is what makes the log's silence the second defect, not a
+footnote: panics went to the error console only, and worker deaths were toasted but never
+recorded.
+
+**THREE COMMITS, EACH REVERT-CHECKED.** Panic capture (`_handle_exception` logs CRITICAL
+through the redacting formatter, then delegates -- pilot re-raise and exit screen stay
+super's); worker deaths logged with tracebacks at the one handler every `run_worker` shares
+(`on_turn_finished` stays render-only, or every failure double-records); DEBUG breadcrumbs
+(event kinds plus screen-stack depth, modal type plus outcome class, never values, each behind
+`isEnabledFor` with a silence-at-INFO test). One procedureal catch worth recording: a
+`worker.join(timeout)` in a pilot test starves the pump that must deliver the dismissal -- poll
+with `settle`, never join. Default verbosity unchanged: httpx/provider DEBUG is noise, and
+more lines widen the query-text surface `PRIVACY.md` discloses.
+
+### Files
+
+- `tui/app.py` -- the override, the worker log line, five breadcrumb sites.
+- `tests/test_tui.py` -- panic, worker-death and three breadcrumb tests.
+- `AGENTS.md` -- the breadcrumb privacy rule beside the logging convention.

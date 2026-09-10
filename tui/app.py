@@ -2268,6 +2268,29 @@ class VenastineApp(App):
         event = message.event
         transcript = self._transcript
 
+        if logger.isEnabledFor(logging.DEBUG):
+            # Batch 78. The ordering breadcrumbs: which event shapes were
+            # handled, and how many screens were on the stack -- the two
+            # facts the spawn crash needed and neither shell recorded. A
+            # permission_request posted before its modal is pushed is
+            # handled after, and only the depth says so. Kind flags only,
+            # never payloads (params/answers stay out of the file); off
+            # by default so the per-token hot path pays one predicate.
+            kinds = ",".join(kind for kind, present in (
+                ("token", event.token_delta),
+                ("thinking", event.thinking_delta),
+                ("call", event.tool_call_start),
+                ("result", event.tool_result),
+                ("notice", event.notice),
+                ("ask", event.permission_request),
+                ("final", event.final_response is not None),
+            ) if present)
+            try:
+                depth = len(self.screen_stack)
+            except Exception:  # noqa: BLE001 -- no screen yet
+                depth = 0
+            logger.debug("loop event [%s] with %d screen(s) on the stack",
+                         kinds, depth)
         self.refresh_usage_line()
         # Batch 61. Counted whether or not the renderer draws it: the
         # commit cap withholds a table from its header row with no
@@ -2884,8 +2907,14 @@ class VenastineApp(App):
         self._meter.set_blocked(True, monotonic())
         self.call_from_thread(
             self.push_screen, screen, lambda answer: channel.put(answer))
+        if logger.isEnabledFor(logging.DEBUG):
+            # Batch 78. Which question went on screen -- screen type only,
+            # never the params it shows or the answer it returns. Paired
+            # with the answered/timed-out lines below, this orders the
+            # modal against the loop events above.
+            logger.debug("modal pushed: %s", type(screen).__name__)
         try:
-            return channel.get(timeout=config.ATTENDED_APPROVAL_TIMEOUT_S)
+            answer = channel.get(timeout=config.ATTENDED_APPROVAL_TIMEOUT_S)
         except queue.Empty:
             # NARRATION IS BEST-EFFORT; THE ANSWER IS NOT. This method's
             # contract is to return the dismissal value raw, and None here
@@ -2904,10 +2933,19 @@ class VenastineApp(App):
                 logger.exception(
                     "Could not narrate the timeout for this request; it is "
                     "still declined.")
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug("modal timed out, declined: %s",
+                             type(screen).__name__)
             return None
         finally:
             self._permission_channel = None
             self._meter.set_blocked(False, monotonic())
+        if logger.isEnabledFor(logging.DEBUG):
+            # The answer CLASS, never the value: notes and ticks stay out
+            # of the file, and a shutdown release reads as an answer here
+            # by design (a bare False), so this orders but does not judge.
+            logger.debug("modal answered: %s", type(screen).__name__)
+        return answer
 
     def ask_choice_blocking(self, payload: dict):
         """Pick one of a set of offered options. Blocks; returns whatever
