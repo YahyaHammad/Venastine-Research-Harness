@@ -1916,6 +1916,13 @@ class Transcript(RichLog):
         self._links: dict[int, tuple] = {}
         # §47. entry index -> the spawn call that drew that line.
         self._agents: dict = {}
+        # §47. Paint-as-if-this-wide, or None to measure. The read-only
+        # viewer is painted while the switcher is hiding it (region 0,
+        # floored to min_width), so the app hands it the live transcript's
+        # width for the paint and clears it after. An attribute rather than
+        # a parameter because five sites measure and only this one is ever
+        # hidden; None keeps every other caller exactly as measured.
+        self._paint_width: int | None = None
         # §38. An assistant span with rows already on screen: its label is
         # drawn and its single entry is open at _entries[-1].
         self._stream_open = False
@@ -1930,6 +1937,35 @@ class Transcript(RichLog):
         # ONE label per turn, above the model's first output of it
         # whether that output is reasoning or text -- see _open_label.
         self._label_in_force = False
+
+    def write(self, content, *args, width=None, **kwargs):
+        """Funnel every row through the paint width when one is set (§47).
+
+        `RichLog.write` wraps at WRITE time -- 8.x stores Strips --
+        measuring the widget's own region: 0 while the switcher hides
+        this pane, floored to min_width (78). The viewer paints hidden
+        (see `_paint_thread_view`), so without this the prose half of a
+        replay froze at 78 while our own pre-wrap (thinking, lists,
+        diffs, streamed commits via `_wrap_width`) used the override:
+        two widths in one transcript. An explicit width also overrides
+        min_width on RichLog's side, which is what makes the two agree
+        rather than merely narrow together.
+
+        `*args` because Textual itself replays deferred writes
+        positionally (`self.write(*deferred_render)` on resize, with
+        content/width/expand/shrink/scroll_end all filled) -- a
+        keyword-only width would turn its own replay into a TypeError.
+        Positional width counts as explicit and wins over the override,
+        exactly like the keyword form.
+        """
+        if not args and width is None and self._paint_width:
+            return super().write(content, width=self._paint_width,
+                                 **kwargs)
+        if args:
+            # Textual's own replay (or any positional caller): pass
+            # through byte-identical, never merging a keyword beside it.
+            return super().write(content, *args, **kwargs)
+        return super().write(content, width=width, **kwargs)
 
     # -- styling -----------------------------------------------------------
 
@@ -2497,10 +2533,14 @@ class Transcript(RichLog):
         suite, so the guard is around the measurement itself, for the same
         reason _styles' is.
         """
-        try:
-            width = max(self.scrollable_content_region.width, self.min_width)
-        except Exception:  # noqa: BLE001 -- unmounted; the newline rule alone
-            return 0
+        if self._paint_width:
+            width = self._paint_width
+        else:
+            try:
+                width = max(self.scrollable_content_region.width,
+                            self.min_width)
+            except Exception:  # noqa: BLE001 -- unmounted; the newline rule
+                return 0
         width -= len(prefix)
         return width if width >= MIN_WRAP_WIDTH else 0
 

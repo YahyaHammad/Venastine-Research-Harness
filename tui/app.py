@@ -1692,7 +1692,29 @@ class VenastineApp(App):
         """
         view = self._thread_view
         view.reset()
-        self._paint_entries(view, entries)
+        # Paint at the live transcript's width: this runs while the
+        # switcher is still showing `#transcript`, so the viewer's own
+        # region measures 0 and every entry would freeze at min_width
+        # (78) -- the left-half transcript with a blank right half.
+        # Read twice: by our pre-wrap (`_wrap_width`, for thinking,
+        # lists, diffs and streamed commits) and by the `write` funnel
+        # below (8.x wraps prose at write time into Strips), which is
+        # what keeps the two at one width. Same box, same borders, same
+        # padding, so the widths are equal by construction rather than
+        # by hope. Cleared after, so a mid-paint exception cannot pin a
+        # stale width onto later polls; unset when the live pane is
+        # itself unmeasurable (never mounted), which keeps the old floor
+        # rather than painting at nothing.
+        try:
+            live_width = self._transcript.scrollable_content_region.width
+        except Exception:  # noqa: BLE001 -- never mounted; see _wrap_width
+            live_width = 0
+        if live_width:
+            view._paint_width = live_width
+        try:
+            self._paint_entries(view, entries)
+        finally:
+            view._paint_width = None
         if not entries:
             # A run that has not written anything yet -- which is the
             # ordinary state for the first instant of a live one, and a

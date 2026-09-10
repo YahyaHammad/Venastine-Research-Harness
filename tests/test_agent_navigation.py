@@ -1710,3 +1710,73 @@ class TestTheAskerComesFromTheOpenSpan:
 
         assert payloads[0]["asking_agent"] == "explore"
         assert payloads[0]["asking_depth"] == 1
+
+
+# ---------------------------------------------------------------------------
+# ---- the viewer paints at live width ---------------------------------------
+# ---------------------------------------------------------------------------
+
+def _drawn_widths(view):
+    """Cell widths of the rows on screen, across RichLog shapes.
+
+    8.x yields Strips (`.cell_len`); the older line lists need
+    `Segment.get_line_length`. The pin is about the wrap, not the
+    container, so it reads whichever shape this version hands over.
+    """
+    from rich.segment import Segment
+
+    widths = []
+    for line in view.lines:
+        cell_len = getattr(line, "cell_len", None)
+        widths.append(cell_len if isinstance(cell_len, int)
+                      else Segment.get_line_length(line))
+    return widths
+
+
+class TestTheViewerPaintsAtLiveWidth:
+
+    @pytest.mark.asyncio
+    async def test_a_long_line_uses_the_panel_not_the_floor(
+            self, lineage, mocker):
+        """The viewer paints while the switcher is hiding it, so its own
+        region measures 0 and `_wrap_width` used to floor every entry to
+        min_width (78): a full-width panel with text down the left half
+        and blank down the right, frozen there because only a live run
+        ever repaints. At 160 columns the floor and the panel disagree
+        loudly enough to tell apart; at the default 80 they coincide and
+        the bug is invisible, which is why this runs wide. Where RichLog
+        wraps at render (pre-8.x) this passes with or without the fix and
+        CI's 8.2.8 -- write-time Strips -- is what adjudicates it; do not
+        read a local green as vacuous and delete it."""
+        mocker.patch("tui.app.replay_entries",
+                      return_value=_entries("x" * 150))
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(160, 40)) as pilot:
+            await pilot.pause()
+            app.open_agent_thread(str(lineage.child))
+            await pilot.pause()
+
+            widths = _drawn_widths(
+                app.query_one("#thread-view", Transcript))
+            assert widths, "the viewer painted nothing at all"
+            assert max(widths) > 78, (
+                f"longest painted row is {max(widths)} cells on a panel "
+                f"three figures wide: entries wrapped to the hidden-measure "
+                f"floor instead of the live width")
+
+    @pytest.mark.asyncio
+    async def test_the_width_override_does_not_survive_the_paint(
+            self, lineage, mocker):
+        """A pinned override would follow the viewer into later polls and
+        resumes at whatever width the first paint saw. Cleared in a
+        finally, so even a mid-paint exception leaves None behind."""
+        mocker.patch("tui.app.replay_entries",
+                      return_value=_entries("hi"))
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(160, 40)) as pilot:
+            await pilot.pause()
+            app.open_agent_thread(str(lineage.child))
+            await pilot.pause()
+
+            assert app.query_one(
+                "#thread-view", Transcript)._paint_width is None
