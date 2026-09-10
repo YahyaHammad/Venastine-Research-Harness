@@ -665,7 +665,7 @@ def test_the_panel_marks_code_stages_apart_from_passes():
     panel = ResearchProgress()
     panel.pass_started("Pass 6a")
     panel.stage_completed("Pass 5")
-    body = panel.renderable.plain
+    body = panel.content.plain
 
     assert f"{MARK_RUNNING} Pass 6a" in body, "a running pass"
     assert f"{MARK_STAGE} Pass 5" in body, "a code stage"
@@ -681,10 +681,10 @@ def test_the_panel_counts_tool_calls_on_the_running_pass():
     panel.pass_started("Pass 1")
     panel.tool_called("Pass 1")
     panel.tool_called("Pass 1")
-    assert "2 tools" in panel.renderable.plain
+    assert "2 tools" in panel.content.plain
 
     panel.pass_completed("Pass 1", ok=True)
-    assert "2 tools" not in panel.renderable.plain, \
+    assert "2 tools" not in panel.content.plain, \
         "the counter belongs to the pass in flight; keeping it on a " \
         "finished row spends sidebar width on a number nobody is waiting on"
 
@@ -1125,7 +1125,7 @@ def test_tool_counts_land_on_the_current_run_of_a_repeated_pass():
 
     panel.pass_started("Pass 6a")
     panel.tool_called("Pass 6a")
-    body = panel.renderable.plain
+    body = panel.content.plain
 
     assert f"{MARK_RUNNING} Pass 6a" in body, \
         "the retry round never showed as running"
@@ -1143,7 +1143,7 @@ def test_tool_counts_land_on_the_current_run_of_a_repeated_pass():
     panel.pass_started("Pass 1")
     panel.pass_started("Pass 1")
     panel.tool_called("Pass 1")
-    body = panel.renderable.plain
+    body = panel.content.plain
     assert body.rindex("1 tool") > body.rindex(f"{MARK_RUNNING} Pass 1"), \
         f"the call landed on the first-started candidate:\n{body}"
 
@@ -1160,7 +1160,7 @@ def test_a_completion_tick_lands_on_the_run_that_just_finished():
     panel.pass_started("Pass 1")
     panel.pass_started("Pass 1")
     panel.pass_completed("Pass 1", ok=True)
-    body = panel.renderable.plain
+    body = panel.content.plain
 
     assert body.index(f"{MARK_RUNNING} Pass 1") \
         < body.index(f"{MARK_DONE} Pass 1"), \
@@ -1176,7 +1176,7 @@ def test_a_zero_llm_stage_is_recorded_already_done():
     panel = ResearchProgress()
     panel.stage_completed("Pass 5")
     panel.stage_completed("D2")
-    body = panel.renderable.plain
+    body = panel.content.plain
 
     assert f"{MARK_STAGE} Pass 5" in body and f"{MARK_STAGE} D2" in body
     assert "> Pass 5" not in body and "> D2" not in body, \

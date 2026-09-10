@@ -12317,3 +12317,109 @@ more lines widen the query-text surface `PRIVACY.md` discloses.
 - `tui/app.py` -- the override, the worker log line, five breadcrumb sites.
 - `tests/test_tui.py` -- panic, worker-death and three breadcrumb tests.
 - `AGENTS.md` -- the breadcrumb privacy rule beside the logging convention.
+
+
+## Batch 79 -- the pin that was written before the version it excluded (2026-09-10)
+
+`requirements.txt` said `textual>=1.0,<2.0`. Upstream was at 8.2.8. The question
+asked was whether there was a record for that, and the answer turned out to be
+the interesting part: there is one, in three places, and none of it says 2.x was
+looked at.
+
+* `requirements.txt` carried a one-line comment borrowing D22's rationale.
+* **D22 is about `mcp`.** Textual and rich were bounded *per* D22, under its
+  general rule, never by a decision of their own.
+* `DEVLOG.md` §16 records the pin arriving with the TUI, and `dependabot.yml`
+  the handling rule ("TUI pilots for textual").
+
+textual 1.0.0 shipped 2024-12-12 and 2.0.0 on 2025-02-16, so **`<2.0` was
+written before 2.0 existed**. It was a don't-migrate-me-by-accident ceiling and
+never a judgement, and it then sat for twenty months. So: an exact
+`textual==8.2.8`, parity only, no feature claimed, and textual's own rationale
+written where the pin lives instead of a borrowed line.
+
+### What it cost
+
+52 failures out of 4256, in five buckets, none of them a hang. Measured first in
+a throwaway venv identical to the project's except for the one package, so the
+list was the pin's and nothing else's.
+
+* **23 -- `Static.renderable` is `.content`** (6.0.0). A rename; `Content`
+  answers `.plain`, `.spans` and `str()`.
+* **18 -- `Static.update` needs a running app** to convert a Rich `Text`,
+  because `visualize()` passes `console=widget.app.console`. This suite builds
+  those panels bare everywhere. `widgets.as_content` does the conversion itself
+  with `console=None`, which `Content.from_rich_text` supports and which falls
+  back to `RichStyle.parse` -- parity, not approximation: 1085 (theme, role)
+  style strings across all 35 themes, zero spans differ.
+* **4 -- `textual-ansi` is gone**, replaced at 8.2.5 by `ansi-dark` and
+  `ansi-light`, with a new `Theme.ansi` flag. `ANSI_THEMES` derives them off the
+  flag rather than naming them again.
+* **2 -- the documented test counts.** The built-in roster went 12 to 21, and
+  `SELECTABLE_THEMES` is derived, so nine unseen themes walked into the
+  parametrised integrity checks by arithmetic. 4231 to 4259.
+* **2 -- `.visual._renderable`**, textual 1.0's `RichVisual` internal.
+* **1 -- `dim` on a drawn footer cell.** Resolved into the COLOUR now. On
+  dark-plain a disabled `^UP` was `dim=True` / `#b8c1d1` then and
+  `dim=False` / `#838a98` now, against a live `^c` unchanged at `#b8c1d1`. The
+  greying never stopped; only its expression moved, so `_footer_dim` compares
+  against a live entry and is true on either version.
+
+**Two silent losses no test could see, and they are the half worth recording.**
+A `Content` carries no `no_wrap` and no `overflow`, and the conversion drops
+both -- so `#agent-panel`, `#thread-crumb` and `#slash-suggest` each lost a
+wrapping rule the moment the pin moved, with a green suite. They are
+`text-wrap` / `text-overflow` in `app.tcss` now. And `test_tui.py`'s viewport
+sweep read `.visual._renderable` inside a bare `except`, so it did not fail --
+it answered `"rows"` for every widget and kept passing.
+
+### One pre-existing hole, and one pre-existing red test
+
+`Button` given a `str` parses it as markup and raises on an unbalanced tag --
+measured on **1.0.0 and 8.2.8 alike**, so this was never safe. The
+single-select branch of the question modal was handing it `ask_user`'s options,
+one line below a multi-select branch that had wrapped its own since batch 42.
+That is RA1's exact bug on a constructor RA1's AST guard did not name. `Button`
+is in `WIDGETS` now and both non-literal labels are wrapped.
+
+Separately, `test_a_worker_error_is_reported_not_swallowed` was already red on
+this branch and had nothing to do with textual: batch 78 added
+`event.worker.name` to the handler and the `SimpleNamespace` double never grew
+the attribute. Confirmed by running it under 1.0.0. The double was fixed.
+
+### What the move did NOT buy
+
+Both of these look like they should have, which is why they are written down.
+
+* **The transcript is still not selectable.** Terminal selection arrived at
+  **2.0.0** -- not 3.x, which is what `ARCHITECTURE.md` said -- and
+  `RichLog.allow_select` has never existed in any release. `RichLog` implements
+  no `get_selection`, and the default extracts from `self._render()`, which for
+  a `ScrollView` subclass is a debug `rich.panel.Panel`. So `/copy` stays. What
+  the move buys is the *possibility* of writing `Transcript.get_selection`
+  ourselves, over `_entries` / `as_text()`, in its own batch.
+* **`shift+enter` is reachable on Windows now** -- 6.6.0 added the kitty
+  keyboard protocol to `drivers/windows_driver.py`. Batch 54's decision that it
+  is unreachable has expired. Claiming it reverses a locked decision rather than
+  restoring one, so it is a batch and not a side effect.
+
+`markup=False` is honoured now, where on 1.0.0 it was stored and never read. The
+`Text(...)` wrap stays anyway: `Selection` and `Button` take no such flag, and a
+per-constructor argument is a thing the next screen has to remember, which is
+the failure RA1 IS.
+
+### Files
+
+- `requirements.txt` -- `textual==8.2.8`, its own rationale and the re-measure
+  list; `rich>=14.2,<16`, which is textual's real floor rather than a guess.
+- `tui/widgets.py` -- `as_content`, the eight update sites, the two widgets
+  whose wrapping moved.
+- `tui/app.tcss` -- `text-wrap` / `text-overflow` on three panels.
+- `tui/screens.py` -- `Button(Text(...))` twice, and RA1's rationale rewritten
+  around what was re-measured.
+- `tui/themes.py`, `tests/test_themes.py` -- `ANSI_THEMES`, and every count.
+- `tests/conftest.py` -- `whole_line_style`.
+- `tests/test_tui.py` -- `_footer_dim`, the AST guard's `WIDGETS`, the viewport
+  sweep, the worker double.
+- Eight test files -- `.renderable` to `.content`, 43 sites.
+- `AGENTS.md`, `ARCHITECTURE.md`, `README.md`, `tests/BREAKING_CHANGES.md`.

@@ -62,6 +62,13 @@
 #thread-crumb {
     height: auto;
     padding: 0 1;
+    /* One line, elided rather than wrapped: a trail that reflowed
+       would take a second row from the transcript below it. The
+       ellipsis is the point -- the segment you are standing on is
+       the last one, so the cut belongs at the far end. Moved off
+       the Rich Text for `#agent-panel`'s reason. */
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
 }
 
 /* Batch 55, the slash-command suggestions. Directly above the prompt
@@ -93,6 +100,14 @@
        the right, which is the corner #prompt's meter uses one box
        down, so titles sit left and status sits right throughout. */
     border-subtitle-color: $text-muted;
+    /* `render()` pads every row to the panel width itself, and the
+       pin on that arithmetic is a test that no drawn row is wider
+       than the panel. This is the net under it, moved off the Rich
+       Text for `#agent-panel`'s reason: a row that ever does
+       overrun clips visibly instead of reflowing into a height the
+       budget did not count. */
+    text-wrap: nowrap;
+    text-overflow: clip;
 }
 
 /* Batch 54. `height: auto` with a `max-height` -- batch 49's shape, for
@@ -144,6 +159,16 @@
 #agent-panel {
     height: auto;
     padding-top: 1;
+    /* The rows are sized by the widget (AgentPanel.WIDTH lays out
+       against 18) and must not be re-wrapped underneath it: a
+       miscalculation should clip where it can be seen rather than
+       reflow where it cannot. This used to be `no_wrap` /
+       `overflow` on the Rich Text itself, which stopped meaning
+       anything when the textual pin moved -- a Content carries
+       neither flag and the conversion drops both. See
+       `widgets.as_content`. */
+    text-wrap: nowrap;
+    text-overflow: clip;
 }
 
 #effort-raven {

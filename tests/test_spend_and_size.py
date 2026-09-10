@@ -367,7 +367,7 @@ class TestTheTuiUsageLine:
             app.refresh_usage_line()
             await pilot.pause()
             assert line.display
-            body = line.renderable.plain
+            body = line.content.plain
             assert "ctx 41k" in body and "billed 118k" in body
 
             # Same values again: the change-guard keeps it a no-op.
@@ -412,5 +412,5 @@ class TestTheTuiUsageLine:
 
             line = app.query_one("#usage-line", UsageLine)
             assert line.display, "a finished turn produced no usage line"
-            body = line.renderable.plain
+            body = line.content.plain
             assert "billed 70k" in body and "ctx 40k" in body, body

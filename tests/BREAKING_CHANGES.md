@@ -2893,7 +2893,7 @@ Count 2786 -> 2815.
 
 | Change | What breaks | Symptom / fix |
 |---|---|---|
-| Every non-literal renderable in `tui/screens.py` is wrapped in `Text(...)` | Any test reading a modal's content back off the constructor argument, and any new screen added without the wrap | `test_every_renderable_built_from_a_non_literal_is_wrapped` fails with the offending `(widget, lineno)` pairs. **Do not "simplify" it to `markup=False`** — on textual 1.0.0 that flag is stored by `__init__` and never read by the `visual` property, so it silently does nothing and the modal still raises. Measured |
+| Every non-literal renderable in `tui/screens.py` is wrapped in `Text(...)` | Any test reading a modal's content back off the constructor argument, and any new screen added without the wrap | `test_every_renderable_built_from_a_non_literal_is_wrapped` fails with the offending `(widget, lineno)` pairs. **Do not "simplify" it to `markup=False`** — it WORKS since the pin moved to 8.2.8 (on 1.0.0 the flag was stored by `__init__` and never read by the `visual` property, so it silently did nothing and the modal still raised). It is still not the answer: `Selection` and `Button` take no such flag and both parse what they are given, and a per-constructor argument is a thing the next screen has to remember. Both halves measured |
 | The `permission_request` LoopEvent and the APPROVAL `Request` payload carry a `rationale` key | Any test asserting the whole dict — `test_streaming_loop.py` had one | `assert perm[0] == {...}` fails with an extra key. That test asserts the WHOLE dict on purpose and that is why it caught this; add `"rationale": None` rather than loosening it to a subset check. Present-and-None for a tool with no `rationale_param`, so a shell need not tell "this tool has no rationale" from "this build predates the field" |
 | `param_digest(params)` is now `param_digest(params, omit=())` | Nothing — the parameter is optional | But **call `registry.call_digest(tool_name, params)` instead** unless you are writing a test about `param_digest` itself. The three production consumers moved; a fourth going direct would silently print a tool's rationale into a line sized for a command |
 | `PermissionScreen.__init__` and `ask_permission_blocking` take a trailing `rationale` | Positional callers passing four arguments | Both default to `None`, so existing three-argument calls are unchanged. A test constructing the screen directly gets no rationale and shows `(none given)` |
@@ -3192,11 +3192,13 @@ and sized to land BELOW the cap, so "wrapped" also cannot be confused with "hit
 ### Standing: `shift+enter` is deliberately untested
 
 A pilot can synthesise the key, so a test would pass everywhere and pin Textual's dispatch
-rather than the thing in doubt — whether a terminal ever sends it. Textual enables the kitty
-keyboard protocol in its Linux drivers alone, so on the Windows driver `shift+enter` arrives
-as a bare CR and reads as `enter`. `ctrl+j` is what the feature rests on and is what is
-pinned. Do not "fix the coverage gap" by adding the shift+enter case; add a by-hand check to
-the batch instead.
+rather than the thing in doubt — whether a terminal ever sends it. That reasoning is
+unchanged. The FACT under it is not: textual enabled the kitty keyboard protocol in its
+Linux drivers alone through 6.5, and **6.6.0 added it to the Windows driver**, so
+`shift+enter` is no longer unreachable there. `ctrl+j` is still what the feature rests on
+and still what is pinned, because claiming shift+enter reverses batch 54's decision rather
+than restoring it — its own batch, with a by-hand check. Do not "fix the coverage gap" by
+adding the shift+enter case in the meantime.
 
 
 ## Batch 55 — the slash-command suggestion panel
@@ -3658,9 +3660,13 @@ built to prevent. Batch 63.
 theme list no longer reaches `watch_theme`.
 
 **Fix:** it is textual's `COMMAND_PALETTE_BINDING`, bound `priority=True`, and this project enables
-the palette deliberately. Do not relocate it to `ctrl+shift+p` either — that chord is
-indistinguishable from `ctrl+p` without the kitty protocol, which textual enables in its Linux
-drivers alone, so the palette would simply be gone on Windows. Batch 63.
+the palette deliberately. Do not relocate it to `ctrl+shift+p` either. That advice now rests on
+the first sentence rather than on the second: the chord is indistinguishable from `ctrl+p`
+without the kitty protocol, and textual enabled that in its Linux drivers alone until 6.6.0
+added the Windows driver — so the chord may now be distinguishable on a terminal that
+implements the protocol, and may still not be on one that does not. Taking a binding whose
+availability depends on the terminal is a worse trade than leaving the palette where textual
+put it. Batch 63, re-measured at the 8.2.8 pin move.
 
 
 ### `role_styles` reading a `Theme` slot directly again
@@ -4207,3 +4213,35 @@ the model's own question, and not `main.py` at all. Every kind that can be raise
 from inside a run renders it in both shells now. `_asker` in `main.py` and
 `asker_label` in `tui/screens.py` are each ONE function for their shell's three
 sites, so the placement rule has one copy per shell. Batch 76.
+
+
+## The textual pin: 1.0 to 8.2.8
+
+`requirements.txt` carries the record and the re-measure list. What follows is
+what breaks in the SUITE, which is a different list.
+
+| Change | What breaks | Symptom / fix |
+|---|---|---|
+| Reading `.renderable` off a Static | 43 sites across 8 test files, `AttributeError: 'X' object has no attribute 'renderable'. Did you mean: 'render_line'?` | It is `.content` since textual 6.0.0 -- the object originally set, so `.plain`, `.spans` and `str()` all still answer. `.visual` is the RENDERED form and is a different question |
+| Handing `Static.update` a Rich `Text` from an unmounted widget | 18 tests, `NoActiveAppError` out of `visualize()` | `widgets.as_content` is the funnel. `visualize` converts a Rich `Text` with `console=widget.app.console`, and this suite builds these panels bare everywhere; `Content.from_rich_text` takes `console=None` and falls back to `RichStyle.parse`, which is parity for every style string `role_styles` emits (measured: 1085 of them, all 35 themes, zero differences) |
+| Setting `no_wrap` / `overflow` on a `Text` a Static will draw | **Nothing, and that is the entry** | A `Content` carries neither, and the conversion drops both -- so `#agent-panel`, `#thread-crumb` and `#slash-suggest` lost their wrapping rule silently when the pin moved. They are `text-wrap` / `text-overflow` in `app.tcss` now. Do not put them back on the Text |
+| `BUILTIN_THEMES["textual-ansi"]` | `KeyError` | 8.2.5 replaced it with `ansi-dark` and `ansi-light`. `test_themes.ANSI_THEMES` derives them off `Theme.ansi`, which is the field that stays true across the next rename |
+| Anything counting textual's built-in themes | The two documented-count tests, and every parametrised theme check silently covering more | The roster is 21, not 12, so `SELECTABLE_THEMES` is 35. Being DERIVED is what made that a count change rather than a coverage hole |
+| Reading `.dim` off a drawn footer cell | `test_the_footer_entries_are_grey_until_there_is_history` | textual resolves `dim` into the drawn COLOUR now. Measured on dark-plain: a disabled `^UP` was `dim=True` at `#b8c1d1` on 1.0.0 and `dim=False` at `#838a98` on 8.2.8, against a live `^c` that is `#b8c1d1` on both. `_footer_dim` compares against a live entry instead, which is true on either version |
+| Reading `.visual._renderable` | `test_rationale.py` twice, loudly; `test_tui.py`'s viewport sweep SILENTLY, by falling into its own `except` and answering `"rows"` for every widget | A Rich `Text` becomes a `Content` that carries `.plain` itself. `_plain`'s `getattr(visual, "_renderable", visual)` is what carried that helper across, and is not dead code |
+| Reading `.style` off what a widget handed `update()` | Two banner tests | `conftest.whole_line_style`. A whole-text style survives `from_rich_text` as the literal string on one span; a per-`append` style is resolved into a `textual.style.Style` and reads back as `rgb(154,109,16) bold` rather than as what was typed |
+
+**Two things this pin move did NOT buy, both of which look like it should have.**
+Terminal text selection exists since 2.0.0, but `RichLog` implements no
+`get_selection` and the default extracts from `self._render()` -- a debug
+`rich.panel.Panel` on a `ScrollView` subclass -- so the transcript is still not
+selectable and `/copy` is still the answer. And the kitty keyboard protocol
+reaches the Windows driver since 6.6.0, so `shift+enter` is no longer
+unreachable there -- but claiming it reverses a locked decision and belongs in
+its own batch.
+
+**One pre-existing hole the batch surfaced.** `Button` given a `str` parses it as
+markup and raises on an unbalanced tag -- measured on 1.0.0 AND 8.2.8, so this
+was never safe. The single-select branch of the question modal was handing it
+`ask_user`'s options, one line below a multi-select branch that had wrapped its
+own since batch 42. `Button` is in the AST guard's `WIDGETS` now.

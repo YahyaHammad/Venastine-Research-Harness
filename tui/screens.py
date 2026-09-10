@@ -11,10 +11,13 @@ modal, and the user's answer unblocks it. Nothing here is async-aware --
 the blocking side is a thread, not a coroutine.
 
 EVERY RENDERABLE BUILT FROM A NON-LITERAL IS WRAPPED IN `Text(...)`
-(batch 42, RA1). Textual renders a `str` through `Text.from_markup`, so
-a square bracket in a tool argument, a claim, a thread preview or an
-`ask_user` option is CONSOLE MARKUP here -- and these screens exist to
-show a person exactly what a model asked for. Two live failures:
+(batch 42, RA1). Textual parses a `str` as MARKUP, so a square bracket
+in a tool argument, a claim, a thread preview or an `ask_user` option
+is a tag here -- and these screens exist to show a person exactly what
+a model asked for. It was Rich's console markup until the textual pin
+moved and is Textual's own grammar now; nothing below changed with it,
+which is the point of re-measuring rather than assuming. Two live
+failures:
 
   * `sed -i "s/[/]//" f.txt` in a permission payload
     raised MarkupError inside compose(). The screen was pushed and
@@ -28,14 +31,25 @@ show a person exactly what a model asked for. Two live failures:
     The severity was silently absent from every review modal since
     §20 -- an unconditional defect, needing no adversary at all.
 
-`markup=False` IS NOT THE FIX, and looks like it is. On the pinned
-textual 1.0.0 `Static.__init__` stores the flag and assigns
-`self._content` directly; the `visual` property then calls
-`render_str()` -> `Text.from_markup` unconditionally and never reads
-it. Only the `renderable` SETTER honours it, and no constructor goes
-through the setter -- so `Static(x, markup=False)` still raises,
-measured. `render_str` returns a `Text` unaltered, which is why
-wrapping works and is the only thing here that does.
+`markup=False` WORKS NOW AND IS STILL NOT THE FIX, which is a
+different sentence from the one that stood here. On textual 1.0.0 the
+flag was stored by `__init__` and never read by the `visual`
+property, so `Static(x, markup=False)` raised anyway -- measured then.
+Since the pin moved it is honoured: `visualize(self, content,
+markup=self._render_markup)`, and all four payloads below render
+literally -- measured again.
+
+The wrap stays, for two reasons that outlived the version fact. It
+covers `Selection` and `Button`, which take no such flag and both
+parse what they are given. And it is one rule for one file, where the
+flag would be a per-constructor argument somebody adding the next
+screen has to remember -- which is exactly the failure RA1 is.
+
+What a bare `str` still does on 8.2.8, measured:
+  `sed -i "s/[/]//" f.txt` raises, `[bold]x` renders as `x`,
+  `[HIGH] rated` renders as ` rated`, and `[1, 2]` survives intact.
+That last one is why the rule cannot be a scan for brackets: the
+shapes that fail are not the ones a reader expects to be dangerous.
 
 A literal written in THIS file is left alone: it is ours and it is
 reviewed. The rule is mechanical, so it holds for the next screen
@@ -180,9 +194,9 @@ class PermissionScreen(ModalScreen[bool]):
     command was merely the part somebody noticed was missing.
 
     Nothing caught it because every assertion about this screen reads
-    `.visual._renderable.plain`, the string the widget was built from,
-    which a widget of zero height still reports in full. §46's tests
-    assert on the rendered REGION for that reason.
+    the widget's own VISUAL -- the string it was built from, which a
+    widget of zero height still reports in full. §46's tests assert on
+    the rendered REGION for that reason.
 
     The headline is DISPLAY ONLY and is also inside `params`, which is
     still rendered whole below it. That duplication is deliberate for
@@ -552,8 +566,17 @@ class QuestionScreen(ModalScreen[object]):
             # at `width: auto` an option wider than the dialog was
             # CLIPPED, and the same label at `width: 100%` wraps to two
             # centred lines instead.
+            #
+            # `Text(option)` for batch 42's reason (RA1), which had
+            # not reached a Button: these are the MODEL's words, and
+            # measured on both the old pin and the new one, a
+            # `Button` given a `str` sends it through markup parsing
+            # and raises on an unbalanced tag -- inside compose(), so
+            # the screen is pushed and never drawn. The multi-select
+            # branch above already wraps its `Selection`; this branch
+            # simply had not.
             widgets.append(ScrollBox(
-                *[Button(option, variant="primary",
+                *[Button(Text(option), variant="primary",
                          id=f"question-opt-{index}")
                   for index, option in enumerate(self._options)],
                 id="question-options"))
@@ -891,7 +914,8 @@ class ConfirmScreen(ModalScreen[bool]):
             ScrollBox(Static(Text(self._body), id="permission-params"),
                       id="permission-params-box"),
             Horizontal(
-                Button(self._confirm_label, variant="success", id="allow"),
+                Button(Text(self._confirm_label), variant="success",
+                       id="allow"),
                 Button("No", variant="error", id="deny"),
                 id="permission-buttons"),
             id="permission-dialog",

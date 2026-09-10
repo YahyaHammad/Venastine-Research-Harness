@@ -35,7 +35,13 @@ from rich.cells import cell_len
 
 import config
 from core.events import LoopEvent
-from tests.conftest import make_model_response, make_stream_sequence, pump, settle
+from tests.conftest import (
+    make_model_response,
+    make_stream_sequence,
+    pump,
+    settle,
+    whole_line_style,
+)
 from tui.app import EffortLevelsReady, LoopEventMessage, VenastineApp
 from tui.commands import registry as commands
 from tui.screens import (
@@ -1367,7 +1373,7 @@ class TestEventsUnderAnOpenModal:
                 "exception out of the handler takes the app down"
             # Held, not queried: query_one searches the ACTIVE screen,
             # which is the modal until it is dismissed below.
-            body = app._usage_line.renderable.plain
+            body = app._usage_line.content.plain
             assert "billed 118k" in body and "ctx 41k" in body, body
             app.screen.dismiss(False)
             await pilot.pause()
@@ -2680,8 +2686,14 @@ def test_a_worker_error_is_reported_not_swallowed(mocker):
     seen = []
     mocker.patch.object(app, "notify",
                         side_effect=lambda *a, **k: seen.append(a))
+    # `name` because the handler logs WHICH worker died (batch 78), and a
+    # double missing it fails inside the handler rather than at the
+    # assertion -- which is how it read as a textual problem when it was
+    # not one. The four names run_worker uses are "turn", "one-shot",
+    # "research" and "compact".
     event = SimpleNamespace(worker=SimpleNamespace(
-        state=WorkerState.ERROR, error=RuntimeError("boom")))
+        name="turn", state=WorkerState.ERROR,
+        error=RuntimeError("boom")))
     app.on_worker_state_changed(event)
 
     assert seen, "the worker's exception was reported nowhere"
@@ -3381,8 +3393,8 @@ async def test_every_modal_actually_draws_its_body(
     substance.
 
     Nothing saw it because every other assertion about these screens
-    reads `.visual._renderable.plain` -- the string the widget was
-    built from, which a widget of zero height still reports in full.
+    reads the widget's VISUAL -- the string it was built from, which a
+    widget of zero height still reports in full.
     A consent surface is a thing a person LOOKS AT, so the assertion
     has to be about what was drawn.
     """
@@ -3400,7 +3412,7 @@ async def test_every_modal_actually_draws_its_body(
                                        SelectionList)):
                 continue
             try:
-                content = widget.visual._renderable.plain
+                content = _plain(widget)
             except Exception:  # noqa: BLE001 -- lists carry no visual
                 content = "rows"
             if content.strip() and widget.region.height == 0:
@@ -3921,7 +3933,7 @@ async def test_an_option_at_the_cap_still_fits_two_lines():
 # These assert on the RENDERED REGION, not on the string the widget was
 # built from, and that distinction is the whole reason the defect shipped.
 # Every modal assertion in test_rationale.py reads
-# `.visual._renderable.plain` -- the text a widget was CONSTRUCTED with,
+# the widget's own visual -- the text it was CONSTRUCTED with,
 # which a widget of zero height still reports in full. That is exactly
 # what #permission-params was, so every one of those tests was green
 # while the modal drew its title, its buttons, and none of its
@@ -4446,9 +4458,9 @@ async def test_the_goal_banner_paints_its_hue_from_the_palette(mocker):
         await pilot.pause()
 
     assert captured, "the banner never rendered its goal"
-    text = captured[-1]
-    assert text.style == "bold #d9a441", \
-        f"banner style {text.style!r} is not the palette's warning hue " \
+    style = whole_line_style(captured[-1])
+    assert style == "bold #d9a441", \
+        f"banner style {style!r} is not the palette's warning hue " \
         "(dark-plain's warning) -- a literal is back"
 
 
@@ -4873,6 +4885,13 @@ def _plain(widget) -> str:
     Reached through the visual rather than the constructor argument on
     purpose -- the bug was that the argument and the drawing disagreed,
     so a test reading the argument back could not have seen it.
+
+    The `getattr` is what carried this helper across the textual pin
+    move and is not dead: on 1.0.0 a Rich `Text` became a `RichVisual`
+    wrapping it, and since 2.0.0 it becomes a `Content` that carries
+    `.plain` itself. Three sites elsewhere reached for `_renderable`
+    directly and two of them raised; the third answered "rows" for
+    every widget and said nothing.
     """
     visual = widget.visual
     renderable = getattr(visual, "_renderable", visual)
@@ -5001,7 +5020,14 @@ def test_every_renderable_built_from_a_non_literal_is_wrapped():
     # Label subclasses Static, and SelectionList prompts go through
     # Text.from_markup in Selection's own constructor -- measured, and
     # `ask_user`'s options are the model's own words.
-    WIDGETS = {"Static", "Label", "Selection"}
+    #
+    # `Button` joined them when the textual pin moved, though it was
+    # never safe: measured on 1.0.0 AND on 8.2.8, a Button given a
+    # `str` parses it as markup and raises on an unbalanced tag. The
+    # single-select branch of the question modal was handing it
+    # `ask_user`'s options directly, one line under a multi-select
+    # branch that had wrapped its own since batch 42.
+    WIDGETS = {"Static", "Label", "Selection", "Button"}
     offenders = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
@@ -5022,10 +5048,11 @@ def test_every_renderable_built_from_a_non_literal_is_wrapped():
 
     assert not offenders, (
         f"these renderables are built from non-literals and are not wrapped "
-        f"in Text(...), so Rich will parse markup out of them: {offenders}. "
-        f"Textual sends a `str` through Text.from_markup; `markup=False` "
-        f"does NOT prevent it on textual 1.0.0 (the flag is stored and "
-        f"never read by the `visual` property). Wrap the value.")
+        f"in Text(...), so textual will parse markup out of them: "
+        f"{offenders}. `markup=False` is honoured since the pin moved to "
+        f"8.2.8 and is still not the answer -- Selection and Button take "
+        f"no such flag, and a per-constructor argument is a thing the "
+        f"next screen has to remember. Wrap the value.")
 
 
 # --- batch 54: the prompt box that grows ------------------------------------
@@ -6427,7 +6454,12 @@ def _quit_key_row(app) -> str:
     return ""
 
 
-def _footer_dim(app, key: str):
+#: The quit binding's footer entry. Always live -- nothing disables it --
+#: so it is the reference `_footer_dim` measures against.
+LIVE_FOOTER_KEY = "^c"
+
+
+def _footer_dim(app, key: str) -> bool:
     """Whether the footer drew `key`'s entry greyed, off the SCREEN.
 
     `_quit_key_row`'s reason one door along: `check_action` returning
@@ -6435,12 +6467,30 @@ def _footer_dim(app, key: str):
     whether the footer then paints it dim is a fact about the drawn
     cell. Reading `enabled` off the binding would pass even when
     nothing raised the signal that makes the footer repaint.
+
+    A COMPARISON against a live entry rather than a read of one
+    attribute, and the textual pin move is why. `dim` is resolved into
+    the drawn colour now instead of reaching the cell as an attribute.
+    Measured on dark-plain, the same disabled `^\u2191`:
+
+        textual 1.0.0   dim=True    #b8c1d1
+        textual 8.2.8   dim=False   #838a98
+
+    against a live `^c` that is dim=None / #b8c1d1 on both. So the
+    greying never stopped happening and only its expression moved --
+    which is a thing `.dim` alone cannot say, and "drawn differently
+    from a live entry" says on either version.
     """
     compositor = app.screen._compositor
-    row = len(compositor.render_strips()) - 1
-    text_row = compositor.render_strips()[row].text
-    column = text_row.index(key)
-    return compositor.get_style_at(column, row).dim
+    strips = compositor.render_strips()
+    row = len(strips) - 1
+    text_row = strips[row].text
+
+    def drawn(entry: str):
+        style = compositor.get_style_at(text_row.index(entry), row)
+        return (style.dim, style.color)
+
+    return drawn(key) != drawn(LIVE_FOOTER_KEY)
 
 
 class TestRecallingAPromptAlreadySent:

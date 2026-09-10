@@ -345,7 +345,7 @@ class TestThePanelWidget:
         panel = self._panel()
         panel.todos = _items(("do a thing", "pending"))
         assert panel.display is True
-        assert "do a thing" in str(panel.renderable)
+        assert "do a thing" in str(panel.content)
 
     def test_clearing_HIDES_IT_AGAIN(self):
         """GoalBanner's reactive-and-hide shape rather than
@@ -362,7 +362,7 @@ class TestThePanelWidget:
                              ("later", "pending"))
         from tui.widgets import MARK_DONE, MARK_PENDING, MARK_RUNNING
 
-        text = str(panel.renderable)
+        text = str(panel.content)
         assert f"{MARK_DONE} done" in text
         assert f"{MARK_RUNNING} now" in text
         assert f"{MARK_PENDING} later" in text
@@ -370,14 +370,14 @@ class TestThePanelWidget:
     def test_it_shows_the_completed_count(self):
         panel = self._panel()
         panel.todos = _items(("a", "completed"), ("b", "pending"))
-        assert "1/2" in str(panel.renderable)
+        assert "1/2" in str(panel.content)
 
     def test_an_unknown_status_renders_as_pending(self):
         from tui.widgets import MARK_PENDING
 
         panel = self._panel()
         panel.todos = [{"content": "x", "status": "???"}]
-        assert f"{MARK_PENDING} x" in str(panel.renderable)
+        assert f"{MARK_PENDING} x" in str(panel.content)
 
     def test_a_long_list_is_windowed_and_says_so(self):
         """A Static does not scroll itself to the bottom, so an unbounded
@@ -388,7 +388,7 @@ class TestThePanelWidget:
         panel = self._panel()
         panel.todos = [{"content": f"item {n}", "status": "pending"}
                        for n in range(TodoPanel.ROWS + 3)]
-        text = str(panel.renderable)
+        text = str(panel.content)
         assert "item 0" not in text
         assert f"item {TodoPanel.ROWS + 2}" in text
         assert "+3 earlier" in text
@@ -399,7 +399,7 @@ class TestThePanelWidget:
         it, because the symptom is the whole app failing to lay out."""
         panel = self._panel()
         panel.todos = _items(("x", "pending"))
-        assert "x" in str(panel.renderable)
+        assert "x" in str(panel.content)
 
 
 class TestTheMarkerVocabulary:
@@ -486,12 +486,12 @@ class TestThePanelIsEventDriven:
             app.memory.set_extra("todos", _items(("from the event", "pending")))
             # The panel must be stale until the event arrives -- that is
             # what "not from polling" means.
-            assert "from the event" not in str(panel.renderable or "")
+            assert "from the event" not in str(panel.content or "")
 
             app.post_message(LoopEventMessage(LoopEvent(
                 notice={"kind": "todo_changed", "text": "todo 0/1"})))
             assert await settle(
-                pilot, lambda: "from the event" in str(panel.renderable or "")
+                pilot, lambda: "from the event" in str(panel.content or "")
             ), "the notice did not reach the panel"
 
     @pytest.mark.asyncio
@@ -545,7 +545,7 @@ class TestThePanelIsEventDriven:
             app.memory.set_extra("todos", _items(("old thread", "pending")))
             app.refresh_todo_panel()
             assert await settle(
-                pilot, lambda: "old thread" in str(panel.renderable or ""))
+                pilot, lambda: "old thread" in str(panel.content or ""))
 
             _cmd_new(app, "")
             assert await settle(pilot, lambda: panel.display is False), \

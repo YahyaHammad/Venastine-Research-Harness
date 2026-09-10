@@ -318,6 +318,24 @@ async def pump(pilot, times: int = 20) -> None:
         await pilot.pause()
 
 
+def whole_line_style(content):
+    """The style a one-span `Content` was built with, as it was written.
+
+    A widget that styles its WHOLE line hands `Static.update` a Rich `Text`
+    carrying a `style=`, and `tui.widgets.as_content` converts that with
+    `Content.from_rich_text`, which keeps a whole-text style as the LITERAL
+    STRING on one span covering everything. So this is the same claim
+    `Text.style` used to make, read one layer down.
+
+    Only the whole-line case stays a string: a style passed to `append` is
+    resolved into a `textual.style.Style` instead, and reads back as
+    `rgb(154,109,16) bold` rather than as what was typed. That asymmetry is
+    why this is a named helper and not an inline attribute chain.
+    """
+    span, = content.spans
+    return span.style
+
+
 # ---------------------------------------------------------------------------
 # ---- Per-test isolation --------------------------------------------------
 # ---------------------------------------------------------------------------

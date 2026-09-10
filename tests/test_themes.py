@@ -30,7 +30,7 @@ import pytest
 from rich.style import Style
 from textual.theme import BUILTIN_THEMES, Theme
 
-from tests.conftest import pump
+from tests.conftest import pump, whole_line_style
 from tui import themes
 from tui.themes import ALL_THEMES, THEME_NAMES, role_styles
 from tui.widgets import CONVERSATION_ROLES, META_ROLES
@@ -75,13 +75,24 @@ EXPECTED_ROLE_KEYS = {
 #: theme fails here rather than in somebody's session.
 #:
 #: Batch 64 exists because this list did not. Every check in this file
-#: parametrised over ALL_THEMES, so three of the twelve built-ins had
-#: never once been through role_styles: textual-dark leaves
-#: `background` at None, textual-light leaves `foreground` at None, and
-#: textual-ansi fills every slot with `ansi_*` names Rich cannot read.
-#: Selecting the first of those killed the harness at mount, and kept
-#: killing it, because watch_theme had already remembered the name.
+#: parametrised over ALL_THEMES, so three of the built-ins had never
+#: once been through role_styles: textual-dark leaves `background` at
+#: None, textual-light leaves `foreground` at None, and the ANSI theme
+#: fills every slot with `ansi_*` names Rich cannot read. Selecting the
+#: first of those killed the harness at mount, and kept killing it,
+#: because watch_theme had already remembered the name.
+#:
+#: Being derived is what carried this across the textual pin move: the
+#: built-in roster went from twelve to twenty-one, and every new one
+#: was covered by the run that noticed.
 SELECTABLE_THEMES = list(BUILTIN_THEMES.values()) + list(ALL_THEMES)
+
+#: Textual's ANSI themes -- the ones painted in the terminal's own
+#: sixteen colours rather than in RGB. DERIVED off `Theme.ansi`, for
+#: SELECTABLE_THEMES' reason: there was ONE of these (`textual-ansi`)
+#: until 8.2.5 replaced it with `ansi-dark` and `ansi-light`, and the
+#: flag is the thing that stayed true across that rename.
+ANSI_THEMES = [t for t in BUILTIN_THEMES.values() if t.ansi]
 
 
 # ---- WCAG contrast, computed rather than trusted ----------------------------
@@ -157,18 +168,24 @@ from this flag"
 # ---- Integrity: can this theme be rendered at all? (batch 64) ----------------
 # ------------------------------------------------------------------------------
 #
-# INTEGRITY over all twenty-six, QUALITY over our fourteen, and the
+# INTEGRITY over all thirty-five, QUALITY over our fourteen, and the
 # split is measured rather than assumed. Held to this file's own floors,
-# nine of Textual's twelve fail a contrast check -- textual-dark's
+# thirteen of Textual's twenty-one fail a contrast check -- textual-dark's
 # `secondary` is 1.89:1 against its own background, where the identity
 # floor is 3.5, and solarized-light's foreground is 4.99 against a floor
-# of 7 -- and three fail pairwise distinctness (textual-dark and
-# textual-light both set accent == warning, monokai sets error ==
-# secondary). Those floors are decisions about OUR palettes; widening
-# them to somebody else's themes would mean either a red suite or floors
-# lowered until they said nothing. So the checks below ask only whether
-# a theme can be drawn, and the ones after them keep asking whether ours
-# are any good.
+# of 7 -- the two ANSI ones cannot be measured at all, since the terminal
+# owns those sixteen colours, and four fail pairwise distinctness
+# (textual-dark and textual-light both collapse tool == tool_error and
+# warning == assistant_label, monokai sets error == pass, ansi-dark sets
+# tool == success). Those floors are decisions about OUR palettes;
+# widening them to somebody else's themes would mean either a red suite
+# or floors lowered until they said nothing. So the checks below ask only
+# whether a theme can be drawn, and the ones after them keep asking
+# whether ours are any good.
+#
+# The counts moved with the textual pin (twelve built-ins became
+# twenty-one) and are recomputed rather than carried over. Nothing about
+# the SPLIT moved, which is the half that matters.
 
 @pytest.mark.parametrize("theme", SELECTABLE_THEMES, ids=lambda t: t.name)
 def test_every_theme_fills_every_role_slot(theme):
@@ -189,7 +206,7 @@ def test_every_role_style_is_one_rich_can_parse(theme):
     Rich's Text.render resolves a style string through
     `console.get_style(style, default=Style.null())`. An unparseable one
     therefore renders PLAIN and raises nothing -- which is why
-    textual-light lost six roles and textual-ansi lost twenty-five with
+    textual-light lost six roles and the ANSI theme lost twenty-five with
     nobody noticing. A test that merely draws a transcript sees a
     perfectly ordinary line and passes; only asking Rich to parse the
     string can tell.
@@ -230,17 +247,19 @@ def test_the_minimal_legal_theme_is_covered(dark):
             f"textual-light did")
 
 
-def test_an_ansi_theme_speaks_richs_vocabulary():
-    """textual-ansi's slots are `ansi_blue`, `ansi_default` and the rest
-    of the terminal's own sixteen. Textual's Color.parse knows the
+@pytest.mark.parametrize("theme", ANSI_THEMES, ids=lambda t: t.name)
+def test_an_ansi_theme_speaks_richs_vocabulary(theme):
+    """An ANSI theme's slots are `ansi_blue`, `ansi_default` and the
+    rest of the terminal's own sixteen. Textual's Color.parse knows the
     prefix and Rich's Style.parse does not; the names underneath it are
     the same list, so the translation is exact rather than approximate.
 
     Asserted on the ABSENCE of the prefix rather than on particular
     colours, because which slot holds which ANSI colour is Textual's
-    decision and may move.
+    decision and may move -- as it did: this was one theme called
+    `textual-ansi` until 8.2.5 made it two.
     """
-    styles = role_styles(BUILTIN_THEMES["textual-ansi"])
+    styles = role_styles(theme)
     leaked = {r: s for r, s in styles.items() if "ansi_" in s}
     assert leaked == {}, (
         f"{leaked} carry Textual's prefix into a Rich style string, "
@@ -248,7 +267,8 @@ def test_an_ansi_theme_speaks_richs_vocabulary():
     assert styles["user"] == "bold blue"
 
 
-def test_a_theme_with_no_rgb_background_gets_no_diff_band():
+@pytest.mark.parametrize("theme", ANSI_THEMES, ids=lambda t: t.name)
+def test_a_theme_with_no_rgb_background_gets_no_diff_band(theme):
     """A diff row is the one place the transcript sets a BACKGROUND, and
     on an ANSI theme there is no RGB to blend one out of -- the terminal
     owns those sixteen colours and the harness cannot know what they
@@ -260,7 +280,7 @@ def test_a_theme_with_no_rgb_background_gets_no_diff_band():
     down for the themes that CAN be measured; picking it here for the
     one theme that cannot would be backwards.
     """
-    styles = role_styles(BUILTIN_THEMES["textual-ansi"])
+    styles = role_styles(theme)
     assert styles["diff_add"] == "green"
     assert styles["diff_del"] == "red"
     for role in ("diff_add", "diff_del"):
@@ -506,15 +526,16 @@ async def test_a_theme_switch_restyles_the_goal_banner(mocker):
         app.memory.set_extra("goal", "ship the themes")
         app.refresh_goal_banner()
         await pilot.pause()
-        assert captured[-1].style == "bold #d9a441", \
+        assert whole_line_style(captured[-1]) == "bold #d9a441", \
             "dark-plain's warning hue expected first"
 
         app.query_one("#prompt").value = "/theme light-red"
         await pilot.press("enter")
         await pilot.pause()
 
-        assert captured[-1].style == "bold #9a6d10", \
-            f"banner kept the old palette after /theme: {captured[-1].style!r}"
+        assert whole_line_style(captured[-1]) == "bold #9a6d10", \
+            f"banner kept the old palette after /theme: " \
+            f"{whole_line_style(captured[-1])!r}"
 
 
 @pytest.mark.asyncio
@@ -708,8 +729,12 @@ async def test_the_palette_offers_exactly_the_themes_this_file_covers():
         f"{sorted(covered - offered)} that cannot be selected")
 
 
+#: The three built-ins that broke `role_styles` before batch 64 -- two
+#: with a blank slot, and the ANSI one(s) whose slots Rich cannot read.
+#: Derived past the 8.2.5 rename for ANSI_THEMES' reason.
 @pytest.mark.parametrize(
-    "name", ["textual-dark", "textual-light", "textual-ansi"])
+    "name",
+    ["textual-dark", "textual-light"] + [t.name for t in ANSI_THEMES])
 @pytest.mark.asyncio
 async def test_a_remembered_built_in_theme_still_mounts(name):
     """THE REPORTED BUG, and the half of it that made it urgent.
@@ -780,7 +805,7 @@ async def test_an_unstylable_theme_does_not_take_the_app_down(
     installer cannot reach.
 
     And it WARNS, which is the other half. Silence is what let
-    textual-light and textual-ansi render unstyled for as long as they
+    textual-light and the ANSI themes render unstyled for as long as they
     did, so a contained failure that reported nothing would be the same
     defect wearing a better exception story.
 

@@ -476,7 +476,8 @@ class VenastineApp(App):
         # silently delete the rest of the typed line instead. Still true
         # after batch 54 swapped Input for TextArea: BOTH bind ctrl+k,
         # and neither binds ctrl+l, which App and Footer also leave free
-        # (D22: verified against the installed version, not assumed).
+        # (D22: verified against the installed version, not assumed --
+        # re-verified when the pin moved to 8.2.8, unchanged).
         ("ctrl+l", "show_claims", "Claims"),
         # §47. The keyboard route to what the sidebar offers on a
         # click, because the sidebar is deliberately not focusable
@@ -501,9 +502,12 @@ class VenastineApp(App):
         # COMMAND_PALETTE_BINDING, bound priority=True, and the
         # palette is enabled on purpose here -- `watch_theme` exists
         # because it sets App.theme directly. Relocating it to
-        # ctrl+shift+p would delete it on Windows: that chord is
-        # indistinguishable from ctrl+p without the kitty protocol,
-        # which textual turns on in its LINUX drivers alone.
+        # ctrl+shift+p is still wrong, though the reason narrowed
+        # when the pin moved: that chord is indistinguishable from
+        # ctrl+p without the kitty protocol, which textual turned on
+        # in its LINUX drivers alone until 6.6.0 added the Windows
+        # one. It would have deleted the palette on Windows; it now
+        # makes it depend on the terminal, which is not better.
         #
         # The plain arrows were the other candidate and are already
         # spoken for twice -- cursor movement in a box batch 54 made
@@ -913,7 +917,7 @@ class VenastineApp(App):
         Three fallbacks to the configured theme, and the third is the one
         that is easy to miss. App.theme VALIDATES against
         available_themes and raises InvalidThemeError on a name it does
-        not know (verified against the pinned textual 1.0.0, per D22), so
+        not know (verified against the installed textual, per D22), so
         a store written by a build with a theme this one has retired --
         or by a future build with more of them -- would be a crash at
         mount rather than a preference nobody could honour. themes.resolve

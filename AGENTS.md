@@ -48,7 +48,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 4231 tests, offline, ~5-15 min by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 4259 tests, offline, ~5-15 min by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -550,8 +550,10 @@ nothing before them. `TextArea` is the only multi-line widget in the pinned text
 this is a swap rather than a setting; the layout needed nothing, because `#prompt` was
 already `dock: bottom` over a `1fr` transcript.
 
-Four things are decisions rather than defaults, all measured against the installed 1.0.0
-(D22) rather than read from docs.
+Four things are decisions rather than defaults, all measured against the installed
+package (D22's rule) rather than read from docs — and re-measured against `8.2.8`
+when the pin moved. Three of the four came back unchanged; the `shift+enter` one
+did not, and says so below.
 
 - **`priority=True` on the `enter` binding is load-bearing and reads like caution.**
   `TextArea._on_key` maps `enter` to a newline insert and calls `event.stop()` /
@@ -559,15 +561,19 @@ Four things are decisions rather than defaults, all measured against the install
   the flag `enter` inserts and never submits, so no turn in this shell would ever start.
   Dropping it fails three tests in `TestEnterSubmitsAndCtrlJDoesNot` and
   `TestThePromptBoxGrowsWithWhatIsTyped`.
-- **`ctrl+j` carries the newline; `shift+enter` is a courtesy that is unreachable here.**
-  Textual enables the kitty keyboard protocol in its LINUX drivers alone
-  (`drivers/linux_driver.py`, `linux_inline_driver.py`), so on the Windows driver a
-  terminal sends a bare CR for shift+enter and the parser yields plain `enter` — the box
-  would submit. `ctrl+j` is byte 0x0a, parses to its own key, is bound by neither `Input`,
-  `TextArea`, `App` nor `Footer`, and is exactly what iTerm2 / VS Code / Windows Terminal
-  emit once configured to send a newline on shift+enter. **`alt+enter` is the obvious third
-  guess and is a dead end**: fed `ESC CR` the parser yields no key at all, and a second one
-  behind it degrades to `escape`, `enter`.
+- **`ctrl+j` carries the newline, and `shift+enter` stopped being unreachable when the
+  pin moved.** Textual enabled the kitty keyboard protocol in its LINUX drivers alone
+  through 6.5, so on the Windows driver a terminal sent a bare CR for shift+enter and
+  the parser yielded plain `enter` — the box would submit. **6.6.0 added the protocol
+  to the Windows driver** (`drivers/windows_driver.py` writes `\x1b[>1u`), so that
+  reason has expired. `ctrl+j` remains what the feature rests on and what is pinned;
+  claiming shift+enter is its own batch, not a side effect of a version bump, because
+  it reverses a decision rather than restoring one. `ctrl+j` is byte 0x0a, parses to
+  its own key, is bound by neither `Input`, `TextArea`, `App` nor `Footer`, and is
+  exactly what iTerm2 / VS Code / Windows Terminal emit once configured to send a
+  newline on shift+enter. **`alt+enter` is the obvious third guess and is a dead
+  end**: fed `ESC CR` the parser yields no key at all, and a second one behind it
+  degrades to `escape`, `enter`.
 - **`value` is an alias over `.text`, and it is why this batch edited no tests.** Roughly
   sixty sites across five files say `app.query_one("#prompt").value = …`; none queries it
   by class. A one-line property is cheaper than sixty edits made to land a rendering
@@ -692,8 +698,11 @@ is App, Screen and `TextArea`'s forty-odd editing bindings in one list rather th
 **`ctrl+p` is not available and must not be taken.** It is textual's `COMMAND_PALETTE_BINDING`,
 bound `priority=True`, and the palette is enabled here deliberately — `watch_theme` exists *because*
 it sets `App.theme` directly, bypassing `/theme`. The ClassVar is overridable, but `ctrl+shift+p` is
-indistinguishable from `ctrl+p` without the kitty protocol, which textual turns on in its Linux
-drivers alone, so relocating it would delete the palette on Windows. The plain arrows were the other
+indistinguishable from `ctrl+p` without the kitty protocol — which textual turned on in its Linux
+drivers alone until **6.6.0 added the Windows driver**. So relocating it would have deleted the
+palette on Windows outright, and now merely makes it depend on whether the terminal implements the
+protocol, which is a worse trade than leaving the binding where textual put it rather than a
+different one. The plain arrows were the other
 candidate and already mean two things — the cursor in a box batch 54 made multi-line, and the
 suggestion panel's highlight since batch 55 — so the shell convention (recall only when the cursor is
 already on line 1) would have been a third meaning gated on a position.
@@ -1762,17 +1771,21 @@ run rather than by reading the code.
   override a severity slot when its own panel tint would swallow the shared value,
   keeping the semantic hue family — each override carries its reason in `themes.py`,
   and the contrast floors (foreground ≥ 7:1, severity ≥ 4:1, identity ≥ 3.5 dark / 3.0
-  light) are pinned in `tests/test_themes.py`, over **our fourteen** — nine of textual's
-  twelve fail one of them, so integrity is checked for all twenty-six and quality for
-  ours. A widget with no running app renders
+  light) are pinned in `tests/test_themes.py`, over **our fourteen** — thirteen of
+  textual's twenty-one fail one of them and the two ANSI ones cannot be measured at
+  all, so integrity is checked for all thirty-five and quality for ours. A widget with
+  no running app renders
   **unstyled rather than raising** — `self.app` raises `NoActiveAppError`, and widgets
   are built bare throughout the suite.
 - **A `Theme` slot can be `None`, and `role_styles` must go through `_palette`**
   (batch 64). Every slot but `primary` is `Optional[str]` on textual's own `Theme`, and
-  the command palette offers **twenty-six** themes, not fourteen — textual registers its
-  twelve in `App.__init__`. Three of them break a naive read: `textual-dark` has no
-  `background`, `textual-light` no `foreground`, and `textual-ansi` fills every slot with
-  `ansi_*` names, which are **textual's vocabulary and not Rich's**. Selecting the first
+  the command palette offers **thirty-five** themes, not fourteen — textual registers
+  its twenty-one in `App.__init__`. Four of them break a naive read: `textual-dark` has
+  no `background`, `textual-light` no `foreground`, and `ansi-dark` / `ansi-light` fill
+  every slot with `ansi_*` names, which are **textual's vocabulary and not Rich's**.
+  (There was ONE such ANSI theme, `textual-ansi`, until 8.2.5 split it in two —
+  `SELECTABLE_THEMES` being DERIVED is what carried this across the pin move, and what
+  put the nine new built-ins under test on the run that noticed.) Selecting the first
   killed the harness *at mount*, and kept killing it, because `watch_theme` had already
   written the name to a user-tier store the installer cannot reach. A blank slot falls
   back to `theme.to_color_system().generate()` — textual's own derivation, so the colour
@@ -1785,7 +1798,7 @@ run rather than by reading the code.
 - **A bad style string is SILENT, which is why the test parses them** (batch 64). Rich's
   `Text.render` resolves a style through `console.get_style(style, default=Style.null())`,
   so an unparseable one renders plain and raises nothing — `textual-light` lost six roles
-  and `textual-ansi` twenty-five without a single test noticing. A test that merely draws
+  and the ANSI theme twenty-five without a single test noticing. A test that merely draws
   a transcript cannot see this; `Style.parse` can. Same shape as batch 41's `dim`, one
   layer along. `styles_for` also contains anything `role_styles` still manages to raise
   (§27) and warns **once per theme**, since it runs once per line.

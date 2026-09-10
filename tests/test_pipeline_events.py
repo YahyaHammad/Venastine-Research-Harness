@@ -311,7 +311,7 @@ class TestTheProgressPanel:
 
         from tui.widgets import MARK_DONE, MARK_RUNNING
 
-        text = str(panel.renderable)
+        text = str(panel.content)
         assert f"{MARK_DONE} Pass 0" in text, \
             "a finished pass must read as finished"
         assert f"{MARK_RUNNING} Pass 1" in text, \
@@ -331,7 +331,7 @@ class TestTheProgressPanel:
 
         from tui.widgets import MARK_DONE, MARK_FAILED, MARK_RUNNING
 
-        text = str(panel.renderable)
+        text = str(panel.content)
         assert f"{MARK_FAILED} Pass 1" in text, \
             "the failed candidate must read as failed"
         assert f"{MARK_DONE} Pass 1" in text, \
@@ -359,7 +359,7 @@ class TestTheProgressPanel:
         panel.claim_tiered("C1", "HIGH")
         panel.claim_tiered("C2", "HIGH")
 
-        text = str(panel.renderable)
+        text = str(panel.content)
         assert "high 2" in text
         assert "low" not in text, "C1's superseded tier is still being counted"
 
@@ -406,16 +406,16 @@ async def test_ac2_the_tui_renders_pass_boundaries_and_tiers_as_they_happen(mock
         _start_research(app, "q", None)
         panel = app.query_one("#research-progress", ResearchProgress)
         assert await settle(
-            pilot, lambda: "Pass 3a" in str(panel.renderable)), \
+            pilot, lambda: "Pass 3a" in str(panel.content)), \
             "the pass boundary never reached the panel"
         assert await settle(
-            pilot, lambda: "medium 1" in str(panel.renderable)), \
+            pilot, lambda: "medium 1" in str(panel.content)), \
             "the claim tier never reached the panel"
         # DONE, not running: the pass_complete event has to land too,
         # or the panel shows every pass as still going for the rest of
         # the run.
         from tui.widgets import MARK_DONE
-        assert f"{MARK_DONE} Pass 3a" in str(panel.renderable)
+        assert f"{MARK_DONE} Pass 3a" in str(panel.content)
 
 
 @pytest.mark.asyncio

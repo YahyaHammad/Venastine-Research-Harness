@@ -1023,7 +1023,7 @@ class TestThePanelDrawsATree:
             AgentRow("beta", 2, "b1", parent_id="b"),
         ])
 
-        drawn = [ln for ln in panel.renderable.plain.splitlines() if ln.strip()]
+        drawn = [ln for ln in panel.content.plain.splitlines() if ln.strip()]
         # ["agent", "plan", then the four spans]
         names = [ln.strip().lstrip("▸ ").strip() for ln in drawn[2:]]
         indents = [len(ln) - len(ln.lstrip(" ")) for ln in drawn[2:]]
@@ -1129,7 +1129,7 @@ class TestThePanelDrawsATree:
         panel.show(None, [AgentRow("Pass 1", 1, "p"),
                           AgentRow("explore", 1, "s", parent_id="p")])
 
-        drawn = [ln for ln in panel.renderable.plain.splitlines() if ln.strip()]
+        drawn = [ln for ln in panel.content.plain.splitlines() if ln.strip()]
         indents = [len(ln) - len(ln.lstrip(" ")) for ln in drawn[2:]]
 
         assert indents == [2, 4], (

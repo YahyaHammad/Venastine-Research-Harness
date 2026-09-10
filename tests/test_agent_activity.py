@@ -577,7 +577,7 @@ class TestTheAgentPanel:
             await pilot.pause()
 
             assert panel.display is True
-            assert "explore" in panel.renderable.plain
+            assert "explore" in panel.content.plain
 
     @pytest.mark.asyncio
     async def test_a_spawn_with_no_active_agent_still_gets_a_root_row(self):
@@ -593,7 +593,7 @@ class TestTheAgentPanel:
             panel.show(None, [AgentRow("explore", 1)])
             await pilot.pause()
 
-            lines = [ln for ln in panel.renderable.plain.splitlines() if ln]
+            lines = [ln for ln in panel.content.plain.splitlines() if ln]
             assert lines[0] == "agent"
             assert lines[1] == "default"
             assert lines[2].startswith("  "), "the spawn row is not indented"
@@ -614,7 +614,7 @@ class TestTheAgentPanel:
             panel.show("plan", [AgentRow("explore", 1), AgentRow("review", 2)])
             await pilot.pause()
 
-            rows = [ln for ln in panel.renderable.plain.splitlines() if ln]
+            rows = [ln for ln in panel.content.plain.splitlines() if ln]
             indents = [len(ln) - len(ln.lstrip(" ")) for ln in rows[1:]]
 
         assert indents == [0, 2, 4], (
@@ -637,7 +637,7 @@ class TestTheAgentPanel:
                        [AgentRow("pipeline-reviewer", 1),
                         AgentRow("pipeline-reviewer", 2)])
             await pilot.pause()
-            rows = panel.renderable.plain.splitlines()
+            rows = panel.content.plain.splitlines()
 
         too_wide = [r for r in rows if len(r) > AgentPanel.WIDTH]
         assert not too_wide, (
@@ -660,12 +660,12 @@ class TestTheAgentPanel:
             panel = app.query_one("#agent-panel", AgentPanel)
             panel.show("explore", [])
             await pilot.pause()
-            before = panel.renderable.spans
+            before = panel.content.spans
 
             app.theme = "gruvbox"
             app.restyle_sidebar()
             await pilot.pause()
-            after = panel.renderable.spans
+            after = panel.content.spans
 
         assert before and after, "the panel drew no styled spans at all"
         assert [s.style for s in before] != [s.style for s in after], (
@@ -690,7 +690,7 @@ class TestTheSinkDrivesThePanel:
             with agent_activity.span(app._activity, "explore", 1):
                 await pilot.pause()
                 await pilot.pause()
-                shown = panel.display and "explore" in panel.renderable.plain
+                shown = panel.display and "explore" in panel.content.plain
             await pilot.pause()
             await pilot.pause()
             cleared = not panel.display

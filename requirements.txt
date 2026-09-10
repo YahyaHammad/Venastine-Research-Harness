@@ -23,9 +23,43 @@ sqlmodel==0.0.39
 python-dotenv==1.2.2
 matplotlib==3.10.3
 pyyaml==6.0.3
-# ROADMAP_v2 §16 TUI. Upper-bounded per D22 -- the mcp lesson was that an
-# unpinned dependency mid-major-version-transition migrates you by accident.
-textual>=1.0,<2.0
+# ROADMAP_v2 §16 TUI. EXACT, and this comment is textual's OWN record
+# rather than a line borrowed from D22's, which is about `mcp`. The
+# `>=1.0,<2.0` it replaces was written BEFORE 2.0 existed -- 1.0.0 shipped
+# 2024-12-12 and 2.0.0 on 2025-02-16 -- so it was a
+# don't-migrate-me-by-accident ceiling and never a judgement about 2.x.
+# Nothing in the repo had evaluated 2.x, and the ceiling then sat there
+# for twenty months while upstream reached 8.2.8.
+#
+# Exact for the reason batch 32 made `mcp` exact: an upper bound stops a
+# MAJOR and lets a MINOR change behaviour underneath CI, which makes CI's
+# result depend on when it ran.
+#
+# Moving it again is a deliberate step. Each of these was verified in hand
+# against the installed package rather than read from a changelog, and
+# each is what to re-measure next time:
+#   * `Static.renderable` is `.content` since 6.0.0 (`.visual` is the
+#     rendered form). 43 sites across 8 test files read it.
+#   * `Static.update` sends a Rich `Text` through `visualize()`, which
+#     converts it with `console=widget.app.console` -- so updating an
+#     UNMOUNTED widget raises NoActiveAppError, and the suite builds these
+#     panels bare everywhere. `tui.widgets.as_content` is the answer.
+#     The conversion also drops `no_wrap` / `overflow`, silently; those
+#     are `text-wrap` / `text-overflow` in app.tcss now.
+#   * Textual markup replaced Rich markup at 2.0.0, and `markup=False` IS
+#     honoured now -- on 1.0.0 it was stored and never read, which is what
+#     tui/screens.py's `Text(...)` rule was written against (RA1).
+#   * `textual-ansi` is GONE. `ansi-dark` / `ansi-light` replaced it at
+#     8.2.5, `Theme` grew an `ansi: bool`, and the built-in roster is 21
+#     rather than 12 -- so SELECTABLE_THEMES in tests/test_themes.py, and
+#     every documented test count, moves with the pin.
+#   * `dim` is resolved into the drawn COLOUR now instead of reaching the
+#     cell as an attribute, which is what a test reading a drawn style
+#     off the compositor sees.
+#   * The kitty keyboard protocol reaches the WINDOWS driver since 6.6.0.
+#     Batch 54's `shift+enter` note was written against its absence.
+# Then re-run the TUI pilots dependabot.yml names -- ~410 run_test sites.
+textual==8.2.8
 
 # Imported DIRECTLY at tui/widgets.py:8-9 (`rich.syntax.Syntax`,
 # `rich.text.Text`) and previously undeclared -- present only because
@@ -33,7 +67,9 @@ textual>=1.0,<2.0
 # chosen by whatever textual's own range resolved to. Upper-bounded per D22
 # for D22's own reason, and this was the one package the project imported
 # without declaring, i.e. the one place such a migration would be silent.
-rich>=13,<16
+# The FLOOR is textual's, not a guess: 8.2.8 requires `rich>=14.2.0`, so
+# `>=13` stated a version this project can no longer be installed with.
+rich>=14.2,<16
 
 # ROADMAP_v2 §17 MCP client. Upper-bounded per D22 -- and D22 exists
 # BECAUSE of this package: it was mid-major-version transition when §17

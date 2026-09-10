@@ -377,7 +377,7 @@ async def test_the_modal_shows_the_reason_below_the_computed_notice():
         await pilot.pause()
         await pilot.pause()
         body = app.screen.query_one("#permission-params")
-        text = body.visual._renderable.plain
+        text = body.visual.plain
         app.screen.dismiss(False)
         await pilot.pause()
 
@@ -406,7 +406,7 @@ async def test_the_modal_says_so_when_no_reason_was_given():
         await pilot.pause()
         await pilot.pause()
         text = (app.screen.query_one("#permission-params")
-                .visual._renderable.plain)
+                .visual.plain)
         app.screen.dismiss(False)
         await pilot.pause()
 

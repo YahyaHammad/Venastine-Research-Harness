@@ -15,6 +15,7 @@ from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
 from textual.binding import Binding
+from textual.content import Content
 from textual.message import Message
 from textual.reactive import reactive
 from textual.widgets import RichLog, Static, TextArea
@@ -22,6 +23,36 @@ from textual.widgets import RichLog, Static, TextArea
 from prompts.system_prompts import pass_label
 from tui import diffs, markdown, ravens, themes
 from tui.commands import registry as commands
+
+
+def as_content(text: Text) -> Content:
+    """A Rich ``Text`` as the ``Content`` textual would build from it anyway.
+
+    ``Static.update`` routes its argument through ``visual.visualize()``,
+    which special-cases a Rich ``Text`` into
+    ``Content.from_rich_text(obj, console=widget.app.console)`` -- and
+    ``self.app`` RAISES outside a running app. Every panel in this module is
+    built bare in the suite (``ThinkingIndicator._redraw``'s guard is the
+    same fact one door along), so handing textual a ``Text`` turned every
+    such construction into an error about the event loop.
+
+    ``Content.from_rich_text`` itself takes ``console=None`` and falls back
+    to ``RichStyle.parse``, so doing the conversion HERE is what removes the
+    app lookup. Parity rather than approximation, measured: over 1085
+    (theme, role) style strings across all 35 selectable themes the console
+    changes not one span. ``role_styles`` emits literal Rich style strings
+    (``bold #0178D4``, ``dim italic``, ``green``) and never a textual CSS
+    variable, and those are exactly what ``RichStyle.parse`` reads.
+
+    The other half is what does NOT survive: ``Content`` carries no
+    ``no_wrap`` and no ``overflow``, and ``from_rich_text`` drops both.
+    Textual's own call drops them too, so a widget that set them on its
+    ``Text`` lost them the moment the pin moved -- silently, and with no
+    test able to see it. They are ``text-wrap`` / ``text-overflow`` in
+    ``app.tcss`` now; see ``#agent-panel`` and ``#thread-crumb``.
+    """
+    return Content.from_rich_text(text)
+
 
 # Animation cadence. Slow enough to read, and paused outright while tokens
 # are streaming -- a redraw loop competing with token deltas is the one
@@ -280,7 +311,7 @@ class ThinkingIndicator(Static):
         except Exception:  # noqa: BLE001 -- no running app; render unstyled
             style = ""
         frame = self.FRAMES[self._frame] if self._animations else self.FRAMES[-1]
-        self.update(Text(f"{THINKING_INDENT}{frame}", style))
+        self.update(as_content(Text(f"{THINKING_INDENT}{frame}", style)))
 
     def start(self) -> None:
         """Idempotent -- called on every thinking delta."""
@@ -348,7 +379,7 @@ class PostureBadge(Static):
         body = Text("!! REDUCED SECURITY\n")
         for label, _detail in self._reasons:
             body.append("- " + label + "\n")
-        self.update(body)
+        self.update(as_content(body))
         self.display = True
 
 
@@ -418,8 +449,9 @@ class UsageLine(Static):
         # meaning for a usage line, and the palette route the batch-26
         # guard test demands (it caught this line as a literal within one
         # commit of the widget existing).
-        self.update(Text(f"usage · ctx {_k(ctx)}{scale} · billed {_k(billed)}",
-                          style=self._styles().get("system", "")))
+        self.update(as_content(
+            Text(f"usage · ctx {_k(ctx)}{scale} · billed {_k(billed)}",
+                 style=self._styles().get("system", ""))))
 
 
 class GoalBanner(Static):
@@ -450,7 +482,7 @@ class GoalBanner(Static):
             # is the second place a weight would be decided. Guarded still,
             # because a bare-built widget has no styles dict at all.
             style = self._styles().get("warning", "") or "bold"
-            self.update(Text(f"goal  {self.goal}", style=style))
+            self.update(as_content(Text(f"goal  {self.goal}", style=style)))
         else:
             self.display = False
             self.update("")
@@ -530,7 +562,7 @@ class TodoPanel(Static):
             body.append(f"(+{len(items) - self.ROWS} earlier)\n",
                         styles.get("system", ""))
         self.display = True
-        self.update(body)
+        self.update(as_content(body))
 
 
 #: How often the viewer re-reads a thread whose run is still going.
@@ -937,13 +969,16 @@ class AgentPanel(Static):
             room = self.WIDTH - len(pad) - 2      # the marker and its space
             body.append(f"{pad}{MARK_RUNNING} {self._fit(row.name, room)}\n",
                         self._armed(styles.get("tool", ""), row.thread_id))
-        # `no_wrap` / crop for batch 55's reason: a row this widget already
-        # sized must not be re-wrapped by the Static underneath it, and a
-        # miscalculation should clip visibly rather than reflow invisibly.
-        body.no_wrap = True
-        body.overflow = "crop"
+        # Batch 55's reason -- a row this widget already sized must not be
+        # re-wrapped by the Static underneath it, and a miscalculation
+        # should clip visibly rather than reflow invisibly -- but the rule
+        # is `text-wrap: nowrap` / `text-overflow: clip` on `#agent-panel`
+        # now. `Content` carries neither flag and `from_rich_text` drops
+        # both, so setting them on the Text stopped meaning anything the
+        # moment the pin moved: silently, and on the widget least able to
+        # afford a reflow. See `as_content`.
         self.display = True
-        self.update(body)
+        self.update(as_content(body))
 
 class ThreadCrumb(Static):
     """Where you are, and every step back out (§47).
@@ -1012,13 +1047,13 @@ class ThreadCrumb(Static):
                                                thread_id))
         body.append("    read-only \u2014 esc to go back",
                     styles.get("system", ""))
-        # One line, cropped rather than wrapped: a trail that reflowed
+        # One line, elided rather than wrapped: a trail that reflowed
         # would take a second row from the transcript below it, and the
-        # segment that matters most is the one you are standing on.
-        body.no_wrap = True
-        body.overflow = "ellipsis"
+        # segment that matters most is the one you are standing on. The
+        # rule is on `#thread-crumb` in app.tcss, for `as_content`'s
+        # reason.
         self.display = True
-        self.update(body)
+        self.update(as_content(body))
 
 
 class ResearchProgress(Static):
@@ -1193,7 +1228,7 @@ class ResearchProgress(Static):
                 body.append(f"  {label} {count}\n", styles.get(tier, ""))
         if self._retries:
             body.append(f"{self._retries} revision(s)\n")
-        self.update(body)
+        self.update(as_content(body))
 
 
 class SlashSuggest(Static):
@@ -1555,9 +1590,12 @@ class PromptInput(TextArea):
 
     `priority=True` on enter. `TextArea._on_key` maps enter to a newline
     insert and calls `event.stop()` / `event.prevent_default()`, which
-    beats an ordinary binding: measured on the pinned textual 1.0.0 (D22,
+    beats an ordinary binding: measured on the installed textual (D22,
     both ways -- without the flag enter inserts and never submits). It
-    reads like caution and is the opposite.
+    reads like caution and is the opposite. Re-read on 8.2.8 when the
+    pin moved: `_on_key` still maps enter through `insert_values` and
+    still stops the event, so the flag is still what makes this a
+    prompt box rather than a text editor.
 
     `ctrl+j` is what carries the newline; `shift+enter` is a courtesy.
     Textual turns the kitty keyboard protocol on in its LINUX drivers

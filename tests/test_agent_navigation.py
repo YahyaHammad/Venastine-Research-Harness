@@ -229,7 +229,7 @@ class TestTheLineageTrail:
 
             app.open_agent_thread(str(lineage.grandchild))
             await pilot.pause()
-            drawn = crumb.renderable.plain
+            drawn = crumb.content.plain
             shown = crumb.display
 
         assert shown is True
@@ -270,7 +270,7 @@ class TestTheLineageTrail:
 
             app.open_agent_thread(str(lineage.grandchild))
             await pilot.pause()
-            steps = crumb.renderable.plain
+            steps = crumb.content.plain
 
         for name in ("chat", "explore", "review"):
             assert name in steps, f"{name!r} missing from {steps!r}"
@@ -289,7 +289,7 @@ class TestTheLineageTrail:
             await pilot.pause()
             app.open_agent_thread(str(first))
             await pilot.pause()
-            drawn = app.query_one("#thread-crumb", ThreadCrumb).renderable.plain
+            drawn = app.query_one("#thread-crumb", ThreadCrumb).content.plain
 
         assert drawn.count("a") >= 1 and "b" in drawn
         assert app._viewing == first
@@ -320,7 +320,7 @@ class TestTheLineageTrail:
             # the real one.
             opened = mocker.patch.object(app, "open_agent_thread")
 
-            hint = crumb.renderable.plain.index("read-only")
+            hint = crumb.content.plain.index("read-only")
             await pilot.click("#thread-crumb", offset=(hint + 2, 0))
             await pilot.pause()
             await pilot.pause()
@@ -1223,7 +1223,7 @@ class TestTheRegistryIsWhatDecides:
 def _picker_rows(screen):
     from textual.widgets import ListItem
 
-    return [str(item.children[0].renderable)
+    return [str(item.children[0].content)
             for item in screen.query(ListItem)]
 
 
@@ -1407,7 +1407,7 @@ class TestThePermissionModalNamesTheAsker:
                 "shell", {"command": ["ls"]}, asked_by="explore", depth=2))
             assert await settle(
                 pilot, lambda: isinstance(app.screen, PermissionScreen))
-            drawn = [str(w.renderable)
+            drawn = [str(w.content)
                      for w in app.screen.query("#permission-asker")]
             app.screen.dismiss(False)
             await pilot.pause()
@@ -1500,7 +1500,7 @@ class TestTheOtherTwoQuestionsNameTheirAskerToo:
                 "review", ["shell"], asked_by="explore", depth=1))
             assert await settle(
                 pilot, lambda: isinstance(app.screen, SubagentSignoffScreen))
-            drawn = [str(w.renderable)
+            drawn = [str(w.content)
                      for w in app.screen.query("#permission-asker")]
             app.screen.dismiss(None)
             await pilot.pause()
@@ -1520,7 +1520,7 @@ class TestTheOtherTwoQuestionsNameTheirAskerToo:
                 "review", [], asked_by="explore", depth=1))
             assert await settle(
                 pilot, lambda: isinstance(app.screen, SubagentSignoffScreen))
-            drawn = [str(w.renderable)
+            drawn = [str(w.content)
                      for w in app.screen.query("#permission-asker")]
             app.screen.dismiss(None)
             await pilot.pause()
@@ -1538,7 +1538,7 @@ class TestTheOtherTwoQuestionsNameTheirAskerToo:
                 "which one?", ["a", "b"], asked_by="explore", depth=2))
             assert await settle(
                 pilot, lambda: isinstance(app.screen, QuestionScreen))
-            drawn = [str(w.renderable)
+            drawn = [str(w.content)
                      for w in app.screen.query("#permission-asker")]
             app.screen.dismiss(None)
             await pilot.pause()
