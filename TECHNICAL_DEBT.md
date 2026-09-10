@@ -632,3 +632,17 @@ defect found.
 - **Bandit `-s B101` revisit.** Skipped because all 6037 hits are pytest
   asserts and production carries zero (measured). If production ever
   gains an `assert`, that skip starts hiding exactly what it is for.
+
+## 19. `with_goal` uncounted in the `with_*` tier convergence (open, deferred 2026-09-10)
+
+`core/loop.py` assembles five prompt tiers outside `with_catalogs()`
+(`with_goal`, `with_catalogs`, `with_memories`, `with_refs`, `with_todos`),
+but J11's "converging the four" counts K6/M13/M19/J11 and omits `with_goal`
+-- while ROADMAP_v2's own J11 row names goal in the merge ("goal/skills/
+memories into one assembly point"). Either the count is four disclosure
+tiers with goal deliberately separate (then say so in the AGENTS J11 bullet
+and the ROADMAP J11 row alike) or it is five (then the AGENTS bullet, the
+ROADMAP row and `tests/BREAKING_CHANGES.md`'s "FOURTH instance" move
+together, or the next fix creates the next finding). The tier pin in
+`tests/test_docs_consistency.py` waits on the answer, which is an owner
+call about what a tier is, not a measurement.

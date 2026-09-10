@@ -7326,6 +7326,23 @@ async def test_the_prompt_border_shows_uptime_before_any_turn(mocker):
 
 
 @pytest.mark.asyncio
+async def test_the_prompt_hint_renders_once_on_the_frame():
+    """`TextArea` renders its native `placeholder` reactive inside the box
+    when empty, so assigning the hint to both it and `border_title` drew
+    "Message, or /help" twice -- frame and text. The border title is the
+    only placeholder this box has; the reactive stays at its default."""
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        prompt = app.query_one("#prompt", PromptInput)
+
+        assert prompt.text == ""
+        assert prompt.border_title == "Message, or /help"
+        assert prompt.placeholder == "", \
+            "the hint is assigned where TextArea draws it a second time"
+
+
+@pytest.mark.asyncio
 async def test_a_modal_does_not_count_toward_the_turn(mocker):
     """Read off the SCREEN STACK, so every modal counts including ones
     added after this batch -- textual's on_screen_suspend does not reach

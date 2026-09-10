@@ -128,7 +128,8 @@
     height: auto;
     max-height: 6;
     padding: 0 1;
-    /* The placeholder, which a TextArea has no other way to carry. Muted
+    /* The placeholder, carried by the border title rather than TextArea's
+       native in-box one (assigning both drew it twice). Muted
        is already this sheet's vocabulary for a hint (#usage-line,
        #todo-panel, #research-progress), so it reads as one rather than
        as a heading. */

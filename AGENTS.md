@@ -498,8 +498,7 @@ competing with deltas is the one place animation costs responsiveness. Both are 
 together they leave the screen most static when the harness is busiest. The meter refills
 that spot; it does not reverse the pause.
 
-- **The subtitle, because `border_title` is already the placeholder** a `TextArea` has no
-  other way to carry, and because it costs ZERO ROWS against the 24-row floor. `RichLog`
+- **The subtitle, because `border_title` is already the placeholder** (deliberately, not for lack of options -- `TextArea`'s native in-box one drew the hint twice, so it is never assigned), and because it costs ZERO ROWS against the 24-row floor. `RichLog`
   cannot rewrite a drawn row, so the live half could never have lived in the transcript --
   only the finished figure goes there, under the answer, in the `system` role that is
   already in `META_ROLES` so `/copy conversation` keeps excluding it.

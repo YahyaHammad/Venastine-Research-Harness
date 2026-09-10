@@ -1643,10 +1643,12 @@ class PromptInput(TextArea):
     both keys, but only while the panel is open: `check_action` hands them
     back to the focus system and to nobody the rest of the time.
 
-    The placeholder is the border TITLE because `TextArea` has no
-    placeholder at all -- no parameter, no attribute. Taking it as a
-    `placeholder=` keyword anyway keeps the call site in app.py reading
-    as it always did.
+    The placeholder is the border TITLE. `TextArea` has a native
+    `placeholder` reactive that renders inside the box when it is empty,
+    so assigning the same string to both drew it twice -- once on the
+    frame, once in the text. Taking it as a `placeholder=` keyword anyway
+    keeps the call site in app.py reading as it always did; it is simply
+    never assigned to `self.placeholder`.
     """
 
     BINDINGS = [
@@ -1726,7 +1728,9 @@ class PromptInput(TextArea):
 
     def __init__(self, placeholder: str = "", **kwargs) -> None:
         super().__init__(soft_wrap=True, show_line_numbers=False, **kwargs)
-        self.placeholder = placeholder
+        # Never assigned to self.placeholder: TextArea renders that reactive
+        # inside the box when empty, which drew the hint twice (frame and
+        # text). The border title is the only placeholder this box has.
         self.border_title = placeholder
 
     @property
