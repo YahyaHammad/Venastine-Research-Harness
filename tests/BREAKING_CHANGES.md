@@ -4177,3 +4177,33 @@ the ANSWER, not the call. Batch 75.
 column in ARRIVAL order, so two peers each spawning a grandchild drew A's
 child under B -- NA17's own defect in the surface NA17 did not touch. Both call
 `lineage_rows` now. Batch 75.
+
+### Keying a parallel batch's outcomes by `call.id`
+
+**Symptom:** `test_two_calls_sharing_one_id_still_get_their_own_answers`, and
+`test_stream_openai_missing_ids_get_their_own_uuids` for the other half.
+
+**Fix:** the id is the PROVIDER'S. `core/client.py`'s v1-compatible branch starts
+a tool-call fragment's id at `""` and fills it only if a delta carries one -- the
+same branch that accumulates `function.name` across deltas because some providers
+split it -- so two spawns can arrive equal on that field. A dict then hands every
+call in the batch the last-finishing worker's outcome, which is one child's answer
+reported for another child's call. `_dispatch_parallel` keeps
+`(call, outcome, failure)` in submission order, and the adapter defaults a missing
+id as its Google sibling always has. Do not reintroduce a lookup here: the same id
+also pairs `app._spawn_threads` to a spawn line and `parent_call_id` to a stored
+thread, so a batch that trusts it is trusting it three times. Batch 76.
+
+### A shell that renders a payload key the other one drops
+
+**Symptom:** `TestTheTerminalNamesTheAskingRun` in `tests/test_cli.py`, or
+`TestTheOtherTwoQuestionsNameTheirAskerToo` in `tests/test_agent_navigation.py`.
+
+**Fix:** audit #7's shape one level down. A missing BRANCH is loud once you look
+for it -- the kind falls through to its declining default -- but a branch that
+drops a FIELD looks perfectly wired up. `asking_agent` / `asking_depth` reached
+the TUI's permission modal for a section and nothing else: not the sign-off, not
+the model's own question, and not `main.py` at all. Every kind that can be raised
+from inside a run renders it in both shells now. `_asker` in `main.py` and
+`asker_label` in `tui/screens.py` are each ONE function for their shell's three
+sites, so the placement rule has one copy per shell. Batch 76.

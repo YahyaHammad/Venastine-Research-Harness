@@ -3947,6 +3947,13 @@ showing, the panel and the picker share one lineage walk, `core/compaction.py`'s
 is per thread, the asker is named on all three modals that can be raised from inside a run, and
 `child_threads` carries `_ordered_rows`' id tiebreaker.
 
+**A second round (batch 76)** re-read those eleven commits against the code and found four more,
+again none of them a decision. Two are worth naming here: the asker line reaches the CLI now as well
+as the TUI, and a parallel batch's results are ordered by POSITION rather than by the provider's call
+id. NA11's guarantee had been resting on an id that `core/client.py`'s v1-compatible branch does not
+always have, which makes it the one finding of either round that could report a wrong ANSWER to the
+model rather than draw a wrong picture.
+
 **The one thing that IS a decision** is which number the panel indents by, and the owner settled it:
 the walk's column rather than `AgentRow.depth`, because a research pass adds a display level without
 adding a spawn level. Bumping the pass's context so the two numbers agree would have spent one level

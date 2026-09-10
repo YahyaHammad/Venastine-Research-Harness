@@ -966,6 +966,18 @@ instead of quietly disabling every compaction in the process. **The lesson is th
 flag** -- a justification that names the condition it depends on is what made this findable at
 all, and this file is full of them.
 
+**A batch's results are ordered by POSITION, never by the provider's call id** (NA11, corrected in
+batch 76). `_dispatch_parallel` collected outcomes into a dict keyed by `call.id` and rebuilt the
+list by looking each one back up -- and that id is the provider's, not ours. `core/client.py`'s
+v1-compatible branch starts a tool-call fragment's id at `""` and fills it only if some delta
+carries one, so a provider that streams parallel calls without ids produced two requests EQUAL on
+the key, and the dict then handed every call in the batch the last-finishing worker's outcome: one
+child's answer reported for another child's call, which is the guarantee NA11 exists to make. It is
+a list of `(call, outcome, failure)` in submission order now, so ordering is structural. **And the
+adapter defaults a missing id** the way its Google sibling always has, because the same id also
+pairs `app._spawn_threads` to a spawn line and `parent_call_id` to a stored thread. Two halves on
+purpose: the loop should not need a provider to keep a promise for its own bookkeeping to hold.
+
 `core/agent_activity.py` is how a shell sees that stack while it exists. Four things about it
 are decisions:
 
@@ -1076,6 +1088,18 @@ than `agent`, which `spawn_subagent`'s own `request_payload` already uses for th
 be SPAWNED. **It is written after `payload.update(request_payload)`**, so a tool cannot declare
 that key and overwrite it: an agent-supplied claim replacing a harness fact is the inversion §42's
 RA6 orders this screen to prevent. Nothing declares it today; the point is that nothing can.
+
+**All three surfaces that can be asked from inside a run, in BOTH shells.** §47 shipped the line on
+the permission modal alone; batch 75's review added the sign-off and the model's own question
+(`tui/screens.py`'s `asker_label` is one function and `#permission-asker` one id, because ids are
+per-screen and three copies drift), and batch 76's second round added all three to `main.py`. The
+CLI mattered for the reason its own handlers state: *a kind one shell renders and the other drops is
+D12's wired-up-but-invisible gap*, and the terminal is where an unattended-looking run is watched
+from. It is worth most on the **sign-off**, because that screen's subject is the run about to be
+SPAWNED -- three children of one response each spawning a grandchild produce three prompts that are
+otherwise identical. `ask_user` is the one that writes the keys itself rather than having them added
+by `_obtain_approval`: `core/interaction.py` is a stdlib-only leaf pinned by
+`tests/test_interaction.py`, so the tool is the producer and the channel stays a leaf.
 
 **A `spawn_subagent` line is armed with its CALL, and resolved at PRESS time** (§47). The line
 is drawn when the call starts, before the child has a thread, so a target baked in at draw time

@@ -12141,3 +12141,90 @@ it. It also carried two `\r\r\n` terminators in slice 8's own new paragraph.
 The terminal pass -- clicking into a restored grandchild in a real session, watching two approvals
 queue, and reading a live subagent with `/thinking` off -- is still the thing no offline suite
 reaches. Every repair here has a test that fails without it, which is a different claim.
+
+## Batch 76 -- the second round, and the id a provider never sent (2026-09-10)
+
+Batch 75 reviewed §47 and repaired nine things. The owner asked for a second round over that work:
+confirm each repair against the code rather than against its commit message, and look for what the
+repairs introduced or the first pass missed. All eleven of batch 75's commits hold. Four more
+repairs came out of the second look, and one of them is the first finding in either round that can
+report a wrong ANSWER to the model rather than draw a wrong picture.
+
+**WHAT THE RE-READ CONFIRMED.** Every fix does what its commit says, and the two that carried real
+risk are sound for reasons worth writing down rather than re-deriving. The per-thread compaction
+guard does not open a second-compaction hole: `/compact` is gated on `app._busy`, `summarize_thread`
+is reached only from user commands, and `save_checkpoint` REFUSES a watermark that does not advance,
+so two folds of one conversation cannot both land. And the wider indent cannot blank a sidebar row:
+`_fit` floors at zero width and `SUBAGENT_MAX_DEPTH` is 2, so the deepest column a display-only
+level can add is 4 of the sidebar's 18.
+
+**THE ASKER REACHED ONE SHELL OF TWO.** Batch 75 gave the line to all three modals and stopped at
+the TUI. `main.py` renders `[approval]`, `[subagent]` and `[question]` and dropped `asking_agent`
+from every one of them -- while `_approval`'s own comment states the rule being broken: *a kind one
+shell renders and the other drops is D12's wired-up-but-invisible gap, the same argument that put
+the reason below in both*, and *the CLI is where an unattended-looking run is watched from*.
+`_question`'s docstring opens with *D12 makes this mandatory, not optional*. It is audit #7's shape
+one level down, and the reason it is a different shape is the reason it lasted: a missing BRANCH
+falls through to a declining default and is loud once looked for, while a branch that drops a FIELD
+looks perfectly wired up. One helper, four sites (the sign-off composes two branches, as the modal
+does), one placement rule.
+
+**AND ONE DICT KEYED ON A PROMISE.** `_dispatch_parallel` collected `outcomes[call.id] =
+future.result()` and rebuilt its ordered list by looking each call's id back up. That id is the
+PROVIDER'S. `core/client.py`'s v1-compatible branch starts a tool-call fragment's id at `""` and
+fills it only if some delta carries one -- and the branch twenty lines below it accumulates
+`function.name` across deltas because *some v1-compatible providers split function.name across
+deltas*, so a provider being sloppy here is the case that file is already written for. The Google
+branch beside it has always defended against exactly this with `fc.id or str(uuid4())`.
+
+Two spawns arriving with one id made the dict hand every call in the batch the last-finishing
+worker's outcome. Nothing crashes: the model is told one child's answer for a DIFFERENT child's
+call, which is precisely the guarantee NA11 exists to make. The sequential branch was never exposed,
+because `_run` pairs `(call, outcome)` positionally -- so this was the parallel path's own
+bookkeeping rather than something inherited. It keeps `(call, outcome, failure)` in submission order
+now, which is the model's order because the futures are submitted from `calls`, and the adapter
+defaults a missing id as its sibling does. **Both halves on purpose:** the same id also pairs
+`app._spawn_threads` to a spawn line and `parent_call_id` to a stored thread, so a batch that trusts
+it is trusting it three times, and this frame should not need a provider to keep a promise for its
+own bookkeeping to hold.
+
+**TWO COMMENTS THAT NAMED THE WRONG MECHANISM**, which is the class batch 75 repaired in
+`storage.py` and then produced one of. The picker's rows have carried `lineage_rows`' walk column
+since that batch under a key still spelled `depth`, with `AgentPickerScreen` still saying "Indented
+by depth" -- the two questions whose difference the batch existed to draw. And `_paint_thread_view`
+resets the pane, so a refusal written into the viewer by hand does not survive a repaint: bounded,
+since the poll runs only while the viewed run is LIVE, and the alternative was the hidden pane batch
+75 moved those messages out of. Both recorded where the next reader will be.
+
+### The measurements
+
+- The full suite: **4211 passed, 20 skipped, 1 deselected, 277s** -- 4211 + 20 is the
+  4231 the three docs now state. The count checks only run on a bare
+  invocation, so the four commits' doc numbers are verified there and nowhere else.
+- Every repair verified RED before being kept, by stashing the production change and running its own
+  tests: the four CLI assertions, the duplicate-id batch (which returns the second call's answer
+  twice), and the id-less pair (which returns `""` twice). The three depth-0 controls pass either
+  way, which is what makes them controls.
+- `_dispatch_parallel`'s fix is the one that needed no new concurrency machinery: the collision is
+  in the KEY, not in the timing, so the test is deterministic and a widened window would have proved
+  nothing.
+
+### Files
+
+- `main.py` -- `_asker`, and the four sites that call it.
+- `core/loop.py` -- the batch's results as a list of positions.
+- `core/client.py` -- a generated id for a call the provider did not name.
+- `tui/app.py`, `tui/screens.py` -- the picker's `level`, and what a repaint drops.
+- `AGENTS.md` -- both shells on the asker paragraph, and NA11's ordering.
+- `tests/BREAKING_CHANGES.md` -- two entries: keying a batch by call id, and a shell that renders a
+  field the other drops.
+
+### Not done
+
+The terminal pass, still. Two approvals queueing on the one stdin reader with a name on each is now
+the thing this batch most wants a human to look at, and nothing offline can look at it -- the tests
+here assert what is printed, not what it is like to be asked twice.
+
+The nested worst case is also still unmeasured: three peers each nesting to `SUBAGENT_MAX_DEPTH` is
+twelve potential SQLite writers, and NA18's table measures 3, 8 and 16. Named in batch 75, unchanged
+here, and it belongs to whoever raises `SUBAGENT_MAX_PARALLEL`.
