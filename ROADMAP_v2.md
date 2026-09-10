@@ -3937,3 +3937,17 @@ subagent-thread sources before research passes.
 8. **Parallel spawns** -- the partition, the executor, the conduit, and
    the six things that were correct only because nothing ran alongside
    anything else. **BUILT, batch 74.**
+
+### Reviewed afterwards (batch 75)
+
+The eight slices were reviewed as a whole once they were all in, and nine repairs came out of it.
+They are recorded in `DEVLOG.md` rather than as decisions, because none of them changed one: the
+sink reaches the reviewer and two retry hops now, the viewer learns the children of the run it is
+showing, the panel and the picker share one lineage walk, `core/compaction.py`'s re-entrancy guard
+is per thread, the asker is named on all three modals that can be raised from inside a run, and
+`child_threads` carries `_ordered_rows`' id tiebreaker.
+
+**The one thing that IS a decision** is which number the panel indents by, and the owner settled it:
+the walk's column rather than `AgentRow.depth`, because a research pass adds a display level without
+adding a spawn level. Bumping the pass's context so the two numbers agree would have spent one level
+of `SUBAGENT_MAX_DEPTH` on a rendering fix. NA17 is amended to that extent and nothing else.

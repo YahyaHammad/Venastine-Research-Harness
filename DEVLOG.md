@@ -12009,3 +12009,135 @@ Not done, and it is the one thing this batch cannot claim: the terminal pass wit
 a human answering. `TestTheRunningApp` mounts the app and drives a stubbed turn through it, which
 is as close as an offline suite reaches; it does not replace clicking into a running child while
 its siblings work, or watching two approvals queue.
+
+## Batch 75 -- reviewing §47, and the nine things it left (2026-09-10)
+
+Not a slice. §47 shipped in eight of them and was reviewed as a whole afterwards, twice over: this
+session's own reading, and a second agent's findings brought in by the owner and deduplicated
+against it. Nine repairs, in eight commits, none of which any existing test could see.
+
+Three of the nine were found by both reviewers, which is the useful signal in the exercise -- they
+are the ones a reader arrives at from the code alone. Two came only from the second agent, four
+only from here.
+
+**WHAT THE TWO AGREED ON.** The viewer could descend exactly one level after a restart; the
+reviewer never drew a row; and the viewer's poll compared the wrong two numbers.
+
+**THE VIEWER'S SECOND LEVEL, AND THE SILENCE UNDER IT.** `open_agent_thread` armed every
+`▸ spawn_subagent` line in the run it was showing and learned nothing about that run's own
+children -- `_learn_spawn_threads` was called from `switch_to_thread` alone. It is the only one of
+the three pairing sources that survives a restart, so a grandchild's line was clickable and opened
+nothing, and there was then no route in at all: the crumb walks up and the picker lists only what
+is running. The refusal was invisible for the same shape of reason, from the other side --
+`on_spawn_selected` wrote to `#transcript`, which the switcher HIDES while the viewer is up, so the
+one click that produces a refusal produced silence. `_visible_transcript` derives the pane from
+`_viewing` like everything else does.
+
+**ONE NUMBER DOING TWO JOBS.** The picker indented by a column in ARRIVAL order, so two peers each
+spawning a grandchild drew A's child under B -- NA17's own defect in the surface NA17 did not
+touch. Separately, a research pass opens its span at `context_depth + 1` and hands the same context
+down, so a subagent it spawns reports depth 1 as well and drew level with its own parent.
+
+Both are `AgentRow.depth` being asked a question it does not answer. It is C3's SPAWN bound;
+what the panel needs is a column. `lineage_rows` returns `(row, level)` pairs now, the level being
+the deeper of the walk's column and the row's own depth -- each is a lower bound on nesting and
+each is what the other cannot see (the walk knows a display level that added no spawn level; the
+row knows its parent is absent from the stack, since `parent_id` is None both for a top-level span
+and for a row that never recorded one). Both surfaces go through the one walk, which is what makes
+"the sidebar and ctrl+g cannot offer different things" structural.
+
+The owner's call, over the alternative: bumping the pass's context so the two numbers agree would
+have spent one level of what a research pass may spawn on a rendering fix.
+
+**THE REVIEWER FORWARDED A SINK IT NEVER GAVE ANYTHING TO.** Slice 7 threaded `activity` into
+`run_review`, and that function only ever reaches `bind()`, which is a NO-OP with no span open. So
+the reviewer drew no row, was absent from ctrl+g, could not be opened while it ran, and -- because
+`_obtain_approval` reads the open span -- asked for its gated tools with no "asked by" line.
+`test_the_reviewer_gets_one_too` asserted the argument arrived. That is the leaf-versus-chain trap
+one level up, and the fourth time this section has met it: the hop was tested and the thing the hop
+is FOR was not.
+
+Two more hops were dropping the sink outright, both reaching the model through
+`continue_conversation`: `json_retry.retry_until_json` and the consent walk down to `_refine`.
+Those are the paths where the channel matters MOST rather than least, because
+`continue_conversation` drains its own loop -- `tui/app.py` already says so in a comment on its
+one-shot path.
+
+**THE SEVENTH THING THAT WAS ONLY SAFE ALONE**, and it was found by reading a comment rather than
+the code. `core/compaction.py`'s re-entrancy flag said: "a thread-local would be more precise, but
+the loop is synchronous and a compaction runs to completion before its caller resumes". Measured
+and true until NA9. With two children of one response, a module flag makes the second child's
+compaction skip silently and lets whichever finishes first clear the guard under the other. Per
+thread now; still a flag rather than a lock, because the property that comment argued for
+(impossible to be half-set) is the one that matters, and two conversations folding at once is
+correct rather than tolerated. **A justification that names the condition it rests on is what made
+this findable**, which is an argument for the house style rather than a coincidence.
+
+**THE ASKER REACHED ONE MODAL OF THREE.** §47 called naming the asking run "a prerequisite for the
+last slice rather than a nicety, because two questions can be pending at once" -- and gave it to the
+permission modal only. The sign-off is where the argument actually lands: three children each
+spawning a grandchild produce three sign-off screens naming the spawnee and nothing else, which are
+three identical screens. `ask_user` never had the keys at all. One `asker_label`, one id, one tcss
+rule; the producer for `ask_user` is the TOOL, because `core/interaction.py` is a stdlib-only leaf
+whose imports are pinned.
+
+**AND THE POLL COMPARED THE PANE AGAINST THE ARCHIVE.** Two states where those counts can never
+match, and in both the viewer repainted every second -- which is the behaviour comparing counts at
+all exists to prevent. With `/thinking` off a reasoning entry is SKIPPED rather than dimmed, so the
+pane is permanently shorter; and an empty run is painted with a placeholder the archive does not
+have, which the first repaint then dropped, leaving the pane blank.
+
+**THE SECOND AGENT'S TWO.** `child_threads` ordered by `created_at` alone, while `_ordered_rows`
+states the rule for exactly that hazard ("'unlikely' is not an ordering guarantee") and four other
+queries carry `(created_at, id)`. This is the one query NA9 has three threads writing at once, so
+it is the only place in the file where the tie stopped being merely unlikely. And four `getattr`
+comments describe a fallback that cannot fire: `session.get` SELECTs every mapped column, so a
+database missing one raises before any attribute is read. Harmless, and this project's comments are
+its record.
+
+**ONE CLAIM THAT DID NOT SURVIVE VERIFICATION**, recorded because the fix it implied would have
+been wrong: that `continue_conversation` has no `activity` parameter. It has one, and the TUI passes
+it. The real gap was two callers, not the signature.
+
+**AND ONE THING THAT WAS NOT A DEFECT.** `ARCHITECTURE.md` was committed with CRLF, so all 1795 of
+its lines read as rewritten against `main` while the real §47 change is 17 insertions -- which is
+what made the branch's diffstat say 3594 lines for one document, and what reset `git blame` on the
+project's largest design record. `.gitattributes` already declares `* text=auto`, so it was a
+normalization that did not happen. Renormalized in its own commit, FIRST, because staging the file
+under that attribute converts it wholesale and every later commit would otherwise appear to rewrite
+it. It also carried two `\r\r\n` terminators in slice 8's own new paragraph.
+
+### The measurements
+
+- The full suite: **4183 passed, 20 skipped, 1 deselected, 902s**, before any of this. The docs said
+  "~2-3 min by machine" in three places, and nothing checks that claim --
+  `test_docs_consistency.py` quantifies over the COUNT. Restated as ~5-15 min.
+- `git check-ignore -v app.db-wal app.db-shm` matched nothing. `.gitignore`'s `*.db` does not cover
+  the WAL sidecars NA18 made permanent, and a `-wal` file holds recently written message rows, so
+  `add -A` from the repo root would have staged conversation content. Both lists take them now;
+  npm's allowlist needed nothing, because it fails closed.
+- The ordering fix was verified RED against the old `ORDER BY` before being kept, with the ids
+  chosen rather than left to uuid4 -- three random ids are already ascending one run in six, and the
+  test would have passed against the unfixed query on those runs.
+
+### Files
+
+- `tui/app.py` -- `_learn_spawn_threads` on open, `_visible_transcript`, `_paint_thread_view` and
+  the remembered replay count, `lineage_rows` in the picker, the asker on two more asks.
+- `tui/widgets.py` -- `lineage_rows` (renamed from `_lineage_order`, returning levels).
+- `tui/screens.py`, `tui/app.tcss` -- `asker_label`, shared by three modals under one id.
+- `tools/builtin/ask_user.py` -- the asking run, read off the open span.
+- `core/reasoning/review.py` -- the reviewer's span, and `activity` through the consent walk.
+- `core/reasoning/json_retry.py`, `core/reasoning/orchestrator.py` -- the retry hop.
+- `core/compaction.py` -- the per-thread guard.
+- `storage.py`, `tests/conftest.py` -- the id tiebreaker, and four comments.
+- `.gitignore`, `.gitattributes` -- the WAL sidecars.
+- Tests: `test_agent_navigation.py` (59 -> 72), `test_parallel_calls.py` (42 -> 44),
+  `test_agent_activity.py` (73 -> 75), `test_compaction.py` (67 -> 68),
+  `test_storage_e2e.py` (45 -> 46).
+
+### Not done
+
+The terminal pass -- clicking into a restored grandchild in a real session, watching two approvals
+queue, and reading a live subagent with `/thinking` off -- is still the thing no offline suite
+reaches. Every repair here has a test that fails without it, which is a different claim.

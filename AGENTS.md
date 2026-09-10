@@ -48,7 +48,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 4222 tests, offline, ~2-3 min by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 4222 tests, offline, ~5-15 min by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -945,13 +945,26 @@ path it always did**, and that is structural rather than incidental -- a group o
 pool and the gate entirely, which is what makes every pre-slice-8 test of that loop a test of the
 sequential branch.
 
-**Six things were correct only because nothing ran alongside anything else**, and each is now
+**SEVEN things were correct only because nothing ran alongside anything else**, and each is now
 guarded rather than lucky: `GrantBudget.take()` (a read-modify-write on an object shared by
 reference), §23's sign-off memo (a check-then-act window, not a racy dict), the loop's
 `authorized_call` (now a per-FUNCTION local, which is stronger than the per-iteration one it
 replaces), every shell's single pending-answer slot, `TuiActivity`'s stack, and the panel's row
 ORDER. The one that was measured and needed nothing is the busy timeout on SQLite; WAL was added
 anyway, because the ceiling is a tunable constant. See ROADMAP_v2 §47 NA9-NA18.
+
+The seventh is `core/compaction.py`'s re-entrancy flag, found by the review of §47 (batch 75) and
+worth the sentence because of HOW it was found: its own comment said "a thread-local would be more
+precise, but the loop is synchronous and a compaction runs to completion before its caller
+resumes", which was measured and true until NA9 removed the premise. A module flag then made a
+sibling's compaction skip silently and let whichever child finished first clear the guard under
+the other. **Per thread now, and still a flag rather than a lock** -- the property that comment
+argued for (impossible to be half-set) is the one that matters, and two conversations folding at
+once is correct rather than tolerated. The bare `_compacting` name is GONE rather than aliased:
+`if _compacting:` against a callable is always true, so a stale reader has to fail at import
+instead of quietly disabling every compaction in the process. **The lesson is the comment, not the
+flag** -- a justification that names the condition it depends on is what made this findable at
+all, and this file is full of them.
 
 `core/agent_activity.py` is how a shell sees that stack while it exists. Four things about it
 are decisions:
@@ -1176,7 +1189,7 @@ would never clear.
 
 Anthropic's valid levels are **queried** (`capabilities.effort` on the Models API) so new Anthropic models need no table entry; everything else falls back to `config.MODEL_EFFORT_LEVELS`, where an unknown model ASSUMES `["low","medium","high"]` — optimistic, cached, and the reason the empty-list entries above matter. Google reports no levels at all on the pinned `google-genai==1.0.0`, which has no `thinking_budget` field, so effort drops there regardless of the default.
 
-The pipeline carries effort like authorization (#139): every pass, every JSON retry ("a retry is the same pass continuing"), §20's reviewer and its re-synthesis inherit it, and `effort_for` validating per RECEIVING model is what makes ensemble rosters and critic routing safe by construction.
+The pipeline carries effort like authorization (#139): every pass, every JSON retry ("a retry is the same pass continuing"), §20's reviewer and its re-synthesis inherit it, and `effort_for` validating per RECEIVING model is what makes ensemble rosters and critic routing safe by construction. **§47's `activity` sink is threaded the same way and along the same hops**, which is worth naming because two of them dropped it until batch 75: `json_retry.retry_until_json` and the review consent walk down to `_refine`. Both reach the model through `continue_conversation`, which drains its own loop — so on those two paths the sink is the ONLY way a subagent spawned inside them is visible at all, which is the reverse of how "just a retry" reads.
 
 `config.MAX_TOKENS` caps thinking **plus** response on current Anthropic models — that is why §16 raised it from 4096.
 
@@ -1292,6 +1305,7 @@ The research pipeline can now review its own finished output and correct it, one
 - **No consent route means nothing is applied** (V6). The review still runs and still records. Same rule §25 applies to gated tools: the inability to ask is not permission to proceed.
 - **The reviewer inherits the run's `RunAuthorization` unchanged** (V7) — same grants, same provider, same `GrantBudget` **instance**. No new security axis.
 - **A refinement re-enters the reviewer's own thread** (V5, via `continue_conversation`) and touches only its own finding. A note about #3 must not redraft #7.
+- **The reviewer opens a §47 span, like a pass** (batch 75). It forwarded the sink and opened nothing until then, and forwarding is not being visible: `run_agent_conversation` only ever calls `bind()`, which is a no-op with no span open. So the reviewer drew no sidebar row, was absent from ctrl+g, could not be opened while it ran, and asked for its gated tools with no "asked by" line — a nested run's question presented as the conversation's own. ONE span over the whole call, retries included, which is `compact()`'s rule for the same shape; the depth is derived from the context `run_review` already builds, never written as a 1. A refinement gets none: it continues a thread whose run has finished, in front of a reader who triggered it.
 - **Four consent outcomes, and only one of them can ever accept.** `reject_all` is the escape a long review needs precisely because it only declines; an accept-all shortcut is the affordance that must not exist, since an injected "correction" needs one reflexive yes.
 - **Every unclear answer is a rejection** — an unrecognised string, a callback that raises, a timeout, a TUI modal dismissed with the bare `False` its shutdown path puts. This is the fifth place the "every dismissal carries a value" invariant applies and the first where the unsafe failure is silently applying an edit rather than hanging a worker.
 
