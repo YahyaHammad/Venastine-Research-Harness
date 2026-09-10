@@ -1,9 +1,27 @@
-# CodeQL SAST: security-only per push/PR, full quality weekly.
+# CodeQL SAST: the default security suite per push/PR, security-and-quality
+# weekly.
 #
 # Split is cost control: the suite already runs ~15 min, and the
 # security-and-quality pack roughly doubles analysis time for findings
 # that are mostly hygiene. Security red blocks the change that introduced
 # it; quality red on the weekly run is triaged, not reverted around.
+#
+# BOTH SUITE NAMES WERE WRONG on the first run that ever executed this
+# file, in opposite directions, and only one of them said so:
+#
+#   * `queries: security-only` is not a CodeQL suite. `database init`
+#     stopped with "Query pack security-only cannot be found" before a
+#     single query ran. The built-ins are the DEFAULT suite -- selected by
+#     omitting `queries:` entirely, and already the high-precision
+#     security set this job wants -- plus `security-extended` and
+#     `security-and-quality`.
+#   * the weekly job omitted `queries:` as well, which is not "everything"
+#     but that same default. It would have re-run the push job's scan once
+#     a week and reported a quality finding never. Silent, because a valid
+#     configuration cannot fail.
+#
+# So omitting the key is the FIX on one job and the BUG on the other. Do
+# not "make them consistent".
 #
 # Static analysis only: no providers.json, no secrets, no services.
 # Python autobuild needs nothing here (no compilation step); explicit
@@ -39,7 +57,7 @@ jobs:
         with:
           languages: python
           build-mode: none
-          queries: security-only
+          # No `queries:` -- that IS the default suite. See the header.
 
       - uses: github/codeql-action/analyze@v3
 
@@ -55,5 +73,6 @@ jobs:
         with:
           languages: python
           build-mode: none
+          queries: security-and-quality
 
       - uses: github/codeql-action/analyze@v3

@@ -38,9 +38,15 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Fast gate (~seconds): doc drift fails here instead of after the full
+  # Fast gate (~10s): doc drift fails here instead of after the full
   # 15-minute suite below. Same fresh-clone steps, same `python -m pytest`
   # rule (see the comment on the full job).
+  #
+  # It runs ONE narrowed invocation, which is why the two count checks used
+  # to skip in it and this gate could not fail on the drift it exists for --
+  # c5fd7c2 passed here at 09:47 and failed the full suite on exactly those
+  # two tests at 09:53. test_docs_consistency.py collects the suite in a
+  # subprocess for this shape alone; ~4.6s of the runtime below is that.
   docs-consistency:
     runs-on: ubuntu-latest
     timeout-minutes: 5

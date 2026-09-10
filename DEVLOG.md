@@ -12423,3 +12423,111 @@ the failure RA1 IS.
   sweep, the worker double.
 - Eight test files -- `.renderable` to `.content`, 43 sites.
 - `AGENTS.md`, `ARCHITECTURE.md`, `README.md`, `tests/BREAKING_CHANGES.md`.
+
+
+## Batch 80 -- four red checks, and only one of them was about the commit (2026-09-10)
+
+`c5fd7c2` went red on `tests`, `compat`, `bandit` and `codeql`. Two of those
+were the commit's own doing and were already fixed before anyone looked; two
+were workflows failing the first time they had ever executed.
+
+`5b8ecf6` added `bandit.yml`, `codeql.yml`, `gitleaks.yml`, `lint.yml` and
+`pip-audit.yml`, and `c5fd7c2` was the first push after it. `gh run list
+--workflow codeql.yml` returns exactly one run, which is the whole diagnosis
+of half this batch: **a workflow that has never run is not passing, it is
+unmeasured.**
+
+### The two suite jobs needed no work
+
+`pytest` and `py313-info` failed on the same three tests, none of them
+version-specific. Two were the documented counts (docs 4231, collected 4238;
+tree 378 for `test_tui.py`, collected 385) -- `c5fd7c2` added seven tests and
+not the numbers that describe them. The third was
+`test_a_worker_error_is_reported_not_swallowed`, where `570ff3f` started
+reading `event.worker.name` and the `SimpleNamespace` double never grew it.
+All three were already fixed in the textual pin batch sitting unpushed on the
+same branch. `py313-info` carries `continue-on-error`, which is why the compat
+RUN reads green while its CHECK reads red -- worth knowing before trusting a
+run's colour.
+
+### bandit: the heuristic was reading the domain vocabulary
+
+Three new B106 findings, all `token_delta="hi "`. B106 matches on the argument
+NAME against
+`(^|_)(pas+wo?r?d|pass(phrase)?|pwd|token|secrete?)(_|$)`, and `token_delta`
+matches `^token_`. Measured, not read: the published prose summarising that
+regex says `token_delta` does not match, and it is wrong.
+
+This project's two central nouns are research **passes** and streaming
+**tokens**. So the check finds the domain: 65 findings at the first run (52
+B105, 13 B106) over `pass_id`, `pass_input` and `token_delta`, and not one of
+them a credential. The four that are not even under `tests/` are
+`{"pass": "Review"}`, `"max_token_budget": None`,
+`THREAD_KIND_RESEARCH_PASS = "research_pass"` and `token == "--file"`.
+
+**The baseline cannot absorb that class, and that is the part worth
+recording.** It matches on the literal STRING VALUE, so every new fixture
+phrase is a new finding. Eight commits introduced one between 2026-08-05 and
+2026-09-10 -- a regeneration every four days -- and regeneration is
+all-or-nothing across the file, so each one would silently re-baseline
+whatever real B603 or B608 landed in the same window. A baseline paid for that
+often stops being a record of accepted risk and becomes a rubber stamp.
+
+So `-s B101,B105,B106`, argued in the workflow's header the same way `-s B101`
+already was. The baseline is NOT regenerated: its now-unreachable entries are
+inert, and regenerating to tidy is the habit being avoided. The gap this
+leaves is not the one it looks like -- `api_key` does not match that regex at
+all, so B105/B106 never covered this project's real credential shape.
+`gitleaks` is that gate and it is green.
+
+### codeql: both suites named wrong, in opposite directions
+
+`analyze-security` never ran a query. `database init` stopped with *"Query
+pack security-only cannot be found"*. There is no `security-only` suite; the
+built-ins are the DEFAULT one (selected by omitting `queries:` entirely, and
+already the high-precision security set), `security-extended` and
+`security-and-quality`.
+
+The sibling is the one that would never have been noticed: `analyze-quality`
+omits `queries:` as well, which is not "everything" but that same default. The
+weekly job would have re-run the push job's scan and reported a quality
+finding never -- silent, because a valid configuration cannot fail. **Omitting
+the key is the fix on one job and the bug on the other**, which is written
+into the header so nobody makes them consistent.
+
+### The fast gate could not fail
+
+`tests.yml`'s `docs-consistency` job exists so "doc drift fails here instead of
+after the full 15-minute suite". It could not: both count checks skip via
+`_was_narrowed`, and that job runs exactly one narrowed invocation -- this file
+alone. On `c5fd7c2` the gate passed at 09:47 and the full suite failed on
+precisely those two tests at 09:53.
+
+`_collected_nodeids` now feeds both. A full run reads `session.items`, free and
+exact, and stays the authority. THIS FILE ALONE gets a subprocess
+`pytest --collect-only -q` instead, ~10s, which is the fast gate's shape and
+also a reader's. Every other narrowing still skips, so a targeted `pytest -k`
+never pays for a collection it did not ask for.
+
+Two tests came with it, and both guard a SILENT failure -- the same reason
+`_was_narrowed` has its own test. `_is_this_file_alone` wrong in the
+restrictive direction puts the gate back to skipping and looks identical to
+being blind. And `test_the_subprocess_collection_agrees_with_the_session`
+compares the two paths per FILE on a full run, because a divergence would read
+as the gate being broken rather than the docs being wrong, and that gets a gate
+disabled.
+
+The gate then caught itself: 24 stated for this file against 26 collected, and
+4259 against 4261. Which is the demonstration -- red on drift, green once the
+numbers move, in ten seconds instead of six minutes.
+
+### Files
+
+- `.github/workflows/bandit.yml` -- `-s B101,B105,B106`, the measurement
+  behind it, and the regeneration recipe updated to match the scan.
+- `.github/workflows/codeql.yml` -- the default suite on push,
+  `security-and-quality` weekly, and why the two differ.
+- `tests/test_docs_consistency.py` -- `_is_this_file_alone`,
+  `_collect_in_a_subprocess`, `_collected_nodeids`, two tests.
+- `README.md`, `AGENTS.md`, `ARCHITECTURE.md` -- 4259 to 4261, and this file's
+  own tree entry 24 to 26.

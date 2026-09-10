@@ -13,9 +13,17 @@ different things to be true:
   1. The three docs agree WITH EACH OTHER. Pure text, no session state, so
      it runs under any invocation -- including `pytest tests/test_foo.py`
      while you are mid-change.
-  2. That number is the REAL one. Needs the collected total, which only
-     exists on an unfiltered run, so it skips when the invocation narrowed
-     rather than failing on a legitimately smaller session.
+  2. That number is the REAL one. Needs the collected total, so it skips
+     when the invocation narrowed rather than failing on a legitimately
+     smaller session -- EXCEPT when the invocation is THIS FILE ALONE,
+     where it collects the suite in a subprocess instead.
+
+     That exception is the entire point of tests.yml's `docs-consistency`
+     job, and it was missing from it. The job runs this file alone as a
+     fast gate so that "doc drift fails here instead of after the full
+     15-minute suite" -- and because both count checks skipped there, it
+     could not fail on drift at all. On c5fd7c2 the gate passed at 09:47
+     and the full suite failed on exactly these two tests at 09:53.
 
 WHY THIS FILE GREW (audit #121/#125/#126/#129). It used to end with:
 "Deliberately narrow. This checks the number that has actually drifted, not
@@ -44,14 +52,18 @@ Unit 16 found the shape all of them share: THE CLAIMS THAT DRIFT ARE THE
 ONES SOMEBODY HAD TO COUNT BY HAND.
 
 The checks that need the collected session skip on a narrowed invocation,
-via _was_narrowed. The ones that are pure text do not, so they still run
-under `pytest tests/test_foo.py` while you are mid-change.
+via _was_narrowed -- unless that invocation is this file alone, which is
+the fast gate's shape and gets a subprocess collection instead. The ones
+that are pure text never skip, so they still run under
+`pytest tests/test_foo.py` while you are mid-change.
 """
 
 import io
 import json
 import os
 import re
+import subprocess
+import sys
 from collections import Counter
 
 import pytest
@@ -148,12 +160,134 @@ def test_the_default_invocation_is_not_treated_as_narrowed():
     assert _was_narrowed(_FakeConfig(["tests/test_review.py::test_x"]))
 
 
-def test_the_documented_count_is_the_real_one(request):
-    if _was_narrowed(request.config):
-        pytest.skip("filtered invocation collects less than the full suite")
+#: This file's own name, which is the one narrowing that still owes the
+#: full answer rather than a skip.
+_THIS_FILE = os.path.basename(__file__)
 
+
+def _is_this_file_alone(config) -> bool:
+    """Whether the invocation named this file and nothing else.
+
+    `pytest tests/test_docs_consistency.py` is two things at once: the CI
+    fast gate's shape, and the shape a reader uses when they want exactly
+    the answer this file gives. Both are ASKING the question, so both get
+    a real answer. Every other narrowing still skips -- a targeted
+    `pytest -k something` must not pay for a full collection it did not
+    ask for.
+    """
+    named = [a for a in config.args if a not in (".", "tests", "tests/")]
+    return bool(named) and all(
+        os.path.basename(a.split("::")[0]) == _THIS_FILE for a in named)
+
+
+#: Filled once per process by _collect_in_a_subprocess.
+_COLLECTED = []
+
+
+def _collect_in_a_subprocess() -> list:
+    """Every node id a full `pytest` would collect, from a child process.
+
+    Measured at ~4.6s for 4261 ids, and the whole gate job at ~10s,
+    which is what buys it the point: it fails on drift in seconds
+    instead of after the full suite.
+
+    pytest.ini's addopts reaches the child, so its `-m "not integration"`
+    makes this the same population `session.items` holds on a full run --
+    and the test below pins that equality rather than assuming it.
+    `-p no:cacheprovider` keeps the child off .pytest_cache, which the
+    parent may be writing at the same time. No recursion: the child
+    collects and runs nothing.
+    """
+    if _COLLECTED:
+        return _COLLECTED
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "pytest", "--collect-only", "-q",
+         "-p", "no:cacheprovider"],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    # Node ids are rootdir-relative and always use forward slashes, so this
+    # cannot pick up a summary line -- and an empty list is a FAILURE here,
+    # never a count of zero.
+    ids = [line.strip() for line in proc.stdout.splitlines()
+           if line.startswith("tests/") and "::" in line]
+
+    assert proc.returncode == 0 and ids, (
+        f"Collecting the suite in a subprocess failed (exit "
+        f"{proc.returncode}, {len(ids)} ids parsed). The count checks "
+        f"cannot run without it, and reporting zero would be worse than "
+        f"saying so.\n"
+        f"--- stdout (tail) ---\n{proc.stdout[-3000:]}\n"
+        f"--- stderr (tail) ---\n{proc.stderr[-2000:]}"
+    )
+    _COLLECTED.extend(ids)
+    return _COLLECTED
+
+
+def _collected_nodeids(request) -> list:
+    """The node ids the two count checks compare against, or a skip.
+
+    A full run already holds them, exactly and for free, and stays the
+    authority. Only the fast gate pays for a subprocess.
+    """
+    if not _was_narrowed(request.config):
+        return [item.nodeid for item in request.session.items]
+    if _is_this_file_alone(request.config):
+        return _collect_in_a_subprocess()
+    pytest.skip("filtered invocation collects less than the full suite")
+
+
+def test_this_file_alone_is_the_only_narrowing_that_gets_an_answer():
+    """The same silent failure mode as the guard above, one layer out.
+
+    Wrong in the restrictive direction and _is_this_file_alone never
+    fires: the fast gate goes back to skipping, stays green through any
+    drift, and looks exactly as it did while it was blind. Wrong in the
+    permissive direction and every `pytest -k foo` spawns a full
+    collection, which is loud and gets fixed the same afternoon.
+    """
+    assert _is_this_file_alone(_FakeConfig(["tests/test_docs_consistency.py"]))
+    assert _is_this_file_alone(
+        _FakeConfig(["tests/test_docs_consistency.py::test_x"]))
+
+    assert not _is_this_file_alone(_FakeConfig(["."]))
+    assert not _is_this_file_alone(_FakeConfig(["tests"]))
+    assert not _is_this_file_alone(_FakeConfig(["tests/test_review.py"]))
+    assert not _is_this_file_alone(
+        _FakeConfig(["tests/test_docs_consistency.py", "tests/test_review.py"]))
+
+
+def test_the_subprocess_collection_agrees_with_the_session(request):
+    """The two paths into _collected_nodeids must not disagree.
+
+    They are read by different runs -- the fast gate uses one, the full
+    suite the other -- so a divergence would show up as the gate failing
+    on a number the suite says is right, which reads as the gate being
+    broken and gets it disabled. Compared per FILE and not just in total,
+    because two offsetting errors are exactly what a total hides.
+    """
+    if _was_narrowed(request.config):
+        pytest.skip("needs the full session to compare against")
+
+    session = Counter(item.nodeid.split("::")[0]
+                      for item in request.session.items)
+    child = Counter(nodeid.split("::")[0]
+                    for nodeid in _collect_in_a_subprocess())
+
+    assert session == child, (
+        "A subprocess collection disagrees with this session:\n"
+        + "".join(f"  {name}: session {session[name]}, subprocess "
+                  f"{child[name]}\n"
+                  for name in sorted(set(session) | set(child))
+                  if session[name] != child[name])
+        + "The fast gate reads the subprocess and the full suite reads the "
+          "session; they answer the same question or the gate is noise."
+    )
+
+
+def test_the_documented_count_is_the_real_one(request):
     documented = set(_documented_counts().values()).pop()
-    actual = len(request.session.items)
+    actual = len(_collected_nodeids(request))
 
     assert documented == actual, (
         f"The docs say {documented} tests; this run collected {actual}. "
@@ -206,13 +340,10 @@ def test_the_tree_states_a_correct_count_for_every_collected_test_file(request):
     The sibling test below is what catches an entry naming a file that has
     genuinely gone away.
     """
-    if _was_narrowed(request.config):
-        pytest.skip("filtered invocation collects less than the full suite")
-
     stated = _tree_entries()
     actual = Counter(
-        os.path.basename(item.nodeid.split("::")[0])
-        for item in request.session.items
+        os.path.basename(nodeid.split("::")[0])
+        for nodeid in _collected_nodeids(request)
     )
 
     wrong = [(name, stated[name], n) for name, n in sorted(actual.items())

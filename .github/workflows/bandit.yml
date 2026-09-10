@@ -6,19 +6,44 @@
 #     providers.json-adjacent residue, output/ and __pycache__ -- the
 #     false-positive farm the rollout plan verified locally (20 gitleaks
 #     hits, 11 of them .pyc).
-#   * `-s B101`: pytest asserts are idiomatic (6037 sites, all in tests/;
-#     production carries zero asserts, verified at rollout). Without the
-#     skip every PR adding a test fails here, which is the job crying
-#     wolf until it is ignored entirely.
+#   * `-s B101,B105,B106`: three skips with one shape -- a check that
+#     fires on every PR is a check nobody reads.
+#       - B101, pytest asserts, are idiomatic (6037 sites, all in tests/;
+#         production carries zero asserts, verified at rollout).
+#       - B105/B106 match on the NAME, not the value:
+#         `(^|_)(pas+wo?r?d|pass(phrase)?|pwd|token|secrete?)(_|$)`. This
+#         project's two central nouns are research PASSES and streaming
+#         TOKENS, so the heuristic is reading the domain vocabulary.
+#         Measured on the first run that executed this file: 65 findings,
+#         52 B105 and 13 B106, over `pass_id`, `pass_input` and
+#         `token_delta`, and NOT ONE a real credential. The four outside
+#         tests/ are `{"pass": "Review"}`, `"max_token_budget": None`,
+#         `THREAD_KIND_RESEARCH_PASS = "research_pass"` and
+#         `token == "--file"`.
+#     A baseline cannot absorb that class, which is the part worth
+#     recording: it matches on the literal STRING VALUE, so every new
+#     fixture phrase is a NEW finding. Eight commits introduced one
+#     between 2026-08-05 and 2026-09-10 -- a regeneration every four days,
+#     and regeneration is all-or-nothing across the file, so each one
+#     silently re-baselines whatever real B603 or B608 landed beside it.
+#     That trade is the opposite of what a baseline is for.
+#
+#     The gap this leaves is not the one it looks like. `api_key` does not
+#     match that regex at all, so B105/B106 never covered this project's
+#     actual credential shape -- gitleaks is that gate, and it is a
+#     separate workflow for that reason.
 #   * `-b .github/bandit-baseline.json`: fails only on NEW issues (129
 #     triaged at rollout: sandbox/subprocess surface, bound-param SQL in
 #     pipeline_storage, arXiv ET feed, redaction-test fixtures -- all
 #     accepted-risk with the reasoning in the rollout summary). Bandit
 #     matches on text/severity/cwe/confidence/filename/test, NOT line
-#     numbers, so normal edits do not invalidate it.
+#     numbers, so normal edits do not invalidate it. 64 of those 129 are
+#     the live half now; the 65 B105/B106 entries are inert under the skip
+#     above and are left in place rather than regenerated away, because
+#     regenerating to tidy is the habit this file is trying not to build.
 #
 # Regenerating the baseline (deliberate step, like moving an exact pin):
-#   git ls-files '*.py' | xargs bandit -s B101 -f json -o .github/bandit-baseline.json
+#   git ls-files '*.py' | xargs bandit -s B101,B105,B106 -f json -o .github/bandit-baseline.json
 # then normalize filename separators to `./` (Bandit stores
 # os.path.join(".", f), which is `.\` on Windows and `./` on Linux --
 # the checked-in file is the Linux form CI produces) and re-triage the
@@ -63,4 +88,4 @@ jobs:
         run: |
           files=$(git ls-files '*.py')
           # shellcheck disable=SC2086
-          bandit $files -s B101 -b .github/bandit-baseline.json -q
+          bandit $files -s B101,B105,B106 -b .github/bandit-baseline.json -q
