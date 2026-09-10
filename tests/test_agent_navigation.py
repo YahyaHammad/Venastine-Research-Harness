@@ -564,6 +564,64 @@ class TestFollowingARunThatIsStillGoing:
         assert grown == ["first", "second"]
 
     @pytest.mark.asyncio
+    async def test_a_run_that_thought_is_not_repainted_every_tick(
+            self, lineage, mocker):
+        """THE COUNT IS THE ARCHIVE'S, NOT THE PANE'S.
+
+        `_paint_entries` SKIPS a reasoning entry rather than dimming it
+        when /thinking is off (§44), so the pane is permanently shorter
+        than the replay -- and a poll comparing the two numbers repainted
+        on every tick for as long as the run was live, which is exactly
+        what comparing counts at all is meant to prevent.
+        """
+        mocker.patch("tui.app.replay_entries", return_value=[
+            ("thinking", "considering", (), ""),
+            ("assistant", "first", (), "")])
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._show_thinking = False
+            app.open_agent_thread(str(lineage.child))
+            await pilot.pause()
+            view = app.query_one("#thread-view", Transcript)
+            redraws = mocker.spy(view, "reset")
+
+            app._poll_thread_view()
+            app._poll_thread_view()
+            await pilot.pause()
+
+            drawn = [t for _, t in view._entries]
+            count = redraws.call_count
+
+        assert count == 0, (
+            f"the viewer repainted {count} times with nothing new written; "
+            "the reasoning entry the paint dropped is not new material")
+        assert drawn == ["first"], (
+            f"the pane holds {drawn}; /thinking off must skip a reasoning "
+            "span here exactly as it does on a resume")
+
+    @pytest.mark.asyncio
+    async def test_an_empty_live_run_keeps_saying_so(self, lineage, mocker):
+        """The placeholder is an entry the archive does not have, so the
+        old comparison never matched and the first tick repainted without
+        it -- leaving a blank pane until the run wrote something."""
+        mocker.patch("tui.app.replay_entries", return_value=[])
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._agent_stack = [AgentRow("explore", 1, "s1", lineage.child)]
+            app.open_agent_thread(str(lineage.child))
+            await pilot.pause()
+
+            app._poll_thread_view()
+            await pilot.pause()
+            still_said = [t for _, t in app._thread_view._entries]
+
+        assert any("not written anything yet" in t for t in still_said), (
+            f"the pane holds {still_said}; a run that has written nothing "
+            "has to go on saying so, not go blank")
+
+    @pytest.mark.asyncio
     async def test_a_poll_that_raises_does_not_take_the_session_down(
             self, lineage, mocker):
         """It runs from a timer, so it can fire while a modal is up and

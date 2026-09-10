@@ -630,6 +630,12 @@ class VenastineApp(App):
         # from it, so they cannot drift into disagreeing.
         self._viewing = None
         self._view_timer = None
+        # How many ARCHIVE entries the viewer last drew, which is what the
+        # poll compares against. Not the pane's own entry count: the two
+        # differ whenever the paint drops something (a reasoning span with
+        # /thinking off) or adds something (the empty-run placeholder), and
+        # a repaint on every tick fights the reader's scroll position.
+        self._viewed_entries = 0
         # §47. Spawn call id -> the thread that call created, as TEXT
         # both sides, because it arrives from style metadata.
         #
@@ -1468,14 +1474,7 @@ class VenastineApp(App):
         # only source that survives a restart. Contained in the helper, so
         # a run whose children cannot be read still opens.
         self._learn_spawn_threads(resolved)
-        view = self._thread_view
-        view.reset()
-        self._paint_entries(view, entries)
-        if not entries:
-            # A run that has not written anything yet -- which is the
-            # ordinary state for the first instant of a live one, and a
-            # real state for one that failed at its first call.
-            view.write_system("This run has not written anything yet.")
+        self._paint_thread_view(entries)
         self._viewing = resolved
         self._crumb.show(self._thread_chain(resolved))
         self._pane.current = "thread-view"
@@ -1494,6 +1493,7 @@ class VenastineApp(App):
         if self._viewing is None:
             return
         self._viewing = None
+        self._viewed_entries = 0
         self._sync_view_poll()
         self._crumb.show(())
         self._pane.current = "transcript"
@@ -1573,12 +1573,47 @@ class VenastineApp(App):
             self._view_timer.stop()
             self._view_timer = None
 
+    def _paint_thread_view(self, entries) -> None:
+        """Draw a viewed run, and remember how much of it was drawn.
+
+        ONE write path for the two callers -- opening a run and the poll
+        that follows it -- because they disagreed on the placeholder and
+        the count was read off the wrong thing in both, which is the same
+        defect twice. `_paint_entries` decides what a stored thread LOOKS
+        like; this decides what the VIEWER shows for one.
+        """
+        view = self._thread_view
+        view.reset()
+        self._paint_entries(view, entries)
+        if not entries:
+            # A run that has not written anything yet -- which is the
+            # ordinary state for the first instant of a live one, and a
+            # real state for one that failed at its first call. Re-said on
+            # every repaint, not only on the first: the poll used to
+            # repaint without it and leave the pane blank.
+            view.write_system("This run has not written anything yet.")
+        # WHAT THE ARCHIVE HELD, not what the widget drew. See the poll.
+        self._viewed_entries = len(entries)
+
     def _poll_thread_view(self) -> None:
         """Redraw the viewed run if it has written anything new.
 
         Compared by ENTRY COUNT rather than by content: a repaint that
         happened every second would fight the reader's scroll position
         for no reason, and a replayed thread only ever grows.
+
+        COUNTED AGAINST THE LAST REPLAY, not against the pane's own
+        entries, and the two are not the same number in two reachable
+        states -- in both of which this repainted on every single tick,
+        which is the behaviour the paragraph above says it exists to
+        avoid:
+
+          * `/thinking` off. `_paint_entries` SKIPS a reasoning entry
+            rather than dimming it (§44), so a run that thought is
+            permanently one or more entries shorter on screen than in the
+            archive.
+          * an empty run. The placeholder above is an entry the archive
+            does not have, so 0 never equalled 1.
 
         Best-effort, batch 66's rule on a new surface: this runs from a
         timer, so it can fire while a modal is up and while the app is
@@ -1589,11 +1624,9 @@ class VenastineApp(App):
             return
         try:
             entries = replay_entries(self._viewing)
-            view = self._thread_view
-            if len(entries) == len(view._entries):
+            if len(entries) == self._viewed_entries:
                 return
-            view.reset()
-            self._paint_entries(view, entries)
+            self._paint_thread_view(entries)
         except Exception:                                   # noqa: BLE001
             logger.exception("Could not refresh the thread view.")
 
