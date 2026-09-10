@@ -2707,6 +2707,21 @@ class VenastineApp(App):
         self._release_permission_channel()
         return super().exit(*args, **kwargs)
 
+    def _handle_exception(self, error: Exception) -> None:
+        """Log an unhandled UI error before Textual reports it (batch 78).
+
+        Textual catches message-handler exceptions internally and reports
+        them to the error console only -- `logs/app.log` heard nothing of
+        the NoMatches that took the app down over a usage-line repaint,
+        and the `textual run --dev` note on the exit screen does not apply
+        to an app launched from `main.py`. This flows through the
+        redacting formatter like every other record, then delegates: the
+        pilot re-raise, the return code and the exit screen are all
+        super()'s to keep.
+        """
+        logger.critical("Unrecoverable UI error: %s", error, exc_info=error)
+        super()._handle_exception(error)
+
     def response_channel(self, honour_run_scope: bool = True):
         """This app's one way of being asked anything (§23 AC1).
 

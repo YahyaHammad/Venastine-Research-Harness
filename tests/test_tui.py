@@ -1406,6 +1406,30 @@ class TestEventsUnderAnOpenModal:
 
 
 @pytest.mark.asyncio
+async def test_an_unhandled_ui_error_is_logged_before_textual_reports_it(caplog):
+    """Batch 78. Textual reports message-handler panics to the error
+    console only -- the NoMatches that took the app down left nothing in
+    logs/app.log, and the exit screen's `textual run --dev` note does not
+    apply to an app launched from main.py. The override logs through the
+    redacting formatter first, then delegates: the pilot re-raise below
+    is super()'s behaviour, kept, and the test would pass vacuously
+    without it -- a logged record for an error that never surfaced would
+    prove the wrong thing."""
+    import logging
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    with caplog.at_level(logging.CRITICAL, logger="tui.app"):
+        with pytest.raises(ValueError, match="boom"):
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                app._handle_exception(ValueError("boom"))
+
+    assert any("Unrecoverable UI error" in r.getMessage()
+               for r in caplog.records), \
+        "an unhandled UI error left no record in the log"
+
+
+@pytest.mark.asyncio
 async def test_a_handler_failure_cannot_take_the_app_down():
     """emit() runs wherever the logging happened -- a research worker
     thread, the MCP bridge thread. A logging handler that raises inside a
