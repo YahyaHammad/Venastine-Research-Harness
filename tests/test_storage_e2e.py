@@ -1221,6 +1221,49 @@ def test_child_threads_returns_this_parents_children_oldest_first(real_storage):
     assert [k["agent_name"] for k in kids] == ["explore", "review"]
 
 
+def test_children_written_on_one_tick_still_come_back_in_a_fixed_order(
+        real_storage):
+    """`_ordered_rows`' rule, at the one query that can actually tie.
+
+    That rule reads: timestamps have microsecond resolution so ties are
+    unlikely, but "unlikely" is not an ordering guarantee. Four other
+    queries in storage.py carry `(created_at, id)` because of it; this one
+    was added with `created_at` alone -- and §47's NA9 is what makes three
+    `create_thread` calls land from three threads at once, so this is where
+    a tie stopped being merely unlikely.
+
+    The clock is FROZEN rather than raced, because what is under test is
+    the ORDER BY, and a test that hoped for a collision would pass on a
+    machine whose clock is coarse and prove nothing anywhere else.
+    """
+    from datetime import datetime, timezone
+    from uuid import UUID
+
+    import storage
+
+    parent = storage.create_thread()
+    one_tick = datetime(2026, 9, 10, 12, 0, 0, tzinfo=timezone.utc)
+    # Ids chosen, and written in DESCENDING order, so insertion order and id
+    # order disagree. Left to uuid4 they would agree one time in six and the
+    # test would pass against the unfixed query on those runs.
+    ids = [UUID(f"0000000{n}-0000-4000-8000-000000000000") for n in (3, 2, 1)]
+    with storage.Session(storage.engine) as session:
+        for n, tid in enumerate(ids):
+            session.add(storage.ConversationThread(
+                id=tid, created_at=one_tick,
+                kind=storage.THREAD_KIND_SUBAGENT, parent_thread_id=parent,
+                parent_call_id=f"call_{n}", agent_name="explore"))
+        session.commit()
+
+    kids = [k["id"] for k in storage.child_threads(parent)]
+
+    assert kids == sorted(ids, key=str), (
+        f"child_threads returned {kids}; with the timestamps tied, the id "
+        "is what has to decide, and it has to decide the same way twice")
+    assert kids == [k["id"] for k in storage.child_threads(parent)], (
+        "two reads of one parent's children disagreed about their order")
+
+
 def test_two_spawns_of_one_agent_are_told_apart_by_their_call(real_storage):
     """THE reason the call id is stored at all. A goal turn can spawn
     `explore` twice, so the agent name identifies the roster entry and

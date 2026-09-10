@@ -880,10 +880,16 @@ class FakeStorage:
 
     def child_threads(self, parent_thread_id):
         """Mirrors storage.child_threads(): the threads this one spawned,
-        oldest first, with no filter by kind (§47)."""
+        oldest first, with no filter by kind (§47).
+
+        The id is the tiebreaker, as it is in the real query -- three
+        `create_thread` calls from three threads can land on one
+        microsecond, and `_ordered_rows`' rule is that "unlikely" is not
+        an ordering guarantee.
+        """
         kids = [tid for tid, row in self._thread_lineage.items()
                 if row[0] == parent_thread_id]
-        kids.sort(key=lambda tid: self._thread_created_at[tid])
+        kids.sort(key=lambda tid: (self._thread_created_at[tid], tid))
         return [
             {
                 "id": tid,

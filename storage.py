@@ -264,9 +264,16 @@ def get_thread(thread_id: UUID) -> Optional[dict]:
     which is exactly the question _ordered_rows' docstring says copying
     columns removes.
 
-    The kind fallback lives HERE rather than at the caller: a row read
-    from a database whose ALTER has not run yet has no attribute at all,
-    and the caller should not have to know that.
+    THE `getattr` FALLBACKS COVER A NULL, NOT A MISSING COLUMN, and this
+    paragraph said the second thing until batch 75. It read: "a row read
+    from a database whose ALTER has not run yet has no attribute at all".
+    It cannot -- `session.get` SELECTs every mapped column, so a database
+    missing one raises OperationalError before any attribute is read, and
+    the class always has the attribute anyway. What these actually absorb
+    is a NULL on a row written before the column existed (and a hand-built
+    stand-in in a test), which is why each pairs the lookup with a default
+    the caller can use. The migration case belongs to
+    `database.ensure_columns()`, which runs at startup.
     """
     with Session(engine) as session:
         thread = session.get(ConversationThread, thread_id)
@@ -278,10 +285,10 @@ def get_thread(thread_id: UUID) -> Optional[dict]:
             "extra_data": dict(thread.extra_data or {}),
             "kind": getattr(thread, "kind", None) or THREAD_KIND_CHAT,
             "last_activity_at": getattr(thread, "last_activity_at", None),
-            # getattr for the kind fallback's reason, one column over: a
-            # row read from a database whose ALTER has not run has no
-            # attribute at all, and a viewer that raises is worse than
-            # one that shows a thread with no known parent (§47).
+            # getattr for the kind fallback's reason, one column over --
+            # see the docstring for what that reason actually is. NULL on
+            # a row written before §47 means "no known parent", and a
+            # viewer showing that is better than one that raises.
             "parent_thread_id": getattr(thread, "parent_thread_id", None),
             "parent_call_id": getattr(thread, "parent_call_id", None),
             "agent_name": getattr(thread, "agent_name", None),
@@ -293,8 +300,7 @@ def child_threads(parent_thread_id: UUID) -> List[dict]:
 
     Each entry: ``{"id", "created_at", "kind", "parent_call_id",
     "agent_name"}``. Empty for a thread that spawned nothing, which is
-    most of them -- and for every thread in a database whose ALTER has
-    not run, since the column reads NULL on every row.
+    most of them.
 
     ONE QUERY, not one per spawn line. A resumed conversation resolves
     every `▸ spawn_subagent` line it draws, and asking per line would be
@@ -304,6 +310,13 @@ def child_threads(parent_thread_id: UUID) -> List[dict]:
     reader comparing this against the transcript walks both the same
     way. `parent_call_id` is what pairs an entry to a specific line;
     ordering is for the human, not for the lookup.
+
+    ORDERED BY `(created_at, id)`, which is `_ordered_rows`' rule and was
+    missing here (batch 75). That rule reads: timestamps have microsecond
+    resolution so ties are unlikely, but "unlikely" is not an ordering
+    guarantee. This is the query where it stopped being merely unlikely --
+    §47's NA9 makes three `create_thread` calls land from three threads at
+    once, which is the one place in this file that can actually tie.
 
     NO `kind` FILTER, deliberately. Every child of a chat thread is
     machinery of some sort, and which kinds exist is §27's question
@@ -315,7 +328,8 @@ def child_threads(parent_thread_id: UUID) -> List[dict]:
         statement = (
             select(ConversationThread)
             .where(ConversationThread.parent_thread_id == parent_thread_id)
-            .order_by(ConversationThread.created_at)
+            .order_by(ConversationThread.created_at.asc(),
+                      ConversationThread.id.asc())
         )
         return [
             {
