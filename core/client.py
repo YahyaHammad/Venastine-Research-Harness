@@ -1351,7 +1351,21 @@ def call_model_stream(
             logger.warning(
                 "%s: %s (finish_reason=%r)", name, parse_error, finish_reason)
         calls.append(ToolCallRequest(
-            id=frag["id"], name=name, input=parsed, parse_error=parse_error,
+            # `or str(uuid4())` for the Google branch's reason, which this
+            # one was missing (batch 76). The fragment's id starts as ""
+            # and is filled only if some delta carries one, so a provider
+            # that streams parallel calls without ids hands back two
+            # requests that are EQUAL on the field everything downstream
+            # pairs by: the batch's own bookkeeping, `_spawn_threads` in
+            # the TUI, and `parent_call_id` in storage. The generated id
+            # is what goes back on the wire too, on BOTH halves of the
+            # pair -- `add_assistant_message` persists the call and
+            # `add_tool_result` answers it, so the two agree by
+            # construction, which is all M4/D20 pairing needs. That is
+            # also why "" was not the safer answer: a provider that
+            # validates `tool_call_id` at all rejects an empty one.
+            id=frag["id"] or str(uuid4()),
+            name=name, input=parsed, parse_error=parse_error,
         ))
 
     # ONE block, not one per delta. There is no block structure on this

@@ -292,6 +292,37 @@ def test_stream_openai_tool_fragment_accumulation(monkeypatch):
     assert resp.usage == {"input_tokens": 5, "output_tokens": 3}
 
 
+def test_stream_openai_missing_ids_get_their_own_uuids(monkeypatch):
+    """Two parallel calls and no ids: the Google branch's rule, on the
+    branch that was missing it (batch 76).
+
+    A fragment's id starts as "" and is filled only if a delta carries
+    one, so a provider that streams parallel calls without ids handed back
+    two requests EQUAL on the field everything downstream pairs by --
+    `_dispatch_parallel`'s bookkeeping, `_spawn_threads` in the TUI, and
+    `parent_call_id` in storage. Distinct is the whole requirement; the
+    values themselves are ours.
+    """
+    monkeypatch.setattr("core.client.load_provider_data", lambda: {})
+
+    chunks = [
+        _oai_chunk(_oai_delta(tool_calls=[SimpleNamespace(
+            index=i, id=None,
+            function=SimpleNamespace(name="get_time", arguments="{}"))]))
+        for i in range(2)
+    ]
+    client = _FakeOpenAIClient(chunks)
+
+    resp = _drain(call_model_stream(client, "OPENAI", "m", [], "sys", []))
+    ids = [tc.id for tc in resp.tool_calls]
+
+    assert len(ids) == 2 and all(ids), (
+        f"got {ids}; a call with no id of its own still needs one")
+    assert len(set(ids)) == 2, (
+        f"both calls came back as {ids[0]!r}, so nothing downstream can "
+        "tell them apart")
+
+
 def test_stream_openai_sends_stream_options_only_when_flag_true(monkeypatch):
     monkeypatch.setattr(
         "core.client.load_provider_data",

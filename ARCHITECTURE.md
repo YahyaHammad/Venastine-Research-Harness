@@ -57,7 +57,7 @@ Venastine Research Harness/
 ├── scripts/
 │   └── prepublish-check.mjs        # batch 35: package.json's `prepublishOnly` gate, so a non-zero exit aborts the publish. Checks the two things that fail SILENTLY and cannot be undone once a version is on the registry -- the two version numbers agreeing, and no secret in the tarball while LICENSE/NOTICE are in it
 │
-├── tests/                          # 4230 tests, all offline, ~5-15 min depending on the machine (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
+├── tests/                          # 4231 tests, all offline, ~5-15 min depending on the machine (+~5s on the first run for the matplotlib font cache) -- see ROADMAP.md §4, DEVLOG.md §4
 │   ├── conftest.py                 # fixtures: make_model_response, make_stream_from_response, make_stream_sequence, FakeStorage, ...
 │   ├── BREAKING_CHANGES.md         # what-breaks-it / symptom / fix per area
 │   ├── test_cli.py                 # 98 tests -- ROADMAP §1 thread_id passthrough + UUID validation + §14 parser defaults/resolution/trust flow + §29 N1-N8 the one stdin reader, N2's channel deadline, every request kind rendered, and the startup block main(argv) made reachable + #102's four declining defaults + §47's asker line on the three kinds a run can raise, which this shell dropped while the TUI drew it (batch 76)
@@ -73,7 +73,7 @@ Venastine Research Harness/
 │   ├── test_embeddings.py          # 16 tests -- ROADMAP_v2 §45 SQ2/SQ10: core.client.embed_texts. The three ways a SUCCESSFUL response is still unusable (a permuted batch, a ragged batch, all-zero vectors), provider dispatch incl. Anthropic's by-name refusal, and asymmetric-embedder prefixes
 │   ├── test_confidence_scoring.py  # 88 tests (3 ROADMAP verbatim regressions) -- plus §45 SQ3: the formula is byte-identical when nothing scored sources, source quality scales the grounding component, the tier still discriminates across the whole domain table, and SQ6's knobs -- warn-and-fall-back per key where compaction raises, an unknown key still raising, and the resolved weights actually reaching the formula
 │   ├── test_client_translation.py  # 45 tests -- all three provider translation branches + batching + Google request/response parsing + §33's W7 guard that importing core.client pulls in no provider SDK
-│   ├── test_client_streaming.py    # 23 tests -- ROADMAP §13 direct call_model_stream coverage (3 providers + D21 + fragment accumulation); §38's thinking capture, incl. that reasoning never joins the answer text
+│   ├── test_client_streaming.py    # 24 tests -- ROADMAP §13 direct call_model_stream coverage (3 providers + D21 + fragment accumulation + a parallel pair whose ids the provider never sent, which everything downstream pairs by); §38's thinking capture, incl. that reasoning never joins the answer text
 │   ├── test_loop_stop_conditions.py# 4 tests -- ROADMAP verbatim stop conditions + #45's belt (a non-positive max_steps raises a named ValueError)
 │   ├── test_streaming_loop.py      # 18 tests -- ROADMAP §13 generator event ordering, exception propagation, D20 persistence, permission_channel, and #158's actionable headless denial (name-gated vs argument-gated)
 │   ├── test_workspace_trust.py     # 26 tests -- ROADMAP_v2 §14 AC1/AC2 + hash-control properties (path-in-hash, determinism)
