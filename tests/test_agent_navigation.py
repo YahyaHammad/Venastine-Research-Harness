@@ -664,15 +664,37 @@ def _spawn_cells(app):
     return out
 
 
-def _spawn_start(app):
-    """A screen point inside the armed name, in the transcript's own
-    coordinates, or None."""
+def _spawn_offset(app, widget):
+    """A screen point inside the armed name, in `widget`'s own
+    coordinates, or None.
+
+    Takes the widget because a spawn line can be drawn in either pane:
+    the live transcript, and -- since the viewer learns the run it is
+    showing -- a stored run's own `▸ spawn_subagent`. `_spawn_cells`
+    scans the SCREEN, and only one of the two panes is ever on it.
+    """
     cells = _spawn_cells(app)
     if not cells:
         return None
     x, y, _call = cells[0]
-    origin = app._transcript.region.offset
+    origin = widget.region.offset
     return (x - origin.x, y - origin.y)
+
+
+def _spawn_start(app):
+    """A screen point inside the armed name, in the transcript's own
+    coordinates, or None."""
+    return _spawn_offset(app, app._transcript)
+
+
+def _tool_entry(call_id, name="spawn_subagent", digest="agent_name=review"):
+    """A replayed tool line in ReplayEntry shape, armed with its call.
+
+    The shape matters: `Transcript._arm_spawn` locates the name
+    structurally (indent, marker, space, name, two spaces, digest)
+    rather than by matching the marker glyph.
+    """
+    return ("tool", f"▸ {name}  {digest}", (), call_id)
 
 
 def _spawn_event(app, name="spawn_subagent", call_id="call_7"):
@@ -923,6 +945,117 @@ class TestTheThreeWaysACallFindsItsRun:
             await pilot.pause()
 
             assert app._spawn_threads == {}
+
+
+class TestDescendingThroughTheViewer:
+    """Opening a run from inside another run's view.
+
+    THE CASE A RESTART LEAVES, and the one the three sources do not cover
+    between them: a live span and a live tool result never happened in
+    this process, so `child_threads()` is the only thing that can pair a
+    stored run's own `▸ spawn_subagent` line with the run it made. The
+    viewer painted those lines armed and learned nothing, so a grandchild
+    was clickable and unreachable -- and the crumb only walks UP and the
+    picker lists only what is running, so the anchor was the sole way
+    down.
+    """
+
+    @pytest.fixture
+    def deep_lineage(self, lineage, mocker):
+        """`lineage`, with `child_threads` answering per thread.
+
+        The base fixture returns `[]` for everything, which is what let
+        this gap sit: every viewer test opened a run whose children were
+        declared to be none.
+        """
+        children = {
+            lineage.chat: [{"id": lineage.child, "created_at": None,
+                            "kind": "subagent", "parent_call_id": "call_1",
+                            "agent_name": "explore"}],
+            lineage.child: [{"id": lineage.grandchild, "created_at": None,
+                             "kind": "subagent", "parent_call_id": "call_9",
+                             "agent_name": "review"}],
+        }
+        mocker.patch("tui.app.storage.child_threads",
+                     side_effect=lambda tid: children.get(tid, []))
+        return lineage
+
+    @pytest.mark.asyncio
+    async def test_opening_a_run_learns_the_runs_IT_spawned(self,
+                                                            deep_lineage,
+                                                            mocker):
+        mocker.patch("tui.app.replay_entries",
+                     return_value=[_tool_entry("call_9")])
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.open_agent_thread(str(deep_lineage.child))
+            await pilot.pause()
+
+            paired = dict(app._spawn_threads)
+
+        assert paired == {"call_9": str(deep_lineage.grandchild)}, (
+            f"the viewer paired {paired}; opening a run has to learn its "
+            "own children or the spawn lines it just armed open nothing")
+
+    @pytest.mark.asyncio
+    async def test_a_grandchild_opens_from_inside_the_view(self,
+                                                           deep_lineage,
+                                                           mocker):
+        """The whole chain, driven through the pilot: the viewer learns,
+        the paint arms, the click resolves, and the pane moves one level
+        deeper. A test that called the handler by hand would pass against
+        a line nothing had armed."""
+        mocker.patch("tui.app.replay_entries",
+                     return_value=[_tool_entry("call_9")])
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.open_agent_thread(str(deep_lineage.child))
+            assert await settle(
+                pilot, lambda: app._viewing == deep_lineage.child)
+
+            offset = _spawn_offset(app, app._thread_view)
+            assert offset is not None, (
+                "the viewed run's spawn line was never armed, so there "
+                "was nothing to click")
+            await pilot.click("#thread-view", offset=offset, control=True)
+            assert await settle(
+                pilot, lambda: app._viewing == deep_lineage.grandchild), (
+                f"the click left the viewer on {app._viewing}; a stored "
+                "run's spawn line has to open the run it made")
+
+    @pytest.mark.asyncio
+    async def test_a_refusal_lands_in_the_pane_on_screen(self, lineage,
+                                                          mocker):
+        """`#transcript` is HIDDEN while the viewer is up, so a refusal
+        written there is not quieter than intended -- it is invisible,
+        which is the silence `on_spawn_selected` exists to avoid."""
+        mocker.patch("tui.app.replay_entries",
+                     return_value=[_tool_entry("call_9")])
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            # `lineage`, not `deep_lineage`: this run's children are
+            # unreadable, so its spawn line resolves to nothing.
+            app.open_agent_thread(str(lineage.child))
+            assert await settle(pilot, lambda: app._viewing == lineage.child)
+
+            await pilot.click("#thread-view",
+                              offset=_spawn_offset(app, app._thread_view),
+                              control=True)
+            await pilot.pause()
+            await pilot.pause()
+
+            seen = [t for _, t in app._thread_view._entries]
+            hidden = [t for _, t in app._transcript._entries]
+
+        assert any("no thread to open" in t for t in seen), (
+            f"the viewer showed {seen}; the refusal has to be where the "
+            "reader is looking")
+        assert not any("no thread to open" in t for t in hidden), (
+            "the refusal went to the hidden pane as well as the visible "
+            "one")
 
 
 class TestTheArmingSurvivesWhatTheEntriesDo:

@@ -1400,7 +1400,12 @@ class VenastineApp(App):
         if thread_id:
             self.open_agent_thread(thread_id)
             return
-        self._transcript.write_system(
+        # THE PANE ON SCREEN, not the live transcript. This click can come
+        # from a spawn line inside the VIEWER -- a stored run's own
+        # `▸ spawn_subagent` -- and the switcher is hiding `#transcript`
+        # then, so a refusal written there is the silence this docstring
+        # says must not happen, reached by the one route that produces it.
+        self._visible_transcript.write_system(
             "That spawn has no thread to open — it was refused, or it "
             "has not started writing yet.")
 
@@ -1433,13 +1438,25 @@ class VenastineApp(App):
         try:
             entries = replay_entries(resolved)
         except Exception as e:                              # noqa: BLE001
-            # The transcript, not the viewer: the viewer is not open yet
-            # and opening it to hold an error would leave the reader
-            # somewhere they cannot see their conversation.
-            self._transcript.write_error(
+            # THE PANE ON SCREEN. This used to write to `_transcript`
+            # unconditionally, reasoning that "the viewer is not open
+            # yet" -- true of a click in the live transcript and false of
+            # the two routes that arrive while it IS open, a crumb
+            # segment and a sidebar row. The reader stays where they
+            # were, so the message has to be where they are looking.
+            self._visible_transcript.write_error(
                 f"Could not open that run: {e}")
             return
 
+        # BEFORE the paint, exactly as `switch_to_thread` does it, and for
+        # the same reason: the paint arms this run's own `▸ spawn_subagent`
+        # lines and the arming is what a click resolves against. Without
+        # it the viewer could descend one level and no further on a
+        # RESUMED conversation -- the live span and the live tool result
+        # never happened in this process, and `child_threads()` is the
+        # only source that survives a restart. Contained in the helper, so
+        # a run whose children cannot be read still opens.
+        self._learn_spawn_threads(resolved)
         view = self._thread_view
         view.reset()
         self._paint_entries(view, entries)
@@ -1575,6 +1592,23 @@ class VenastineApp(App):
         if self._thread_view_widget is not None:
             return self._thread_view_widget
         return self.query_one("#thread-view", Transcript)
+
+    @property
+    def _visible_transcript(self) -> Transcript:
+        """Whichever pane the switcher is showing.
+
+        For anything the harness says to the READER, as opposed to
+        anything it says about the conversation. Only `#pane`'s current
+        child is on screen, so a line written to the other one is not
+        quieter than intended -- it is invisible, which is the state a
+        deliberate click answered with silence reads as a broken feature.
+
+        Derived from `_viewing`, like the switcher's `current`, the
+        crumb's rows and the prompt's `disabled` flag, so it cannot drift
+        into disagreeing with them about which pane is up.
+        """
+        return (self._thread_view if self._viewing is not None
+                else self._transcript)
 
     @property
     def _crumb(self) -> ThreadCrumb:
