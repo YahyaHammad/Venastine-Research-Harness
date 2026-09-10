@@ -1378,16 +1378,21 @@ class VenastineApp(App):
             runs.append({
                 "label": (self.active_agent.name if self.active_agent
                           else "this conversation"),
-                "depth": 0, "thread_id": str(root)})
+                "level": 0, "thread_id": str(root)})
         for row, level in lineage_rows(self._agent_stack):
             if row.thread_id is not None:
                 runs.append({"label": row.name,
-                             # The walk's level, exactly as the panel
-                             # indents by it -- see `lineage_rows`. A row
-                             # whose parent has no thread still keeps its
-                             # own column, because the column is about
-                             # lineage and being openable is not.
-                             "depth": level,
+                             # `level`, and the key is named for what it
+                             # holds: the walk's column, exactly as the
+                             # panel indents by it. It was called `depth`
+                             # for one batch after it stopped being one
+                             # (see `lineage_rows` for the difference),
+                             # which is the drift storage.py's `getattr`
+                             # comments were repaired for. A row whose
+                             # parent has no thread still keeps its own
+                             # column, because the column is about lineage
+                             # and being openable is not.
+                             "level": level,
                              "thread_id": str(row.thread_id)})
 
         def chosen(thread_id) -> None:
@@ -1581,6 +1586,14 @@ class VenastineApp(App):
         the count was read off the wrong thing in both, which is the same
         defect twice. `_paint_entries` decides what a stored thread LOOKS
         like; this decides what the VIEWER shows for one.
+
+        IT RESETS, so anything written into the pane BY HAND does not
+        survive a repaint -- `_visible_transcript`'s refusals and errors,
+        which is the only thing that writes there outside this function.
+        Bounded rather than fixed: the poll only runs while the viewed run
+        is live, so a stored run keeps such a line indefinitely, and the
+        alternative was writing it to a pane the switcher is hiding. Worth
+        knowing before treating this pane as somewhere a message lasts.
         """
         view = self._thread_view
         view.reset()

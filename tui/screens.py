@@ -987,12 +987,15 @@ class AgentPickerScreen(ModalScreen[object]):
 
     def compose(self) -> ComposeResult:
         items = [
-            # Indented by depth, so the list reads as the same shape
-            # the sidebar draws rather than as a flat menu of names.
+            # Indented by the LINEAGE LEVEL the app read off
+            # `widgets.lineage_rows`, which is the walk the sidebar
+            # indents by -- not `AgentRow.depth`, which is the spawn
+            # bound and parts company with the column wherever a span
+            # adds a display level without adding a spawn level.
             # `Text(...)` for RA1's reason: an agent name comes from a
             # file this project did not necessarily write.
             ListItem(Label(Text(
-                f"{'  ' * run.get('depth', 0)}{run['label']}")))
+                f"{'  ' * run.get('level', 0)}{run['label']}")))
             for run in self._runs
         ]
         children = [Label("Read which run?", id="agent-picker-title")]
