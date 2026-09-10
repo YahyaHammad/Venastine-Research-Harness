@@ -45,14 +45,16 @@ import threading
 import time
 from typing import Optional
 
-import config as _harness_config
 from mcp import Client
 from mcp.client.sse import sse_client
 from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.client.streamable_http import (
-    create_mcp_http_client, streamable_http_client,
+    create_mcp_http_client,
+    streamable_http_client,
 )
 from mcp.shared.exceptions import MCPError
+
+import config as _harness_config
 
 logger = logging.getLogger(__name__)
 

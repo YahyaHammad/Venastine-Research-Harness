@@ -18,15 +18,16 @@ rather than by calling `corpus.add` directly, for the same reason: the
 wiring is the part that can silently not exist.
 """
 
-import json
-from uuid import uuid4
 
 import pytest
 
 from core.events import LoopEvent
 from core.reasoning import orchestrator
 from core.reasoning.source_corpus import (
-    MAX_DOCUMENTS, MIN_DOCUMENT_CHARS, SourceCorpus, arxiv_id_from_url,
+    MAX_DOCUMENTS,
+    MIN_DOCUMENT_CHARS,
+    SourceCorpus,
+    arxiv_id_from_url,
     normalize_url,
 )
 
@@ -309,8 +310,7 @@ class TestTranslateCollectsIntoTheCorpus:
 
     def _translate(self, events, corpus=None):
         def stream():
-            for event in events:
-                yield event
+            yield from events
             return "response"
         return list(orchestrator._translate("Pass 3a", stream(), corpus=corpus))
 

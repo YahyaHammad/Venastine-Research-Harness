@@ -88,6 +88,31 @@ pdf = ["markdown", "weasyprint"]
 [tool.setuptools.dynamic]
 dependencies = { file = ["requirements.txt"] }
 
+[tool.ruff]
+# Lint gate (lint.yml), judged against the 3.11 floor even though
+# developers may run 3.12/3.13 locally -- UP modernisations must be valid
+# where CI runs, not just where they were written.
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+ignore = [
+  # Long docstring/comment lines are the record (decision ids, trace
+  # excerpts, URLs). Reflowing them for a ruler would bury the content.
+  "E501",
+  # `Optional[X]` is this codebase's idiom (300+ sites); `X | None`
+  # rewrites are churn with zero behaviour change.
+  "UP045",
+  # Deferred imports are architectural: tools/registry.py <-> agents/
+  # subagent_tool.py would cycle at import time, and several tests import
+  # only after arranging fixtures/patches.
+  "E402",
+  # printf-style `%` is the logging convention (AGENTS.md: interpolate via
+  # logger args, never f-strings at the call site) and the user-facing
+  # string idiom; mass conversion is churn for no behaviour change.
+  "UP031",
+]
+
 [tool.setuptools]
 # DECLARATIVE ONLY -- this project is run from a checkout, not installed.
 # `pip install .` would otherwise put `config`, `main`, `storage` and

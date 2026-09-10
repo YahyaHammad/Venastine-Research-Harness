@@ -6,7 +6,7 @@ grounding "as of today" or "current events" style claims during research
 passes without needing a network call.
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 TOOL_SCHEMA = {
     "name": "get_time",
@@ -16,5 +16,5 @@ TOOL_SCHEMA = {
 
 
 def run(params: dict) -> dict:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     return {"utc_datetime": now.isoformat()}

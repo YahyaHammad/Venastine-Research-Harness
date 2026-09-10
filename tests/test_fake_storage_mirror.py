@@ -44,7 +44,6 @@ import pytest
 import storage
 from tests.conftest import FakeStorage
 
-
 # ---------------------------------------------------------------------------
 # ---- Rows that cover every branch of both implementations ------------------
 # ---------------------------------------------------------------------------

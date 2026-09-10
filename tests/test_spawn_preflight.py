@@ -27,9 +27,9 @@ from core import config_loader
 from core.client import StreamToken
 from core.interaction import ResponseChannel
 from core.loop import RunAgentLoop
+from tests.conftest import make_model_response
 from tools.context import ToolContext
 from tools.registry import registry
-from tests.conftest import make_model_response
 
 
 @pytest.fixture

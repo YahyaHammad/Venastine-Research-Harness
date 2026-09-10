@@ -30,10 +30,10 @@ import pytest
 from rich.style import Style
 from textual.theme import BUILTIN_THEMES, Theme
 
-from tests.conftest import pump, settle
+from tests.conftest import pump
 from tui import themes
-from tui.widgets import CONVERSATION_ROLES, META_ROLES
 from tui.themes import ALL_THEMES, THEME_NAMES, role_styles
+from tui.widgets import CONVERSATION_ROLES, META_ROLES
 
 GRID_NAMES = [
     "dark-plain", "dark-red", "dark-green", "dark-blue",

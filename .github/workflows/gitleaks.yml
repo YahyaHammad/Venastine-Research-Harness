@@ -1,0 +1,57 @@
+# Secret scan: working tree only, never history.
+#
+# `--no-git` is the load-bearing flag. A history scan would flag every
+# rotated or test-fixture secret ever committed (including the planted
+# redaction fixtures), turning one cleanup into permanent red. The threat
+# that matters here is a secret ENTERING the tree: providers.json-shaped
+# keys, .env entries, pasted tokens.
+#
+# Two companion files do the tuning, for different reasons:
+#   * `.github/gitleaks.toml` (-c): path allowlist for gitignored runtime
+#     residue Gitleaks does NOT skip on its own -- providers.json (real
+#     local keys, verified locally) and __pycache__/*.pyc (bytecode copies
+#     of fixtures). CI scans the empty example-derived providers.json,
+#     which is clean; the allowlist is what keeps local runs honest too.
+#   * `.gitleaksignore` (auto-picked from the repo root): fingerprints of
+#     the six INTENTIONAL fake secrets in tests/test_policy_enforcement.py
+#     (the suite asserts they redact). A moved fixture re-fires until
+#     re-blessed -- a tripwire, not friction.
+# Adding a fingerprint for a REAL credential is never the fix; rotation is.
+
+name: gitleaks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gitleaks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gitleaks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Working-tree scan needs no history; a shallow checkout keeps
+          # the job fast and is all `--no-git` reads.
+          fetch-depth: 1
+
+      # Pinned binary, not the floating action: D22's exact-pin rule
+      # applies to CI tooling too -- a scanner upgrade must be a deliberate
+      # step with a re-triage, not something Friday's run inherits.
+      - name: Install Gitleaks
+        run: |
+          curl -sSL -o gitleaks.tar.gz \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          tar xzf gitleaks.tar.gz gitleaks
+          rm gitleaks.tar.gz
+
+      - name: Scan working tree
+        run: ./gitleaks detect --source . --no-git -c .github/gitleaks.toml -v

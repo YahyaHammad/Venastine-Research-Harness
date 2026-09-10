@@ -30,10 +30,9 @@ from uuid import uuid4
 
 import pytest
 
-from tests.conftest import run_pass, settle
 import storage
 from core.replay import replay_entries
-
+from tests.conftest import run_pass, settle
 
 # ===========================================================================
 # ---- AC1: every creation path says what it is ------------------------------
@@ -53,9 +52,11 @@ class TestWhatEachPathCreates:
         thread per pass is a locked invariant -- passes share distilled JSON,
         never raw history -- so the fix has to be the label, not the reuse.
         """
-        from core.loop import RunAgentLoop
-        from tests.conftest import (FakeMemory, make_model_response,
-                                    make_stream_from_response)
+        from tests.conftest import (
+            FakeMemory,
+            make_model_response,
+            make_stream_from_response,
+        )
 
         created = []
 
@@ -126,8 +127,8 @@ class TestWhatEachPathCreates:
 # would let this file pass while the production lookup was broken.
 
 def _invoke_subagent(mocker, project):
-    from core import config_loader
     from agents import subagent_tool
+    from core import config_loader
     config_loader.initialize(str(project))
     try:
         subagent_tool.run({"agent_name": "grill-me", "task": "do it"})
@@ -148,9 +149,9 @@ def _invoke_reviewer(mocker, project):
 
 
 def _invoke_compactor(mocker, project):
+    from agents.manager import manager
     from core import compaction, config_loader
     from core.loop import RunAgentLoop
-    from agents.manager import manager
     config_loader.initialize(str(project))
     try:
         import config
@@ -674,10 +675,11 @@ class TestPassThreadsAreRecorded:
     def test_the_artifact_carries_them(self, tmp_path, mocker):
         """AC6's durable half: hiding a pass thread from the picker must not
         make it unreachable."""
+        import json
+
         import config
         from core.reasoning.base import PipelineRun
         from core.reasoning.output_writer import write_run_artifacts
-        import json
 
         mocker.patch.object(config, "OUTPUT_DIR", str(tmp_path))
         run = PipelineRun(user_query="q")
@@ -824,6 +826,7 @@ class TestTwoTierClassification:
         naming the run -- data the writer did write must not vanish
         silently."""
         import logging
+
         from core.reasoning.pipeline_storage import classify_legacy_pass_threads
 
         legacy_db.execute(

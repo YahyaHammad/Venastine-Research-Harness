@@ -28,12 +28,13 @@ from __future__ import annotations
 import difflib
 import logging
 import os
-from typing import Callable, Optional
+from collections.abc import Callable
+from typing import Optional
 
 import config
 from core import config_loader, workspace_trust
-from project_init import (config_files, doc_sets,
-                          manifest as manifest_mod)
+from project_init import config_files, doc_sets
+from project_init import manifest as manifest_mod
 
 logger = logging.getLogger(__name__)
 
@@ -173,7 +174,7 @@ def _read_existing_context(project_path: str) -> Optional[str]:
     if not os.path.exists(path):
         return None
     try:
-        with open(path, "r", encoding="utf-8-sig") as f:
+        with open(path, encoding="utf-8-sig") as f:
             return f.read()
     except (OSError, UnicodeDecodeError) as e:
         # Degrade like config_loader does with an unreadable hub document.
@@ -222,7 +223,7 @@ def _run_initializer(project_path: str, kind: str, existing: Optional[str],
                      model: str, provider_name: str, activity=None) -> str:
     from agents.manager import manager
     from core import agent_activity
-    from core.loop import RunAgentLoop, DEFAULT_SYSTEM_PROMPT
+    from core.loop import DEFAULT_SYSTEM_PROMPT, RunAgentLoop
     from storage import THREAD_KIND_SUBAGENT
 
     agent = manager.get(config.INITIALIZER_AGENT)
@@ -323,7 +324,7 @@ def generate(
     Returns a notice dict in the {"kind", "text"} shape both shells render.
     """
     from tools.builtin.project_docs import HUB_FILENAME, doc_path
-    from tools.registry import registry, ToolCallDenied
+    from tools.registry import ToolCallDenied, registry
 
     root = project_path or config_loader.get_project_path()
     if root is None:

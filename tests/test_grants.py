@@ -23,29 +23,26 @@ ignores it entirely.
 import ast
 import collections
 import inspect
-import queue
 
 import pytest
 
 import config
 import core.loop
-
-from core.approval import GrantBudget, RunAuthorization
-from core.interaction import ResponseChannel
-from core.client import StreamToken
-from core.loop import RunAgentLoop
-from core.reasoning.authorization import candidates
 from agents.manager import manager
 from core import config_loader, interaction
-from tools.base import GRANT_SIGNOFF_ONLY, ToolSpec
-from tools.context import RunInfo, ToolContext
-from tools.registry import registry
-from tests.conftest import make_model_response
-
+from core.approval import GrantBudget, RunAuthorization
+from core.client import StreamToken
+from core.interaction import ResponseChannel
+from core.loop import RunAgentLoop
+from core.reasoning.authorization import candidates
 
 # ROADMAP_v2 §21 gave _run() more to call on a memory. One stand-in, in
 # conftest -- see FakeMemory there.
 from tests.conftest import FakeMemory as _Mem
+from tests.conftest import make_model_response
+from tools.base import GRANT_SIGNOFF_ONLY, ToolSpec
+from tools.context import RunInfo, ToolContext
+from tools.registry import registry
 
 
 class _AnswerChannel:

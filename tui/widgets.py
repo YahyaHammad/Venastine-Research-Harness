@@ -6,7 +6,6 @@ or reaches into harness state; tui/app.py feeds them.
 """
 
 import webbrowser
-
 from dataclasses import dataclass
 
 from rich import box
@@ -21,7 +20,6 @@ from textual.reactive import reactive
 from textual.widgets import RichLog, Static, TextArea
 
 from prompts.system_prompts import pass_label
-
 from tui import diffs, markdown, ravens, themes
 from tui.commands import registry as commands
 

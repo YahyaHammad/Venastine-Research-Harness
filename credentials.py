@@ -58,7 +58,7 @@ def unknown_provider_message(provider_name: str, providers: dict) -> str:
 def load_provider_data() -> dict:
     if not os.path.exists(LLM_PROVIDERS_FILE):
         return {}
-    with open(LLM_PROVIDERS_FILE, "r", encoding="utf-8") as file:
+    with open(LLM_PROVIDERS_FILE, encoding="utf-8") as file:
         return json.load(file)
 
 

@@ -1,14 +1,17 @@
-from dataclasses import dataclass, field
-from typing import Optional
-from uuid import UUID, uuid4
 import json
 import logging
 import os
+from dataclasses import dataclass, field
+from typing import Optional
+from uuid import UUID, uuid4
 
-import credentials
-from credentials import load_provider_data, no_providers_message, \
-    unknown_provider_message
 import config
+import credentials
+from credentials import (
+    load_provider_data,
+    no_providers_message,
+    unknown_provider_message,
+)
 
 # ROADMAP_v2 §33 W7 (#135). The three provider SDKs are NOT imported here.
 #

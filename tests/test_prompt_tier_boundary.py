@@ -56,7 +56,6 @@ import prompts.system_prompts as system_prompts
 from core import config_loader
 from core.loop import with_goal, with_memories, with_refs, with_todos
 
-
 CANARIES = {
     "goal": "CANARY-GOAL-a1",
     "todo": "CANARY-TODO-b2",

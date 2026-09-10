@@ -27,7 +27,11 @@ import pytest
 
 import config
 from core.reasoning.scholar import (
-    ScholarLookup, author_standing, doi_for, is_peer_reviewed, paper_score,
+    ScholarLookup,
+    author_standing,
+    doi_for,
+    is_peer_reviewed,
+    paper_score,
     venue_credit,
 )
 

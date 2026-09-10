@@ -1,0 +1,12 @@
+# Intentional fake secrets: planted fixtures for the redaction tests in
+# tests/test_policy_enforcement.py (the suite asserts they come back as
+# [REDACTED]). Each line is a gitleaks fingerprint (File:RuleID:Line).
+# Moving a fixture re-fires the job until the fingerprint is re-blessed --
+# that is deliberate, so a real secret pasted beside a fake one cannot hide
+# behind this file. Never add a fingerprint for a real credential; the
+# response to a real leak is rotation, not allowlisting.
+tests/test_policy_enforcement.py:gcp-api-key:57
+tests/test_policy_enforcement.py:private-key:69
+tests/test_policy_enforcement.py:generic-api-key:81
+tests/test_policy_enforcement.py:generic-api-key:352
+tests/test_policy_enforcement.py:generic-api-key:862

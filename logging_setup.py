@@ -142,7 +142,7 @@ def configure_logging(
         root.removeHandler(handler)
         try:
             handler.close()
-        except (OSError, IOError):
+        except OSError:
             # Closing should not fail loudly, but if a handler is in a
             # weird state we still want to proceed with fresh handlers.
             pass

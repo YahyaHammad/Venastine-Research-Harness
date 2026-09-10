@@ -65,11 +65,11 @@ from typing import Any, Optional
 
 import sympy
 from sympy.parsing.sympy_parser import (
+    convert_equals_signs,
     eval_expr,
+    implicit_multiplication_application,
     standard_transformations,
     stringify_expr,
-    implicit_multiplication_application,
-    convert_equals_signs,
 )
 
 # SymPy's own public namespace (sin, cos, sqrt, pi, Symbol, Matrix, oo, ...)

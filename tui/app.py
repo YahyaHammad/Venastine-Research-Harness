@@ -34,8 +34,8 @@ import os
 import queue
 import threading
 from dataclasses import replace
-from time import monotonic
 from pathlib import Path
+from time import monotonic
 from uuid import UUID
 
 from textual.app import App, ComposeResult
@@ -50,47 +50,72 @@ import config
 import storage
 from agents.manager import manager
 from agents.tui_commands import register_agent_commands
-from skills.manager import manager as skills
-from memories.tui_commands import register_memory_commands
-from project_init.tui_commands import register_init_commands
-from skills.tui_commands import register_skill_commands
 from core import config_loader
 from core.agent_activity import AgentActivity
 from core.approval import RunAuthorization
 from core.client import api_initialization, effort_levels_for_model
 from core.loop import (
-    DEFAULT_PROVIDER, DEFAULT_SYSTEM_PROMPT, RunAgentLoop, advertisement_facts,
-    with_goal, with_refs, with_memories, with_todos,
+    DEFAULT_PROVIDER,
+    DEFAULT_SYSTEM_PROMPT,
+    RunAgentLoop,
+    advertisement_facts,
+    with_goal,
+    with_memories,
+    with_refs,
+    with_todos,
 )
 from core.memory import ConversationMemory
-from core.replay import replay_entries
+
 # Module scope, not inside _cmd_research: _split_research_flags needs the
 # sentinel too, and two shells comparing against two different object()
 # instances would look identical and behave differently.
 from core.reasoning.authorization import GRANT_PICKER, NOTHING_TO_GRANT
+from core.replay import replay_entries
+from memories.tui_commands import register_memory_commands
+from project_init.tui_commands import register_init_commands
 from prompts import system_prompts
-from safety.policy_enforcement import (
-    redact_output_text, redact_secrets)
-
+from safety.policy_enforcement import redact_output_text, redact_secrets
+from security import posture
+from skills.manager import manager as skills
+from skills.tui_commands import register_skill_commands
 from tools.builtin import file_ops
 from tools.registry import registry as tool_registry
 from tui import diffs, history, meters, preferences, ravens, themes
-from tui.commands import SlashCommand, registry as commands
+from tui.commands import SlashCommand
+from tui.commands import registry as commands
 from tui.screens import (
-    AgentPickerScreen, ClaimsScreen, ConfirmScreen, GrantPickerScreen,
+    AgentPickerScreen,
+    ClaimsScreen,
+    ConfirmScreen,
+    GrantPickerScreen,
     PermissionScreen,
-    ProjectKindScreen, QuestionScreen, ReviewScreen, SubagentSignoffScreen,
+    ProjectKindScreen,
+    QuestionScreen,
+    ReviewScreen,
+    SubagentSignoffScreen,
     ThreadPickerScreen,
 )
-from security import posture
 from tui.widgets import (
-    AgentPanel, AgentRow, ANIMATION_INTERVAL,
-    CONVERSATION_ROLES, EffortRaven, GoalBanner, lineage_rows,
-    PostureBadge, PromptInput,
-    RavenPanel, ResearchProgress, SlashSuggest, SpawnSelected,
+    ANIMATION_INTERVAL,
+    CONVERSATION_ROLES,
+    THREAD_VIEW_POLL_S,
+    AgentPanel,
+    AgentRow,
+    EffortRaven,
+    GoalBanner,
+    PostureBadge,
+    PromptInput,
+    RavenPanel,
+    ResearchProgress,
+    SlashSuggest,
+    SpawnSelected,
     ThinkingIndicator,
-    THREAD_VIEW_POLL_S, ThreadCrumb, ThreadSelected, TodoPanel,
-    Transcript, UsageLine,
+    ThreadCrumb,
+    ThreadSelected,
+    TodoPanel,
+    Transcript,
+    UsageLine,
+    lineage_rows,
 )
 
 logger = logging.getLogger(__name__)
@@ -615,13 +640,13 @@ class VenastineApp(App):
         # The transcript, held rather than re-queried. See the `_transcript`
         # property and on_mount; None until mounted, which is the state
         # every test that builds this app without a pilot is in.
-        self._transcript_widget: "Transcript | None" = None
+        self._transcript_widget: Transcript | None = None
         # §47's viewer. Held for the same reason the transcript is (batch
         # 66): the poll below writes from a timer callback, which can
         # fire while a modal is up, and `query_one` searches the ACTIVE
         # screen. None until mounted.
-        self._thread_view_widget: "Transcript | None" = None
-        self._crumb_widget: "ThreadCrumb | None" = None
+        self._thread_view_widget: Transcript | None = None
+        self._crumb_widget: ThreadCrumb | None = None
         self._pane_widget = None
         # The thread the viewer is showing, or None when it is closed.
         # THE ONE FACT that says whether the viewer is open; everything
@@ -2321,7 +2346,7 @@ class VenastineApp(App):
                 return None
             if os.path.getsize(resolved) > DIFF_SNAPSHOT_MAX_BYTES:
                 return None
-            with open(resolved, "r", encoding="utf-8", errors="replace") as f:
+            with open(resolved, encoding="utf-8", errors="replace") as f:
                 return f.read()
         except Exception:  # noqa: BLE001 -- see the docstring
             return None
@@ -3582,7 +3607,9 @@ def _cmd_research(app: VenastineApp, args: str) -> None:
     sets. Bare --grant opens the picker.
     """
     from core.reasoning.authorization import (
-        candidates, parse_grant_spec, GrantSpecError,
+        GrantSpecError,
+        candidates,
+        parse_grant_spec,
     )
 
     attended, review, grant_spec, query = _split_research_flags(args)
@@ -3776,7 +3803,8 @@ def _start_research(app: VenastineApp, query: str, authorization) -> None:
 
     def work() -> None:
         from core.reasoning.orchestrator import (
-            run_pipeline_to_completion, stream_deep_research_pipeline,
+            run_pipeline_to_completion,
+            stream_deep_research_pipeline,
         )
         from core.reasoning.output_writer import write_run_artifacts
         error = None

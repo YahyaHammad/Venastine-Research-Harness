@@ -37,7 +37,6 @@ import pytest
 
 from tools.builtin import fetch_url
 
-
 BLOCKED = "https://blocked.example/page"
 
 

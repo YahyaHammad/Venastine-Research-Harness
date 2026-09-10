@@ -13,7 +13,7 @@ from typing import Literal, Optional
 import sympy
 from pydantic import BaseModel, Field
 
-from tools.builtin._math_common import safe_parse, serialize, MathParseError
+from tools.builtin._math_common import MathParseError, safe_parse, serialize
 
 _OPERATIONS = Literal[
     "add", "subtract", "multiply", "transpose", "determinant",

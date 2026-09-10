@@ -56,9 +56,9 @@ import json
 import os
 import sys
 import threading
+from datetime import UTC
 
 import pytest
-
 
 # ---------------------------------------------------------------------------
 # ---- Real sqlmodel, real sqlite --------------------------------------------
@@ -979,9 +979,9 @@ def test_replaying_a_compacted_thread_shows_the_original_first_message(
     """
     import importlib
 
-    from core import compaction
-    from core.memory import ConversationMemory, SUMMARY_PREFIX
     import core.replay as replay_module
+    from core import compaction
+    from core.memory import SUMMARY_PREFIX, ConversationMemory
 
     # core/replay.py bound archive_history at import, against the fake
     # storage every other module was rebound away from.
@@ -1023,9 +1023,9 @@ def test_a_thread_summary_does_not_compact_the_thread(real_storage, compactor):
     """
     import importlib
 
+    import core.replay as replay_module
     from core import compaction
     from core.memory import ConversationMemory
-    import core.replay as replay_module
 
     importlib.reload(replay_module)
 
@@ -1236,13 +1236,13 @@ def test_children_written_on_one_tick_still_come_back_in_a_fixed_order(
     the ORDER BY, and a test that hoped for a collision would pass on a
     machine whose clock is coarse and prove nothing anywhere else.
     """
-    from datetime import datetime, timezone
+    from datetime import datetime
     from uuid import UUID
 
     import storage
 
     parent = storage.create_thread()
-    one_tick = datetime(2026, 9, 10, 12, 0, 0, tzinfo=timezone.utc)
+    one_tick = datetime(2026, 9, 10, 12, 0, 0, tzinfo=UTC)
     # Ids chosen, and written in DESCENDING order, so insertion order and id
     # order disagree. Left to uuid4 they would agree one time in six and the
     # test would pass against the unfixed query on those runs.
@@ -1391,8 +1391,9 @@ class TestConcurrentWriters:
         source. `journal_mode` is persistent in the FILE, so reading it back
         is the only way to know the listener actually reached the database
         this process opened."""
-        import database
         from sqlalchemy import text
+
+        import database
 
         with database.engine.connect() as conn:
             assert conn.execute(

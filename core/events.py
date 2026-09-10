@@ -21,7 +21,7 @@ their own consumption loop in try/except.
 """
 
 from dataclasses import dataclass
-from typing import Optional, Any
+from typing import Any, Optional
 
 
 @dataclass

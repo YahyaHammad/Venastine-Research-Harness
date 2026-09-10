@@ -188,8 +188,6 @@ class TestOurOwnFilesAlreadyComply:
         import glob
         import os
 
-        import yaml
-
         from core.config_loader import _parse_frontmatter
 
         root = config_loader.HARNESS_ROOT

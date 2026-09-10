@@ -22,7 +22,6 @@ import pytest
 from tests.conftest import pump, settle
 from tui import diffs
 
-
 NUMBERED = "\n".join(f"line {n}" for n in range(1, 31))
 
 
@@ -577,8 +576,8 @@ def test_a_snapshot_that_does_not_contain_the_replaced_text_degrades():
     result, reconstructing from the snapshot would be a guess presented
     as a diff -- so it falls back to the old/new text, which came from the
     call's own arguments and is true whatever the file did."""
-    from tui.widgets import Transcript
     from tui.app import VenastineApp
+    from tui.widgets import Transcript
 
     app = VenastineApp("ANTHROPIC", "test-model", {})
     transcript = Transcript()

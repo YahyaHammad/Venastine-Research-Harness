@@ -28,15 +28,48 @@ on:
   push:
   pull_request:
 
+# Least privilege: this workflow only reads the checkout.
+permissions:
+  contents: read
+
 # A second push to the same branch makes the first run's result irrelevant.
 concurrency:
   group: tests-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  # Fast gate (~seconds): doc drift fails here instead of after the full
+  # 15-minute suite below. Same fresh-clone steps, same `python -m pytest`
+  # rule (see the comment on the full job).
+  docs-consistency:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Provide providers.json
+        run: cp providers.json.example providers.json
+
+      - name: Run docs-consistency
+        run: python -m pytest tests/test_docs_consistency.py -q
+
   pytest:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Measured at ~15 min on ~4200 tests (DEVLOG Batch 75); 15 left no
+    # headroom and a loaded runner read as a hang.
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v4

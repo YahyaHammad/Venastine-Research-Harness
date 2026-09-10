@@ -44,11 +44,12 @@ import logging
 
 import config
 from core import agent_activity, interaction
+
 # §23: the decision vocabulary lives in core.interaction, beside the decoder
 # that validates it. Imported under the names this module and its tests
 # already use -- two spellings of the same four strings is how a decoder and
 # its caller come to disagree about what "refine" is.
-from core.interaction import ACCEPT, REJECT, REFINE, REJECT_ALL
+from core.interaction import ACCEPT, REFINE, REJECT, REJECT_ALL
 from core.reasoning.json_retry import parse_json_response, retry_until_json
 from storage import THREAD_KIND_SUBAGENT
 
@@ -116,7 +117,7 @@ def run_review(run, model: str, provider_name: str, authorization=None,
     with, not at the parameter's silent default.
     """
     from agents.manager import manager
-    from core.loop import RunAgentLoop, DEFAULT_SYSTEM_PROMPT
+    from core.loop import RunAgentLoop
 
     agent = manager.get(REVIEWER_AGENT)
     if agent is None:

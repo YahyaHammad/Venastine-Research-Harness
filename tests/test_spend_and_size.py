@@ -29,13 +29,20 @@ WHAT WOULD MAKE THESE VACUOUS:
     spend_cap() itself reads.
 """
 
+from uuid import uuid4
+
 import pytest
 
 from core.events import LoopEvent
 from core.loop import RunAgentLoop, run_to_completion
-from tests.conftest import FakeMemory, make_model_response, \
-    make_stream_from_response, make_stream_sequence, pump, settle
-from uuid import uuid4
+from tests.conftest import (
+    FakeMemory,
+    make_model_response,
+    make_stream_from_response,
+    make_stream_sequence,
+    pump,
+    settle,
+)
 
 
 def _resp(inp, out, *, tool=False):
@@ -176,7 +183,6 @@ class TestUncappedByDefault:
         """None is a deliberate answer ('run uncapped'), not 'ask the
         settings'. Collapsing the two would make every existing explicit-
         None caller silently start obeying a cap they never saw."""
-        import core.config_loader as config_loader_module
 
         def _fake(memory, system_prompt, provider_name, model, context,
                   max_steps, max_total_tokens=None, **kw):
@@ -196,7 +202,6 @@ class TestUncappedByDefault:
 class TestConfiguredCap:
 
     def test_unset_argument_resolves_settings_at_call_time(self, mocker):
-        import core.config_loader as config_loader_module
 
         seen = {}
 
@@ -281,7 +286,6 @@ class TestCliEarlyStopLine:
     def test_the_early_stop_line_names_billed_this_turn(self, mocker,
                                                         capsys, fake_storage,
                                                         cli_stdin):
-        from uuid import uuid4
 
         import main
 
@@ -300,7 +304,6 @@ class TestCliEarlyStopLine:
     def test_a_complete_turn_prints_no_early_stop_line(self, mocker,
                                                        capsys, fake_storage,
                                                        cli_stdin):
-        from uuid import uuid4
 
         import main
 
@@ -383,10 +386,9 @@ class TestTheTuiUsageLine:
         """Wired through on_loop_event_message, reading MEMORY -- so a
         test that only calls refresh_usage_line() by hand proves nothing
         about the wiring. This drives a real two-step turn."""
+        from tests.test_tui import type_into_prompt
         from tui.app import VenastineApp
         from tui.widgets import UsageLine
-
-        from tests.test_tui import type_into_prompt
 
         mocker.patch("core.loop.api_initialization", return_value=object())
         with_tool = make_model_response(

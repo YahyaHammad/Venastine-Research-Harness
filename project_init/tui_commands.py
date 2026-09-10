@@ -14,7 +14,8 @@ run the work off the UI thread, render a diff into the transcript, and put
 a modal in front of a human.
 """
 
-from tui.commands import SlashCommand, registry as commands
+from tui.commands import SlashCommand
+from tui.commands import registry as commands
 
 
 def _split_init_flags(args: str) -> tuple:

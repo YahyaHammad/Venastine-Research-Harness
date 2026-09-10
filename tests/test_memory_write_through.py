@@ -44,12 +44,12 @@ went uncaught for a time.
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 """
 
-import pytest
 from uuid import UUID
+
+import pytest
 
 from core.memory import ConversationMemory
 from tests.conftest import make_model_response
-
 
 # ---------------------------------------------------------------------------
 # ---- Test that import alone catches the storage-path bug ----------------
@@ -243,8 +243,8 @@ def test_list_threads_returns_all_threads_most_recent_first(fake_storage):
     against REAL storage in test_storage_e2e.py -- what a SQL WHERE clause
     returns is not a question the fake can answer (this file's own rule)."""
     import time
-    from uuid import UUID
     from datetime import datetime
+    from uuid import UUID
 
     id1 = fake_storage.create_thread()
     time.sleep(0.01)  # ensure distinct created_at
@@ -291,8 +291,9 @@ def test_update_thread_extra_assigns_a_fresh_dict(monkeypatch):
     instead is the property the real test would rest on: the object bound
     to extra_data afterwards is not the object that was there before.
     """
-    import storage as storage_mod
     from uuid import uuid4
+
+    import storage as storage_mod
 
     original = {"goal": "old"}
     seen = {}

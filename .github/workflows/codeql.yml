@@ -1,0 +1,59 @@
+# CodeQL SAST: security-only per push/PR, full quality weekly.
+#
+# Split is cost control: the suite already runs ~15 min, and the
+# security-and-quality pack roughly doubles analysis time for findings
+# that are mostly hygiene. Security red blocks the change that introduced
+# it; quality red on the weekly run is triaged, not reverted around.
+#
+# Static analysis only: no providers.json, no secrets, no services.
+# Python autobuild needs nothing here (no compilation step); explicit
+# `build-mode: none` says so rather than letting the action guess.
+
+name: codeql
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "0 5 * * 1"
+
+permissions:
+  actions: read
+  contents: read
+  security-events: write
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze-security:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: python
+          build-mode: none
+          queries: security-only
+
+      - uses: github/codeql-action/analyze@v3
+
+  analyze-quality:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: python
+          build-mode: none
+
+      - uses: github/codeql-action/analyze@v3

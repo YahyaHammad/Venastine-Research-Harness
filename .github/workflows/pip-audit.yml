@@ -1,0 +1,54 @@
+# Supply-chain audit: requirements.txt against the OSV database.
+#
+# Schedule, not per-PR: vulnerabilities arrive over time, not with pushes,
+# and this is the one job in the set that needs network (OSV lookup).
+# Running it per push would tax every PR for information that changes
+# weekly. `workflow_dispatch` covers the "new advisory just dropped" case.
+#
+# `-r requirements.txt`, never bare `pip-audit`: the file is the one
+# dependency list (pyproject reads it via `dynamic`), while a bare run
+# audits whatever happens to sit in site-packages -- including the
+# scanner's own transitive deps, which this project cannot fix.
+#
+# Threshold note: pip-audit 2.x has no severity filter, only per-ID
+# `--ignore-vuln`. The tree is clean at ALL levels as of rollout
+# (verified locally), so fail-on-any is the posture: a future LOW is
+# triaged to an inline `--ignore-vuln <ID>  # reason` in this file, not
+# waved through silently. That is stricter than HIGH+-only, in the safe
+# direction, and revisitable the day it bites.
+
+name: pip-audit
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pip-audit-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pip-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install pip-audit
+        run: |
+          python -m pip install --upgrade pip
+          pip install "pip-audit==2.10.1"
+
+      - name: Audit requirements.txt
+        run: pip-audit -r requirements.txt --desc

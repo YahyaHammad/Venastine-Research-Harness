@@ -18,8 +18,7 @@ it is what made §21's first green run go red on an unrelated test.
 
 import pytest
 
-from core.memory import ConversationMemory, SUMMARY_PREFIX
-
+from core.memory import SUMMARY_PREFIX, ConversationMemory
 
 # ---------------------------------------------------------------------------
 # ---- Helpers ---------------------------------------------------------------

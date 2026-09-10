@@ -38,7 +38,6 @@ from security.permissions import is_tool_allowed
 from tools.context import ToolContext
 from tools.registry import registry
 
-
 #: Writing tools that are ALLOWED by global config, so excluding them is
 #: this roster's own decision and `is_tool_allowed` can see it.
 #: `spawn_subagent` is here for R4's reason rather than for writing:

@@ -88,7 +88,6 @@ from core.loop import RunAgentLoop
 from core.reasoning.pipeline_storage import load_pipeline_run
 from tests.conftest import make_model_response, pass_stream, run_pipeline
 
-
 # ---------------------------------------------------------------------------
 # ---- Mock helper ----------------------------------------------------------
 # ---------------------------------------------------------------------------
@@ -969,8 +968,9 @@ def test_json_retry_path_calls_continue_conversation_on_malformed_json(mocker):
     trace-line format belongs in the unit test of
     _run_pass_with_json_retry (see tests/test_json_retry.py).
     """
-    import config
     from uuid import uuid4
+
+    import config
     fake_thread_id = uuid4()
 
     def fake_run_dr_mode(*, pass_input, model, pass_id, provider_name="ANTHROPIC", **kwargs):
@@ -1779,7 +1779,9 @@ class TestOneIdResolutionForTheWholePipeline:
         claims built any other way -- §20's corrections, a future resume."""
         from core.reasoning.base import Claim
         from core.reasoning.orchestrator import (
-            _apply_assumption_flags, _apply_critic, _apply_grounding,
+            _apply_assumption_flags,
+            _apply_critic,
+            _apply_grounding,
         )
 
         first = Claim(id="C1", text="first", type="factual")

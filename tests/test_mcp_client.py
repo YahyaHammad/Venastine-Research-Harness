@@ -27,7 +27,6 @@ import logging
 import threading
 
 import pytest
-
 from mcp import Client
 from mcp.server import MCPServer
 
@@ -37,8 +36,7 @@ from mcp_client.client import MCPClient, _normalize
 from security import permissions
 from tools.base import ToolSpec
 from tools.context import ToolContext
-from tools.registry import ToolRegistry, ToolCallDenied
-
+from tools.registry import ToolCallDenied, ToolRegistry
 
 # ---------------------------------------------------------------------------
 # ---- a real in-process MCP server ----------------------------------------
@@ -137,7 +135,6 @@ def test_ac1_server_configs_is_set_and_inspectable():
 # once). Asserted on type: str without extras, context manager with them.
 
 def test_an_sse_server_always_builds_its_own_transport_never_a_bare_url(monkeypatch):
-    from mcp.client.sse import sse_client
     c = MCPClient({"e": _cfg("e", transport="sse",
                              url="https://example.test/sse")})
     transport = c._transport_for(c.server_configs["e"])

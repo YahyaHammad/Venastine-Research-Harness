@@ -39,8 +39,6 @@ import os
 import sys
 from types import SimpleNamespace as _SimpleNamespace
 
-import pytest
-
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
@@ -457,7 +455,7 @@ def test_the_anthropic_thinking_block_still_carries_a_signature():
     whole lesson.
     """
     with real_package("anthropic", "httpx"):
-        from anthropic.types import ThinkingBlock, RedactedThinkingBlock
+        from anthropic.types import RedactedThinkingBlock, ThinkingBlock
 
         assert "signature" in ThinkingBlock.model_fields, (
             "anthropic's ThinkingBlock no longer carries .signature -- the "

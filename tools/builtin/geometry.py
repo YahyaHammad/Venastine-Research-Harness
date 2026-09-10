@@ -10,10 +10,10 @@ from __future__ import annotations
 
 from typing import Literal, Optional
 
-from sympy.geometry import Point, Line, Circle, Polygon, Triangle
 from pydantic import BaseModel, Field
+from sympy.geometry import Circle, Line, Point, Polygon, Triangle
 
-from tools.builtin._math_common import safe_parse, serialize, MathParseError
+from tools.builtin._math_common import MathParseError, safe_parse, serialize
 
 _OPERATIONS = Literal[
     "distance", "midpoint", "is_collinear", "line_intersection",

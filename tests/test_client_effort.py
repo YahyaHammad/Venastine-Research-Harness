@@ -32,7 +32,9 @@ import pytest
 import config
 from core import client as client_module
 from core.client import (
-    _sampling_kwargs, _thinking_for_provider, effort_levels_for_model,
+    _sampling_kwargs,
+    _thinking_for_provider,
+    effort_levels_for_model,
 )
 
 

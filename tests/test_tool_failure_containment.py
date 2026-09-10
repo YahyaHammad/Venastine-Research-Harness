@@ -31,7 +31,6 @@ Two layers of fix, tested here:
 """
 
 import logging
-import xml.etree.ElementTree as ET
 
 # The root conftest fakes httpx, and the fake exposes HTTPError only --
 # which is also what arxiv's retry loop actually catches, so it is the
@@ -41,7 +40,6 @@ import pytest
 
 from tools.base import ToolSpec
 from tools.registry import ToolCallDenied, ToolRegistry
-
 
 # ---------------------------------------------------------------------------
 # ---- dispatch() contains a raising handler --------------------------------

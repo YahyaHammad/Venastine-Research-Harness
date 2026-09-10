@@ -18,9 +18,14 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from core.loop import RunAgentLoop
 from core.events import LoopEvent
-from main import _uuid_type, build_parser, resolve_runtime_defaults, _ensure_workspace_trust
+from core.loop import RunAgentLoop
+from main import (
+    _ensure_workspace_trust,
+    _uuid_type,
+    build_parser,
+    resolve_runtime_defaults,
+)
 from tests.conftest import make_model_response
 
 
@@ -44,9 +49,7 @@ def test_run_agent_conversation_passes_thread_id_to_memory(mocker):
     known_thread_id = uuid4()
 
     captured_kwargs = {}
-    real_memory_cls = None
 
-    from core.memory import ConversationMemory
 
     class SpyMemory:
         def __init__(self, thread_id=None, kind="chat", **lineage):
@@ -173,8 +176,8 @@ def test_resolve_runtime_defaults_precedence():
     assert (provider, model) == ("ANTHROPIC", "gpt-5.1")
 
     # no settings -> config.py constants
-    from core.loop import DEFAULT_PROVIDER
     import config
+    from core.loop import DEFAULT_PROVIDER
     provider, model = resolve_runtime_defaults(
         SimpleNamespace(provider=None, model=None), {})
     assert (provider, model) == (DEFAULT_PROVIDER, config.MODEL_NAME)
@@ -554,12 +557,11 @@ class TestOneReaderForEveryRead:
         than a property anyone stated, and it would break the first time
         a startup prompt moved. So: no live input() in this module.
         """
-        import io
         import re
 
         import main
 
-        source = io.open(main.__file__, encoding="utf-8").read()
+        source = open(main.__file__, encoding="utf-8").read()
         code = re.sub(r'"""[\s\S]*?"""', "", source)      # drop docstrings
         code = "\n".join(line.split("#", 1)[0] for line in code.splitlines())
         assert not re.search(r"(?<![\w.])input\s*\(", code), (
@@ -1251,7 +1253,6 @@ class TestAPipeDoesNotAcknowledgeAnMcpServer:
     def test_a_terminal_can_still_accept_it(self, monkeypatch, cli_stdin):
         """The control: skipping unconditionally would pass the test
         above and make user-level servers unusable."""
-        import main
         from mcp_client import config as mcp_config
 
         cli_stdin("y")
@@ -1259,7 +1260,6 @@ class TestAPipeDoesNotAcknowledgeAnMcpServer:
         assert set(self._pending(monkeypatch, interactive=True)) == {"srv"}
 
     def test_a_terminal_can_decline_it(self, monkeypatch, cli_stdin):
-        import main
 
         cli_stdin("n")
         assert self._pending(monkeypatch, interactive=True) == {}
@@ -1381,8 +1381,9 @@ class TestTheLaunchProviderCheck:
     def test_a_healthy_install_is_silent(self, startup, capsys):
         """Silence is the healthy case's whole UX: /model does not
         announce anything on success either."""
-        import main
         import json
+
+        import main
 
         with open("providers.json", "w", encoding="utf-8") as f:
             json.dump({"ANTHROPIC": {"API_KEY": "sk-test", "API_URL": "",
@@ -1397,8 +1398,9 @@ class TestTheLaunchProviderCheck:
         """/model warns rather than refuses on a missing key -- a local
         OpenAI-compatible endpoint legitimately takes none. Launch makes
         the same call on the same facts."""
-        import main
         import json
+
+        import main
 
         with open("providers.json", "w", encoding="utf-8") as f:
             json.dump({"ANTHROPIC": {"API_KEY": "", "API_URL": "",
@@ -1424,6 +1426,7 @@ class TestTheLaunchProviderCheck:
         """
         import inspect
         import json
+
         import tui.app
 
         seen = {}
@@ -1551,9 +1554,9 @@ def test_run_research_forwards_effort_to_the_pipeline(mocker, capsys):
     """#139 on the CLI's other path. The pipeline receives the resolved
     level, and the header names it. run_research imports the generator
     lazily from the orchestrator module, so that is the seam."""
+    import main
     from core.reasoning.base import PipelineRun
     from core.reasoning.events import PipelineEvent
-    import main
 
     captured = {}
     run = PipelineRun(user_query="q", final_report="REPORT")

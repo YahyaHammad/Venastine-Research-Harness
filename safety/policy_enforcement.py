@@ -31,12 +31,10 @@ from __future__ import annotations
 import ipaddress
 import json
 import logging
-import os
 import re
 import socket
 from urllib.parse import urlparse
 
-import config
 # safety -> security, and never the reverse. `security.posture` imports
 # `config` and the stdlib only, so this adds no cycle -- which is exactly
 # why batch 37 kept `logging_setup` OUT of `security/`: that one pulls in

@@ -20,8 +20,8 @@ from types import SimpleNamespace
 import pytest
 
 from core.client import (
-    _tools_for_provider,
     _messages_for_provider,
+    _tools_for_provider,
     call_model_stream,
 )
 

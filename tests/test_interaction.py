@@ -38,8 +38,17 @@ import pytest
 
 from core import interaction
 from core.interaction import (
-    APPROVAL, CHOICE, CONFIRM, QUESTION, REVIEW, SAFE_DEFAULTS,
-    SUBAGENT_SIGNOFF, Request, ResponseChannel, ask, decode,
+    APPROVAL,
+    CHOICE,
+    CONFIRM,
+    QUESTION,
+    REVIEW,
+    SAFE_DEFAULTS,
+    SUBAGENT_SIGNOFF,
+    Request,
+    ResponseChannel,
+    ask,
+    decode,
 )
 
 
@@ -402,6 +411,10 @@ def test_the_module_is_a_leaf():
     what this test is about is PROJECT imports, and every stdlib name it
     permits was permitted one at a time, on purpose, so that adding one is
     a decision somebody made rather than a category that grew.
+
+    `collections` arrived the same way, via Ruff's UP035 (`typing.Callable`
+    is a deprecated alias for `collections.abc.Callable`): stdlib to
+    stdlib, no behaviour change, recorded here rather than absorbed.
     """
     import ast
     import pathlib
@@ -415,4 +428,5 @@ def test_the_module_is_a_leaf():
         elif isinstance(node, ast.ImportFrom) and node.module:
             imported.add(node.module.split(".")[0])
     assert imported <= {
-        "dataclasses", "typing", "logging", "threading"}, imported
+        "collections", "dataclasses", "typing", "logging",
+        "threading"}, imported

@@ -27,13 +27,7 @@ import sys
 from uuid import UUID
 
 import config
-from core import config_loader, workspace_trust
-from core.loop import RunAgentLoop, DEFAULT_PROVIDER
-from core.reasoning.authorization import GRANT_PICKER
-from core.replay import replay_entries
-from database import create_db_and_tables, engine
-from logging_setup import configure_logging
-from security import posture, protected_paths
+import core.reasoning.pipeline_storage  # noqa: F401 -- registers PipelineRunRecord
 
 # Importing these for their SIDE EFFECT, and the side effect is load-bearing:
 # a SQLModel table class registers on SQLModel.metadata when its module is
@@ -47,7 +41,13 @@ from security import posture, protected_paths
 # already run, so a FRESH database never got a pipelinerunrecord table and the
 # first research run died on "no such table". Do not "tidy" these away.
 import storage  # noqa: F401 -- registers ConversationThread, MessageLog
-import core.reasoning.pipeline_storage  # noqa: F401 -- registers PipelineRunRecord
+from core import config_loader, workspace_trust
+from core.loop import DEFAULT_PROVIDER, RunAgentLoop
+from core.reasoning.authorization import GRANT_PICKER
+from core.replay import replay_entries
+from database import create_db_and_tables, engine
+from logging_setup import configure_logging
+from security import posture, protected_paths
 
 logger = logging.getLogger(__name__)
 
@@ -255,7 +255,10 @@ def build_research_authorization(grant_spec, attended: bool = False):
     """
     from core.approval import GrantBudget, RunAuthorization
     from core.reasoning.authorization import (
-        NOTHING_TO_GRANT, candidates, parse_grant_spec, GrantSpecError,
+        NOTHING_TO_GRANT,
+        GrantSpecError,
+        candidates,
+        parse_grant_spec,
     )
 
     if grant_spec is None and not attended:

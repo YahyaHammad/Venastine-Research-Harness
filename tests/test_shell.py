@@ -18,6 +18,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 import config
+from security import protected_paths
 from security.capability import (
     CONTAINED,
     UNAVAILABLE,
@@ -27,13 +28,13 @@ from security.capability import (
     validate_mode,
 )
 from security.sandbox import (
+    _SHELL_METACHARACTERS,
     HOST_READ,
     INERT,
     SANDBOXED,
     SANDBOXED_NET,
     UNKNOWN,
     SandboxUnavailable,
-    _SHELL_METACHARACTERS,
     _escapes_workspace,
     _is_inert,
     _needs_network,
@@ -49,8 +50,7 @@ from security.sandbox import (
     is_docker_available,
     run_sandboxed,
 )
-from security import protected_paths
-from tests.conftest import rebind_posture, set_posture
+from tests.conftest import set_posture
 from tools.builtin.shell import _shell_approval_check, _shell_approval_notice
 
 # Batch 39 builds command strings containing backslashes. Written as

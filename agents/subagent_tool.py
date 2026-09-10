@@ -142,10 +142,12 @@ def request_payload(params: dict, context=None) -> dict:
 def run(params: dict, parent_context=None, parent_run=None,
         response_channel=None, signoff=None, activity=None,
         memory=None, call_id=None) -> dict:
-    from core.loop import (
-        RunAgentLoop, DEFAULT_PROVIDER, DEFAULT_SYSTEM_PROMPT,
-    )
     from agents.manager import manager
+    from core.loop import (
+        DEFAULT_PROVIDER,
+        DEFAULT_SYSTEM_PROMPT,
+        RunAgentLoop,
+    )
 
     parent = parent_context or ToolContext()
     # §32 A7. The SAME function the loop consulted before deciding

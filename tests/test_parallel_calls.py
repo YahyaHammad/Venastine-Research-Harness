@@ -35,9 +35,9 @@ from core.approval import GrantBudget
 from core.client import StreamToken
 from core.interaction import ResponseChannel
 from core.loop import RunAgentLoop, _parallel_groups
+from tests.conftest import FakeMemory as _Mem
+from tests.conftest import make_model_response
 from tools.registry import registry
-from tests.conftest import FakeMemory as _Mem, make_model_response
-
 
 # A barrier that never blocks longer than this. Long enough that a loaded
 # machine does not fail spuriously, short enough that a genuinely
@@ -575,7 +575,6 @@ class TestARaisingSibling:
         `test_grants.py` drives the real gate.
         """
         _make_parallel(mocker, "get_time")
-        real_dispatch = registry.dispatch
 
         def dispatch(name, params, **kw):
             if params.get("boom"):
@@ -852,8 +851,8 @@ class TestTheActivitySink:
 
     @staticmethod
     def _sink():
-        from tui.app import TuiActivity
         from core.agent_activity import AgentSpan
+        from tui.app import TuiActivity
 
         class _App:
             def __init__(self):
@@ -1141,8 +1140,8 @@ class TestThePanelDrawsATree:
         """The one hop that was missing between batch 67's span and the
         panel: `parent_id` has been on `AgentSpan` since slice 1, and the row
         had no field for it because a stack did not need one."""
-        from tui.app import TuiActivity
         from core.agent_activity import AgentSpan
+        from tui.app import TuiActivity
 
         class _App:
             def post_message(self, message):
@@ -1219,6 +1218,7 @@ class TestTheQuestionNamesItsAsker:
         under threads and a passing behaviour test cannot say which mechanism
         produced it."""
         import inspect
+
         from core.loop import _obtain_approval
 
         source = inspect.getsource(_obtain_approval)
@@ -1247,7 +1247,7 @@ class TestTheRunningApp:
     async def test_two_spawns_are_live_as_peers_in_the_sidebar(
             self, mocker, real_harness_tier):
         from core import config_loader
-        from tui.app import VenastineApp, AgentStackChanged
+        from tui.app import VenastineApp
 
         config_loader.initialize(str(real_harness_tier))
 

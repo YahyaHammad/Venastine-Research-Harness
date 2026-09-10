@@ -30,7 +30,6 @@ import pytest
 
 import config
 
-
 # ===========================================================================
 # ---- The schema: asked for, tolerated when absent (RA4) -------------------
 # ===========================================================================
@@ -118,8 +117,8 @@ def test_the_rationale_cannot_change_the_decision(rationale, monkeypatch,
     The rationales above are the ones an attacker would write. They are
     here to be ignored, and the assertion is that they were not looked at.
     """
-    from tools.builtin import shell
     from security import capability
+    from tools.builtin import shell
 
     monkeypatch.setattr(config, "SHELL_APPROVAL_MODE", "tiered")
     monkeypatch.setattr(capability, "validate_mode",
@@ -311,10 +310,10 @@ def test_the_loop_carries_the_reason_to_whoever_is_asked(mocker):
     have to carry it.
     """
     import queue  # noqa: F401 -- parity with the loop harness
+
     from core.interaction import ResponseChannel
     from core.loop import RunAgentLoop
-    from tests.conftest import (FakeMemory, make_model_response,
-                                make_stream_sequence)
+    from tests.conftest import FakeMemory, make_model_response, make_stream_sequence
     from tools.registry import registry
 
     call = {"id": "t1", "name": "shell",
@@ -420,8 +419,8 @@ def test_the_cli_prompt_shows_it_too(capsys):
     watched from, so it gets the same three-part prompt."""
     import unittest.mock as mock
 
-    from core import interaction
     import main as main_module
+    from core import interaction
     from tests.conftest import FakeStdinReader
 
     reader = FakeStdinReader(["n"])
@@ -447,8 +446,8 @@ def test_the_cli_prompt_shows_it_too(capsys):
 def test_the_cli_prompt_says_so_when_no_reason_was_given(capsys):
     import unittest.mock as mock
 
-    from core import interaction
     import main as main_module
+    from core import interaction
     from tests.conftest import FakeStdinReader
 
     reader = FakeStdinReader(["n"])

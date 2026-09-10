@@ -21,7 +21,6 @@ import config
 from core import compaction, config_loader
 from core.memory import ConversationMemory
 
-
 # ---------------------------------------------------------------------------
 # ---- Helpers ---------------------------------------------------------------
 # ---------------------------------------------------------------------------
@@ -942,7 +941,6 @@ def test_a_trigger_too_close_to_a_configured_cap_warns(caplog, mocker):
     spend cap lets a thread reach a size where the cap ends the turn after
     one response -- compaction would then only ever fire on the turn
     AFTER the one it should have saved."""
-    import core.config_loader as config_loader_module
 
     mocker.patch.object(config_loader, "get_settings",
                         return_value={"max_token_budget": 250_000})
@@ -958,7 +956,6 @@ def test_an_uncapped_run_never_warns_no_matter_how_tight(caplog, mocker):
     Uncapped -- the default -- nothing competes with compaction, and a
     warning about a ceiling that does not exist is exactly how a real
     warning becomes one nobody reads."""
-    import core.config_loader as config_loader_module
 
     assert config_loader.spend_cap() is None
     with caplog.at_level("WARNING", logger="core.config_loader"):
@@ -984,7 +981,6 @@ def test_the_headroom_advisory_is_silent_off_the_startup_path(caplog, mocker):
     configuration complaint dozens of times per conversation, which is how
     a real warning becomes one nobody reads. initialize() passes
     warn=True; nothing else does."""
-    import core.config_loader as config_loader_module
 
     mocker.patch.object(config_loader, "get_settings",
                         return_value={"max_token_budget": 250_000})

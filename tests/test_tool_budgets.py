@@ -51,8 +51,13 @@ import pytest
 import config
 from tools import isolation
 from tools.base import (
-    BUDGET_COMPUTE, BUDGET_HUMAN, BUDGET_IO, BUDGETS, GRANT_ANYWHERE,
-    ToolSpec, assert_budget_declared,
+    BUDGET_COMPUTE,
+    BUDGET_HUMAN,
+    BUDGET_IO,
+    BUDGETS,
+    GRANT_ANYWHERE,
+    ToolSpec,
+    assert_budget_declared,
 )
 from tools.registry import registry
 
@@ -304,7 +309,6 @@ class TestAComputeToolIsBoundedByAClockThatCanStopIt:
         growing, which is exactly what it would assert if the child had
         never started. This is the positive control: the same handler,
         observed while it is still running."""
-        from tests import _isolation_probe
 
         ticks = tmp_path / "ticks"
         ticks.write_text("", encoding="utf-8")

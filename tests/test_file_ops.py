@@ -19,7 +19,6 @@ import pytest
 import config
 from tools.builtin import file_ops
 
-
 # ---------------------------------------------------------------------------
 # ---- Fixture: real workspace in tmp_path ----------------------------------
 # ---------------------------------------------------------------------------
@@ -284,7 +283,7 @@ class TestRegistryIntegration:
     def test_dispatch_outside_workspace_without_callback_denied(self, workspace, monkeypatch):
         """Outside workspace, dispatch without approval_callback should
         raise ToolCallDenied."""
-        from tools.registry import registry, ToolCallDenied
+        from tools.registry import ToolCallDenied, registry
         monkeypatch.setattr(config, "ToolPermissions", lambda: type("P", (), {"read": True, "write": True, "edit": True})())
         monkeypatch.setattr(config, "ToolApprovals", lambda: type("A", (), {"read": False, "write": False, "edit": False})())
         with pytest.raises(ToolCallDenied):

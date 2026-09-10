@@ -17,7 +17,6 @@ draw the line where the line actually is, and do not pretend to more.
 
 import ast
 import dataclasses
-import io
 import os
 
 import pytest
@@ -51,7 +50,7 @@ def _production_sources():
     for name in PRODUCTION_FILES:
         path = os.path.join(ROOT, name)
         if os.path.isfile(path):
-            yield name, io.open(path, encoding="utf-8").read()
+            yield name, open(path, encoding="utf-8").read()
     for directory in PRODUCTION_DIRS:
         base = os.path.join(ROOT, directory)
         for dirpath, _dirs, files in os.walk(base):
@@ -62,7 +61,7 @@ def _production_sources():
                     continue
                 path = os.path.join(dirpath, name)
                 yield (os.path.relpath(path, ROOT).replace(os.sep, "/"),
-                       io.open(path, encoding="utf-8").read())
+                       open(path, encoding="utf-8").read())
 
 
 def _import_time_nodes(node):
@@ -291,7 +290,7 @@ class TestNothingReachableChangesIt:
         caught by pytest any other way.
         """
         path = os.path.join(ROOT, "scripts", "prepublish-check.mjs")
-        src = io.open(path, encoding="utf-8").read()
+        src = open(path, encoding="utf-8").read()
         assert "function unsafeBranchProblems()" in src, \
             "the unsafe-mode publish guard is gone"
         # LIVE lines only. A substring check passes on

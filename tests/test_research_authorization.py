@@ -33,12 +33,19 @@ import pytest
 
 from core.approval import RunAuthorization
 from core.reasoning.authorization import (
-    GRANT_PICKER, NOTHING_TO_GRANT, GrantSpecError, candidates,
+    GRANT_PICKER,
+    NOTHING_TO_GRANT,
+    GrantSpecError,
+    candidates,
     parse_grant_spec,
 )
 from tests.conftest import drain, pass_stream, run_pass, well_shaped
 from tools.base import (
-    GRANT_ANYWHERE, GRANT_NEVER, GRANT_POLICIES, GRANT_SIGNOFF_ONLY, ToolSpec,
+    GRANT_ANYWHERE,
+    GRANT_NEVER,
+    GRANT_POLICIES,
+    GRANT_SIGNOFF_ONLY,
+    ToolSpec,
     assert_grant_policy_declared,
 )
 from tools.registry import registry

@@ -217,10 +217,9 @@ class TestTheLoopForwardsAndStripsIt:
         there were five copies of a wait helper in this suite once, and the
         same instinct applies to a loop driver.
         """
-        from tests.conftest import (FakeMemory, make_model_response,
-                                    make_stream_sequence)
-        from tests.test_streaming_loop import _run_kwargs
         from core.loop import RunAgentLoop
+        from tests.conftest import FakeMemory, make_model_response, make_stream_sequence
+        from tests.test_streaming_loop import _run_kwargs
 
         mocker.patch("core.loop.api_initialization")
         mocker.patch("core.loop.call_model_stream", side_effect=(

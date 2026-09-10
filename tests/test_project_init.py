@@ -27,10 +27,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.conftest import settle
 import config
 from core import config_loader, workspace_trust
 from project_init import doc_sets, generator, manifest
+from tests.conftest import settle
 from tools.builtin import project_docs
 
 
@@ -684,7 +684,6 @@ class TestTheConfigTemplates:
         adding it on purpose.
         """
         import credentials
-
         from project_init import config_files
         from tui import preferences
         from tui.app import VenastineApp
@@ -1507,9 +1506,9 @@ class TestWorkspaceTrust:
 @pytest.mark.asyncio
 async def test_the_tui_asks_the_kind_then_confirms_then_writes(
         project, fake_agent, monkeypatch):
+    from project_init.tui_commands import _cmd_init
     from tui.app import VenastineApp
     from tui.screens import ConfirmScreen, ProjectKindScreen
-    from project_init.tui_commands import _cmd_init
 
     app = VenastineApp("ANTHROPIC", "test-model", {})
     async with app.run_test() as pilot:
@@ -1537,9 +1536,9 @@ async def test_dismissing_the_tui_confirmation_writes_nothing(
         project, fake_agent):
     """Escape on the confirmation must decline, not hang. The worker is
     parked on a queue; a dismissal carrying no value never unblocks it."""
+    from project_init.tui_commands import _cmd_init
     from tui.app import VenastineApp
     from tui.screens import ConfirmScreen, ProjectKindScreen
-    from project_init.tui_commands import _cmd_init
 
     app = VenastineApp("ANTHROPIC", "test-model", {})
     async with app.run_test() as pilot:
@@ -1559,9 +1558,9 @@ async def test_dismissing_the_tui_confirmation_writes_nothing(
 @pytest.mark.asyncio
 async def test_cancelling_the_kind_modal_never_reaches_the_confirmation(
         project, fake_agent):
+    from project_init.tui_commands import _cmd_init
     from tui.app import VenastineApp
     from tui.screens import ConfirmScreen, ProjectKindScreen
-    from project_init.tui_commands import _cmd_init
 
     app = VenastineApp("ANTHROPIC", "test-model", {})
     async with app.run_test() as pilot:
@@ -1582,9 +1581,9 @@ async def test_the_kind_modal_is_told_what_was_proposed(project, fake_agent):
     a key now silently shows an empty modal instead of failing at a
     signature. The pilot above only dismisses the screen; this asserts the
     screen was given something to render."""
+    from project_init.tui_commands import _cmd_init
     from tui.app import VenastineApp
     from tui.screens import ProjectKindScreen
-    from project_init.tui_commands import _cmd_init
 
     app = VenastineApp("ANTHROPIC", "test-model", {})
     async with app.run_test() as pilot:
@@ -1610,9 +1609,9 @@ async def test_the_kind_modal_is_told_what_was_proposed(project, fake_agent):
 async def test_the_confirmation_is_told_what_it_is_confirming(project,
                                                               fake_agent):
     """The other half: the diff summary travels in the payload too."""
+    from project_init.tui_commands import _cmd_init
     from tui.app import VenastineApp
     from tui.screens import ConfirmScreen
-    from project_init.tui_commands import _cmd_init
 
     app = VenastineApp("ANTHROPIC", "test-model", {})
     async with app.run_test() as pilot:
@@ -1629,9 +1628,9 @@ async def test_the_confirmation_is_told_what_it_is_confirming(project,
 
 @pytest.mark.asyncio
 async def test_an_explicit_flag_skips_the_kind_modal(project, fake_agent):
+    from project_init.tui_commands import _cmd_init
     from tui.app import VenastineApp
     from tui.screens import ConfirmScreen
-    from project_init.tui_commands import _cmd_init
 
     app = VenastineApp("ANTHROPIC", "test-model", {})
     async with app.run_test() as pilot:
@@ -1935,10 +1934,10 @@ async def test_config_only_goes_straight_to_one_confirmation(project,
     answering with a fixture.
     """
     from core.loop import RunAgentLoop
+    from project_init import config_files
+    from project_init.tui_commands import _cmd_init
     from tui.app import VenastineApp
     from tui.screens import ConfirmScreen
-    from project_init.tui_commands import _cmd_init
-    from project_init import config_files
 
     def _explode(**_kwargs):
         raise AssertionError("/init --config made a model call")
@@ -2000,9 +1999,9 @@ async def test_an_unrecognised_kind_answer_cancels(project, fake_agent):
     dismissal path added later must cancel rather than scaffold a document
     set nobody chose.
     """
+    from project_init.tui_commands import _cmd_init
     from tui.app import VenastineApp
     from tui.screens import ConfirmScreen, ProjectKindScreen
-    from project_init.tui_commands import _cmd_init
 
     app = VenastineApp("ANTHROPIC", "test-model", {})
     async with app.run_test() as pilot:

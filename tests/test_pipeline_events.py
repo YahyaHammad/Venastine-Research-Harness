@@ -519,9 +519,12 @@ def test_a_skipped_ensemble_candidate_resolves_as_failed(mocker, monkeypatch):
     dies mid-pass has already yielded pass_start, E7 skips it, and the
     run carries on -- so the only honest report is pass_complete with
     ok=False for THAT attempt, before the survivors' own events."""
-    from tests.test_orchestrator import (
-        THREE_MODELS, _build_pass_mock, _ensemble_payloads)
     import config
+    from tests.test_orchestrator import (
+        THREE_MODELS,
+        _build_pass_mock,
+        _ensemble_payloads,
+    )
 
     monkeypatch.setattr(config, "ENSEMBLE_MODELS", THREE_MODELS)
     payloads = _ensemble_payloads(["Survivor A text.", "Survivor C text."])

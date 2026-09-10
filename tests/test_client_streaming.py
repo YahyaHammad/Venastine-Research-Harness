@@ -21,7 +21,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from core.client import StreamToken, call_model_stream
+from core.client import call_model_stream
 
 
 def _drain(gen):

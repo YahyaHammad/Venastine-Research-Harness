@@ -125,7 +125,7 @@ class ServerConfig:
             rendered = json.dumps(self.raw, indent=2, sort_keys=True,
                                   default=str)
             lines.append("  full entry:")
-            lines.extend(f"    {l}" for l in rendered.splitlines())
+            lines.extend(f"    {line}" for line in rendered.splitlines())
         return "\n".join(lines)
 
 
@@ -228,7 +228,7 @@ def _read_file(path: str, tier: str) -> dict:
         # utf-8-sig: mcp.json is commonly copied between hosts and hand
         # edited, so a BOM is realistic and would otherwise be reported as
         # invalid JSON at character 0.
-        with open(path, "r", encoding="utf-8-sig") as f:
+        with open(path, encoding="utf-8-sig") as f:
             data = json.load(f)
     except (OSError, ValueError) as e:
         logger.warning("Could not read %s-level mcp.json at %s: %s", tier, path, e)
@@ -322,7 +322,7 @@ def _read_store() -> tuple:
     if not os.path.exists(path):
         return {}, False
     try:
-        with open(path, "r", encoding="utf-8-sig") as f:
+        with open(path, encoding="utf-8-sig") as f:
             data = json.load(f)
     except (OSError, ValueError):
         logger.warning("Could not read %s; re-confirming every user-level "

@@ -26,11 +26,12 @@ carry an authorization bundle at all.
 import pytest
 
 from core import interaction
-from core.interaction import ResponseChannel
 from core.approval import (
-    GrantBudget, RunAuthorization,
+    GrantBudget,
+    RunAuthorization,
 )
 from core.events import LoopEvent
+from core.interaction import ResponseChannel
 from core.loop import RunAgentLoop
 from tests.conftest import make_model_response, pass_stream, run_pipeline
 
@@ -1448,6 +1449,7 @@ class TestOneStdinReaderPerProcess:
         shape the class docstring forbids -- under --attended --review the
         attended pump swallows the review walk's answers."""
         from types import SimpleNamespace
+
         import main
 
         mocker.patch.object(main.sys, "stdin",
@@ -1985,8 +1987,8 @@ class TestUnpinnedReviewProperties:
         """V5's re-target check (#86 item 4): a note about #3 must not
         silently redraft #7. This is the one mutating stage, so it is the
         one place unit 6's delete-the-guard rule applies."""
-        from core.reasoning import review as review_module
         from core import config_loader
+        from core.reasoning import review as review_module
 
         config_loader.initialize(str(real_harness_tier))
         run = _reviewed_run()

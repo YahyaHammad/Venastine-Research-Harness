@@ -28,9 +28,13 @@ import pytest
 
 from core.events import LoopEvent
 from tests.conftest import pump, settle
-from tui.widgets import (THINKING_BAR, THINKING_CLOSE, THINKING_OPEN,
-                         ThinkingIndicator, Transcript)
-
+from tui.widgets import (
+    THINKING_BAR,
+    THINKING_CLOSE,
+    THINKING_OPEN,
+    ThinkingIndicator,
+    Transcript,
+)
 
 #: The label §43 moved. Written with a leading newline, so rows are
 #: matched on the text rather than compared whole.

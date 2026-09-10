@@ -24,10 +24,9 @@ already fits it costs no model call at all.
 
 import pytest
 
-from tests.conftest import settle
 import config
 from core import compaction, config_loader
-
+from tests.conftest import settle
 
 # ---------------------------------------------------------------------------
 # ---- Helpers ---------------------------------------------------------------
@@ -469,8 +468,8 @@ def _memory_with_refs(fake_storage, summary_text):
 
 def _prompt_sent(mocker, thread_id=None, **kwargs) -> str:
     """The system prompt a real chat turn actually sends."""
-    from tests.conftest import make_model_response, make_stream_from_response
     from core.loop import RunAgentLoop
+    from tests.conftest import make_model_response, make_stream_from_response
 
     mocker.patch("core.loop.api_initialization", return_value=object())
     mocker.patch("tools.registry.registry.schemas", return_value=[])
@@ -591,8 +590,8 @@ class TestTheSummaryCommand:
         """M20. /compact shortens what the model sees next turn; /summary
         leaves the conversation exactly as it is. Two different requests that
         happen to share a summarizer."""
-        from memories.tui_commands import _cmd_summary
         from core.memory import ConversationMemory
+        from memories.tui_commands import _cmd_summary
 
         memory = ConversationMemory()
         _thread(memory, turns=30, body="y" * 200)
@@ -607,8 +606,8 @@ class TestTheSummaryCommand:
         assert ConversationMemory(thread_id=memory.thread_id).messages == before
 
     def test_it_refuses_while_a_turn_is_running(self, fake_storage, summarizer):
-        from memories.tui_commands import _cmd_summary
         from core.memory import ConversationMemory
+        from memories.tui_commands import _cmd_summary
 
         app = _StubApp(ConversationMemory(), busy=True)
 
@@ -634,8 +633,8 @@ class TestTheRefCommand:
                                                    summarizer, mocker):
         """Referencing yourself spends a model call to inject what the model is
         already reading."""
-        from memories.tui_commands import _cmd_ref
         from core.memory import ConversationMemory
+        from memories.tui_commands import _cmd_ref
 
         memory = ConversationMemory()
         memory.add_user_message("this conversation")
@@ -654,9 +653,9 @@ class TestTheRefCommand:
 
     def test_choosing_a_thread_attaches_its_summary(self, fake_storage,
                                                    summarizer, mocker):
-        from memories.tui_commands import _cmd_ref
         from core.loop import with_refs
         from core.memory import ConversationMemory
+        from memories.tui_commands import _cmd_ref
 
         memory = ConversationMemory()
         memory.add_user_message("this conversation")
@@ -684,8 +683,8 @@ class TestTheRefCommand:
         the user pressing escape got told "Could not summarise thread None".
         So the assertion is on the WHOLE outcome: no work, no output.
         """
-        from memories.tui_commands import _cmd_ref
         from core.memory import ConversationMemory
+        from memories.tui_commands import _cmd_ref
 
         memory = ConversationMemory()
         memory.add_user_message("this conversation")
@@ -706,9 +705,9 @@ class TestTheRefCommand:
         assert app._busy is False
 
     def test_list_and_clear(self, fake_storage, summarizer):
-        from memories.tui_commands import _cmd_ref
         from core.loop import attach_ref
         from core.memory import ConversationMemory
+        from memories.tui_commands import _cmd_ref
 
         memory = ConversationMemory()
         source = fake_storage.create_thread()
@@ -729,8 +728,8 @@ class TestTheRefCommand:
                                                        summarizer):
         """A mistyped flag must not silently do the default thing -- the same
         rule /compact's argument parsing follows."""
-        from memories.tui_commands import _cmd_ref
         from core.memory import ConversationMemory
+        from memories.tui_commands import _cmd_ref
 
         app = _StubApp(ConversationMemory())
 

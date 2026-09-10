@@ -1,0 +1,81 @@
+# Compatibility matrix, lean by design: the full suite stays on 3.11/Ubuntu
+# in tests.yml, and these two jobs cover what that gate cannot see.
+#
+# py313-info: pyproject advertises 3.11-3.13, but CI only ran 3.11 -- so a
+# 3.12-only syntax slip (PEP 701 f-string tokens, the exact construct
+# tools/_math_common.py reasons about) or a version-gated stdlib change
+# lands green and breaks a user. Informational (`continue-on-error`)
+# until sustained green; promoting it to required is one flag flip once
+# the failures it finds are fixed rather than recorded.
+#
+# windows-subset: development happens on win32, CI runs Ubuntu. The
+# Windows-only defects this project has actually had -- UNC `realpath`
+# raising inside `_within` (Q3), `list2cmdline` quoting, NUL-path and
+# symlink behaviour, POSIX toolchains resolved off PATH (EP8) -- all live
+# in test_shell.py and test_posture.py. Running those two files on
+# windows-latest covers the platform split for ~2 min instead of a second
+# 15-minute suite. Same fresh-clone steps (providers.json is needed even
+# here), same `python -m pytest` rule.
+
+name: compat
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: compat-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  py313-info:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Provide providers.json
+        run: cp providers.json.example providers.json
+
+      - name: Run the suite (informational)
+        run: python -m pytest -q
+
+  windows-subset:
+    runs-on: windows-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Provide providers.json
+        run: cp providers.json.example providers.json
+
+      - name: Run platform-sensitive tests
+        run: python -m pytest tests/test_shell.py tests/test_posture.py -q

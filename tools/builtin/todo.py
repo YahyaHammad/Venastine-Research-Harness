@@ -29,7 +29,6 @@ conversation, not a person.
 
 import config
 
-
 TOOL_SCHEMA = {
     "name": "todo_write",
     "description": (

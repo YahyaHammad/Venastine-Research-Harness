@@ -80,7 +80,7 @@ def pass_label(pass_id: str) -> str:
 # prompts is not something to do as a side effect of a chat fix.
 _UNTRUSTED_CONTENT_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "untrusted_content")
-with open(_UNTRUSTED_CONTENT_PATH, "r", encoding="utf-8") as _f:
+with open(_UNTRUSTED_CONTENT_PATH, encoding="utf-8") as _f:
     UNTRUSTED_CONTENT_CORE = _f.read().strip()
 
 PIPELINE_INSTRUCTION_SOURCE = (
@@ -114,14 +114,14 @@ def get_system_prompts() -> dict:
     current_dir = os.path.dirname(os.path.abspath(__file__))
 
     universal_path = os.path.join(current_dir, "universal_system_prompt")
-    with open(universal_path, "r", encoding="utf-8") as file:
+    with open(universal_path, encoding="utf-8") as file:
         universal_preamble = (
             file.read().strip() + "\n\n"
             + untrusted_content_paragraph(PIPELINE_INSTRUCTION_SOURCE))
 
     for pass_id, pass_filename in passes_source_files.items():
         md_file_path = os.path.join(current_dir, pass_filename)
-        with open(md_file_path, "r", encoding="utf-8") as file:
+        with open(md_file_path, encoding="utf-8") as file:
             pass_specific = file.read().strip()
         passes_prompts[pass_id] = f"{universal_preamble}\n\n---\n\n{pass_specific}"
     return passes_prompts

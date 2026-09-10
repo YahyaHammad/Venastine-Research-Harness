@@ -21,7 +21,6 @@ import pytest
 
 from agents.manager import manager as agent_manager
 from core.loop import with_memories
-from memories.manager import manager as memory_manager
 
 
 @pytest.fixture(autouse=True)
@@ -117,8 +116,8 @@ def test_the_plain_chat_helper_is_a_no_op_with_nothing_to_say(fake_storage):
 def _prompt_sent(mocker, fake_storage, **kwargs):
     """Drive a real run_agent_conversation and return the system prompt it
     actually sent."""
-    from tests.conftest import make_model_response, make_stream_from_response
     from core.loop import RunAgentLoop
+    from tests.conftest import make_model_response, make_stream_from_response
 
     mocker.patch("core.loop.api_initialization", return_value=object())
     mocker.patch("tools.registry.registry.schemas", return_value=[])

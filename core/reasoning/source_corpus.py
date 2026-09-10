@@ -43,7 +43,7 @@ import hashlib
 import logging
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from urllib.parse import urlsplit, urlunsplit
 
 from safety.policy_enforcement import redact_output_text
@@ -116,7 +116,7 @@ class SourceDocument:
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 def arxiv_id_from_url(url: str) -> str | None:

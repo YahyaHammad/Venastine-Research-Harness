@@ -485,8 +485,8 @@ def pin_measurements(thread_id, last_n: int) -> dict:
     prefix is counted at full weight exactly as the derived view will
     carry it. Never compared against a provider count (M10).
     """
-    from storage import _ordered_rows
     from core import config_loader
+    from storage import _ordered_rows
 
     settings = config_loader.effective_compaction()
     # THE MINIMUM, and the min() is load-bearing rather than defensive.
@@ -623,9 +623,12 @@ def compact(memory, model: str, provider_name: str,
     it can neither call anything nor trigger a compaction of its own.
     """
     from agents.manager import manager
-    from core.loop import RunAgentLoop, DEFAULT_SYSTEM_PROMPT
+    from core.loop import DEFAULT_SYSTEM_PROMPT, RunAgentLoop
     from storage import (
-        advances, history_through, latest_checkpoint, save_checkpoint,
+        advances,
+        history_through,
+        latest_checkpoint,
+        save_checkpoint,
     )
     storage_advances = advances
 
@@ -839,9 +842,12 @@ def summarize_thread(thread_id, model: str, provider_name: str,
     inject tens of kilobytes into every call indefinitely.
     """
     from agents.manager import manager
-    from core.loop import RunAgentLoop, DEFAULT_SYSTEM_PROMPT
+    from core.loop import DEFAULT_SYSTEM_PROMPT, RunAgentLoop
     from storage import (
-        advances, archive_history, last_message_id, latest_thread_summary,
+        advances,
+        archive_history,
+        last_message_id,
+        latest_thread_summary,
         save_thread_summary,
     )
 

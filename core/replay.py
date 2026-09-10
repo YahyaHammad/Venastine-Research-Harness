@@ -56,11 +56,11 @@ surface.
 
 from __future__ import annotations
 
-from typing import List, Optional, Tuple
+from typing import Optional
 from uuid import UUID
 
-from tools.registry import registry
 from storage import archive_history
+from tools.registry import registry
 
 #: One replayed entry: (role, text, links). The roles are transcript palette
 #: roles (tui/themes.role_styles), so the TUI can paint them with what it
@@ -87,17 +87,17 @@ from storage import archive_history
 #: resumed conversation would draw `▸ spawn_subagent` exactly as the
 #: live turn did and refuse to open it -- the same divergence §44
 #: removed for thinking spans, and batch 65 for a truncated URL.
-ReplayEntry = Tuple[str, str, Tuple[str, ...], str]
+ReplayEntry = tuple[str, str, tuple[str, ...], str]
 
 
-def replay_entries(thread_id: UUID) -> List[ReplayEntry]:
+def replay_entries(thread_id: UUID) -> list[ReplayEntry]:
     """A stored thread as display entries, oldest first (§27 T3/T4).
 
     Empty for a thread with no messages -- a `/new` thread that was never
     used is a real state, and the shells write their own "nothing here yet"
     line rather than this function inventing one.
     """
-    entries: List[ReplayEntry] = []
+    entries: list[ReplayEntry] = []
     for message in archive_history(thread_id):
         role = message.get("role")
         if role == "user":
@@ -150,7 +150,7 @@ def _reasoning_text(record) -> str:
     return "\n\n".join(parts)
 
 
-def _tool_marker(call: dict) -> Tuple[str, Tuple[str, ...], str]:
+def _tool_marker(call: dict) -> tuple[str, tuple[str, ...], str]:
     """One line for one tool call, its click targets, and its own id.
 
     The line is the name, then a redacted param digest.

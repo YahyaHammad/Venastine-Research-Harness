@@ -39,11 +39,11 @@ Deliberately a leaf module with no project imports, matching core/approval.py
 it depends on none of them.
 """
 
-from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
-
 import logging
 import threading
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 

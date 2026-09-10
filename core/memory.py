@@ -45,9 +45,17 @@ from typing import Optional
 from uuid import UUID
 
 from storage import (
-    create_thread, get_thread, save_message, get_session_history,
-    update_thread_extra, latest_checkpoint, pinned_through,
-    message_ids_from, set_pinned, turn_start_ids, THREAD_KIND_CHAT,
+    THREAD_KIND_CHAT,
+    create_thread,
+    get_session_history,
+    get_thread,
+    latest_checkpoint,
+    message_ids_from,
+    pinned_through,
+    save_message,
+    set_pinned,
+    turn_start_ids,
+    update_thread_extra,
 )
 
 # ROADMAP_v2 §21 (M8). How a compaction summary is introduced to the model.

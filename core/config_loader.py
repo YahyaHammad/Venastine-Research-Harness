@@ -49,7 +49,6 @@ NUMBER_TYPES = (int, float)
 # vocabulary is a second thing to keep in step.
 from core.reasoning.base import GROUNDING_STATUSES  # noqa: E402
 
-
 _FRONTMATTER_DELIM = re.compile(r"^---\s*$", re.MULTILINE)
 
 _KNOWN_SETTINGS = {
@@ -340,7 +339,7 @@ def _parse_md_file(path: str, kind: str, tier: str, category: str = ""):
         # ^--- no longer sits at position 0 and the file is skipped with
         # the false diagnosis "does not begin with a YAML frontmatter
         # block". utf-8-sig strips a BOM and is a no-op without one.
-        with open(path, "r", encoding="utf-8-sig") as f:
+        with open(path, encoding="utf-8-sig") as f:
             text = f.read()
         fm, body = _parse_frontmatter(text)
     except (OSError, ValueError, yaml.YAMLError) as e:
@@ -888,7 +887,7 @@ def _read_settings_file(path: str) -> dict:
         return {}
     # utf-8-sig for the same reason as _parse_md_file: a BOM'd
     # settings.json makes json.load raise at the first character.
-    with open(path, "r", encoding="utf-8-sig") as f:
+    with open(path, encoding="utf-8-sig") as f:
         data = json.load(f)  # json.JSONError propagates as ValueError
     _validate_settings(data, path)
     return data
@@ -972,7 +971,7 @@ def initialize(project_path: str) -> None:
             # -- including plain chat, which never reads the file. Every
             # other malformed content file in this module warns and skips.
             try:
-                with open(context_path, "r", encoding="utf-8-sig") as f:
+                with open(context_path, encoding="utf-8-sig") as f:
                     context = f.read()
             except (OSError, UnicodeDecodeError) as e:
                 logger.warning(
@@ -1245,7 +1244,7 @@ def describe_project_content(project_path: str) -> str:
                        workspace_trust.PROJECT_CONTEXT_FILENAME)
     if os.path.exists(hub):
         try:
-            with open(hub, "r", encoding="utf-8-sig") as f:
+            with open(hub, encoding="utf-8-sig") as f:
                 body = f.read()
         except (OSError, UnicodeDecodeError) as e:
             lines.append(
@@ -1274,7 +1273,7 @@ def describe_project_content(project_path: str) -> str:
         if not os.path.exists(path):
             continue
         try:
-            with open(path, "r", encoding="utf-8-sig") as f:
+            with open(path, encoding="utf-8-sig") as f:
                 body = f.read()
         except (OSError, UnicodeDecodeError) as e:
             # This function runs ONLY for untrusted projects, i.e. content

@@ -12,7 +12,6 @@ the thread and shapes conversations that have not started yet. Both halves
 have to hold, or the reasoning is decoration.
 """
 
-import types
 
 import pytest
 

@@ -18,11 +18,9 @@ from uuid import uuid4
 
 import pytest
 
-from core.client import ToolCallRequest
 from core.reasoning.base import PipelineRun
 from main import run_chat, run_research
 from tests.conftest import make_model_response, make_stream_from_response
-
 
 # ===========================================================================
 # ---- Chat mode: multi-turn with tool use ----------------------------------

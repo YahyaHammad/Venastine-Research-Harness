@@ -9,7 +9,7 @@ table schema.
 
 import logging
 
-from sqlmodel import create_engine, SQLModel
+from sqlmodel import SQLModel, create_engine
 
 import config
 

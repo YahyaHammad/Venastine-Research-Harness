@@ -46,7 +46,6 @@ from typing import Optional
 from pydantic import BaseModel, Field
 
 import config
-
 from security.protected_paths import protected_segment
 
 logger = logging.getLogger(__name__)
@@ -260,7 +259,7 @@ def read_run(params: dict) -> dict:
             raw_text = _read_rich(resolved)
             all_lines = raw_text.splitlines()
         else:
-            with open(resolved, "r", encoding="utf-8", errors="replace") as f:
+            with open(resolved, encoding="utf-8", errors="replace") as f:
                 all_lines = f.read().splitlines()
     except Exception as e:
         logger.exception("read tool failed on %s", parsed.path)
@@ -383,7 +382,7 @@ def edit_run(params: dict) -> dict:
         }
 
     try:
-        with open(resolved, "r", encoding="utf-8") as f:
+        with open(resolved, encoding="utf-8") as f:
             content = f.read()
     except Exception as e:
         logger.exception("edit tool read failed on %s", parsed.path)

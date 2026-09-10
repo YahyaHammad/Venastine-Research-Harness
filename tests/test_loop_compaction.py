@@ -20,10 +20,12 @@ three -- the defect §20 and §25 each shipped once.
 import pytest
 
 from core import compaction
-from core.events import LoopEvent
 from core.loop import RunAgentLoop, run_to_completion
 from tests.conftest import (
-    FakeMemory, make_model_response, make_stream_sequence, run_pass,
+    FakeMemory,
+    make_model_response,
+    make_stream_sequence,
+    run_pass,
 )
 
 

@@ -21,35 +21,58 @@ ROADMAP_v2 §15:
 
 import inspect
 import logging
+from typing import TYPE_CHECKING, Optional
 
 import config
-from typing import Optional, TYPE_CHECKING
-
-from tools.base import (
-    BUDGET_COMPUTE, BUDGET_HUMAN, BUDGET_IO,
-    GRANT_ANYWHERE, GRANT_NEVER, GRANT_SIGNOFF_ONLY, ToolSpec,
-    assert_budget_declared, assert_grant_policy_declared,
-)
-from tools import isolation
-from tools.builtin import (
-    web_search, fetch_url, get_time, arxiv,
-    symbolic_math, linear_algebra, probability_stats, discrete_math, logic, geometry,
-    file_ops, shell, load_skill, pin, remember, project_docs,
-    ask_user, todo,
+from agents import subagent_tool
+from safety.policy_enforcement import (
+    check_input_policy,
+    check_output_policy,
+    param_digest,
+    redacted_values,
 )
 from security.permissions import (
-    assert_permissions_declared, is_tool_allowed, requires_approval,
+    assert_permissions_declared,
+    is_tool_allowed,
+    requires_approval,
 )
-from safety.policy_enforcement import (check_input_policy,
-                                        check_output_policy,
-                                        param_digest,
-                                        redacted_values)
-from agents import subagent_tool
+from tools import isolation
+from tools.base import (
+    BUDGET_COMPUTE,
+    BUDGET_HUMAN,
+    BUDGET_IO,
+    GRANT_ANYWHERE,
+    GRANT_NEVER,
+    GRANT_SIGNOFF_ONLY,
+    ToolSpec,
+    assert_budget_declared,
+    assert_grant_policy_declared,
+)
+from tools.builtin import (
+    arxiv,
+    ask_user,
+    discrete_math,
+    fetch_url,
+    file_ops,
+    geometry,
+    get_time,
+    linear_algebra,
+    load_skill,
+    logic,
+    pin,
+    probability_stats,
+    project_docs,
+    remember,
+    shell,
+    symbolic_math,
+    todo,
+    web_search,
+)
 
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from tools.context import ToolContext, RunInfo
+    from tools.context import RunInfo, ToolContext
 
 # Handler parameter names dispatch() will inject, by signature inspection
 # (ROADMAP_v2 §18). A tool handler that declares one of these receives the

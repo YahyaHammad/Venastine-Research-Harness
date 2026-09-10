@@ -14,7 +14,6 @@ import config
 from core.loop import RunAgentLoop
 from tests.conftest import make_model_response, pass_stream, run_pipeline
 
-
 # ---------------------------------------------------------------------------
 # ---- Helpers --------------------------------------------------------------
 # ---------------------------------------------------------------------------

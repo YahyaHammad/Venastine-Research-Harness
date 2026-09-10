@@ -13,8 +13,9 @@ A handler takes (app, argument_string) and returns None. It runs on the UI
 thread, so anything slow belongs in a worker.
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Optional
 
 
 @dataclass

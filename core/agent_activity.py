@@ -77,12 +77,12 @@ Lives in core/ rather than tui/ because D12 makes the CLI a permanent
 fallback -- and because nothing here knows what a widget is.
 """
 
+import logging
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Optional
 from uuid import uuid4
-import logging
 
 logger = logging.getLogger(__name__)
 

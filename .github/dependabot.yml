@@ -1,0 +1,31 @@
+# Weekly grouped updates: one pip PR + one npm PR, not per-dependency noise.
+#
+# Grouping is load-bearing for D22: several pins here are exact BECAUSE a
+# minor once changed behaviour underneath CI (mcp 2.0.0 -> 2.1.0 withheld
+# crash text; see requirements.txt). Each group lands as one diff the
+# suite (15 min) adjudicates once, and a behavioural break bisects to one
+# PR rather than hiding among five green ones.
+#
+# Patch-level bumps that stay green merge on sight; anything minor/major
+# gets the deliberate-step treatment (read the split, re-run the owning
+# tests -- test_mcp_client.py for mcp, TUI pilots for textual).
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      python-deps:
+        patterns:
+          - "*"
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      npm-deps:
+        patterns:
+          - "*"

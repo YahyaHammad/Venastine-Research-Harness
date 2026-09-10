@@ -28,25 +28,32 @@ import json
 import logging
 import queue
 import time
-
 from types import SimpleNamespace
 
 import pytest
-
-import config
 from rich.cells import cell_len
 
+import config
 from core.events import LoopEvent
-from tests.conftest import (make_model_response, make_stream_sequence,
-                            pump, settle)
+from tests.conftest import make_model_response, make_stream_sequence, pump, settle
 from tui.app import EffortLevelsReady, LoopEventMessage, VenastineApp
 from tui.commands import registry as commands
-from tui.widgets import (SUGGEST_HIGHLIGHT, SUGGEST_HINT_MOVE,
-                         SUGGEST_HINT_REST, SUGGEST_HINT_SEP,
-                         SUGGEST_MAX_ENTRIES, SUGGEST_MAX_LINES,
-                         SUGGEST_MAX_ROWS, PromptInput, SlashSuggest)
 from tui.screens import (
-    ConfirmScreen, PermissionScreen, QuestionScreen, ScrollBox,
+    ConfirmScreen,
+    PermissionScreen,
+    QuestionScreen,
+    ScrollBox,
+)
+from tui.widgets import (
+    SUGGEST_HIGHLIGHT,
+    SUGGEST_HINT_MOVE,
+    SUGGEST_HINT_REST,
+    SUGGEST_HINT_SEP,
+    SUGGEST_MAX_ENTRIES,
+    SUGGEST_MAX_LINES,
+    SUGGEST_MAX_ROWS,
+    PromptInput,
+    SlashSuggest,
 )
 
 
@@ -1973,7 +1980,7 @@ async def test_the_redrawn_banner_reports_the_switched_model(_mocked_loop):
     """The banner is REPRINTED, not remembered from mount: a /model
     switch survives /new (it is session state), so a banner replaying
     the launch pair would name a model the next turn will not call."""
-    from tui.app import _cmd_new, _cmd_model
+    from tui.app import _cmd_model, _cmd_new
 
     app = VenastineApp("ANTHROPIC", "test-model", {})
     async with app.run_test() as pilot:
@@ -2440,7 +2447,6 @@ async def test_resuming_refreshes_the_todo_panel(fake_storage, mocker):
     """#110 group 2. §23 added this call for §27's reason ("a resume
     showed the previous thread's list"); deleting it was green because
     the test covered the callback and stopped one line short."""
-    from uuid import uuid4
 
     app = VenastineApp("ANTHROPIC", "test-model", {})
     async with app.run_test() as pilot:
@@ -2852,8 +2858,8 @@ async def test_an_unknown_thread_id_reports_and_stays_put(mocker):
 
 
 def test_the_resume_command_is_registered():
-    from tui.app import register_builtin_commands
     import tui.commands as commands_module
+    from tui.app import register_builtin_commands
 
     register_builtin_commands()
     command = commands_module.registry.get("resume")
@@ -3067,8 +3073,13 @@ def _modal_cases():
     empty-candidates branch composes the permission dialog, its populated
     branch the grant one."""
     from tui.screens import (
-        ClaimsScreen, ConfirmScreen, GrantPickerScreen, ProjectKindScreen,
-        QuestionScreen, ReviewScreen, SubagentSignoffScreen,
+        ClaimsScreen,
+        ConfirmScreen,
+        GrantPickerScreen,
+        ProjectKindScreen,
+        QuestionScreen,
+        ReviewScreen,
+        SubagentSignoffScreen,
         ThreadPickerScreen,
     )
 
@@ -3220,8 +3231,12 @@ _REASON = ("Checking the sandbox mount table to answer the user question "
 def _overflowing_modal_cases():
     """The same constructors, given enough to outgrow the dialog."""
     from tui.screens import (
-        ClaimsScreen, ConfirmScreen, GrantPickerScreen, QuestionScreen,
-        ReviewScreen, SubagentSignoffScreen,
+        ClaimsScreen,
+        ConfirmScreen,
+        GrantPickerScreen,
+        QuestionScreen,
+        ReviewScreen,
+        SubagentSignoffScreen,
     )
 
     claim = {"id": "c001", "text": "Water boils at 100C.",
@@ -3440,7 +3455,10 @@ async def test_a_bounded_box_reserves_its_bound_not_its_content(
 #: exact inversion the rest of this table exists to prevent.
 def _focus_cases():
     from tui.screens import (
-        ConfirmScreen, GrantPickerScreen, ProjectKindScreen, ReviewScreen,
+        ConfirmScreen,
+        GrantPickerScreen,
+        ProjectKindScreen,
+        ReviewScreen,
         SubagentSignoffScreen,
     )
     return [
@@ -3644,6 +3662,7 @@ async def test_an_option_at_the_cap_still_fits_two_lines():
     holding and not.
     """
     from textual.widgets import Button
+
     from tools.builtin.ask_user import MAX_OPTION_CHARS
 
     cap = MAX_OPTION_CHARS
@@ -4306,13 +4325,12 @@ def test_no_widget_or_screen_paints_a_literal_colour():
     the count at zero. (Rich THEME names such as ansi_dark are chosen by
     lookup from the active theme's dark flag, not painted, and are not
     caught here.)"""
-    import io
     import os
 
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     offenders = []
     for rel in ("tui/widgets.py", "tui/screens.py"):
-        with io.open(os.path.join(root, rel), encoding="utf-8") as fh:
+        with open(os.path.join(root, rel), encoding="utf-8") as fh:
             for lineno, line in enumerate(fh, 1):
                 if 'style="' in line:
                     offenders.append(f"{rel}:{lineno}")
@@ -4561,9 +4579,9 @@ async def test_the_skill_precondition_reads_the_active_agents_context(
     the global context instead reports tools as available that the agent
     cannot call -- the divergence _current_context's docstring exists to
     prevent."""
+    import skills.tui_commands as skill_cmds
     from core.config_loader import AgentDef
     from skills.manager import manager as skills_manager
-    import skills.tui_commands as skill_cmds
 
     mocker.patch.object(skills_manager, "get", return_value=type(
         "S", (), {"name": "fixer", "description": "d",
@@ -5825,8 +5843,8 @@ class TestThePanelSaysWhichKeysItSpends:
             before = panel.chosen
             panel.move(1)
             assert panel.chosen is before, (
-                f"move() changed the selection with one match, so the "
-                f"hint is now wrong to omit the arrows")
+                "move() changed the selection with one match, so the "
+                "hint is now wrong to omit the arrows")
 
     @pytest.mark.parametrize(
         "width", [80, 54, 44, 43, 38, 34, 33, 20, 13, 12])

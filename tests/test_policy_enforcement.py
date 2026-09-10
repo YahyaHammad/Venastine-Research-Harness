@@ -11,10 +11,7 @@ import sys
 import pytest
 
 import config
-from tests.conftest import rebind_posture, set_posture
-
 from safety.policy_enforcement import (
-    BLOCKED_DOMAINS,
     check_input_policy,
     check_output_policy,
     is_domain_blocked,
@@ -22,7 +19,7 @@ from safety.policy_enforcement import (
     param_digest,
     redact_secrets,
 )
-
+from tests.conftest import rebind_posture
 
 # ===========================================================================
 # ---- redact_secrets -------------------------------------------------------
@@ -495,10 +492,11 @@ class TestRegistryIntegration:
     def test_dispatch_redacts_secret_from_tool_output(self, mocker):
         """A fake tool returning a planted key must have it redacted
         by the time dispatch() returns."""
-        from tools.registry import registry, ToolSpec
+        from tools.registry import ToolSpec, registry
 
         fake_schema = {"name": "fake_secret_tool", "description": "test", "input_schema": {}}
-        fake_handler = lambda params: {"result": "leaked: sk-abc123def456ghi789jkl012mno345pqr678"}
+        def fake_handler(params):
+            return {"result": "leaked: sk-abc123def456ghi789jkl012mno345pqr678"}
 
         # Register a temporary tool
         registry.register(ToolSpec("fake_secret_tool", fake_schema, fake_handler))
@@ -539,7 +537,8 @@ class TestErrorChannelRedaction:
         and the result is what reaches model context, the transcript and
         the persisted MessageLog."""
         import json as _json
-        from tools.registry import registry, ToolSpec
+
+        from tools.registry import ToolSpec, registry
 
         registry.register(ToolSpec(
             "mcp__srv__leak", {"name": "mcp__srv__leak"},
@@ -682,7 +681,7 @@ SECRET = "sk-ant-api03-CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC"
 def spy_tool(mocker):
     """A registered tool with no approval_check, no domain check and no
     secret handling, which RECORDS whether its handler ran."""
-    from tools.registry import registry, ToolSpec
+    from tools.registry import ToolSpec, registry
 
     calls = []
     registry.register(ToolSpec(
@@ -779,7 +778,7 @@ class TestDispatchEnforcesItBeforeTheHandlerRuns:
     that imports nothing from this module."""
 
     def test_refused_call_raises_and_the_handler_never_runs(self, spy_tool):
-        from tools.registry import registry, ToolCallDenied
+        from tools.registry import ToolCallDenied, registry
 
         with pytest.raises(ToolCallDenied) as exc:
             registry.dispatch("spy", {"text": SECRET})
@@ -799,7 +798,7 @@ class TestDispatchEnforcesItBeforeTheHandlerRuns:
         authorises the ACTION, not smuggling a credential out inside its
         parameters -- and a user who just clicked Allow is the last person
         positioned to notice which arguments the model chose."""
-        from tools.registry import registry, ToolCallDenied
+        from tools.registry import ToolCallDenied, registry
 
         mocker.patch("tools.registry.requires_approval", return_value=True)
         with pytest.raises(ToolCallDenied):

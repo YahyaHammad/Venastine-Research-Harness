@@ -28,8 +28,7 @@ import pytest
 
 import config
 from core.reasoning.base import Claim, PipelineRun
-from core.reasoning.output_writer import write_run_artifacts, _tier_counts
-
+from core.reasoning.output_writer import _tier_counts, write_run_artifacts
 
 # ---------------------------------------------------------------------------
 # ---- Helper ---------------------------------------------------------------

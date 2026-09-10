@@ -49,7 +49,13 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import (
-    Button, Input, Label, ListItem, ListView, SelectionList, Static,
+    Button,
+    Input,
+    Label,
+    ListItem,
+    ListView,
+    SelectionList,
+    Static,
 )
 from textual.widgets.selection_list import Selection
 

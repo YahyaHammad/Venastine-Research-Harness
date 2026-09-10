@@ -44,7 +44,8 @@ status='failed' record.
 from __future__ import annotations
 
 import json
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from typing import Any, Optional
 
 import config
 from core.reasoning.payload_validation import PayloadShapeError

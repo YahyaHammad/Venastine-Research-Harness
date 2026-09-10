@@ -27,14 +27,13 @@ import pytest
 
 import config
 from agents import subagent_tool
-from core import agent_activity
+from core import agent_activity, config_loader
 from core.agent_activity import AgentActivity, AgentSpan
-from tui.widgets import AgentRow
-from core import config_loader
 from core.loop import RunAgentLoop
 from tests.conftest import make_model_response
-from tools.context import ToolContext, RunInfo
+from tools.context import ToolContext
 from tools.registry import registry
+from tui.widgets import AgentRow
 
 
 @pytest.fixture
@@ -1384,7 +1383,10 @@ class TestTheOrchestratorCarriesTheSink:
         def _run(**kwargs):
             captured.update(kwargs)
             return
-            yield                                   # noqa: unreachable
+            # Unreachable by design -- its presence is what makes this a
+            # generator, which is what `_run_pass` needs to drain it with
+            # `yield from`. Do not "clean up" this line.
+            yield
         return _run
 
     def test_a_pass_runner_hands_it_down(self, mocker):

@@ -29,13 +29,14 @@ import pytest
 
 import config
 from security.permissions import (
-    _default_for_unknown_tool, assert_permissions_declared,
-    is_tool_allowed, requires_approval,
+    _default_for_unknown_tool,
+    assert_permissions_declared,
+    is_tool_allowed,
+    requires_approval,
 )
 from tools.base import ToolSpec
 from tools.context import ToolContext
-from tools.registry import ToolRegistry, ToolCallDenied, registry
-
+from tools.registry import ToolCallDenied, ToolRegistry, registry
 
 # ---------------------------------------------------------------------------
 # ---- Helpers --------------------------------------------------------------

@@ -34,10 +34,10 @@ from core.events import LoopEvent
 from core.interaction import ResponseChannel
 from core.loop import RunAgentLoop
 from security.permissions import is_tool_allowed, requires_approval
-from tools.base import ToolSpec
-from tools.context import ToolContext, RunInfo
-from tools.registry import registry
 from tests.conftest import make_model_response
+from tools.base import ToolSpec
+from tools.context import RunInfo, ToolContext
+from tools.registry import registry
 
 
 @pytest.fixture

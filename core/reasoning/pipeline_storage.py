@@ -27,13 +27,14 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Optional
 from uuid import UUID, uuid4
 
 from sqlmodel import Field, Session, SQLModel
 
 from database import engine
+
 # §27: the thread-kind vocabulary lives beside the table that stores it.
 # This import direction is the only one that exists -- storage.py knows
 # nothing about pipeline runs, and classify_legacy_pass_threads() below is
@@ -75,7 +76,7 @@ class PipelineRunRecord(SQLModel, table=True):
     # what it had reached.
     candidates_json: str = "[]"
     final_report: str = ""
-    started_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    started_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     finished_at: Optional[datetime] = None
 
 
@@ -128,7 +129,7 @@ def update_pipeline_run(
         if status is not None:
             record.status = status
             if status in ("complete", "failed"):
-                record.finished_at = datetime.now(timezone.utc)
+                record.finished_at = datetime.now(UTC)
         record.claims_json = json.dumps([vars(c) for c in run.claims])
         record.trace_json = json.dumps(run.trace)
         record.coverage_gaps_json = json.dumps(run.coverage_gaps)

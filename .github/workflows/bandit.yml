@@ -1,0 +1,66 @@
+# Bandit SAST, baseline-blocking (advisory would train readers past red).
+#
+# Invocation shape matters twice here:
+#   * `git ls-files '*.py'` feeds ONLY tracked files. Bandit does NOT
+#     respect .gitignore, so a bare `bandit -r .` would also scan
+#     providers.json-adjacent residue, output/ and __pycache__ -- the
+#     false-positive farm the rollout plan verified locally (20 gitleaks
+#     hits, 11 of them .pyc).
+#   * `-s B101`: pytest asserts are idiomatic (6037 sites, all in tests/;
+#     production carries zero asserts, verified at rollout). Without the
+#     skip every PR adding a test fails here, which is the job crying
+#     wolf until it is ignored entirely.
+#   * `-b .github/bandit-baseline.json`: fails only on NEW issues (129
+#     triaged at rollout: sandbox/subprocess surface, bound-param SQL in
+#     pipeline_storage, arXiv ET feed, redaction-test fixtures -- all
+#     accepted-risk with the reasoning in the rollout summary). Bandit
+#     matches on text/severity/cwe/confidence/filename/test, NOT line
+#     numbers, so normal edits do not invalidate it.
+#
+# Regenerating the baseline (deliberate step, like moving an exact pin):
+#   git ls-files '*.py' | xargs bandit -s B101 -f json -o .github/bandit-baseline.json
+# then normalize filename separators to `./` (Bandit stores
+# os.path.join(".", f), which is `.\` on Windows and `./` on Linux --
+# the checked-in file is the Linux form CI produces) and re-triage the
+# delta. Never regenerate blindly to make red green.
+#
+# Offline suite guarantee unaffected: static analysis, no providers.json,
+# no network.
+
+name: bandit
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bandit-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bandit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install Bandit
+        run: |
+          python -m pip install --upgrade pip
+          pip install "bandit==1.9.4"
+
+      - name: Bandit (new issues only)
+        run: |
+          files=$(git ls-files '*.py')
+          # shellcheck disable=SC2086
+          bandit $files -s B101 -b .github/bandit-baseline.json -q

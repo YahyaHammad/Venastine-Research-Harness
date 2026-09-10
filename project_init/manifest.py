@@ -88,7 +88,7 @@ _MAKE_TEST_TARGET = re.compile(r"^test\s*:", re.M)
 def _make_test(project_path: str) -> Optional[str]:
     """`make test` only when the Makefile declares that target."""
     try:
-        with open(os.path.join(project_path, "Makefile"), "r",
+        with open(os.path.join(project_path, "Makefile"),
                   encoding="utf-8", errors="replace") as f:
             head = f.read(64_000)
     except OSError:
@@ -188,7 +188,7 @@ def _first_heading(path: str) -> str:
     repo alone.
     """
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
+        with open(path, encoding="utf-8", errors="replace") as f:
             head = f.read(4096)
     except OSError:
         return ""
@@ -340,7 +340,7 @@ def _mentions(project_path: str, filenames, needle: str) -> bool:
         if not os.path.isfile(path):
             continue
         try:
-            with open(path, "r", encoding="utf-8", errors="replace") as f:
+            with open(path, encoding="utf-8", errors="replace") as f:
                 if needle in f.read(64_000):
                     return True
         except OSError:
@@ -351,7 +351,7 @@ def _mentions(project_path: str, filenames, needle: str) -> bool:
 def _package_json_test(project_path: str) -> Optional[str]:
     path = os.path.join(project_path, "package.json")
     try:
-        with open(path, "r", encoding="utf-8-sig") as f:
+        with open(path, encoding="utf-8-sig") as f:
             data = json.load(f)
     except (OSError, ValueError):
         # A malformed package.json is the project's problem, not /init's.

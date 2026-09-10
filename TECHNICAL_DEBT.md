@@ -605,3 +605,31 @@ shape for the drift it was written for and is blind to this one.
 documentation pass of its own, and slice 8 was already touching six files.
 Whoever does it should also decide whether the floor becomes "one entry per
 `## N.` heading", which is the version that could not drift again.
+
+## 18. CI workflow follow-ups (open, deferred 2026-09-10)
+
+Recorded rather than done: the lint/SAST/matrix rollout (lint.yml,
+bandit.yml + baseline, gitleaks.yml + config, pip-audit.yml,
+dependabot.yml, codeql.yml, compat.yml, tests.yml hardening) was verified
+locally on Windows only. Each item below is green-elsewhere work, not a
+defect found.
+
+- **Confirm the new jobs green on Linux runners.** Bandit's checked-in
+  baseline uses the `./`-joined filenames Linux produces
+  (`manager.py:253` joins `os.path.join(".", f)`; verified from source,
+  not from a run) and Gitleaks/CodeQL/compat have never executed outside
+  this machine. First red on `push` is expected to be platform-shaped;
+  do not "fix" it by regenerating the baseline blindly (bandit.yml names
+  the procedure and its precondition).
+- **arXiv feed hardening (Bandit B314/B405, baselined).**
+  `tools/builtin/arxiv.py:141` parses an attacker-influenced Atom feed
+  with stdlib `ElementTree`. Accepted-risk for the rollout; the fix is
+  `defusedxml` (or `defuse_stdlib`), with `tests/test_mcp_client.py`-style
+  version-pinned re-verification.
+- **pip-audit threshold.** The job fails on any finding because 2.10.1
+  has no severity filter and the tree was clean at all levels. Revisit
+  HIGH+-only if a LOW advisory starts taxing PRs; the escape hatch is a
+  reasoned `--ignore-vuln` in pip-audit.yml, never silence.
+- **Bandit `-s B101` revisit.** Skipped because all 6037 hits are pytest
+  asserts and production carries zero (measured). If production ever
+  gains an `assert`, that skip starts hiding exactly what it is for.

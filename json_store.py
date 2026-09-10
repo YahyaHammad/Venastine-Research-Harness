@@ -112,7 +112,7 @@ def read_versioned(path: str, version: int, fallback_note: str = "") -> dict:
     if not os.path.exists(path):
         return {}
     try:
-        with open(path, "r", encoding="utf-8-sig") as f:
+        with open(path, encoding="utf-8-sig") as f:
             data = json.load(f)
     except (OSError, ValueError):
         logger.debug("Could not read %s; %s", path,

@@ -48,8 +48,8 @@ via _was_narrowed. The ones that are pure text do not, so they still run
 under `pytest tests/test_foo.py` while you are mid-change.
 """
 
-import json
 import io
+import json
 import os
 import re
 from collections import Counter
@@ -559,7 +559,7 @@ def test_no_source_file_carries_double_encoded_text():
                 continue
             path = os.path.join(dirpath, name)
             try:
-                with io.open(path, encoding="utf-8") as f:
+                with open(path, encoding="utf-8") as f:
                     text = f.read()
             except (UnicodeDecodeError, OSError):
                 continue
@@ -700,8 +700,8 @@ def _decision_definitions(docs=_RECORD_DOCS):
 def _map_line():
     with open(os.path.join(ROOT, "AGENTS.md"), encoding="utf-8") as f:
         text = f.read().replace("\r\n", "\n")
-    line = next((l for l in text.split("\n")
-                 if "Design Decisions Record" in l and "ROADMAP" in l), None)
+    line = next((ln for ln in text.split("\n")
+                 if "Design Decisions Record" in ln and "ROADMAP" in ln), None)
     assert line, (
         "AGENTS.md has no documentation-map line naming the Design Decisions "
         "Record. That line is what these checks quantify over; if it moved, "
@@ -740,7 +740,6 @@ def _prose_lines(path):
     what the pipeline emits -- which is exactly what happened when this
     batch tried it, and how the boundary got drawn here instead of guessed.
     """
-    import io
     import tokenize
 
     with open(path, encoding="utf-8", errors="replace") as f:

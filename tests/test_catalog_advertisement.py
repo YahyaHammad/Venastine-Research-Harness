@@ -284,7 +284,6 @@ class TestTheFactsSurviveTheCallSite:
 
     def _prompt_on_the_wire(self, mocker, authorization):
         from core.client import StreamToken
-        from core.loop import RunAgentLoop
         from tests.conftest import make_model_response
 
         seen = {}
@@ -406,6 +405,7 @@ class TestTheOneShotPromptSpeaksForTheRun:
     def _bare_app(self):
         from types import SimpleNamespace
         from uuid import uuid4
+
         from tui.app import VenastineApp
 
         class _R:

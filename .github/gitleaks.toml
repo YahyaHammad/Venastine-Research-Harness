@@ -1,0 +1,22 @@
+# Gitleaks config for the secrets job (gitleaks.yml). Extends the default
+# rule set; the only delta is the allowlist below.
+#
+# These paths are gitignored runtime/build residue, not committable
+# content, so scanning them can only produce noise:
+#   * providers.json holds the operator's real local keys (gitignored;
+#     CI scans the empty example-derived copy instead, which is clean).
+#   * __pycache__/*.pyc are bytecode copies of redaction-test fixtures
+#     (gitignored via *.pyc); fingerprints would churn per interpreter.
+# Intentional fake secrets in TRACKED test fixtures are allowlisted by
+# fingerprint in .gitleaksignore instead -- a moved fixture re-fires,
+# which is the tripwire behaviour we want there.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "gitignored runtime artifacts and bytecode"
+paths = [
+    '''providers\.json$''',
+    '''__pycache__/''',
+    '''\.pyc$''',
+]

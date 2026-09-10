@@ -8,8 +8,8 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from pydantic import BaseModel, Field, field_validator
 from ddgs import DDGS
+from pydantic import BaseModel, Field, field_validator
 
 from safety.policy_enforcement import is_url_permitted
 from tools.builtin._net_common import TTLCache

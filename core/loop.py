@@ -29,6 +29,7 @@ budget-truncated responses.
 import logging
 import queue
 import threading
+
 # §47 slice 8 (NA10). Threads rather than asyncio: `_run` is a synchronous
 # generator and everything under it is blocking I/O, so a bounded pool is
 # the change that fits what is already here. `copy_context` is what makes
@@ -37,28 +38,34 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from contextvars import copy_context
 from dataclasses import dataclass, field
+from datetime import UTC
 from typing import Optional
 from uuid import UUID
 
 import config
 import prompts.system_prompts as system_prompts
+from core import agent_activity, interaction
 from core.client import (
-    api_initialization, call_model_stream, context_window_for, effort_for,
     ModelResponse,
+    api_initialization,
+    call_model_stream,
+    context_window_for,
+    effort_for,
 )
 from core.events import LoopEvent
-from core import agent_activity
-from core import interaction
 from core.memory import ConversationMemory
+
 # §27 (T1). The loop is where a thread's kind is DECIDED -- it knows which
 # of its three entry points is running -- and storage.create_thread is
 # where it is stored. Nothing in between learns what a kind means.
 from storage import (
-    THREAD_KIND_CHAT, THREAD_KIND_RESEARCH_PASS, THREAD_KIND_SUBAGENT,
+    THREAD_KIND_CHAT,
+    THREAD_KIND_RESEARCH_PASS,
+    THREAD_KIND_SUBAGENT,
 )
 from tools.base import GRANT_NEVER
-from tools.context import ToolContext, RunInfo
-from tools.registry import registry, ToolCallDenied
+from tools.context import RunInfo, ToolContext
+from tools.registry import ToolCallDenied, registry
 
 logger = logging.getLogger(__name__)
 
@@ -228,7 +235,7 @@ def attach_ref(memory: ConversationMemory, thread_id, summary: str,
     about the same source, and two entries for one thread would spend the cap
     on a duplicate.
     """
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     refs = [dict(r) for r in (memory.extra.get("refs") or [])]
     key = str(thread_id)
@@ -243,7 +250,7 @@ def attach_ref(memory: ConversationMemory, thread_id, summary: str,
         "thread_id": key,
         "summary": summary,
         "label": label,
-        "attached_at": datetime.now(timezone.utc).isoformat(),
+        "attached_at": datetime.now(UTC).isoformat(),
     }
     if existing is not None:
         refs[refs.index(existing)] = entry

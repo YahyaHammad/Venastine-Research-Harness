@@ -18,11 +18,11 @@ from __future__ import annotations
 from typing import Literal, Optional
 
 import sympy
+from pydantic import BaseModel, Field
 from sympy.logic.boolalg import simplify_logic, truth_table
 from sympy.logic.inference import satisfiable
-from pydantic import BaseModel, Field
 
-from tools.builtin._math_common import safe_parse, MathParseError
+from tools.builtin._math_common import MathParseError, safe_parse
 
 _OPERATIONS = Literal["simplify", "equivalent", "satisfiable", "tautology", "truth_table"]
 

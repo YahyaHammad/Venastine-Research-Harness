@@ -1,11 +1,13 @@
 import json
 import logging
-from datetime import datetime, timezone
-from typing import List, Dict, Any, Optional
+from datetime import UTC, datetime
+from typing import Any, Optional
 from uuid import UUID, uuid4
 
-from sqlmodel import Field, SQLModel, JSON, Session, select
-from sqlalchemy import func as sa_func  # real sqlalchemy; sqlmodel is faked in tests, this is not
+from sqlalchemy import (
+    func as sa_func,  # real sqlalchemy; sqlmodel is faked in tests, this is not
+)
+from sqlmodel import JSON, Field, Session, SQLModel, select
 
 from database import engine  # your SQLAlchemy engine, assumed to exist here
 
@@ -14,8 +16,8 @@ logger = logging.getLogger(__name__)
 
 class ConversationThread(SQLModel, table=True):
     id: UUID = Field(default_factory=uuid4, primary_key=True)
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    extra_data: Dict[str, Any] = Field(default_factory=dict, sa_type=JSON)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    extra_data: dict[str, Any] = Field(default_factory=dict, sa_type=JSON)
     # ROADMAP_v2 §27 (T1). What this thread IS: "chat" (a conversation a
     # human had), "research_pass" (one pass of the ten-pass pipeline) or
     # "subagent" (a spawned agent, the §20 reviewer, or the compactor).
@@ -89,7 +91,7 @@ class MessageLog(SQLModel, table=True):
     content: str  # always JSON-encoded, regardless of the original type
     name: Optional[str] = None
     tool_call_id: Optional[str] = None
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     # ROADMAP_v2 §21. Compaction-exempt within this thread (D26's pin
     # tool). This is the first field this project has ever added to a
     # table that already exists on disk, which is why database.py grew
@@ -140,7 +142,7 @@ class CompactionCheckpoint(SQLModel, table=True):
     summary_text: str
     covers_up_to_message_id: UUID
     strategy: str = Field(default="rederive")
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 class ThreadSummary(SQLModel, table=True):
@@ -175,7 +177,7 @@ class ThreadSummary(SQLModel, table=True):
     thread_id: UUID = Field(foreign_key="conversationthread.id", index=True)
     summary_text: str
     covers_up_to_message_id: UUID
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 class UserMemory(SQLModel, table=True):
@@ -215,7 +217,7 @@ class UserMemory(SQLModel, table=True):
     scope: str = Field(default="project", index=True)
     project_path: Optional[str] = Field(default=None, index=True)
     source_thread_id: UUID = Field(foreign_key="conversationthread.id")
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 #: ROADMAP_v2 §27 (T1). The three things a thread can be. Not an Enum:
@@ -295,7 +297,7 @@ def get_thread(thread_id: UUID) -> Optional[dict]:
         }
 
 
-def child_threads(parent_thread_id: UUID) -> List[dict]:
+def child_threads(parent_thread_id: UUID) -> list[dict]:
     """The threads spawned by this one, oldest first (§47).
 
     Each entry: ``{"id", "created_at", "kind", "parent_call_id",
@@ -343,7 +345,7 @@ def child_threads(parent_thread_id: UUID) -> List[dict]:
         ]
 
 
-def get_thread_extra(thread_id: UUID) -> Dict[str, Any]:
+def get_thread_extra(thread_id: UUID) -> dict[str, Any]:
     """Copy of the thread's extra_data JSON column (goal mode §18, todo
     list §23). Raises ValueError for an unknown thread, same contract as
     the other accessors."""
@@ -405,14 +407,14 @@ def save_message(
         session.add(new_message)
         thread = session.get(ConversationThread, thread_id)
         if thread is not None:
-            thread.last_activity_at = datetime.now(timezone.utc)
+            thread.last_activity_at = datetime.now(UTC)
             session.add(thread)
         session.commit()
 
 
 def list_threads(
     kind: Optional[str] = THREAD_KIND_CHAT, limit: Optional[int] = None,
-) -> List[dict]:
+) -> list[dict]:
     """Conversation threads, most recently ACTIVE first (#32).
 
     Each entry: ``{"id": UUID, "created_at": datetime, "kind": str,
@@ -501,7 +503,7 @@ def thread_preview(thread_id: UUID) -> str:
         return _first_user_messages(session, [thread_id]).get(thread_id, "")
 
 
-def _first_user_messages(session, thread_ids: List[UUID]) -> Dict[UUID, str]:
+def _first_user_messages(session, thread_ids: list[UUID]) -> dict[UUID, str]:
     """thread id -> truncated first user message, for the given threads.
 
     ONE query for the whole list, walked oldest-first so the first row seen
@@ -538,7 +540,7 @@ def _first_user_messages(session, thread_ids: List[UUID]) -> Dict[UUID, str]:
         select(ranked.c.thread_id, ranked.c.content)
         .where(ranked.c.rn == 1)
     ).all()
-    out: Dict[UUID, str] = {}
+    out: dict[UUID, str] = {}
     for thread_id, raw in rows:
         try:
             text = json.loads(raw)
@@ -616,7 +618,7 @@ def _to_neutral(msg: dict) -> dict:
     return payload
 
 
-def _ordered_rows(thread_id: UUID) -> List[dict]:
+def _ordered_rows(thread_id: UUID) -> list[dict]:
     """Every row of a thread as plain column values, oldest first.
 
     Ordered by (created_at, id) rather than created_at alone. Timestamps
@@ -655,7 +657,7 @@ def _ordered_rows(thread_id: UUID) -> List[dict]:
         ]
 
 
-def _split_at(rows: List[dict], message_id: Optional[UUID]) -> int:
+def _split_at(rows: list[dict], message_id: Optional[UUID]) -> int:
     """Index just past `message_id` in `rows`, or 0 when it isn't there.
 
     Resolving a watermark by POSITION in the already-loaded, already-ordered
@@ -680,7 +682,7 @@ def _split_at(rows: List[dict], message_id: Optional[UUID]) -> int:
 
 def get_session_history(
     thread_id: UUID, after_message_id: Optional[UUID] = None,
-) -> List[dict]:
+) -> list[dict]:
     """The thread's messages in neutral shape, oldest first.
 
     `after_message_id` (ROADMAP_v2 §21) loads only the UNCOMPACTED TAIL --
@@ -695,7 +697,7 @@ def get_session_history(
     return [_to_neutral(m) for m in rows[_split_at(rows, after_message_id):]]
 
 
-def archive_history(thread_id: UUID) -> List[dict]:
+def archive_history(thread_id: UUID) -> list[dict]:
     """Every message ever written to this thread, compaction or not.
 
     This is ROADMAP_v2 §21 AC1 made greppable: compaction adds
@@ -709,7 +711,7 @@ def archive_history(thread_id: UUID) -> List[dict]:
     return get_session_history(thread_id)
 
 
-def pinned_through(thread_id: UUID, message_id: Optional[UUID]) -> List[dict]:
+def pinned_through(thread_id: UUID, message_id: Optional[UUID]) -> list[dict]:
     """Pinned rows at or before the watermark, in neutral shape (§21 M9).
 
     A summary covers a contiguous span, but §21 AC2 says a pinned message is
@@ -777,7 +779,7 @@ def pinned_through(thread_id: UUID, message_id: Optional[UUID]) -> List[dict]:
 def history_through(
     thread_id: UUID, message_id: Optional[UUID],
     after_message_id: Optional[UUID] = None,
-) -> List[dict]:
+) -> list[dict]:
     """The span a compaction is about to summarize, in neutral shape.
 
     Pinned rows are EXCLUDED (§21 AC2: a pinned message is never included in
@@ -792,7 +794,7 @@ def history_through(
     return [_to_neutral(m) for m in rows[start:end] if not m["pinned"]]
 
 
-def turn_start_ids(thread_id: UUID) -> List[UUID]:
+def turn_start_ids(thread_id: UUID) -> list[UUID]:
     """Ids of the rows that BEGIN each turn, oldest first.
 
     A turn starts at a user message: the wrapper adds one, then the loop
@@ -805,7 +807,7 @@ def turn_start_ids(thread_id: UUID) -> List[UUID]:
     return [m["id"] for m in _ordered_rows(thread_id) if m["role"] == "user"]
 
 
-def message_ids_from(thread_id: UUID, message_id: UUID) -> List[UUID]:
+def message_ids_from(thread_id: UUID, message_id: UUID) -> list[UUID]:
     """Ids of `message_id` and everything after it. Resolves pin()'s
     ordinal ("the last N turns") into the real row ids the pinned flag is
     written against -- §21 keeps MessageLog.id an implementation detail
@@ -818,7 +820,7 @@ def message_ids_from(thread_id: UUID, message_id: UUID) -> List[UUID]:
     return [message_id] + [m["id"] for m in rows[start:]]
 
 
-def set_pinned(message_ids: List[UUID], pinned: bool = True) -> int:
+def set_pinned(message_ids: list[UUID], pinned: bool = True) -> int:
     """Flag rows compaction-exempt. Returns how many rows changed."""
     if not message_ids:
         return 0
@@ -1043,7 +1045,7 @@ def save_memory(
 
 def list_memories(
     project_path: Optional[str] = None, scope: Optional[str] = None,
-) -> List[dict]:
+) -> list[dict]:
     """Memories visible from `project_path`, NEWEST FIRST.
 
     Returns global memories plus the project ones recorded against exactly

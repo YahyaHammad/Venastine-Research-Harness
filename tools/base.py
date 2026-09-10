@@ -1,6 +1,6 @@
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from typing import Callable, Iterable, Optional
-
+from typing import Optional
 
 # ROADMAP_v2 §25 (R13). How far approving a tool BY NAME goes -- the
 # question asked before any call exists, by the §18 subagent sign-off and

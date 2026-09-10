@@ -26,9 +26,12 @@ from tests.conftest import settle
 from tui.app import VenastineApp
 from tui.screens import AgentPickerScreen, PermissionScreen
 from tui.widgets import (
-    AgentPanel, AgentRow, ThreadCrumb, ThreadSelected, Transcript,
+    AgentPanel,
+    AgentRow,
+    ThreadCrumb,
+    ThreadSelected,
+    Transcript,
 )
-
 
 # ---------------------------------------------------------------------------
 # ---- fixtures --------------------------------------------------------------
@@ -757,7 +760,6 @@ def _tool_entry(call_id, name="spawn_subagent", digest="agent_name=review"):
 
 def _spawn_event(app, name="spawn_subagent", call_id="call_7"):
     from core.events import LoopEvent
-
     from tui.app import LoopEventMessage
 
     params = ({"agent_name": "explore", "task": "go and look"}
@@ -941,7 +943,6 @@ class TestTheThreeWaysACallFindsItsRun:
         reached the shell. The tool has said the id in its result since
         §18 -- it was simply never read here."""
         from core.events import LoopEvent
-
         from tui.app import LoopEventMessage
 
         app = VenastineApp("ANTHROPIC", "test-model", {})

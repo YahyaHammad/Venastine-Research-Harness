@@ -1,0 +1,49 @@
+# Lint gate: Ruff check over the tracked tree (E/F/I/UP, py311).
+#
+# Rules and their carve-outs live in pyproject.toml [tool.ruff.lint] with a
+# reason per ignore -- E501 (record-style long lines), UP045 (`Optional`
+# idiom), E402 (deferred imports are architectural), UP031 (printf-style is
+# the logging convention). Tightening a rule means removing an ignore AND
+# landing the local `ruff check --fix` diff in the same change, so this job
+# is never red on arrival.
+#
+# Ruff respects .gitignore by default (never pass --no-respect-gitignore):
+# providers.json, *.db*, output/ and logs/ are present locally and must not
+# be scanned. The suite's offline guarantee is unaffected -- this installs
+# one pinned linter and reads source only.
+
+name: lint
+
+on:
+  push:
+  pull_request:
+
+# Least privilege: read the checkout, nothing else.
+permissions:
+  contents: read
+
+concurrency:
+  group: lint-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ruff:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install Ruff
+        run: |
+          python -m pip install --upgrade pip
+          pip install "ruff==0.15.21"
+
+      - name: Ruff check
+        run: ruff check . --output-format concise

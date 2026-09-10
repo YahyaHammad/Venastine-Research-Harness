@@ -48,7 +48,6 @@ from core.reasoning.pipeline_storage import (
 )
 from tests.conftest import run_pipeline
 
-
 # ---------------------------------------------------------------------------
 # ---- Helper ---------------------------------------------------------------
 # ---------------------------------------------------------------------------
@@ -71,6 +70,7 @@ def _fetch_record(run_id: UUID) -> PipelineRunRecord:
     """Retrieves a row through the same Session engine the production
     code uses (reaching through the fake sqlmodel's in-memory store)."""
     from sqlmodel import Session
+
     from database import engine
     with Session(engine) as session:
         return session.get(PipelineRunRecord, run_id)
@@ -346,6 +346,7 @@ def test_load_pipeline_run_survives_a_legacy_null_candidates_column():
     record = _fetch_record(run_id)
     record.candidates_json = None
     from sqlmodel import Session
+
     from database import engine
     with Session(engine) as session:
         session.add(record)
@@ -456,6 +457,7 @@ def test_load_pipeline_run_survives_a_legacy_null_pass_threads_column():
     record = _fetch_record(run_id)
     record.pass_threads_json = None
     from sqlmodel import Session
+
     from database import engine
     with Session(engine) as session:
         session.add(record)

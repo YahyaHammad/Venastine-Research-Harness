@@ -45,18 +45,21 @@ import sys
 
 import pytest
 import sympy
-from sympy import S, sqrt, pi, Rational, Symbol, simplify, sympify
+from sympy import Symbol, pi, simplify, sympify
 
-from tools.builtin._math_common import (
-    safe_parse, MathParseError, _ALLOWED_NODES, _ALLOWED_NAMES, _SAFE_GLOBALS)
-
-import tools.builtin.symbolic_math as symbolic_math
-import tools.builtin.linear_algebra as linear_algebra
 import tools.builtin.discrete_math as discrete_math
-import tools.builtin.logic as logic
 import tools.builtin.geometry as geometry
+import tools.builtin.linear_algebra as linear_algebra
+import tools.builtin.logic as logic
 import tools.builtin.probability_stats as probability_stats
-
+import tools.builtin.symbolic_math as symbolic_math
+from tools.builtin._math_common import (
+    _ALLOWED_NAMES,
+    _ALLOWED_NODES,
+    _SAFE_GLOBALS,
+    MathParseError,
+    safe_parse,
+)
 
 # ===========================================================================
 # ---- Regression: safe_parse injection blocking (per ARCHITECTURE.md §10) -
@@ -636,8 +639,9 @@ def test_no_allowlisted_name_evaluates_a_string_it_can_be_handed():
 # `<module 'os'>`, `__subclasses__`, a bound method's `__globals__`.
 
 def test_the_backstop_refuses_a_module():
-    from tools.builtin._math_common import _reject_escaped_value
     import os
+
+    from tools.builtin._math_common import _reject_escaped_value
 
     with pytest.raises(MathParseError, match="module"):
         _reject_escaped_value(os)
@@ -666,8 +670,9 @@ def test_the_backstop_looks_inside_containers():
     escaped object could arrive nested rather than at the top level. It
     would be a strange kind of guard that checked only the outermost
     value of a function whose normal return type is a container."""
-    from tools.builtin._math_common import _reject_escaped_value
     import os
+
+    from tools.builtin._math_common import _reject_escaped_value
 
     for container in ([os], (os,), {os}, {"k": os}, {os: 1}, [[[os]]]):
         with pytest.raises(MathParseError):

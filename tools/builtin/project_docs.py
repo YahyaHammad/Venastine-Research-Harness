@@ -283,7 +283,7 @@ def read_run(params: dict) -> dict:
     # streams, so the offset is walked rather than jumped: correctness
     # over cleverness, and it still holds one chunk rather than the file.
     try:
-        with open(resolved, "r", encoding="utf-8", errors="replace") as f:
+        with open(resolved, encoding="utf-8", errors="replace") as f:
             _skip(f, offset)
             chunk = f.read(config.INIT_READ_CHARS)
             more = f.read(1) != ""

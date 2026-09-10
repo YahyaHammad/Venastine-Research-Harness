@@ -23,18 +23,17 @@ thing that now performs the check would assert nothing about it.
 from unittest.mock import ANY
 
 from core.loop import RunAgentLoop, run_to_completion
-from tools.context import ToolContext
-from tests.conftest import make_model_response, make_stream_sequence
-
 
 # ---------------------------------------------------------------------------
 # ---- Fake memory + fake dispatch helpers --------------------------------
 # ---------------------------------------------------------------------------
-
 # ROADMAP_v2 §21 gave _run() three new things to call on a memory, and
 # this fake existed in three near-identical copies. One class, in
 # conftest -- see FakeMemory there for why.
 from tests.conftest import FakeMemory as _FakeMemory
+from tests.conftest import make_model_response, make_stream_sequence
+from tools.context import ToolContext
+
 
 def _make_run_kwargs(memory, max_steps=10, context=None):
     return dict(

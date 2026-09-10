@@ -37,14 +37,21 @@ import pytest
 from core.events import LoopEvent
 from core.loop import RunAgentLoop
 from core.reasoning import orchestrator
+
 # §27 moved the param digest here from orchestrator.py, because the replay
 # renderer became its second caller and redact-before-truncate must not
 # exist in two copies. These tests moved with it rather than being
 # duplicated, so there is still exactly one place that ordering is pinned.
 from safety import policy_enforcement
-from tests.conftest import (drain, make_model_response,
-                            make_stream_sequence, pass_stream, run_pass,
-                            settle, well_shaped)
+from tests.conftest import (
+    drain,
+    make_model_response,
+    make_stream_sequence,
+    pass_stream,
+    run_pass,
+    settle,
+    well_shaped,
+)
 from tests.test_orchestrator import _build_pass_mock, _clean_pipeline_payloads
 
 
@@ -591,6 +598,7 @@ async def test_the_speaker_labels_are_distinguishable_and_coloured():
     it introduced and carried no separator, so it read as the first word
     of the sentence."""
     from rich.text import Text
+
     from tui.app import VenastineApp
 
     app = VenastineApp("ANTHROPIC", "test-model", {})
@@ -1107,8 +1115,7 @@ def test_tool_counts_land_on_the_current_run_of_a_repeated_pass():
     that never run and hide rows that run three times -- and a count that
     lands on the FIRST run's row would report activity on a pass nobody
     is waiting on while the retry reads silent."""
-    from tui.widgets import (
-        MARK_DONE, MARK_RUNNING, ResearchProgress)
+    from tui.widgets import MARK_DONE, MARK_RUNNING, ResearchProgress
 
     panel = ResearchProgress()
     panel.pass_started("Pass 6a")
@@ -1147,8 +1154,7 @@ def test_a_completion_tick_lands_on_the_run_that_just_finished():
     the most recent UNRESOLVED row -- scanning forward instead would tick
     the first candidate and leave the one that actually returned showing
     as still running."""
-    from tui.widgets import (
-        MARK_DONE, MARK_RUNNING, ResearchProgress)
+    from tui.widgets import MARK_DONE, MARK_RUNNING, ResearchProgress
 
     panel = ResearchProgress()
     panel.pass_started("Pass 1")

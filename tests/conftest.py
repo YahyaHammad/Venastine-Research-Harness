@@ -9,18 +9,16 @@ This file provides helpers and per-test isolation, not import-time
 behavior.
 """
 
-import importlib
 import itertools
 import os
-import sys
 import time
 import types
+from datetime import UTC
 from uuid import uuid4
 
 import pytest
 
-from core.client import ModelResponse, ToolCallRequest, StreamToken
-
+from core.client import ModelResponse, StreamToken, ToolCallRequest
 
 # ---------------------------------------------------------------------------
 # ---- Generator draining (ROADMAP_v2 §22) ---------------------------------
@@ -73,8 +71,7 @@ def pass_stream(source, events=()):
 
 
 def _with_events(response, events):
-    for event in events:
-        yield event
+    yield from events
     return response
 
 
@@ -97,7 +94,9 @@ def run_pipeline(*args, **kwargs):
     deleted wrapper made.
     """
     from core.reasoning.orchestrator import (
-        run_pipeline_to_completion, stream_deep_research_pipeline)
+        run_pipeline_to_completion,
+        stream_deep_research_pipeline,
+    )
     return run_pipeline_to_completion(
         stream_deep_research_pipeline(*args, **kwargs))
 
@@ -483,7 +482,7 @@ def isolate_ui_preferences(tmp_path_factory, monkeypatch):
     """
     from tui import preferences
 
-    name = "ui-prefs-{}.json".format(next(_ui_prefs_counter))
+    name = f"ui-prefs-{next(_ui_prefs_counter)}.json"
     path = tmp_path_factory.getbasetemp() / name
     monkeypatch.setattr(preferences, "store_path", lambda: str(path))
     return path
@@ -506,8 +505,7 @@ def isolate_model_windows(tmp_path_factory, monkeypatch):
     """
     from core import model_windows
 
-    path = tmp_path_factory.getbasetemp() / "model-windows-{}.json".format(
-        next(_ui_prefs_counter))
+    path = tmp_path_factory.getbasetemp() / f"model-windows-{next(_ui_prefs_counter)}.json"
     monkeypatch.setattr(model_windows, "store_path", lambda: str(path))
     return path
 
@@ -548,8 +546,7 @@ def isolate_pipeline_models(tmp_path_factory, monkeypatch):
     """
     from core import pipeline_models
 
-    path = tmp_path_factory.getbasetemp() / "pipeline-models-{}.json".format(
-        next(_ui_prefs_counter))
+    path = tmp_path_factory.getbasetemp() / f"pipeline-models-{next(_ui_prefs_counter)}.json"
     monkeypatch.setattr(pipeline_models, "store_path", lambda: str(path))
     return path
 
@@ -589,8 +586,7 @@ def isolate_provider_check(tmp_path_factory, monkeypatch):
         if isinstance(entry, dict) and not entry.get("API_KEY"):
             entry["API_KEY"] = "test-key-not-a-real-credential"
 
-    path = tmp_path_factory.getbasetemp() / "providers-{}.json".format(
-        next(_ui_prefs_counter))
+    path = tmp_path_factory.getbasetemp() / f"providers-{next(_ui_prefs_counter)}.json"
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f)
     monkeypatch.setattr(credentials, "LLM_PROVIDERS_FILE", str(path))
@@ -624,7 +620,6 @@ def real_harness_tier(tmp_path, monkeypatch):
     because several of them initialize at a specific moment relative to
     writing files.
     """
-    from core import config_loader
 
     home = tmp_path / "home"
     monkeypatch.setenv("USERPROFILE", str(home))
@@ -826,12 +821,12 @@ class FakeStorage:
 
     def create_thread(self, kind="chat", *, parent_thread_id=None,
                       parent_call_id=None, agent_name=None):
-        from datetime import datetime, timezone
+        from datetime import datetime
         from uuid import uuid4
         thread_id = uuid4()
         self.created_threads.append(thread_id)
         self._threads[thread_id] = True
-        self._thread_created_at[thread_id] = datetime.now(timezone.utc)
+        self._thread_created_at[thread_id] = datetime.now(UTC)
         # §27: recorded, so a test can assert WHAT a code path created
         # without a real database. Mirrors production's column default.
         self._thread_kind[thread_id] = kind
@@ -965,7 +960,7 @@ class FakeStorage:
         # RECONSTRUCTION logic below, though, has to mirror storage.py's
         # for real -- that part isn't just a serialization round trip,
         # it's role-specific shape-building that has to match production.
-        from datetime import datetime, timezone
+        from datetime import datetime
         self.saved_messages.append((thread_id, role, content, name, tool_call_id))
         self._messages_by_thread.setdefault(thread_id, []).append({
             "id": uuid4(),
@@ -985,7 +980,7 @@ class FakeStorage:
         # in the same write.
         if thread_id in self._threads:
             self._thread_last_activity[thread_id] = \
-                datetime.now(timezone.utc)
+                datetime.now(UTC)
 
     # -- ROADMAP_v2 §21 reads ---------------------------------------------
     #
@@ -1076,14 +1071,14 @@ class FakeStorage:
 
     def save_memory(self, content, source_thread_id, scope="project",
                     category=None, project_path=None):
+        from datetime import datetime
         from uuid import uuid4 as _u
-        from datetime import datetime, timezone
         row = {
             "id": _u(), "content": content, "category": category,
             "scope": scope,
             "project_path": project_path if scope == "project" else None,
             "source_thread_id": source_thread_id,
-            "created_at": datetime.now(timezone.utc),
+            "created_at": datetime.now(UTC),
         }
         self._memories.append(row)
         return row["id"]
@@ -1117,14 +1112,14 @@ class FakeStorage:
 
     def save_checkpoint(self, thread_id, summary_text,
                         covers_up_to_message_id, strategy="rederive"):
-        from datetime import datetime, timezone
+        from datetime import datetime
         # A plain dict, mirroring production's latest_checkpoint (#31):
         # callers subscript rather than dot-access.
         checkpoint = {
             "id": uuid4(), "thread_id": thread_id,
             "summary_text": summary_text,
             "covers_up_to_message_id": covers_up_to_message_id,
-            "strategy": strategy, "created_at": datetime.now(timezone.utc),
+            "strategy": strategy, "created_at": datetime.now(UTC),
         }
         self._checkpoints[thread_id] = checkpoint
         return checkpoint["id"]
@@ -1145,13 +1140,13 @@ class FakeStorage:
 
     def save_thread_summary(self, thread_id, summary_text,
                             covers_up_to_message_id):
-        from datetime import datetime, timezone
+        from datetime import datetime
         # A plain dict, mirroring production's latest_thread_summary (#31).
         summary = {
             "id": uuid4(), "thread_id": thread_id,
             "summary_text": summary_text,
             "covers_up_to_message_id": covers_up_to_message_id,
-            "created_at": datetime.now(timezone.utc),
+            "created_at": datetime.now(UTC),
         }
         self._thread_summaries[thread_id] = summary
         return summary["id"]
@@ -1350,6 +1345,7 @@ def set_posture(monkeypatch, **fields):
     each other, matching the two-line `setattr` pairs this replaced.
     """
     import dataclasses
+
     from security import posture
     monkeypatch.setattr(
         posture, "_posture",

@@ -33,7 +33,8 @@ import re
 import shlex
 import subprocess
 import uuid
-from typing import Callable, Optional
+from collections.abc import Callable
+from typing import Optional
 
 import config
 from security import posture, protected_paths
