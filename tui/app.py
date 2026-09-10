@@ -3223,6 +3223,13 @@ class VenastineApp(App):
         """§16 AC3. Required alongside exit_on_error=False: without a handler the
         exception is available on the worker and reported nowhere."""
         if event.worker.state is WorkerState.ERROR:
+            # Batch 78. The toast is transient; the traceback is the part
+            # worth keeping, and no other site logs it -- on_turn_finished
+            # renders message.error into the transcript but never records
+            # it, so logging here (the one handler every run_worker shares)
+            # is the single site, not a second copy beside that render.
+            logger.error("Worker %r failed: %s", event.worker.name,
+                         event.worker.error, exc_info=event.worker.error)
             self.notify(f"Turn failed: {event.worker.error}", severity="error")
 
     # -- actions -------------------------------------------------------------

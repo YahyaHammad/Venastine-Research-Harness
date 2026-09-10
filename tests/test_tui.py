@@ -1430,6 +1430,33 @@ async def test_an_unhandled_ui_error_is_logged_before_textual_reports_it(caplog)
 
 
 @pytest.mark.asyncio
+async def test_a_dead_worker_leaves_a_traceback_in_the_log(caplog):
+    """Batch 78. on_worker_state_changed toasted worker deaths and logged
+    nothing -- and on_turn_finished renders message.error into the
+    transcript without recording it either, so a parked-worker cascade
+    like the modal crash's was only recoverable from memory. The handler
+    every run_worker shares is the single logging site."""
+    import logging
+
+    from textual.worker import WorkerState
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        with caplog.at_level(logging.ERROR, logger="tui.app"):
+            app.on_worker_state_changed(SimpleNamespace(worker=SimpleNamespace(
+                state=WorkerState.ERROR, error=ValueError("worker blew up"),
+                name="agent-turn")))
+
+    matching = [r for r in caplog.records
+                if "agent-turn" in r.getMessage()
+                and "worker blew up" in r.getMessage()]
+    assert matching, "a dead worker left no record in the log"
+    assert matching[0].exc_info is not None, \
+        "the record names the failure but carries no traceback"
+
+
+@pytest.mark.asyncio
 async def test_a_handler_failure_cannot_take_the_app_down():
     """emit() runs wherever the logging happened -- a research worker
     thread, the MCP bridge thread. A logging handler that raises inside a
