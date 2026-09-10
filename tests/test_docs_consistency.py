@@ -1335,3 +1335,180 @@ def test_the_launcher_never_sets_the_two_variables_that_would_break_it():
             f"both variables are inherited by machinery that computes its own "
             f"value from the parent process, and setting either from the "
             f"launcher breaks that quietly rather than loudly.")
+
+
+# ---------------------------------------------------------------------------
+# ---- hand-counted roster numbers (the September 2026 drift) -----------------
+# ---------------------------------------------------------------------------
+
+_SMALL_NUMBERS = {
+    "three": 3, "nine": 9, "twelve": 12, "fifteen": 15,
+    "nineteen": 19, "twenty-one": 21, "thirty-five": 35,
+}
+
+
+def _word_number(word):
+    word = word.lower()
+    if word.isdigit():
+        return int(word)
+    assert word in _SMALL_NUMBERS, (
+        f"a doc claim counts {word!r}, which is outside the small parser. "
+        f"Extend _SMALL_NUMBERS rather than working around it.")
+    return _SMALL_NUMBERS[word]
+
+
+def test_the_documented_provider_roster_matches_the_example():
+    """Three prose numbers described one roster three different ways: AGENTS.md
+    said nineteen providers, ARCHITECTURE.md and ROADMAP.md said fourteen,
+    and providers.json.example held fifteen -- with the stream-usage trio
+    right in every telling, so each paragraph read as careful while
+    disagreeing about its own denominator. The same drift lived in
+    tui/meters.py's and tui/app.py's comments, which is how a reader met the
+    wrong number whichever document they opened first.
+
+    Unit 16's shape again: somebody counted the roster by hand, in five
+    places, and the roster moved. So this parses the claimed totals out of
+    the live claims and compares them against the example file itself --
+    never against another hand-written number.
+
+    DEVLOG.md is deliberately out of scope: it is append-only history, and a
+    batch entry's contemporary count was true when written. tests/ is out for
+    the same reason the tree test skips it -- docstrings there describe the
+    behaviour under test, they are not a claim an agent navigates by.
+    """
+    with open(os.path.join(ROOT, "providers.json.example"),
+              encoding="utf-8") as f:
+        example = json.load(f)
+    live_total = len(example)
+    live_true = sorted(name for name, entry in example.items()
+                       if entry.get("supports_stream_usage"))
+
+    with open(os.path.join(ROOT, "AGENTS.md"), encoding="utf-8") as f:
+        agents = f.read()
+    total = _word_number(re.search(
+        r"THREE of the (\w+) configured providers", agents).group(1))
+    complement = _word_number(re.search(
+        r"the other (\w+) -- D21", agents).group(1))
+    assert (total, complement) == (live_total, live_total - len(live_true)), (
+        f"AGENTS.md's meter bullet claims {total} providers with "
+        f"{complement} complements; providers.json.example holds "
+        f"{live_total} with {live_total - len(live_true)} complements.")
+    assert len(live_true) == 3 and live_true == [
+            "ANTHROPIC", "OPENAI", "QWEN_TOKEN_PLAN"], (
+        f"the stream-usage trio changed: {live_true}. The bullet's THREE is "
+        f"stale alongside its denominator -- update both, not one.")
+
+    for doc, pattern in (
+            ("ARCHITECTURE.md",
+             r"across the (\d+) providers in `providers.json.example`"),
+            ("ROADMAP.md",
+             r"Across the (\d+) providers in `providers.json.example`")):
+        with open(os.path.join(ROOT, doc), encoding="utf-8") as f:
+            hit = re.search(pattern, f.read())
+        assert hit is not None, (
+            f"{doc} no longer states the roster size where it used to -- "
+            f"if the sentence moved, move this pattern with it.")
+        assert int(hit.group(1)) == live_total, (
+            f"{doc} claims {hit.group(1)} providers; the example holds "
+            f"{live_total}.")
+
+    for path, patterns in (
+            ("tui/meters.py", [r"(\w+) configured providers",
+                               r"forever on\s+(\w+) providers"]),
+            ("tui/app.py", [r"is (\w+) of the (\w+) configured",
+                             r"nothing on (\w+) of the (\w+)"])):
+        with open(os.path.join(ROOT, path), encoding="utf-8") as f:
+            source = f.read()
+        claimed = set()
+        for pattern in patterns:
+            for hit in re.finditer(pattern, source):
+                claimed.update(_word_number(g) for g in hit.groups())
+        assert claimed <= {live_total, live_total - len(live_true)}, (
+            f"{path} counts {sorted(claimed)} against a live roster of "
+            f"{live_total} with {live_total - len(live_true)} complements.")
+
+
+def test_the_held_widget_count_matches_the_prose():
+    """Batch 76 wrote "seven" and §47 added three more holds without
+    revisiting the sentence -- the transcript, the six crash-path widgets,
+    then the thread viewer, the crumb and the pane switcher, all held at
+    mount with a never-mounted fallback. A count that understates the set
+    tells the next author the set is closed, which is exactly how the two
+    NoMatches crashes happened: a widget added as a per-event query on a
+    path that runs under a modal.
+
+    The live value is the holds themselves, not a second list: every
+    `self._x = self.query_one(...)` in tui/app.py, all of which sit in
+    on_mount today, so a tenth hold anywhere in the file trips this and a
+    human decides whether the sentence follows it.
+    """
+    with open(os.path.join(ROOT, "tui", "app.py"), encoding="utf-8") as f:
+        app_source = f.read()
+    live = len(re.findall(r"self\._\w+ = self\.query_one\(", app_source))
+
+    with open(os.path.join(ROOT, "AGENTS.md"), encoding="utf-8") as f:
+        agents = f.read()
+    claimed = _word_number(re.search(
+        r"The held set is (\w+) now", agents).group(1))
+    assert claimed == live, (
+        f"AGENTS.md says the held set is {claimed}; tui/app.py holds "
+        f"{live}. Name the new hold in the bullet, or move it to a query "
+        f"with its NoMatches guard -- the count is the tripwire, the "
+        f"preconditions sentence beside it is the argument.")
+
+
+def test_the_roadmap_v2_index_covers_every_section():
+    """TECHNICAL_DEBT's index entry, closed 2026-09-10: the index stopped at
+    §31 while the record ran to §47, then backfills reached §45 and left
+    §39, §40, §46 and §47 absent -- the document a reader consults to find
+    out what is outstanding, missing the security posture and all of the
+    agent-navigation work. The marker test cannot see this: it checks the
+    entries it found, and an absent row has no marker to miss.
+
+    The prescription the debt entry recorded is the check: one index row per
+    `## N.` heading, in either of the two heading spellings the record uses
+    (`## 13.` for the older sections, `## §39.` for the newer ones). The
+    index block is everything between `## Index` and its closing rule, in
+    both of the two row spellings it uses (`- 13.` and `- **§32.**`).
+    """
+    with open(os.path.join(ROOT, "ROADMAP_v2.md"), encoding="utf-8") as f:
+        text = f.read()
+    headings = set(int(n) for n in
+                   re.findall(r"^## (?:§)?(\d+)\.", text, re.M))
+    index_block = text.split("## Index")[1].split("---")[0]
+    indexed = set(int(n) for n in re.findall(r"§(\d+)\.", index_block))
+    indexed.update(int(n) for n in
+                   re.findall(r"^- (\d+)\.", index_block, re.M))
+
+    assert headings, "no section headings parsed -- the pattern moved."
+    missing = sorted(headings - indexed)
+    assert not missing, (
+        f"ROADMAP_v2.md sections without an index row: {missing}. A section "
+        f"missing from the index reads as nonexistent, which is #129's "
+        f"complaint one level up.")
+
+
+def test_the_revisit_note_covers_the_ensemble_family():
+    """L1's shape, and the hole in the range test's scope: ROADMAP.md's §10
+    revisit blockquote said "Decisions record: E1-E12" while the record held
+    E1-E14, and test_a_claimed_range_covers_its_whole_family only reads
+    AGENTS.md's map line -- a range anywhere else can stop short while every
+    range check stays green.
+
+    Narrow on purpose: this pins the one out-of-scope range that already
+    drifted, against the record's live maximum, rather than rescanning every
+    document for ranges nobody has mis-stated yet.
+    """
+    record = _decision_definitions()
+    highest = max(int(re.match(r"E(\d+)$", one).group(1))
+                  for one in record if re.match(r"E\d+$", one))
+
+    with open(os.path.join(ROOT, "ROADMAP.md"), encoding="utf-8") as f:
+        roadmap = f.read()
+    hit = re.search(r"Decisions record: E1[–-]E?(\w+)", roadmap)
+    assert hit is not None, (
+        "ROADMAP.md's revisit note no longer carries its decisions-record "
+        "range -- if the sentence moved, move this pattern with it.")
+    assert _word_number(hit.group(1)) >= highest, (
+        f"ROADMAP.md's revisit note runs E1-E{hit.group(1)} while the "
+        f"record defines through E{highest}.")
