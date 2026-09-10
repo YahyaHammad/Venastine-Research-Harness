@@ -2959,7 +2959,7 @@ Count 2786 -> 2815.
 
 | Change | What breaks | Symptom / fix |
 |---|---|---|
-| `agent_catalog_text()` is no longer `""` on the default install | Any test asserting it is empty, or that `## Available agents` is absent from an attended prompt | `test_spawnable.py::test_none_of_the_four_shipped_agents_is_spawnable` was exactly that test and is now `test_exactly_two_shipped_agents_are_spawnable`. A headless prompt is unchanged — `spawn_subagent` is unreachable there (R16) |
+| `agent_catalog_text()` is no longer `""` on the default install | Any test asserting it is empty, or that `## Available agents` is absent from an attended prompt | `test_spawnable.py::test_none_of_the_four_shipped_agents_is_spawnable` was exactly that test, then `test_exactly_two_shipped_agents_are_spawnable` (batch 51), now `test_exactly_six_shipped_agents_are_spawnable`. A headless prompt is unchanged — `spawn_subagent` is unreachable there (R16) |
 | Seven agents ship, not four | A test counting `config_loader.get_agents()` against the real harness tier | Use the roster, not the number. `real_harness_tier` is the fixture that reaches the real files |
 | Fourteen skills ship, not four, and `software/` is a new category folder | A test asserting the skill catalog's length, or the set of categories | The catalog grew 610 → 2093 characters and it rides every research pass, so a byte-identical pass-prompt assertion must be regenerated |
 | `explore` and `review` are SPAWNABLE | A test asserting that no shipped agent is | That was the assertion §32 wrote to fail on this day; see the first row |

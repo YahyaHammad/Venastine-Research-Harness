@@ -21,11 +21,13 @@ max_steps: 20
 # sentence it was given. `/agent plan` supplies the conversation by
 # being in one, which is grill-me's shape and for grill-me's reason.
 spawnable: false
-# §32 A13. This whitelist is a strict SUPERSET of explore's and
-# review's, and that is load-bearing rather than tidy: C6 intersects a
-# child's tools with its parent's, so a plan turn that spawns explore
-# would otherwise hand it an explore with no web_search — degraded
-# exactly the way A4 describes, and with the parent unable to tell.
+# §32 A13. This whitelist is a strict SUPERSET of every spawnable leaf's,
+# and that is load-bearing rather than tidy: C6 intersects a child's tools
+# with its parent's, so a plan turn that spawns explore without `web_search`
+# — or build without `write`/`edit` — would silently hand it a degraded
+# agent with the parent unable to tell. `general` holds the same superset
+# for the spawns it makes; the two branches never compete for one route
+# because plan is not spawnable and general is.
 ---
 
 You are planning a piece of work before any of it is written. The plan is

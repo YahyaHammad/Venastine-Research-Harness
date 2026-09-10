@@ -213,7 +213,7 @@ class TestWhatTheDefaultInstallActuallyAdvertises:
             assert agent.spawnable is not None, (
                 f"{name} does not declare spawnable")
 
-    def test_exactly_two_shipped_agents_are_spawnable(self, real_harness_tier):
+    def test_exactly_six_shipped_agents_are_spawnable(self, real_harness_tier):
         """A4 stated as a test rather than only in the record.
 
         THIS TEST USED TO ASSERT THE OPPOSITE. It required the spawnable
@@ -230,15 +230,17 @@ class TestWhatTheDefaultInstallActuallyAdvertises:
         input a task string cannot carry -- a stretch of transcript
         (compactor), a live thread (grill-me, plan), a document manifest
         (initializer), a finished PipelineRun (pipeline-reviewer). The
-        two that are true take a task string as their entire input,
-        which is exactly the question A3's field asks.
+        six that are true take a task string as their entire input,
+        which is exactly the question A3's field asks: explore and review
+        (batch 51) plus build, test and writer (spawnable C6 leaves with
+        no spawn_subagent) and general (the only spawnable branch).
         """
         config_loader.initialize(str(real_harness_tier))
 
         agents = config_loader.get_agents()
         spawnable = sorted(n for n, a in agents.items() if a.spawnable)
 
-        assert spawnable == ["explore", "review"]
+        assert spawnable == ["build", "explore", "general", "review", "test", "writer"]
 
         catalog = system_prompts.agent_catalog_text()
         assert "## Available agents" in catalog

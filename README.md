@@ -506,15 +506,21 @@ A skill declaring `additional_tools` is stating a *need*, not granting anything 
 
 An agent declares `spawnable` — whether the `spawn_subagent` tool can actually feed it. A task string in a fresh thread is all a spawn can pass, and an agent that needs a transcript, a thread or a finished research run cannot be given one; spawning it anyway produces a confident answer about nothing. Your own agents are not spawnable unless they say so.
 
-Seven ship. Five are not spawnable, each because a real caller supplies something a task string cannot carry — `compactor` (a stretch of transcript), `initializer` (a document manifest), `pipeline-reviewer` (a finished research run), `grill-me` and `plan` (the live conversation). Two are:
+Eleven ship. Five are not spawnable, each because a real caller supplies something a task string cannot carry — `compactor` (a stretch of transcript), `initializer` (a document manifest), `pipeline-reviewer` (a finished research run), `grill-me` and `plan` (the live conversation). Six are:
 
 | agent | for | reach it with |
 |---|---|---|
 | `plan` | designing an approach before the work starts — reads what exists, names the decisions, says what would make the plan wrong | `/agent plan` |
 | `explore` | finding where something lives and how it is wired, in a codebase or in the literature, and reporting locations and evidence | `spawn_subagent`, or `/agent explore` |
 | `review` | reading a finished change or document against what it claims to do, and reporting defects with the evidence for each | `spawn_subagent`, or `/agent review` |
+| `build` | implementing a specified change from pointers — reads what exists, makes the smallest diff, reports what changed plus how it was verified | `spawn_subagent`, or `/agent build` |
+| `test` | verifying a change against its claim — reproduces, runs the checks, reports pass/fail with the exact command and what was not covered | `spawn_subagent`, or `/agent test` |
+| `writer` | turning notes, claims or sources into clear structured prose for a named audience — reports, READMEs, changelogs, decision records | `spawn_subagent`, or `/agent writer` |
+| `general` | scoping a task's intent, splitting it into self-contained sub-tasks, delegating to specialized subagents in parallel, synthesizing their answers | `spawn_subagent`, or `/agent general` |
 
-`explore` and `review` are **read-only by omission**: `write`, `edit`, `write_project_doc` and `remember` are simply absent from their tool lists, so no configuration makes one reachable. They do list `read` and `shell`, which are [denied by default](#what-needs-approval-by-default) and cannot be enabled at runtime — so on a stock install `explore` works from `read_project_doc` and the three network tools, and both become code agents only where you have enabled file access in `config.py`. Approving a spawn of either grants nothing standing: `shell` carries a per-call gate, so it is excluded from every grant path by name and each non-inert command still asks.
+`build`, `test`, `writer`, `explore` and `review` are leaves: they take a task string as their entire input and cannot spawn further. `general` is the one spawnable branch — the spawning discipline lives there and nowhere else, so users who want a less constricted experience change one file or add their own. `plan` keeps its own spawning ability for interactive `/agent` use but is not itself spawnable.
+
+`explore`, `review`, `build`, `test` and `writer` are **read-only or write-only by omission**: none of them lists `spawn_subagent`, `remember` or `write_project_doc`, so no configuration makes one reachable. `build` is the exception that proves the shape — it declares `write`/`edit` because implementing means writing, while the other four simply absent them. They all list tools (`read`, `shell`) which are [denied by default](#what-needs-approval-by-default) and cannot be enabled at runtime — so on a stock install `explore` works from `read_project_doc` and the three network tools, and all become code agents only where you have enabled file access in `config.py`. Approving a spawn of a leaf grants nothing standing: `shell` carries a per-call gate, so it is excluded from every grant path by name and each non-inert command still asks.
 
 Fourteen skills ship, under `security/`, `crypto/`, `math/`, `research/` and `software/` — methodologies for reviewing code, debugging, designing tests, designing experiments, statistical inference, reproducibility, evaluating sources, technical writing, numerical methods, formal specification, literature review, proof writing, cryptography verification and cybersecurity research.
 

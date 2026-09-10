@@ -230,9 +230,13 @@ Venastine Research Harness/
 │       ├── grill-me.md            # built-in agent: surfaces what still needs a decision in the current thread
 │       ├── pipeline-reviewer.md   # ROADMAP_v2 §20: reviews a finished research run and proposes corrections. No spawn_subagent, no load_skill
 │       ├── compactor.md           # ROADMAP_v2 §21a: condenses an older stretch of a conversation. allowed_tools: [] -- it summarizes, it does not act
-│       ├── plan.md                # batch 51: designs an approach before the work starts. NOT spawnable -- its subject is the conversation, which a task string cannot carry. §32 A13: its whitelist is a strict SUPERSET of explore's and review's, because C6 intersects a child's tools with its parent's
+│       ├── plan.md                # batch 51: designs an approach before the work starts. NOT spawnable -- its subject is the conversation, which a task string cannot carry. §32 A13: its whitelist is a strict SUPERSET of every spawnable leaf's, because C6 intersects a child's tools with its parent's
 │       ├── explore.md             # batch 51: finds where something lives and how it is wired, in a codebase or the literature. SPAWNABLE -- a task string IS its whole input, which is the only question A3's field asks
 │       ├── review.md              # batch 51: reads a finished change or document against what it claims to do. SPAWNABLE. Read-only by OMISSION (§32 A15) -- no write/edit/write_project_doc/remember in the whitelist at all
+│       ├── build.md               # implements a specified change from pointers; SPAWNABLE C6 leaf (no spawn_subagent). Declares write/edit per A15 -- denied by default, live where the operator enabled them
+│       ├── test.md                # verifies a change against its claim; SPAWNABLE C6 leaf. No write/edit by omission -- it verifies, never fixes
+│       ├── writer.md              # turns notes/sources into structured prose; SPAWNABLE C6 leaf. Returns text; the delegator decides where it lands
+│       ├── general.md             # the only spawnable BRANCH: scopes intent, splits into sub-tasks, spawns leaves in parallel, synthesizes. Holds the A13 superset for its own spawns; plan keeps its own for interactive /agent use
 │       └── initializer.md         # ROADMAP_v2 §24: reads a project and writes its AGENTS.md (§44 moved the hub out of .venastine/). allowed_tools: [read_project_doc] -- it drafts, the shell writes
 │
 ├── project_init/                  # ROADMAP_v2 §24: /init. Namespace package, mirroring memories/

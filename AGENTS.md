@@ -914,7 +914,7 @@ load-bearing, and only one of them can widen anything.
   restrictive definition uses to opt out, so a coerced string would invert a deliberate choice
   silently.
 
-**Seven ship, two of them spawnable** (§32 A12, batch 51).
+**Eleven ship, six of them spawnable** (§32 A12, batch 51; `build`/`test`/`writer`/`general` added after).
 
 | agent | reached by | what a spawn would have to carry |
 |---|---|---|
@@ -925,6 +925,10 @@ load-bearing, and only one of them can widen anything.
 | `plan` | `/agent plan` | the conversation |
 | **`explore`** | **`spawn_subagent`**, `/agent` | — a task string IS its input |
 | **`review`** | **`spawn_subagent`**, `/agent` | — a task string IS its input |
+| **`build`** | **`spawn_subagent`**, `/agent` | — a task string IS its input |
+| **`test`** | **`spawn_subagent`**, `/agent` | — a task string IS its input |
+| **`writer`** | **`spawn_subagent`**, `/agent` | — a task string IS its input |
+| **`general`** | **`spawn_subagent`**, `/agent` | — a task string IS its input |
 
 Until batch 51 the spawnable column was empty, so `agent_catalog_text()` returned `""` and
 `## Available agents` had never appeared in a prompt this harness produced — while
@@ -934,12 +938,8 @@ way: `spawn_subagent` is unreachable headless (R16), so `with_catalogs` suppress
 in all ten. The SKILL catalog is the opposite and deliberately so — `load_skill` is callable
 headless, so all fourteen skills ride every pass.
 
-**Two things about the new three that are decisions, not defaults.** `plan`'s whitelist is a
-strict SUPERSET of the other two (A13), because C6 intersects a child's tools with its parent's
-and a `plan` turn spawning `explore` would otherwise silently hand it an `explore` with no
-`web_search`. And `explore`/`review` name `read` and `shell` although
-`config.ToolPermissions` denies both to everything (A15) — on a stock install they are five
-callable tools and two. That is deliberate: `registry.schemas(context)` filters by the same
+**Leaves, one branch, and the two whitelists that must stay supersets.** `build`, `test`, `writer`, `explore` and `review` are C6 leaves with no `spawn_subagent` — the spawning discipline lives in `general`, the only spawnable branch, so it is taught once rather than repeated in every leaf. `plan` keeps its own `spawn_subagent` for interactive `/agent` use; it is not spawnable, so the two branches never compete for one route. Both `plan`'s and `general`'s whitelists are strict SUPERSETS of every leaf's (A13), because C6 intersects a child's tools with its parent's and a `plan` or `general` turn spawning `build` without `write`/`edit` would otherwise silently hand it a degraded agent with the parent unable to tell. And the new leaves name `read`/`write`/`edit`/`shell` although
+`config.ToolPermissions` denies all four to everything (A15) — on a stock install they work from `read_project_doc` (plus the network tools where declared) and become code agents only where the operator has enabled file access. That is deliberate: `registry.schemas(context)` filters by the same
 predicate, so nothing uncallable is advertised, while an agent that omitted them would stay
 crippled on an install where the operator had enabled them.
 

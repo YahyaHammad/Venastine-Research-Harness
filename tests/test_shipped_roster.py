@@ -11,11 +11,13 @@ definitions that only becomes checkable once there is more than one of
 them:
 
   A12  the roster itself -- three agents added for a harness whose two
-       modes are research and development.
-  A13  `plan`'s whitelist is a strict SUPERSET of the two spawnable
-       agents', because C6 intersects a child's tools with its parent's
-       and a silently narrowed child is A4's failure arriving through
-       the permission axis.
+       modes are research and development, plus four more after: build,
+       test and writer as spawnable C6 leaves, general as the only
+       spawnable branch.
+  A13  `plan`'s and `general`'s whitelists are strict SUPERSETS of every
+       spawnable leaf's, because C6 intersects a child's tools with its
+       parent's and a silently narrowed child is A4's failure arriving
+       through the permission axis.
   A15  `explore` and `review` are read-only by OMISSION rather than by
        gating. Asserted through the real policy layer for the writing
        tools global config ALLOWS, and against the declaration for the
@@ -53,15 +55,29 @@ GLOBALLY_ALLOWED_WRITERS = ("write_project_doc", "remember",
 GLOBALLY_DENIED_WRITERS = ("write", "edit")
 
 #: What a STOCK install can actually call from these agents' sets. The
-#: rest of what they declare (`read`, `shell`) is globally denied and
-#: reaches them only where the operator has turned it on in config.py.
+#: rest of what they declare (`read`, `write`, `edit`, `shell`) is globally
+#: denied and reaches them only where the operator has turned it on in
+#: config.py.
 STOCK_TOOLS = {
     "explore": {"read_project_doc", "web_search", "fetch_url",
                 "arxiv_search", "load_skill"},
     "review": {"read_project_doc", "load_skill"},
+    "build": {"read_project_doc", "todo_write", "load_skill"},
+    "test": {"read_project_doc", "todo_write", "load_skill"},
+    "writer": {"read_project_doc", "web_search", "fetch_url",
+               "arxiv_search", "todo_write", "load_skill"},
+    "general": {"read_project_doc", "web_search", "fetch_url",
+                "arxiv_search", "load_skill", "todo_write", "ask_user",
+                "spawn_subagent"},
 }
 
 READ_ONLY_AGENTS = ("explore", "review")
+
+#: Spawnable leaves: task string in, answer out, no spawn_subagent of
+#: their own. `general` is the only spawnable branch and is covered
+#: separately — it declares `spawn_subagent` by design, so the read-only
+#: assertions below do not apply to it.
+SPAWNABLE_LEAVES = ("build", "test", "writer", "explore", "review")
 
 
 @pytest.fixture
@@ -231,28 +247,97 @@ class TestTheReadOnlyAgentsAreReadOnly:
 
 
 # ===========================================================================
+# ---- the four new agents: stock sets + deliberate declarations ------------
+# ===========================================================================
+
+class TestNewAgentsStockBehavior:
+
+    @pytest.mark.parametrize("name", ("build", "test", "writer", "general"))
+    def test_what_a_stock_install_can_actually_call(self, roster, name):
+        """Same line as the read-only control one class up: the whitelist
+        is the agent's intent, the global switch is the operator's.
+        `read`/`write`/`edit`/`shell` ship denied, so a stock install
+        sees these agents without them."""
+        child = manager.child_context(roster[name], ToolContext())
+        callable_now = {t for t in roster[name].allowed_tools
+                        if is_tool_allowed(t, child)}
+
+        assert callable_now == STOCK_TOOLS[name]
+
+    def test_build_declares_write_and_edit_deliberately(self, roster):
+        """The A15 shape, one tool over: `write`/`edit` are denied by
+        global config, so declaring them costs nothing on a stock
+        install and keeps `build` whole where the operator enabled
+        them. Asserted against the DECLARATION, since the policy layer
+        answers False either way -- the vacuity trap the class above
+        documents."""
+        declared = set(roster["build"].allowed_tools)
+
+        assert {"write", "edit"} <= declared
+
+    def test_only_general_reaches_spawn_subagent(self, roster):
+        """The branch/leaf split: `general` declares `spawn_subagent`
+        by design, and no spawnable leaf does. A leaf that could spawn
+        would compound one sign-off into unbounded delegated authority
+        (R4), and would need the spawning discipline `general` exists
+        to teach exactly once."""
+        assert "spawn_subagent" in (roster["general"].allowed_tools or ())
+
+        for name in SPAWNABLE_LEAVES:
+            assert "spawn_subagent" not in (
+                roster[name].allowed_tools or ()), (
+                f"{name} is a C6 leaf and must not declare spawn_subagent")
+
+    def test_signing_off_a_leaf_spawn_grants_it_nothing(self, roster):
+        """Like the read-only control: every leaf's gated surface is
+        per-call (`shell` carries an `approval_check`), so the sign-off
+        list is empty and one yes creates no standing authority."""
+        for name in ("build", "test"):
+            child = manager.child_context(roster[name], ToolContext())
+
+            assert manager.candidate_approvals(child) == []
+
+
+# ===========================================================================
 # ---- A13: delegation must not narrow the child ----------------------------
 # ===========================================================================
 
 class TestPlanCanDelegateWithoutNarrowingTheChild:
 
-    def test_plan_holds_a_superset_of_both_spawnable_agents(self, roster):
+    def test_plan_holds_a_superset_of_every_spawnable_leaf(self, roster):
         """C6 intersects a child's `allowed_tools` with its parent's, so
         a parent missing a tool the child declares REMOVES it from the
-        child. `plan` is the one shipped agent that can spawn, so its
-        whitelist has to cover both of the agents it can spawn or
-        delegation silently degrades them.
+        child. `plan` is a shipped agent that can spawn, so its
+        whitelist has to cover every spawnable leaf it can spawn or
+        delegation silently degrades them -- `build`'s `write`/`edit`
+        is the case that matters, since no batch-51 leaf declared them.
         """
         plan = set(roster["plan"].allowed_tools)
         children = set()
-        for name in READ_ONLY_AGENTS:
+        for name in SPAWNABLE_LEAVES:
             children |= set(roster[name].allowed_tools)
 
         assert not children - plan, (
             f"plan cannot delegate without narrowing: {sorted(children - plan)} "
             f"would be removed from a child that declares them")
 
-    @pytest.mark.parametrize("child_name", READ_ONLY_AGENTS)
+    def test_general_holds_a_superset_of_every_spawnable_leaf(self, roster):
+        """The same invariant for the other branch. `general` is the only
+        spawnable agent that can spawn, so its whitelist has to cover
+        every leaf -- including `write`/`edit` it rarely calls itself,
+        which are declared for PASS-THROUGH rather than for its own use.
+        """
+        general = set(roster["general"].allowed_tools)
+        children = set()
+        for name in SPAWNABLE_LEAVES:
+            children |= set(roster[name].allowed_tools)
+
+        assert not children - general, (
+            f"general cannot delegate without narrowing: "
+            f"{sorted(children - general)} "
+            f"would be removed from a child that declares them")
+
+    @pytest.mark.parametrize("child_name", SPAWNABLE_LEAVES)
     def test_a_spawn_under_plan_loses_nothing(self, roster, child_name):
         """The invariant above, driven through the composition rather
         than through the declaration -- so it fails on what a spawn
@@ -264,6 +349,19 @@ class TestPlanCanDelegateWithoutNarrowingTheChild:
 
         assert child.allowed_tools == declared, (
             f"spawning {child_name} from plan removes "
+            f"{sorted(declared - (child.allowed_tools or set()))}")
+
+    @pytest.mark.parametrize("child_name", SPAWNABLE_LEAVES)
+    def test_a_spawn_under_general_loses_nothing(self, roster, child_name):
+        """The same, through the branch that actually does the spawning
+        at depth 1."""
+        parent = manager.active_context(roster["general"])
+        child = manager.child_context(roster[child_name], parent)
+
+        declared = set(roster[child_name].allowed_tools)
+
+        assert child.allowed_tools == declared, (
+            f"spawning {child_name} from general removes "
             f"{sorted(declared - (child.allowed_tools or set()))}")
 
     def test_a_restricted_parent_still_narrows_it(self, roster):
@@ -318,7 +416,8 @@ class TestTheProjectContextTheyOptedInTo:
         workspace_trust.grant_trust(str(root))
         config_loader.initialize(str(root))
 
-    @pytest.mark.parametrize("name", ("plan", "explore", "review"))
+    @pytest.mark.parametrize("name", ("plan", "explore", "review", "build",
+                                       "test", "writer", "general"))
     def test_each_one_receives_the_projects_own_agents_md(
             self, real_harness_tier, name):
         """Through the assembled prompt, because that is what the run
@@ -367,7 +466,9 @@ class TestTheCatalogTheDefaultInstallNowCarries:
         prompt = system_prompts.with_catalogs("BASE")
 
         assert "## Available agents" in prompt
-        assert "- explore:" in prompt and "- review:" in prompt
+        for name in ("build", "explore", "general", "review", "test",
+                     "writer"):
+            assert f"- {name}:" in prompt
 
     def test_a_headless_run_is_still_told_about_no_agents(self, roster):
         """#68/A1: `spawn_subagent` is gated with no `approval_check`, so
