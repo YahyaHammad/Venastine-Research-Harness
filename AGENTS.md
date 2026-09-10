@@ -1090,7 +1090,10 @@ focusable, so making its rows clickable made navigation mouse-only; the picker m
 draws from the same two facts the panel does, **through the same `lineage_rows` walk** — it
 iterated the stack raw until batch 75, so it indented by a column in arrival order and drew A's
 child under B, which is NA17's defect in the surface NA17 did not touch. One walk is what makes
-"the two cannot come to offer different things" structural rather than intended.
+"the two cannot come to offer different things" structural rather than intended. Below the live
+rows it lists the stored descendants the stack has already forgotten (muted): a finished run
+stays openable, and the picker answers what can be READ while the panel keeps saying what is
+RUNNING — the two differ on purpose past the live half.
 **The letter was chosen by elimination and the test MEASURES it** against
 `screen.active_bindings` with the prompt focused, which is the only state where the answer means
 anything: `TextArea` claims a/c/d/e/f/k/u/v/w/x/y/z, `App` claims ctrl+c and ctrl+q, textual claims

@@ -1383,8 +1383,142 @@ class TestTheRunPicker:
             await pilot.pause()
             await pilot.pause()
 
-            assert app._viewing is None
-            opened.assert_not_called()
+        assert app._viewing is None
+        opened.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# ---- the picker lists finished runs ----------------------------------------
+# ---------------------------------------------------------------------------
+
+def _stored_child(cid, agent, call):
+    """A storage.child_threads row, in the shape §47 gave it."""
+    return {"id": cid, "created_at": None, "kind": "subagent",
+            "parent_call_id": call, "agent_name": agent}
+
+
+class TestThePickerListsFinishedRuns:
+
+    def _children(self, mocker, mapping):
+        mocker.patch("tui.app.storage.child_threads",
+                      side_effect=lambda parent: mapping.get(parent, []))
+
+    def _memory(self, app, thread_id):
+        app.memory = type("M", (), {"thread_id": thread_id, "extra": {},
+                                    "messages": []})()
+
+    @staticmethod
+    def _classes(screen):
+        from textual.widgets import ListItem
+
+        return [set(item.classes) for item in screen.query(ListItem)]
+
+    @pytest.mark.asyncio
+    async def test_a_finished_run_is_offered_dimmed(self, mocker):
+        """The reported bug: the stack forgets a run the moment it ends,
+        so after the subagent finished with no restart the picker showed
+        only the conversation -- while ctrl+click on the same call still
+        opened it, because that route reads storage too."""
+        chat, child = uuid4(), uuid4()
+        self._children(mocker, {chat: [_stored_child(
+            child, "explore", "call_1")]})
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            self._memory(app, chat)
+            app._agent_stack = []
+
+            await pilot.press("ctrl+g")
+            assert await settle(
+                pilot, lambda: isinstance(app.screen, AgentPickerScreen))
+            rows = _picker_rows(app.screen)
+            classes = self._classes(app.screen)
+
+        assert rows == ["this conversation", "  explore"], (
+            f"the picker offered {rows}; a finished run stays openable, "
+            f"so omitting it is lying by omission")
+        assert "finished" not in classes[0]
+        assert "finished" in classes[1]
+
+    @pytest.mark.asyncio
+    async def test_a_live_run_is_not_listed_twice(self, mocker):
+        """The stored walk runs under the same root the live rows came
+        from, so a run that is both bound and stored would arrive twice
+        without the exclusion -- once live, once dimmed, opening the
+        same thread from two rows."""
+        chat, child = uuid4(), uuid4()
+        self._children(mocker, {chat: [_stored_child(
+            child, "explore", "call_1")]})
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            self._memory(app, chat)
+            app._agent_stack = [AgentRow("explore", 1, "s1", child)]
+
+            await pilot.press("ctrl+g")
+            assert await settle(
+                pilot, lambda: isinstance(app.screen, AgentPickerScreen))
+            rows = _picker_rows(app.screen)
+            classes = self._classes(app.screen)
+
+        assert rows == ["this conversation", "  explore"]
+        assert "finished" not in classes[1]
+
+    @pytest.mark.asyncio
+    async def test_grandchildren_follow_their_own_parent(self, mocker):
+        """Depth-first under the parent, at the walk's own level: the
+        stored half shares the panel's column language (a top-level
+        spawn is level 1 on both), so a grandchild indents under the
+        run that spawned it rather than under its uncle."""
+        chat, child, grandchild = uuid4(), uuid4(), uuid4()
+        self._children(mocker, {
+            chat: [_stored_child(child, "explore", "call_1")],
+            child: [_stored_child(grandchild, "review", "call_9")],
+        })
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            self._memory(app, chat)
+            app._agent_stack = []
+
+            await pilot.press("ctrl+g")
+            assert await settle(
+                pilot, lambda: isinstance(app.screen, AgentPickerScreen))
+            rows = _picker_rows(app.screen)
+
+        assert rows == ["this conversation", "  explore", "    review"], (
+            f"the picker offered {rows}")
+
+    def test_a_hand_edited_cycle_terminates(self, mocker):
+        """The crumb's rule for the crumb's reason: a parent link is
+        data, and data can be wrong in ways a walk turns into a wedged
+        UI. Driven at the helper so no pilot has to hang to prove it."""
+        root, first, second = uuid4(), uuid4(), uuid4()
+        self._children(mocker, {
+            root: [_stored_child(first, "explore", "call_1")],
+            first: [_stored_child(second, "review", "call_2")],
+            second: [_stored_child(first, "explore", "call_1")],
+        })
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+
+        rows = app._stored_run_tree(root)
+
+        assert [r["thread_id"] for r in rows] == [str(first), str(second)]
+
+    def test_a_nameless_row_still_names_itself(self, mocker):
+        """Pre-§47 rows carry no agent_name (NULL in the column); the
+        fallback is a short id rather than an empty row, which would be
+        a control with no name -- the unbound-row rule from the other
+        direction."""
+        root, child = uuid4(), uuid4()
+        self._children(mocker, {root: [_stored_child(
+            child, None, "call_1")]})
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+
+        (row,) = app._stored_run_tree(root)
+
+        assert row["label"] == f"subagent {str(child)[:8]}"
+        assert row["live"] is False
 
 
 # ---------------------------------------------------------------------------

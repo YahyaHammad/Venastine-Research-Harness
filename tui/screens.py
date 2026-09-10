@@ -1023,9 +1023,14 @@ class AgentPickerScreen(ModalScreen[object]):
             # bound and parts company with the column wherever a span
             # adds a display level without adding a spawn level.
             # `Text(...)` for RA1's reason: an agent name comes from a
-            # file this project did not necessarily write.
-            ListItem(Label(Text(
-                f"{'  ' * run.get('level', 0)}{run['label']}")))
+            # file this project did not necessarily write. Finished
+            # runs read muted: they open like any other row, so the
+            # mark is de-emphasis rather than a warning, and `live`
+            # defaults True so a hand-built row renders as running.
+            ListItem(
+                Label(Text(
+                    f"{'  ' * run.get('level', 0)}{run['label']}")),
+                classes="" if run.get("live", True) else "finished")
             for run in self._runs
         ]
         children = [Label("Read which run?", id="agent-picker-title")]

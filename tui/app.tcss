@@ -497,6 +497,16 @@ ClaimsScreen {
     max-height: 14;
 }
 
+/* Finished runs read muted. They open like any other row, so this is
+   de-emphasis rather than a warning -- and a muted hue rather than the
+   `dim` attribute, which is the transcript's vocabulary (test_themes
+   pins it to the system role) while this list is a modal, where
+   UNVERIFIED_COVERAGE already set the precedent that quiet names a
+   different state rather than a broken one. */
+#agent-picker-list .finished {
+    color: $text-muted;
+}
+
 AgentPickerScreen {
     align: center middle;
 }

@@ -1448,13 +1448,65 @@ class VenastineApp(App):
 
     # -- §47, the read-only thread view ----------------------------------
 
+    def _stored_run_tree(self, root_id) -> list:
+        """Finished runs under `root_id`, oldest-first, depth-indented.
+
+        The picker reads the live stack, which forgets a run the moment
+        it ends; storage remembers it through the parent link slice 1
+        put in a column -- the same source ctrl+click already resolves
+        against, so the two routes cannot offer different histories.
+        One query per thread WITH children (child_threads is one query
+        per parent, not per spawn line), which is cheap for a modal that
+        opens on a keypress and never on the hot path. `seen` guards a
+        hand-edited cycle, the crumb's rule for the crumb's reason.
+        Live threads are EXCLUDED here: the caller owns the live half
+        and this half must never list a run twice however the two
+        overlap. Each row carries `live: False`; see the screen for why
+        that key exists rather than a second list.
+        """
+        try:
+            root = UUID(str(root_id))
+        except (ValueError, AttributeError, TypeError):
+            return []
+        live = {str(row.thread_id) for row in self._agent_stack
+                if row.thread_id is not None}
+        live.add(str(root_id))
+        found, seen, fringe = [], {str(root_id)}, []
+        try:
+            fringe = [(child, 1) for child in storage.child_threads(root)]
+        except Exception:                                   # noqa: BLE001
+            logger.exception("Could not read this thread's spawned runs.")
+            return []
+        while fringe:
+            child, level = fringe.pop(0)
+            cid = str(child["id"])
+            if cid in seen:
+                continue
+            seen.add(cid)
+            if cid not in live:
+                name = child.get("agent_name") or f"subagent {cid[:8]}"
+                found.append({"label": name, "level": level,
+                              "thread_id": cid, "live": False})
+            try:
+                grandchildren = storage.child_threads(child["id"])
+            except Exception:                               # noqa: BLE001
+                logger.exception(
+                    "Could not read a spawned run's children.")
+                continue
+            fringe = [(g, level + 1) for g in grandchildren] + fringe
+        return found
+
     def action_pick_agent(self) -> None:
         """ctrl+g: choose a run to read, from the keyboard (§47).
 
-        The SAME list the sidebar draws, from the same two facts -- the
-        conversation's own thread and the spans open right now -- and
-        through the SAME ordering, which is what makes "the two routes
-        cannot come to offer different things" true rather than intended.
+        Live rows are the SAME list the sidebar draws, through the SAME
+        ordering (`lineage_rows`) -- which is what keeps the two from
+        disagreeing about what is running. Below them, the stored
+        descendants the stack has already forgotten: a finished run
+        stays openable, so a picker that omitted it lied by omission
+        while ctrl+click on the same call opened it. The sidebar keeps
+        its narrower contract (who is running); the picker answers the
+        wider one (what can I read), and the two differ on purpose.
         This iterated `_agent_stack` raw, so it drew arrival order under
         depth indentation: two peers each spawning a grandchild arrive A,
         B, A's child, B's child, and the picker put A's child under B --
@@ -1473,22 +1525,30 @@ class VenastineApp(App):
             runs.append({
                 "label": (self.active_agent.name if self.active_agent
                           else "this conversation"),
-                "level": 0, "thread_id": str(root)})
+                "level": 0, "thread_id": str(root), "live": True})
         for row, level in lineage_rows(self._agent_stack):
             if row.thread_id is not None:
                 runs.append({"label": row.name,
-                             # `level`, and the key is named for what it
-                             # holds: the walk's column, exactly as the
-                             # panel indents by it. It was called `depth`
-                             # for one batch after it stopped being one
-                             # (see `lineage_rows` for the difference),
-                             # which is the drift storage.py's `getattr`
-                             # comments were repaired for. A row whose
-                             # parent has no thread still keeps its own
-                             # column, because the column is about lineage
-                             # and being openable is not.
-                             "level": level,
-                             "thread_id": str(row.thread_id)})
+                              # `level`, and the key is named for what it
+                              # holds: the walk's column, exactly as the
+                              # panel indents by it. It was called `depth`
+                              # for one batch after it stopped being one
+                              # (see `lineage_rows` for the difference),
+                              # which is the drift storage.py's `getattr`
+                              # comments were repaired for. A row whose
+                              # parent has no thread still keeps its own
+                              # column, because the column is about lineage
+                              # and being openable is not.
+                              "level": level,
+                              "thread_id": str(row.thread_id), "live": True})
+        if root is not None:
+            # History the stack has forgotten, from the conversation root
+            # rather than the viewed thread: one stable list wherever the
+            # key is pressed, and the in-viewer facet needs no second
+            # rule. Live first, then stored, each half in lineage order;
+            # the stored half skips anything still live, so no run
+            # appears twice however the two overlap.
+            runs.extend(self._stored_run_tree(root))
 
         def chosen(thread_id) -> None:
             if thread_id:
