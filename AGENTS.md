@@ -48,7 +48,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 4206 tests, offline, ~2-3 min by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 4209 tests, offline, ~2-3 min by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -1022,18 +1022,34 @@ them the other way and is simply lost. The posted list is a copy because the UI 
 iterates it, and handing over the object the worker keeps appending to makes the worker a second
 writer of what the UI thread is reading.
 
-**The panel is ordered by LINEAGE, not by arrival** (NA17). Rows still indent by depth, and peers
-at one depth now legitimately share a column. What had to change is the order, because arrival
-order and lineage order are the same thing for a stack and are not for a tree: two children of
-one turn each spawning a grandchild can arrive A, B, A's child, B's child, and drawing that in
-order puts A's child one level in from B. The panel would be INVENTING a lineage, which is worse
-than omitting one. `_lineage_order` keys its cycle guard on row IDENTITY rather than on
-`span_id`, because `span_id` defaults to `""` — so a set of ids drops the second hand-built row,
-invisibly in the app and wrongly in every test that builds rows directly.
+**The panel is ordered by LINEAGE, not by arrival** (NA17). Peers at one depth now legitimately
+share a column. What had to change is the order, because arrival order and lineage order are the
+same thing for a stack and are not for a tree: two children of one turn each spawning a
+grandchild can arrive A, B, A's child, B's child, and drawing that in order puts A's child one
+level in from B. The panel would be INVENTING a lineage, which is worse than omitting one.
+`lineage_rows` keys its cycle guard on row IDENTITY rather than on `span_id`, because `span_id`
+defaults to `""` — so a set of ids drops the second hand-built row, invisibly in the app and
+wrongly in every test that builds rows directly.
+
+**And the INDENT is the walk, not `AgentRow.depth`** (batch 75, review of §47). This entry used
+to say "rows still indent by depth", and that was one number doing two jobs. `depth` is
+`ToolContext.subagent_depth`, the number C3 bounds, about how many SPAWNS deep a run is — and a
+research pass adds a display level without adding a spawn level, because it opens its span at
+`context_depth + 1` and hands the same context down. So a pass and the subagent it spawned both
+reported depth 1 and the child drew level with its own parent; `/init`'s initializer is the same
+shape. `lineage_rows` returns `(row, level)` pairs and the level is the DEEPER of the walk's
+column and the row's own depth: each is a lower bound on nesting, and the second is what places a
+row whose parent is not in the stack (`parent_id` is None both for a top-level span and for a row
+that never recorded one, and a depth above 1 tells them apart). The alternative considered and
+refused was bumping the pass's context, which would have spent one level of what a pass may spawn
+on a rendering fix.
 
 **ctrl+g is the keyboard route to the sidebar's rows** (§47). The panel is deliberately not
 focusable, so making its rows clickable made navigation mouse-only; the picker mirrors ctrl+t and
-draws from the same two facts the panel does, so the two cannot come to offer different things.
+draws from the same two facts the panel does, **through the same `lineage_rows` walk** — it
+iterated the stack raw until batch 75, so it indented by a column in arrival order and drew A's
+child under B, which is NA17's defect in the surface NA17 did not touch. One walk is what makes
+"the two cannot come to offer different things" structural rather than intended.
 **The letter was chosen by elimination and the test MEASURES it** against
 `screen.active_bindings` with the prompt focused, which is the only state where the answer means
 anything: `TextArea` claims a/c/d/e/f/k/u/v/w/x/y/z, `App` claims ctrl+c and ctrl+q, textual claims

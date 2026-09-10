@@ -85,7 +85,8 @@ from tui.screens import (
 from security import posture
 from tui.widgets import (
     AgentPanel, AgentRow, ANIMATION_INTERVAL,
-    CONVERSATION_ROLES, EffortRaven, GoalBanner, PostureBadge, PromptInput,
+    CONVERSATION_ROLES, EffortRaven, GoalBanner, lineage_rows,
+    PostureBadge, PromptInput,
     RavenPanel, ResearchProgress, SlashSuggest, SpawnSelected,
     ThinkingIndicator,
     THREAD_VIEW_POLL_S, ThreadCrumb, ThreadSelected, TodoPanel,
@@ -1350,8 +1351,13 @@ class VenastineApp(App):
         """ctrl+g: choose a run to read, from the keyboard (§47).
 
         The SAME list the sidebar draws, from the same two facts -- the
-        conversation's own thread and the spans open right now -- so
-        the two routes cannot come to offer different things.
+        conversation's own thread and the spans open right now -- and
+        through the SAME ordering, which is what makes "the two routes
+        cannot come to offer different things" true rather than intended.
+        This iterated `_agent_stack` raw, so it drew arrival order under
+        depth indentation: two peers each spawning a grandchild arrive A,
+        B, A's child, B's child, and the picker put A's child under B --
+        NA17's own defect, in the surface NA17 did not touch.
 
         Runs with no thread yet are left out. A row that cannot be
         opened would be a control that does nothing, which is the rule
@@ -1367,10 +1373,15 @@ class VenastineApp(App):
                 "label": (self.active_agent.name if self.active_agent
                           else "this conversation"),
                 "depth": 0, "thread_id": str(root)})
-        for row in self._agent_stack:
+        for row, level in lineage_rows(self._agent_stack):
             if row.thread_id is not None:
                 runs.append({"label": row.name,
-                             "depth": max(row.depth, 1),
+                             # The walk's level, exactly as the panel
+                             # indents by it -- see `lineage_rows`. A row
+                             # whose parent has no thread still keeps its
+                             # own column, because the column is about
+                             # lineage and being openable is not.
+                             "depth": level,
                              "thread_id": str(row.thread_id)})
 
         def chosen(thread_id) -> None:

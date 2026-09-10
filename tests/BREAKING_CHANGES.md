@@ -4110,7 +4110,7 @@ WIDENS the window (a few hundred rows) and raises the preemption rate
 (`sys.setswitchinterval`, restored in a `finally`). A test whose input cannot
 discriminate is batch 14's lesson, reached from the scheduling side. Batch 74.
 
-### `_lineage_order` keyed on `span_id` instead of row identity
+### `lineage_rows` keyed on `span_id` instead of row identity
 
 **Symptom:** `test_hand_built_rows_that_share_a_defaulted_id_all_survive`.
 
@@ -4120,7 +4120,7 @@ rows always carry a real id, so this is invisible in the app and wrong in
 every test that builds rows directly -- which this file already records tests
 here doing. Batch 74.
 
-### Testing `_lineage_order` and calling it the panel
+### Testing `lineage_rows` and calling it the panel
 
 **Symptom:** `test_the_PANEL_draws_them_in_lineage_order` passes while
 `AgentPanel._redraw` iterates the raw stack.
@@ -4140,3 +4140,26 @@ nothing. Eight is where the unfixed configuration produced "database is
 locked". The busy timeout was already 5000ms from SQLAlchemy's pysqlite
 default and is restated explicitly, because the measurements rest on it.
 Batch 74.
+
+### Indenting a run by `AgentRow.depth` again
+
+**Symptom:** `test_the_column_is_the_walk_and_not_the_reported_depth`,
+`test_the_PANEL_draws_a_passs_child_one_level_in`, or
+`test_it_draws_the_same_shape_the_panel_does`.
+
+**Fix:** `lineage_rows` returns `(row, level)` pairs, and the level is the
+deeper of the walk's column and the row's own depth -- not `depth` alone.
+`depth` is the number C3 bounds, about how many SPAWNS deep a run is, and a
+research pass adds a display level without adding a spawn level: the pass and
+the subagent it spawned both report 1, so drawing by depth put a child level
+with its parent. Both surfaces that draw this list go through the walk, which
+is what keeps the sidebar and ctrl+g from offering different shapes. Batch 75.
+
+### The run picker iterating `_agent_stack` raw
+
+**Symptom:** `test_it_draws_the_same_shape_the_panel_does`.
+
+**Fix:** the panel has ordered by lineage since NA17; the picker indented by a
+column in ARRIVAL order, so two peers each spawning a grandchild drew A's
+child under B -- NA17's own defect in the surface NA17 did not touch. Both call
+`lineage_rows` now. Batch 75.

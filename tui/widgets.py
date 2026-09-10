@@ -657,21 +657,51 @@ class AgentRow:
     parent_id: object = None
 
 
-def _lineage_order(rows) -> list:
-    """`rows` depth-first, every child immediately under its own parent.
+def lineage_rows(rows) -> list:
+    """`[(row, level)]` depth-first, every child immediately under its
+    own parent, at the column its own lineage puts it in.
 
-    §47 SLICE 8. The panel indents by depth, so what sits ABOVE a row is
-    what a reader takes to be its parent. While one agent ran at a time
-    arrival order guaranteed that reading: a stack can only arrive
+    §47 SLICE 8. The panel indents, so what sits ABOVE a row is what a
+    reader takes to be its parent. While one agent ran at a time arrival
+    order guaranteed that reading: a stack can only arrive
     outermost-first. Peers break it -- two children of one turn each
     spawning a grandchild can arrive A, B, A's child, B's child, and
     drawing that in order puts A's child under B. The panel would be
     inventing a lineage, which is worse than omitting one.
 
+    THE LEVEL IS THE DEEPER OF THE WALK AND `AgentRow.depth`, which are
+    two different questions however often they agree. `depth` is
+    ToolContext.subagent_depth -- the number C3 BOUNDS, about how many
+    spawns deep a run is. The walk is where the row sits in the parent
+    chain THIS stack contains. Each is a lower bound on how nested the run
+    is, so the honest column is the larger, and the two ways they part are
+    both real:
+
+      * The walk knows more where a span added a display level without
+        adding a spawn level. A research pass opens its span at
+        `context_depth + 1` and hands the same context down, so a subagent
+        it spawns reports depth 1 as well and drew level with its own
+        parent; `/init`'s initializer is the same shape. Taking the walk
+        fixes every instance at once and leaves the spawn bound alone --
+        bumping the pass's context would have spent one level of what a
+        pass may spawn on a rendering fix.
+      * The row knows more where its parent is not in the stack at all.
+        `parent_id` is None for a genuine top-level span AND for a row
+        that never recorded one, and a depth above 1 is what tells them
+        apart, since a run two spawns deep has a parent by construction.
+
+    A top-level span is level 1, so the ordinary case draws exactly where
+    it drew before: a chat turn's spawn at depth 1 is also at level 1.
+
     Ordered here rather than sorted in the sink for the reason the sink
     keeps its own stack: enter/exit pairing is the sink's business and
     what the rows MEAN on screen is this widget's. It is also why this
-    takes rows and returns rows rather than mutating anything.
+    takes rows and returns them rather than mutating anything. PUBLIC,
+    unlike the module's other helpers, because two surfaces draw this
+    same list -- the panel and §47's ctrl+g picker, which is a screen
+    rather than a widget. The picker indented by `depth` in ARRIVAL order
+    and invented the lineage this function exists to prevent, in the one
+    case slice 8 made ordinary.
 
     ORPHANS ARE DRAWN, at the end. A row whose parent is not in the stack
     cannot happen through `span()` -- a child's span opens inside its
@@ -701,23 +731,52 @@ def _lineage_order(rows) -> list:
     seen: set = set()
     ordered: list = []
 
-    def walk(parent) -> None:
+    def walk(parent, level: int) -> None:
         for row in by_parent.get(parent, []):
             if id(row) in seen:
                 continue
             seen.add(id(row))
-            ordered.append(row)
+            # THE DEEPER OF THE TWO ANSWERS, because both are LOWER BOUNDS
+            # on how nested this run is and neither may be under-drawn.
+            # The walk knows the lineage this stack contains; the row knows
+            # how many spawns deep it is. Where they differ, one of them is
+            # missing something:
+            #
+            #   level > depth -- a span that added a display level without
+            #     adding a spawn level. A research pass and the subagent it
+            #     spawned both report depth 1, so only the walk tells them
+            #     apart.
+            #   depth > level -- a run whose parent is not in this stack.
+            #     `parent_id` is None both for a genuine top-level span and
+            #     for a row that never recorded one, and a depth above 1
+            #     settles which: a run two spawns deep HAS a parent, so an
+            #     absent one is missing rather than nonexistent. That is
+            #     the orphan case below reached through a null instead of a
+            #     dangling id, and drawing it at level 1 would claim it is
+            #     a child of the conversation.
+            drawn = max(level, row.depth)
+            ordered.append((row, drawn))
             # Only a row with a real id can have children. Recursing on
             # `""` would look up the bucket every defaulted row shares.
+            #
+            # ONE IN FROM WHERE THE PARENT WAS DRAWN, not from the walk's
+            # own count, so a chain always steps in. Pass the walk level
+            # instead and a parent bumped out by its own depth ends up
+            # level with its child, which is the invented lineage this
+            # function exists to prevent, one row along.
             if row.span_id:
-                walk(row.span_id)
+                walk(row.span_id, drawn + 1)
 
     # Depth is bounded by SUBAGENT_MAX_DEPTH, so the recursion is too.
-    walk(None)
+    walk(None, 1)
     for row in rows:
         if id(row) not in seen:
             seen.add(id(row))
-            ordered.append(row)
+            # An ORPHAN has no walk position, so its own depth is the only
+            # answer available -- floored at 1 for the reason the panel
+            # floors it, and the honest drawing of "somewhere below the
+            # root, we cannot say where".
+            ordered.append((row, max(row.depth, 1)))
     return ordered
 
 
@@ -737,7 +796,7 @@ class AgentPanel(Static):
     `depth`, bounded by config.SUBAGENT_MAX_DEPTH, and peers at one depth
     now legitimately share a column. The one thing that had to change is
     the ORDER: arrival order and lineage order were the same thing for a
-    stack and are not for a tree. See `_lineage_order`.
+    stack and are not for a tree. See `lineage_rows`.
 
     Fed from core/agent_activity.py through app.py, never polled -- the
     same split TodoPanel keeps: the sink says when, and this widget holds
@@ -860,21 +919,25 @@ class AgentPanel(Static):
             # armed like any other -- "back to the main agent" is then a
             # click rather than a special case somebody has to remember.
             self._armed(styles.get("assistant_label", ""), self._root))
-        for row in _lineage_order(self._stack):
-            name, depth = row.name, row.depth
-            # `max(depth, 1)` so a span that somehow reports depth 0 still
-            # reads as nested rather than colliding with the root row.
+        for row, level in lineage_rows(self._stack):
+            # THE WALK'S LEVEL, not `row.depth`. The two agree for a chat
+            # turn's spawns and part company wherever a span adds a display
+            # level without adding a spawn level -- a research pass and its
+            # own subagent both report depth 1, and drawing that put a
+            # child level with its parent. See `lineage_rows`.
             #
-            # The reason USED to be "two rows at column zero would say two
-            # agents are running, which is the one thing this panel must
-            # never claim". Slice 8 makes that claim true, and peers at one
-            # depth sharing a column is now the point. What survives is the
-            # narrower half: the root row stands for the CONVERSATION, and
-            # a span drawn level with it would read as a second
-            # conversation rather than as a run inside this one.
-            pad = " " * (self.INDENT * max(depth, 1))
+            # It is never 0, so a span cannot collide with the root row.
+            # That floor USED to be spelled `max(depth, 1)` and its reason
+            # USED to be "two rows at column zero would say two agents are
+            # running, which is the one thing this panel must never
+            # claim". Slice 8 makes that claim true, and peers sharing a
+            # column is now the point. What survives is the narrower half:
+            # the root row stands for the CONVERSATION, and a span drawn
+            # level with it would read as a second conversation rather
+            # than as a run inside this one.
+            pad = " " * (self.INDENT * level)
             room = self.WIDTH - len(pad) - 2      # the marker and its space
-            body.append(f"{pad}{MARK_RUNNING} {self._fit(name, room)}\n",
+            body.append(f"{pad}{MARK_RUNNING} {self._fit(row.name, room)}\n",
                         self._armed(styles.get("tool", ""), row.thread_id))
         # `no_wrap` / crop for batch 55's reason: a row this widget already
         # sized must not be re-wrapped by the Static underneath it, and a

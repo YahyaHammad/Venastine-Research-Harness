@@ -1208,6 +1208,37 @@ class TestTheRunPicker:
             "sidebar does, from the same two facts")
 
     @pytest.mark.asyncio
+    async def test_it_draws_the_same_shape_the_panel_does(self):
+        """NA17'S DEFECT, IN THE SURFACE NA17 DID NOT TOUCH.
+
+        The picker indents by a column and iterated the stack raw, so
+        arrival order decided who looked like whose child: two peers each
+        spawning a grandchild arrive A, B, A's child, B's child, and the
+        picker drew A's child under B. The panel has ordered by lineage
+        since slice 8; both go through the same walk now, which is what
+        makes 'the two cannot offer different things' structural.
+        """
+        threads = [uuid4() for _ in range(4)]
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._agent_stack = [
+                AgentRow("explore", 1, "a", threads[0]),
+                AgentRow("review", 1, "b", threads[1]),
+                AgentRow("alpha", 2, "a1", threads[2], parent_id="a"),
+                AgentRow("beta", 2, "b1", threads[3], parent_id="b"),
+            ]
+
+            await pilot.press("ctrl+g")
+            assert await settle(
+                pilot, lambda: isinstance(app.screen, AgentPickerScreen))
+            rows = _picker_rows(app.screen)
+
+        assert rows == ["  explore", "    alpha", "  review", "    beta"], (
+            f"the picker offered {rows}; each child has to follow its own "
+            "parent, or the indentation names the wrong one")
+
+    @pytest.mark.asyncio
     async def test_a_run_with_no_thread_is_not_offered(self):
         """A row that cannot be opened would be a control that does
         nothing -- the rule the sidebar's unbound rows already follow."""

@@ -938,7 +938,7 @@ class TestThePanelDrawsATree:
         drawn in that order, A's child sits under B at a deeper indent and
         the panel has invented a lineage.
         """
-        from tui.widgets import _lineage_order
+        from tui.widgets import lineage_rows
         AgentRow = self._rows()
 
         a = AgentRow("explore", 1, "a")
@@ -946,15 +946,17 @@ class TestThePanelDrawsATree:
         a_child = AgentRow("plan", 2, "a1", parent_id="a")
         b_child = AgentRow("plan", 2, "b1", parent_id="b")
 
-        ordered = _lineage_order([a, b, a_child, b_child])
+        ordered = lineage_rows([a, b, a_child, b_child])
 
-        assert [r.span_id for r in ordered] == ["a", "a1", "b", "b1"], (
+        assert [r.span_id for r, _level in ordered] == ["a", "a1", "b", "b1"], (
             "a grandchild is not drawn under its own parent")
+        assert [level for _r, level in ordered] == [1, 2, 1, 2], (
+            "each grandchild sits one column in from its own parent")
 
     def test_the_PANEL_draws_them_in_lineage_order(self):
         """THROUGH THE WIDGET, and that is the point of having both.
 
-        Every other test in this class calls `_lineage_order` directly, and
+        Every other test in this class calls `lineage_rows` directly, and
         the mutation that reverts `_redraw` to iterating the raw stack
         SURVIVED all of them -- measured. Testing a leaf and calling it the
         chain is one of the four traps `tests/BREAKING_CHANGES.md` records,
@@ -988,13 +990,13 @@ class TestThePanelDrawsATree:
         """Which is the thing that used to be forbidden. `AgentPanel`'s
         docstring said a flat list "would claim a concurrency this harness
         does not have"; NA9 gave it that concurrency."""
-        from tui.widgets import _lineage_order
+        from tui.widgets import lineage_rows
         AgentRow = self._rows()
 
-        rows = _lineage_order([AgentRow("explore", 1, "a"),
-                              AgentRow("review", 1, "b")])
-        assert [r.depth for r in rows] == [1, 1]
-        assert [r.span_id for r in rows] == ["a", "b"], (
+        rows = lineage_rows([AgentRow("explore", 1, "a"),
+                             AgentRow("review", 1, "b")])
+        assert [level for _r, level in rows] == [1, 1]
+        assert [r.span_id for r, _level in rows] == ["a", "b"], (
             "peers must keep the order they arrived in; there is no other "
             "honest answer for two runs with the same parent")
 
@@ -1002,13 +1004,16 @@ class TestThePanelDrawsATree:
         """The defensive half. It cannot happen through `span()` -- a child's
         span opens inside its parent's frame, so parents outlive children --
         but dropping such a row would make the panel lie by omission."""
-        from tui.widgets import _lineage_order
+        from tui.widgets import lineage_rows
         AgentRow = self._rows()
 
         orphan = AgentRow("plan", 2, "x1", parent_id="gone")
-        ordered = _lineage_order([AgentRow("explore", 1, "a"), orphan])
-        assert orphan in ordered
+        ordered = lineage_rows([AgentRow("explore", 1, "a"), orphan])
+        assert orphan in [row for row, _level in ordered]
         assert len(ordered) == 2
+        # Its own depth is the only column available, since it has no walk
+        # position -- floored at 1, like every other row.
+        assert dict((row.span_id, level) for row, level in ordered)["x1"] == 2
 
     def test_hand_built_rows_that_share_a_defaulted_id_all_survive(self):
         """`AgentRow.span_id` defaults to `""`, so every hand-built row
@@ -1017,11 +1022,11 @@ class TestThePanelDrawsATree:
         ids are real, and wrong in every test that builds rows directly,
         which BREAKING_CHANGES.md already records tests here doing. This is
         why the walk keys on row identity."""
-        from tui.widgets import _lineage_order
+        from tui.widgets import lineage_rows
         AgentRow = self._rows()
 
         rows = [AgentRow("explore", 1), AgentRow("review", 2)]
-        assert len(_lineage_order(rows)) == 2, (
+        assert len(lineage_rows(rows)) == 2, (
             "a row was dropped for sharing a defaulted span_id")
 
     def test_a_parent_cycle_terminates(self):
@@ -1029,13 +1034,58 @@ class TestThePanelDrawsATree:
         recursion into a wedged UI rather than a visible mistake. Note that
         the mutation removing the guard HANGS rather than fails, which is
         why the mutation harness carries a subprocess timeout."""
-        from tui.widgets import _lineage_order
+        from tui.widgets import lineage_rows
         AgentRow = self._rows()
 
         rows = [AgentRow("a", 1, "a", parent_id="b"),
                 AgentRow("b", 1, "b", parent_id="a")]
-        ordered = _lineage_order(rows)
+        ordered = lineage_rows(rows)
         assert len(ordered) == 2
+
+    def test_the_column_is_the_walk_and_not_the_reported_depth(self):
+        """A RESEARCH PASS AND ITS OWN SUBAGENT BOTH REPORT DEPTH 1.
+
+        `stream_deep_research_mode` opens its span at `context_depth + 1`
+        and hands the same context down, so a spawn inside the pass
+        computes `subagent_depth` 1 as well -- and indenting by that drew a
+        child level with its own parent, which is the lineage the panel
+        must never invent. `/init`'s initializer is the same shape.
+
+        Fixed by indenting by the walk rather than by the number C3
+        bounds, so the pass keeps every level of its spawn budget.
+        """
+        from tui.widgets import lineage_rows
+        AgentRow = self._rows()
+
+        # Exactly what the sink holds during an attended research run:
+        # the pass, and a subagent the pass spawned.
+        pass_row = AgentRow("Pass 1", 1, "p")
+        spawned = AgentRow("explore", 1, "s", parent_id="p")
+
+        ordered = lineage_rows([pass_row, spawned])
+
+        assert [r.span_id for r, _level in ordered] == ["p", "s"]
+        assert [level for _r, level in ordered] == [1, 2], (
+            "the pass and its own child were drawn in the same column, so "
+            "the panel reads them as peers")
+
+    def test_the_PANEL_draws_a_passs_child_one_level_in(self):
+        """Through the widget, for `test_the_PANEL_draws_them_in_lineage_
+        order`'s reason: a correct helper nothing calls is not a correct
+        panel, and this is the pairing that mutation survived once."""
+        from tui.widgets import AgentPanel
+        AgentRow = self._rows()
+
+        panel = AgentPanel()
+        panel.show(None, [AgentRow("Pass 1", 1, "p"),
+                          AgentRow("explore", 1, "s", parent_id="p")])
+
+        drawn = [ln for ln in panel.renderable.plain.splitlines() if ln.strip()]
+        indents = [len(ln) - len(ln.lstrip(" ")) for ln in drawn[2:]]
+
+        assert indents == [2, 4], (
+            f"drew at indents {indents}; a pass's subagent has to sit one "
+            "column in from the pass, however deep either reports itself")
 
     def test_the_sink_carries_the_parent_onto_the_row(self):
         """The one hop that was missing between batch 67's span and the
