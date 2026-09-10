@@ -1895,9 +1895,24 @@ independent bugs, both found by using the app.
   query stays as the fallback for an app that was never mounted, which is most of the
   suite. **A line written under a modal now LANDS** rather than being dropped, which for
   a routed warning is the whole point of a handler that exists because the TUI detached
-  stderr. In a pilot test, holding the widget before opening a modal still works and is
-  still the clearer spelling; `#thinking-indicator` and `#prompt` are still queries, so
-  their `NoMatches` guards are still load-bearing.
+   stderr. In a pilot test, holding the widget before opening a modal still works and is
+   still the clearer spelling; `#thinking-indicator` and `#prompt` are still queries, so
+   their `NoMatches` guards are still load-bearing.
+- **The held set is seven now, and the two that forced it were on the crash
+  path** (batch 76). A `permission_request` event is posted BEFORE the worker
+  pushes the modal it announces (`post_message` only enqueues for a later
+  pump; the push is a direct loop callback), so the first gated call of a
+  session was handled with a modal already active -- and died in
+  `refresh_usage_line` with `NoMatches`, taking the app down over a
+  usage-line repaint whose own docstring claimed containment. The
+  `permission_request` branch touches the raven three lines later through
+  the same unguarded query, so `UsageLine` and `RavenPanel` moved to
+  held-at-mount refs together; `GoalBanner`, `TodoPanel` and
+  `ResearchProgress` followed (notice events and pipeline events are
+  postable mid-modal too -- an attended review modal with passes still
+  reporting). Same preconditions as the transcript: unconditionally
+  composed (the checklist in exactly one of its three slots), never
+  remounted, query kept as the never-mounted fallback.
 - **Narration is best-effort; the ANSWER is not.** `_blocking_modal` returns the raw
   dismissal value, and `None` on timeout is what `interaction.decode` turns into the
   declining default. A failure while merely SAYING a request timed out used to escape as

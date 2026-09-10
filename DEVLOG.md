@@ -12228,3 +12228,56 @@ here assert what is printed, not what it is like to be asked twice.
 The nested worst case is also still unmeasured: three peers each nesting to `SUBAGENT_MAX_DEPTH` is
 twelve potential SQLite writers, and NA18's table measures 3, 8 and 16. Named in batch 75, unchanged
 here, and it belongs to whoever raises `SUBAGENT_MAX_PARALLEL`.
+
+## Batch 77 -- the first gated call, answered by a modal that was already open (2026-09-10)
+
+A live crash, not a review finding: three `spawn_subagent` calls in one response, and the app went
+down handling the first `permission_request` with `NoMatches: No nodes match '#usage-line'`.
+Restart clean, thread replays, spawn lines unopenable -- every symptom the mechanism predicts,
+since the crash lands between the narration yield and the approval answer: the assistant turn
+(with the `tool_use`) is persisted, no span ever opens, no `tool_result` is ever written.
+
+**THE MODAL WINS A RACE IT WAS NEVER SUPPOSED TO RUN.** `core/loop.py` yields the
+`permission_request` narration before calling `_obtain_approval`, and the TUI worker's `_consume`
+does `post_message` then steps the generator into the ask, which does `call_from_thread` for the
+push. But Textual 1.0.0's `post_message` from a foreign thread only *enqueues*
+(`message_pump.py:831` -- `call_soon_threadsafe(queue.put_nowait, ...)`), while the push is a
+*direct* loop callback, so the modal can be mounted before the already-posted event is *handled*.
+And `on_loop_event_message` calls `refresh_usage_line()` first, before any branch. The query at
+its end sat outside the `try` that covers the thresholds, under a docstring claiming
+containment -- while every sibling on a hot path was held or guarded. No parallel machinery is
+implicated: `with gate:` spans the whole ask and `_ask_lock` serialises the modals, so siblings
+cannot interleave narration mid-modal; a lone first gated call suffices, and three parallel
+spawns merely widen the window with three tool_call_start events in flight.
+
+**THE FIX EXTENDS BATCH 66, TWICE.** Commit one holds `UsageLine` and `RavenPanel` at mount --
+the raven because the `permission_request` branch touches it three lines below where the usage
+line died. Commit two holds `GoalBanner`, `TodoPanel` and `ResearchProgress` (notice events and
+pipeline events are postable mid-modal too -- an attended review modal with passes still
+reporting -- and the checklist lives in exactly one of its three slots, so the hold is
+unambiguous). Same preconditions as the transcript in both: unconditionally composed, never
+remounted, query kept as the never-mounted fallback the suite runs under.
+
+- Both regression tests verified RED by stashing the production change: the exact `NoMatches`
+  (`#usage-line`, then `#goal-banner`) out of the handler. The depth-0 silence (no asker label
+  at depth 0) passes either way, which is what makes it a control.
+- Ruff caught one of its own in passing: the new test's local import tripped F401, fixed by
+  reading the held ref instead -- which is also the stronger assertion, since a query would
+  raise under the modal the test holds open.
+- Deliberately untouched: the gate/`_ask_lock`/`_blocking_modal` layer (sound as built),
+  narration-before-modal ordering (documented intent), and `textual run --dev` (inapplicable
+  to the `main.py` entry -- the hidden second exit-renderable is only recoverable from
+  `logs/app.log`, which carried no ERROR lines for this crash at all).
+
+### Files
+
+- `tui/app.py` -- five held refs, three held properties, four rewritten call sites.
+- `tests/test_tui.py` -- `TestEventsUnderAnOpenModal` (two tests).
+- `AGENTS.md` -- the held-set paragraph, now seven.
+
+### Not done
+
+The `screens.py:581` list juggling was re-read and is a modal-local python list, not a widget
+removal -- noted so the next reader does not re-audit it. `restyle_sidebar`'s remaining direct
+queries (`#agent-panel`, `#thread-crumb`) stay queries: restyling cannot run mid-turn today, and
+holding them would be machinery pretending to work.

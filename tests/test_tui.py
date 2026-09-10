@@ -1374,6 +1374,36 @@ class TestEventsUnderAnOpenModal:
 
         assert app._transcript._entries, "nothing survived the modal"
 
+    @pytest.mark.asyncio
+    async def test_sidebar_refreshes_land_while_a_modal_is_open(self):
+        """The same class one widget over: refresh_goal_banner and
+        refresh_todo_panel run off notice events and resume paths, and
+        on_pipeline_event_message touches the progress widget while an
+        attended-review modal can be open. All three are held at mount
+        now; this posts nothing and calls them directly with a modal on
+        top, which is exactly what the event paths do."""
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._memory = SimpleNamespace(extra={
+                "goal": "ship it",
+                "todos": [{"content": "write it", "status": "pending"}]})
+            app.push_screen(PermissionScreen("shell", {"command": "ls"}))
+            assert await settle(
+                pilot, lambda: isinstance(app.screen, PermissionScreen)), \
+                "the modal never opened"
+            app.refresh_goal_banner()
+            app.refresh_todo_panel()
+            # Held, not queried: the assertions below must read through
+            # the same refs the refreshes wrote through, and a query
+            # would raise under the modal -- which is the defect.
+            assert app._goal_banner.goal == "ship it"
+            assert app._todo_panel.todos == [
+                {"content": "write it", "status": "pending"}]
+            assert app._research_progress is app._progress_widget
+            app.screen.dismiss(False)
+            await pilot.pause()
+
 
 @pytest.mark.asyncio
 async def test_a_handler_failure_cannot_take_the_app_down():

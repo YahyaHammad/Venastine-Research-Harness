@@ -657,6 +657,14 @@ class VenastineApp(App):
         # NoMatches. None until mounted, like the four above.
         self._usage_widget: UsageLine | None = None
         self._raven_widget: RavenPanel | None = None
+        # Goal banner, checklist and research progress, held for the same
+        # reason: refresh_goal_banner/refresh_todo_panel run off notice
+        # events (postable mid-modal), and on_pipeline_event_message
+        # touches the progress widget while an attended-review modal can
+        # be open. None until mounted, like the five above.
+        self._goal_widget: GoalBanner | None = None
+        self._todo_widget: TodoPanel | None = None
+        self._progress_widget: ResearchProgress | None = None
         # The thread the viewer is showing, or None when it is closed.
         # THE ONE FACT that says whether the viewer is open; everything
         # else -- the switcher's `current`, the crumb's rows, the
@@ -834,6 +842,10 @@ class VenastineApp(App):
         self._transcript_widget = self.query_one("#transcript", Transcript)
         self._usage_widget = self.query_one("#usage-line", UsageLine)
         self._raven_widget = self.query_one("#raven", RavenPanel)
+        self._goal_widget = self.query_one("#goal-banner", GoalBanner)
+        self._todo_widget = self.query_one("#todo-panel", TodoPanel)
+        self._progress_widget = self.query_one(
+            "#research-progress", ResearchProgress)
         self._thread_view_widget = self.query_one("#thread-view", Transcript)
         self._crumb_widget = self.query_one("#thread-crumb", ThreadCrumb)
         self._pane_widget = self.query_one("#pane", ContentSwitcher)
@@ -1331,11 +1343,38 @@ class VenastineApp(App):
         except Exception:  # noqa: BLE001 -- not mounted; nothing to reset
             pass
 
+    @property
+    def _goal_banner(self) -> GoalBanner:
+        """The objective banner, HELD rather than queried per access.
+
+        Same reason as `_usage_line`: refresh_goal_banner() runs off
+        notice events and resume paths, both reachable with a modal on
+        top. Nothing ever remounts it; the query remains as the fallback
+        for an app that was constructed but never mounted.
+        """
+        if self._goal_widget is not None:
+            return self._goal_widget
+        return self.query_one("#goal-banner", GoalBanner)
+
+    @property
+    def _todo_panel(self) -> TodoPanel:
+        """The checklist, HELD rather than queried per access.
+
+        Same reason as `_goal_banner` beside it: refresh_todo_panel()
+        runs off the `todo_changed` notice, which a worker can post
+        while a modal is open. Nothing ever remounts it (its slot is
+        chosen once at mount); the query remains as the fallback for
+        an app that was constructed but never mounted.
+        """
+        if self._todo_widget is not None:
+            return self._todo_widget
+        return self.query_one("#todo-panel", TodoPanel)
+
     def refresh_goal_banner(self) -> None:
         # self._memory, NOT self.memory: reading the banner must not be
         # what creates the thread this property exists to defer.
         goal = self._memory.extra.get("goal") if self._memory else None
-        self.query_one("#goal-banner", GoalBanner).goal = goal
+        self._goal_banner.goal = goal
 
     def refresh_todo_panel(self) -> None:
         """Re-read the checklist from thread state and repaint.
@@ -1349,7 +1388,7 @@ class VenastineApp(App):
         painting a panel must not be what creates a thread.
         """
         todos = self._memory.extra.get("todos") if self._memory else None
-        self.query_one("#todo-panel", TodoPanel).todos = todos
+        self._todo_panel.todos = todos
 
     @property
     def _transcript(self) -> Transcript:
@@ -1747,6 +1786,17 @@ class VenastineApp(App):
 
     @property
     def _research_progress(self) -> ResearchProgress:
+        """Live pipeline state, HELD rather than queried per access.
+
+        Same reason as `_todo_panel`: on_pipeline_event_message runs on
+        the UI thread off a worker's post, and an attended run can have
+        a review-consent modal open while passes still report -- the
+        exact shape that took the app down over the usage line. Nothing
+        ever remounts it; the query remains as the fallback for an app
+        that was constructed but never mounted.
+        """
+        if self._progress_widget is not None:
+            return self._progress_widget
         return self.query_one("#research-progress", ResearchProgress)
 
     @property
@@ -2204,7 +2254,7 @@ class VenastineApp(App):
         """
         self.refresh_goal_banner()
         self.refresh_todo_panel()
-        self.query_one("#research-progress", ResearchProgress).restyle()
+        self._research_progress.restyle()
         # Batch 59. A Rich-styled sidebar widget like the two above it, so
         # it needs the same poke -- tcss reaches the panel's box and not
         # the styles inside its Text.
