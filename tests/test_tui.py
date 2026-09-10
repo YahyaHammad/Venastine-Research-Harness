@@ -1331,6 +1331,50 @@ async def test_the_handler_is_detached_when_the_app_unmounts():
     assert len(after) == len(before), "the handler outlived its app"
 
 
+class TestEventsUnderAnOpenModal:
+    """A permission_request event is posted BEFORE the worker pushes the
+    modal it announces (post_message only enqueues for a later pump;
+    the push is a direct loop callback), so the first gated call of a
+    session was handled with a modal already active -- and died in
+    refresh_usage_line with NoMatches, taking the app down over a
+    usage-line repaint. UsageLine and RavenPanel are held at mount for
+    the transcript's reason (batch 66); this drives all three event
+    shapes through a mounted app with a modal on top."""
+
+    @pytest.mark.asyncio
+    async def test_loop_events_land_while_a_modal_is_open(self):
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._memory = SimpleNamespace(billed_tokens=118_000,
+                                          last_input_tokens=41_000)
+            app.push_screen(PermissionScreen("shell", {"command": "ls"}))
+            assert await settle(
+                pilot, lambda: isinstance(app.screen, PermissionScreen)), \
+                "the modal never opened"
+            app.post_message(LoopEventMessage(LoopEvent(token_delta="hi ")))
+            app.post_message(LoopEventMessage(LoopEvent(tool_call_start={
+                "id": "c1", "name": "spawn_subagent",
+                "input": {"agent_name": "explore", "task": "t"}})))
+            app.post_message(LoopEventMessage(LoopEvent(permission_request={
+                "tool_name": "spawn_subagent", "params": {},
+                "notice": None, "rationale": None, "headline": None})))
+            assert await settle(
+                pilot,
+                lambda: any("spawn_subagent" in t
+                            for _r, t in app._transcript._entries)), \
+                "a tool line posted under a modal never landed -- an " \
+                "exception out of the handler takes the app down"
+            # Held, not queried: query_one searches the ACTIVE screen,
+            # which is the modal until it is dismissed below.
+            body = app._usage_line.renderable.plain
+            assert "billed 118k" in body and "ctx 41k" in body, body
+            app.screen.dismiss(False)
+            await pilot.pause()
+
+        assert app._transcript._entries, "nothing survived the modal"
+
+
 @pytest.mark.asyncio
 async def test_a_handler_failure_cannot_take_the_app_down():
     """emit() runs wherever the logging happened -- a research worker

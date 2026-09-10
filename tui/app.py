@@ -648,6 +648,15 @@ class VenastineApp(App):
         self._thread_view_widget: Transcript | None = None
         self._crumb_widget: ThreadCrumb | None = None
         self._pane_widget = None
+        # The sidebar usage line and the raven, held for the transcript's
+        # reason (batch 66): on_loop_event_message touches both on EVERY
+        # event, and a permission_request event is handled after the worker
+        # has already pushed the modal it announces (post_message only
+        # enqueues; the push is a direct loop callback), so the very first
+        # gated call of a session died in refresh_usage_line with
+        # NoMatches. None until mounted, like the four above.
+        self._usage_widget: UsageLine | None = None
+        self._raven_widget: RavenPanel | None = None
         # The thread the viewer is showing, or None when it is closed.
         # THE ONE FACT that says whether the viewer is open; everything
         # else -- the switcher's `current`, the crumb's rows, the
@@ -823,6 +832,8 @@ class VenastineApp(App):
         # on top. See the `_transcript` property for why holding it is
         # what makes that survivable.
         self._transcript_widget = self.query_one("#transcript", Transcript)
+        self._usage_widget = self.query_one("#usage-line", UsageLine)
+        self._raven_widget = self.query_one("#raven", RavenPanel)
         self._thread_view_widget = self.query_one("#thread-view", Transcript)
         self._crumb_widget = self.query_one("#thread-crumb", ThreadCrumb)
         self._pane_widget = self.query_one("#pane", ContentSwitcher)
@@ -1316,7 +1327,7 @@ class VenastineApp(App):
         # until that thread's first turn rather than keeping the previous
         # thread's totals. Pre-mount setter calls have no widget yet.
         try:
-            self.query_one("#usage-line", UsageLine)._reset()
+            self._usage_line._reset()
         except Exception:  # noqa: BLE001 -- not mounted; nothing to reset
             pass
 
@@ -1375,6 +1386,22 @@ class VenastineApp(App):
         if self._transcript_widget is not None:
             return self._transcript_widget
         return self.query_one("#transcript", Transcript)
+
+    @property
+    def _usage_line(self) -> UsageLine:
+        """The sidebar usage line, HELD rather than queried per access.
+
+        Same reason as `_transcript` above: on_loop_event_message calls
+        refresh_usage_line() on EVERY event, and an event posted before
+        its modal is pushed is handled after -- at which point a query
+        for anything on the main screen raises NoMatches out of the
+        handler and takes the app down. Nothing ever remounts this
+        widget, so the reference cannot go stale; the query remains as
+        the fallback for an app that was constructed but never mounted.
+        """
+        if self._usage_widget is not None:
+            return self._usage_widget
+        return self.query_one("#usage-line", UsageLine)
 
     # -- §47, the read-only thread view ----------------------------------
 
@@ -1706,6 +1733,16 @@ class VenastineApp(App):
 
     @property
     def _raven(self) -> RavenPanel:
+        """The mascot, HELD rather than queried per access.
+
+        Same reason as `_usage_line` above: every event branch touches
+        the raven (pause/resume/state), so the second event handled
+        under a modal would have died one branch below where the usage
+        line died. Nothing ever remounts it; the query remains as the
+        fallback for an app that was constructed but never mounted.
+        """
+        if self._raven_widget is not None:
+            return self._raven_widget
         return self.query_one("#raven", RavenPanel)
 
     @property
@@ -2102,7 +2139,7 @@ class VenastineApp(App):
         except Exception:  # noqa: BLE001 -- see above
             ceiling = 0
         overridden = session.trigger_for(self.provider_name, self.model) is not None
-        self.query_one("#usage-line", UsageLine).update_usage(
+        self._usage_line.update_usage(
             self._memory.billed_tokens, self._memory.last_input_tokens,
             ceiling, overridden)
 
