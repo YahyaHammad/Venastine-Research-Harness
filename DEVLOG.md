@@ -12531,3 +12531,87 @@ numbers move, in ten seconds instead of six minutes.
   `_collect_in_a_subprocess`, `_collected_nodeids`, two tests.
 - `README.md`, `AGENTS.md`, `ARCHITECTURE.md` -- 4259 to 4261, and this file's
   own tree entry 24 to 26.
+
+
+## Batch 81 -- the reason moved, so the decision stands on a different one (2026-09-10)
+
+Batch 54 deferred `shift+enter` because **textual** enabled the kitty keyboard
+protocol in its Linux drivers alone, so a Windows terminal sent a bare CR and
+the prompt box submitted a half-written message. 6.6.0 added the protocol to
+`drivers/windows_driver.py`. Batch 79 spotted that the reason had expired and
+held the claim back for a batch of its own, rather than reversing a locked
+decision as a side effect of a version bump.
+
+This is that batch. **The answer is still no, and the interesting part is why.**
+
+### What was measured
+
+On the installed 8.2.8, not read:
+
+| Fact | Result |
+|---|---|
+| `windows_driver.start_application_mode` | writes `\x1b[>1u`, unconditionally |
+| parser fed `\x1b[13;2u` | key `shift+enter` |
+| parser fed `\r` | key `enter` |
+| parser fed `\x1b\r` (alt+enter) | no key at all |
+| `PromptInput.BINDINGS` | already binds `shift+enter` to `newline` |
+
+So every half the CODE owns is ready, and has been since the pin moved.
+
+**The obstacle is the TERMINAL now.** Textual's Windows driver reads console
+input records and keeps `uChar.UnicodeChar` alone -- it discards
+`dwControlKeyState`, so the modifier never reaches the app through that path.
+The escape encoding is the only route a modified Enter has, and that needs a
+terminal implementing the protocol. Windows Terminal shipped support in
+**Preview 1.25**; this project is developed on **1.24**, and nothing else on
+the machine implements it either. A by-hand press here would submit the
+message and would prove nothing about the code, so there is no by-hand check
+in this batch and that absence is the finding rather than an omission.
+
+### Two sites were still asserting the expired fact
+
+Batch 79 corrected five places and missed two, both in the present tense:
+`PromptInput`'s docstring in `tui/widgets.py`, and
+`TestEnterSubmitsAndCtrlJDoesNot`'s class docstring, which also still cited
+"the pinned textual 1.0.0". Both now say what is true: the driver asks, the
+parser decodes, the binding exists, the terminal does not cooperate.
+
+### The part worth keeping
+
+**A reason that lives only in prose expires without anyone noticing.** Batch
+54's reason sat in four documents, silently untrue, for twenty months. It was
+not wrong when written and no test could go red when it stopped being right.
+
+So `TestShiftEnterIsStillNotTheKey` pins the three dependency facts the
+docstrings assert -- the kitty encoding decoding to `shift+enter` with a bare
+CR beside it as the control, the `alt+enter` dead end that two documents
+call a dead end, and the Windows driver's enable. Each goes red at the version
+that retires it, naming the docstring that would then be lying.
+
+The third reads `inspect.getsource`, which is brittle on purpose: it is a
+claim about a dependency's internals that three documents make, so the choice
+is a fragile test or prose nobody re-reads. It also needs a RAW string --
+`getsource` returns the driver file as TEXT, where the sequence is spelled
+with a literal backslash, and an ESC byte there would never match and the test
+would be a lie that passes. Precedent for reaching into textual's privates is
+already in this suite (`textual.widgets._footer.FooterKey`).
+
+**Nothing was claimed.** The binding stays bound, unadvertised. `README.md` is
+untouched -- its sentence already says shift+enter works "where your terminal
+can send it ... elsewhere it arrives as a plain Enter and sends the message",
+which is still true and still points at `ctrl+j`. Naming a Windows Terminal
+version there would be a claim taken from a release note rather than a
+measurement.
+
+**What would end this:** a terminal here that implements the protocol. The
+by-hand press comes first and the docs after, in that order.
+
+### Files
+
+- `tui/widgets.py`, `tests/test_tui.py` -- the two docstrings still carrying
+  the expired reason.
+- `AGENTS.md`, `tests/BREAKING_CHANGES.md` -- the two entries that promised
+  this batch, now recording what it found.
+- `tests/test_tui.py` -- `TestShiftEnterIsStillNotTheKey`, three tests.
+- `README.md`, `AGENTS.md`, `ARCHITECTURE.md` -- 4261 to 4264, test_tui.py
+  385 to 388.

@@ -3192,13 +3192,26 @@ and sized to land BELOW the cap, so "wrapped" also cannot be confused with "hit
 ### Standing: `shift+enter` is deliberately untested
 
 A pilot can synthesise the key, so a test would pass everywhere and pin Textual's dispatch
-rather than the thing in doubt — whether a terminal ever sends it. That reasoning is
-unchanged. The FACT under it is not: textual enabled the kitty keyboard protocol in its
-Linux drivers alone through 6.5, and **6.6.0 added it to the Windows driver**, so
-`shift+enter` is no longer unreachable there. `ctrl+j` is still what the feature rests on
-and still what is pinned, because claiming shift+enter reverses batch 54's decision rather
-than restoring it — its own batch, with a by-hand check. Do not "fix the coverage gap" by
-adding the shift+enter case in the meantime.
+rather than the thing in doubt — whether a terminal ever sends it. **That reasoning has
+never changed.** The FACT under it has, twice, and batch 81 was the batch that went and
+looked.
+
+It was "textual enables the kitty keyboard protocol in its Linux drivers alone", which
+**6.6.0 retired** by adding it to the Windows driver. What replaced it is the TERMINAL:
+textual's Windows driver reads console records and keeps only the translated character,
+discarding the modifier state, so the escape encoding is the only route a modified Enter
+has — and a terminal that does not implement the protocol still sends a bare CR that
+reads as `enter` and submits. Windows Terminal shipped support in Preview 1.25; this
+project is developed on 1.24, so the press has never been observed here.
+
+So `ctrl+j` is still what the feature rests on and still what is pinned. Do not "fix the
+coverage gap" by adding the shift+enter case. `TestShiftEnterIsStillNotTheKey` pins the
+three DEPENDENCY facts instead — the parser's encoding, the alt+enter dead end, and the
+Windows driver's enable — which is what stops the paragraph above going stale unnoticed
+for another twenty months, as its predecessor did.
+
+**What would end this:** a terminal here that implements the protocol. The by-hand press
+comes first and the docs after, in that order.
 
 
 ## Batch 55 — the slash-command suggestion panel

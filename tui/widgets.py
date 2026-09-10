@@ -1598,11 +1598,24 @@ class PromptInput(TextArea):
     prompt box rather than a text editor.
 
     `ctrl+j` is what carries the newline; `shift+enter` is a courtesy.
-    Textual turns the kitty keyboard protocol on in its LINUX drivers
-    alone (`drivers/linux_driver.py`, `linux_inline_driver.py`), and
-    without it a terminal sends a bare CR for shift+enter and the parser
-    yields plain `enter` -- so on Windows that binding is unreachable and
-    the box would submit instead. `ctrl+j` is byte 0x0a, parses to its own
+    Every half of that courtesy the CODE owns works now, and it is still
+    not the key. Textual turned the kitty keyboard protocol on in its
+    LINUX drivers alone through 6.5, which is why batch 54 called this
+    binding unreachable here; 6.6.0 added it to
+    `drivers/windows_driver.py`, which writes `ESC [>1u` when application
+    mode starts, and the parser turns `ESC [13;2u` into `shift+enter`.
+    Both measured on 8.2.8 and both pinned by
+    `TestShiftEnterIsStillNotTheKey`, because that is the sentence that
+    went stale unnoticed for twenty months last time.
+
+    What is left is the TERMINAL. This driver reads console records and
+    keeps the translated character alone, discarding the modifier state,
+    so that escape sequence is the only route a modified Enter has -- and
+    a terminal that does not implement the protocol still sends a bare CR,
+    which reads as `enter` and submits the half-written message. Windows
+    Terminal shipped support in Preview 1.25 and this is developed on
+    1.24, so the press has never been observed here and the courtesy stays
+    unclaimed. `ctrl+j` is byte 0x0a, parses to its own
     key, is bound by neither Input, TextArea, App nor Footer, and is
     exactly what iTerm2 / VS Code / Windows Terminal emit once configured
     to send a newline on shift+enter. `alt+enter` is the obvious third

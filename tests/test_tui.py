@@ -5236,18 +5236,25 @@ class TestEnterSubmitsAndCtrlJDoesNot:
     this batch and it reads like caution, which is exactly why it needs a
     test that goes red when someone tidies it away. `TextArea._on_key`
     maps enter to a newline insert and calls `event.stop()` and
-    `event.prevent_default()` -- measured on the pinned textual 1.0.0
-    (D22), that beats an ordinary binding, so without the flag every
+    `event.prevent_default()` -- measured on the installed textual (D22,
+    and re-measured when the pin moved to 8.2.8), that beats an ordinary
+    binding, so without the flag every
     Enter in this shell would insert a line break and no turn would ever
     start.
 
-    `shift+enter` gets no test of its own, deliberately. A pilot can
-    synthesise the key, so such a test would pass everywhere and pin
-    Textual's dispatch rather than the thing actually in doubt -- whether
-    a terminal ever sends it. Textual enables the kitty keyboard protocol
-    in its LINUX drivers alone, so on Windows shift+enter arrives as a
-    bare CR and reads as `enter`. That is why ctrl+j is the binding the
-    feature rests on, and it is the one pinned here.
+    `shift+enter` gets no test of its own, deliberately -- and the reason
+    changed under it. A pilot can synthesise the key, so such a test would
+    pass everywhere and pin Textual's dispatch rather than the thing
+    actually in doubt, which is whether a terminal ever sends it. That
+    half has never changed. The other half was "Textual enables the kitty
+    keyboard protocol in its LINUX drivers alone", and 6.6.0 retired it by
+    adding the protocol to the Windows driver.
+
+    What stops the courtesy now is the TERMINAL rather than textual, and
+    no test can see a terminal. `TestShiftEnterIsStillNotTheKey` below
+    pins the three dependency facts the docstrings do assert, so the next
+    reason cannot expire in silence the way the last one did. ctrl+j is
+    still the binding the feature rests on and the one pinned here.
     """
 
     @pytest.mark.asyncio
@@ -5367,6 +5374,81 @@ def _panel_rows(panel) -> list[str]:
     the widget produced, before anything trimmed it.
     """
     return panel.render().plain.split("\n")
+
+
+class TestShiftEnterIsStillNotTheKey:
+    """Batch 81. The dependency facts under a decision, not the feature.
+
+    Batch 54 deferred `shift+enter` because textual enabled the kitty
+    keyboard protocol in its Linux drivers alone. That stopped being true
+    at 6.6.0 and nobody noticed for twenty months, because the reason
+    lived in four documents and in no test. The decision still stands --
+    the obstacle moved from textual to the terminal, which no test can
+    observe -- so what is pinned here is every sentence the docstrings
+    DO assert, and each one goes red at the version that retires it.
+
+    This is deliberately not a test of the feature. The standing rule in
+    tests/BREAKING_CHANGES.md holds: do not add a pilot
+    `press("shift+enter")` case, which would pass everywhere and pin
+    Textual's dispatch rather than whether a terminal ever sends the key.
+    """
+
+    def test_the_parser_would_yield_shift_enter_if_a_terminal_sent_it(self):
+        """The kitty encoding for the chord, and the legacy byte beside it.
+
+        `PromptInput` binds `shift+enter`, so the binding is live the
+        moment something delivers that key name. This is what would
+        deliver it, and the control below is what a terminal without the
+        protocol sends instead -- the two together are the whole reason
+        ctrl+j is the key and not this.
+        """
+        from textual._xterm_parser import XTermParser
+
+        def keys(sequence):
+            return [event.key for event in XTermParser().feed(sequence)]
+
+        assert keys("\x1b[13;2u") == ["shift+enter"], (
+            "textual no longer decodes the kitty encoding for shift+enter; "
+            "PromptInput's docstring says it does")
+        assert keys("\r") == ["enter"], (
+            "a bare CR stopped reading as enter -- that is the fallback "
+            "every terminal without the protocol sends, and the reason "
+            "shift+enter would SUBMIT rather than break the line")
+
+    def test_alt_enter_is_still_the_dead_end_two_documents_call_it(self):
+        """The third guess, pinned so nobody re-derives it by trying it.
+
+        `AGENTS.md` and `PromptInput`'s docstring both state this, and it
+        is the kind of claim that reads like an assumption.
+        """
+        from textual._xterm_parser import XTermParser
+
+        assert [e.key for e in XTermParser().feed("\x1b\r")] == [], (
+            "ESC CR now yields a key; alt+enter may have stopped being a "
+            "dead end, which two docstrings currently assert it is")
+
+    def test_the_windows_driver_still_asks_for_the_protocol(self):
+        """The exact fact that expired last time, and silently.
+
+        Source inspection is brittle and that is accepted here: this is a
+        claim about a dependency's INTERNALS that three documents make, so
+        the choice is a fragile test or prose nobody re-reads. The suite
+        already reaches into textual's privates for `FooterKey`.
+        """
+        import inspect
+
+        from textual.drivers import windows_driver
+
+        # A RAW string: getsource hands back the driver file as TEXT,
+        # where that sequence is spelled with a literal backslash. An
+        # ESC byte here would never match and the test would be a lie.
+        source = inspect.getsource(windows_driver)
+        assert r"\x1b[>1u" in source, (
+            "the Windows driver no longer enables the kitty keyboard "
+            "protocol. PromptInput's docstring, AGENTS.md and "
+            "tests/BREAKING_CHANGES.md all say it does -- and if this "
+            "reverted, batch 54's ORIGINAL reason is live again rather "
+            "than the terminal-side one they now give")
 
 
 class TestMatchingIsTheListHelpReads:

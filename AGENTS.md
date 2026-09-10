@@ -48,7 +48,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 4261 tests, offline, ~5-15 min by machine (+~5s first run: matplotlib font cache)
+pytest                                            # 4264 tests, offline, ~5-15 min by machine (+~5s first run: matplotlib font cache)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -561,14 +561,22 @@ did not, and says so below.
   the flag `enter` inserts and never submits, so no turn in this shell would ever start.
   Dropping it fails three tests in `TestEnterSubmitsAndCtrlJDoesNot` and
   `TestThePromptBoxGrowsWithWhatIsTyped`.
-- **`ctrl+j` carries the newline, and `shift+enter` stopped being unreachable when the
-  pin moved.** Textual enabled the kitty keyboard protocol in its LINUX drivers alone
-  through 6.5, so on the Windows driver a terminal sent a bare CR for shift+enter and
-  the parser yielded plain `enter` — the box would submit. **6.6.0 added the protocol
-  to the Windows driver** (`drivers/windows_driver.py` writes `\x1b[>1u`), so that
-  reason has expired. `ctrl+j` remains what the feature rests on and what is pinned;
-  claiming shift+enter is its own batch, not a side effect of a version bump, because
-  it reverses a decision rather than restoring one. `ctrl+j` is byte 0x0a, parses to
+- **`ctrl+j` carries the newline, and `shift+enter` is still not claimed — for a
+  different reason than it used to be.** Textual enabled the kitty keyboard protocol in
+  its LINUX drivers alone through 6.5, so on the Windows driver a terminal sent a bare
+  CR for shift+enter and the parser yielded plain `enter` — the box would submit.
+  **6.6.0 added the protocol to the Windows driver** (`drivers/windows_driver.py` writes
+  `\x1b[>1u`), so that reason expired, and **batch 81 went looking for what replaced
+  it**. Every half the CODE owns works: the driver asks for the protocol, the parser
+  turns `\x1b[13;2u` into `shift+enter`, and `PromptInput` already binds it. **The
+  obstacle is the TERMINAL now.** That driver reads console records and keeps only the
+  translated character, discarding the modifier state, so the escape encoding is the
+  only route a modified Enter has, and a terminal without the protocol still sends a
+  bare CR. Windows Terminal shipped support in Preview 1.25 and this is developed on
+  1.24, so the end-to-end press has never been observed here and the claim stays unmade.
+  `TestShiftEnterIsStillNotTheKey` pins those three dependency facts, so the next reason
+  cannot expire in silence the way this one did for twenty months. `ctrl+j` is byte
+  0x0a, parses to
   its own key, is bound by neither `Input`, `TextArea`, `App` nor `Footer`, and is
   exactly what iTerm2 / VS Code / Windows Terminal emit once configured to send a
   newline on shift+enter. **`alt+enter` is the obvious third guess and is a dead
