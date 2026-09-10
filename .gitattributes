@@ -7,6 +7,9 @@
 providers.json export-ignore
 .env export-ignore
 *.db export-ignore
+# The WAL sidecars, for .gitignore's reason one channel over (NA18).
+*.db-wal export-ignore
+*.db-shm export-ignore
 logs/ export-ignore
 output/ export-ignore
 CLAUDE-SECURITY-* export-ignore

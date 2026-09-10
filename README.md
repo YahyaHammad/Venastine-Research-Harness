@@ -734,7 +734,7 @@ The CLI names the figures behind an early stop — billed this turn, and the thr
 
 Other ceilings worth knowing: the six maths tools run in killable subprocesses under a 15-second wall clock (`TOOL_COMPUTE_TIMEOUT_S`) and are told which tool and which limit stopped them; pre-granted tool calls cap at 150 per research run (`MAX_GRANTED_TOOL_CALLS`), degrading to asking when exhausted; subagent nesting stops at depth 2 (`SUBAGENT_MAX_DEPTH`) and at most three subagents of one turn run at once (`SUBAGENT_MAX_PARALLEL`), with anything beyond that running in waves; attended prompts expire after 600 seconds (`ATTENDED_APPROVAL_TIMEOUT_S`), denying that one call while the run continues.
 
-Subagents spawned in one model response run **concurrently**, up to `SUBAGENT_MAX_PARALLEL`. Their answers come back to the model in the order it asked for them however they finish, one approval question reaches you at a time, and the sidebar draws them as a tree rather than a chain. The database runs in SQLite's WAL mode to keep their writes from contending, which means `app.db` is accompanied by `app.db-wal` and `app.db-shm` while the harness is open.
+Subagents spawned in one model response run **concurrently**, up to `SUBAGENT_MAX_PARALLEL`. Their answers come back to the model in the order it asked for them however they finish, one approval question reaches you at a time, and the sidebar draws them as a tree rather than a chain. The database runs in SQLite's WAL mode to keep their writes from contending, which means `app.db` is accompanied by `app.db-wal` and `app.db-shm` while the harness is open — both are gitignored, and excluded from `git archive`, because a WAL file holds recently written messages.
 
 ### Logging
 

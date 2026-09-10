@@ -4,6 +4,14 @@
 logs/
 *.log
 *.db
+# SQLite's WAL sidecars, which §47 slice 8 made permanent fixtures of a
+# running harness (NA18). `*.db` does not match them -- they end `-wal`
+# and `-shm` -- and a `-wal` file holds recently written message rows, so
+# without these an `add -A` from the repo root stages conversation
+# content. Both are listed rather than `app.db*`, so a database named
+# something else is still covered.
+*.db-wal
+*.db-shm
 providers.json
 .qwen/
 .zcode/
