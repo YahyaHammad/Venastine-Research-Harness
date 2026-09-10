@@ -4156,6 +4156,19 @@ the subagent it spawned both report 1, so drawing by depth put a child level
 with its parent. Both surfaces that draw this list go through the walk, which
 is what keeps the sidebar and ctrl+g from offering different shapes. Batch 75.
 
+### Widening an `ask_*_blocking` signature
+
+**Symptom:** `test_two_spawns_are_live_as_peers_in_the_sidebar`, with a `TypeError`
+about a lambda taking two positional arguments and being given four.
+
+**Fix:** a stub that LISTS the signature breaks on each argument added to it. When
+the sign-off learned to name the run doing the asking, the one stub written as
+`lambda agent, candidates: set()` broke -- and it broke in the file about
+CONCURRENCY, three files away from the change, which is why the batch's own
+targeted runs missed it. Stubs for these six methods swallow their arguments
+(`lambda *_a, **_kw: ...`), for `FakeMemory`'s stated reason: what they are for is
+the ANSWER, not the call. Batch 75.
+
 ### The run picker iterating `_agent_stack` raw
 
 **Symptom:** `test_it_draws_the_same_shape_the_panel_does`.

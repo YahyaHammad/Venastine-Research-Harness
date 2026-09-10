@@ -1216,7 +1216,12 @@ class TestTheRunningApp:
         mocker.patch("memories.manager.manager.visible", return_value=[])
         mocker.patch.object(
             VenastineApp, "ask_signoff_blocking",
-            side_effect=lambda agent, candidates: set())
+            # Every argument SWALLOWED, for `FakeMemory`'s reason: what this
+            # stub is for is "approve the spawn, grant nothing", and a double
+            # that lists the signature breaks on each argument added to it --
+            # which is exactly what happened when the sign-off learned to
+            # name the run doing the asking.
+            side_effect=lambda *_a, **_kw: set())
 
         uses = make_model_response(text="", tool_calls=[
             {"id": "s0", "name": "spawn_subagent",
