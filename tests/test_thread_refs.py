@@ -55,11 +55,11 @@ def _real_agents(real_harness_tier):
 
 @pytest.fixture(autouse=True)
 def _guard_released():
-    """`_compacting` is module state; a test that leaves it set makes every
-    later one silently no-op, which is the failure mode hardest to read off a
-    test report."""
+    """The re-entrancy flag is per-thread state; a test that leaves it set
+    makes every later one silently no-op, which is the failure mode hardest
+    to read off a test report."""
     yield
-    compaction._compacting = False
+    compaction._set_compacting(False)
 
 
 @pytest.fixture
@@ -236,7 +236,7 @@ class TestSummarizingAThread:
 
         memory = ConversationMemory()
         _thread(memory, turns=30, body="y" * 200)
-        compaction._compacting = True
+        compaction._set_compacting(True)
 
         assert compaction.summarize_thread(
             memory.thread_id, "claude-sonnet-5", "ANTHROPIC") is None

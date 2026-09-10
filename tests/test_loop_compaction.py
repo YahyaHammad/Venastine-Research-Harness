@@ -36,7 +36,7 @@ def _no_client(mocker):
 @pytest.fixture(autouse=True)
 def _guard_released():
     yield
-    compaction._compacting = False
+    compaction._set_compacting(False)
 
 
 @pytest.fixture

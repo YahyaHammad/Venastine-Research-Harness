@@ -32,6 +32,7 @@ ratio check needs -- it is never compared against a provider's count.
 
 import logging
 import re
+import threading
 from typing import Optional
 
 import config
@@ -46,11 +47,47 @@ logger = logging.getLogger(__name__)
 CHARS_PER_TOKEN = 4
 
 # The re-entrancy guard (M3). The compactor is an agent, so compacting runs
-# the loop, which evaluates the trigger, which could compact. A thread-local
-# would be more precise, but the loop is synchronous and a compaction runs
-# to completion before its caller resumes -- and a module flag has the
-# property that matters more: it is impossible to be half-set.
-_compacting = False
+# the loop, which evaluates the trigger, which could compact.
+#
+# PER THREAD SINCE BATCH 75, AND IT WAS A MODULE FLAG UNTIL THEN. That flag
+# said: "a thread-local would be more precise, but the loop is synchronous
+# and a compaction runs to completion before its caller resumes -- and a
+# module flag has the property that matters more: it is impossible to be
+# half-set." True when written, and §47's NA9 removed the premise. Two
+# children of one response each reach `_maybe_compact` on their own thread,
+# and a shared flag then does two wrong things:
+#
+#   * the second child's `should_compact` returns "" and its compaction is
+#     silently skipped for that step, because a sibling is mid-fold;
+#   * whichever finishes first clears the flag while the other's compactor
+#     is still running, reopening exactly the window this guard closes.
+#
+# Neither is loud: a skipped compaction self-corrects on the next step, so
+# the visible symptom would be a thread running into a provider's context
+# limit with a guard that looked like it was working. It was the seventh
+# member of slice 8's "six things that were only safe alone", found by
+# reading this comment against what NA9 had done to it.
+#
+# The half-set property survives, which is why this is still a flag and not
+# a lock: one bool per thread, set and cleared in a `finally` by the frame
+# that owns it. Nothing here serialises anything -- two conversations
+# folding at once is correct, since each needs its own fold.
+#
+# A FUNCTION RATHER THAN A BARE ATTRIBUTE, and the module name is GONE
+# rather than kept as an alias: `if _compacting:` against a callable is
+# always true, so a reader left holding the old name has to fail at import
+# instead of quietly disabling every compaction in the process.
+_reentrancy = threading.local()
+
+
+def _is_compacting() -> bool:
+    """Whether THIS thread is already inside a compaction."""
+    return getattr(_reentrancy, "active", False)
+
+
+def _set_compacting(active: bool) -> None:
+    """Mark this thread as compacting, or done."""
+    _reentrancy.active = bool(active)
 
 
 def _chars(messages) -> int:
@@ -321,7 +358,7 @@ def should_compact(used: int, model: str, mode: str = "working_set",
     context-limit error from the provider instead. The budget stop
     condition and this trigger fail together, from the same cause.
     """
-    if _compacting:
+    if _is_compacting():
         return ""
     warn_at, compact_at = thresholds(model, mode, overrides, provider_name)
     if used >= compact_at:
@@ -585,8 +622,6 @@ def compact(memory, model: str, provider_name: str,
     (`allowed_tools: []` in its definition), and the re-entrancy guard, so
     it can neither call anything nor trigger a compaction of its own.
     """
-    global _compacting
-
     from agents.manager import manager
     from core.loop import RunAgentLoop, DEFAULT_SYSTEM_PROMPT
     from storage import (
@@ -594,7 +629,7 @@ def compact(memory, model: str, provider_name: str,
     )
     storage_advances = advances
 
-    if _compacting:
+    if _is_compacting():
         return {"status": "reentrant", "kind": None,
                 "text": "A compaction is already running."}
 
@@ -707,12 +742,12 @@ def compact(memory, model: str, provider_name: str,
     if truncation_notice:
         original = len(segment_text)
 
-    _compacting = True
+    _set_compacting(True)
     try:
         # Batch 59. ONE span over the whole call, retries included: this is
         # one compactor run that may take several calls to hit its target,
         # and a shell drawing a row per attempt would report the retry loop
-        # as a stack of compactors. Inside the `_compacting` guard rather
+        # as a stack of compactors. Inside the re-entrancy guard rather
         # than around it, so the two brackets nest instead of interleaving.
         with agent_activity.span(activity, agent.name, depth):
             summary = _summarize(
@@ -726,7 +761,7 @@ def compact(memory, model: str, provider_name: str,
                 # link is not a convention, it is what happened.
                 parent_thread_id=memory.thread_id)
     finally:
-        _compacting = False
+        _set_compacting(False)
 
     if summary is None:
         # #136, batch 20: this used to be kind=None -- invisible to both
@@ -803,8 +838,6 @@ def summarize_thread(thread_id, model: str, provider_name: str,
     referencing thread, so a proportional target would let one big thread
     inject tens of kilobytes into every call indefinitely.
     """
-    global _compacting
-
     from agents.manager import manager
     from core.loop import RunAgentLoop, DEFAULT_SYSTEM_PROMPT
     from storage import (
@@ -812,7 +845,7 @@ def summarize_thread(thread_id, model: str, provider_name: str,
         save_thread_summary,
     )
 
-    if _compacting:
+    if _is_compacting():
         return None
 
     watermark = last_message_id(thread_id)
@@ -868,7 +901,7 @@ def summarize_thread(thread_id, model: str, provider_name: str,
     # trigger. Its own thread is one turn long and would not trip it today,
     # which is exactly the kind of "cannot happen yet" that stops being true
     # quietly.
-    _compacting = True
+    _set_compacting(True)
     try:
         # Batch 59, and see compact() above for why one span covers the
         # retries. §21c's /summary runs this from its own worker, so it is
@@ -879,7 +912,7 @@ def summarize_thread(thread_id, model: str, provider_name: str,
                 thread_text, target, original, model, provider_name,
                 settings["max_retries"], authorization)
     finally:
-        _compacting = False
+        _set_compacting(False)
 
     if summary is None:
         return None

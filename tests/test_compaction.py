@@ -46,11 +46,12 @@ def _real_agents(real_harness_tier):
 
 @pytest.fixture(autouse=True)
 def _guard_released():
-    """The re-entrancy flag is module state. A test that leaves it set
-    would make every later one silently no-op, which is the failure mode
-    hardest to read from a test report."""
+    """The re-entrancy flag is per-thread state (batch 75; it was module
+    state until NA9 made two children of one response real). A test that
+    leaves it set on the test thread would make every later one silently
+    no-op, which is the failure mode hardest to read from a test report."""
     yield
-    compaction._compacting = False
+    compaction._set_compacting(False)
 
 
 @pytest.fixture(autouse=True)
@@ -339,9 +340,53 @@ def test_the_reentrancy_guard_stops_the_compactor_compacting():
     """M3. The compactor is an agent, so compacting runs the loop, which
     evaluates the trigger, which could compact. `allowed_tools: []` stops
     it calling anything; this stops it recursing."""
-    compaction._compacting = True
+    compaction._set_compacting(True)
 
     assert compaction.should_compact(10_000_000, "claude-sonnet-5") == ""
+
+
+def test_the_guard_does_not_reach_across_threads():
+    """§47 NA9 MADE THIS REACHABLE, and it is the seventh member of slice
+    8's "six things that were correct only because nothing ran alongside
+    anything else".
+
+    Two children of one model response each evaluate the trigger on their
+    own thread. A module-level flag made the second one's compaction
+    silently skip while the first was folding, and made whichever finished
+    first clear the flag under the other -- reopening the recursion window
+    the guard exists to close. Neither is loud, which is why this is
+    asserted directly rather than through a behaviour.
+
+    The window is not raced here on purpose: what is under test is the
+    SCOPE of the flag, and a bool per thread has no window to widen.
+    """
+    import threading
+
+    compaction._set_compacting(True)
+    seen = {}
+
+    def sibling():
+        # A second run, on its own thread, mid-fold on the first.
+        seen["mid_fold"] = compaction._is_compacting()
+        seen["trigger"] = compaction.should_compact(
+            10_000_000, "claude-sonnet-5")
+        compaction._set_compacting(True)
+        compaction._set_compacting(False)
+
+    worker = threading.Thread(target=sibling)
+    worker.start()
+    worker.join(timeout=5)
+
+    assert seen["mid_fold"] is False, (
+        "a sibling saw its own thread as compacting because another one "
+        "was; its own compaction is then skipped for that step")
+    assert seen["trigger"] == "compact", (
+        "the trigger declined to fire for a run that needs a fold, because "
+        "an unrelated run was folding")
+    assert compaction._is_compacting() is True, (
+        "a sibling finishing cleared THIS thread's guard, which is the "
+        "recursion the guard is structural to prevent, reached from the "
+        "other side")
 
 
 # ---------------------------------------------------------------------------
@@ -658,7 +703,7 @@ def test_the_guard_is_released_after_a_compaction(fake_storage, summaries):
 
     compaction.compact(memory, "claude-sonnet-5", "ANTHROPIC", overrides=OVERRIDES)
 
-    assert compaction._compacting is False
+    assert compaction._is_compacting() is False
 
 
 def test_the_guard_is_released_when_the_compactor_raises(
@@ -672,7 +717,7 @@ def test_the_guard_is_released_when_the_compactor_raises(
         compaction.compact(memory, "claude-sonnet-5", "ANTHROPIC",
                            overrides=OVERRIDES)
 
-    assert compaction._compacting is False
+    assert compaction._is_compacting() is False
 
 
 def test_the_compactor_runs_with_no_tools(fake_storage, summaries):
