@@ -2635,7 +2635,13 @@ class VenastineApp(App):
         if request.kind == interaction.SUBAGENT_SIGNOFF:
             return self.ask_signoff_blocking(
                 request.payload.get("agent", "this subagent"),
-                request.payload.get("candidates") or [])
+                request.payload.get("candidates") or [],
+                # §47. `agent` above is the one about to be SPAWNED;
+                # this is the run doing the spawning, and with three
+                # children of one turn able to ask at once it is what
+                # tells two of these screens apart.
+                request.payload.get("asking_agent"),
+                request.payload.get("asking_depth") or 0)
         # An unrecognised kind is a bug in whoever built the Request;
         # interaction.decode raises on one, and falling through lets that
         # happen rather than answering a question this app cannot render.
@@ -2804,7 +2810,12 @@ class VenastineApp(App):
             payload.get("question", ""),
             payload.get("options") or (),
             payload.get("multi_select", False),
-            payload.get("allow_text", True))
+            payload.get("allow_text", True),
+            # §47. Which run is asking, when it is not the conversation
+            # itself. `ask_user` puts these on the payload from the open
+            # span, the same source `_obtain_approval` reads.
+            payload.get("asking_agent"),
+            payload.get("asking_depth") or 0)
         return self._blocking_modal(
             screen,
             on_timeout=lambda screen: self._timed_out_ask(
@@ -2815,7 +2826,8 @@ class VenastineApp(App):
                 after_line=("[answer arrived after the timeout — the model "
                             "was told nobody answered]")))
 
-    def ask_signoff_blocking(self, agent: str, candidates: list):
+    def ask_signoff_blocking(self, agent: str, candidates: list,
+                             asked_by: str = None, depth: int = 0):
         """Which of a subagent's gated tools it may use unprompted (§23
         AC1b). Blocks; returns a set, or None to refuse the spawn.
 
@@ -2826,7 +2838,7 @@ class VenastineApp(App):
         if self._shutting_down:
             return None
         return self._blocking_modal(
-            SubagentSignoffScreen(agent, candidates),
+            SubagentSignoffScreen(agent, candidates, asked_by, depth),
             on_timeout=lambda screen: self._timed_out_ask(
                 screen,
                 dismiss_with=False,

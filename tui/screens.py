@@ -99,6 +99,33 @@ class ScrollBox(VerticalScroll):
     """
 
 
+def asker_label(asked_by, depth) -> list:
+    """`[Label]` naming the run that raised a question, or `[]` (§47).
+
+    ONE SENTENCE FOR THE THREE MODALS THAT CAN BE ASKED FROM INSIDE A RUN.
+    §47 gave it to the permission modal alone; batch 75's review found the
+    sign-off and the model's own question without it, which is where it
+    matters most now that three children of one turn can each be asking:
+    three sign-off screens naming the grandchild and nothing about who
+    asked are three identical screens.
+
+    Empty at depth 0, and that is the right SCOPE rather than a gap: the
+    asking run is then the conversation you are looking at, which needs no
+    label.
+
+    Returned as a LIST so a caller splices it into its widget list without
+    a branch, which is what keeps the placement rule (directly under the
+    title, above anything the agent wrote) in one shape across the three.
+
+    `Text(...)` for RA1's reason -- an agent name comes from a file whose
+    author is not necessarily this project.
+    """
+    if not asked_by:
+        return []
+    return [Label(Text(f"asked by {asked_by} (depth {depth})"),
+                  id="permission-asker")]
+
+
 class PermissionScreen(ModalScreen[bool]):
     """Approve or deny one tool call. Dismisses with the decision.
 
@@ -221,17 +248,11 @@ class PermissionScreen(ModalScreen[bool]):
             rendered = f"{self._notice}\n\n{rendered}"
         widgets = [Label(Text(f"Allow {self._tool_name}?"),
                          id="permission-title")]
-        if self._asked_by:
-            # DIRECTLY under the title, above the headline and
-            # everything the agent wrote: RA6's ordering says a
-            # harness fact is read before an agent's claim, and which
-            # run is asking is the most harness-y fact on the screen.
-            # `Text(...)` for RA1's reason -- an agent name comes from
-            # a file whose author is not necessarily this project.
-            widgets.append(Label(
-                Text(f"asked by {self._asked_by} "
-                     f"(depth {self._depth})"),
-                id="permission-asker"))
+        # DIRECTLY under the title, above the headline and everything the
+        # agent wrote: RA6's ordering says a harness fact is read before an
+        # agent's claim, and which run is asking is the most harness-y fact
+        # on the screen. See `asker_label` for the rest.
+        widgets.extend(asker_label(self._asked_by, self._depth))
         if self._headline:
             # `Text(...)` is not optional here (batch 42, RA1). This is
             # the most attacker-influenced string on the screen -- a
@@ -378,16 +399,26 @@ class SubagentSignoffScreen(ModalScreen[object]):
 
     BINDINGS = [("escape", "refuse", "Refuse")]
 
-    def __init__(self, agent: str, candidates: list):
+    def __init__(self, agent: str, candidates: list, asked_by: str = None,
+                 depth: int = 0):
         super().__init__()
         self._agent = agent
         self._candidates = list(candidates)
+        # §47, extended by batch 75's review. WHICH run wants to spawn
+        # this one -- a different agent from `self._agent`, which is the
+        # one about to be spawned. It matters more here than on the
+        # permission modal: three children of one turn each spawning a
+        # grandchild produce three of these screens, and without this they
+        # name the grandchild and nothing else, so they are identical.
+        self._asked_by = asked_by
+        self._depth = depth
 
     def compose(self) -> ComposeResult:
         if not self._candidates:
             yield Vertical(
                 Label(Text(f"Run {self._agent}?"),
                       id="permission-title"),
+                *asker_label(self._asked_by, self._depth),
                 Static(Text(f"{self._agent} needs no approval-gated "
                             f"tools."),
                        id="permission-params"),
@@ -403,6 +434,10 @@ class SubagentSignoffScreen(ModalScreen[object]):
         yield Vertical(
             Label(Text(f"What may {self._agent} use without asking again?"),
                   id="grant-title"),
+            # BOTH branches, because either can be reached from inside a
+            # run -- the no-candidates one is what a nested spawn of an
+            # agent with no gated tools shows.
+            *asker_label(self._asked_by, self._depth),
             Static(
                 "Space toggles, then choose. Anything left unticked still "
                 "prompts you if the subagent tries it.\nRunning with none "
@@ -471,18 +506,26 @@ class QuestionScreen(ModalScreen[object]):
     BINDINGS = [("escape", "dismiss_unanswered", "No answer")]
 
     def __init__(self, question: str, options=(), multi_select: bool = False,
-                 allow_text: bool = True):
+                 allow_text: bool = True, asked_by: str = None,
+                 depth: int = 0):
         super().__init__()
         self._question = question
         self._options = list(options)
         self._multi = bool(multi_select)
         self._allow_text = bool(allow_text)
+        # §47, added by batch 75's review. "The assistant has a question"
+        # is the right title for a chat turn and an understatement for a
+        # subagent two levels down, whose question surfaces on the parent's
+        # screen exactly as its approvals do.
+        self._asked_by = asked_by
+        self._depth = depth
 
     def compose(self) -> ComposeResult:
         # The question is the MODEL's, so its length is the one thing
         # this screen does not choose -- bounded and scrollable for the
         # same reason the payload block is.
         widgets = [Label("The assistant has a question", id="question-title"),
+                   *asker_label(self._asked_by, self._depth),
                    ScrollBox(Static(Text(self._question), id="question-body"),
                              id="question-body-box")]
 

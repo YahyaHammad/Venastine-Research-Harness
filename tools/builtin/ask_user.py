@@ -33,7 +33,7 @@ rather than "is this the pipeline".
 
 import logging
 
-from core import interaction
+from core import agent_activity, interaction
 
 logger = logging.getLogger(__name__)
 
@@ -165,6 +165,20 @@ def run(params: dict, response_channel=None) -> dict:
                      "assumption you are proceeding on, and carry on.",
         }
 
+    # §47, added by batch 75's review of it. WHICH run is asking, read off
+    # the open span rather than threaded through the tool's parameters --
+    # the same source and the same reason as `_obtain_approval`'s: params
+    # are the MODEL'S, and a model that could name its own asker could
+    # claim to be a run it is not.
+    #
+    # THE PRODUCER, because `core/interaction.py` cannot be. That module is
+    # the one place every question goes through and would be the tidy home
+    # for this, but it is a stdlib-only leaf -- `tests/test_interaction.py`
+    # pins its import list -- so reaching `core.agent_activity` from there
+    # would break a boundary to save one line here.
+    #
+    # None at depth 0, where the asking run is the conversation on screen.
+    asking = agent_activity.current()
     answer = interaction.ask(response_channel, interaction.Request(
         kind=interaction.QUESTION,
         payload={
@@ -175,6 +189,8 @@ def run(params: dict, response_channel=None) -> dict:
             # the four affordances, so absence of the key is not absence of
             # the affordance.
             "allow_text": params.get("allow_text", True) is not False,
+            "asking_agent": asking.name if asking is not None else None,
+            "asking_depth": asking.depth if asking is not None else 0,
         },
     ))
 

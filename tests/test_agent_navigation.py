@@ -1476,6 +1476,158 @@ class TestTheAskerReachesTheScreen:
         assert args[-2:] == (None, 0)
 
 
+class TestTheOtherTwoQuestionsNameTheirAskerToo:
+    """§47 named the asking run on the permission modal alone.
+
+    The sign-off and the model's own question can be raised from inside a
+    run just as approvals can -- and with three children of one turn able
+    to ask at once, the sign-off is where it matters most: three screens
+    naming only the grandchild about to be spawned are three identical
+    screens.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_signoff_names_the_run_doing_the_spawning(self):
+        """`agent` on that screen is the one about to be SPAWNED. This is
+        the other one, which is why the key cannot be called `agent`."""
+        from tui.screens import SubagentSignoffScreen
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.push_screen(SubagentSignoffScreen(
+                "review", ["shell"], asked_by="explore", depth=1))
+            assert await settle(
+                pilot, lambda: isinstance(app.screen, SubagentSignoffScreen))
+            drawn = [str(w.renderable)
+                     for w in app.screen.query("#permission-asker")]
+            app.screen.dismiss(None)
+            await pilot.pause()
+
+        assert drawn == ["asked by explore (depth 1)"], drawn
+
+    @pytest.mark.asyncio
+    async def test_a_signoff_with_nothing_to_tick_names_it_as_well(self):
+        """The no-candidates branch is its own composition, and a nested
+        spawn of an agent with no gated tools is what reaches it."""
+        from tui.screens import SubagentSignoffScreen
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.push_screen(SubagentSignoffScreen(
+                "review", [], asked_by="explore", depth=1))
+            assert await settle(
+                pilot, lambda: isinstance(app.screen, SubagentSignoffScreen))
+            drawn = [str(w.renderable)
+                     for w in app.screen.query("#permission-asker")]
+            app.screen.dismiss(None)
+            await pilot.pause()
+
+        assert drawn == ["asked by explore (depth 1)"], drawn
+
+    @pytest.mark.asyncio
+    async def test_a_question_from_a_nested_run_names_it(self):
+        from tui.screens import QuestionScreen
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.push_screen(QuestionScreen(
+                "which one?", ["a", "b"], asked_by="explore", depth=2))
+            assert await settle(
+                pilot, lambda: isinstance(app.screen, QuestionScreen))
+            drawn = [str(w.renderable)
+                     for w in app.screen.query("#permission-asker")]
+            app.screen.dismiss(None)
+            await pilot.pause()
+
+        assert drawn == ["asked by explore (depth 2)"], drawn
+
+    @pytest.mark.asyncio
+    async def test_neither_says_anything_at_depth_zero(self):
+        from tui.screens import QuestionScreen, SubagentSignoffScreen
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            counts = []
+            for screen in (SubagentSignoffScreen("review", ["shell"]),
+                           QuestionScreen("which one?", ["a"])):
+                app.push_screen(screen)
+                assert await settle(pilot, lambda: app.screen is screen)
+                counts.append(len(app.screen.query("#permission-asker")))
+                app.screen.dismiss(None)
+                await pilot.pause()
+
+        assert counts == [0, 0], (
+            "a top-level turn is the conversation on screen and needs no "
+            "label; that is scope rather than a gap")
+
+    @pytest.mark.asyncio
+    async def test_the_signoff_payload_reaches_the_screen(self, mocker):
+        """The bridge, for `TestTheAskerReachesTheScreen`'s reason: the
+        app could drop the two keys between the request and the modal and
+        every other test here would still pass."""
+        from core import interaction
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            shown = mocker.patch.object(app, "ask_signoff_blocking",
+                                        return_value=None)
+
+            app._ask_blocking(interaction.Request(
+                kind=interaction.SUBAGENT_SIGNOFF,
+                payload={"agent": "review", "candidates": ["shell"],
+                         "asking_agent": "explore", "asking_depth": 1}))
+
+            args = shown.call_args.args
+
+        assert args[-2:] == ("explore", 1), (
+            f"the modal was asked with {args!r}; `agent` is the one being "
+            "spawned, so the asker has to travel beside it")
+
+    def test_ask_user_puts_the_open_span_on_its_request(self, mocker):
+        """The tool is the producer, because `core/interaction.py` is a
+        stdlib-only leaf and cannot read the span."""
+        from core import agent_activity
+        from tools.builtin import ask_user
+
+        seen = {}
+
+        class _Channel:
+            honour_run_scope = True
+
+            def ask(self, request):
+                seen.update(request.payload)
+                return {"defer": True}
+
+        with agent_activity.span(None, "explore", 2):
+            ask_user.run({"question": "which one?"},
+                         response_channel=_Channel())
+
+        assert seen.get("asking_agent") == "explore"
+        assert seen.get("asking_depth") == 2
+
+    def test_ask_user_names_nobody_at_the_top(self):
+        from tools.builtin import ask_user
+
+        seen = {}
+
+        class _Channel:
+            honour_run_scope = True
+
+            def ask(self, request):
+                seen.update(request.payload)
+                return {"defer": True}
+
+        ask_user.run({"question": "which one?"}, response_channel=_Channel())
+
+        assert seen.get("asking_agent") is None
+        assert seen.get("asking_depth") == 0
+
+
 class TestTheAskerComesFromTheOpenSpan:
 
     def _ask(self, payloads):

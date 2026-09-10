@@ -261,7 +261,13 @@ ReviewScreen {
    reads a harness fact before anything the agent wrote.
 
    It eats the title's margin, so the pair reads as one heading rather
-   than as two blocks -- which is what the margin exists to separate. */
+   than as two blocks -- which is what the margin exists to separate.
+
+   ONE ID ACROSS THE THREE MODALS that can be asked from inside a run
+   (batch 75: the sign-off and the model's own question joined the
+   permission prompt). Ids are per-screen, so one rule styles all three
+   and there is nothing to keep in step -- the same reason
+   `screens.asker_label` is one function. */
 #permission-asker {
     color: $text-muted;
     margin-top: -1;
