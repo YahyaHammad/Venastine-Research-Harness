@@ -338,8 +338,8 @@ This section exists specifically because earlier drafts of this project put pers
 
 ### 4.4 `database.py` — the CONNECTION only
 
-**Belongs here:** `engine` (the SQLAlchemy/SQLModel engine object, built once from `config.DB_PATH`), and `create_db_and_tables()` (calls `SQLModel.metadata.create_all(engine)`), and the per-connection pragmas concurrent writers need (§47 NA18).
-
+**Belongs here:** `engine` (the SQLAlchemy/SQLModel engine object, built once from `config.DB_PATH`), and `create_db_and_tables()` (calls `SQLModel.metadata.create_all(engine)`), and the per-connection pragmas concurrent writers need (§47 NA18).
+
 **The pragmas are here for this file's own reason.** WAL and the busy timeout are properties of the CONNECTION, not of any table, so they sit beside the engine and `storage.py` never learns they exist. They arrived with §47 slice 8, which is the first time two writers could be in flight at once — measured at the real engine: three concurrent writers do not lock, eight do, and WAL removes that while being about twice as fast at three. Registered on `connect` rather than run once at import, because the pool opens connections over the life of the process; and guarded by an `isinstance` check on a real SQLAlchemy `Engine`, because the suite stubs `sqlmodel` before collection and an `except` there would have swallowed a genuine misregistration in production too.
 
 **Does NOT belong here:** any table class (`ConversationThread`, `MessageLog`, or any future table). Does NOT belong here: any function that reads or writes a row. This file has zero awareness of what data exists — only how to connect to wherever it lives.
