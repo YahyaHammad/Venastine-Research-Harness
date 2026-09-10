@@ -85,6 +85,7 @@ def retry_until_json(
     max_total_tokens: Optional[int] = None,
     validate: Optional[Callable] = None,
     effort: Optional[str] = None,
+    activity=None,
 ) -> str:
     """Returns the first response text that parses as JSON, retrying by
     continuing `response`'s thread.
@@ -121,6 +122,16 @@ def retry_until_json(
                   PayloadShapeError re-enters this same loop. None means
                   "parse is the only contract", which is what the reviewer
                   wants and what every caller had before §30.
+    activity      §47's agent-activity sink, forwarded for the same reason
+                  as everything above it: a retry is the same run
+                  continuing. It matters MORE here than elsewhere, not
+                  less -- `continue_conversation` drains its own loop, so
+                  a subagent spawned while the model is being corrected
+                  reaches a shell through this channel or through nothing
+                  (`tui/app.py`'s one-shot path carries it for exactly
+                  that reason). No span is opened here: the caller's own
+                  brackets the whole attempt-and-retry sequence, and a row
+                  per correction would report one run as several.
     """
     from core.loop import RunAgentLoop
 
@@ -165,6 +176,12 @@ def retry_until_json(
                 # continuing, so it carries the pass's effort too --
                 # effort_for re-validates against this thread's model.
                 effort=effort,
+                # And the same rule again for §47's sink (batch 75). This
+                # hop dropped it, so a spawn inside a corrective attempt
+                # was invisible -- and this is the one path where the
+                # channel is the ONLY route, because continue_conversation
+                # drains its own loop.
+                activity=activity,
                 **({} if max_total_tokens is None
                    else {"max_total_tokens": max_total_tokens}),
             )

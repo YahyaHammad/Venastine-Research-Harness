@@ -43,7 +43,7 @@ from __future__ import annotations
 import logging
 
 import config
-from core import interaction
+from core import agent_activity, interaction
 # §23: the decision vocabulary lives in core.interaction, beside the decoder
 # that validates it. Imported under the names this module and its tests
 # already use -- two spellings of the same four strings is how a decoder and
@@ -140,40 +140,67 @@ def run_review(run, model: str, provider_name: str, authorization=None,
     # the one place that quietly goes back to advertising a headless
     # run's uncallable tools.
     prompt = _reviewer_prompt(authorization, agent=agent, context=context)
+    # §47, completed by the review of it (batch 75). Slice 7 threaded the
+    # sink this far and stopped: `run_agent_conversation` only ever calls
+    # `bind()`, which is a NO-OP with no span open, so the reviewer forwarded
+    # a sink that could learn nothing. It drew no sidebar row, was absent
+    # from ctrl+g, could not be opened while it ran, and -- because
+    # `_obtain_approval` reads the open span -- asked for its gated tools
+    # with no "asked by" line, presenting a nested run's question as the
+    # conversation's own. The passes, the compactor and the initializer all
+    # bracket themselves; this is the fourth.
+    #
+    # ONE SPAN OVER THE WHOLE CALL, retries included, which is
+    # `compact()`'s rule for the same shape: this is one reviewer run that
+    # may take several calls to produce usable JSON, and a row per attempt
+    # would report the retry loop as a stack of reviewers.
+    #
+    # Depth derived from the context this function already built, never
+    # written as a 1 -- `_compactor_depth`'s rule at its fourth call site.
+    depth = (context.subagent_depth if context is not None else 0) + 1
     try:
-        response = RunAgentLoop.run_agent_conversation(
-            user_goal=_review_input(run),
-            model=model,
-            provider_name=provider_name,
-            max_steps=agent.max_steps or config.MAX_ITERATIONS,
-            context=context,
-            system_prompt=prompt,
-            authorization=authorization,
-            effort=effort,
-            # §27 AC1. The reviewer IS a subagent -- §20 calls it one and it
-            # runs through the same entry point -- so its thread is labelled
-            # like one rather than getting a fourth kind of its own.
-            thread_kind=THREAD_KIND_SUBAGENT,
-            activity=activity,
-            # §47. What it WAS, for a reader who has only the row. No
-            # parent thread: the reviewer reviews a RUN, and a run is
-            # not a conversation.
-            thread_agent=agent.name,
-        )
-        _record_granted_calls(run, response, authorization)
+        with agent_activity.span(activity, agent.name, depth):
+            response = RunAgentLoop.run_agent_conversation(
+                user_goal=_review_input(run),
+                model=model,
+                provider_name=provider_name,
+                max_steps=agent.max_steps or config.MAX_ITERATIONS,
+                context=context,
+                system_prompt=prompt,
+                authorization=authorization,
+                effort=effort,
+                # §27 AC1. The reviewer IS a subagent -- §20 calls it one
+                # and it runs through the same entry point -- so its thread
+                # is labelled like one rather than getting a fourth kind of
+                # its own.
+                thread_kind=THREAD_KIND_SUBAGENT,
+                activity=activity,
+                # §47. What it WAS, for a reader who has only the row. No
+                # parent thread: the reviewer reviews a RUN, and a run is
+                # not a conversation.
+                thread_agent=agent.name,
+            )
+            _record_granted_calls(run, response, authorization)
 
-        text = retry_until_json(
-            response,
-            label="Review",
-            system_prompt=prompt,
-            model=model,
-            provider_name=provider_name,
-            trace=run.trace,
-            authorization=authorization,
-            on_response=lambda r: _record_granted_calls(run, r, authorization),
-            context=context,
-            effort=effort,
-        )
+            text = retry_until_json(
+                response,
+                label="Review",
+                system_prompt=prompt,
+                model=model,
+                provider_name=provider_name,
+                trace=run.trace,
+                authorization=authorization,
+                on_response=lambda r: _record_granted_calls(
+                    run, r, authorization),
+                context=context,
+                effort=effort,
+                # A corrective attempt reaches the model through
+                # `continue_conversation`, which drains its own loop -- so
+                # this channel is the only way a tool call made while
+                # arguing about JSON is visible at all. Same reason
+                # `tui/app.py` passes it on the one-shot path.
+                activity=activity,
+            )
     except Exception as e:
         # A transient reviewer failure (provider error, unrecoverable
         # JSON) must not cost a completed ten-pass run: the stage is
@@ -312,7 +339,7 @@ def _validated(raw, run) -> list:
 
 def walk_consent(findings, consent, run, *, model=None, provider_name=None,
                  thread_id=None, authorization=None,
-                 effort: str | None = None) -> list:
+                 effort: str | None = None, activity=None) -> list:
     """Returns one decision record per finding, in the order asked.
 
     `consent` is a core.interaction.ResponseChannel (§23) -- it was a
@@ -340,7 +367,8 @@ def walk_consent(findings, consent, run, *, model=None, provider_name=None,
             continue
         decision, current = _decide_one(
             finding, consent, run, model=model, provider_name=provider_name,
-            thread_id=thread_id, authorization=authorization, effort=effort)
+            thread_id=thread_id, authorization=authorization, effort=effort,
+            activity=activity)
         if decision == REJECT_ALL:
             stopped = True
             decisions.append(dict(current, decision=REJECT,
@@ -351,7 +379,7 @@ def walk_consent(findings, consent, run, *, model=None, provider_name=None,
 
 
 def _decide_one(finding, consent, run, *, model, provider_name, thread_id,
-                authorization, effort: str | None = None):
+                authorization, effort: str | None = None, activity=None):
     """One finding through however many refinement rounds it takes.
 
     Returns (decision, finding) where finding is the LAST version shown --
@@ -379,7 +407,8 @@ def _decide_one(finding, consent, run, *, model, provider_name, thread_id,
             return REJECT, dict(current, refinements=refinements)
         refined = _refine(current, notes, run, model=model,
                           provider_name=provider_name, thread_id=thread_id,
-                          authorization=authorization, effort=effort)
+                          authorization=authorization, effort=effort,
+                          activity=activity)
         if refined is None:
             run.log("Review: refinement produced no revised finding; "
                     "recorded as rejected.")
@@ -418,7 +447,7 @@ def _ask(consent, finding, round_index):
 
 
 def _refine(finding, notes, run, *, model, provider_name, thread_id,
-            authorization, effort: str | None = None):
+            authorization, effort: str | None = None, activity=None):
     """Sends one finding back into the reviewer's OWN thread (V5).
 
     The thread continuation is the point: the reviewer sees its own
@@ -456,6 +485,14 @@ def _refine(finding, notes, run, *, model, provider_name, thread_id,
             authorization=authorization,
             context=context,
             effort=effort,
+            # §47's sink (batch 75). NO SPAN of its own, deliberately: a
+            # refinement is the reviewer's thread continuing after its
+            # run's span has closed, and the reader triggered this one and
+            # is watching the modal it came from. What the sink is for
+            # here is anything the refinement SPAWNS -- and this is a path
+            # where the channel is the only route, since
+            # continue_conversation drains its own loop.
+            activity=activity,
         )
         _record_granted_calls(run, response, authorization)
         # Same recovery as the first reviewer call: a prose-wrapped
@@ -472,6 +509,7 @@ def _refine(finding, notes, run, *, model, provider_name, thread_id,
             on_response=lambda r: _record_granted_calls(run, r, authorization),
             context=context,
             effort=effort,
+            activity=activity,
         )
         revised = _validated(parse_json_response(text), run)
     except Exception as e:

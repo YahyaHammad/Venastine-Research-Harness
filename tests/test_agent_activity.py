@@ -21,6 +21,8 @@ Discovery roots are redirected into tmp_path exactly as test_agents.py
 does, so the real agents/builtin never leaks in.
 """
 
+from uuid import uuid4
+
 import pytest
 
 import config
@@ -1428,6 +1430,16 @@ class TestTheOrchestratorCarriesTheSink:
         the orchestrator, so it needs the same plumbing the passes do and
         building it twice would be two copies that can disagree.
 
+        AND IT OPENS A SPAN, which is the half this test asserted its way
+        past for a batch. Forwarding a sink is not being visible:
+        `run_agent_conversation` only ever calls `bind()`, and `bind()` is
+        a no-op with no span open, so the reviewer handed down a channel
+        that could learn nothing about it. The row, ctrl+g, opening it
+        while it runs and the modal's "asked by" line all followed from
+        the span, not from the argument -- which is the leaf-versus-chain
+        trap one level up: the hop was tested and the thing the hop is
+        FOR was not.
+
         Patched on `core.loop` rather than on the review module, which
         imports the loop INSIDE the function to avoid an import cycle.
         """
@@ -1467,3 +1479,83 @@ class TestTheOrchestratorCarriesTheSink:
 
         assert captured.get("activity") is sink
         assert captured.get("thread_agent")
+        assert [(kind, name) for kind, name, _depth in sink.events] == [
+            ("enter", review_module.REVIEWER_AGENT),
+            ("exit", review_module.REVIEWER_AGENT)], (
+            f"the sink saw {sink.events}; a reviewer that opens no span "
+            "cannot be drawn, opened or named on a modal, however faithfully "
+            "the argument reaches it")
+        assert sink.events[0][2] == 1, (
+            "the reviewer draws one level below the run, like a pass -- and "
+            "the number is derived from its context, never written as a 1")
+
+    def test_a_corrective_retry_hands_the_sink_down(self, mocker):
+        """The hop batch 73 missed. A retry reaches the model through
+        `continue_conversation`, which drains its own loop -- so a subagent
+        spawned while the model is being corrected about JSON is visible
+        through this channel or not at all, which is the reason
+        `tui/app.py`'s one-shot path carries it.
+
+        No span here: the caller's own brackets the whole
+        attempt-and-retry sequence, and a row per correction would report
+        one run as several."""
+        from core.loop import RunAgentLoop
+        from core.reasoning import json_retry
+
+        captured = {}
+
+        def _continue(**kwargs):
+            captured.update(kwargs)
+            return make_model_response(text="still not json")
+
+        mocker.patch.object(RunAgentLoop, "continue_conversation",
+                            side_effect=_continue)
+        sink = Recorder()
+        try:
+            json_retry.retry_until_json(
+                make_model_response(text="not json"), label="Pass 2",
+                system_prompt="p", model="m", provider_name="ANTHROPIC",
+                max_retries=1, activity=sink)
+        except ValueError:
+            # Both attempts are prose, which is the shape that exercises
+            # the retry at all. What is under test is the argument.
+            pass
+
+        assert captured.get("activity") is sink
+        assert sink.events == [], (
+            "a corrective attempt opened a span of its own; the caller's "
+            "span already covers the whole sequence")
+
+    def test_a_review_refinement_hands_the_sink_down(self, _roots, mocker,
+                                                     fake_storage):
+        """A refinement continues the reviewer's thread after that run's
+        span has closed, so it draws no row -- but anything it SPAWNS has
+        to reach the panel, and the walk dropped the sink."""
+        from core.loop import RunAgentLoop
+        from core.reasoning import review as review_module
+
+        _write_harness_agent(_roots, review_module.REVIEWER_AGENT)
+        config_loader.initialize(str(_roots["project"]))
+
+        captured = {}
+
+        def _continue(**kwargs):
+            captured.update(kwargs)
+            return make_model_response(text="[]")
+
+        mocker.patch.object(RunAgentLoop, "continue_conversation",
+                            side_effect=_continue)
+
+        class _Run:
+            trace = []
+
+            def log(self, _message):
+                pass
+
+        sink = Recorder()
+        review_module._refine(
+            {"kind": "text", "claim_id": "C1"}, "a note", _Run(),
+            model="m", provider_name="ANTHROPIC", thread_id=uuid4(),
+            authorization=None, activity=sink)
+
+        assert captured.get("activity") is sink

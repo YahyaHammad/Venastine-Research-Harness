@@ -608,6 +608,12 @@ def _run_pass_with_json_retry(
             authorization=authorization,
             effort=effort,
             on_response=lambda r: _record_granted_calls(pass_id, r, authorization),
+            # §47's sink, at the hop batch 73 missed (batch 75). A
+            # corrective attempt reaches the model through
+            # continue_conversation, which drains its own loop, so a
+            # subagent spawned while a pass is being corrected is visible
+            # through this channel or not at all.
+            activity=activity,
             # The retry re-enters THIS pass's thread. No separate pass
             # ceiling any more (#4): omitting the kwarg lets the wrapper
             # resolve the configured spend cap, exactly as the pass itself
@@ -816,7 +822,10 @@ def _review_stage(run: PipelineRun, progress: _Progress, model: str,
 
     decisions = review_module.walk_consent(
         findings, review, run, model=model, provider_name=provider_name,
-        thread_id=thread_id, authorization=authorization, effort=effort)
+        thread_id=thread_id, authorization=authorization, effort=effort,
+        # §47's sink, for the refinement calls the walk can make. Every
+        # hop is a place it can be dropped, and this one was.
+        activity=activity)
     run.subagent_reviews = decisions
     yield from progress.checkpoint()
 
