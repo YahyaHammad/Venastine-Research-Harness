@@ -840,7 +840,7 @@ Implemented against `google-genai==1.0.0` with all SDK shapes verified by inspec
 > as though it were a raise**. On OpenAI Chat Completions and Google's
 > `GenerateContentConfig` the documented default is already 1.0, so on the two providers
 > this note previously said ensemble "works only on", the knob plausibly sent the value the
-> provider would have used anyway. Across the 14 providers in `providers.json.example` the
+> provider would have used anyway. Across the 15 providers in `providers.json.example` the
 > default differs, so how much diversity a run got — and therefore what "2 of 3 agreed"
 > meant — varied by provider with no way for Pass 4 to know. **Needs a live check**; it
 > cannot be settled offline. Separately, `MODELS_REJECTING_SAMPLING_PARAMS` lists only
@@ -866,7 +866,7 @@ Implemented against `google-genai==1.0.0` with all SDK shapes verified by inspec
 > 2-of-3 agreement. It is now a **disagreement penalty** (E8), subtracted like
 > `ASSUMPTION_FLAG_PENALTY`.
 >
-> **Decisions record: E1–E12.** Defined in `ROADMAP_v2.md`'s Design Decisions Record;
+> **Decisions record: E1–E14.** Defined in `ROADMAP_v2.md`'s Design Decisions Record;
 > this section's build notes are in DEVLOG §10-revisit. The acceptance criteria at the end
 > of this section still hold with two amendments, both recorded there: N comes from
 > `len(config.ENSEMBLE_MODELS)` rather than `ensemble_n`, and the 2-of-3 case's

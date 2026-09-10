@@ -35,11 +35,11 @@ WHAT THIS OWNS
 
 TWO INSTRUMENTS, AND THEY ARE NOT THE SAME ONE. The live rate is an
 ESTIMATE from characters, because `StreamToken` carries no incremental
-usage and only three of the nineteen configured providers report usage on
+usage and only three of the fifteen configured providers report usage on
 a streaming call at all (D21: OpenAI-compatible streaming returns none
 unless `stream_options` is sent, and Mistral rejects that parameter
 outright). An exact live rate would therefore read `0 tok/s` forever on
-sixteen providers, which is D21's own failure mode -- correct-looking
+twelve providers, which is D21's own failure mode -- correct-looking
 output -- one layer up in the UI. The estimate also keeps MOVING during a
 table hold, because the deltas are still arriving; it is the renderer that
 is withholding, not the stream. That is the whole point of the feature, so
@@ -253,7 +253,7 @@ class TurnMeter:
         `output_tokens` is the provider's own count for the turn, or None
         where the provider reports none. NO TOKEN CLAIM is made in that
         case -- not a zero, which would say the model wrote nothing on
-        sixteen of the nineteen configured providers.
+        twelve of the fifteen configured providers.
 
         The rate here carries no tilde. It is not the same instrument as
         the live figure: that one divides characters by a constant, this

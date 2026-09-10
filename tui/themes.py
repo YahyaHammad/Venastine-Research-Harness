@@ -296,7 +296,7 @@ def _palette(theme: Theme) -> dict[str, str]:
     #D8A441 and differs from the raw slot on 41 values across the
     fourteen shipped themes. And it is 48x slower than role_styles
     itself. Reaching for it only where a slot is actually None leaves
-    all fourteen byte-identical and costs the other nineteen built-ins
+    all fourteen byte-identical and costs the other twenty-one built-ins
     eight getattrs.
     """
     raw = tuple(getattr(theme, slot) for slot in _SLOTS)

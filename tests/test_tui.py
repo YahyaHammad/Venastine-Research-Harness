@@ -7447,7 +7447,7 @@ async def test_a_finished_turn_says_how_long_it_took(mocker, _mocked_loop):
 
 @pytest.mark.asyncio
 async def test_the_completion_line_makes_no_token_claim_without_usage(mocker):
-    """Sixteen of the nineteen configured providers report no usage on a
+    """Twelve of the fifteen configured providers report no usage on a
     streaming call (D21). Printing `0 tokens out` there would say the
     model wrote nothing."""
     clock = _Clock()

@@ -713,7 +713,7 @@ class VenastineApp(App):
         self._last_turn_elapsed = None
         #: The finished turn's OUTPUT tokens, off the terminal
         #: response. None where the provider reports no usage, which
-        #: is sixteen of the nineteen configured ones -- and None is
+        #: is twelve of the fifteen configured ones -- and None is
         #: why the completion line can decline to claim a count
         #: instead of printing a zero.
         self._turn_output_tokens = None
@@ -1177,7 +1177,7 @@ class VenastineApp(App):
 
         The exact token count is the provider's own, and where a
         provider reports none NO TOKEN CLAIM IS MADE -- a zero would
-        say the model wrote nothing on sixteen of the nineteen
+        say the model wrote nothing on twelve of the fifteen
         configured providers (D21: OpenAI-compatible streaming reports
         no usage unless stream_options is sent, which Mistral rejects
         outright)."""

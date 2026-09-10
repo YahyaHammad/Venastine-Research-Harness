@@ -512,8 +512,8 @@ that spot; it does not reverse the pause.
   that forgets. A property rather than a rename for batch 54's reason: 89 references across
   11 test files, all plain reads and assignments.
 - **The rate is an ESTIMATE and says so with a tilde.** `StreamToken` carries no incremental
-  usage and only THREE of the nineteen configured providers set `supports_stream_usage`, so
-  an exact live figure would read `0 tok/s` forever on the other sixteen -- D21's own
+  usage and only THREE of the fifteen configured providers set `supports_stream_usage`, so
+  an exact live figure would read `0 tok/s` forever on the other twelve -- D21's own
   failure mode, correct-looking output, one layer up. The estimate also keeps MOVING during
   a table hold, because the deltas arrive whether or not the renderer draws them. The
   completion line carries the exact count from `turn_output_tokens` and makes NO TOKEN CLAIM
@@ -1301,7 +1301,7 @@ Invariants that look like simplification opportunities but are not:
 - **The pipeline is a GENERATOR** (§22). `stream_deep_research_pipeline()` yields `PipelineEvent`s; `run_pipeline_to_completion()` drains. Same shape as `_run()` / `run_to_completion()`, for the same reason. **P3's third name is retired.** It kept a synchronous `run_deep_research_pipeline()` so §22 would change no caller — and then both shells moved to the generator anyway, to render progress, each with a comment saying it deliberately did not call the wrapper. What was left was a public function with no production caller, fifty call sites in `tests/`, and three docstrings still calling it the live entry point. The convenience is `tests/conftest.run_pipeline` now, which is what it had become. Its pass-level twin `run_deep_research_mode` retired with it and for the same reason; `tests/conftest.run_pass` is that one.
 - **`_Progress.checkpoint()` is the only place a trace line is recorded** (§22). It persists, then yields every line appended since it last ran — so §5's per-pass persistence and the events are DERIVED from `run.trace` rather than emitted beside it. This is what finally made "a checkpoint after every trace line" true: `review.py` writes fifteen lines and checkpointed after none, and `json_retry.py` appends straight to the list. Both are now carried without either module changing, which is also why a JSON-parse retry needs no event kind. Persist-before-emit is deliberate: a generator only advances while someone iterates it, so emitting first would make durability depend on a UI continuing to read.
 - **An abandoned pipeline generator leaves `status='running'`** (§22). `GeneratorExit` is not an `Exception`, so a consumer that stops iterating is recorded as abandoned rather than failed — and the persist-before-emit ordering is what keeps the checkpoints it already took.
-- **A pass's `LoopEvent`s are TRANSLATED, not propagated** (§22 P2 as amended by §26), and `PipelineEvent` is a separate, kind-discriminated type from `LoopEvent` (§22 P1) — adding §22's or §26's kinds to that flat bag is the thing the decision rejected, and `test_pipeline_events.py` fails if `LoopEvent` grows an EIGHTH field. (It has seven: six payload fields plus `stop_reason`. This paragraph said "six-field bag" and "a seventh field" in consecutive clauses — counting payloads once and fields once — which audit #128 caught as a wording defect with no gap behind it: the test asserts the exact seven-name set, so any addition goes red.) §22 kept a pass opaque on the premise that its internals were not worth seeing; the first real ten-pass run disproved that, so `_run_pass` now iterates `RunAgentLoop.stream_deep_research_mode()` and converts a chosen subset into pipeline kinds. A consumer still sees exactly one event type — that is what P1/P2 were protecting, and it still holds.
+- **A pass's `LoopEvent`s are TRANSLATED, not propagated** (§22 P2 as amended by §26), and `PipelineEvent` is a separate, kind-discriminated type from `LoopEvent` (§22 P1) — adding §22's or §26's kinds to that flat bag is the thing the decision rejected, and `test_pipeline_events.py` fails if `LoopEvent` grows a NINTH field. (It has eight: seven payload fields plus `stop_reason` — §23's `notice` joined the set, which is why the test renamed from seventh to ninth. This paragraph said "six-field bag" and "a seventh field" in consecutive clauses — counting payloads once and fields once — which audit #128 caught as a wording defect with no gap behind it: the test asserts the exact eight-name set, so any addition goes red.) §22 kept a pass opaque on the premise that its internals were not worth seeing; the first real ten-pass run disproved that, so `_run_pass` now iterates `RunAgentLoop.stream_deep_research_mode()` and converts a chosen subset into pipeline kinds. A consumer still sees exactly one event type — that is what P1/P2 were protecting, and it still holds.
 - **A truncated pass is detected AT the pass.** `_check_not_truncated()` reads
   `stop_reason`: truncated with text traces and continues, truncated with no text
   raises naming the pass and the reason. A stop condition returns the last
@@ -1919,8 +1919,10 @@ independent bugs, both found by using the app.
    stderr. In a pilot test, holding the widget before opening a modal still works and is
    still the clearer spelling; `#thinking-indicator` and `#prompt` are still queries, so
    their `NoMatches` guards are still load-bearing.
-- **The held set is seven now, and the two that forced it were on the crash
-  path** (batch 76). A `permission_request` event is posted BEFORE the worker
+- **The held set is nine now, and the two that forced it were on the crash
+  path** (batch 76; §47's thread viewer added three more: the read-only
+  `Transcript`, the `ThreadCrumb` and the `#pane` switcher, same pattern).
+  A `permission_request` event is posted BEFORE the worker
   pushes the modal it announces (`post_message` only enqueues for a later
   pump; the push is a direct loop callback), so the first gated call of a
   session was handled with a modal already active -- and died in

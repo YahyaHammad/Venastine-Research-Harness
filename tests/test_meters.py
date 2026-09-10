@@ -254,7 +254,7 @@ class TestTheSubtitleSaysOnlyWhatItKnows:
 class TestTheCompletionLineNeverInventsACount:
 
     def test_the_time_alone_when_the_provider_reports_no_usage(self):
-        """Sixteen of the nineteen configured providers report no usage on
+        """Twelve of the fifteen configured providers report no usage on
         a streaming call (D21). A zero there would say the model wrote
         nothing, which is a claim, not an absence."""
         assert TurnMeter().completion(12.4, None) == "took 12.4s"
